@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link href="https://cdn.datatables.net/1.10.21/css/jquery.dataTables.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="darkDatatable.css">
+
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="spinner.css">
+  <link rel="stylesheet" href="index.css">
+  <title>SDEditor</title>
+</head>
+<body>
+  <div id="app">
+
+    <div class="loader centerContainer" v-if="loading">
+      <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
+    </div>
+
+    <div class="droparea centerContainer" v-if="loadingProgress < 100">
+      <h1 v-if="loadingProgress == 0" @dragover="(e) => e.preventDefault()" @drop="fileDropped">Drop StatDescriptions.zip Here!</h1>
+      <h1 v-if="loadingProgress > 0 && loadingProgress < 100">Loading: {{ loadingProgress.toFixed(2) }}%</h1>
+    </div>
+
+    <table id="table" class="display compact cell-border" v-if="loadingProgress >= 100">
+      <thead>
+        <tr>
+          <th>Directory</th>
+          <th>Filename</th>
+          <th>English</th>
+          <th>Translation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="desc in descs">
+          <td>{{ desc.filedir }}</td>
+          <td>{{ desc.filename }}</td>
+          <td>{{ desc.translations.English?.join("<br />") }}</td>
+          <td>{{ desc.translations.Thai?.join("<br />") }}</td>
+        </tr>
+      </tbody>
+    </table>
+    
+  </div>
+
+  <script src="https://unpkg.com/vue@next"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.3.0/jszip.min.js"></script>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+  <script src="https://cdn.datatables.net/1.10.21/js/jquery.dataTables.min.js"></script>
+  <script src="FileSaver.js"></script>
+  <script src="statDescParser.js"></script>
+  <script src="helper.js"></script>
+  <script src="index.js"></script>
+</body>
+</html>

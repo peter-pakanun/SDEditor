@@ -1,0 +1,31 @@
+html, body {
+  background-color: #121212;
+  color: #FFFFFF;
+  font-family: 'Sarabun', sans-serif;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  font-size: 12px;
+}
+
+.centerContainer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loader {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.droparea>h1 {
+  background-color: rgba(255, 255, 255, 0.05);
+  box-shadow: 2px 2px 2px rgba(0, 0, 0, 0.3);
+  padding: 3em 5em;
+  border-radius: 5px;
+}
