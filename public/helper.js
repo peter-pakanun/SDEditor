@@ -9,3 +9,10 @@ function allProgress(proms, progress_cb) {
   }
   return Promise.all(proms);
 }
+
+function elipsisRenderer(data, type, row) {
+  if (type == "sort" || type == 'type') return data;
+  return data.length > 20 ?
+    data.substr(0, 5) + '…' + data.substr(data.length - 15, data.length) :
+    data;
+}
