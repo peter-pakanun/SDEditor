@@ -323,7 +323,7 @@ const App = {
       desc.isMissing = false;
       for (const editorBlock of this.editorDescs) {
         newTranslations.push(editorBlock.translation);
-        if (editorBlock.translation.trim() == "") desc.isMissing = true;
+        if (editorBlock.translation?.trim() == "") desc.isMissing = true;
       }
       desc.hasChanges = !arrayEquals(desc.translations[this.lang], newTranslations);
       desc.translations[this.lang] = newTranslations;
