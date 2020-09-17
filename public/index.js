@@ -333,6 +333,7 @@ const App = {
           if (!m) continue;
           if (!force) word.replace = replacerObj.replace;
         }
+        if (!word.replace) word.replace = "";
         desc.translation = desc.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
       }
     },
