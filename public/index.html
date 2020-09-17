@@ -63,7 +63,7 @@
         <tbody>
           <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges }" @click="editFile(desc.filepath)">
             <td v-bind:title="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
-            <td v-bind:title="desc.filename">desc.filename</td>
+            <td v-bind:title="desc.filename">{{ desc.filename }}</td>
             <td><span v-html="desc.english"></span></td>
             <td class="translationTr"><span v-html="desc.translation"></span></td>
           </tr>
