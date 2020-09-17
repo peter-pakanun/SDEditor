@@ -41,13 +41,12 @@ function regexMagic(str, dictionary) {
   let m;
   let f = str;
   let r = str;
-  let c = 1;
 
   // {} tag
   if (m = /([\+\-]?\{[\dd\:\+]*\}\%?)/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "([^ ]+)");
-      r = r.replace(m[i], "$$" + c++);
+      r = r.replace(m[i], "\u200B");
     }
   }
 
@@ -55,7 +54,7 @@ function regexMagic(str, dictionary) {
   if (m = /\b(increased|reduced)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(increased|reduced)");
-      r = r.replace(m[i], "$$" + c++);
+      r = r.replace(m[i], "\u200B");
     }
   }
 
@@ -63,7 +62,7 @@ function regexMagic(str, dictionary) {
   if (m = /\b(more|less)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(more|less)");
-      r = r.replace(m[i], "$$" + c++);
+      r = r.replace(m[i], "\u200B");
     }
   }
 
@@ -71,7 +70,7 @@ function regexMagic(str, dictionary) {
   if (m = /\b(\d+ seconds?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(\d+) (seconds?)");
-      r = r.replace(m[i], "$$" + c++ + " $$" + c++);
+      r = r.replace(m[i], "\u200B \u200B);
     }
   }
   
@@ -80,18 +79,21 @@ function regexMagic(str, dictionary) {
     for (const replacerObj of dictionary) {
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
-        console.log(m);
         for (let i = 0; i < m.length; i++) {
           f = f.replace(m[i], "(.+)");
-          r = r.replace(m[i], "$$" + c++);
-          console.log(m[i]);
+          r = r.replace(m[i], "\u200B");
         }
       }
     }
   }
 
+  let c = 1;
+  let oldR = r;
+  let newR = r;
+  while (oldR != ( newR = newR.replace("\u200B", "$$" + c++) )) oldR = newR;
+
   return {
     find: f,
-    replace: r
+    replace: newR
   }
 }
