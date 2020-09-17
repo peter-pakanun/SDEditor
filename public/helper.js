@@ -68,7 +68,7 @@ function regexMagic(str, dictionary) {
   }
 
   // n seconds
-  if (m = /\b\d+ seconds?\b/ig.exec(f)) {
+  if (m = /\b(\d+ seconds?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(\d+) (seconds?)");
       r = r.replace(m[i], "$$" + c++ + "$$" + c++);
@@ -79,7 +79,6 @@ function regexMagic(str, dictionary) {
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
       let regex = new RegExp("\b" + replacerObj.find + "\b", "ig");
-      console.log(regex);
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
           f = f.replace(m[i], "(.+)");
