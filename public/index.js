@@ -219,39 +219,39 @@ const App = {
     },
     importDescs(descsToImport) {
       // check if it is safe to import new desc
-      for (const newDesc of descsToImport) {
-        let oldDesc = this.getDescByFilepath(newDesc.filepath);
+      for (const importingDesc of descsToImport) {
+        let oldDesc = this.getDescByFilepath(importingDesc.filepath);
         if (!oldDesc) {
-          alert(`${newDesc.filepath} not found in working table! Aborting!`);
+          alert(`${importingDesc.filepath} not found in working table! Aborting!`);
           return;
         }
-        if (oldDesc.name !== newDesc.name) {
-          alert(`${newDesc.filepath} stat name mismatched! Aborting!`);
+        if (oldDesc.name !== importingDesc.name) {
+          alert(`${importingDesc.filepath} stat name mismatched! Aborting!`);
           return;
         }
-        if (!arrayEquals(oldDesc.stats, newDesc.stats)) {
-          alert(`${newDesc.filepath} stats definition mismatched! Aborting!`);
+        if (!arrayEquals(oldDesc.stats, importingDesc.stats)) {
+          alert(`${importingDesc.filepath} stats definition mismatched! Aborting!`);
           return;
         }
-        if (!arrayEquals(oldDesc.variables, newDesc.variables)) {
-          alert(`${newDesc.filepath} variables definition mismatched! Aborting!`);
+        if (!arrayEquals(oldDesc.variables, importingDesc.variables)) {
+          alert(`${importingDesc.filepath} variables definition mismatched! Aborting!`);
           return;
         }
-        if (!arrayEquals(oldDesc.remarks, newDesc.remarks)) {
-          alert(`${newDesc.filepath} remarks mismatched! Aborting!`);
+        if (!arrayEquals(oldDesc.remarks, importingDesc.remarks)) {
+          alert(`${importingDesc.filepath} remarks mismatched! Aborting!`);
           return;
         }
-        if (!arrayEquals(oldDesc.translations.English, newDesc.translations.English)) {
-          alert(`${newDesc.filepath} original English string changed! Aborting!`);
+        if (!arrayEquals(oldDesc.translations.English, importingDesc.translations.English)) {
+          alert(`${importingDesc.filepath} original English string changed! Aborting!`);
           return;
         }
       }
 
       // Look like it is safe to import, then we import!
-      for (const newDesc of descsToImport) {
-        let oldDesc = this.getDescByFilepath(newDesc.filepath);
-        if (!arrayEquals(oldDesc.translations[this.lang], newDesc.translations[this.lang])) oldDesc.hasChanges = true;
-        oldDesc.translations[this.lang] = newDesc.translations[this.lang];
+      for (const importingDesc of descsToImport) {
+        let oldDesc = this.getDescByFilepath(importingDesc.filepath);
+        if (!arrayEquals(oldDesc.translations[this.lang], importingDesc.translations[this.lang])) oldDesc.hasChanges = true;
+        oldDesc.translations[this.lang] = importingDesc.translations[this.lang];
         oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
         for (const translation of oldDesc.translations[this.lang]) {
           if (translation?.trim() == "") {
