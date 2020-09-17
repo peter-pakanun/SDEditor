@@ -319,7 +319,7 @@ const App = {
         desc.words = [];
         for (let i = 1; i < m.length; i++) {
           const captureString = m[i];
-          desc.words.unshift({
+          desc.words.push({
             captured: captureString,
             replace: captureString
           });
@@ -376,7 +376,7 @@ const App = {
       }
     },
     addVocab() {
-      this.dictionary.push({ find: "", replace: "" });
+      this.dictionary.unshift({ find: "", replace: "" });
       this.saveToLocalStorage();
     },
     removeVocab(word) {
