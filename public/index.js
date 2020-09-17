@@ -2,7 +2,18 @@
 const App = {
   data() {
     return {
-      lang: "Thai",
+      langs: [
+        "Thai",
+        "Portuguese",
+        "German",
+        "Russian",
+        "Spanish",
+        "French",
+        "Traditional Chinese",
+        "Simplified Chinese",
+        "Korean"
+      ],
+      lang: "",
       loadingProgress: 0,
       descs: [],
       filteredDescs: [],
@@ -31,7 +42,7 @@ const App = {
           replace: "เพิ่มความเสียหาย $2 {$1}%"
         }
       ],
-      replaceWords: [
+      dictionary: [
         {
           find: "Fire",
           replace: "ไฟ"
@@ -40,7 +51,16 @@ const App = {
     }
   },
   mounted() {
-    
+    let settings = localStorage.getItem('settings');
+    if (!settings) return;
+    try {
+      settings = JSON.parse(settings);
+    } catch (error) {
+      alert('Cannot read Localstorage');
+      return;
+    }
+    this.editorRegexes = settings.editorRegexes || [];
+    this.dictionary = settings.dictionary || [];
   },
   computed: {
     pageCount() {
@@ -267,13 +287,22 @@ const App = {
       for (const editorBlock of this.editorDescs) {
         translations[this.lang].push(editorBlock.translation);
       }
+      saveToLocalStorage();
       this.editorVisible = false;
       console.log(translations);
       this.filterDesc();
     },
     editorExit() {
       if (!confirm('Are you sure you want to exit without saving?')) return;
+      saveToLocalStorage();
       this.editorVisible = false;
+    },
+    saveToLocalStorage() {
+      let settings = {
+        editorRegexes: this.editorRegexes,
+        dictionary: this.dictionary,
+      }
+      localStorage.setItem('settings', JSON.stringify(settings));
     },
     useRegex(desc) {
       for (const regexObj of this.editorRegexes) {
@@ -298,7 +327,7 @@ const App = {
       desc.translation = desc.translationReplace;
       for (let i = 0; i < desc.words.length; i++) {
         const word = desc.words[i];
-        for (const replacerObj of this.replaceWords) {
+        for (const replacerObj of this.dictionary) {
           let regex = new RegExp("^" + replacerObj.find + "$", "igm");
           let m = regex.exec(word.captured);
           if (!m) continue;
@@ -314,12 +343,12 @@ const App = {
       if (!confirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`)) return;
       this.editorRegexes = this.editorRegexes.filter(o => o !== regex);
     },
-    addWord() {
-      this.replaceWords.push({ find: "", replace: "" });
+    addVocab() {
+      this.dictionary.push({ find: "", replace: "" });
     },
-    removeWord(word) {
+    removeVocab(word) {
       if (!confirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`)) return;
-      this.replaceWords = this.replaceWords.filter(o => o !== word);
+      this.dictionary = this.dictionary.filter(o => o !== word);
     },
     async exportZip() {
       let descsToExport = this.descs.filter(o => o.hasChanges);

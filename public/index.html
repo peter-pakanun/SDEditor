@@ -12,7 +12,16 @@
 <body>
   <div id="app">
 
-    <div class="droparea centerContainer" v-if="loadingProgress < 100" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
+    <div class="langSelect centerContainer" v-if="lang == ''">
+      <div>
+        <h1>Language to translate</h1>
+        <select v-model="lang">
+          <option v-for="lang in langs">{{ lang }}</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="droparea centerContainer" v-if="loadingProgress < 100 && lang !== ''" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
       <div>
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
@@ -100,16 +109,16 @@
 
       <div class="word fixed">
         <div class="twoSided">
-          <h1>🔖 Words</h1>
-          <button @click="addWord()">➕</button>
+          <h1>📚 Dictionary</h1>
+          <button @click="addVocab()">➕</button>
         </div>
-        <div class="editBlock" v-for="word in replaceWords">
+        <div class="editBlock" v-for="word in dictionary">
           <div class="twoSided">
             <div>
               <input type="text" v-model="word.find">
               <input type="text" v-model="word.replace">
             </div>
-            <button @click="removeWord(word)">🗑️</button>
+            <button @click="removeVocab(word)">🗑️</button>
           </div>
         </div>
       </div>

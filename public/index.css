@@ -28,7 +28,7 @@ html, body {
   font-size: 12px;
 }
 
-input, button {
+input, button, select {
   line-height: 1.5em;
   padding: 0.5em 1em;
   box-sizing: border-box;
@@ -63,6 +63,10 @@ input:focus, button:focus {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.langSelect {
+  z-index: 100;
 }
 
 .droparea>div {
