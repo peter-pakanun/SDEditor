@@ -67,7 +67,8 @@ function regexMagic(str, dictionary) {
     }
   }
 
-  // dictionary
+  // dictionary, This was a bad Idea
+  /*
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
       let regex = new RegExp(replacerObj.find, "ig");
@@ -81,6 +82,7 @@ function regexMagic(str, dictionary) {
       }
     }
   }
+  */
 
   return {
     find: f,
