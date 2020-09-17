@@ -36,3 +36,57 @@ function arrayMove(arr, old_index, new_index) {
   arr.splice(new_index, 0, arr.splice(old_index, 1)[0]);
   return arr; // for testing
 };
+
+function regexMagic(str, dictionary) {
+  let m;
+  let f = str;
+  let r = str;
+  let c = 1;
+
+  // {} tag
+  if (m = /([\+\-]?\{[\dd\:\+]*\}\%?)/ig.exec(f)) {
+    for (let i = 1; i < m.length; i++) {
+      match = m[i];
+      f = f.replace(m[i], "([^ ]+)");
+      r = r.replace(m[i], "$$" + c++);
+    }
+  }
+
+  // increased/reduced
+  if (m = /(increased|reduced)/ig.exec(f)) {
+    for (let i = 1; i < m.length; i++) {
+      match = m[i];
+      f = f.replace(m[i], "(increased|reduced)");
+      r = r.replace(m[i], "$$" + c++);
+    }
+  }
+
+  // more/less
+  if (m = /(more|less)/ig.exec(f)) {
+    for (let i = 1; i < m.length; i++) {
+      match = m[i];
+      f = f.replace(m[i], "(more|less)");
+      r = r.replace(m[i], "$$" + c++);
+    }
+  }
+
+  // dictionary
+  if (Array.isArray(dictionary)) {
+    for (const replacerObj of dictionary) {
+      let regex = new RegExp(replacerObj.find, "ig");
+      console.log(regex);
+      if (m = regex.exec(f)) {
+        for (let i = 0; i < m.length; i++) {
+          match = m[i];
+          f = f.replace(m[i], "(.+)");
+          r = r.replace(m[i], "$$" + c++);
+        }
+      }
+    }
+  }
+
+  return {
+    find: f,
+    replace: r
+  }
+}

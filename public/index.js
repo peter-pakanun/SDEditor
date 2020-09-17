@@ -327,6 +327,12 @@ const App = {
         this.doTranslationReplace(desc);
         break;
       }
+
+      if (!confirm("No match! Create new regex?")) return;
+
+      // magically creating regex :D
+      let r = regexMagic(desc.english, this.dictionary);
+      this.addRegex(r.find, r.replace);
     },
     doTranslationReplace(desc, force) {
       if (!desc.translationReplace) return;
@@ -343,8 +349,8 @@ const App = {
         desc.translation = desc.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
       }
     },
-    addRegex() {
-      this.editorRegexes.unshift({ find: "", replace: "" });
+    addRegex(find="", replace="") {
+      this.editorRegexes.unshift({ find, replace });
       this.saveToLocalStorage();
     },
     removeRegex(regex) {
