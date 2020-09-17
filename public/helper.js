@@ -44,7 +44,7 @@ function regexMagic(str, dictionary) {
   let c = 1;
 
   // {} tag
-  if (m = /([\+\-]?\{[\dd\:\+]*\}\%?)/ig.exec(f)) {
+  if (m = /\b([\+\-]?\{[\dd\:\+]*\}\%?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "([^ ]+)");
       r = r.replace(m[i], "$$" + c++);
@@ -52,7 +52,7 @@ function regexMagic(str, dictionary) {
   }
 
   // increased/reduced
-  if (m = /(increased|reduced)/ig.exec(f)) {
+  if (m = /\b(increased|reduced)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(increased|reduced)");
       r = r.replace(m[i], "$$" + c++);
@@ -60,13 +60,21 @@ function regexMagic(str, dictionary) {
   }
 
   // more/less
-  if (m = /(more|less)/ig.exec(f)) {
+  if (m = /\b(more|less)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(more|less)");
       r = r.replace(m[i], "$$" + c++);
     }
   }
 
+  // n seconds
+  if (m = /\b\d+ seconds?\b/ig.exec(f)) {
+    for (let i = 1; i < m.length; i++) {
+      f = f.replace(m[i], "(\d+) (seconds?)");
+      r = r.replace(m[i], "$$" + c++ + "$$" + c++);
+    }
+  }
+  
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
