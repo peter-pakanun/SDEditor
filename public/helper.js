@@ -46,7 +46,6 @@ function regexMagic(str, dictionary) {
   // {} tag
   if (m = /([\+\-]?\{[\dd\:\+]*\}\%?)/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
-      match = m[i];
       f = f.replace(m[i], "([^ ]+)");
       r = r.replace(m[i], "$$" + c++);
     }
@@ -55,7 +54,6 @@ function regexMagic(str, dictionary) {
   // increased/reduced
   if (m = /(increased|reduced)/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
-      match = m[i];
       f = f.replace(m[i], "(increased|reduced)");
       r = r.replace(m[i], "$$" + c++);
     }
@@ -64,7 +62,6 @@ function regexMagic(str, dictionary) {
   // more/less
   if (m = /(more|less)/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
-      match = m[i];
       f = f.replace(m[i], "(more|less)");
       r = r.replace(m[i], "$$" + c++);
     }
@@ -77,9 +74,9 @@ function regexMagic(str, dictionary) {
       console.log(regex);
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
-          match = m[i];
           f = f.replace(m[i], "(.+)");
           r = r.replace(m[i], "$$" + c++);
+          console.log(m[i]);
         }
       }
     }
