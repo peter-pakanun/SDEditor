@@ -1,11 +1,57 @@
+:root {
+  --color-bg: #CCC;
+  --color-bg2: #C2C2C2;
+  --color-element: #BCBCBC;
+  --color-element-alt: #AEAEAE;
+  --color-element-highlight: #8E8E8E;
+  --color-shadow: rgba(0, 0, 0, 0.5);
+  --color-font: #000;
+}
+
+[data-theme="dark"] {
+  --color-bg: #121212;
+  --color-bg2: #1E1E1E;
+  --color-element: #252525;
+  --color-element-alt: #2F2F2F;
+  --color-element-highlight: #515151;
+  --color-shadow: rgba(255, 255, 255, 0.5);
+  --color-font: #EEEEEE;
+}
+
 html, body {
-  background-color: #121212;
-  color: #EEE;
+  background-color: var(--color-bg);
+  color: var(--color-font);
   font-family: 'Sarabun', sans-serif;
   margin: 0;
   padding: 0;
   width: 100%;
   font-size: 12px;
+}
+
+input, button {
+  line-height: 1.5em;
+  padding: 0.5em 1em;
+  box-sizing: border-box;
+  color: var(--color-font);
+  background-color: var(--color-element-alt);
+  border: 1px solid black;
+}
+input:read-only {
+  background-color: var(--color-element);
+  color: var(--color-shadow);
+}
+input:focus, button:focus {
+  outline: 1px solid var(--color-element-highlight);
+}
+
+::-webkit-scrollbar {
+  width: 0.7em;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-element-alt);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-element-highlight);
 }
 
 .centerContainer {
@@ -20,8 +66,8 @@ html, body {
 }
 
 .droparea>div {
-  background-color: rgba(255, 255, 255, 0.05);
-  box-shadow: 2px 2px 2px rgba(0, 0, 0, 0.3);
+  background-color: var(--color-bg2);
+  box-shadow: 2px 2px 2px var(--color-shadow);
   padding: 3em 5em;
   border-radius: 5px;
   display: flex;
@@ -36,7 +82,7 @@ html, body {
 }
 
 .topbar {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--color-bg2);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -49,25 +95,16 @@ html, body {
 
 .topbar>div>button,
 .topbar>div>input {
-  line-height: 1.5em;
   vertical-align: middle;
-  padding: 0.5em 1em;
   margin-right: 0.5em;
-  box-sizing: border-box;
   width: 4em;
-  color: #FFFFFF;
-  background-color: rgba(255, 255, 255, 0.1);
-  border: 1px solid black;
 }
-.topbar>div>button:focus,
-.topbar>div>input:focus {
-  outline: 1px solid rgba(255, 255, 255, 0.5);
-}
+
 .topbar>div>input {
   width: 7em;
 }
 .topbar>div>button.active {
-  background-color: rgba(255, 255, 255, 0.3);
+  background-color: var(--color-element-highlight);
 }
 
 #searchInp {
@@ -90,7 +127,7 @@ table {
 th {
   text-align: left;
   vertical-align: top;
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: var(--color-bg2);
 }
 th, td {
   padding: 1em;
@@ -98,14 +135,30 @@ th, td {
   overflow-x: auto;
 }
 tr {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: var(--color-element);
 }
 tr:nth-child(even) {
-  background-color: rgba(255, 255, 255, 0.12);
+  background-color: var(--color-element-alt);
 }
 tbody>tr:hover,
 th:hover {
-  background-color: rgba(255, 255, 255, 0.3);
+  background-color: var(--color-element-highlight);
+}
+
+tr.hasChanges>td {
+  background-color: rgba(80, 255, 90, 0.08);
+}
+
+tr.hasChanges:nth-child(even)>td {
+  background-color: rgba(80, 255, 90, 0.12);
+}
+
+tbody>tr:hover.hasChanges>td {
+  background-color: rgba(80, 255, 90, 0.3);
+}
+
+tr.hasChanges>td.translationTr {
+  font-weight: bold;
 }
 
 tr.isMissing>td.translationTr {
@@ -116,6 +169,76 @@ tr.isMissing:nth-child(even)>td.translationTr {
   background-color: rgba(255, 80, 90, 0.12);
 }
 
-tbody>tr.isMissing>td.translationTr:hover {
+tbody>tr:hover.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.3);
 }
+
+button, label, th, td, input[type="checkbox"] {
+  cursor: pointer;
+}
+
+
+
+
+
+
+
+
+
+.editor>* {
+  padding: 0px 0.5em;
+  box-sizing: border-box;
+}
+
+.editor>*::-webkit-scrollbar {
+  width: 0;
+}
+
+.editor>.fixed {
+  position: fixed;
+  height: 100%;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+}
+.editor>.regex {
+  width: 400px;
+  right: 300px;
+}
+.editor>.word {
+  width: 300px;
+  right: 0;
+}
+
+.twoSided {
+  display: flex;
+  justify-content: space-between;
+}
+.twoSided:first-child div {
+  flex-grow: 1;
+}
+
+
+.editor>.edit {
+  margin-right: 700px;
+}
+
+.editBlock {
+  padding: 1em 2em;
+  background-color: var(--color-bg2);
+  margin-top: 1em;
+}
+.edit>.editBlock>* {
+  margin: 1em 0;
+}
+.inputField {
+  display: flex;
+}
+.inputField>input {
+  flex-grow: 1;
+}
+.editBlock input {
+  display: block;
+  width: 100%;
+}
+

@@ -1,4 +1,4 @@
-async function parseFile(filepath, zipObject) {
+async function parseFile(filepath, zipObject, lang) {
   let data = await zipObject.async('uint8array');
   let blob = new Blob([data]);
   let text = await blob.text();
@@ -9,11 +9,11 @@ async function parseFile(filepath, zipObject) {
   // find description mark
   let count = (text.match(/^description/gim) ?? []).length;
   if (count == 0) return false;
-  let desc = parseDesc(filepath, text);
+  let desc = parseDesc(filepath, text, lang);
   return desc;
 }
 
-function parseDesc(filepath, text) {
+function parseDesc(filepath, text, lang) {
   text = text.replace(/\t/g, ' ').replace(/\r/g, '');
   
   let filepaths = filepath.split('/');
@@ -144,6 +144,8 @@ function parseDesc(filepath, text) {
       desc.translations[lang] = desc.translations[lang].content;
     }
   }
+
+  desc.isMissing = desc.translations.English?.length !== desc.translations[lang]?.length;
 
   return desc;
 }

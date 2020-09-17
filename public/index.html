@@ -22,17 +22,19 @@
       </div>
     </div>
 
-    <div v-if="loadingProgress >= 100">
+
+    <div v-if="loadingProgress >= 100 && !editorVisible">
       <div class="topbar">
         <div class="pagination">
+          <button @click="exportZip">💾</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
           <button @click="nextPage">⯈</button>
         </div>
         <div>
-          <input id="searchInp" type="text" placeholder="Search..." v-model="searchText">
-          <input type="checkbox" id="showOnlyMissing" name="showOnlyMissing" v-model="showOnlyMissing" checked>
+          <input id="searchInp" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
+          <input type="checkbox" id="showOnlyMissing" name="showOnlyMissing" v-model="showOnlyMissing" checked @change="filterDesc">
           <label for="showOnlyMissing"> Only Missing</label>
         </div>
       </div>
@@ -44,13 +46,13 @@
               {{ this.currentSort == "filedir" ? this.currentSortIcon : "" }}</th>
             <th style="width: 10%;" @click="sort('filename')">
               Filename{{ this.currentSort == "filename" ? this.currentSortIcon : "" }}</th>
-            <th @click="sort('english')">English{{ this.currentSort == "english" ? this.currentSortIcon : "" }}</th>
-            <th @click="sort('translation')">Translation{{ this.currentSort == "translation" ? this.currentSortIcon : "" }}
+            <th style="width: auto;" @click="sort('english')">English{{ this.currentSort == "english" ? this.currentSortIcon : "" }}</th>
+            <th style="width: auto;" @click="sort('translation')">Translation{{ this.currentSort == "translation" ? this.currentSortIcon : "" }}
             </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing }">
+          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges }" @click="editFile(desc.filepath)">
             <td v-bind:title="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
             <td v-bind:title="desc.filename">{{ elipsisRenderer(desc.filename) }}</td>
             <td><span v-html="desc.english"></span></td>
@@ -58,6 +60,58 @@
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div class="editor" v-if="editorVisible">
+      <div class="edit">
+        <div class="twoSided">
+          <h1>🧾 Translation</h1>
+          <button @click="editorSave">💾</button>
+        </div>
+        <div class="editBlock" v-for="desc in editorDescs">
+          <div class="inputField">
+            <input type="text" placeholder="English" readonly v-model="desc.english">
+            <button @click="useRegex(desc)">📑</button>
+          </div>
+          <input type="text" placeholder="Translation" v-model="desc.translation">
+          <div class="inputField" v-for="word in desc.words">
+            <input type="text" placeholder="Captured" v-model="word.captured" readonly>
+            <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(desc, true)">
+          </div>
+        </div>
+      </div>
+
+      <div class="regex fixed">
+        <div class="twoSided">
+          <h1>📑 Regex</h1>
+          <button @click="addRegex()">➕</button>
+        </div>
+        <div class="editBlock" v-for="regex in editorRegexes">
+          <div class="twoSided">
+            <div>
+              <input type="text" v-model="regex.find">
+              <input type="text" v-model="regex.replace">
+            </div>
+            <button @click="removeRegex(regex)">🗑️</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="word fixed">
+        <div class="twoSided">
+          <h1>🔖 Words</h1>
+          <button @click="addWord()">➕</button>
+        </div>
+        <div class="editBlock" v-for="word in replaceWords">
+          <div class="twoSided">
+            <div>
+              <input type="text" v-model="word.find">
+              <input type="text" v-model="word.replace">
+            </div>
+            <button @click="removeWord(word)">🗑️</button>
+          </div>
+        </div>
+      </div>
     </div>
 
   </div>
