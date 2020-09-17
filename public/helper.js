@@ -49,6 +49,10 @@ function regexMagic(str, dictionary) {
       r = r.replace(m[i], "\u200B");
     }
   }
+  
+  console.log("{} tag");
+  console.log(f);
+  console.log(r);
 
   // increased/reduced
   if (m = /\b(increased|reduced)\b/ig.exec(f)) {
@@ -58,6 +62,10 @@ function regexMagic(str, dictionary) {
     }
   }
 
+  console.log("increased/reduced");
+  console.log(f);
+  console.log(r);
+
   // more/less
   if (m = /\b(more|less)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
@@ -66,6 +74,10 @@ function regexMagic(str, dictionary) {
     }
   }
 
+  console.log("more|less");
+  console.log(f);
+  console.log(r);
+
   // n seconds
   if (m = /\b(\d+ seconds?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
@@ -73,15 +85,22 @@ function regexMagic(str, dictionary) {
       r = r.replace(m[i], "\u200B \u200B");
     }
   }
-  
+
+  console.log("n seconds");
+  console.log(f);
+  console.log(r);
+
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
-      if (replacerObj.find.includes("increased")) continue;
-      if (replacerObj.find.includes("reduced")) continue;
-      if (replacerObj.find.includes("more")) continue;
-      if (replacerObj.find.includes("less")) continue;
-      if (replacerObj.find.includes("second")) continue; // already found it before hand
+      
+      // ignore what we already did
+      if (replacerObj.find.toLowerCase().includes("increased")) continue;
+      if (replacerObj.find.toLowerCase().includes("reduced")) continue;
+      if (replacerObj.find.toLowerCase().includes("more")) continue;
+      if (replacerObj.find.toLowerCase().includes("less")) continue;
+      if (replacerObj.find.toLowerCase().includes("second")) continue;
+
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
@@ -92,10 +111,18 @@ function regexMagic(str, dictionary) {
     }
   }
 
+  console.log("dict");
+  console.log(f);
+  console.log(r);
+
   let c = 1;
   let oldR = r;
   let newR = r;
   while (oldR != ( newR = newR.replace("\u200B", "$$" + c++) )) oldR = newR;
+
+  console.log("replace R");
+  console.log(f);
+  console.log(newR);
 
   return {
     find: f,
