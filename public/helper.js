@@ -93,7 +93,7 @@ function regexMagic(str, dictionary) {
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
-      
+
       // ignore what we already did
       if (replacerObj.find.toLowerCase().includes("increased")) continue;
       if (replacerObj.find.toLowerCase().includes("reduced")) continue;
@@ -104,7 +104,7 @@ function regexMagic(str, dictionary) {
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
-          f = f.replace(m[i], "\\b(.+)\\b");
+          f = f.replace(m[i], "(.+)");
           r = r.replace(m[i], "\u200B");
         }
       }
