@@ -135,9 +135,18 @@ const App = {
 
       if (
         e.dataTransfer.files[0].lastModified !== this.localDescs.lastModified &&
-        e.dataTransfer.files[0].size !== this.localDescs.size &&
-        prompt("This seems like a new file, Do you want to start anew?\nType 'YES' to confirm\nAll your work on last file will be lost!!") !== 'YES'
-      ) return;
+        e.dataTransfer.files[0].size !== this.localDescs.size
+      ) {
+        if (prompt(
+          "This seems like a new file, Do you want to start anew?\n" +
+          "Type 'YES' to confirm\n" +
+          "All your work on last file will be lost!!") !== 'YES'
+        ) return;
+        this.localDescs.lastModified = e.dataTransfer.files[0].lastModified;
+        this.localDescs.size = e.dataTransfer.files[0].size;
+        this.localDescs.descs = [];
+        this.saveToLocalStorage();
+      }
 
       let zip;
       this.loadingProgress = 0.001;
