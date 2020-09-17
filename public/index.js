@@ -240,6 +240,12 @@ const App = {
         oldDesc.hasChanges = !arrayEquals(oldDesc.translations[this.lang], newDesc.translations[this.lang]);
         oldDesc.translations[this.lang] = newDesc.translations[this.lang];
         oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
+        for (const translation of oldDesc.translations[this.lang]) {
+          if (translation.trim() == "") {
+            oldDesc.isMissing = true;
+            break;
+          }
+        }
       }
     },
     filterDesc() {
@@ -313,24 +319,21 @@ const App = {
     },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
-      desc.hasChanges = true;
+      let newTranslations = [];
       desc.isMissing = false;
-      let translations = desc.translations;
-      translations[this.lang] = [];
       for (const editorBlock of this.editorDescs) {
-        translations[this.lang].push(editorBlock.translation);
+        newTranslations.push(editorBlock.translation);
+        if (editorBlock.translation.trim() == "") desc.isMissing = true;
       }
+      desc.hasChanges = !arrayEquals(desc.translations[this.lang], newTranslations);
+      desc.translations[this.lang] = newTranslations;
 
       // save to localDescs too
       let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
       if (localDesc) {
-        localDesc.hasChanges = desc.hasChanges;
         localDesc.isMissing = desc.isMissing;
-        let translations = localDesc.translations;
-        translations[this.lang] = [];
-        for (const editorBlock of this.editorDescs) {
-          translations[this.lang].push(editorBlock.translation);
-        }
+        localDesc.hasChanges = desc.hasChanges;
+        localDesc.translations[this.lang] = newTranslations;
       } else {
         let cloneDesc = {
           filedir: desc.filedir,
@@ -346,7 +349,7 @@ const App = {
             English: desc.translations.English,
           }
         }
-        cloneDesc.translations[this.lang] = desc.translations[this.lang];
+        cloneDesc.translations[this.lang] = newTranslations;
         this.localDescs.descs.push(cloneDesc);
       }
 
