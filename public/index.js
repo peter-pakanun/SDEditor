@@ -250,7 +250,7 @@ const App = {
       // Look like it is safe to import, then we import!
       for (const newDesc of descsToImport) {
         let oldDesc = this.getDescByFilepath(newDesc.filepath);
-        oldDesc.hasChanges = !arrayEquals(oldDesc.translations[this.lang], newDesc.translations[this.lang]);
+        if (!arrayEquals(oldDesc.translations[this.lang], newDesc.translations[this.lang])) oldDesc.hasChanges = true;
         oldDesc.translations[this.lang] = newDesc.translations[this.lang];
         oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
         for (const translation of oldDesc.translations[this.lang]) {
@@ -365,7 +365,7 @@ const App = {
         newTranslations.push(editorBlock.translation);
         if (editorBlock.translation?.trim() == "") desc.isMissing = true;
       }
-      desc.hasChanges = !arrayEquals(desc.translations[this.lang], newTranslations);
+      if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
       desc.translations[this.lang] = newTranslations;
 
       // save to localDescs too
