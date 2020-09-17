@@ -328,6 +328,21 @@ const App = {
       for (const editorBlock of this.editorDescs) {
         translations[this.lang].push(editorBlock.translation);
       }
+
+      // save to localDescs too
+      let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
+      if (localDesc) {
+        localDesc.hasChanges = true;
+        localDesc.isMissing = false;
+        let translations = localDesc.translations;
+        translations[this.lang] = [];
+        for (const editorBlock of this.editorDescs) {
+          translations[this.lang].push(editorBlock.translation);
+        }
+      } else {
+        this.localDescs.descs.push(desc);
+      }
+
       this.saveToLocalStorage();
       this.editorVisible = false;
       this.hasUnsavedEdit = true;
