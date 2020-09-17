@@ -89,6 +89,9 @@ const App = {
     theme(newTheme) {
       document.documentElement.setAttribute('data-theme', newTheme);
       this.saveSettings();
+    },
+    showOnlyMissing() {
+      this.filterDesc();
     }
   },
   computed: {
