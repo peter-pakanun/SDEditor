@@ -67,11 +67,10 @@ function regexMagic(str, dictionary) {
     }
   }
 
-  // dictionary, This was a bad Idea
-  /*
+  // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
-      let regex = new RegExp(replacerObj.find, "ig");
+      let regex = new RegExp("\b" + replacerObj.find + "\b", "ig");
       console.log(regex);
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
@@ -82,7 +81,6 @@ function regexMagic(str, dictionary) {
       }
     }
   }
-  */
 
   return {
     find: f,
