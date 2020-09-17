@@ -80,7 +80,7 @@ function regexMagic(str, dictionary) {
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
-          f = f.replace(m[i], "(.+)");
+          f = f.replace(m[i], "\\b(.+)\\b");
           r = r.replace(m[i], "\u200B");
         }
       }
