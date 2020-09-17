@@ -49,10 +49,6 @@ function regexMagic(str, dictionary) {
       r = r.replace(m[i], "\u200B");
     }
   }
-  
-  console.log("{} tag");
-  console.log(f);
-  console.log(r);
 
   // increased/reduced
   if (m = /\b(increased|reduced)\b/ig.exec(f)) {
@@ -62,10 +58,6 @@ function regexMagic(str, dictionary) {
     }
   }
 
-  console.log("increased/reduced");
-  console.log(f);
-  console.log(r);
-
   // more/less
   if (m = /\b(more|less)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
@@ -74,10 +66,6 @@ function regexMagic(str, dictionary) {
     }
   }
 
-  console.log("more|less");
-  console.log(f);
-  console.log(r);
-
   // n seconds
   if (m = /\b(\d+ seconds?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
@@ -85,10 +73,6 @@ function regexMagic(str, dictionary) {
       r = r.replace(m[i], "\u200B \u200B");
     }
   }
-
-  console.log("n seconds");
-  console.log(f);
-  console.log(r);
 
   // dictionary
   if (Array.isArray(dictionary)) {
@@ -111,18 +95,10 @@ function regexMagic(str, dictionary) {
     }
   }
 
-  console.log("dict");
-  console.log(f);
-  console.log(r);
-
   let c = 1;
   let oldR = r;
   let newR = r;
   while (oldR != ( newR = newR.replace("\u200B", "$$" + c++) )) oldR = newR;
-
-  console.log("replace R");
-  console.log(f);
-  console.log(newR);
 
   return {
     find: f,
