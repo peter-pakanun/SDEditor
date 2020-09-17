@@ -324,16 +324,33 @@ const App = {
       // save to localDescs too
       let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
       if (localDesc) {
-        localDesc.hasChanges = true;
-        localDesc.isMissing = false;
+        localDesc.hasChanges = desc.hasChanges;
+        localDesc.isMissing = desc.isMissing;
         let translations = localDesc.translations;
         translations[this.lang] = [];
         for (const editorBlock of this.editorDescs) {
           translations[this.lang].push(editorBlock.translation);
         }
       } else {
-        this.localDescs.descs.push(desc);
+        let cloneDesc = {
+          filedir: desc.filedir,
+          filename: desc.filename,
+          filepath: desc.filepath,
+          hasChanges: desc.hasChanges,
+          isMissing: desc.isMissing,
+          name: desc.name,
+          remarks: desc.remarks,
+          stats: desc.stats,
+          variables: desc.variables,
+          translations: {
+            English: desc.translations.English,
+          }
+        }
+        cloneDesc.translations[this.lang] = desc.translations[this.lang];
+        this.localDescs.descs.push(cloneDesc);
       }
+
+      console.log(this.localDescs.descs);
 
       this.saveToLocalStorage();
       this.editorVisible = false;
