@@ -158,9 +158,6 @@ const App = {
         return;
       }
 
-      
-
-
       let parseFuncs = [];
       for (let filepath in zip.files) {
         if (zip.files.hasOwnProperty(filepath)) {
@@ -176,6 +173,8 @@ const App = {
       });
 
       this.descs = descs.filter(Boolean);
+
+      this.importDescs(this.localDescs.descs);
 
       this.filterDesc();
     },
