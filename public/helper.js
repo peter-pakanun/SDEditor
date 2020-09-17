@@ -78,9 +78,10 @@ function regexMagic(str, dictionary) {
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
-      let regex = new RegExp("\b" + replacerObj.find + "\b", "ig");
+      let regex = new RegExp("\b(" + replacerObj.find + ")\b", "ig");
       if (m = regex.exec(f)) {
-        for (let i = 0; i < m.length; i++) {
+        console.log(m);
+        for (let i = 1; i < m.length; i++) {
           f = f.replace(m[i], "(.+)");
           r = r.replace(m[i], "$$" + c++);
           console.log(m[i]);
