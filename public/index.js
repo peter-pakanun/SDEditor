@@ -319,7 +319,7 @@ const App = {
         desc.words = [];
         for (let i = 1; i < m.length; i++) {
           const captureString = m[i];
-          desc.words.push({
+          desc.words.unshift({
             captured: captureString,
             replace: captureString
           });
@@ -345,7 +345,7 @@ const App = {
       }
     },
     addRegex() {
-      this.editorRegexes.push({ find: "", replace: "" });
+      this.editorRegexes.unshift({ find: "", replace: "" });
       this.saveToLocalStorage();
     },
     removeRegex(regex) {
