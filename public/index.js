@@ -58,24 +58,37 @@ const App = {
   },
   mounted() {
     let settings = localStorage.getItem('settings');
-    if (!settings) return;
-    try {
-      settings = JSON.parse(settings);
-    } catch (error) {
-      alert('Cannot read Localstorage!!\nFile maybe corrupted!');
-      return;
+    if (settings) {
+      try {
+        settings = JSON.parse(settings);
+      } catch (error) {
+        alert('Cannot read Localstorage!!\nFile maybe corrupted!');
+        return;
+      }
+      this.editorRegexes = settings.editorRegexes || [];
+      this.dictionary = settings.dictionary || [];
+      if (settings.lang) this.lang = settings.lang;
+      if (settings.theme) this.theme = settings.theme;
     }
-    this.editorRegexes = settings.editorRegexes || [];
-    this.dictionary = settings.dictionary || [];
-    this.lang = settings.lang || "";
-    if (settings.localDescs) this.localDescs = settings.localDescs;
+
+    let localDescs = localStorage.getItem('localDescs');
+    if (localDescs) {
+      try {
+        localDescs = JSON.parse(localDescs);
+      } catch (error) {
+        alert('Cannot read Localstorage!!\nFile maybe corrupted!');
+        return;
+      }
+      if (localDescs) this.localDescs = localDescs;
+    }
   },
   watch: {
     lang() {
-      this.saveToLocalStorage();
+      this.saveSettings();
     },
     theme(newTheme) {
       document.documentElement.setAttribute('data-theme', newTheme);
+      this.saveSettings();
     }
   },
   computed: {
@@ -137,7 +150,7 @@ const App = {
         this.localDescs.lastModified = e.dataTransfer.files[0].lastModified;
         this.localDescs.size = e.dataTransfer.files[0].size;
         this.localDescs.descs = [];
-        this.saveToLocalStorage();
+        this.saveLocalDescs();
       }
 
       let zip;
@@ -241,12 +254,39 @@ const App = {
         oldDesc.translations[this.lang] = newDesc.translations[this.lang];
         oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
         for (const translation of oldDesc.translations[this.lang]) {
-          if (translation.trim() == "") {
+          if (translation?.trim() == "") {
             oldDesc.isMissing = true;
             break;
           }
         }
+
+        // save to localDescs too
+        let localDesc = this.localDescs.descs.find(o => o.filepath == oldDesc.filepath);
+        if (localDesc) {
+          localDesc.isMissing = oldDesc.isMissing;
+          localDesc.hasChanges = oldDesc.hasChanges;
+          localDesc.translations[this.lang] = oldDesc.translations[this.lang];
+        } else {
+          let cloneDesc = {
+            filedir: oldDesc.filedir,
+            filename: oldDesc.filename,
+            filepath: oldDesc.filepath,
+            hasChanges: oldDesc.hasChanges,
+            isMissing: oldDesc.isMissing,
+            name: oldDesc.name,
+            remarks: oldDesc.remarks,
+            stats: oldDesc.stats,
+            variables: oldDesc.variables,
+            translations: {
+              English: oldDesc.translations.English,
+            }
+          }
+          cloneDesc.translations[this.lang] = oldDesc.translations[this.lang];
+          this.localDescs.descs.push(cloneDesc);
+        }
       }
+
+      this.saveLocalDescs();
     },
     filterDesc() {
       this.filteredDescs = [];
@@ -352,26 +392,29 @@ const App = {
         cloneDesc.translations[this.lang] = newTranslations;
         this.localDescs.descs.push(cloneDesc);
       }
+      this.saveLocalDescs();
 
-      console.log(this.localDescs.descs);
-
-      this.saveToLocalStorage();
+      this.saveSettings();
       this.editorVisible = false;
       this.filterDesc();
     },
     editorExit() {
       if (!confirm('Are you sure you want to exit without saving?')) return;
-      this.saveToLocalStorage();
+      this.saveSettings();
       this.editorVisible = false;
     },
-    saveToLocalStorage() {
+    saveSettings() {
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
         lang: this.lang,
-        localDescs: this.localDescs
+        theme: this.theme,
       }
-      localStorage.setItem('settings', JSON.stringify(settings));
+      let buffer = JSON.stringify(settings);
+      localStorage.setItem('settings', buffer);
+    },
+    saveLocalDescs() {
+      localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
     },
     useRegex(desc) {
       for (const regexObj of this.editorRegexes) {
@@ -414,12 +457,12 @@ const App = {
     },
     addRegex(find="", replace="") {
       this.editorRegexes.unshift({ find, replace });
-      this.saveToLocalStorage();
+      this.saveSettings();
     },
     removeRegex(regex) {
       if (!confirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`)) return;
       this.editorRegexes = this.editorRegexes.filter(o => o !== regex);
-      this.saveToLocalStorage();
+      this.saveSettings();
     },
     moveRegexUp(regex) {
       for (let i = 0; i < this.editorRegexes.length; i++) {
@@ -427,7 +470,7 @@ const App = {
         if (r == regex) {
           if (i <= 0) return;
           arrayMove(this.editorRegexes, i, i-1);
-          this.saveToLocalStorage();
+          this.saveSettings();
           return;
         }
       }
@@ -438,19 +481,19 @@ const App = {
         if (r == regex) {
           if (i >= this.editorRegexes.length-1) return;
           arrayMove(this.editorRegexes, i, i + 1);
-          this.saveToLocalStorage();
+          this.saveSettings();
           return;
         }
       }
     },
     addVocab() {
       this.dictionary.unshift({ find: "", replace: "" });
-      this.saveToLocalStorage();
+      this.saveSettings();
     },
     removeVocab(word) {
       if (!confirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`)) return;
       this.dictionary = this.dictionary.filter(o => o !== word);
-      this.saveToLocalStorage();
+      this.saveSettings();
     },
     async exportZip() {
       let descsToExport = this.descs.filter(o => o.hasChanges);
