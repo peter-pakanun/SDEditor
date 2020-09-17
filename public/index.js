@@ -196,7 +196,6 @@ const App = {
           alert(`${newDesc.filepath} variables definition mismatched! Aborting!`);
           return;
         }
-        console.log(oldDesc.remarks, newDesc.remarks);
         if (!arrayEquals(oldDesc.remarks, newDesc.remarks)) {
           alert(`${newDesc.filepath} remarks mismatched! Aborting!`);
           return;
