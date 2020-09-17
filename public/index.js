@@ -287,14 +287,14 @@ const App = {
       for (const editorBlock of this.editorDescs) {
         translations[this.lang].push(editorBlock.translation);
       }
-      saveToLocalStorage();
+      this.saveToLocalStorage();
       this.editorVisible = false;
       console.log(translations);
       this.filterDesc();
     },
     editorExit() {
       if (!confirm('Are you sure you want to exit without saving?')) return;
-      saveToLocalStorage();
+      this.saveToLocalStorage();
       this.editorVisible = false;
     },
     saveToLocalStorage() {
