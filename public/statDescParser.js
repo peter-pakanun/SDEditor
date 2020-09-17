@@ -146,6 +146,13 @@ function parseDesc(filepath, text, lang) {
   }
 
   desc.isMissing = desc.translations.English?.length !== desc.translations[lang]?.length;
+  if (desc.translations[lang]?.length)
+  for (const translation of desc.translations[lang]) {
+    if (translation.trim() == "") {
+      desc.isMissing = true;
+      break;
+    }
+  }
 
   return desc;
 }
