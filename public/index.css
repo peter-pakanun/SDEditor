@@ -65,15 +65,19 @@ input:focus, button:focus {
   justify-content: center;
 }
 
-.langSelect {
+.settingPage {
+  background-color: var(--color-bg);
   z-index: 100;
 }
 
-.droparea>div {
+.box {
   background-color: var(--color-bg2);
   box-shadow: 2px 2px 2px var(--color-shadow);
   padding: 3em 5em;
   border-radius: 5px;
+}
+
+.droparea>div {
   display: flex;
 }
 .droparea>div>* {

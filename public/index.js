@@ -13,8 +13,15 @@ const App = {
         "Korean"
       ],
       lang: "",
+      theme: 'grey',
+      showSetting: false,
       loadingProgress: 0,
       descs: [],
+      localDescs: {
+        descs: [],
+        lastModified: 0,
+        size: 0
+      },
       filteredDescs: [],
       currentSort: "english",
       currentSortDir: 'asc',
@@ -61,12 +68,23 @@ const App = {
     }
     this.editorRegexes = settings.editorRegexes || [];
     this.dictionary = settings.dictionary || [];
+    this.lang = settings.lang || "";
+    if (settings.localDescs) this.localDescs = settings.localDescs;
+
     let vueThis = this;
     window.onbeforeunload = function () {
       if (vueThis.hasUnsavedEdit) {
         return 'Exit without save?\nYour unsaved changes will be discarded';
       }
     };
+  },
+  watch: {
+    lang() {
+      this.saveToLocalStorage();
+    },
+    theme(newTheme) {
+      document.documentElement.setAttribute('data-theme', newTheme);
+    }
   },
   computed: {
     pageCount() {
@@ -113,7 +131,14 @@ const App = {
   methods: {
     async fileDropped(e) {
       e.preventDefault();
-      if (e.dataTransfer.files.length !== 1) return;
+      if (e.dataTransfer.files.length !== 1) return; // only accpet one file at a time
+
+      if (
+        e.dataTransfer.files[0].lastModified !== this.localDescs.lastModified &&
+        e.dataTransfer.files[0].size !== this.localDescs.size &&
+        prompt("This seems like a new file, Do you want to start anew?\nType 'YES' to confirm\nAll your work on last file will be lost!!") !== 'YES'
+      ) return;
+
       let zip;
       this.loadingProgress = 0.001;
       try {
@@ -123,6 +148,9 @@ const App = {
         alert('Cannot open this file');
         return;
       }
+
+      
+
 
       let parseFuncs = [];
       for (let filepath in zip.files) {
@@ -306,6 +334,8 @@ const App = {
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
+        lang: this.lang,
+        localDescs: this.localDescs
       }
       localStorage.setItem('settings', JSON.stringify(settings));
     },

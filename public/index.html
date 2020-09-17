@@ -12,17 +12,25 @@
 <body>
   <div id="app">
 
-    <div class="langSelect centerContainer" v-if="lang == ''">
-      <div>
+    <div class="settingPage centerContainer" v-if="showSetting || lang == ''">
+      <div class="box">
         <h1>Language to translate</h1>
         <select v-model="lang">
           <option v-for="lang in langs">{{ lang }}</option>
         </select>
+        <h1>Theme</h1>
+        <div class="inputField">
+          <select v-model="theme">
+            <option value="grey">Grey</option>
+            <option value="dark">Dark</option>
+          </select>
+          <button @click="showSetting = false">💾</button>
+        </div>
       </div>
     </div>
 
     <div class="droparea centerContainer" v-if="loadingProgress < 100 && lang !== ''" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
-      <div>
+      <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
         </div>
@@ -36,6 +44,7 @@
       <div class="topbar">
         <div class="pagination">
           <button @click="exportZip">💾</button>
+          <button @click="showSetting = true">⚙️</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
