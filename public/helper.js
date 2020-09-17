@@ -70,7 +70,7 @@ function regexMagic(str, dictionary) {
   if (m = /\b(\d+ seconds?)\b/ig.exec(f)) {
     for (let i = 1; i < m.length; i++) {
       f = f.replace(m[i], "(\d+) (seconds?)");
-      r = r.replace(m[i], "\u200B \u200B);
+      r = r.replace(m[i], "\u200B \u200B");
     }
   }
   
