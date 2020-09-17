@@ -13,8 +13,8 @@ const App = {
         "Simplified Chinese",
         "Korean"
       ],
-      lang: "Thai",
-      loadingProgress: 100,
+      lang: "",
+      loadingProgress: 0,
       descs: [],
       filteredDescs: [],
       currentSort: "english",
@@ -26,7 +26,7 @@ const App = {
       searchText: "",
       showOnlyMissing: true,
 
-      editorVisible: true,
+      editorVisible: false,
       editorCurrentEditingDesc: null,
       editorDescs: [
         {
