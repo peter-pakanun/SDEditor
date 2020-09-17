@@ -28,6 +28,7 @@ const App = {
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
+      hasUnsavedEdit: false,
       editorDescs: [
         {
           english: "{0}% Increased Fire damage",
@@ -61,6 +62,12 @@ const App = {
     }
     this.editorRegexes = settings.editorRegexes || [];
     this.dictionary = settings.dictionary || [];
+
+    window.onbeforeunload = function () {
+      if (this.hasUnsavedEdit) {
+        return 'Exit without save?\nYour unsaved changes will be discarded';
+      }
+    };
   },
   computed: {
     pageCount() {
@@ -289,7 +296,7 @@ const App = {
       }
       this.saveToLocalStorage();
       this.editorVisible = false;
-      console.log(translations);
+      this.hasUnsavedEdit = true;
       this.filterDesc();
     },
     editorExit() {
@@ -396,6 +403,7 @@ const App = {
       });
       this.loadingProgress = 100;
       saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
+      this.hasUnsavedEdit = false;
     }
   },
 }
