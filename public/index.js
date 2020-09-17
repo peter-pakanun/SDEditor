@@ -325,7 +325,7 @@ const App = {
         }
         desc.translationReplace = regexObj.replace;
         this.doTranslationReplace(desc);
-        break;
+        return;
       }
 
       if (!confirm("No match! Create new regex?")) return;
