@@ -77,6 +77,10 @@ function regexMagic(str, dictionary) {
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
+      if (replacerObj.find.includes("increased")) continue;
+      if (replacerObj.find.includes("reduced")) continue;
+      if (replacerObj.find.includes("more")) continue;
+      if (replacerObj.find.includes("less")) continue;
       if (replacerObj.find.includes("second")) continue; // already found it before hand
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
