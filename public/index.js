@@ -34,7 +34,6 @@ const App = {
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
-      hasUnsavedEdit: false,
       editorDescs: [
         {
           english: "{0}% Increased Fire damage",
@@ -63,20 +62,13 @@ const App = {
     try {
       settings = JSON.parse(settings);
     } catch (error) {
-      alert('Cannot read Localstorage');
+      alert('Cannot read Localstorage!!\nFile maybe corrupted!');
       return;
     }
     this.editorRegexes = settings.editorRegexes || [];
     this.dictionary = settings.dictionary || [];
     this.lang = settings.lang || "";
     if (settings.localDescs) this.localDescs = settings.localDescs;
-
-    let vueThis = this;
-    window.onbeforeunload = function () {
-      if (vueThis.hasUnsavedEdit) {
-        return 'Exit without save?\nYour unsaved changes will be discarded';
-      }
-    };
   },
   watch: {
     lang() {
@@ -345,7 +337,6 @@ const App = {
 
       this.saveToLocalStorage();
       this.editorVisible = false;
-      this.hasUnsavedEdit = true;
       this.filterDesc();
     },
     editorExit() {
@@ -460,7 +451,6 @@ const App = {
       });
       this.loadingProgress = 100;
       saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
-      this.hasUnsavedEdit = false;
     }
   },
 }
