@@ -369,7 +369,7 @@ const App = {
         vueThis.loadingProgress = 0.001 + (metadata.percent * 0.999);
       });
       this.loadingProgress = 100;
-      saveAs(zippedBuffer, "StatDescriptions_New.zip");
+      saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
     }
   },
 }
