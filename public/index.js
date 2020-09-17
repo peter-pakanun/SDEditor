@@ -237,9 +237,9 @@ const App = {
       // Look like it is safe to import, then we import!
       for (const newDesc of descsToImport) {
         let oldDesc = this.getDescByFilepath(newDesc.filepath);
+        oldDesc.hasChanges = !arrayEquals(oldDesc.translations[this.lang], newDesc.translations[this.lang]);
         oldDesc.translations[this.lang] = newDesc.translations[this.lang];
-        oldDesc.hasChanges = true;
-        oldDesc.isMissing  = false;
+        oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
       }
     },
     filterDesc() {
