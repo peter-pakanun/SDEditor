@@ -99,8 +99,14 @@
         <div class="editBlock" v-for="regex in editorRegexes">
           <div class="twoSided">
             <div>
-              <input type="text" v-model="regex.find">
-              <input type="text" v-model="regex.replace">
+              <div class="inputField">
+                <input type="text" v-model="regex.find">
+                <button @click="moveRegexUp(regex)">🡩</button>
+              </div>
+              <div class="inputField">
+                <input type="text" v-model="regex.replace">
+                <button @click="moveRegexDown(regex)">🡫</button>
+              </div>
             </div>
             <button @click="removeRegex(regex)">🗑️</button>
           </div>

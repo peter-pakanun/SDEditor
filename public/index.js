@@ -13,8 +13,8 @@ const App = {
         "Simplified Chinese",
         "Korean"
       ],
-      lang: "",
-      loadingProgress: 0,
+      lang: "Thai",
+      loadingProgress: 100,
       descs: [],
       filteredDescs: [],
       currentSort: "english",
@@ -26,7 +26,7 @@ const App = {
       searchText: "",
       showOnlyMissing: true,
 
-      editorVisible: false,
+      editorVisible: true,
       editorCurrentEditingDesc: null,
       editorDescs: [
         {
@@ -339,17 +339,43 @@ const App = {
     },
     addRegex() {
       this.editorRegexes.push({ find: "", replace: "" });
+      this.saveToLocalStorage();
     },
     removeRegex(regex) {
       if (!confirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`)) return;
       this.editorRegexes = this.editorRegexes.filter(o => o !== regex);
+      this.saveToLocalStorage();
+    },
+    moveRegexUp(regex) {
+      for (let i = 0; i < this.editorRegexes.length; i++) {
+        const r = this.editorRegexes[i];
+        if (r == regex) {
+          if (i <= 0) return;
+          arrayMove(this.editorRegexes, i, i-1);
+          this.saveToLocalStorage();
+          return;
+        }
+      }
+    },
+    moveRegexDown(regex) {
+      for (let i = 0; i < this.editorRegexes.length; i++) {
+        const r = this.editorRegexes[i];
+        if (r == regex) {
+          if (i >= this.editorRegexes.length-1) return;
+          arrayMove(this.editorRegexes, i, i + 1);
+          this.saveToLocalStorage();
+          return;
+        }
+      }
     },
     addVocab() {
       this.dictionary.push({ find: "", replace: "" });
+      this.saveToLocalStorage();
     },
     removeVocab(word) {
       if (!confirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`)) return;
       this.dictionary = this.dictionary.filter(o => o !== word);
+      this.saveToLocalStorage();
     },
     async exportZip() {
       let descsToExport = this.descs.filter(o => o.hasChanges);
