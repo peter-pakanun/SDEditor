@@ -23,7 +23,7 @@
     </div>
 
 
-    <div v-if="loadingProgress >= 100 && !editorVisible">
+    <div v-if="loadingProgress >= 100 && !editorVisible" @dragover="(e) => e.preventDefault()" @drop="importFileDropped">
       <div class="topbar">
         <div class="pagination">
           <button @click="exportZip">💾</button>
@@ -65,8 +65,9 @@
     <div class="editor" v-if="editorVisible">
       <div class="edit">
         <div class="twoSided">
-          <h1>🧾 Translation</h1>
+          <h1 style="flex-grow: 1;">🧾 Translation</h1>
           <button @click="editorSave">💾</button>
+          <button @click="editorExit">❌</button>
         </div>
         <div class="editBlock" v-for="desc in editorDescs">
           <div class="inputField">

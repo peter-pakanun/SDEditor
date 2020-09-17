@@ -39,6 +39,9 @@ const App = {
       ]
     }
   },
+  mounted() {
+    
+  },
   computed: {
     pageCount() {
       return Math.ceil(this.filteredDescs.length / this.pageSize);
@@ -83,7 +86,6 @@ const App = {
   },
   methods: {
     async fileDropped(e) {
-      let vthis = this;
       e.preventDefault();
       if (e.dataTransfer.files.length !== 1) return;
       let zip;
@@ -110,11 +112,82 @@ const App = {
         this.loadingProgress = 0.001 + (p * 0.99999);
       });
 
-      this.loading = false;
-
       this.descs = descs.filter(Boolean);
 
       this.filterDesc();
+    },
+    async importFileDropped(e) {
+      e.preventDefault();
+
+      if (!confirm('Do you want to load your local changes from this file?')) return;
+
+      if (e.dataTransfer.files.length !== 1) return;
+      let zip;
+      this.loadingProgress = 0.001;
+      try {
+        zip = await new JSZip().loadAsync(e.dataTransfer.files[0]);
+      } catch (error) {
+        this.loadingProgress = 0;
+        alert('Cannot open this file');
+        return;
+      }
+
+      let parseFuncs = [];
+      for (let filepath in zip.files) {
+        if (zip.files.hasOwnProperty(filepath)) {
+          let ext = filepath.split('.').pop().toLocaleLowerCase();
+          if (ext.toLocaleLowerCase() == 'txt') {
+            parseFuncs.push(parseFile(filepath, zip.files[filepath], this.lang));
+          }
+        }
+      }
+
+      let descs = await allProgress(parseFuncs, (p) => {
+        this.loadingProgress = 0.001 + (p * 0.99999);
+      });
+
+      let descsToImport = descs.filter(Boolean);
+      this.importDescs(descsToImport);
+      this.filterDesc();
+    },
+    importDescs(descsToImport) {
+      // check if it is safe to import new desc
+      for (const newDesc of descsToImport) {
+        let oldDesc = this.getDescByFilepath(newDesc.filepath);
+        if (!oldDesc) {
+          alert(`${newDesc.filepath} not found in working table! Aborting!`);
+          return;
+        }
+        if (oldDesc.name !== newDesc.name) {
+          alert(`${newDesc.filepath} stat name mismatched! Aborting!`);
+          return;
+        }
+        if (!arrayEquals(oldDesc.stats, newDesc.stats)) {
+          alert(`${newDesc.filepath} stats definition mismatched! Aborting!`);
+          return;
+        }
+        if (!arrayEquals(oldDesc.variables, newDesc.variables)) {
+          alert(`${newDesc.filepath} variables definition mismatched! Aborting!`);
+          return;
+        }
+        console.log(oldDesc.remarks, newDesc.remarks);
+        if (!arrayEquals(oldDesc.remarks, newDesc.remarks)) {
+          alert(`${newDesc.filepath} remarks mismatched! Aborting!`);
+          return;
+        }
+        if (!arrayEquals(oldDesc.translations.English, newDesc.translations.English)) {
+          alert(`${newDesc.filepath} original English string changed! Aborting!`);
+          return;
+        }
+      }
+
+      // Look like it is safe to import, then we import!
+      for (const newDesc of descsToImport) {
+        let oldDesc = this.getDescByFilepath(newDesc.filepath);
+        oldDesc.translations[this.lang] = newDesc.translations[this.lang];
+        oldDesc.hasChanges = true;
+        oldDesc.isMissing  = false;
+      }
     },
     filterDesc() {
       this.filteredDescs = [];
@@ -173,11 +246,12 @@ const App = {
 
       this.editorDescs = [];
       this.editorCurrentEditingDesc = desc;
-      for (const english of desc.translations.English) {
-        console.log(english);
+      for (let i = 0; i < desc.translations.English.length; i++) {
+        let english = desc.translations.English[i];
+        let translation = desc.translations[this.lang]?.[i];
         this.editorDescs.push({
           english,
-          translation: "",
+          translation,
           translationReplace: "",
           words: []
         })
@@ -196,6 +270,10 @@ const App = {
       this.editorVisible = false;
       console.log(translations);
       this.filterDesc();
+    },
+    editorExit() {
+      if (!confirm('Are you sure you want to exit without saving?')) return;
+      this.editorVisible = false;
     },
     useRegex(desc) {
       for (const regexObj of this.editorRegexes) {
@@ -233,16 +311,36 @@ const App = {
       this.editorRegexes.push({ find: "", replace: "" });
     },
     removeRegex(regex) {
-      if (confirm(`Please answer 'No/Cancel' to remove this regex\n\n#${regex.find}\n${regex.replace}`)) return;
+      if (!confirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`)) return;
       this.editorRegexes = this.editorRegexes.filter(o => o !== regex);
     },
     addWord() {
       this.replaceWords.push({ find: "", replace: "" });
     },
     removeWord(word) {
-      if (confirm(`Please answer 'No/Cancel' to remove this word\n\n#${word.find}\n${word.replace}`)) return;
+      if (!confirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`)) return;
       this.replaceWords = this.replaceWords.filter(o => o !== word);
     },
+    async exportZip() {
+      let descsToExport = this.descs.filter(o => o.hasChanges);
+      if (!descsToExport.length) {
+        alert(`There're no files to be export!`);
+        return;
+      }
+
+      this.loadingProgress = 0.001;
+      let vueThis = this;
+      let zip = new JSZip();
+      for (const desc of descsToExport) {
+        let buffer = descStringify(desc);
+        zip.file(desc.filepath, buffer);
+      }
+      let zippedBuffer = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, function (metadata) {
+        vueThis.loadingProgress = 0.001 + (metadata.percent * 0.999);
+      });
+      this.loadingProgress = 100;
+      saveAs(zippedBuffer, "StatDescriptions_New.zip");
+    }
   },
 }
 

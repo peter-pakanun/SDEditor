@@ -149,3 +149,27 @@ function parseDesc(filepath, text, lang) {
 
   return desc;
 }
+
+function descStringify(desc) {
+  var text = `description ${desc.name}`.trim() + '\r\n';
+  text += `\t${desc.stats.length} ${desc.stats.join(' ')}\r\n`;
+  text += generateTranslationBlock(desc, 'English');
+  for (var lang in desc.translations) {
+    if (desc.translations.hasOwnProperty(lang)) {
+      if (lang == 'English') continue;
+      text += `\tlang "${lang}"\r\n`
+      text += generateTranslationBlock(desc, lang);
+    }
+  }
+
+  return '\uFEFF' + text;
+}
+
+function generateTranslationBlock(desc, lang) {
+  var text = `\t${desc.translations[lang].length}\r\n`;
+  for (let i = 0; i < desc.translations[lang].length; i++) {
+    const translation = desc.translations[lang][i];
+    text += `\t\t${desc.variables[i]} "${translation}" ${desc.remarks[i]}\r\n`;
+  }
+  return text;
+}
