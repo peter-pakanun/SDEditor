@@ -77,6 +77,7 @@ function regexMagic(str, dictionary) {
   // dictionary
   if (Array.isArray(dictionary)) {
     for (const replacerObj of dictionary) {
+      if (replacerObj.find.includes("second")) continue; // already found it before hand
       let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
       if (m = regex.exec(f)) {
         for (let i = 0; i < m.length; i++) {
