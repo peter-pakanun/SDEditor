@@ -62,9 +62,9 @@ const App = {
     }
     this.editorRegexes = settings.editorRegexes || [];
     this.dictionary = settings.dictionary || [];
-
+    let vueThis = this;
     window.onbeforeunload = function () {
-      if (this.hasUnsavedEdit) {
+      if (vueThis.hasUnsavedEdit) {
         return 'Exit without save?\nYour unsaved changes will be discarded';
       }
     };
