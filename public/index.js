@@ -16,7 +16,7 @@ const App = {
       lang: "",
       theme: 'grey',
       showSetting: false,
-      loadingProgress: 0,
+      loadingProgress: 0.001,
       descs: [],
       localDescs: {
         descs: [],
@@ -97,6 +97,7 @@ const App = {
       if (localDescs) this.localDescs = localDescs;
     }
 
+    this.loadingProgress = 0;
     localStorageInitialized = true;
   },
   watch: {
