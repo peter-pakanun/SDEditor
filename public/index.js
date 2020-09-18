@@ -69,6 +69,10 @@ const App = {
         settings = JSON.parse(settings);
       } catch (error) {
         alert('Cannot read Localstorage!!\nFile maybe corrupted!');
+        if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
+          localStorage.removeItem('settings');
+        }
+        window.location.reload();
         return;
       }
       this.editorRegexes = settings.editorRegexes || [];
@@ -84,6 +88,10 @@ const App = {
         localDescs = JSON.parse(localDescs);
       } catch (error) {
         alert('Cannot read Localstorage!!\nFile maybe corrupted!');
+        if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
+          localStorage.removeItem('settings');
+        }
+        window.location.reload();
         return;
       }
       if (localDescs) this.localDescs = localDescs;
