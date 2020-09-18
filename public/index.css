@@ -65,9 +65,14 @@ input:focus, button:focus {
   justify-content: center;
 }
 
+.loadingPage {
+  z-index: 1000;
+  background-color: var(--color-bg);
+}
+
 .settingPage {
   background-color: var(--color-bg);
-  z-index: 100;
+  z-index: 2;
 }
 
 .box {

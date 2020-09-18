@@ -29,7 +29,7 @@
       </div>
     </div>
 
-    <div class="droparea centerContainer" v-if="loadingProgress < 100 && lang !== ''" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
+    <div class="droparea centerContainer loadingPage" v-if="loadingProgress < 100 && lang !== ''" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
