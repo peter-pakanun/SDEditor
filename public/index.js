@@ -461,28 +461,23 @@ const App = {
       localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
     },
     useRegex(editorBlock) {
-      for (const regexObj of this.editorRegexes) {
-        let regex = new RegExp("^"+regexObj.find+"$", "igm");
-        let m = regex.exec(editorBlock.english);
-        if (!m) continue;
-        editorBlock.words = [];
-        for (let i = 1; i < m.length; i++) {
-          const captureString = m[i];
-          editorBlock.words.push({
-            captured: captureString,
-            replace: captureString
-          });
-        }
-        editorBlock.translationReplace = regexObj.replace;
-        this.doTranslationReplace(editorBlock);
-        return;
+      let regexEngineResult = regexEngineLookup(editorBlock.english, this.editorRegexes);
+      editorBlock.words = [];
+      for (const word of regexEngineResult.words) {
+        editorBlock.words.push({
+          captured: word,
+          replace: word,
+        })
       }
-
-      if (!confirm("No match! Create new regex?")) return;
-
-      // magically creating regex :D
-      let r = regexMagic(editorBlock.english, this.dictionary);
-      this.addRegex(r.find, r.replace);
+      editorBlock.translationReplace = regexEngineResult.replace;
+      this.doTranslationReplace(editorBlock);
+      
+      if (regexEngineResult.failed) {
+        if (confirm("No match for:\n" + regexEngineResult.failStr + "\n\nCreate new regex for it?")) {
+          let r = regexEngineCreate(regexEngineResult.failStr, this.dictionary);
+          this.addRegex(r.find, r.replace);
+        }
+      }
     },
     doTranslationReplace(editorBlock, force) {
       if (!editorBlock.translationReplace) return;
@@ -496,42 +491,7 @@ const App = {
           if (!force) word.replace = replacerObj.replace;
         }
         if (!word.replace) word.replace = "";
-        editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
-
-        // if there's nested regex replacer tag
-        if (editorBlock.translation.includes("$R" + (i + 1))) {
-          // a lot of time, this will be a 40 point jewel, replace \n with space
-          let toFind = word.captured.replace(/\\n/g, " ");
-          word.replace = toFind;
-          // check regex list...
-          let found = false;
-          for (const regexObj of this.editorRegexes) {
-            let regex = new RegExp("^" + regexObj.find + "$", "igm");
-            let m = regex.exec(toFind);
-            if (!m) continue;
-
-            // found it, now replace dictionary words
-            found = true;
-            word.replace = regexObj.replace;
-            for (let i = 1; i < m.length; i++) {
-              const captureString = m[i];
-              let replacer = this.dictionary.find(dict => new RegExp("^" + dict.find + "$", 'igm').test(captureString))?.replace || captureString;
-              word.replace = word.replace.replace(new RegExp("\\$" + i, "ig"), replacer);
-            }
-            break;
-          }
-
-          // replace the string
-          editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$R" + (i + 1), "g"), word.replace);
-
-          if (!found) {
-            if (!confirm("No match for nested regex!\n\n" + toFind + "\n\nCreate new regex?")) continue;
-
-            // magically creating regex :D
-            let r = regexMagic(toFind, this.dictionary);
-            this.addRegex(r.find, r.replace);
-          }
-        }
+        editorBlock.translation = editorBlock.translation.replace('🔖', word.replace);
       }
     },
     addRegex(find="", replace="") {
