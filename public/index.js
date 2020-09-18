@@ -376,11 +376,15 @@ const App = {
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
-      desc.isMissing = false;
+      let isMissing = false;
       for (const editorBlock of this.editorDescs) {
         newTranslations.push(editorBlock.translation);
-        if (editorBlock.translation?.trim() == "") desc.isMissing = true;
+        if (editorBlock.translation?.trim() == "") isMissing = true;
       }
+
+      if (isMissing && !confirm("There're missing field in translation, are you sure you want to save?")) return;
+
+      desc.isMissing = isMissing;
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
       desc.translations[this.lang] = newTranslations;
 
