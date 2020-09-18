@@ -497,6 +497,31 @@ const App = {
         }
         if (!word.replace) word.replace = "";
         editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
+
+        // if there's nested regex replacer tag
+        if (editorBlock.translation.includes("$R" + (i + 1))) {
+          // a lot of time, this will be a 40 point jewel, replace \n with space
+          let toFind = word.captured.replace(/\\n/g, " ");
+          word.replace = toFind;
+          // check regex list...
+          for (const regexObj of this.editorRegexes) {
+            let regex = new RegExp("^" + regexObj.find + "$", "igm");
+            let m = regex.exec(toFind);
+            if (!m) continue;
+
+            // found it, now replace dictionary words
+            word.replace = regexObj.replace;
+            for (let i = 1; i < m.length; i++) {
+              const captureString = m[i];
+              let replacer = this.dictionary.find(dict => new RegExp("^" + dict.find + "$", 'igm').test(captureString))?.replace || captureString;
+              word.replace = word.replace.replace(new RegExp("\\$" + i, "ig"), replacer);
+            }
+            break;
+          }
+
+          // replace the string
+          editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$R" + (i + 1), "g"), word.replace);
+        }
       }
     },
     addRegex(find="", replace="") {
