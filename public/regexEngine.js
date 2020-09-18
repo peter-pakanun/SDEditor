@@ -7,6 +7,7 @@ function regexEngineLookup(str, dictionary, words = []) {
 
     let replace = dict.replace;
     let failed = false;
+    let failStr = "";
 
     let m;
     while (m = /\$(R?)(\d+)/.exec(replace)) {
