@@ -1,6 +1,7 @@
 const App = {
   data() {
     return {
+      localStorageInitialized: false,
       langs: [
         "Thai",
         "Portuguese",
@@ -87,6 +88,8 @@ const App = {
       }
       if (localDescs) this.localDescs = localDescs;
     }
+
+    localStorageInitialized = true;
   },
   watch: {
     lang() {
@@ -433,6 +436,7 @@ const App = {
       this.editorVisible = false;
     },
     saveSettings() {
+      if (!localStorageInitialized) return;
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
@@ -444,6 +448,7 @@ const App = {
       localStorage.setItem('settings', buffer);
     },
     saveLocalDescs() {
+      if (!localStorageInitialized) return;
       localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
     },
     useRegex(desc) {
