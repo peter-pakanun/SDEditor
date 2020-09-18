@@ -5,7 +5,7 @@
 - [ ] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with single click on it
 - [ ] Add function of viewing/comparing files, that were changed for set period of time
 - [ ] Add sorting variant "like in Missing***"
-- [ ] Add counter of files, that needed to be translated
+- [x] Add counter of files, that needed to be translated
 - [ ] Saving a file with empty translation field with remove it from list. Add a confirmation window please
 - [ ] Add an option to save Dictionary. If there is a word in line for translation, that is already in dictionary, move it on top of dictionary list and mark it red. If there are many, move and mark all of them
 - [ ] If there is a variable with {} in line, but there is no {} in translation line - make a confirmation window noting on that

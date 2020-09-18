@@ -51,6 +51,9 @@
           <button @click="nextPage">⯈</button>
         </div>
         <div>
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="New translation in localStorage from this session">
+          <span></span>
           <input id="searchInp" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
           <input type="checkbox" id="showOnlyMissing" name="showOnlyMissing" v-model="showOnlyMissing" checked>
           <label for="showOnlyMissing"> Only Missing</label>

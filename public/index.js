@@ -23,11 +23,15 @@ const App = {
         size: 0
       },
       filteredDescs: [],
+      statistic: {
+        hasChanges: 0,
+        isMissing: 0
+      },
       currentSort: "english",
       currentSortDir: 'asc',
       currentSortIcon: '▲',
       pageSize: 20,
-      paginationPadding: 3,
+      paginationPadding: 2,
       currentPage: 1,
       searchText: "",
       showOnlyMissing: true,
@@ -293,8 +297,17 @@ const App = {
     },
     filterDesc() {
       this.filteredDescs = [];
+      this.statistic.hasChanges = 0;
+      this.statistic.isMissing = 0;
       for (const desc of this.descs) {
-        if (this.showOnlyMissing && !desc.isMissing) continue;
+        if (desc.hasChanges) {
+          this.statistic.hasChanges++;
+        }
+        if (desc.isMissing) {
+          this.statistic.isMissing++;
+        } else {
+          if (this.showOnlyMissing) continue;
+        }
         if (
           this.searchText.trim() == "" ||
           desc.filepath.toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||
