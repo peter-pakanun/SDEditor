@@ -342,6 +342,7 @@ const App = {
           });
         }
       }
+      if (this.currentPage > this.pageCount) this.gotoPage(1);
     },
     sort(s) {
       //if s == current sort, reverse
