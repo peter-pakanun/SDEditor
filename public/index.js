@@ -481,7 +481,7 @@ const App = {
       if (!confirm("No match! Create new regex?")) return;
 
       // magically creating regex :D
-      let r = regexMagic(desc.english, this.dictionary);
+      let r = regexMagic(editorBlock.english, this.dictionary);
       this.addRegex(r.find, r.replace);
     },
     doTranslationReplace(editorBlock, force) {
