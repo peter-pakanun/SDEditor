@@ -387,7 +387,11 @@ const App = {
         if (editorBlock.translation?.trim() == "") isMissing = true;
       }
 
-      if (isMissing && !confirm("There're missing field in translation, are you sure you want to save?")) return;
+      if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
+
+      let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
+      let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
+      if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return;
 
       desc.isMissing = isMissing;
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;

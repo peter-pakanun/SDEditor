@@ -37,16 +37,23 @@ function arrayMove(arr, old_index, new_index) {
   return arr; // for testing
 };
 
+let gggVarTagRegex = "([\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
+
+function countGGGVarTag(str) {
+  let m = str.match(new RegExp(gggVarTagRegex, 'gi'));
+  return m?.length || 0;
+}
+
 function regexMagic(str, dictionary) {
   let m;
   let f = str;
   let r = str;
 
   // {} tag
-  if (m = /([\+\-]?\{[\dd\:\+]*\}\%?)/ig.exec(f)) {
-    for (let i = 1; i < m.length; i++) {
-      f = f.replace(m[i], "([^ ]+)");
-      r = r.replace(m[i], "\u200B");
+  if (m = f.match(new RegExp(gggVarTagRegex, 'ig'))) {
+    for (const match of m) {
+      f = f.replace(match, "([^ ]+)");
+      r = r.replace(match, "\u200B");
     }
   }
 
