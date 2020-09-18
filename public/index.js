@@ -384,7 +384,7 @@ const App = {
       let isMissing = false;
       for (const editorBlock of this.editorDescs) {
         newTranslations.push(editorBlock.translation);
-        if (editorBlock.translation?.trim() == "") isMissing = true;
+        if (!editorBlock.translation?.trim()) isMissing = true;
       }
 
       if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
