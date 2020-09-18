@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      max-width: 200px;
+      margin: 1em auto;
+      background-color: #fff;
+    }
+    .textHL {
+      position: relative;
+      overflow: hidden;
+      --padding: 5px;
+      font: 14px sans-serif;
+      border: 1px solid lightgrey;
+      display: block;
+    }
+    .textHL>input {
+      background: none;
+      border: none;
+      font: inherit;
+      display: block;
+      padding: var(--padding);
+      width: 100%;
+    }
+    .textHL>.HLter {
+      position: absolute;
+      top: var(--padding);
+      left: var(--padding);
+      color: transparent;
+      z-index: 1;
+      white-space: pre;
+      pointer-events: none;
+    }
+    .textHL>.HLter>span {
+      pointer-events: all;
+      cursor: pointer;
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 2px;
+    }
+    .textHL>.HLter>span:hover {
+      box-shadow: 0 0 0 1px #ff2ecc;
+    }
+  </style>
+</head>
+<body>
+  <div class="textHL">
+    <input type="text" value="Test x  T">
+    <div class="HLter">Test x  <span>T</span></div>
+  </div>
+</body>
+</html>
