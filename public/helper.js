@@ -40,7 +40,7 @@ function arrayMove(arr, old_index, new_index) {
 let gggVarTagRegex = "([\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
 function countGGGVarTag(str) {
-  let m = str.match(new RegExp(gggVarTagRegex, 'gi'));
+  let m = str?.match(new RegExp(gggVarTagRegex, 'gi'));
   return m?.length || 0;
 }
 
