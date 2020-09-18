@@ -90,6 +90,9 @@
           <button @click="editorSave">💾</button>
           <button @click="editorExit">❌</button>
         </div>
+        <div>
+          <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+        </div>
         <div class="editBlock" v-for="desc in editorDescs">
           <div class="inputField">
             <input type="text" placeholder="English" readonly v-model="desc.english">
@@ -112,11 +115,11 @@
           <div class="twoSided">
             <div>
               <div class="inputField">
-                <input type="text" v-model="regex.find">
+                <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off">
                 <button @click="moveRegexUp(regex)">🡩</button>
               </div>
               <div class="inputField">
-                <input type="text" v-model="regex.replace">
+                <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off">
                 <button @click="moveRegexDown(regex)">🡫</button>
               </div>
             </div>
