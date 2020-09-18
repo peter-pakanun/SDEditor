@@ -504,12 +504,14 @@ const App = {
           let toFind = word.captured.replace(/\\n/g, " ");
           word.replace = toFind;
           // check regex list...
+          let found = false;
           for (const regexObj of this.editorRegexes) {
             let regex = new RegExp("^" + regexObj.find + "$", "igm");
             let m = regex.exec(toFind);
             if (!m) continue;
 
             // found it, now replace dictionary words
+            found = true;
             word.replace = regexObj.replace;
             for (let i = 1; i < m.length; i++) {
               const captureString = m[i];
@@ -521,6 +523,14 @@ const App = {
 
           // replace the string
           editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$R" + (i + 1), "g"), word.replace);
+
+          if (!found) {
+            if (!confirm("No match for nested regex!\n\n" + toFind + "\n\nCreate new regex?")) continue;
+
+            // magically creating regex :D
+            let r = regexMagic(toFind, this.dictionary);
+            this.addRegex(r.find, r.replace);
+          }
         }
       }
     },
