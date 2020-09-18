@@ -93,15 +93,15 @@
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
         </div>
-        <div class="editBlock" v-for="desc in editorDescs">
+        <div class="editBlock" v-for="editorBlock in editorBlocks">
           <div class="inputField">
-            <input type="text" placeholder="English" readonly v-model="desc.english">
-            <button @click="useRegex(desc)">📑</button>
+            <input type="text" placeholder="English" readonly v-model="editorBlock.english">
+            <button @click="useRegex(editorBlock)">📑</button>
           </div>
-          <input type="text" placeholder="Translation" v-model="desc.translation">
-          <div class="inputField" v-for="word in desc.words">
+          <input type="text" placeholder="Translation" v-model="editorBlock.translation">
+          <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
-            <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(desc, true)">
+            <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">
           </div>
         </div>
       </div>

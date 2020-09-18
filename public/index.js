@@ -39,7 +39,7 @@ const App = {
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
-      editorDescs: [
+      editorBlocks: [
         {
           english: "{0}% Increased Fire damage",
           translation: "ทดสอบ",
@@ -376,12 +376,12 @@ const App = {
         return;
       }
 
-      this.editorDescs = [];
+      this.editorBlocks = [];
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
         let translation = desc.translations[this.lang]?.[i];
-        this.editorDescs.push({
+        this.editorBlocks.push({
           english,
           translation,
           translationReplace: "",
@@ -394,7 +394,7 @@ const App = {
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
       let isMissing = false;
-      for (const editorBlock of this.editorDescs) {
+      for (const editorBlock of this.editorBlocks) {
         newTranslations.push(editorBlock.translation);
         if (!editorBlock.translation?.trim()) isMissing = true;
       }
@@ -460,21 +460,21 @@ const App = {
       if (!localStorageInitialized) return;
       localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
     },
-    useRegex(desc) {
+    useRegex(editorBlock) {
       for (const regexObj of this.editorRegexes) {
         let regex = new RegExp("^"+regexObj.find+"$", "igm");
-        let m = regex.exec(desc.english);
+        let m = regex.exec(editorBlock.english);
         if (!m) continue;
-        desc.words = [];
+        editorBlock.words = [];
         for (let i = 1; i < m.length; i++) {
           const captureString = m[i];
-          desc.words.push({
+          editorBlock.words.push({
             captured: captureString,
             replace: captureString
           });
         }
-        desc.translationReplace = regexObj.replace;
-        this.doTranslationReplace(desc);
+        editorBlock.translationReplace = regexObj.replace;
+        this.doTranslationReplace(editorBlock);
         return;
       }
 
@@ -484,11 +484,11 @@ const App = {
       let r = regexMagic(desc.english, this.dictionary);
       this.addRegex(r.find, r.replace);
     },
-    doTranslationReplace(desc, force) {
-      if (!desc.translationReplace) return;
-      desc.translation = desc.translationReplace;
-      for (let i = 0; i < desc.words.length; i++) {
-        const word = desc.words[i];
+    doTranslationReplace(editorBlock, force) {
+      if (!editorBlock.translationReplace) return;
+      editorBlock.translation = editorBlock.translationReplace;
+      for (let i = 0; i < editorBlock.words.length; i++) {
+        const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
           let regex = new RegExp("^" + replacerObj.find + "$", "igm");
           let m = regex.exec(word.captured);
@@ -496,7 +496,7 @@ const App = {
           if (!force) word.replace = replacerObj.replace;
         }
         if (!word.replace) word.replace = "";
-        desc.translation = desc.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
+        editorBlock.translation = editorBlock.translation.replace(new RegExp("\\$" + (i + 1), "ig"), word.replace);
       }
     },
     addRegex(find="", replace="") {
