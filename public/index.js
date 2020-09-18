@@ -57,7 +57,8 @@ const App = {
           find: "Fire",
           replace: "ไฟ"
         },
-      ]
+      ],
+      editorClipboard: ""
     }
   },
   mounted() {
@@ -71,6 +72,7 @@ const App = {
       }
       this.editorRegexes = settings.editorRegexes || [];
       this.dictionary = settings.dictionary || [];
+      this.editorClipboard = settings.editorClipboard || "";
       if (settings.lang) this.lang = settings.lang;
       if (settings.theme) this.theme = settings.theme;
     }
@@ -96,6 +98,9 @@ const App = {
     },
     showOnlyMissing() {
       this.filterDesc();
+    },
+    editorClipboard() {
+      this.saveSettings();
     }
   },
   computed: {
@@ -427,6 +432,7 @@ const App = {
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
+        editorClipboard: this.editorClipboard,
         lang: this.lang,
         theme: this.theme,
       }
