@@ -2,7 +2,7 @@
 
 # TODO
 - [ ] In statfiles with several lines, compare these lines and mark differences with another color
-- [ ] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with single click on it
+- [x] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with ctrl+click, or paste them below with single click
 - [ ] Add function of viewing/comparing files, that were changed for set period of time
 - [ ] Add sorting variant "like in Missing***"
 - [x] Add counter of files, that needed to be translated
