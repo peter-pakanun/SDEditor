@@ -41,16 +41,24 @@ const App = {
       editorCurrentEditingDesc: null,
       editorBlocks: [
         {
-          english: "{0}% Increased Fire damage",
-          translation: "ทดสอบ",
+          english: "Buff grants {0}% increased Fire Damage per 1% Shield Quality",
+          translation: "",
           translationReplace: "",
           words: []
         },
       ],
       editorRegexes: [
         {
-          find: "\\{(\\d)*\\}\\% Increased (.+) damage",
-          replace: "เพิ่มความเสียหาย $2 {$1}%"
+          find: "(.+) per (\\d+%) \\b(.+)\\b Quality",
+          replace: "$R1 ต่อคุณภาพของ $3 ทุกๆ $2"
+        },
+        {
+          find: "Buff Grants (.+)",
+          replace: "บัฟมอบม็อด $R1"
+        },
+        {
+          find: "([^ ]+) (increased|reduced) \\b(.+)\\b Damage",
+          replace: "$2ความเสียหาย $3 $1"
         }
       ],
       dictionary: [
