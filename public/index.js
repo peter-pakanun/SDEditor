@@ -42,6 +42,7 @@ const App = {
       editorBlocks: [
         {
           english: "Buff grants {0}% increased Fire Damage per 1% Shield Quality",
+          englishHLter: "Buff grants <span>{0}%</span> increased Fire Damage per 1% Shield Quality",
           translation: "",
           translationReplace: "",
           words: []
@@ -395,12 +396,16 @@ const App = {
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
+          englishHLter: escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'ig'), "<span>$1</span>"),
           translation,
           translationReplace: "",
           words: []
         })
       }
       this.editorVisible = true;
+    },
+    copySpan(e) {
+      console.log(e.target.innerText);
     },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;

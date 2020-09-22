@@ -4,7 +4,7 @@
   --color-element: #BCBCBC;
   --color-element-alt: #AEAEAE;
   --color-element-highlight: #8E8E8E;
-  --color-shadow: rgba(0, 0, 0, 0.5);
+  --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #000;
 }
 
@@ -14,7 +14,7 @@
   --color-element: #2F3136;
   --color-element-alt: #36393F;
   --color-element-highlight: #677BC4;
-  --color-shadow: rgba(128, 128, 128, 0.5);
+  --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #D8D9DA;
 }
 
@@ -38,7 +38,7 @@ input, button, select, textarea {
 }
 input:read-only {
   background-color: var(--color-element);
-  color: var(--color-shadow);
+  /* color: var(--color-shadow); */
 }
 input:focus, button:focus {
   outline: 1px solid var(--color-element-highlight);
@@ -52,6 +52,44 @@ input:focus, button:focus {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-element-highlight);
+}
+
+.textHL {
+  position: relative;
+  overflow: hidden;
+  --padding-top: 0.5em;
+  --padding-left: 1em;
+  font-size: 14px;
+  display: block;
+}
+
+.textHL>input {
+  font: inherit;
+  display: block;
+  padding-top: var(--padding-top);
+  padding-left: var(--padding-left);
+  width: 100%;
+}
+
+.textHL>.HLter {
+  position: absolute;
+  top: var(--padding-top);
+  left: var(--padding-left);
+  color: transparent;
+  z-index: 1;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.textHL>.HLter>span {
+  pointer-events: all;
+  cursor: pointer;
+  background-color: var(--color-shadow);
+  border-radius: 2px;
+}
+
+.textHL>.HLter>span:hover {
+  box-shadow: 0 0 0 1px var(--color-element-highlight);
 }
 
 .centerContainer {
@@ -262,7 +300,7 @@ button, label, th, td, input[type="checkbox"] {
 .inputField {
   display: flex;
 }
-.inputField>input {
+.inputField>input, .inputField>.textHL {
   flex-grow: 1;
 }
 .editBlock input {

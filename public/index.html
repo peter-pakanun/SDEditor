@@ -95,7 +95,10 @@
         </div>
         <div class="editBlock" v-for="editorBlock in editorBlocks">
           <div class="inputField">
-            <input type="text" placeholder="English" readonly v-model="editorBlock.english">
+            <div class="textHL">
+              <input type="text" placeholder="English" readonly v-model="editorBlock.english">
+              <div class="HLter" v-html="editorBlock.englishHLter" @click="copySpan">{{ editorBlock.englishHLter }}</div>
+            </div>
             <button @click="useRegex(editorBlock)">📑</button>
           </div>
           <input type="text" placeholder="Translation" v-model="editorBlock.translation">
