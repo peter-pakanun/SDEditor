@@ -404,8 +404,11 @@ const App = {
       }
       this.editorVisible = true;
     },
-    copySpan(e) {
-      console.log(e.target.innerText);
+    copySpanToTranslation(e, editorBlock) {
+      editorBlock.translation += e.target.innerText;
+    },
+    copySpanToClipboard(e) {
+      navigator.clipboard.writeText(e.target.innerText)
     },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;

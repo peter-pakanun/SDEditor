@@ -93,11 +93,11 @@
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
         </div>
-        <div class="editBlock" v-for="editorBlock in editorBlocks">
+        <div class="editBlock" v-for="editorBlock in editorBlocks" ref="editorBlocks">
           <div class="inputField">
             <div class="textHL">
               <input type="text" placeholder="English" readonly v-model="editorBlock.english">
-              <div class="HLter" v-html="editorBlock.englishHLter" @click="copySpan">{{ editorBlock.englishHLter }}</div>
+              <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock)">{{ editorBlock.englishHLter }}</div>
             </div>
             <button @click="useRegex(editorBlock)">📑</button>
           </div>
