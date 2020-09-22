@@ -396,7 +396,7 @@ const App = {
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
-          englishHLter: escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'ig'), "<span>$1</span>"),
+          englishHLter: escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'ig'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard'>$1</span>"),
           translation,
           translationReplace: "",
           words: []
