@@ -405,7 +405,7 @@ const App = {
       this.editorVisible = true;
     },
     copySpanToTranslation(e, editorBlock) {
-      editorBlock.translation += e.target.innerText;
+      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + e.target.innerText;
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.innerText)
