@@ -158,7 +158,7 @@ function parseDesc(filepath, text, lang) {
 }
 
 function descStringify(desc) {
-  var text = `description ${desc.name}`.trim() + '\r\n';
+  var text = `description ${desc.name || ""}`.trim() + '\r\n';
   text += `\t${desc.stats.length} ${desc.stats.join(' ')}\r\n`;
   text += generateTranslationBlock(desc, 'English');
   for (var lang in desc.translations) {
@@ -173,10 +173,10 @@ function descStringify(desc) {
 }
 
 function generateTranslationBlock(desc, lang) {
-  var text = `\t${desc.translations[lang].length}\r\n`;
-  for (let i = 0; i < desc.translations[lang].length; i++) {
-    const translation = desc.translations[lang][i];
-    text += `\t\t${desc.variables[i]} "${translation}" ${desc.remarks[i]}\r\n`;
+  var text = `\t${desc.translations[lang]?.length || "0"}\r\n`;
+  for (let i = 0; i < desc.translations[lang]?.length; i++) {
+    const translation = desc.translations[lang][i] || "";
+    text += `\t\t${desc.variables[i] || ""} "${translation}" ${desc.remarks[i] || ""}\r\n`;
   }
   return text;
 }
