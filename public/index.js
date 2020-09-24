@@ -505,10 +505,14 @@ const App = {
           alert("This is not JSON settings file");
           return;
         }
-        if (prompt('Are you sure you want to overwrite current settings with this file?\n\nType "YES" to continue') !== "YES") return;
+        if (prompt('Are you sure you want to overwrite current settings with this file?\n\nType "YES" to continue') !== "YES") {
+          vueThis.$refs.importSettingsFileForm.reset();
+          return;
+        }
 
         vueThis.importSettings(settings);
         alert('Settings imported!');
+        vueThis.$refs.importSettingsFileForm.reset();
       }
       fr.readAsText(e.target.files[0]); 
     },

@@ -32,7 +32,10 @@
         <button @click="showSetting = false">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>
-        <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile" accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
+        <form ref="importSettingsFileForm">
+          <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
+            accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
+        </form>
       </div>
     </div>
 
