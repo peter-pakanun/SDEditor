@@ -505,6 +505,8 @@ const App = {
           alert("This is not JSON settings file");
           return;
         }
+        if (prompt('Are you sure you want to overwrite current settings with this file?\n\nType "YES" to continue') !== "YES") return;
+
         vueThis.importSettings(settings);
         alert('Settings imported!');
       }
