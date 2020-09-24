@@ -14,18 +14,22 @@
 
     <div class="settingPage centerContainer" v-if="showSetting || lang == ''">
       <div class="box">
-        <h1>Language to translate</h1>
+        <h3>Language to translate</h3>
         <select v-model="lang">
           <option v-for="lang in langs">{{ lang }}</option>
         </select>
-        <h1>Theme</h1>
+        <h3>Theme</h3>
         <div class="inputField">
           <select v-model="theme">
             <option value="grey">Grey</option>
             <option value="dark">Dark</option>
           </select>
-          <button @click="showSetting = false">💾</button>
         </div>
+        <h3>Other settings</h3>
+        <input type="checkbox" id="hideDNT" name="hideDNT" v-model="hideDNT">
+        <label for="hideDNT"> Hide DNT</label>
+        <br>
+        <button @click="showSetting = false">💾</button>
       </div>
     </div>
 

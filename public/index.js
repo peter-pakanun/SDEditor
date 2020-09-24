@@ -36,6 +36,7 @@ const App = {
       currentPage: 1,
       searchText: "",
       showOnlyMissing: true,
+      hideDNT: true,
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
@@ -89,6 +90,7 @@ const App = {
       this.editorClipboard = settings.editorClipboard || "";
       if (settings.lang) this.lang = settings.lang;
       if (settings.theme) this.theme = settings.theme;
+      if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
     }
 
     let localDescs = localStorage.getItem('localDescs');
@@ -110,6 +112,9 @@ const App = {
     localStorageInitialized = true;
   },
   watch: {
+    hideDNT() {
+      this.saveSettings();
+    },
     lang() {
       this.saveSettings();
     },
@@ -326,6 +331,7 @@ const App = {
       this.statistic.hasChanges = 0;
       this.statistic.isMissing = 0;
       for (const desc of this.descs) {
+        if (this.hideDNT && desc.isDNT) continue;
         if (desc.hasChanges) {
           this.statistic.hasChanges++;
         }
@@ -472,6 +478,7 @@ const App = {
         editorClipboard: this.editorClipboard,
         lang: this.lang,
         theme: this.theme,
+        hideDNT: this.hideDNT
       }
       let buffer = JSON.stringify(settings);
       localStorage.setItem('settings', buffer);

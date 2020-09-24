@@ -26,7 +26,8 @@ function parseDesc(filepath, text, lang) {
     stats: [],
     variables: [],
     remarks: [],
-    translations: {}
+    translations: {},
+    isDNT: false
   };
 
   let curLang = "English"; // first translation block langauge
@@ -135,6 +136,7 @@ function parseDesc(filepath, text, lang) {
       desc.variables.push(variable);
       desc.remarks.push(remark);
     }
+    
     desc.translations[curLang].content.push(content);
   }
 
@@ -153,6 +155,8 @@ function parseDesc(filepath, text, lang) {
       break;
     }
   }
+
+  if (desc.translations.English[0].indexOf('[DNT]') == 0 || desc.translations.English[0].indexOf('DNT ') == 0) desc.isDNT = true;
 
   return desc;
 }
