@@ -30,6 +30,9 @@
         <label for="hideDNT"> Hide DNT</label>
         <br>
         <button @click="showSetting = false">💾</button>
+        <button @click="exportSettingsClicked">📤</button>
+        <button @click="importSettingsClicked">📥</button>
+        <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile" accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
       </div>
     </div>
 

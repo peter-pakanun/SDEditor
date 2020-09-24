@@ -85,12 +85,7 @@ const App = {
         window.location.reload();
         return;
       }
-      this.editorRegexes = settings.editorRegexes || [];
-      this.dictionary = settings.dictionary || [];
-      this.editorClipboard = settings.editorClipboard || "";
-      if (settings.lang) this.lang = settings.lang;
-      if (settings.theme) this.theme = settings.theme;
-      if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
+      this.importSettings(settings);
     }
 
     let localDescs = localStorage.getItem('localDescs');
@@ -482,6 +477,46 @@ const App = {
       }
       let buffer = JSON.stringify(settings);
       localStorage.setItem('settings', buffer);
+    },
+    exportSettingsClicked() {
+      let settings = {
+        editorRegexes: this.editorRegexes,
+        dictionary: this.dictionary,
+        editorClipboard: this.editorClipboard,
+        lang: this.lang,
+        theme: this.theme,
+        hideDNT: this.hideDNT
+      }
+      let settingsStr = JSON.stringify(settings, null, 2);
+      var settingsBlob = new Blob([settingsStr], {});
+      saveAs(settingsBlob, "sdeditor_settings.json");
+    },
+    importSettingsClicked() {
+      this.$refs.importSettingsFile.click();
+    },
+    importSettingsFileChanged(e) {
+      var fr = new FileReader();
+      let vueThis = this;
+      fr.onload = function () {
+        let settings;
+        try {
+          settings = JSON.parse(fr.result);
+        } catch (error) {
+          alert("This is not JSON settings file");
+          return;
+        }
+        vueThis.importSettings(settings);
+        alert('Settings imported!');
+      }
+      fr.readAsText(e.target.files[0]); 
+    },
+    importSettings(settings) {
+      this.editorRegexes = settings.editorRegexes || [];
+      this.dictionary = settings.dictionary || [];
+      this.editorClipboard = settings.editorClipboard || "";
+      if (settings.lang) this.lang = settings.lang;
+      if (settings.theme) this.theme = settings.theme;
+      if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
     },
     saveLocalDescs() {
       if (!localStorageInitialized) return;
