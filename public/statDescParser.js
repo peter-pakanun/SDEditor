@@ -161,7 +161,7 @@ function parseDesc(filepath, text, lang) {
   return desc;
 }
 
-function descStringify(desc) {
+function descEncode(desc) {
   var text = `description ${desc.name || ""}`.trim() + '\r\n';
   text += `\t${desc.stats.length} ${desc.stats.join(' ')}\r\n`;
   text += generateTranslationBlock(desc, 'English');
@@ -173,7 +173,14 @@ function descStringify(desc) {
     }
   }
 
-  return '\uFEFF' + text;
+  let data_16 = strEncodeUTF16(text);
+  let data_8 = new Uint8Array(data_16.buffer, data_16.byteOffset, data_16.byteLength);
+
+  let withBOM = new Uint8Array(2 + data_8.byteLength);
+  withBOM.set(new Uint8Array([0xFF, 0xFE]));
+  withBOM.set(data_8, 2);
+
+  return withBOM;
 }
 
 function generateTranslationBlock(desc, lang) {
@@ -183,4 +190,13 @@ function generateTranslationBlock(desc, lang) {
     text += `\t\t${desc.variables[i] || ""} "${translation}" ${desc.remarks[i] || ""}\r\n`;
   }
   return text;
+}
+
+function strEncodeUTF16(str) {
+  var buf = new ArrayBuffer(str.length * 2);
+  var bufView = new Uint16Array(buf);
+  for (var i = 0, strLen = str.length; i < strLen; i++) {
+    bufView[i] = str.charCodeAt(i);
+  }
+  return bufView;
 }

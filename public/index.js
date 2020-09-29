@@ -613,7 +613,7 @@ const App = {
       let vueThis = this;
       let zip = new JSZip();
       for (const desc of descsToExport) {
-        let buffer = descStringify(desc);
+        let buffer = descEncode(desc);
         zip.file(desc.filepath, buffer);
       }
       let zippedBuffer = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, function (metadata) {
