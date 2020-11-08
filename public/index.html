@@ -103,15 +103,15 @@
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
         </div>
-        <div class="editBlock" v-for="editorBlock in editorBlocks" ref="editorBlocks">
+        <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
             <div class="textHL">
               <input type="text" placeholder="English" readonly v-model="editorBlock.english">
-              <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock)">{{ editorBlock.englishHLter }}</div>
+              <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
             </div>
             <button @click="useRegex(editorBlock)">📑</button>
           </div>
-          <input type="text" placeholder="Translation" v-model="editorBlock.translation">
+          <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index'>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">
