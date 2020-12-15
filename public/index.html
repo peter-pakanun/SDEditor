@@ -53,7 +53,7 @@
     <div v-if="loadingProgress >= 100 && !editorVisible" @dragover="(e) => e.preventDefault()" @drop="importFileDropped">
       <div class="topbar">
         <div class="pagination">
-          <button @click="exportZip">💾</button>
+          <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>

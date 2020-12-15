@@ -612,8 +612,9 @@ const App = {
       this.dictionary = this.dictionary.filter(o => o !== word);
       this.saveSettings();
     },
-    async exportZip() {
-      let descsToExport = this.descs.filter(o => o.hasChanges);
+    async exportZip(doFullExport) {
+      if (doFullExport && !confirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes")) return;
+      let descsToExport = doFullExport ? this.descs : this.descs.filter(o => o.hasChanges);
       if (!descsToExport.length) {
         alert(`There're no files to be export!`);
         return;
