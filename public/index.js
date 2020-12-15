@@ -398,8 +398,7 @@ const App = {
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
-        // highlight ggg var tag
-        let englishHLter = escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'igm'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"$1\">$1</span>");
+        
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
@@ -411,6 +410,9 @@ const App = {
             }
           }
         }
+        // highlight ggg var tag
+        let englishHLter = escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'igm'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"$1\">$1</span>");
+
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
