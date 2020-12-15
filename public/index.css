@@ -84,8 +84,13 @@ input:focus, button:focus {
 .textHL>.HLter>span {
   pointer-events: all;
   cursor: pointer;
-  background-color: var(--color-shadow);
+  background-color: var(--color-element-highlight);
+  opacity: 0.3;
   border-radius: 2px;
+}
+
+.textHL>.HLter>span.vocab {
+  background-color: var(--color-font);
 }
 
 .textHL>.HLter>span:hover {

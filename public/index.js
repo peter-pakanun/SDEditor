@@ -394,10 +394,19 @@ const App = {
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
+        let englishHLter = escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'igm'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"$1\">$1</span>");
+        for (const replacerObj of this.dictionary) {
+          let regex = new RegExp(replacerObj.find, "igm");
+          let m = regex.exec(englishHLter);
+          if (!m) continue;
+          for (const match of m) {
+            englishHLter = englishHLter.replace(new RegExp("(" + replacerObj.find + ")", 'igm'), "<span class='vocab' title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"" + replacerObj.replace + "\">$1</span>");
+          }
+        }
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
-          englishHLter: escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'ig'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard'>$1</span>"),
+          englishHLter,
           translation,
           translationReplace: "",
           words: []
@@ -406,11 +415,11 @@ const App = {
       this.editorVisible = true;
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
-      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + e.target.innerText;
+      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + e.target.getAttribute('datavalue');
       this.$refs['translation_' + editorIndex].focus();
     },
     copySpanToClipboard(e) {
-      navigator.clipboard.writeText(e.target.innerText)
+      navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
     },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
