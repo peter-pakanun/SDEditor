@@ -37,6 +37,7 @@ const App = {
       searchText: "",
       showOnlyMissing: true,
       hideDNT: true,
+      highlightDict: true,
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
@@ -108,6 +109,9 @@ const App = {
   },
   watch: {
     hideDNT() {
+      this.saveSettings();
+    },
+    highlightDict() {
       this.saveSettings();
     },
     lang() {
@@ -394,13 +398,17 @@ const App = {
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
+        // highlight ggg var tag
         let englishHLter = escapeHtml(english).replace(new RegExp(gggVarTagRegex, 'igm'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"$1\">$1</span>");
-        for (const replacerObj of this.dictionary) {
-          let regex = new RegExp(replacerObj.find, "igm");
-          let m = regex.exec(englishHLter);
-          if (!m) continue;
-          for (const match of m) {
-            englishHLter = englishHLter.replace(new RegExp("(" + replacerObj.find + ")", 'igm'), "<span class='vocab' title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"" + replacerObj.replace + "\">$1</span>");
+        // highlight word from dictionary
+        if (this.highlightDict) {
+          for (const replacerObj of this.dictionary) {
+            let regex = new RegExp(replacerObj.find, "igm");
+            let m = regex.exec(englishHLter);
+            if (!m) continue;
+            for (const match of m) {
+              englishHLter = englishHLter.replace(new RegExp("(" + replacerObj.find + ")", 'igm'), "<span class='vocab' title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"" + replacerObj.replace + "\">$1</span>");
+            }
           }
         }
         let translation = desc.translations[this.lang]?.[i];
@@ -483,7 +491,8 @@ const App = {
         editorClipboard: this.editorClipboard,
         lang: this.lang,
         theme: this.theme,
-        hideDNT: this.hideDNT
+        hideDNT: this.hideDNT,
+        highlightDict: this.highlightDict,
       }
       let buffer = JSON.stringify(settings);
       localStorage.setItem('settings', buffer);
@@ -495,7 +504,8 @@ const App = {
         editorClipboard: this.editorClipboard,
         lang: this.lang,
         theme: this.theme,
-        hideDNT: this.hideDNT
+        hideDNT: this.hideDNT,
+        highlightDict: this.highlightDict,
       }
       let settingsStr = JSON.stringify(settings, null, 2);
       var settingsBlob = new Blob([settingsStr], {});
@@ -533,6 +543,7 @@ const App = {
       if (settings.lang) this.lang = settings.lang;
       if (settings.theme) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
+      if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
     },
     saveLocalDescs() {
       if (!localStorageInitialized) return;
