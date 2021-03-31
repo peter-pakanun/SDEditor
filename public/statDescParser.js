@@ -187,7 +187,10 @@ function generateTranslationBlock(desc, lang) {
   var text = `\t${desc.translations[lang]?.length || "0"}\r\n`;
   for (let i = 0; i < desc.translations[lang]?.length; i++) {
     const translation = desc.translations[lang][i] || "";
-    text += `\t\t${desc.variables[i] || ""} "${translation}" ${desc.remarks[i] || ""}\r\n`;
+    text += `\t\t${desc.variables[i] || ""} "${translation}"`;
+    if (desc.remarks[i]) 
+      text += ` ${desc.remarks[i]}`;
+    text += `\r\n`;
   }
   return text;
 }
