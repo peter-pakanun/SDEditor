@@ -96,7 +96,7 @@
       </table>
     </div>
 
-    <div class="editor" v-if="editorVisible">
+    <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorExit">
       <div class="edit">
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
@@ -109,10 +109,10 @@
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
             <div class="textHL">
-              <input type="text" placeholder="English" readonly v-model="editorBlock.english">
+              <input type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
               <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
             </div>
-            <button @click="useRegex(editorBlock)">📑</button>
+            <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
           <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index'>
           <div class="inputField" v-for="word in editorBlock.words">
