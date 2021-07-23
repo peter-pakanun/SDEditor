@@ -410,6 +410,7 @@ const config = {
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
+            console.log(replacerObj);
             if (!replacerObj.find) continue;
             let regex = new RegExp(replacerObj.find, "igm");
             let m;
