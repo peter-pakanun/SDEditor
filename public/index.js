@@ -416,7 +416,7 @@ const config = {
             while (m = regex.exec(escapedEnglish)) {
               HLs.push({
                 index: m.index,
-                find: replacerObj.find,
+                find: m[1],
                 replace: replacerObj.replace
               });
             }
