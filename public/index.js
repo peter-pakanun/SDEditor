@@ -410,14 +410,14 @@ const config = {
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
-            console.log(replacerObj);
-            if (!replacerObj.find) continue;
+            if (!replacerObj.find || replacerObj.find.length <= 0) continue;
             let regex = new RegExp(replacerObj.find, "igm");
             let m;
             while (m = regex.exec(escapedEnglish)) {
+              console.log(m);
               HLs.push({
                 index: m.index,
-                find: m[1],
+                find: m[0],
                 replace: replacerObj.replace
               });
             }
