@@ -114,7 +114,9 @@
             </div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
-          <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index'>
+          <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index'
+            @keyup.alt.1="hotkeyPasteHL($event, editorBlock, index, 0)"
+          >
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">

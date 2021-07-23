@@ -457,6 +457,11 @@ const config = {
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
     },
+    hotkeyPasteHL(e, editorBlock, editorIndex, id) {
+      if (!editorBlock.HLs[id]) return;
+      let text = editorBlock.HLs[id].replace || editorBlock.HLs[id].find;
+      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + text;
+    },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
