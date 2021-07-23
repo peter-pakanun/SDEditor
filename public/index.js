@@ -1,4 +1,4 @@
-const App = {
+const config = {
   data() {
     return {
       localStorageInitialized: false,
@@ -650,7 +650,5 @@ const App = {
   },
 }
 
-Vue.createApp(App).mount('#app');
-
-
-
+const app = Vue.createApp(config);
+app.mount('#app');
