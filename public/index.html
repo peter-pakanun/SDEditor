@@ -116,6 +116,15 @@
           </div>
           <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index'
             @keyup.alt.1="hotkeyPasteHL($event, editorBlock, index, 0)"
+            @keyup.alt.2="hotkeyPasteHL($event, editorBlock, index, 1)"
+            @keyup.alt.3="hotkeyPasteHL($event, editorBlock, index, 2)"
+            @keyup.alt.4="hotkeyPasteHL($event, editorBlock, index, 3)"
+            @keyup.alt.5="hotkeyPasteHL($event, editorBlock, index, 4)"
+            @keyup.alt.6="hotkeyPasteHL($event, editorBlock, index, 5)"
+            @keyup.alt.7="hotkeyPasteHL($event, editorBlock, index, 6)"
+            @keyup.alt.8="hotkeyPasteHL($event, editorBlock, index, 7)"
+            @keyup.alt.9="hotkeyPasteHL($event, editorBlock, index, 8)"
+            @keyup.alt.0="hotkeyPasteHL($event, editorBlock, index, 9)"
           >
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
