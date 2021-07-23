@@ -35,7 +35,7 @@ const config = {
       paginationPadding: 2,
       currentPage: 1,
       searchText: "",
-      showOnlyMissing: true,
+      filterSelect: "new",
       hideDNT: true,
       highlightDict: true,
 
@@ -121,7 +121,7 @@ const config = {
       document.documentElement.setAttribute('data-theme', newTheme);
       this.saveSettings();
     },
-    showOnlyMissing() {
+    filterSelect() {
       this.filterDesc();
     },
     editorClipboard() {
@@ -339,6 +339,11 @@ const config = {
         } else {
           if (this.showOnlyMissing) continue;
         }
+
+        if (this.filterSelect == "new" && !desc.isMissing && !desc.hasChanges) continue;
+        if (this.filterSelect == "blank" && !desc.isMissing) continue;
+        if (this.filterSelect == "done" && !desc.hasChanges) continue;
+
         if (
           this.searchText.trim() == "" ||
           desc.filepath.toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||

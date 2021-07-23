@@ -68,8 +68,13 @@
           <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="New translation in localStorage from this session">
           <span></span>
           <input id="searchInp" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
-          <input type="checkbox" id="showOnlyMissing" name="showOnlyMissing" v-model="showOnlyMissing">
-          <label for="showOnlyMissing"> Only Missing</label>
+
+          <select v-model="filterSelect">
+            <option value="new">New statfiles</option>
+            <option value="blank">Blank only</option>
+            <option value="done">Done only</option>
+            <option value="all">Show All</option>
+          </select>
         </div>
       </div>
 
