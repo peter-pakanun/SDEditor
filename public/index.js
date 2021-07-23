@@ -414,7 +414,6 @@ const config = {
             let regex = new RegExp(replacerObj.find, "igm");
             let m;
             while (m = regex.exec(escapedEnglish)) {
-              console.log(m);
               HLs.push({
                 index: m.index,
                 find: m[0],
