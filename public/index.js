@@ -410,7 +410,7 @@ const config = {
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
-            if (!replacerObj.find || replacerObj.find.length <= 0) continue;
+            if (!replacerObj.find) continue;
             let regex = new RegExp(replacerObj.find, "igm");
             let m;
             while (m = regex.exec(escapedEnglish)) {
