@@ -398,26 +398,50 @@ const config = {
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
-        let englishHLter = escapeHtml(english);
+        let escapedEnglish = escapeHtml(english);
+        let englishHLter = escapedEnglish;
+        let HLs = [];
         
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
             let regex = new RegExp(replacerObj.find, "igm");
-            let m = regex.exec(englishHLter);
-            if (!m) continue;
-            for (const match of m) {
-              englishHLter = englishHLter.replace(new RegExp("(" + replacerObj.find + ")", 'igm'), "<span class='vocab' title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"" + replacerObj.replace + "\">$1</span>");
+            let m;
+            while (m = regex.exec(escapedEnglish)) {
+              HLs.push({
+                index: m.index,
+                find: replacerObj.find,
+                replace: replacerObj.replace
+              });
             }
           }
         }
+
         // highlight ggg var tag
-        englishHLter = englishHLter.replace(new RegExp(gggVarTagRegex, 'igm'), "<span title='Click = Paste below\nCtrl+Click = Copy to Clipboard' dataValue=\"$1\">$1</span>");
+        let regex = new RegExp(gggVarTagRegex, 'igm');
+        let m;
+        while (m = regex.exec(escapedEnglish)) {
+          HLs.push({
+            index: m.index,
+            find: m[1]
+          });
+        }
+
+        // construct HLter
+        HLs.sort((a, b) => b.index - a.index); // sort deacending
+        for (let i = 0; i < HLs.length; i++) {
+          const HL = HLs[i];
+          let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click/Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
+          englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
+        }
+        HLs.sort((a, b) => a.index - b.index); // sort acending
+
 
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
           englishHLter,
+          HLs,
           translation,
           translationReplace: "",
           words: []
