@@ -431,7 +431,7 @@ const config = {
         HLs.sort((a, b) => b.index - a.index); // sort deacending
         for (let i = 0; i < HLs.length; i++) {
           const HL = HLs[i];
-          let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click/Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
+          let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
           englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
         }
         HLs.sort((a, b) => a.index - b.index); // sort acending
@@ -451,8 +451,8 @@ const config = {
       this.$nextTick(() => this.$refs['translation_0'].focus());
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
-      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + e.target.getAttribute('datavalue');
       this.$refs['translation_' + editorIndex].focus();
+      document.execCommand("insertText", false, e.target.getAttribute('datavalue'));
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
@@ -460,7 +460,7 @@ const config = {
     hotkeyPasteHL(e, editorBlock, editorIndex, id) {
       if (!editorBlock.HLs[id]) return;
       let text = editorBlock.HLs[id].replace || editorBlock.HLs[id].find;
-      editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + text;
+      document.execCommand("insertText", false, text);
     },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
