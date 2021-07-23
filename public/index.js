@@ -424,6 +424,7 @@ const config = {
         })
       }
       this.editorVisible = true;
+      this.$nextTick(() => this.$refs['translation_0'].focus());
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
       editorBlock.translation = (editorBlock.translation == undefined ? "" : editorBlock.translation) + e.target.getAttribute('datavalue');
