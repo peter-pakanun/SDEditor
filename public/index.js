@@ -462,7 +462,9 @@ const config = {
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
     },
-    hotkeyPasteHL(e, editorBlock, editorIndex, id) {
+    hotkeyPasteHL(e, editorBlock, editorIndex) {
+      let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);
+      if (id < 0) return;
       if (!editorBlock.HLs[id]) return;
       let text = editorBlock.HLs[id].replace || editorBlock.HLs[id].find;
       document.execCommand("insertText", false, text);
