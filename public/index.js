@@ -38,6 +38,7 @@ const config = {
       filterSelect: "new",
       hideDNT: true,
       highlightDict: true,
+      shiftEnterSave: false,
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
@@ -112,6 +113,9 @@ const config = {
       this.saveSettings();
     },
     highlightDict() {
+      this.saveSettings();
+    },
+    shiftEnterSave() {
       this.saveSettings();
     },
     lang() {
@@ -470,6 +474,9 @@ const config = {
       let text = editorBlock.HLs[id].replace || editorBlock.HLs[id].find;
       document.execCommand("insertText", false, text);
     },
+    editorShiftEnter() {
+      if (this.shiftEnterSave) this.editorSave();
+    },
     editorSave() {
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
@@ -534,6 +541,7 @@ const config = {
         theme: this.theme,
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
+        shiftEnterSave: this.shiftEnterSave,
       }
       let buffer = JSON.stringify(settings);
       localStorage.setItem('settings', buffer);
@@ -547,6 +555,7 @@ const config = {
         theme: this.theme,
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
+        shiftEnterSave: this.shiftEnterSave,
       }
       let settingsStr = JSON.stringify(settings, null, 2);
       var settingsBlob = new Blob([settingsStr], {});
@@ -585,6 +594,7 @@ const config = {
       if (settings.theme) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
+      if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
     },
     saveLocalDescs() {
       if (!localStorageInitialized) return;

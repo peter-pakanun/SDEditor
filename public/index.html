@@ -32,6 +32,9 @@
         <input type="checkbox" id="highlightDict" name="highlightDict" v-model="highlightDict">
         <label for="highlightDict"> Highlight words from Dictionary</label>
         <br>
+        <input type="checkbox" id="shiftEnterSave" name="shiftEnterSave" v-model="shiftEnterSave">
+        <label for="shiftEnterSave"> Shift + Enter to Save</label>
+        <br>
         <button @click="showSetting = false">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>
@@ -101,7 +104,7 @@
       </table>
     </div>
 
-    <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorExit">
+    <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorExit" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
