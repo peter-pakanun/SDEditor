@@ -415,7 +415,13 @@ const config = {
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
             if (!replacerObj.find || replacerObj.find.length <= 0) continue;
-            let regex = new RegExp(replacerObj.find, "igm");
+            let regex;
+            try {
+              regex = new RegExp("^" + replacerObj.find + "$", "igm");
+            } catch (error) {
+              alert(`Invalid regex: ${replacerObj.find}`);
+              continue;
+            }
             let m;
             while (m = regex.exec(escapedEnglish)) {
               HLs.push({
@@ -625,7 +631,13 @@ const config = {
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
-          let regex = new RegExp("^" + replacerObj.find + "$", "igm");
+          let regex;
+          try {
+            regex = new RegExp("^" + replacerObj.find + "$", "igm");
+          } catch (error) {
+            alert(`Invalid regex: ${replacerObj.find}`);
+            continue;
+          }
           let m = regex.exec(word.captured);
           if (!m) continue;
           if (!force) word.replace = replacerObj.replace;
