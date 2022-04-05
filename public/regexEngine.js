@@ -1,7 +1,14 @@
 function regexEngineLookup(str, dictionary, words = []) {
   str = str.replace(/\\n/g, " ");
   for (const dict of dictionary) {
-    let regex = new RegExp("^" + dict.find + "$", 'igm');
+    let regex;
+    try {
+      regex = new RegExp("^" + dict.find + "$", 'igm');
+    } catch (error) {
+      alert(`Invalid regex: ${dict.find}`);
+      continue;
+    }
+
     let match = regex.exec(str);
     if (!match) continue;
 
