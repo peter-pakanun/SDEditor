@@ -417,7 +417,7 @@ const config = {
             if (!replacerObj.find || replacerObj.find.length <= 0) continue;
             let regex;
             try {
-              regex = new RegExp("^" + replacerObj.find + "$", "igm");
+              regex = new RegExp(replacerObj.find, "igm");
             } catch (error) {
               alert(`Invalid regex: ${replacerObj.find}`);
               continue;
