@@ -11,7 +11,8 @@ const config = {
         "French",
         "Traditional Chinese",
         "Simplified Chinese",
-        "Korean"
+        "Korean",
+        "Japanese",
       ],
       lang: "",
       theme: 'grey',
