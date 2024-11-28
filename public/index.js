@@ -79,6 +79,9 @@ const config = {
     if (settings) {
       try {
         settings = JSON.parse(settings);
+        if (settings.dictionary && Array.isArray(settings.dictionary)) {
+          settings.dictionary.sort((a, b) => b.find.length - a.find.length);
+        };
       } catch (error) {
         alert('Cannot read Localstorage!!\nFile maybe corrupted!');
         if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
@@ -107,6 +110,10 @@ const config = {
 
     this.loadingProgress = 0;
     localStorageInitialized = true;
+    document.addEventListener('keydown', this.handleKeydown);
+  },
+  beforeDestroy() {
+    document.removeEventListener('keydown', this.handleKeydown);
   },
   watch: {
     hideDNT() {
@@ -175,6 +182,18 @@ const config = {
     }
   },
   methods: {
+    handleKeydown(e) {
+      if (e.shiftKey && e.code === 'Enter') {
+        this.openFirstFile();
+      }
+    },
+  
+    openFirstFile() {
+      if (this.descsDisplay.length > 0) {
+        let firstDesc = this.descsDisplay[0];
+        this.editFile(firstDesc.filepath);
+      }
+    },
     async fileDropped(e) {
       e.preventDefault();
       if (e.dataTransfer.files.length !== 1) return; // only accpet one file at a time
@@ -409,26 +428,24 @@ const config = {
         let english = desc.translations.English[i];
         let escapedEnglish = escapeHtml(english);
         let englishHLter = escapedEnglish;
+        let modifiedEnglish = escapeHtml(english); // Usado para substituir por asteriscos
         let HLs = [];
         
         // highlight word from dictionary
         if (this.highlightDict) {
           for (const replacerObj of this.dictionary) {
             if (!replacerObj.find || replacerObj.find.length <= 0) continue;
-            let regex;
-            try {
-              regex = new RegExp(replacerObj.find, "igm");
-            } catch (error) {
-              alert(`Invalid regex: ${replacerObj.find}`);
-              continue;
-            }
+            let escapedFind = escapeRegExp(replacerObj.find);
+            let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
             let m;
-            while (m = regex.exec(escapedEnglish)) {
+            while (m = regex.exec(modifiedEnglish)) {
               HLs.push({
                 index: m.index,
                 find: m[0],
                 replace: replacerObj.replace
               });
+              let asterisks = '*'.repeat(m[0].length);
+              modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
             }
           }
         }
@@ -436,7 +453,7 @@ const config = {
         // highlight ggg var tag
         let regex = new RegExp(gggVarTagRegex, 'igm');
         let m;
-        while (m = regex.exec(escapedEnglish)) {
+        while (m = regex.exec(modifiedEnglish)) {
           HLs.push({
             index: m.index,
             find: m[1]
@@ -631,13 +648,7 @@ const config = {
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
-          let regex;
-          try {
-            regex = new RegExp("^" + replacerObj.find + "$", "igm");
-          } catch (error) {
-            alert(`Invalid regex: ${replacerObj.find}`);
-            continue;
-          }
+          let regex = new RegExp("^" + replacerObj.find + "$", "igm");
           let m = regex.exec(word.captured);
           if (!m) continue;
           if (!force) word.replace = replacerObj.replace;

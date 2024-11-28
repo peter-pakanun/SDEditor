@@ -1,14 +1,13 @@
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // escapa todos os caracteres especiais do regex
+}
 function regexEngineLookup(str, dictionary, words = []) {
   str = str.replace(/\\n/g, " ");
+  if (dictionary && Array.isArray(dictionary)) {
+    dictionary.sort((a, b) => b.find.length - a.find.length);
+  };
   for (const dict of dictionary) {
-    let regex;
-    try {
-      regex = new RegExp("^" + dict.find + "$", 'igm');
-    } catch (error) {
-      alert(`Invalid regex: ${dict.find}`);
-      continue;
-    }
-
+    let regex = new RegExp("^" + dict.find + "$", 'igm');
     let match = regex.exec(str);
     if (!match) continue;
 
