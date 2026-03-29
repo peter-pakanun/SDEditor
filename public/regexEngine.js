@@ -50,7 +50,7 @@ function regexEngineLookup(str, dictionary, words = []) {
   }
 }
 
-let gggVarTagRegex = "([\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
+let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
 function countGGGVarTag(str) {
   let m = str?.match(new RegExp(gggVarTagRegex, 'gi'));
