@@ -156,7 +156,7 @@ function parseDesc(filepath, text, lang) {
     }
   }
 
-  if (desc.translations.English[0].indexOf('[DNT]') == 0 || desc.translations.English[0].indexOf('DNT ') == 0) desc.isDNT = true;
+  if (desc.translations.English[0].indexOf('[DNT') == 0 || desc.translations.English[0].indexOf('DNT ') == 0) desc.isDNT = true;
 
   return desc;
 }
