@@ -3,9 +3,9 @@ function escapeRegExp(string) {
 }
 function regexEngineLookup(str, dictionary, words = []) {
   str = str.replace(/\\n/g, " ");
-  if (dictionary && Array.isArray(dictionary)) {
-    dictionary.sort((a, b) => b.find.length - a.find.length);
-  };
+  // if (dictionary && Array.isArray(dictionary)) {
+  //   dictionary.sort((a, b) => b.find.length - a.find.length);
+  // };
   for (const dict of dictionary) {
     let regex = new RegExp("^" + dict.find + "$", 'igm');
     let match = regex.exec(str);
