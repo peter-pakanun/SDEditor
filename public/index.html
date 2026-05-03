@@ -70,7 +70,7 @@
           <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
           <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="New translation in localStorage from this session">
           <span></span>
-          <input id="searchInp" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
+          <input id="searchInp" ref="searchInput" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
 
           <select v-model="filterSelect">
             <option value="new">New statfiles</option>

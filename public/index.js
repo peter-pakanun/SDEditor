@@ -187,6 +187,12 @@ const config = {
       if (e.shiftKey && e.code === 'Enter') {
         this.openFirstFile();
       }
+      
+      if (e.ctrlKey && e.code === 'KeyF') {
+        e.preventDefault();
+        this.$refs.searchInput?.focus();
+        this.$refs.searchInput?.select();
+      }
     },
   
     openFirstFile() {
