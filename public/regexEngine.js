@@ -108,6 +108,16 @@ function regexEngineCreate(str, dictionary) {
   let f = str;
   let r = str;
 
+  // keyword popup tag
+  if (m = f.match(new RegExp(keywordPopupTagRegex, 'ig'))) {
+    console.log(m);
+
+    for (const match of m) {
+      f = f.replace(match, "(.+)");
+      r = r.replace(match, "\u200B");
+    }
+  }
+
   // {} tag
   if (m = f.match(new RegExp(gggVarTagRegex, 'ig'))) {
     for (const match of m) {
