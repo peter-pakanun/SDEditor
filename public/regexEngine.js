@@ -1,6 +1,16 @@
+/**
+ * @param {string} string
+ * @returns {string}
+ */
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // escapa todos os caracteres especiais do regex
 }
+/**
+ * @param {string} str
+ * @param {any} dictionary
+ * @param {string[]} words
+ * @returns {*} result
+ */
 function regexEngineLookup(str, dictionary, words = []) {
   str = str.replace(/\\n/g, " ");
   // if (dictionary && Array.isArray(dictionary)) {
@@ -52,11 +62,20 @@ function regexEngineLookup(str, dictionary, words = []) {
 
 let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
+/**
+ * @param {string} str
+ * @returns {number}
+ */
 function countGGGVarTag(str) {
   let m = str?.match(new RegExp(gggVarTagRegex, 'gi'));
   return m?.length || 0;
 }
 
+/**
+ * @param {string} str
+ * @param {any} dictionary
+ * @returns {any}
+ */
 function regexEngineCreate(str, dictionary) {
   let m;
   let f = str;
