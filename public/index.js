@@ -437,6 +437,33 @@ const config = {
         let englishHLter = escapedEnglish;
         let modifiedEnglish = escapeHtml(english); // Usado para substituir por asteriscos
         let HLs = [];
+        let m;
+
+        // highlight KeywordPopup tags [TagName|format] or [TagName]
+        let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
+        while (m = keywordPopupRegex.exec(modifiedEnglish)) {
+          let tagName = m[2];
+          let dynamicContent = m[3] || '';
+          let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
+          console.log(m[0]);
+          HLs.push({
+            index: m.index,
+            find: m[0],
+            tagName: tagName,
+            dynamicContent: hasDynamicContent ? '' : dynamicContent,
+            isKeywordPopup: true,
+            replace: lookupKeywordPopupReplacement(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary)
+          });
+        }
+
+        // highlight ggg var tag
+        let regex = new RegExp(gggVarTagRegex, 'igm');
+        while (m = regex.exec(modifiedEnglish)) {
+          HLs.push({
+            index: m.index,
+            find: m[1]
+          });
+        }
         
         // highlight word from dictionary
         if (this.highlightDict) {
@@ -444,8 +471,11 @@ const config = {
             if (!replacerObj.find || replacerObj.find.length <= 0) continue;
             let escapedFind = escapeRegExp(replacerObj.find);
             let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-            let m;
             while (m = regex.exec(modifiedEnglish)) {
+              // skip if it is within a keyword popup tag
+              if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
+              // skip if it is within a ggg var tag
+              if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
               HLs.push({
                 index: m.index,
                 find: m[0],
@@ -455,16 +485,6 @@ const config = {
               modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
             }
           }
-        }
-
-        // highlight ggg var tag
-        let regex = new RegExp(gggVarTagRegex, 'igm');
-        let m;
-        while (m = regex.exec(modifiedEnglish)) {
-          HLs.push({
-            index: m.index,
-            find: m[1]
-          });
         }
 
         // construct HLter

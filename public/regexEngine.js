@@ -39,8 +39,14 @@ function regexEngineLookup(str, dictionary, words = []) {
           failStr = r.failStr;
         }
       } else {
-        words.push(captured);
-        replace = replace.replace(m[0], '🔖')
+        let transformed = checkKeywordPopupTag(captured, '🔖');
+        if (!transformed || !transformed.word) {
+          words.push(captured);
+          replace = replace.replace(m[0], '🔖')
+        } else {
+          words.push(transformed.word);
+          replace = replace.replace(m[0], transformed.replace);
+        }
       }
     }
 
@@ -61,6 +67,27 @@ function regexEngineLookup(str, dictionary, words = []) {
 }
 
 let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
+
+let keywordPopupTagRegex = "(\\[([^\\]|]+)(?:\\|([^\\]]*))?\\])";
+
+/**
+ * @param {string} str the string to check
+ * @param {string} replacer the string to use in place of the found string
+ * @returns {{find: string, word: string | null, replace: string | null} | null}
+ * if the string is not a keyword popup tag, it returns null
+ */
+function checkKeywordPopupTag(str, replacer = '') {
+  let regex = new RegExp(keywordPopupTagRegex, 'ig');
+  let match = regex.exec(str);
+  if (!match) return null;
+  let tagName = match[2];
+  let defaultValue = match[3] || '';
+  return {
+    find: str,
+    word: defaultValue || tagName,
+    replace: replacer ? `[${tagName}|${replacer}]` : `[${tagName}${defaultValue ? `|${defaultValue}` : ''}]`
+  };
+}
 
 /**
  * @param {string} str
@@ -143,4 +170,46 @@ function regexEngineCreate(str, dictionary) {
     find: f,
     replace: newR
   }
+}
+
+/**
+ * @param {string} tagName the keyword popup tag name
+ * @param {string} dynamicContent the dynamic content of the keyword popup tag
+ * @param {any} dictionary the dictionary to use for lookup
+ * @returns {string}
+ */
+function lookupKeywordPopupReplacement(tagName, dynamicContent, dictionary) {
+  let replacement = null;
+
+  if (dynamicContent && dynamicContent !== '') {
+    for (const dictEntry of dictionary) {
+      let escapedFind = escapeRegExp(dictEntry.find);
+      let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+      console.log(regex);
+      if (regex.test(dynamicContent)) {
+        replacement = dictEntry.replace;
+        console.log('Found replacement:', replacement);
+        break;
+      }
+    }
+  }
+
+  if (replacement === null) {
+    for (const dictEntry of dictionary) {
+      let escapedFind = escapeRegExp(dictEntry.find);
+      let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+      console.log(regex);
+      if (regex.test(tagName)) {
+        replacement = dictEntry.replace;
+        console.log('Found replacement:', replacement);
+        break;
+      }
+    }
+  }
+
+  if (replacement === null) {
+    replacement = dynamicContent || '';
+  }
+
+  return `[${tagName}|${replacement}]`;
 }
