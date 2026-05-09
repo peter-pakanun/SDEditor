@@ -43,6 +43,19 @@ const config = {
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
+      editorFocusedIndex: 0,
+      hlPopup: {
+        visible: false,
+        editorIndex: 0,
+        openedByBracket: false,
+        items: [],
+        filtered: [],
+        filter: "",
+        selectedIndex: 0,
+        x: 0,
+        y: 0,
+        width: 0
+      },
       editorBlocks: [
         {
           english: "Buff grants {0}% increased Fire Damage per 1% Shield Quality",
@@ -275,7 +288,204 @@ const config = {
         this.refreshEditorHLter();
       }, 150);
     },
+    setEditorFocus(index) {
+      this.editorFocusedIndex = index;
+      if (this.hlPopup.visible) {
+        this.openHlPopup(index);
+      }
+    },
+    buildHlPopupItems(editorIndex) {
+      let editorBlock = this.editorBlocks?.[editorIndex];
+      let HLs = editorBlock?.HLs || [];
+      let items = [];
+      let seen = new Set();
+      for (const hl of HLs) {
+        let value = hl?.replace || hl?.find || "";
+        if (!value) continue;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        let label = hl?.replace && hl.replace !== hl.find ? `${hl.find} → ${hl.replace}` : `${hl.find}`;
+        items.push({ label, value });
+      }
+      return items;
+    },
+    positionHlPopup(editorIndex) {
+      let el = this.$refs["translation_" + editorIndex];
+      if (!el?.getBoundingClientRect) return;
+      let rect = el.getBoundingClientRect();
+      let width = Math.min(Math.max(rect.width, 260), 640);
+      let left = Math.min(rect.left, window.innerWidth - width - 8);
+      if (left < 8) left = 8;
+      let top = rect.bottom + 6;
+      if (top > window.innerHeight - 120) top = rect.top - 6;
+      if (top < 8) top = 8;
+      this.hlPopup.x = Math.round(left);
+      this.hlPopup.y = Math.round(top);
+      this.hlPopup.width = Math.round(width);
+    },
+    applyHlPopupFilter() {
+      let filter = (this.hlPopup.filter || "").trim().toLowerCase();
+      if (!filter) {
+        this.hlPopup.filtered = this.hlPopup.items.slice();
+      } else {
+        this.hlPopup.filtered = this.hlPopup.items.filter(item => {
+          return (item.label || "").toLowerCase().includes(filter) || (item.value || "").toLowerCase().includes(filter);
+        });
+      }
+      this.hlPopup.selectedIndex = 0;
+    },
+    openHlPopup(editorIndex, options = {}) {
+      if (!this.editorVisible) return;
+      if (editorIndex == null) editorIndex = this.editorFocusedIndex || 0;
+      this.hlPopup.editorIndex = editorIndex;
+      this.hlPopup.openedByBracket = !!options.openedByBracket;
+      this.hlPopup.items = this.buildHlPopupItems(editorIndex);
+      this.hlPopup.filter = "";
+      this.applyHlPopupFilter();
+      this.positionHlPopup(editorIndex);
+      this.hlPopup.visible = true;
+      let focusFilter = options.focusFilter !== false;
+      if (focusFilter) this.$nextTick(() => this.$refs.hlPopupFilter?.focus());
+    },
+    closeHlPopup(options = {}) {
+      let editorIndex = this.hlPopup.editorIndex;
+      this.hlPopup.visible = false;
+      this.hlPopup.openedByBracket = false;
+      this.hlPopup.filter = "";
+      this.hlPopup.items = [];
+      this.hlPopup.filtered = [];
+      this.hlPopup.selectedIndex = 0;
+      if (options.refocus && this.editorVisible) {
+        this.$nextTick(() => this.$refs["translation_" + editorIndex]?.focus?.());
+      }
+    },
+    moveHlPopupSelection(delta) {
+      let len = this.hlPopup.filtered.length;
+      if (len <= 0) return;
+      let next = this.hlPopup.selectedIndex + delta;
+      if (next < 0) next = len - 1;
+      if (next >= len) next = 0;
+      this.hlPopup.selectedIndex = next;
+    },
+    insertTranslationText(editorIndex, text, options = {}) {
+      let el = this.$refs["translation_" + editorIndex];
+      let editorBlock = this.editorBlocks?.[editorIndex];
+      if (!el || !editorBlock) {
+        document.execCommand("insertText", false, text);
+        return;
+      }
+      if (typeof el.selectionStart !== "number" || typeof el.selectionEnd !== "number") {
+        if (el?.focus) el.focus();
+        document.execCommand("insertText", false, text);
+        return;
+      }
+      let value = el.value || "";
+      let start = el.selectionStart;
+      let end = el.selectionEnd;
+      if (options.deleteOpeningBracket && start > 0 && value[start - 1] === "[") {
+        start = start - 1;
+      }
+      let newValue = value.slice(0, start) + text + value.slice(end);
+      editorBlock.translation = newValue;
+      this.$nextTick(() => {
+        el.focus?.();
+        let caret = start + text.length;
+        el.setSelectionRange?.(caret, caret);
+      });
+    },
+    insertHlPopupItem(item) {
+      let editorIndex = this.hlPopup.editorIndex;
+      let deleteOpeningBracket = this.hlPopup.openedByBracket;
+      this.insertTranslationText(editorIndex, item.value, { deleteOpeningBracket });
+      this.closeHlPopup({ refocus: true });
+    },
+    insertHlPopupSelection() {
+      let item = this.hlPopup.filtered[this.hlPopup.selectedIndex];
+      if (!item) return;
+      this.insertHlPopupItem(item);
+    },
+    translationKeydown(e, editorIndex) {
+      if (e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!this.editorVisible) return;
+        this.setEditorFocus(editorIndex);
+        if (!this.hlPopup.visible) {
+          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: true }), 0);
+        }
+        return;
+      }
+
+      if (!this.hlPopup.visible) return;
+
+      if (e.code === "Escape") {
+        e.preventDefault();
+        this.closeHlPopup({ refocus: true });
+        return;
+      }
+
+      if (e.code === "Backspace") {
+        if (this.hlPopup.filter) {
+          e.preventDefault();
+          this.hlPopup.filter = this.hlPopup.filter.slice(0, -1);
+          this.applyHlPopupFilter();
+        } else {
+          this.closeHlPopup({ refocus: true });
+        }
+        return;
+      }
+
+      if (e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        this.hlPopup.filter += e.key;
+        this.applyHlPopupFilter();
+      }
+    },
+    hlPopupFilterKeydown(e) {
+      if (!this.hlPopup.visible) return;
+      if (e.code === "Escape") {
+        e.preventDefault();
+        this.closeHlPopup({ refocus: true });
+        return;
+      }
+      if (e.code === "Backspace" && !this.hlPopup.filter) {
+        e.preventDefault();
+        if (this.hlPopup.openedByBracket) {
+          this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true });
+        }
+        this.closeHlPopup({ refocus: true });
+      }
+    },
     handleKeydown(e) {
+      if (e.ctrlKey && (e.code === "Space" || e.key === " ")) {
+        if (!this.editorVisible) return;
+        e.preventDefault();
+        if (this.hlPopup.visible) this.closeHlPopup({ refocus: true });
+        else this.openHlPopup(this.editorFocusedIndex || 0);
+        return;
+      }
+
+      if (this.hlPopup.visible) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          this.closeHlPopup({ refocus: true });
+          return;
+        }
+        if (e.code === "ArrowDown") {
+          e.preventDefault();
+          this.moveHlPopupSelection(1);
+          return;
+        }
+        if (e.code === "ArrowUp") {
+          e.preventDefault();
+          this.moveHlPopupSelection(-1);
+          return;
+        }
+        if (e.code === "Enter") {
+          e.preventDefault();
+          this.insertHlPopupSelection();
+          return;
+        }
+      }
+
       if (e.shiftKey && e.code === 'Enter') {
         this.openFirstFile();
       }
@@ -521,6 +731,7 @@ const config = {
         return;
       }
 
+      this.closeHlPopup();
       this.editorBlocks = [];
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
@@ -537,6 +748,7 @@ const config = {
         })
       }
       this.editorVisible = true;
+      this.editorFocusedIndex = 0;
       this.$nextTick(() => this.$refs['translation_0'].focus());
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
@@ -602,12 +814,14 @@ const config = {
       this.saveLocalDescs();
 
       this.saveSettings();
+      this.closeHlPopup();
       this.editorVisible = false;
       this.filterDesc();
     },
     editorExit() {
       if (!confirm('Are you sure you want to exit without saving?')) return;
       this.saveSettings();
+      this.closeHlPopup();
       this.editorVisible = false;
     },
     saveSettings() {
