@@ -189,29 +189,33 @@ function regexEngineCreate(str, dictionary) {
  * @returns {string}
  */
 function lookupKeywordPopupReplacement(tagName, dynamicContent, dictionary) {
+  return lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary).text;
+}
+
+function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) {
   let replacement = null;
+  let foundEntry = null;
+  let dict = Array.isArray(dictionary) ? dictionary : [];
 
   if (dynamicContent && dynamicContent !== '') {
-    for (const dictEntry of dictionary) {
+    for (const dictEntry of dict) {
       let escapedFind = escapeRegExp(dictEntry.find);
       let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-      console.log(regex);
       if (regex.test(dynamicContent)) {
         replacement = dictEntry.replace;
-        console.log('Found replacement:', replacement);
+        foundEntry = dictEntry;
         break;
       }
     }
   }
 
   if (replacement === null) {
-    for (const dictEntry of dictionary) {
+    for (const dictEntry of dict) {
       let escapedFind = escapeRegExp(dictEntry.find);
       let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-      console.log(regex);
       if (regex.test(tagName)) {
         replacement = dictEntry.replace;
-        console.log('Found replacement:', replacement);
+        foundEntry = dictEntry;
         break;
       }
     }
@@ -221,5 +225,5 @@ function lookupKeywordPopupReplacement(tagName, dynamicContent, dictionary) {
     replacement = dynamicContent || '';
   }
 
-  return `[${tagName}|${replacement}]`;
+  return { text: `[${tagName}|${replacement}]`, dictEntry: foundEntry };
 }

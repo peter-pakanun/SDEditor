@@ -204,13 +204,40 @@ const config = {
       });
       return descsToDisplay;
     },
+    foundDictionarySet() {
+      if (!this.editorVisible) return new Set();
+      let set = new Set();
+      for (const editorBlock of this.editorBlocks || []) {
+        for (const hl of editorBlock?.HLs || []) {
+          if (hl?.dictEntry) set.add(hl.dictEntry);
+        }
+      }
+      return set;
+    },
     filteredDictionary() {
+      let dictionary = this.dictionary || [];
       let f = (this.dictionaryFilter || "").trim().toLowerCase();
-      if (!f) return this.dictionary || [];
-      return (this.dictionary || []).filter(word => {
+      let list;
+      if (!f) {
+        list = dictionary.slice();
+      } else {
+        list = dictionary.filter(word => {
         let find = (word?.find || "").toLowerCase();
         let replace = (word?.replace || "").toLowerCase();
         return find.includes(f) || replace.includes(f) || `${find} ${replace}`.includes(f);
+        });
+      }
+
+      let foundSet = this.foundDictionarySet;
+      if (!foundSet || foundSet.size <= 0) return list;
+
+      let indexMap = new Map();
+      for (let i = 0; i < dictionary.length; i++) indexMap.set(dictionary[i], i);
+      return list.sort((a, b) => {
+        let aFound = foundSet.has(a) ? 1 : 0;
+        let bFound = foundSet.has(b) ? 1 : 0;
+        if (aFound !== bFound) return bFound - aFound;
+        return (indexMap.get(a) ?? 0) - (indexMap.get(b) ?? 0);
       });
     },
     filteredRegexes() {
@@ -224,6 +251,9 @@ const config = {
     }
   },
   methods: {
+    isDictionaryEntryFound(word) {
+      return this.foundDictionarySet?.has?.(word) || false;
+    },
     sideAddClicked() {
       if (this.sideTab === 'regex') {
         this.addRegex();
@@ -247,13 +277,15 @@ const config = {
         let dynamicContent = m[3] || '';
         let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
         console.log(m[0]);
+        let kwInfo = lookupKeywordPopupReplacementInfo(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary);
         HLs.push({
           index: m.index,
           find: m[0],
           tagName: tagName,
           dynamicContent: hasDynamicContent ? '' : dynamicContent,
           isKeywordPopup: true,
-          replace: lookupKeywordPopupReplacement(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary)
+          replace: kwInfo.text,
+          dictEntry: kwInfo.dictEntry
         });
       }
 
@@ -283,7 +315,8 @@ const config = {
             HLs.push({
               index: m.index,
               find: m[0],
-              replace: replacerObj.replace
+              replace: replacerObj.replace,
+              dictEntry: replacerObj
             });
             let asterisks = '*'.repeat(m[0].length);
             modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
