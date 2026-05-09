@@ -41,6 +41,10 @@ const config = {
       highlightDict: true,
       shiftEnterSave: false,
 
+      sideTab: 'dictionary',
+      dictionaryFilter: '',
+      regexFilter: '',
+
       editorVisible: false,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
@@ -94,9 +98,6 @@ const config = {
     if (settings) {
       try {
         settings = JSON.parse(settings);
-        if (settings.dictionary && Array.isArray(settings.dictionary)) {
-          settings.dictionary.sort((a, b) => b.find.length - a.find.length);
-        };
       } catch (error) {
         alert('Cannot read Localstorage!!\nFile maybe corrupted!');
         if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
@@ -202,9 +203,36 @@ const config = {
         if (index >= start && index < end) return true;
       });
       return descsToDisplay;
+    },
+    filteredDictionary() {
+      let f = (this.dictionaryFilter || "").trim().toLowerCase();
+      if (!f) return this.dictionary || [];
+      return (this.dictionary || []).filter(word => {
+        let find = (word?.find || "").toLowerCase();
+        let replace = (word?.replace || "").toLowerCase();
+        return find.includes(f) || replace.includes(f) || `${find} ${replace}`.includes(f);
+      });
+    },
+    filteredRegexes() {
+      let f = (this.regexFilter || "").trim().toLowerCase();
+      if (!f) return this.editorRegexes || [];
+      return (this.editorRegexes || []).filter(regex => {
+        let find = (regex?.find || "").toLowerCase();
+        let replace = (regex?.replace || "").toLowerCase();
+        return find.includes(f) || replace.includes(f) || `${find} ${replace}`.includes(f);
+      });
     }
   },
   methods: {
+    sideAddClicked() {
+      if (this.sideTab === 'regex') {
+        this.addRegex();
+        this.regexFilter = "";
+      } else {
+        this.addVocab();
+        this.dictionaryFilter = "";
+      }
+    },
     buildEnglishHLter(english) {
       let escapedEnglish = escapeHtml(english);
       let englishHLter = escapedEnglish;
@@ -909,6 +937,7 @@ const config = {
       localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
     },
     useRegex(editorBlock) {
+      this.sideTab = 'regex';
       let regexEngineResult = regexEngineLookup(editorBlock.english, this.editorRegexes);
       editorBlock.words = [];
       for (const word of regexEngineResult.words) {

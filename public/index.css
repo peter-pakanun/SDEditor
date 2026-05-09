@@ -241,6 +241,10 @@ button, label, th, td, input[type="checkbox"] {
 
 
 
+.editor {
+  --side-width: 360px;
+}
+
 .editor>* {
   padding: 0px 0.5em;
   box-sizing: border-box;
@@ -255,14 +259,12 @@ button, label, th, td, input[type="checkbox"] {
   height: calc(100% - 150px);
   z-index: 1;
   top: 0;
+  overflow-y: auto;
   overflow-x: hidden;
 }
-.editor>.regex {
-  width: 400px;
-  right: 300px;
-}
-.editor>.word {
-  width: 300px;
+
+.editor>.side {
+  width: var(--side-width);
   right: 0;
 }
 
@@ -270,7 +272,7 @@ button, label, th, td, input[type="checkbox"] {
   top: auto;
   right: 0;
   bottom: 0;
-  width: 700px;
+  width: var(--side-width);
   height: 150px;
   overflow: hidden;
   padding: 1em;
@@ -291,13 +293,39 @@ button, label, th, td, input[type="checkbox"] {
 
 
 .editor>.edit {
-  margin-right: 700px;
+  margin-right: var(--side-width);
 }
 
 .editBlock {
   padding: 1em 2em;
   background-color: var(--color-bg2);
   margin-top: 1em;
+}
+.side .editBlock {
+  padding: 0.75em 1em;
+}
+
+.sideHeader {
+  position: sticky;
+  top: 0;
+  background-color: var(--color-bg);
+  padding-top: 0.5em;
+  padding-bottom: 0.5em;
+  z-index: 2;
+}
+
+.sideTabs {
+  display: flex;
+  gap: 0.25em;
+}
+
+.tabBtn.active {
+  background-color: var(--color-element-highlight);
+}
+
+.sideFilter {
+  width: 100%;
+  margin-top: 0.5em;
 }
 .edit>.editBlock>* {
   margin: 1em 0;

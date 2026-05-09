@@ -130,40 +130,44 @@
         </div>
       </div>
 
-      <div class="regex fixed">
-        <div class="twoSided">
-          <h1>📑 Regex</h1>
-          <button @click="addRegex()">➕</button>
+      <div class="side fixed">
+        <div class="twoSided sideHeader">
+          <div class="sideTabs">
+            <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
+            <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
+          </div>
+          <button @click="sideAddClicked()">➕</button>
         </div>
-        <div class="editBlock" v-for="regex in editorRegexes">
-          <div class="twoSided">
-            <div>
-              <div class="inputField">
-                <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off">
-                <button @click="moveRegexUp(regex)">🡩</button>
+
+        <div v-if="sideTab === 'dictionary'">
+          <input class="sideFilter" type="text" v-model="dictionaryFilter" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
+          <div class="editBlock" v-for="word in filteredDictionary">
+            <div class="twoSided">
+              <div>
+                <input type="text" v-model="word.find" placeholder="Find">
+                <input type="text" v-model="word.replace" placeholder="Replace">
               </div>
-              <div class="inputField">
-                <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off">
-                <button @click="moveRegexDown(regex)">🡫</button>
-              </div>
+              <button @click="removeVocab(word)">🗑️</button>
             </div>
-            <button @click="removeRegex(regex)">🗑️</button>
           </div>
         </div>
-      </div>
 
-      <div class="word fixed">
-        <div class="twoSided">
-          <h1>📚 Dictionary</h1>
-          <button @click="addVocab()">➕</button>
-        </div>
-        <div class="editBlock" v-for="word in dictionary">
-          <div class="twoSided">
-            <div>
-              <input type="text" v-model="word.find">
-              <input type="text" v-model="word.replace">
+        <div v-if="sideTab === 'regex'">
+          <input class="sideFilter" type="text" v-model="regexFilter" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
+          <div class="editBlock" v-for="regex in filteredRegexes">
+            <div class="twoSided">
+              <div>
+                <div class="inputField">
+                  <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off" placeholder="Find (regex)">
+                  <button @click="moveRegexUp(regex)">🡩</button>
+                </div>
+                <div class="inputField">
+                  <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off" placeholder="Replace">
+                  <button @click="moveRegexDown(regex)">🡫</button>
+                </div>
+              </div>
+              <button @click="removeRegex(regex)">🗑️</button>
             </div>
-            <button @click="removeVocab(word)">🗑️</button>
           </div>
         </div>
       </div>
