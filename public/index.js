@@ -847,7 +847,7 @@ const config = {
       let HL = (editorBlock?.HLs || []).find(hl => String(hl?._hlId) === String(hlId));
       if (!HL?.isKeywordPopup) return;
 
-      let tagName = (HL.tagName || "").trim();
+      let tagName = unescapeHtml(HL.tagName || "").trim();
       if (!tagName) return;
 
       this.sideTab = 'dictionary';
@@ -856,7 +856,8 @@ const config = {
       let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
       if (existing) return;
 
-      let replace = (HL.dynamicContent || "").trim();
+      let replace = unescapeHtml(HL.dynamicContent || "").trim();
+      if (replace.includes("<")) replace = "";
       this.dictionary.unshift({
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
         find: tagName,

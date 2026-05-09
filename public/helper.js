@@ -45,3 +45,10 @@ function escapeHtml(unsafe) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
+
+function unescapeHtml(escaped) {
+  if (escaped == null) return "";
+  let el = document.createElement("textarea");
+  el.innerHTML = String(escaped);
+  return el.value;
+}
