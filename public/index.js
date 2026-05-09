@@ -277,6 +277,11 @@ const config = {
       let englishHLter = escapedEnglish;
       let modifiedEnglish = escapedEnglish;
       let HLs = [];
+      let nextHlId = 1;
+      let addHL = (hl) => {
+        hl._hlId = nextHlId++;
+        HLs.push(hl);
+      };
       let m;
 
       // highlight KeywordPopup tags [TagName|format] or [TagName]
@@ -286,7 +291,7 @@ const config = {
         let dynamicContent = m[3] || '';
         let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
         let kwInfo = lookupKeywordPopupReplacementInfo(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary);
-        HLs.push({
+        addHL({
           index: m.index,
           find: m[0],
           tagName: tagName,
@@ -300,7 +305,7 @@ const config = {
       // highlight ggg var tag
       let regex = new RegExp(gggVarTagRegex, 'igm');
       while (m = regex.exec(modifiedEnglish)) {
-        HLs.push({
+        addHL({
           index: m.index,
           find: m[1]
         });
@@ -320,7 +325,7 @@ const config = {
             if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
             // skip if it is within a ggg var tag
             if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
-            HLs.push({
+            addHL({
               index: m.index,
               find: m[0],
               replace: replacerObj.replace,
@@ -336,7 +341,11 @@ const config = {
       HLs.sort((a, b) => b.index - a.index); // sort deacending
       for (let i = 0; i < HLs.length; i++) {
         const HL = HLs[i];
-        let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
+        let title = `Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard`;
+        if (HL?.isKeywordPopup && !HL?.dictId) {
+          title += `\nAlt+Click = Add to Dictionary`;
+        }
+        let tag = `<span class='${HL.replace ? "vocab" : ""}' title='${title}' data-hl-id="${HL._hlId}" dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
       }
       HLs.sort((a, b) => a.index - b.index); // sort acending
@@ -829,6 +838,30 @@ const config = {
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
+    },
+    altClickHighlight(e, editorBlock) {
+      let target = e?.target;
+      if (!target?.getAttribute) return;
+      let hlId = target.getAttribute('data-hl-id');
+      if (!hlId) return;
+      let HL = (editorBlock?.HLs || []).find(hl => String(hl?._hlId) === String(hlId));
+      if (!HL?.isKeywordPopup) return;
+
+      let tagName = (HL.tagName || "").trim();
+      if (!tagName) return;
+
+      this.sideTab = 'dictionary';
+      this.dictionaryFilter = tagName;
+
+      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
+      if (existing) return;
+
+      let replace = (HL.dynamicContent || "").trim();
+      this.dictionary.unshift({
+        _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        find: tagName,
+        replace: replace
+      });
     },
     hotkeyPasteHL(e, editorBlock, editorIndex) {
       let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);
