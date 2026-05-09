@@ -211,6 +211,11 @@ const config = {
       let set = new Set();
       for (const editorBlock of this.editorBlocks || []) {
         for (const hl of editorBlock?.HLs || []) {
+          if (Array.isArray(hl?.dictIds)) {
+            for (const id of hl.dictIds) {
+              if (id) set.add(id);
+            }
+          }
           if (hl?.dictId) set.add(hl.dictId);
         }
       }
@@ -283,6 +288,15 @@ const config = {
         hl._hlId = nextHlId++;
         HLs.push(hl);
       };
+      let addMatchingDictIds = (set, text) => {
+        if (!text) return;
+        for (const dictEntry of this.dictionary || []) {
+          if (!dictEntry?._id || !dictEntry?.find) continue;
+          let escapedFind = escapeRegExp(dictEntry.find);
+          let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+          if (regex.test(text)) set.add(dictEntry._id);
+        }
+      };
       let m;
 
       // highlight KeywordPopup tags [TagName|format] or [TagName]
@@ -290,8 +304,17 @@ const config = {
       while (m = keywordPopupRegex.exec(modifiedEnglish)) {
         let tagName = m[2];
         let dynamicContent = m[3] || '';
-        let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
-        let kwInfo = lookupKeywordPopupReplacementInfo(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary);
+        let rawTagName = unescapeHtml(tagName || "");
+        let rawDynamicContent = unescapeHtml(dynamicContent || "");
+        let hasDynamicContent = /<[^>]*>/.test(rawDynamicContent);
+        let staticDynamicContent = rawDynamicContent
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        let dictIdSet = new Set();
+        addMatchingDictIds(dictIdSet, rawTagName);
+        addMatchingDictIds(dictIdSet, staticDynamicContent);
+        let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent, this.dictionary);
         addHL({
           index: m.index,
           find: m[0],
@@ -299,7 +322,8 @@ const config = {
           dynamicContent: hasDynamicContent ? '' : dynamicContent,
           isKeywordPopup: true,
           replace: kwInfo.text,
-          dictId: kwInfo.dictEntry?._id
+          dictId: kwInfo.dictEntry?._id,
+          dictIds: Array.from(dictIdSet)
         });
       }
 
