@@ -122,6 +122,7 @@ const config = {
     },
     highlightDict() {
       this.saveSettings();
+      this.scheduleEditorHLterRefresh();
     },
     shiftEnterSave() {
       this.saveSettings();
@@ -138,6 +139,13 @@ const config = {
     },
     editorClipboard() {
       this.saveSettings();
+    },
+    dictionary: {
+      deep: true,
+      handler() {
+        this.saveSettings();
+        this.scheduleEditorHLterRefresh();
+      }
     }
   },
   computed: {
@@ -183,6 +191,90 @@ const config = {
     }
   },
   methods: {
+    buildEnglishHLter(english) {
+      let escapedEnglish = escapeHtml(english);
+      let englishHLter = escapedEnglish;
+      let modifiedEnglish = escapedEnglish;
+      let HLs = [];
+      let m;
+
+      // highlight KeywordPopup tags [TagName|format] or [TagName]
+      let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
+      while (m = keywordPopupRegex.exec(modifiedEnglish)) {
+        let tagName = m[2];
+        let dynamicContent = m[3] || '';
+        let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
+        console.log(m[0]);
+        HLs.push({
+          index: m.index,
+          find: m[0],
+          tagName: tagName,
+          dynamicContent: hasDynamicContent ? '' : dynamicContent,
+          isKeywordPopup: true,
+          replace: lookupKeywordPopupReplacement(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary)
+        });
+      }
+
+      // highlight ggg var tag
+      let regex = new RegExp(gggVarTagRegex, 'igm');
+      while (m = regex.exec(modifiedEnglish)) {
+        HLs.push({
+          index: m.index,
+          find: m[1]
+        });
+      }
+
+      // highlight word from dictionary
+      if (this.highlightDict) {
+        let sortedDictionary = (this.dictionary || [])
+          .slice()
+          .sort((a, b) => (b.find || '').length - (a.find || '').length);
+        for (const replacerObj of sortedDictionary) {
+          if (!replacerObj.find || replacerObj.find.length <= 0) continue;
+          let escapedFind = escapeRegExp(replacerObj.find);
+          let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+          while (m = regex.exec(modifiedEnglish)) {
+            // skip if it is within a keyword popup tag
+            if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
+            // skip if it is within a ggg var tag
+            if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
+            HLs.push({
+              index: m.index,
+              find: m[0],
+              replace: replacerObj.replace
+            });
+            let asterisks = '*'.repeat(m[0].length);
+            modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
+          }
+        }
+      }
+
+      // construct HLter
+      HLs.sort((a, b) => b.index - a.index); // sort deacending
+      for (let i = 0; i < HLs.length; i++) {
+        const HL = HLs[i];
+        let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
+        englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
+      }
+      HLs.sort((a, b) => a.index - b.index); // sort acending
+
+      return { englishHLter, HLs };
+    },
+    refreshEditorHLter() {
+      if (!this.editorVisible) return;
+      for (const editorBlock of this.editorBlocks) {
+        let { englishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
+        editorBlock.englishHLter = englishHLter;
+        editorBlock.HLs = HLs;
+      }
+    },
+    scheduleEditorHLterRefresh() {
+      if (!this.editorVisible) return;
+      if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
+      this._hlterRefreshTimer = setTimeout(() => {
+        this.refreshEditorHLter();
+      }, 150);
+    },
     handleKeydown(e) {
       if (e.shiftKey && e.code === 'Enter') {
         this.openFirstFile();
@@ -433,70 +525,7 @@ const config = {
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
-        let escapedEnglish = escapeHtml(english);
-        let englishHLter = escapedEnglish;
-        let modifiedEnglish = escapeHtml(english); // Usado para substituir por asteriscos
-        let HLs = [];
-        let m;
-
-        // highlight KeywordPopup tags [TagName|format] or [TagName]
-        let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
-        while (m = keywordPopupRegex.exec(modifiedEnglish)) {
-          let tagName = m[2];
-          let dynamicContent = m[3] || '';
-          let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
-          console.log(m[0]);
-          HLs.push({
-            index: m.index,
-            find: m[0],
-            tagName: tagName,
-            dynamicContent: hasDynamicContent ? '' : dynamicContent,
-            isKeywordPopup: true,
-            replace: lookupKeywordPopupReplacement(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary)
-          });
-        }
-
-        // highlight ggg var tag
-        let regex = new RegExp(gggVarTagRegex, 'igm');
-        while (m = regex.exec(modifiedEnglish)) {
-          HLs.push({
-            index: m.index,
-            find: m[1]
-          });
-        }
-        
-        // highlight word from dictionary
-        if (this.highlightDict) {
-          for (const replacerObj of this.dictionary) {
-            if (!replacerObj.find || replacerObj.find.length <= 0) continue;
-            let escapedFind = escapeRegExp(replacerObj.find);
-            let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-            while (m = regex.exec(modifiedEnglish)) {
-              // skip if it is within a keyword popup tag
-              if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
-              // skip if it is within a ggg var tag
-              if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
-              HLs.push({
-                index: m.index,
-                find: m[0],
-                replace: replacerObj.replace
-              });
-              let asterisks = '*'.repeat(m[0].length);
-              modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
-            }
-          }
-        }
-
-        // construct HLter
-        HLs.sort((a, b) => b.index - a.index); // sort deacending
-        for (let i = 0; i < HLs.length; i++) {
-          const HL = HLs[i];
-          let tag = `<span class='${HL.replace ? "vocab" : ""}' title='Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard' dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
-          englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
-        }
-        HLs.sort((a, b) => a.index - b.index); // sort acending
-
-
+        let { englishHLter, HLs } = this.buildEnglishHLter(english);
         let translation = desc.translations[this.lang]?.[i];
         this.editorBlocks.push({
           english,
