@@ -853,10 +853,15 @@ const config = {
       let tagName = unescapeHtml(HL.tagName || "").trim();
       if (!tagName) return;
 
-      this.sideTab = 'dictionary';
-      this.dictionaryFilter = tagName;
+      let replace = unescapeHtml(HL.dynamicContent || "").trim();
+      if (replace.includes("<")) replace = "";
+  
+      let find = replace || tagName;
 
-      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
+      this.sideTab = 'dictionary';
+      this.dictionaryFilter = find;
+
+      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === find.toLowerCase());
       if (existing) {
         this.dictionaryFlashId = existing._id || '';
         if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
@@ -866,12 +871,10 @@ const config = {
         return;
       }
 
-      let replace = unescapeHtml(HL.dynamicContent || "").trim();
-      if (replace.includes("<")) replace = "";
       let entry = {
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
-        find: tagName,
-        replace: replace
+        find: find,
+        replace: find
       };
       this.dictionary.unshift(entry);
       this.dictionaryFlashId = entry._id;
