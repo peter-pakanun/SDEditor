@@ -44,6 +44,7 @@ const config = {
       sideTab: 'dictionary',
       dictionaryFilter: '',
       regexFilter: '',
+      dictionaryFlashId: '',
 
       editorVisible: false,
       editorCurrentEditingDesc: null,
@@ -856,15 +857,28 @@ const config = {
       this.dictionaryFilter = tagName;
 
       let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
-      if (existing) return;
+      if (existing) {
+        this.dictionaryFlashId = existing._id || '';
+        if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
+        this._dictFlashTimer = setTimeout(() => {
+          if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
+        }, 320);
+        return;
+      }
 
       let replace = unescapeHtml(HL.dynamicContent || "").trim();
       if (replace.includes("<")) replace = "";
-      this.dictionary.unshift({
+      let entry = {
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
         find: tagName,
         replace: replace
-      });
+      };
+      this.dictionary.unshift(entry);
+      this.dictionaryFlashId = entry._id;
+      if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
+      this._dictFlashTimer = setTimeout(() => {
+        if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
+      }, 320);
     },
     hotkeyPasteHL(e, editorBlock, editorIndex) {
       let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);

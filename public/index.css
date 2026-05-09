@@ -305,9 +305,25 @@ button, label, th, td, input[type="checkbox"] {
   padding: 0.5em 0.6em;
   margin-top: 0.5em;
   position: relative;
+  transition: transform 140ms ease, box-shadow 320ms ease;
 }
 .side .editBlock.dictFound {
   box-shadow: 0 0 0 1px var(--color-element-highlight) inset;
+}
+.side .editBlock::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-element-highlight);
+  opacity: 0;
+  transition: opacity 320ms ease;
+  pointer-events: none;
+}
+.side .editBlock.dictNew {
+  transform: translateX(-6px);
+}
+.side .editBlock.dictNew::after {
+  opacity: 0.22;
 }
 .side .editBlock::before {
   content: "";
