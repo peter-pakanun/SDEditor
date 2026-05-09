@@ -44,6 +44,7 @@ const config = {
       editorVisible: false,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
+      editorOriginalTranslations: [],
       hlPopup: {
         visible: false,
         editorIndex: 0,
@@ -733,11 +734,13 @@ const config = {
 
       this.closeHlPopup();
       this.editorBlocks = [];
+      this.editorOriginalTranslations = [];
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let english = desc.translations.English[i];
         let { englishHLter, HLs } = this.buildEnglishHLter(english);
-        let translation = desc.translations[this.lang]?.[i];
+        let translation = desc.translations[this.lang]?.[i] || "";
+        this.editorOriginalTranslations.push(translation);
         this.editorBlocks.push({
           english,
           englishHLter,
@@ -815,11 +818,23 @@ const config = {
 
       this.saveSettings();
       this.closeHlPopup();
+      this.editorOriginalTranslations = newTranslations.slice();
       this.editorVisible = false;
       this.filterDesc();
     },
+    editorEsc(e) {
+      if (e?.defaultPrevented) return;
+      if (this.hlPopup.visible) {
+        e?.preventDefault();
+        this.closeHlPopup({ refocus: true });
+        return;
+      }
+      this.editorExit();
+    },
     editorExit() {
-      if (!confirm('Are you sure you want to exit without saving?')) return;
+      let original = (this.editorOriginalTranslations || []).map(v => v ?? "");
+      let current = (this.editorBlocks || []).map(b => b?.translation ?? "");
+      if (!arrayEquals(original, current) && !confirm('Are you sure you want to exit without saving?')) return;
       this.saveSettings();
       this.closeHlPopup();
       this.editorVisible = false;

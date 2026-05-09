@@ -104,7 +104,7 @@
       </table>
     </div>
 
-    <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorExit" @keydown.shift.enter="editorShiftEnter">
+    <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
