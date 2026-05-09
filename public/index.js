@@ -126,6 +126,7 @@ const config = {
 
     this.loadingProgress = 0;
     localStorageInitialized = true;
+    this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
   },
   beforeDestroy() {
@@ -209,7 +210,7 @@ const config = {
       let set = new Set();
       for (const editorBlock of this.editorBlocks || []) {
         for (const hl of editorBlock?.HLs || []) {
-          if (hl?.dictEntry) set.add(hl.dictEntry);
+          if (hl?.dictId) set.add(hl.dictId);
         }
       }
       return set;
@@ -234,8 +235,8 @@ const config = {
       let indexMap = new Map();
       for (let i = 0; i < dictionary.length; i++) indexMap.set(dictionary[i], i);
       return list.sort((a, b) => {
-        let aFound = foundSet.has(a) ? 1 : 0;
-        let bFound = foundSet.has(b) ? 1 : 0;
+        let aFound = foundSet.has(a?._id) ? 1 : 0;
+        let bFound = foundSet.has(b?._id) ? 1 : 0;
         if (aFound !== bFound) return bFound - aFound;
         return (indexMap.get(a) ?? 0) - (indexMap.get(b) ?? 0);
       });
@@ -251,8 +252,16 @@ const config = {
     }
   },
   methods: {
+    ensureDictionaryIds() {
+      if (!Array.isArray(this.dictionary)) return;
+      for (const entry of this.dictionary) {
+        if (entry && !entry._id) {
+          entry._id = `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+        }
+      }
+    },
     isDictionaryEntryFound(word) {
-      return this.foundDictionarySet?.has?.(word) || false;
+      return this.foundDictionarySet?.has?.(word?._id) || false;
     },
     sideAddClicked() {
       if (this.sideTab === 'regex') {
@@ -276,7 +285,6 @@ const config = {
         let tagName = m[2];
         let dynamicContent = m[3] || '';
         let hasDynamicContent = dynamicContent === '' || dynamicContent.includes('<');
-        console.log(m[0]);
         let kwInfo = lookupKeywordPopupReplacementInfo(tagName, hasDynamicContent ? '' : dynamicContent, this.dictionary);
         HLs.push({
           index: m.index,
@@ -285,7 +293,7 @@ const config = {
           dynamicContent: hasDynamicContent ? '' : dynamicContent,
           isKeywordPopup: true,
           replace: kwInfo.text,
-          dictEntry: kwInfo.dictEntry
+          dictId: kwInfo.dictEntry?._id
         });
       }
 
@@ -316,7 +324,7 @@ const config = {
               index: m.index,
               find: m[0],
               replace: replacerObj.replace,
-              dictEntry: replacerObj
+              dictId: replacerObj._id
             });
             let asterisks = '*'.repeat(m[0].length);
             modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
@@ -958,6 +966,7 @@ const config = {
     importSettings(settings) {
       this.editorRegexes = settings.editorRegexes || [];
       this.dictionary = settings.dictionary || [];
+      this.ensureDictionaryIds();
       this.editorClipboard = settings.editorClipboard || "";
       if (settings.lang) this.lang = settings.lang;
       if (settings.theme) this.theme = settings.theme;
@@ -1036,7 +1045,7 @@ const config = {
       }
     },
     addVocab() {
-      this.dictionary.unshift({ find: "", replace: "" });
+      this.dictionary.unshift({ _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "" });
       this.saveSettings();
     },
     removeVocab(word) {

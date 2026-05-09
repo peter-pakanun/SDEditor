@@ -304,10 +304,22 @@ button, label, th, td, input[type="checkbox"] {
 .side .editBlock {
   padding: 0.5em 0.6em;
   margin-top: 0.5em;
+  position: relative;
 }
 .side .editBlock.dictFound {
   box-shadow: 0 0 0 1px var(--color-element-highlight) inset;
-  border-left: 4px solid var(--color-element-highlight);
+}
+.side .editBlock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: transparent;
+}
+.side .editBlock.dictFound::before {
+  background: var(--color-element-highlight);
 }
 
 .sideHeader {

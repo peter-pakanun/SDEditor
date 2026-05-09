@@ -141,7 +141,7 @@
 
         <div v-if="sideTab === 'dictionary'">
           <input class="sideFilter" type="text" v-model="dictionaryFilter" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
-          <div class="editBlock" v-for="word in filteredDictionary" :class="{ dictFound: isDictionaryEntryFound(word) }">
+          <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word) }">
             <div class="twoSided">
               <div class="dictRow">
                 <input type="text" v-model="word.find" placeholder="Find">
