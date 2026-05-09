@@ -342,8 +342,10 @@ const config = {
       for (let i = 0; i < HLs.length; i++) {
         const HL = HLs[i];
         let title = `Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard`;
-        if (HL?.isKeywordPopup && !HL?.dictId) {
-          title += `\nAlt+Click = Add to Dictionary`;
+        if (HL?.isKeywordPopup) {
+          title += HL?.dictId
+            ? `\nAlt+Click = Jump to Dictionary`
+            : `\nAlt+Click = Add to Dictionary`;
         }
         let tag = `<span class='${HL.replace ? "vocab" : ""}' title='${title}' data-hl-id="${HL._hlId}" dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
