@@ -242,7 +242,7 @@ button, label, th, td, input[type="checkbox"] {
 
 
 .editor {
-  --side-width: 360px;
+  --side-width: 520px;
 }
 
 .editor>* {
@@ -302,15 +302,16 @@ button, label, th, td, input[type="checkbox"] {
   margin-top: 1em;
 }
 .side .editBlock {
-  padding: 0.75em 1em;
+  padding: 0.5em 0.6em;
+  margin-top: 0.5em;
 }
 
 .sideHeader {
   position: sticky;
   top: 0;
   background-color: var(--color-bg);
-  padding-top: 0.5em;
-  padding-bottom: 0.5em;
+  padding-top: 0.25em;
+  padding-bottom: 0.25em;
   z-index: 2;
 }
 
@@ -326,6 +327,24 @@ button, label, th, td, input[type="checkbox"] {
 .sideFilter {
   width: 100%;
   margin-top: 0.5em;
+}
+
+.side input,
+.side button,
+.side select,
+.side textarea {
+  padding: 0.25em 0.5em;
+  line-height: 1.2em;
+}
+
+.side .dictRow {
+  display: flex;
+  gap: 0.4em;
+  flex-grow: 1;
+}
+
+.side .dictRow > input {
+  width: 50%;
 }
 .edit>.editBlock>* {
   margin: 1em 0;

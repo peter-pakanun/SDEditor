@@ -143,7 +143,7 @@
           <input class="sideFilter" type="text" v-model="dictionaryFilter" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
           <div class="editBlock" v-for="word in filteredDictionary">
             <div class="twoSided">
-              <div>
+              <div class="dictRow">
                 <input type="text" v-model="word.find" placeholder="Find">
                 <input type="text" v-model="word.replace" placeholder="Replace">
               </div>
