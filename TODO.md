@@ -1,5 +1,5 @@
 # TODO
-- [ ] In statfiles with several lines, compare these lines and mark differences with another color
+- [x] In statfiles with several lines, compare these lines and mark differences with another color
 - [x] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with ctrl+click, or paste them below with single click
 - [ ] Add function of viewing/comparing files, that were changed for set period of time
 - [x] Add sorting variant "like in Missing***"

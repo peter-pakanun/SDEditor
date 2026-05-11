@@ -1172,6 +1172,19 @@ const config = Vue.defineComponent({
 
       if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
 
+      let lineMismatchInfo = [];
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        let b = this.editorBlocks[i];
+        let engLines = this.computeTextStats(b?.english ?? "").lines;
+        let trLines = this.computeTextStats(b?.translation ?? "").lines;
+        if (engLines !== trLines) lineMismatchInfo.push(`#${i + 1}: ${trLines}/${engLines}`);
+      }
+      if (lineMismatchInfo.length > 0) {
+        let details = lineMismatchInfo.slice(0, 12).join("\n");
+        let suffix = lineMismatchInfo.length > 12 ? `\n...and ${lineMismatchInfo.length - 12} more` : "";
+        if (!confirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return;
+      }
+
       let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
       let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
       if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return;
