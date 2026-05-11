@@ -116,13 +116,16 @@
         </div>
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
-            <div class="textHL">
-              <input type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
+            <div class="textHL" :class="{ multiline: editorBlock.isMultiline }">
+              <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
+              <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3"></textarea>
               <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
             </div>
+            <div v-if="editorBlock.isMultiline" class="multilineIcon" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
-          <input type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)">
+          <input v-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)">
+          <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)"></textarea>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">

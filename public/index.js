@@ -278,6 +278,45 @@ const config = Vue.defineComponent({
     }
   },
   methods: {
+    isMultilineText(text) {
+      let s = text ?? "";
+      return typeof s === "string" && (s.includes("\\n") || s.includes("\n"));
+    },
+    decodeEscapedNewlines(text) {
+      let s = text ?? "";
+      if (typeof s !== "string") return s;
+      return s.replaceAll("\\n", "\n");
+    },
+    encodeNewlines(text) {
+      let s = text ?? "";
+      if (typeof s !== "string") return s;
+      return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\n", "\\n");
+    },
+    autosizeTextarea(el, options = {}) {
+      if (!el || el.tagName !== "TEXTAREA") return;
+      let minHeight = options.minHeight ?? 72;
+      let maxHeight = options.maxHeight ?? 240;
+      el.style.height = "auto";
+      let next = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+      el.style.height = next + "px";
+    },
+    autosizeEditorMultilineFields() {
+      if (!this.editorVisible) return;
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        let b = this.editorBlocks[i];
+        if (!b?.isMultiline) continue;
+        this.autosizeTextarea(this.$refs["english_" + i], { minHeight: 72, maxHeight: 220 });
+        this.autosizeTextarea(this.$refs["translation_" + i], { minHeight: 84, maxHeight: 260 });
+      }
+    },
+    normalizeMultilineEditorBlock(editorBlock, editorIndex) {
+      if (!editorBlock?.isMultiline) return;
+      let next = this.decodeEscapedNewlines(editorBlock.translation || "");
+      if (next !== editorBlock.translation) editorBlock.translation = next;
+      if (typeof editorIndex === "number") {
+        this.$nextTick(() => this.autosizeTextarea(this.$refs["translation_" + editorIndex], { minHeight: 84, maxHeight: 260 }));
+      }
+    },
     loadDummyData() {
       let desc = parseDesc("test/dummy.txt", dummyFile, this.lang);
       if (!desc) return;
@@ -520,6 +559,7 @@ const config = Vue.defineComponent({
       }
       let newValue = value.slice(0, start) + text + value.slice(end);
       editorBlock.translation = newValue;
+      this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
       this.$nextTick(() => {
         el.focus?.();
         let caret = start + text.length;
@@ -830,12 +870,14 @@ const config = Vue.defineComponent({
           desc.translations.English?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||
           desc.translations[this.lang]?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase())
         ) {
+          let englishHtml = (desc.translations.English || []).join("<br />");
+          let translationHtml = (desc.translations[this.lang] || []).join("<br />");
           this.filteredDescs.push({
             filepath: desc.filepath,
             filedir: desc.filedir,
             filename: desc.filename,
-            english: desc.translations.English?.join("<br />"),
-            translation: desc.translations[this.lang]?.join("<br />"),
+            english: englishHtml.replaceAll("\\n", "<br />"),
+            translation: translationHtml.replaceAll("\\n", "<br />"),
             isMissing: desc.isMissing,
             hasChanges: desc.hasChanges,
           });
@@ -884,11 +926,15 @@ const config = Vue.defineComponent({
       this.editorOriginalTranslations = [];
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
-        let english = desc.translations.English[i];
+        let englishRaw = desc.translations.English[i] || "";
+        let translationRaw = desc.translations[this.lang]?.[i] || "";
+        let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
+        let english = isMultiline ? this.decodeEscapedNewlines(englishRaw) : englishRaw;
         let { englishHLter, HLs } = this.buildEnglishHLter(english);
-        let translation = desc.translations[this.lang]?.[i] || "";
+        let translation = isMultiline ? this.decodeEscapedNewlines(translationRaw) : translationRaw;
         this.editorOriginalTranslations.push(translation);
         this.editorBlocks.push({
+          isMultiline,
           english,
           englishHLter,
           HLs,
@@ -899,7 +945,10 @@ const config = Vue.defineComponent({
       }
       this.editorVisible = true;
       this.editorFocusedIndex = 0;
-      this.$nextTick(() => this.$refs['translation_0'].focus());
+      this.$nextTick(() => {
+        this.$refs['translation_0'].focus();
+        this.autosizeEditorMultilineFields();
+      });
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
       this.$refs['translation_' + editorIndex].focus();
@@ -965,8 +1014,10 @@ const config = Vue.defineComponent({
       let newTranslations = [];
       let isMissing = false;
       for (const editorBlock of this.editorBlocks) {
-        newTranslations.push(editorBlock.translation);
-        if (!editorBlock.translation?.trim()) isMissing = true;
+        let ui = editorBlock?.translation ?? "";
+        if (!String(ui).trim()) isMissing = true;
+        let normalizedUi = editorBlock?.isMultiline ? this.decodeEscapedNewlines(ui) : ui;
+        newTranslations.push(this.encodeNewlines(normalizedUi));
       }
 
       if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
@@ -1007,7 +1058,7 @@ const config = Vue.defineComponent({
 
       this.saveSettings();
       this.closeHlPopup();
-      this.editorOriginalTranslations = newTranslations.slice();
+      this.editorOriginalTranslations = (this.editorBlocks || []).map(b => b?.translation ?? "");
       this.editorVisible = false;
       this.filterDesc();
     },
@@ -1121,6 +1172,7 @@ const config = Vue.defineComponent({
     doTranslationReplace(editorBlock, force) {
       if (!editorBlock.translationReplace) return;
       editorBlock.translation = editorBlock.translationReplace;
+      this.normalizeMultilineEditorBlock(editorBlock);
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {

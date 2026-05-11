@@ -40,7 +40,10 @@ input:read-only {
   background-color: var(--color-element);
   /* color: var(--color-shadow); */
 }
-input:focus, button:focus {
+textarea:read-only {
+  background-color: var(--color-element);
+}
+input:focus, button:focus, textarea:focus {
   outline: 1px solid var(--color-element-highlight);
 }
 
@@ -71,6 +74,15 @@ input:focus, button:focus {
   width: 100%;
 }
 
+.textHL>textarea {
+  font: inherit;
+  display: block;
+  padding-top: var(--padding-top);
+  padding-left: var(--padding-left);
+  width: 100%;
+  resize: none;
+}
+
 .textHL>.HLter {
   position: absolute;
   top: var(--padding-top);
@@ -79,6 +91,24 @@ input:focus, button:focus {
   z-index: 1;
   white-space: pre;
   pointer-events: none;
+}
+
+.textHL.multiline>.HLter {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.multilineField {
+  border-color: var(--color-element-highlight);
+  background-color: var(--color-element);
+}
+
+.multilineIcon {
+  display: flex;
+  align-items: center;
+  padding: 0 0.5em;
+  user-select: none;
+  opacity: 0.85;
 }
 
 .textHL>.HLter>span {
@@ -388,6 +418,10 @@ button, label, th, td, input[type="checkbox"] {
   flex-grow: 1;
 }
 .editBlock input {
+  display: block;
+  width: 100%;
+}
+.editBlock textarea {
   display: block;
   width: 100%;
 }
