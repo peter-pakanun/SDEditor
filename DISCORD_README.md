@@ -12,6 +12,7 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 ## Notes
 - Your in-progress edits are stored in your browser (`localStorage`)
 - You can drag & drop a previously exported ZIP onto the table to re-import edits
+- Only supported browser is Chromium-based (e.g. Chrome, Brave, Edge)
 ## Keyboard shortcuts
 - **Ctrl + Space:** during editing to open the autocomplete menu
 - **Ctrl + S:** save the current file
