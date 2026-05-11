@@ -140,7 +140,7 @@
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <input class="sideFilter" type="text" v-model="dictionaryFilter" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
+          <input class="sideFilter" type="text" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
           <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided">
               <div class="dictRow">
@@ -153,7 +153,7 @@
         </div>
 
         <div v-if="sideTab === 'regex'">
-          <input class="sideFilter" type="text" v-model="regexFilter" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
+          <input class="sideFilter" type="text" v-model="regexFilter" ref="regexFilterInput" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
           <div class="editBlock" v-for="regex in filteredRegexes">
             <div class="twoSided">
               <div>

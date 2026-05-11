@@ -560,6 +560,20 @@ const config = {
         this.closeHlPopup({ refocus: true });
       }
     },
+    isActiveElementInEditorPane() {
+      if (!this.editorVisible) return false;
+      let el = document.activeElement;
+      if (!el || typeof el.closest !== "function") return false;
+      return !!el.closest(".editor .edit");
+    },
+    focusSidebarFilterInput() {
+      if (!this.editorVisible) return false;
+      let ref = this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
+      if (!ref) return false;
+      ref.focus?.();
+      ref.select?.();
+      return true;
+    },
     handleKeydown(e) {
       if (e.ctrlKey && (e.code === "Space" || e.key === " ")) {
         if (!this.editorVisible) return;
@@ -598,6 +612,7 @@ const config = {
       
       if (e.ctrlKey && e.code === 'KeyF') {
         e.preventDefault();
+        if (this.isActiveElementInEditorPane() && this.focusSidebarFilterInput()) return;
         this.$refs.searchInput?.focus();
         this.$refs.searchInput?.select();
       }
