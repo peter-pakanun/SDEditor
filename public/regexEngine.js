@@ -215,6 +215,10 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
   let foundEntry = null;
   let matchedFind = null;
   let dict = Array.isArray(dictionary) ? dictionary : [];
+  let tagNameLower = String(tagName ?? "").trim().toLowerCase();
+  if (tagNameLower) {
+    dict = dict.filter(d => String(d?.find ?? "").trim().toLowerCase() === tagNameLower);
+  }
 
   if (dynamicContent && dynamicContent !== '') {
     for (const dictEntry of dict) {

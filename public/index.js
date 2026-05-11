@@ -580,10 +580,11 @@ const config = Vue.defineComponent({
         hl._hlId = nextHlId++;
         HLs.push(hl);
       };
-      let addMatchingDictIds = (set, text) => {
+      let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
         if (!text) return;
         for (const dictEntry of this.dictionary || []) {
           if (!dictEntry?._id) continue;
+          if (restrictMainFindLower && String(dictEntry?.find || "").trim().toLowerCase() !== restrictMainFindLower) continue;
           for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
             let escapedFind = escapeRegExp(pair.find);
             let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
@@ -601,6 +602,7 @@ const config = Vue.defineComponent({
         let tagName = m[2];
         let dynamicContent = m[3] || '';
         let rawTagName = unescapeHtml(tagName || "");
+        let tagLower = rawTagName.trim().toLowerCase();
         let rawDynamicContent = unescapeHtml(dynamicContent || "");
         let hasDynamicContent = /<[^>]*>/.test(rawDynamicContent);
         let staticDynamicContent = rawDynamicContent
@@ -608,8 +610,8 @@ const config = Vue.defineComponent({
           .replace(/\s+/g, " ")
           .trim();
         let dictIdSet = new Set();
-        addMatchingDictIds(dictIdSet, rawTagName);
-        addMatchingDictIds(dictIdSet, staticDynamicContent);
+        addMatchingDictIds(dictIdSet, rawTagName, tagLower);
+        addMatchingDictIds(dictIdSet, staticDynamicContent, tagLower);
         let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent, this.dictionary);
         addHL({
           index: m.index,
@@ -726,9 +728,13 @@ const config = Vue.defineComponent({
       let seen = new Map();
       for (const hl of HLs) {
         if (hl?.dictId) {
-          let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(hl.dictId));
-          if (!dictEntry) continue;
-          let pairs = this.getDictionaryDefinitionPairs(dictEntry);
+          let dictIdList = [hl.dictId];
+          if (hl?.isKeywordPopup && Array.isArray(hl?.dictIds) && hl.dictIds.length > 0) {
+            dictIdList = hl.dictIds.slice();
+          }
+          let uniqueDictIds = Array.from(new Set(dictIdList.map(v => String(v || "")).filter(Boolean)));
+          if (uniqueDictIds.length <= 0) continue;
+
           let matchCandidate = "";
           if (hl?.isKeywordPopup) {
             let dc = unescapeHtml(hl.dynamicContent || "").trim();
@@ -738,37 +744,49 @@ const config = Vue.defineComponent({
             matchCandidate = String(hl?.dictDefFind || hl?.find || "").trim();
           }
           let matchCandidateLower = matchCandidate.toLowerCase();
-          for (const p of pairs) {
-            let value;
-            let label;
-            if (hl?.isKeywordPopup) {
-              let tn = unescapeHtml(hl.tagName || "").trim();
-              if (!tn) tn = p.find;
-              value = `[${tn}|${p?.replace ?? ""}]`;
-              label = value + (p.find && p.find !== tn ? ` (${p.find})` : "");
-            } else {
-              value = p?.replace || p?.find || "";
-              label = p?.replace && p.replace !== p.find ? `${p.find} → ${p.replace}` : `${p.find}`;
-            }
-            if (!value) continue;
-            let key = `${dictEntry._id}|${p.find.toLowerCase()}|${value}`;
-            let exactFromContext = !!matchCandidateLower && matchCandidateLower === p.find.toLowerCase();
-            let existingItem = seen.get(key);
-            if (existingItem) {
-              existingItem.exactFromContext = existingItem.exactFromContext || exactFromContext;
-              continue;
-            }
-            let item = {
-              label,
-              value,
-              matchText: p.find,
-              matchTextLower: p.find.toLowerCase(),
-              isAlt: !p.isMain,
-              exactFromContext
-            };
-            seen.set(key, item);
-            items.push(item);
+          let keywordTagNameLower = "";
+          if (hl?.isKeywordPopup) {
+            keywordTagNameLower = unescapeHtml(hl.tagName || "").trim().toLowerCase();
           }
+
+          for (const dictId of uniqueDictIds) {
+            let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(dictId));
+            if (!dictEntry) continue;
+            if (keywordTagNameLower && String(dictEntry?.find || "").trim().toLowerCase() !== keywordTagNameLower) continue;
+            let pairs = this.getDictionaryDefinitionPairs(dictEntry);
+            for (const p of pairs) {
+              let value;
+              let label;
+              if (hl?.isKeywordPopup) {
+                let tn = unescapeHtml(hl.tagName || "").trim();
+                if (!tn) tn = p.find;
+                value = `[${tn}|${p?.replace ?? ""}]`;
+                label = value + (p.find && p.find !== tn ? ` (${p.find})` : "");
+              } else {
+                value = p?.replace || p?.find || "";
+                label = p?.replace && p.replace !== p.find ? `${p.find} → ${p.replace}` : `${p.find}`;
+              }
+              if (!value) continue;
+              let key = `${dictEntry._id}|${p.find.toLowerCase()}|${value}`;
+              let exactFromContext = !!matchCandidateLower && matchCandidateLower === p.find.toLowerCase();
+              let existingItem = seen.get(key);
+              if (existingItem) {
+                existingItem.exactFromContext = existingItem.exactFromContext || exactFromContext;
+                continue;
+              }
+              let item = {
+                label,
+                value,
+                matchText: p.find,
+                matchTextLower: p.find.toLowerCase(),
+                isAlt: !p.isMain,
+                exactFromContext
+              };
+              seen.set(key, item);
+              items.push(item);
+            }
+          }
+
           continue;
         }
 
