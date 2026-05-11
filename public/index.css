@@ -503,6 +503,55 @@ button, label, th, td, input[type="checkbox"] {
 .side .dictRow > input {
   width: 50%;
 }
+
+.side .dictAltHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  margin-top: 0.35em;
+  opacity: 0.9;
+}
+
+.side .dictAltHeader > span {
+  font-size: 0.9em;
+}
+
+.side .dictAltHeader > button {
+  padding: 0.15em 0.35em;
+}
+
+.side .dictAltRow {
+  display: flex;
+  gap: 0.4em;
+  margin-top: 0.25em;
+  padding-left: 0.9em;
+  opacity: 0.95;
+}
+
+.side .dictAltRow > input {
+  width: 50%;
+  font-size: 0.9em;
+}
+
+.side .dictAltRow > button {
+  padding: 0.15em 0.35em;
+}
+
+.side details.dictTlnote {
+  margin-top: 0.35em;
+}
+
+.side details.dictTlnote > summary {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.85;
+}
+
+.side details.dictTlnote > textarea {
+  margin-top: 0.35em;
+  resize: vertical;
+}
 .edit>.editBlock>* {
   margin: 0.6em 0;
 }
@@ -562,6 +611,15 @@ button, label, th, td, input[type="checkbox"] {
 .hlPopupItem.active,
 .hlPopupItem:hover {
   background-color: var(--color-element-highlight);
+}
+
+.hlPopupItem.alt {
+  opacity: 0.92;
+  padding-left: 1.2em;
+}
+
+.hlPopupItem.exact {
+  font-weight: 700;
 }
 
 .hlPopupEmpty {

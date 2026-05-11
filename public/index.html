@@ -154,9 +154,24 @@
           <input class="sideFilter" type="text" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
           <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided">
-              <div class="dictRow">
-                <input type="text" v-model="word.find" placeholder="Find">
-                <input type="text" v-model="word.replace" placeholder="Replace">
+              <div>
+                <div class="dictRow">
+                  <input type="text" v-model="word.find" placeholder="Find">
+                  <input type="text" v-model="word.replace" placeholder="Replace">
+                </div>
+                <div class="dictAltHeader">
+                  <span>Alternates</span>
+                  <button @click="addDictionaryAltRow(word)">➕</button>
+                </div>
+                <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id">
+                  <input type="text" v-model="alt.find" placeholder="Find">
+                  <input type="text" v-model="alt.replace" placeholder="Replace">
+                  <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
+                </div>
+                <details class="dictTlnote">
+                  <summary>TL note</summary>
+                  <textarea rows="3" v-model="word.tlnote" placeholder="Translator note (shared)"></textarea>
+                </details>
               </div>
               <button @click="removeVocab(word)">🗑️</button>
             </div>
@@ -191,7 +206,7 @@
         <div class="hlPopup" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px' }" @mousedown.stop>
           <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
           <div class="hlPopupList">
-            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">{{ item.label }}</div>
+            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">{{ item.label }}</div>
             <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
           </div>
         </div>

@@ -257,7 +257,17 @@ const config = Vue.defineComponent({
         list = dictionary.filter(word => {
         let find = (word?.find || "").toLowerCase();
         let replace = (word?.replace || "").toLowerCase();
-        return find.includes(f) || replace.includes(f) || `${find} ${replace}`.includes(f);
+        let alts = "";
+        if (Array.isArray(word?.alts)) {
+          alts = word.alts.map(a => {
+            if (!a) return "";
+            if (typeof a !== "object") return "";
+            return `${a.find || ""} ${a.replace || ""}`;
+          }).join(" ");
+        }
+        alts = String(alts || "").toLowerCase();
+        let tlnote = String(word?.tlnote || "").toLowerCase();
+        return find.includes(f) || replace.includes(f) || alts.includes(f) || tlnote.includes(f) || `${find} ${replace} ${alts} ${tlnote}`.includes(f);
         });
       }
 
@@ -302,6 +312,66 @@ const config = Vue.defineComponent({
       let s = text ?? "";
       if (typeof s !== "string") return s;
       return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+    },
+    safeExactRegex(pattern, flags = "igm") {
+      let p = String(pattern ?? "");
+      try {
+        return new RegExp("^" + p + "$", flags);
+      } catch (e) {
+        return new RegExp("^" + escapeRegExp(p) + "$", flags);
+      }
+    },
+    getDictionaryDefinitionPairs(entry) {
+      let mainFind = String(entry?.find ?? "").trim();
+      let mainReplace = String(entry?.replace ?? "");
+      let pairs = [];
+      if (mainFind) pairs.push({ find: mainFind, replace: mainReplace, isMain: true });
+
+      let normalizedAlts = Array.isArray(entry?.alts) ? entry.alts : [];
+
+      let seen = new Set();
+      if (mainFind) seen.add(mainFind.toLowerCase());
+      for (const alt of normalizedAlts) {
+        if (!alt || typeof alt !== "object") continue;
+        let f = String(alt.find ?? "").trim();
+        if (!f) continue;
+        let key = f.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push({ _id: alt._id, find: f, replace: String(alt.replace ?? mainReplace), isMain: false });
+      }
+      return pairs;
+    },
+    addDictionaryAltRow(word) {
+      if (!word) return;
+      if (!Array.isArray(word.alts)) word.alts = [];
+      word.alts.push({
+        _id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        find: "",
+        replace: String(word?.replace ?? "")
+      });
+    },
+    removeDictionaryAltRow(word, alt) {
+      if (!word || !Array.isArray(word.alts)) return;
+      let id = alt?._id;
+      if (id) {
+        word.alts = word.alts.filter(a => String(a?._id) !== String(id));
+      } else {
+        word.alts = word.alts.filter(a => a !== alt);
+      }
+    },
+    addDictionaryAltPair(word, find, replace) {
+      if (!word) return;
+      let f = String(find ?? "").trim();
+      if (!f) return;
+      let pairs = this.getDictionaryDefinitionPairs(word);
+      if (pairs.some(p => (p?.find || "").trim().toLowerCase() === f.toLowerCase())) return;
+      if (!Array.isArray(word.alts)) word.alts = [];
+      word.alts.unshift({
+        _id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        find: f,
+        replace: String(replace ?? word?.replace ?? "")
+      });
     },
     computeTextStats(text) {
       let s = this.normalizeNewlines(text ?? "");
@@ -442,6 +512,15 @@ const config = Vue.defineComponent({
         if (entry && !entry._id) {
           entry._id = `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
         }
+        if (!entry) continue;
+        if (typeof entry.tlnote !== "string") entry.tlnote = entry.tlnote == null ? "" : String(entry.tlnote);
+        if (!Array.isArray(entry.alts)) entry.alts = [];
+        entry.alts = entry.alts.map(a => {
+          if (!a || typeof a !== "object") return null;
+          let f = String(a.find ?? "");
+          let r = (typeof a.replace === "string" ? a.replace : String(entry?.replace ?? ""));
+          return { _id: a._id || `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: f, replace: r };
+        }).filter(Boolean);
       }
     },
     isDictionaryEntryFound(word) {
@@ -469,10 +548,14 @@ const config = Vue.defineComponent({
       let addMatchingDictIds = (set, text) => {
         if (!text) return;
         for (const dictEntry of this.dictionary || []) {
-          if (!dictEntry?._id || !dictEntry?.find) continue;
-          let escapedFind = escapeRegExp(dictEntry.find);
-          let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-          if (regex.test(text)) set.add(dictEntry._id);
+          if (!dictEntry?._id) continue;
+          for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
+            let escapedFind = escapeRegExp(pair.find);
+            let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+            if (!regex.test(text)) continue;
+            set.add(dictEntry._id);
+            break;
+          }
         }
       };
       let m;
@@ -516,12 +599,19 @@ const config = Vue.defineComponent({
 
       // highlight word from dictionary
       if (this.highlightDict) {
-        let sortedDictionary = (this.dictionary || [])
-          .slice()
-          .sort((a, b) => (b.find || '').length - (a.find || '').length);
-        for (const replacerObj of sortedDictionary) {
-          if (!replacerObj.find || replacerObj.find.length <= 0) continue;
-          let escapedFind = escapeRegExp(replacerObj.find);
+        let defs = [];
+        for (const dictEntry of (this.dictionary || [])) {
+          if (!dictEntry?._id) continue;
+          for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
+            if (!pair?.find) continue;
+            defs.push({ pair, dictEntry });
+          }
+        }
+        defs.sort((a, b) => (b.pair.find || '').length - (a.pair.find || '').length);
+
+        for (const d of defs) {
+          if (!d.pair.find || d.pair.find.length <= 0) continue;
+          let escapedFind = escapeRegExp(d.pair.find);
           let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
           while (m = regex.exec(modifiedEnglish)) {
             // skip if it is within a keyword popup tag
@@ -531,8 +621,9 @@ const config = Vue.defineComponent({
             addHL({
               index: m.index,
               find: m[0],
-              replace: replacerObj.replace,
-              dictId: replacerObj._id
+              replace: d.pair.replace,
+              dictId: d.dictEntry._id,
+              dictDefFind: d.pair.find
             });
             let asterisks = '*'.repeat(m[0].length);
             modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
@@ -596,14 +687,62 @@ const config = Vue.defineComponent({
       let editorBlock = this.editorBlocks?.[editorIndex];
       let HLs = editorBlock?.HLs || [];
       let items = [];
-      let seen = new Set();
+      let seen = new Map();
       for (const hl of HLs) {
+        if (hl?.dictId) {
+          let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(hl.dictId));
+          if (!dictEntry) continue;
+          let pairs = this.getDictionaryDefinitionPairs(dictEntry);
+          let matchCandidate = "";
+          if (hl?.isKeywordPopup) {
+            let dc = unescapeHtml(hl.dynamicContent || "").trim();
+            let tn = unescapeHtml(hl.tagName || "").trim();
+            matchCandidate = (dc || tn || "").trim();
+          } else {
+            matchCandidate = String(hl?.dictDefFind || hl?.find || "").trim();
+          }
+          let matchCandidateLower = matchCandidate.toLowerCase();
+          for (const p of pairs) {
+            let value;
+            let label;
+            if (hl?.isKeywordPopup) {
+              let tn = unescapeHtml(hl.tagName || "").trim();
+              if (!tn) tn = p.find;
+              value = `[${tn}|${p?.replace ?? ""}]`;
+              label = value + (p.find && p.find !== tn ? ` (${p.find})` : "");
+            } else {
+              value = p?.replace || p?.find || "";
+              label = p?.replace && p.replace !== p.find ? `${p.find} → ${p.replace}` : `${p.find}`;
+            }
+            if (!value) continue;
+            let key = `${dictEntry._id}|${p.find.toLowerCase()}|${value}`;
+            let exactFromContext = !!matchCandidateLower && matchCandidateLower === p.find.toLowerCase();
+            let existingItem = seen.get(key);
+            if (existingItem) {
+              existingItem.exactFromContext = existingItem.exactFromContext || exactFromContext;
+              continue;
+            }
+            let item = {
+              label,
+              value,
+              matchText: p.find,
+              matchTextLower: p.find.toLowerCase(),
+              isAlt: !p.isMain,
+              exactFromContext
+            };
+            seen.set(key, item);
+            items.push(item);
+          }
+          continue;
+        }
+
         let value = hl?.replace || hl?.find || "";
         if (!value) continue;
         if (seen.has(value)) continue;
-        seen.add(value);
+        seen.set(value, true);
         let label = hl?.replace && hl.replace !== hl.find ? `${hl.find} → ${hl.replace}` : `${hl.find}`;
-        items.push({ label, value });
+        let matchText = String(hl?.find || "").trim();
+        items.push({ label, value, matchText, matchTextLower: matchText.toLowerCase(), isAlt: false });
       }
       return items;
     },
@@ -629,6 +768,9 @@ const config = Vue.defineComponent({
         this.hlPopup.filtered = this.hlPopup.items.filter(item => {
           return (item.label || "").toLowerCase().includes(filter) || (item.value || "").toLowerCase().includes(filter);
         });
+      }
+      for (const item of this.hlPopup.filtered) {
+        item.exactMatch = (!!filter && (item?.matchTextLower || "") === filter) || (!filter && !!item?.exactFromContext);
       }
       this.hlPopup.selectedIndex = 0;
     },
@@ -1128,17 +1270,16 @@ const config = Vue.defineComponent({
       let tagName = unescapeHtml(HL.tagName || "").trim();
       if (!tagName) return;
 
-      let replace = unescapeHtml(HL.dynamicContent || "").trim();
-      if (replace.includes("<")) replace = "";
-  
-      let find = replace || tagName;
+      let alt = unescapeHtml(HL.dynamicContent || "").trim();
+      if (alt.includes("<")) alt = "";
+      alt = alt.trim();
 
       this.sideTab = 'dictionary';
-      // this.dictionaryFilter = find;
       this.dictionaryFilter = "";
 
-      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === find.toLowerCase());
+      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
       if (existing) {
+        if (alt) this.addDictionaryAltPair(existing, alt, existing?.replace ?? "");
         this.dictionaryFlashId = existing._id || '';
         if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
         this._dictFlashTimer = setTimeout(() => {
@@ -1149,8 +1290,10 @@ const config = Vue.defineComponent({
 
       let entry = {
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
-        find: find,
-        replace: find
+        find: tagName,
+        replace: tagName,
+        alts: alt ? [{ _id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: alt, replace: tagName }] : [],
+        tlnote: ""
       };
       this.dictionary.unshift(entry);
       this.dictionaryFlashId = entry._id;
@@ -1355,10 +1498,21 @@ const config = Vue.defineComponent({
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
-          let regex = new RegExp("^" + replacerObj.find + "$", "igm");
-          let m = regex.exec(word.captured);
-          if (!m) continue;
-          if (!force) word.replace = replacerObj.replace;
+          let mainRegex = this.safeExactRegex(replacerObj.find, "igm");
+          let m = mainRegex.exec(word.captured);
+          if (m) {
+            if (!force) word.replace = replacerObj.replace;
+            continue;
+          }
+          for (const alt of (Array.isArray(replacerObj?.alts) ? replacerObj.alts : [])) {
+            if (!alt || typeof alt !== "object") continue;
+            let altFind = alt.find;
+            let altReplace = alt.replace ?? replacerObj.replace;
+            let altRegex = this.safeExactRegex(altFind, "i");
+            if (!altRegex.test(word.captured)) continue;
+            if (!force) word.replace = altReplace;
+            break;
+          }
         }
         if (!word.replace) word.replace = "";
         editorBlock.translation = editorBlock.translation.replace('🔖', word.replace);
@@ -1397,7 +1551,7 @@ const config = Vue.defineComponent({
       }
     },
     addVocab() {
-      this.dictionary.unshift({ _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "" });
+      this.dictionary.unshift({ _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" });
       this.saveSettings();
     },
     removeVocab(word) {

@@ -162,17 +162,22 @@ function regexEngineCreate(str, dictionary) {
     for (const replacerObj of dictionary) {
 
       // ignore what we already did
-      if (replacerObj.find.toLowerCase().includes("increased")) continue;
-      if (replacerObj.find.toLowerCase().includes("reduced")) continue;
-      if (replacerObj.find.toLowerCase().includes("more")) continue;
-      if (replacerObj.find.toLowerCase().includes("less")) continue;
-      if (replacerObj.find.toLowerCase().includes("second")) continue;
+      let defs = getDictEntryDefinitionsWithMeta(replacerObj);
+      for (const def of defs) {
+        let lower = def.find.toLowerCase();
+        if (lower.includes("increased")) continue;
+        if (lower.includes("reduced")) continue;
+        if (lower.includes("more")) continue;
+        if (lower.includes("less")) continue;
+        if (lower.includes("second")) continue;
 
-      let regex = new RegExp("\\b(" + replacerObj.find + ")\\b", "ig");
-      if (m = regex.exec(f)) {
-        for (let i = 0; i < m.length; i++) {
-          f = f.replace(m[i], "\\b(.+)\\b");
-          r = r.replace(m[i], "\u200B");
+        let pattern = def.isMain ? def.find : escapeRegExp(def.find);
+        let regex = new RegExp("\\b(" + pattern + ")\\b", "ig");
+        if (m = regex.exec(f)) {
+          for (let i = 0; i < m.length; i++) {
+            f = f.replace(m[i], "\\b(.+)\\b");
+            r = r.replace(m[i], "\u200B");
+          }
         }
       }
     }
@@ -212,25 +217,31 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
 
   if (dynamicContent && dynamicContent !== '') {
     for (const dictEntry of dict) {
-      let escapedFind = escapeRegExp(dictEntry.find);
-      let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-      if (regex.test(dynamicContent)) {
-        replacement = dictEntry.replace;
-        foundEntry = dictEntry;
-        break;
+      for (const def of getDictEntryDefinitionsWithMeta(dictEntry)) {
+        let escapedFind = escapeRegExp(def.find);
+        let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+        if (regex.test(dynamicContent)) {
+          replacement = def.replace;
+          foundEntry = dictEntry;
+          break;
+        }
       }
+      if (replacement !== null) break;
     }
   }
 
   if (replacement === null) {
     for (const dictEntry of dict) {
-      let escapedFind = escapeRegExp(dictEntry.find);
-      let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-      if (regex.test(tagName)) {
-        replacement = dictEntry.replace;
-        foundEntry = dictEntry;
-        break;
+      for (const def of getDictEntryDefinitionsWithMeta(dictEntry)) {
+        let escapedFind = escapeRegExp(def.find);
+        let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+        if (regex.test(tagName)) {
+          replacement = def.replace;
+          foundEntry = dictEntry;
+          break;
+        }
       }
+      if (replacement !== null) break;
     }
   }
 
@@ -239,4 +250,30 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
   }
 
   return { text: `[${tagName}|${replacement}]`, dictEntry: foundEntry };
+}
+
+function getDictEntryDefinitionsWithMeta(dictEntry) {
+  let defs = [];
+  let mainFind = String(dictEntry?.find ?? "").trim();
+  let mainReplace = String(dictEntry?.replace ?? "");
+  if (mainFind) defs.push({ find: mainFind, replace: mainReplace, isMain: true });
+  let alts = [];
+  if (Array.isArray(dictEntry?.alts)) alts = dictEntry.alts;
+  for (const alt of alts) {
+    if (!alt) continue;
+    if (typeof alt !== "object") continue;
+    let f = String(alt.find ?? "").trim();
+    if (!f) continue;
+    let r = (typeof alt.replace === "string") ? alt.replace : mainReplace;
+    defs.push({ find: f, replace: r, isMain: false });
+  }
+  let seen = new Set();
+  let out = [];
+  for (const d of defs) {
+    let key = d.find.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
 }
