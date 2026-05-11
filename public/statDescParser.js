@@ -1,4 +1,4 @@
-const dummyFile = `description
+const dummyFile = String.raw`description
 	2 plague_bearer_gains_%_of_damage_from_inflicted_poisons plague_bearer_maximum_stored_poison_damage
 	2
 		# # table_only "Expected [Poison] damage stored (cap)@{0}% ({1})"

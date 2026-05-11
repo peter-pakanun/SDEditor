@@ -1,7 +1,18 @@
+let localStorageInitialized = false;
+
+const urlParams = new URLSearchParams(window.location.search);
+const TEST_MODE = (() => {
+  if (!urlParams.has('testMode')) return false;
+  let v = (urlParams.get('testMode') || '').toLowerCase();
+  return v === '' || v === '1' || v === 'true' || v === 'yes';
+})();
+const URL_LANG = urlParams.get('lang');
+
 const config = {
   data() {
     return {
       localStorageInitialized: false,
+      testMode: TEST_MODE,
       langs: [
         "Thai",
         "Portuguese",
@@ -95,6 +106,15 @@ const config = {
     }
   },
   mounted() {
+    if (this.testMode) {
+      this.lang = (URL_LANG && this.langs.includes(URL_LANG)) ? URL_LANG : (this.langs[0] || "Thai");
+      this.loadingProgress = 0;
+      this.ensureDictionaryIds();
+      document.addEventListener('keydown', this.handleKeydown);
+      this.loadDummyData();
+      return;
+    }
+
     let settings = localStorage.getItem('settings');
     if (settings) {
       try {
@@ -117,7 +137,7 @@ const config = {
       } catch (error) {
         alert('Cannot read Localstorage!!\nFile maybe corrupted!');
         if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
-          localStorage.removeItem('settings');
+          localStorage.removeItem('localDescs');
         }
         window.location.reload();
         return;
@@ -258,6 +278,13 @@ const config = {
     }
   },
   methods: {
+    loadDummyData() {
+      let desc = parseDesc("test/dummy.txt", dummyFile, this.lang);
+      if (!desc) return;
+      this.descs = [desc];
+      this.loadingProgress = 100;
+      this.filterDesc();
+    },
     ensureDictionaryIds() {
       if (!Array.isArray(this.dictionary)) return;
       for (const entry of this.dictionary) {

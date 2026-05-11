@@ -1,5 +1,15 @@
 # SDEditor
 
+## Debug / AI test mode
+
+The app normally requires dropping `StatDescriptions.zip` into the browser to start.
+
+For debugging (including AI-driven testing), you can start the app with URL params to skip drag & drop and load the built-in dummy data (`dummyFile`) instead:
+
+- `?testMode=1&lang=Thai`
+
+In `testMode`, the app does not read or write `localStorage`, so your real saved settings/local changes won’t be modified.
+
 # TODO
 - [ ] In statfiles with several lines, compare these lines and mark differences with another color
 - [x] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with ctrl+click, or paste them below with single click
