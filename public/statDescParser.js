@@ -56,6 +56,13 @@ async function parseFile(filepath, zipObject, lang) {
   // find description mark
   let count = (text.match(/^description/gim) ?? []).length;
   if (count == 0) return false;
+  if (count > 1) {
+    alert(
+      'ERROR: Multiple description declaration\n' +
+      filepath + '\n\n' + text
+    );
+    return false;
+  }
   let desc = parseDesc(filepath, text, lang);
   return desc;
 }
