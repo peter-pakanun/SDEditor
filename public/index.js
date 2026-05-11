@@ -759,6 +759,11 @@ const config = Vue.defineComponent({
       if (!el || typeof el.closest !== "function") return false;
       return !!el.closest(".editor .edit");
     },
+    isActiveElementInSearchBox() {
+      let el = document.activeElement;
+      if (!el) return false;
+      return [this.$refs.searchInput, this.$refs.dictionaryFilterInput, this.$refs.regexFilterInput].includes(el);
+    },
     focusSidebarFilterInput() {
       if (!this.editorVisible) return false;
       let ref = this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
@@ -804,6 +809,7 @@ const config = Vue.defineComponent({
       }
       
       if (e.ctrlKey && e.code === 'KeyF') {
+        if (this.isActiveElementInSearchBox()) return;
         e.preventDefault();
         if (this.isActiveElementInEditorPane() && this.focusSidebarFilterInput()) return;
         this.$refs.searchInput?.focus();
