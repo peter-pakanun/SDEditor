@@ -199,6 +199,12 @@ function lookupKeywordPopupReplacement(tagName, dynamicContent, dictionary) {
   return lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary).text;
 }
 
+/**
+ * @param {string} tagName the keyword popup tag name
+ * @param {string} dynamicContent the dynamic content of the keyword popup tag
+ * @param {any} dictionary the dictionary to use for lookup
+ * @returns {{text: string, dictEntry: any | null}}
+ */
 function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) {
   let replacement = null;
   let foundEntry = null;
