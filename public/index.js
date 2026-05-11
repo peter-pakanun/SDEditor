@@ -8,7 +8,7 @@ const TEST_MODE = (() => {
 })();
 const URL_LANG = urlParams.get('lang');
 
-const config = {
+const config = Vue.defineComponent({
   data() {
     return {
       localStorageInitialized: false,
@@ -1195,7 +1195,7 @@ const config = {
       saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
     }
   },
-}
+});
 
 const app = Vue.createApp(config);
 app.mount('#app');
