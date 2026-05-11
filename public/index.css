@@ -133,9 +133,9 @@ input:focus, button:focus, textarea:focus {
 
 .fieldMeta {
   display: flex;
-  gap: 0.5em;
+  gap: 0.4em;
   align-items: center;
-  padding: 0.35em 0.1em 0.1em 0.1em;
+  padding: 0.25em 0.05em 0.05em 0.05em;
   color: var(--color-font);
   opacity: 0.85;
   user-select: none;
@@ -145,7 +145,7 @@ input:focus, button:focus, textarea:focus {
   display: inline-flex;
   align-items: center;
   gap: 0.45em;
-  padding: 0.2em 0.65em;
+  padding: 0.15em 0.55em;
   border-radius: 999px;
   background-color: var(--color-element);
   background: color-mix(in srgb, var(--color-element) 70%, transparent);
@@ -165,12 +165,12 @@ input:focus, button:focus, textarea:focus {
 
 .metaIcon {
   opacity: 0.85;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
 }
 
 .metaNum {
-  font-size: 11px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
@@ -336,11 +336,11 @@ button, label, th, td, input[type="checkbox"] {
 
 
 .editor {
-  --side-width: 520px;
+  --side-width: 480px;
 }
 
 .editor>* {
-  padding: 0px 0.5em;
+  padding: 0px 0.35em;
   box-sizing: border-box;
 }
 
@@ -348,9 +348,40 @@ button, label, th, td, input[type="checkbox"] {
   width: 0;
 }
 
+.editor input,
+.editor button,
+.editor select,
+.editor textarea {
+  padding: 0.35em 0.75em;
+  line-height: 1.25em;
+  font-size: 13px;
+}
+
+.editor h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.editor h3 {
+  font-size: 12px;
+  margin: 0.4em 0 0.6em 0;
+  font-weight: 600;
+}
+
+.editor .twoSided {
+  align-items: center;
+  gap: 0.5em;
+}
+
+.editor .textHL {
+  font-size: 13px;
+  --padding-top: 0.35em;
+  --padding-left: 0.75em;
+}
+
 .editor>.fixed {
   position: fixed;
-  height: calc(100% - 150px);
+  height: calc(100% - 120px);
   z-index: 1;
   top: 0;
   overflow-y: auto;
@@ -367,9 +398,9 @@ button, label, th, td, input[type="checkbox"] {
   right: 0;
   bottom: 0;
   width: var(--side-width);
-  height: 150px;
+  height: 120px;
   overflow: hidden;
-  padding: 1em;
+  padding: 0.6em;
 }
 .editor>.clipboard>textarea {
   width: 100%;
@@ -391,9 +422,9 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .editBlock {
-  padding: 1em 2em;
+  padding: 0.6em 1em;
   background-color: var(--color-bg2);
-  margin-top: 1em;
+  margin-top: 0.6em;
 }
 .side .editBlock {
   padding: 0.5em 0.6em;
@@ -473,10 +504,12 @@ button, label, th, td, input[type="checkbox"] {
   width: 50%;
 }
 .edit>.editBlock>* {
-  margin: 1em 0;
+  margin: 0.6em 0;
 }
 .inputField {
   display: flex;
+  gap: 0.4em;
+  align-items: center;
 }
 .inputField>input, .inputField>.textHL {
   flex-grow: 1;
