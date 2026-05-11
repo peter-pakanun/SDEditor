@@ -883,7 +883,8 @@ const config = {
       let find = replace || tagName;
 
       this.sideTab = 'dictionary';
-      this.dictionaryFilter = find;
+      // this.dictionaryFilter = find;
+      this.dictionaryFilter = "";
 
       let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === find.toLowerCase());
       if (existing) {
