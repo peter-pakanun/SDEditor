@@ -100,6 +100,15 @@ function countGGGVarTag(str) {
 
 /**
  * @param {string} str
+ * @returns {number}
+ */
+function countKeywordPopupTag(str) {
+  let m = str?.match(new RegExp(keywordPopupTagRegex, 'gi'));
+  return m?.length || 0;
+}
+
+/**
+ * @param {string} str
  * @param {any} dictionary
  * @returns {any}
  */

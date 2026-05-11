@@ -1026,6 +1026,10 @@ const config = Vue.defineComponent({
       let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
       if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return;
 
+      let newKeywordPopupTagCount = newTranslations.reduce((p, c) => p += countKeywordPopupTag(c), 0);
+      let engKeywordPopupTagCount = desc.translations.English.reduce((p, c) => p += countKeywordPopupTag(c), 0);
+      if (newKeywordPopupTagCount != engKeywordPopupTagCount && !confirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return;
+
       desc.isMissing = isMissing;
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
       desc.translations[this.lang] = newTranslations;
