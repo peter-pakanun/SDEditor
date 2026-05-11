@@ -64,8 +64,8 @@ const config = {
       },
       editorBlocks: [
         {
-          english: "Buff grants {0}% increased Fire Damage per 1% Shield Quality",
-          englishHLter: "Buff grants <span>{0}%</span> increased Fire Damage per 1% Shield Quality",
+          english: "+1 to Maximum [EnergyShield|Energy Shield] per {0} [ItemEvasion|Item Evasion] on Equipped Body Armour",
+          englishHLter: "+1 to Maximum <span>[EnergyShield|Energy Shield]</span> per <span>{0}%</span> <span>[ItemEvasion|Item Evasion]</span> on Equipped Body Armour",
           translation: "",
           translationReplace: "",
           words: []
