@@ -213,6 +213,7 @@ function lookupKeywordPopupReplacement(tagName, dynamicContent, dictionary) {
 function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) {
   let replacement = null;
   let foundEntry = null;
+  let matchedFind = null;
   let dict = Array.isArray(dictionary) ? dictionary : [];
 
   if (dynamicContent && dynamicContent !== '') {
@@ -223,6 +224,7 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
         if (regex.test(dynamicContent)) {
           replacement = def.replace;
           foundEntry = dictEntry;
+          matchedFind = def.find;
           break;
         }
       }
@@ -238,6 +240,7 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
         if (regex.test(tagName)) {
           replacement = def.replace;
           foundEntry = dictEntry;
+          matchedFind = def.find;
           break;
         }
       }
@@ -249,7 +252,7 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
     replacement = dynamicContent || '';
   }
 
-  return { text: `[${tagName}|${replacement}]`, dictEntry: foundEntry };
+  return { text: `[${tagName}|${replacement}]`, dictEntry: foundEntry, matchedFind };
 }
 
 function getDictEntryDefinitionsWithMeta(dictEntry) {

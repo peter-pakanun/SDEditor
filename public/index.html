@@ -156,7 +156,7 @@
             <div class="twoSided">
               <div>
                 <div class="dictRow">
-                  <input type="text" v-model="word.find" placeholder="Find">
+                  <input type="text" v-model="word.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryEntryFindMatched(word) }">
                   <input type="text" v-model="word.replace" placeholder="Replace">
                 </div>
                 <div class="dictAltHeader">
@@ -164,7 +164,7 @@
                   <button @click="addDictionaryAltRow(word)">➕</button>
                 </div>
                 <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id">
-                  <input type="text" v-model="alt.find" placeholder="Find">
+                  <input type="text" v-model="alt.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
                   <input type="text" v-model="alt.replace" placeholder="Replace">
                   <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
                 </div>

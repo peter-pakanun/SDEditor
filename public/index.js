@@ -247,6 +247,25 @@ const config = Vue.defineComponent({
       }
       return set;
     },
+    foundDictionaryDefMap() {
+      if (!this.editorVisible) return new Map();
+      let map = new Map();
+      for (const editorBlock of this.editorBlocks || []) {
+        for (const hl of editorBlock?.HLs || []) {
+          let dictId = hl?.dictId;
+          let def = (hl?.dictDefFind || "").trim();
+          if (!dictId || !def) continue;
+          let key = String(dictId);
+          let set = map.get(key);
+          if (!set) {
+            set = new Set();
+            map.set(key, set);
+          }
+          set.add(def.toLowerCase());
+        }
+      }
+      return map;
+    },
     filteredDictionary() {
       let dictionary = this.dictionary || [];
       let f = (this.dictionaryFilter || "").trim().toLowerCase();
@@ -526,6 +545,22 @@ const config = Vue.defineComponent({
     isDictionaryEntryFound(word) {
       return this.foundDictionarySet?.has?.(word?._id) || false;
     },
+    isDictionaryEntryFindMatched(word) {
+      let id = word?._id;
+      let find = String(word?.find ?? "").trim();
+      if (!id || !find) return false;
+      let set = this.foundDictionaryDefMap?.get?.(String(id));
+      if (!set) return false;
+      return set.has(find.toLowerCase());
+    },
+    isDictionaryAltFindMatched(word, alt) {
+      let id = word?._id;
+      let find = String(alt?.find ?? "").trim();
+      if (!id || !find) return false;
+      let set = this.foundDictionaryDefMap?.get?.(String(id));
+      if (!set) return false;
+      return set.has(find.toLowerCase());
+    },
     sideAddClicked() {
       if (this.sideTab === 'regex') {
         this.addRegex();
@@ -584,6 +619,7 @@ const config = Vue.defineComponent({
           isKeywordPopup: true,
           replace: kwInfo.text,
           dictId: kwInfo.dictEntry?._id,
+          dictDefFind: kwInfo.matchedFind || '',
           dictIds: Array.from(dictIdSet)
         });
       }

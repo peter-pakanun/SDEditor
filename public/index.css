@@ -504,6 +504,10 @@ button, label, th, td, input[type="checkbox"] {
   width: 50%;
 }
 
+.side input.dictExactMatchFind {
+  box-shadow: inset 3px 0 0 var(--color-element-highlight);
+}
+
 .side .dictAltHeader {
   display: flex;
   align-items: center;
