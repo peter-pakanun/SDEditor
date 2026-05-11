@@ -420,6 +420,11 @@ const config = Vue.defineComponent({
       let tr = this.normalizeNewlines(translation ?? "");
       let engLines = String(eng).split("\n");
       let trLines = String(tr).split("\n");
+      let eVarTotal = countGGGVarTag(String(eng));
+      let tVarTotal = countGGGVarTag(String(tr));
+      let eKwTotal = countKeywordPopupTag(String(eng));
+      let tKwTotal = countKeywordPopupTag(String(tr));
+      let tagMismatch = eVarTotal !== tVarTotal || eKwTotal !== tKwTotal;
       let max = Math.max(engLines.length, trLines.length);
       let engMismatch = new Array(engLines.length).fill(false);
       let trMismatch = new Array(trLines.length).fill(false);
@@ -434,21 +439,17 @@ const config = Vue.defineComponent({
           engMismatch[i] = true;
           continue;
         }
-        let eVar = countGGGVarTag(eLine);
-        let tVar = countGGGVarTag(tLine);
-        let eKw = countKeywordPopupTag(eLine);
-        let tKw = countKeywordPopupTag(tLine);
-        if (eVar !== tVar || eKw !== tKw) {
-          engMismatch[i] = true;
-          trMismatch[i] = true;
-        }
+      }
+      if (tagMismatch) {
+        engMismatch.fill(true);
+        trMismatch.fill(true);
       }
       return {
         engLines,
         trLines,
         engMismatch,
         trMismatch,
-        mismatch: engMismatch.some(Boolean) || trMismatch.some(Boolean)
+        mismatch: tagMismatch || engMismatch.some(Boolean) || trMismatch.some(Boolean)
       };
     },
     wrapHlterByLines(html, mismatchLines) {
