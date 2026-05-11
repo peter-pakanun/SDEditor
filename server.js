@@ -31,7 +31,7 @@ app.listen(PORT, HOST, () => {
   console.log(`[SDEditor] Serving: ${PUBLIC_DIR}`);
   console.log(`[SDEditor] URL: ${BASE_URL}/`);
   console.log(`[SDEditor] Open browser: ${SHOULD_OPEN_BROWSER ? 'yes' : 'no'} (use --no-open or NO_OPEN_BROWSER=1 to disable)`);
-  console.log(`[SDEditor] AI test URL: ${BASE_URL}/?testMode=1&lang=Thai`);
+  console.log(`[SDEditor] Test mode URL: ${BASE_URL}/?testMode=1&lang=Thai`);
   console.log(`[SDEditor] Log requests: ${LOG_REQUESTS ? 'yes' : 'no'} (use --log-requests to enable)`);
 
   if (SHOULD_OPEN_BROWSER) {
