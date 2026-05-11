@@ -131,6 +131,50 @@ input:focus, button:focus, textarea:focus {
   font-weight: 700;
 }
 
+.fieldMeta {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  padding: 0.35em 0.1em 0.1em 0.1em;
+  color: var(--color-font);
+  opacity: 0.85;
+  user-select: none;
+}
+
+.metaPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  padding: 0.2em 0.65em;
+  border-radius: 999px;
+  background-color: var(--color-element);
+  background: color-mix(in srgb, var(--color-element) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-shadow) 35%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.metaPill.mismatch {
+  background-color: var(--color-line-diff);
+  border-color: color-mix(in srgb, var(--color-line-diff) 70%, var(--color-shadow));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-line-diff) 30%, transparent) inset;
+}
+
+.metaPill.mismatch .metaNum {
+  font-weight: 700;
+}
+
+.metaIcon {
+  opacity: 0.85;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.metaNum {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
 .textHL>.HLter span[data-hl-id] {
   pointer-events: all;
   cursor: pointer;

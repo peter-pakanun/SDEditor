@@ -78,6 +78,12 @@ const config = Vue.defineComponent({
           english: "+1 to Maximum [EnergyShield|Energy Shield] per {0} [ItemEvasion|Item Evasion] on Equipped Body Armour",
           englishHLter: "+1 to Maximum <span>[EnergyShield|Energy Shield]</span> per <span>{0}%</span> <span>[ItemEvasion|Item Evasion]</span> on Equipped Body Armour",
           translation: "",
+          metaLinesEn: 0,
+          metaLinesTr: 0,
+          metaVarsEn: 0,
+          metaVarsTr: 0,
+          metaKwEn: 0,
+          metaKwTr: 0,
           translationReplace: "",
           words: []
         },
@@ -297,6 +303,29 @@ const config = Vue.defineComponent({
       if (typeof s !== "string") return s;
       return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
     },
+    computeTextStats(text) {
+      let s = this.normalizeNewlines(text ?? "");
+      let lines = String(s).length <= 0 ? 0 : String(s).split("\n").length;
+      return {
+        lines,
+        vars: countGGGVarTag(String(s)),
+        kw: countKeywordPopupTag(String(s))
+      };
+    },
+    refreshEditorBlockMeta(editorBlock, editorIndex) {
+      if (!editorBlock) return;
+      let eng = this.computeTextStats(editorBlock.english ?? "");
+      let tr = this.computeTextStats(editorBlock.translation ?? "");
+      editorBlock.metaLinesEn = eng.lines;
+      editorBlock.metaLinesTr = tr.lines;
+      editorBlock.metaVarsEn = eng.vars;
+      editorBlock.metaVarsTr = tr.vars;
+      editorBlock.metaKwEn = eng.kw;
+      editorBlock.metaKwTr = tr.kw;
+      if (typeof editorIndex === "number" && editorBlock.isMultiline) {
+        this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
+      }
+    },
     computeMultilineLineMismatch(english, translation) {
       let eng = this.normalizeNewlines(english ?? "");
       let tr = this.normalizeNewlines(translation ?? "");
@@ -394,6 +423,7 @@ const config = Vue.defineComponent({
         this.$nextTick(() => this.autosizeTextarea(this.$refs["translation_" + editorIndex], { minHeight: 84, maxHeight: 260 }));
       }
       if (typeof editorIndex === "number") this.refreshEditorBlockHLter(editorIndex);
+      if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
     },
     loadDummyData() {
       let desc = parseDesc("test/dummy.txt", dummyFile, this.lang);
@@ -651,7 +681,11 @@ const config = Vue.defineComponent({
       }
       let newValue = value.slice(0, start) + text + value.slice(end);
       editorBlock.translation = newValue;
-      this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
+      if (editorBlock.isMultiline) {
+        this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
+      } else {
+        this.refreshEditorBlockMeta(editorBlock, editorIndex);
+      }
       this.$nextTick(() => {
         el.focus?.();
         let caret = start + text.length;
@@ -1034,6 +1068,8 @@ const config = Vue.defineComponent({
           multilineLineMismatch = diff.mismatch;
         }
         this.editorOriginalTranslations.push(translation);
+        let engStats = this.computeTextStats(english);
+        let trStats = this.computeTextStats(translation);
         this.editorBlocks.push({
           isMultiline,
           english,
@@ -1042,6 +1078,12 @@ const config = Vue.defineComponent({
           translation,
           translationHLter,
           multilineLineMismatch,
+          metaLinesEn: engStats.lines,
+          metaLinesTr: trStats.lines,
+          metaVarsEn: engStats.vars,
+          metaVarsTr: trStats.vars,
+          metaKwEn: engStats.kw,
+          metaKwTr: trStats.kw,
           translationReplace: "",
           words: []
         })
@@ -1283,8 +1325,10 @@ const config = Vue.defineComponent({
     },
     doTranslationReplace(editorBlock, force) {
       if (!editorBlock.translationReplace) return;
+      let editorIndex = this.editorBlocks?.indexOf?.(editorBlock);
+      if (typeof editorIndex !== "number" || editorIndex < 0) editorIndex = undefined;
       editorBlock.translation = editorBlock.translationReplace;
-      this.normalizeMultilineEditorBlock(editorBlock);
+      if (typeof editorIndex === "number") this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
@@ -1296,6 +1340,7 @@ const config = Vue.defineComponent({
         if (!word.replace) word.replace = "";
         editorBlock.translation = editorBlock.translation.replace('🔖', word.replace);
       }
+      if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
     },
     addRegex(find="", replace="") {
       this.editorRegexes.unshift({ find, replace });

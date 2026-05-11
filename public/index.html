@@ -124,10 +124,15 @@
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
-          <input v-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)">
+          <input v-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="refreshEditorBlockMeta(editorBlock, index)">
           <div v-else class="textHL multiline">
             <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
             <div class="HLter" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+          </div>
+          <div class="fieldMeta">
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" title="Lines (translation / english)"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" title="Variable tags (translation / english)"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" title="Keyword tags (translation / english)"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
           </div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
