@@ -86,7 +86,7 @@ function parseDesc(filepath, text, lang) {
 
   let curLang = "English"; // first translation block langauge
   let lines = text.split("\n");
-  for (line of lines) {
+  for (let line of lines) {
     line = line.trim();
     if (line == '') continue; // ignore empty line
 
