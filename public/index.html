@@ -118,14 +118,17 @@
           <div class="inputField">
             <div class="textHL" :class="{ multiline: editorBlock.isMultiline }">
               <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
-              <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3"></textarea>
-              <div class="HLter" v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+              <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
+              <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
             </div>
-            <div v-if="editorBlock.isMultiline" class="multilineIcon" title="Multiline content">↵</div>
+            <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
           <input v-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)">
-          <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)"></textarea>
+          <div v-else class="textHL multiline">
+            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
+            <div class="HLter" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+          </div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">

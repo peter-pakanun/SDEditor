@@ -292,6 +292,83 @@ const config = Vue.defineComponent({
       if (typeof s !== "string") return s;
       return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\n", "\\n");
     },
+    normalizeNewlines(text) {
+      let s = text ?? "";
+      if (typeof s !== "string") return s;
+      return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+    },
+    computeMultilineLineMismatch(english, translation) {
+      let eng = this.normalizeNewlines(english ?? "");
+      let tr = this.normalizeNewlines(translation ?? "");
+      let engLines = String(eng).split("\n");
+      let trLines = String(tr).split("\n");
+      let max = Math.max(engLines.length, trLines.length);
+      let engMismatch = new Array(engLines.length).fill(false);
+      let trMismatch = new Array(trLines.length).fill(false);
+      for (let i = 0; i < max; i++) {
+        let eLine = engLines[i];
+        let tLine = trLines[i];
+        if (typeof eLine !== "string") {
+          if (typeof tLine === "string") trMismatch[i] = true;
+          continue;
+        }
+        if (typeof tLine !== "string") {
+          engMismatch[i] = true;
+          continue;
+        }
+        let eVar = countGGGVarTag(eLine);
+        let tVar = countGGGVarTag(tLine);
+        let eKw = countKeywordPopupTag(eLine);
+        let tKw = countKeywordPopupTag(tLine);
+        if (eVar !== tVar || eKw !== tKw) {
+          engMismatch[i] = true;
+          trMismatch[i] = true;
+        }
+      }
+      return {
+        engLines,
+        trLines,
+        engMismatch,
+        trMismatch,
+        mismatch: engMismatch.some(Boolean) || trMismatch.some(Boolean)
+      };
+    },
+    wrapHlterByLines(html, mismatchLines) {
+      let lines = String(html ?? "").split("\n");
+      let parts = [];
+      for (let i = 0; i < lines.length; i++) {
+        let content = lines[i];
+        if (content === "") content = "&#8203;";
+        let mismatch = Array.isArray(mismatchLines) && mismatchLines[i];
+        parts.push(`<div class="hlLine${mismatch ? " lineMismatch" : ""}">${content}</div>`);
+      }
+      return parts.join("");
+    },
+    refreshEditorBlockHLter(editorIndex) {
+      if (!this.editorVisible) return;
+      let editorBlock = this.editorBlocks?.[editorIndex];
+      if (!editorBlock) return;
+      let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
+      editorBlock.HLs = HLs;
+      if (!editorBlock.isMultiline) {
+        editorBlock.englishHLter = baseEnglishHLter;
+        editorBlock.translationHLter = "";
+        editorBlock.multilineLineMismatch = false;
+        return;
+      }
+      let diff = this.computeMultilineLineMismatch(editorBlock.english, editorBlock.translation);
+      editorBlock.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+      editorBlock.translationHLter = this.wrapHlterByLines(escapeHtml(editorBlock.translation ?? ""), diff.trMismatch);
+      editorBlock.multilineLineMismatch = diff.mismatch;
+    },
+    syncHlScroll(kind, index) {
+      let inputEl = this.$refs?.[`${kind}_` + index];
+      let hlterEl = this.$refs?.[`${kind}HLter_` + index];
+      if (Array.isArray(inputEl)) inputEl = inputEl[0];
+      if (Array.isArray(hlterEl)) hlterEl = hlterEl[0];
+      if (!inputEl || !hlterEl) return;
+      hlterEl.style.transform = `translate(${-inputEl.scrollLeft}px, ${-inputEl.scrollTop}px)`;
+    },
     autosizeTextarea(el, options = {}) {
       if (!el || el.tagName !== "TEXTAREA") return;
       let minHeight = options.minHeight ?? 72;
@@ -316,6 +393,7 @@ const config = Vue.defineComponent({
       if (typeof editorIndex === "number") {
         this.$nextTick(() => this.autosizeTextarea(this.$refs["translation_" + editorIndex], { minHeight: 84, maxHeight: 260 }));
       }
+      if (typeof editorIndex === "number") this.refreshEditorBlockHLter(editorIndex);
     },
     loadDummyData() {
       let desc = parseDesc("test/dummy.txt", dummyFile, this.lang);
@@ -432,11 +510,11 @@ const config = Vue.defineComponent({
       HLs.sort((a, b) => b.index - a.index); // sort deacending
       for (let i = 0; i < HLs.length; i++) {
         const HL = HLs[i];
-        let title = `Click / Alt+${HLs.length-i} = Paste below\nCtrl+Click = Copy to Clipboard`;
+        let title = `Click / Alt+${HLs.length-i} = Paste below&#10;Ctrl+Click = Copy to Clipboard`;
         if (HL?.isKeywordPopup) {
           title += HL?.dictId
-            ? `\nAlt+Click = Jump to Dictionary`
-            : `\nAlt+Click = Add to Dictionary`;
+            ? `&#10;Alt+Click = Jump to Dictionary`
+            : `&#10;Alt+Click = Add to Dictionary`;
         }
         let tag = `<span class='${HL.replace ? "vocab" : ""}' title='${title}' data-hl-id="${HL._hlId}" dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
@@ -447,10 +525,24 @@ const config = Vue.defineComponent({
     },
     refreshEditorHLter() {
       if (!this.editorVisible) return;
-      for (const editorBlock of this.editorBlocks) {
-        let { englishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
-        editorBlock.englishHLter = englishHLter;
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        let editorBlock = this.editorBlocks[i];
+        let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
         editorBlock.HLs = HLs;
+        if (!editorBlock.isMultiline) {
+          editorBlock.englishHLter = baseEnglishHLter;
+          editorBlock.translationHLter = "";
+          editorBlock.multilineLineMismatch = false;
+          continue;
+        }
+        let diff = this.computeMultilineLineMismatch(editorBlock.english, editorBlock.translation);
+        editorBlock.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+        editorBlock.translationHLter = this.wrapHlterByLines(escapeHtml(editorBlock.translation ?? ""), diff.trMismatch);
+        editorBlock.multilineLineMismatch = diff.mismatch;
+        this.$nextTick(() => {
+          this.syncHlScroll('english', i);
+          this.syncHlScroll('translation', i);
+        });
       }
     },
     scheduleEditorHLterRefresh() {
@@ -930,8 +1022,17 @@ const config = Vue.defineComponent({
         let translationRaw = desc.translations[this.lang]?.[i] || "";
         let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
         let english = isMultiline ? this.decodeEscapedNewlines(englishRaw) : englishRaw;
-        let { englishHLter, HLs } = this.buildEnglishHLter(english);
         let translation = isMultiline ? this.decodeEscapedNewlines(translationRaw) : translationRaw;
+        let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(english);
+        let englishHLter = baseEnglishHLter;
+        let translationHLter = "";
+        let multilineLineMismatch = false;
+        if (isMultiline) {
+          let diff = this.computeMultilineLineMismatch(english, translation);
+          englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+          translationHLter = this.wrapHlterByLines(escapeHtml(translation ?? ""), diff.trMismatch);
+          multilineLineMismatch = diff.mismatch;
+        }
         this.editorOriginalTranslations.push(translation);
         this.editorBlocks.push({
           isMultiline,
@@ -939,6 +1040,8 @@ const config = Vue.defineComponent({
           englishHLter,
           HLs,
           translation,
+          translationHLter,
+          multilineLineMismatch,
           translationReplace: "",
           words: []
         })
@@ -948,6 +1051,11 @@ const config = Vue.defineComponent({
       this.$nextTick(() => {
         this.$refs['translation_0'].focus();
         this.autosizeEditorMultilineFields();
+        for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+          if (!this.editorBlocks[i]?.isMultiline) continue;
+          this.syncHlScroll('english', i);
+          this.syncHlScroll('translation', i);
+        }
       });
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {

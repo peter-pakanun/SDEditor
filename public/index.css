@@ -4,6 +4,7 @@
   --color-element: #BCBCBC;
   --color-element-alt: #AEAEAE;
   --color-element-highlight: #8E8E8E;
+  --color-line-diff: rgba(200, 0, 0, 0.22);
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #000;
 }
@@ -14,6 +15,7 @@
   --color-element: #2F3136;
   --color-element-alt: #36393F;
   --color-element-highlight: #677BC4;
+  --color-line-diff: rgba(255, 120, 120, 0.22);
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #D8D9DA;
 }
@@ -98,6 +100,19 @@ input:focus, button:focus, textarea:focus {
   word-break: break-word;
 }
 
+.textHL>.HLter * {
+  pointer-events: none;
+}
+
+.textHL>.HLter .hlLine {
+  display: block;
+  border-radius: 2px;
+}
+
+.textHL>.HLter .hlLine.lineMismatch {
+  background-color: var(--color-line-diff);
+}
+
 .multilineField {
   border-color: var(--color-element-highlight);
   background-color: var(--color-element);
@@ -111,7 +126,12 @@ input:focus, button:focus, textarea:focus {
   opacity: 0.85;
 }
 
-.textHL>.HLter>span {
+.multilineIcon.mismatch {
+  color: #B00000;
+  font-weight: 700;
+}
+
+.textHL>.HLter span[data-hl-id] {
   pointer-events: all;
   cursor: pointer;
   background-color: var(--color-element-highlight);
@@ -119,11 +139,11 @@ input:focus, button:focus, textarea:focus {
   border-radius: 2px;
 }
 
-.textHL>.HLter>span.vocab {
+.textHL>.HLter span[data-hl-id].vocab {
   background-color: var(--color-font);
 }
 
-.textHL>.HLter>span:hover {
+.textHL>.HLter span[data-hl-id]:hover {
   box-shadow: 0 0 0 1px var(--color-element-highlight);
 }
 
