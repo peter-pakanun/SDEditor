@@ -426,9 +426,13 @@ const config = Vue.defineComponent({
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
     },
     loadDummyData() {
-      let desc = parseDesc("test/dummy.txt", dummyFile, this.lang);
-      if (!desc) return;
-      this.descs = [desc];
+      let desc1 = parseDesc("test/dummy1.txt", dummyFile1, this.lang);
+      let desc2 = parseDesc("test/dummy2.txt", dummyFile2, this.lang);
+      let desc3 = parseDesc("test/dummy3.txt", dummyFile3, this.lang);
+      if (!desc1) return;
+      if (!desc2) return;
+      if (!desc3) return;
+      this.descs = [desc1, desc2, desc3];
       this.loadingProgress = 100;
       this.filterDesc();
     },
