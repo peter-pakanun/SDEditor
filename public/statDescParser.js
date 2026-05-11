@@ -45,6 +45,31 @@ const dummyFile = String.raw`description
 		# # "Emmagasine {0} % des Dégâts de [Poison|Poison] prévus, jusqu'à {1}\nInflige des Dégâts [Physical|Physiques] équivalents au [Poison|Poison] Emmagasiné"
 `;
 
+/**
+ * @typedef {Object} tempTranslation
+ * @property {number} count
+ * @property {string[]} content
+ */
+/**
+ * @typedef {Object} StatDesc
+ * @property {string} filepath 
+ * @property {string} filedir 
+ * @property {string|undefined} filename 
+ * @property {string|null} name 
+ * @property {string[]} stats 
+ * @property {string[]} variables 
+ * @property {string[]} remarks 
+ * @property {Object.<string,tempTranslation>} tempTranslations
+ * @property {Object.<string,string[]>} translations 
+ * @property {boolean} isDNT 
+ * @property {boolean} [isMissing] 
+ */
+/**
+ * @param {string} filepath 
+ * @param {import('jszip').JSZipObject} zipObject
+ * @param {string} lang 
+ * @returns {Promise<StatDesc|false>}
+ */
 async function parseFile(filepath, zipObject, lang) {
   let data = await zipObject.async('uint8array');
   let blob = new Blob([data]);
@@ -67,11 +92,20 @@ async function parseFile(filepath, zipObject, lang) {
   return desc;
 }
 
+/**
+ * @param {string} filepath 
+ * @param {string} text 
+ * @param {string} lang 
+ * @returns {StatDesc|false}
+ */
 function parseDesc(filepath, text, lang) {
   text = text.replace(/\t/g, ' ').replace(/\r/g, '');
   
   let filepaths = filepath.split('/');
   let filename = filepaths.pop();
+  /**
+   * @type {StatDesc}
+   */
   let desc = {
     filepath,
     filedir: filepaths.join('/'),
@@ -80,6 +114,7 @@ function parseDesc(filepath, text, lang) {
     stats: [],
     variables: [],
     remarks: [],
+    tempTranslations: {},
     translations: {},
     isDNT: false
   };
@@ -131,8 +166,15 @@ function parseDesc(filepath, text, lang) {
     }
 
     // >>> expecting translation count
-    if (!desc.translations[curLang]) {
+    if (!desc.tempTranslations[curLang]) {
       let count = parseInt(lineArray[0]);
+      if (lineArray.length > 2) {
+        alert(
+          'ERROR: Multiple description declaration\n' +
+          filepath + '\n\n' + text
+        );
+        return false;
+      }
       if (!count) {
         alert(
           'ERROR: Malform description file\n' +
@@ -141,7 +183,7 @@ function parseDesc(filepath, text, lang) {
         );
         return false;
       }
-      desc.translations[curLang] = {
+      desc.tempTranslations[curLang] = {
         count, // temporary variable, use to validate the next "expect"
         content: []
       };
@@ -152,7 +194,7 @@ function parseDesc(filepath, text, lang) {
     let matchs = /lang "([^"]+)"/.exec(line);
     if (matchs) {
       let nextLang = matchs[1];
-      if (!desc.translations[curLang] || desc.translations[curLang].count != desc.translations[curLang].content.length) {
+      if (!desc.tempTranslations[curLang] || desc.tempTranslations[curLang].count != desc.tempTranslations[curLang].content.length) {
         alert(
           'ERROR: Malform description file\n' +
           'missing some/all translation text\n' +
@@ -160,44 +202,44 @@ function parseDesc(filepath, text, lang) {
         );
         return false;
       }
-      if (desc.translations[nextLang]) {
+      if (desc.tempTranslations[nextLang]) {
         alert(
           'ERROR: Malform description file\n' +
           'Duplicate Lang declaration detected\n' +
           filepath + '\n\nLang: ' + curLang
         );
-        delete desc.translations[nextLang];
+        delete desc.tempTranslations[nextLang];
       }
       curLang = nextLang;
       continue;
     }
 
     // >>> found nothing that we need, this mean that the current line is translation string
-    let str = lineArray.join(" ");
-    matchs = str.match(/^([^"]*)"([^"]*)" ?(.*)$/);
-    if (!matchs) {
+    let matchs2 = line.match(/^([^"]*)"([^"]*)" ?(.*)$/);
+    if (!matchs2) {
       alert(
         'ERROR: Malform description file\n' +
         'Malform translation text\n' +
         filepath + '\n\nLang: ' + curLang + '\n' + text
       );
-      continue;
+      return false;
     }
-    let variable = matchs[1].trim();
-    let content = matchs[2];
-    let remark = matchs[3];
+    let variable = matchs2[1].trim();
+    let content = matchs2[2];
+    let remark = matchs2[3];
     if (curLang == "English") {
       desc.variables.push(variable);
       desc.remarks.push(remark);
     }
     
-    desc.translations[curLang].content.push(content);
+    desc.tempTranslations[curLang].content.push(content);
   }
 
   // remove the count and replace the translation block with the array of all the text in that langauge
-  for (let lang in desc.translations) {
-    if (desc.translations.hasOwnProperty(lang)) {
-      desc.translations[lang] = desc.translations[lang].content;
+  for (let lang in desc.tempTranslations) {
+    if (desc.tempTranslations.hasOwnProperty(lang)) {
+      desc.translations[lang] = desc.tempTranslations[lang].content;
+      delete desc.tempTranslations[lang];
     }
   }
 
@@ -215,6 +257,10 @@ function parseDesc(filepath, text, lang) {
   return desc;
 }
 
+/**
+ * @param {StatDesc} desc 
+ * @returns {Uint8Array}
+ */
 function descEncode(desc) {
   var text = `description ${desc.name || ""}`.trim() + '\r\n';
   text += `\t${desc.stats.length} ${desc.stats.join(' ')}\r\n`;
@@ -237,6 +283,11 @@ function descEncode(desc) {
   return withBOM;
 }
 
+/**
+ * @param {StatDesc} desc 
+ * @param {string} lang 
+ * @returns {string}
+ */
 function generateTranslationBlock(desc, lang) {
   var text = `\t${desc.translations[lang]?.length || "0"}\r\n`;
   for (let i = 0; i < desc.translations[lang]?.length; i++) {
@@ -249,6 +300,10 @@ function generateTranslationBlock(desc, lang) {
   return text;
 }
 
+/**
+ * @param {string} str 
+ * @returns {Uint16Array}
+ */
 function strEncodeUTF16(str) {
   var buf = new ArrayBuffer(str.length * 2);
   var bufView = new Uint16Array(buf);

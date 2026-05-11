@@ -8,6 +8,7 @@
     "opn": "^6.0.0"
   },
   "devDependencies": {
+    "@types/jszip": "^3.4.0",
     "typescript": "^6.0.3"
   },
   "scripts": {
