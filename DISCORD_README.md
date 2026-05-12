@@ -15,11 +15,12 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 - Only supported browser is Chromium-based (e.g. Chrome, Brave, Edge)
 ## Keyboard shortcuts
 - **Ctrl + Space:** during editing to open the autocomplete menu
+  - **Autocomplete menu:** while it’s open, **Ctrl + Enter** will jump to/edit the matching Dictionary entry, or create one (and focus the right Replace field)
 - **Ctrl + S:** save the current file
 - **Shift + Enter:** save and move to the next file
 - **Ctrl + F:** focus on the search bar
 - **Highlighted text**: in the source file there is a highlighted text that you can interact with
   - **Click:** on the highlighted text to paste it down, replacing the current selection
-  - **Ctrl + Click:** on the highlighted text to copy it
-  - **Alt + Click:** on the highlighted text to jump to Dictionary entry or create a new one if it doesn't exist
+  - **Ctrl + Click:** on the highlighted text to jump to the Dictionary entry (or create it if it doesn't exist)
+  - **Alt + Click:** on the highlighted text to copy it
   - **Alt + number:** paste the highlighted text down by the order number, replacing the current selection
