@@ -7,6 +7,7 @@ const TEST_MODE = (() => {
   return v === '' || v === '1' || v === 'true' || v === 'yes';
 })();
 const URL_LANG = urlParams.get('lang');
+const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
 
 const config = Vue.defineComponent({
   data() {
@@ -60,6 +61,8 @@ const config = Vue.defineComponent({
       dictionaryFilter: '',
       regexFilter: '',
       dictionaryFlashId: '',
+
+      importDialogVisible: false,
 
       historyItems: [],
       historyLoading: false,
@@ -1228,6 +1231,12 @@ const config = Vue.defineComponent({
       return true;
     },
     handleKeydown(e) {
+      if (this.importDialogVisible && e.code === "Escape") {
+        e.preventDefault();
+        this.closeImportDialog();
+        return;
+      }
+
       if (e.ctrlKey && (e.code === "Space" || e.key === " ")) {
         if (!this.editorVisible) return;
         e.preventDefault();
@@ -1287,7 +1296,7 @@ const config = Vue.defineComponent({
     },
 
     importUpdateZipClicked() {
-      this.$refs.importUpdateZipFile?.click?.();
+      this.importDialogVisible = true;
     },
     async importUpdateZipChanged(e) {
       const file = e?.target?.files?.[0];
@@ -1295,15 +1304,32 @@ const config = Vue.defineComponent({
       await this.importUpdateZipFile(file);
       this.$refs.importUpdateZipFileForm?.reset?.();
     },
+    closeImportDialog() {
+      this.importDialogVisible = false;
+    },
+    importNextVersionZipClicked() {
+      this.closeImportDialog();
+      this.$refs.importUpdateZipFile?.click?.();
+    },
+    importTranslatedZipClicked() {
+      this.closeImportDialog();
+      this.$refs.importTranslatedZipFile?.click?.();
+    },
+    async importTranslatedZipChanged(e) {
+      const file = e?.target?.files?.[0];
+      if (!file) return;
+      await this.importTranslatedZipFile(file);
+      this.$refs.importTranslatedZipFileForm?.reset?.();
+    },
 
     async startFromScratch() {
-      const msg =
+      const ok = this.confirmProceedByTypingYes(
         "This will DELETE all of your local translated workspace data and ALL revision history stored in this browser.\n\n" +
         "You will lose your working translated files and history.\n\n" +
-        "Type YES to proceed:";
-      const typed = (prompt(msg) || "").trim();
-      if (typed !== "YES") return;
-      if (!confirm("Last warning: This cannot be undone. Proceed?")) return;
+        "Type YES to proceed:",
+        { confirmMessage: "Last warning: This cannot be undone. Proceed?" }
+      );
+      if (!ok) return;
       try {
         await window.OfflineStore?.clearWorkspace?.();
       } catch (_) {
@@ -1317,6 +1343,26 @@ const config = Vue.defineComponent({
       } catch (_) {
       }
       location.reload();
+    },
+
+    confirmProceedByTypingYes(message, { confirmMessage } = {}) {
+      const typed = (prompt(message) || "").trim();
+      if (typed !== "YES") return false;
+      if (!confirm(confirmMessage || "Last warning: Proceed?")) return false;
+      return true;
+    },
+    countZipTxtFiles(zip) {
+      if (!zip?.files) return 0;
+      let n = 0;
+      for (let filepath in zip.files) {
+        if (!zip.files.hasOwnProperty(filepath)) continue;
+        const entry = zip.files[filepath];
+        if (entry?.dir) continue;
+        let ext = filepath.split('.').pop().toLocaleLowerCase();
+        if (ext.toLocaleLowerCase() !== 'txt') continue;
+        n++;
+      }
+      return n;
     },
 
     async importUpdateZipFile(file) {
@@ -1343,6 +1389,27 @@ const config = Vue.defineComponent({
         this.loadingProgress = 0;
         alert('Cannot open this file');
         return;
+      }
+
+      const txtFileCount = this.countZipTxtFiles(zip);
+      if (txtFileCount === 0) {
+        this.loadingProgress = 100;
+        alert('No .txt files found in this ZIP.');
+        return;
+      }
+      if (txtFileCount < ZIP_TXT_FILE_COUNT_THRESHOLD) {
+        const ok = this.confirmProceedByTypingYes(
+          "This ZIP looks smaller than a full StatDescriptions export.\n\n" +
+          `Found only ${txtFileCount} .txt files (expected ~${ZIP_TXT_FILE_COUNT_THRESHOLD}+).\n\n` +
+          "This might be a partial export or the translated ZIP.\n" +
+          "Importing it as a Next Version update can mark many source files as deleted.\n\n" +
+          "Type YES to proceed:",
+          { confirmMessage: "Last warning: Import anyway?" }
+        );
+        if (!ok) {
+          this.loadingProgress = 100;
+          return;
+        }
       }
 
       let parseFuncs = [];
@@ -1503,6 +1570,228 @@ const config = Vue.defineComponent({
 
       this.loadingProgress = 100;
       this.filterDesc();
+    },
+
+    async importTranslatedZipFile(file) {
+      if (!file) return;
+      if (!offlineStoreReady) return;
+      if (!this.lang) {
+        alert('Please select a language in Settings first.');
+        return;
+      }
+      if (!this.sourceLoaded || !Array.isArray(this.descs) || this.descs.length === 0) {
+        alert('Please import the latest StatDescriptions.zip first.');
+        return;
+      }
+      if (String(file?.name || '').toLowerCase() !== 'statdescriptions_translated.zip') {
+        if (!confirm('This does not look like StatDescriptions_Translated.zip. Import anyway?')) return;
+      }
+
+      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
+
+      this.loadingProgress = 0.001;
+
+      let zip;
+      try {
+        zip = await new JSZip().loadAsync(file);
+      } catch (error) {
+        this.loadingProgress = 100;
+        alert('Cannot open this file');
+        return;
+      }
+
+      const txtFileCount = this.countZipTxtFiles(zip);
+      if (txtFileCount === 0) {
+        this.loadingProgress = 100;
+        alert('No .txt files found in this ZIP.');
+        return;
+      }
+      if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD) {
+        const ok = this.confirmProceedByTypingYes(
+          "This ZIP looks like a full StatDescriptions export.\n\n" +
+          `Found ${txtFileCount} .txt files (expected less than ${ZIP_TXT_FILE_COUNT_THRESHOLD} for a translated transfer ZIP).\n\n` +
+          "This import mode is meant for moving translated data between PCs.\n" +
+          "If you actually got a new export from the game data, use Import Next Version instead.\n\n" +
+          "Type YES to proceed:",
+          { confirmMessage: "Last warning: Import as translated anyway?" }
+        );
+        if (!ok) {
+          this.loadingProgress = 100;
+          return;
+        }
+      }
+
+      let parseFuncs = [];
+      for (let filepath in zip.files) {
+        if (!zip.files.hasOwnProperty(filepath)) continue;
+        let ext = filepath.split('.').pop().toLocaleLowerCase();
+        if (ext.toLocaleLowerCase() !== 'txt') continue;
+        parseFuncs.push(parseFile(filepath, zip.files[filepath], this.lang));
+      }
+
+      let parsed = await allProgress(parseFuncs, (p) => {
+        const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+        this.loadingProgress = percent;
+      });
+      const importedDescs = parsed.filter(Boolean);
+
+      const sourceMap = new Map((this.descs || []).filter(Boolean).map(d => [d.filepath, d]));
+
+      const mismatchFiles = [];
+      for (const imported of importedDescs) {
+        const prev = sourceMap.get(imported?.filepath);
+        if (!prev) {
+          mismatchFiles.push(`${imported?.filepath || '(unknown)'}: file not found in current source`);
+          continue;
+        }
+        const prevEng = Array.isArray(prev?.translations?.English) ? prev.translations.English : [];
+        const impEng = Array.isArray(imported?.translations?.English) ? imported.translations.English : [];
+        if (!arrayEquals(prevEng, impEng)) {
+          mismatchFiles.push(`${imported.filepath}: English source text differs`);
+          continue;
+        }
+        const impTr = Array.isArray(imported?.translations?.[this.lang]) ? imported.translations[this.lang] : null;
+        if (!impTr) {
+          mismatchFiles.push(`${imported.filepath}: missing "${this.lang}" translation block`);
+          continue;
+        }
+        if (impTr.length !== prevEng.length) {
+          mismatchFiles.push(`${imported.filepath}: translation line count differs`);
+          continue;
+        }
+        const prevStats = Array.isArray(prev?.stats) ? prev.stats : [];
+        const impStats = Array.isArray(imported?.stats) ? imported.stats : [];
+        if (!arrayEquals(prevStats, impStats)) {
+          mismatchFiles.push(`${imported.filepath}: stat list differs`);
+          continue;
+        }
+        const prevVars = Array.isArray(prev?.variables) ? prev.variables : [];
+        const impVars = Array.isArray(imported?.variables) ? imported.variables : [];
+        if (!arrayEquals(prevVars, impVars)) {
+          mismatchFiles.push(`${imported.filepath}: variables differ`);
+          continue;
+        }
+        const prevRemarks = Array.isArray(prev?.remarks) ? prev.remarks : [];
+        const impRemarks = Array.isArray(imported?.remarks) ? imported.remarks : [];
+        if (!arrayEquals(prevRemarks, impRemarks)) {
+          mismatchFiles.push(`${imported.filepath}: remarks differ`);
+          continue;
+        }
+      }
+
+      if (mismatchFiles.length > 0) {
+        this.loadingProgress = 100;
+        const head = mismatchFiles.slice(0, 12).join('\n');
+        const more = mismatchFiles.length > 12 ? `\n… and ${mismatchFiles.length - 12} more` : '';
+        alert(
+          'Import aborted: source fields mismatch detected.\n\n' +
+          head +
+          more +
+          '\n\nMake sure you imported the matching StatDescriptions.zip version before importing translations.'
+        );
+        return;
+      }
+
+      const oldWorkspaceMap = new Map((this.localDescs.descs || []).filter(Boolean).map(d => [d.filepath, d]));
+      const now = Date.now();
+      let changedCount = 0;
+      const changedPaths = new Set();
+
+      for (const imported of importedDescs) {
+        const desc = sourceMap.get(imported.filepath);
+        if (!desc) continue;
+
+        const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
+        const importedRaw = Array.isArray(imported?.translations?.[this.lang]) ? imported.translations[this.lang] : [];
+        const importedLines = Array.from({ length: engLen }).map((_, i) => importedRaw[i] ?? "");
+
+        let localDesc = oldWorkspaceMap.get(imported.filepath);
+        const existing = Array.isArray(localDesc?.translations?.[this.lang])
+          ? localDesc.translations[this.lang]
+          : (Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : []);
+        const existingLines = Array.from({ length: engLen }).map((_, i) => existing[i] ?? "");
+
+        const changed = !arrayEquals(existingLines, importedLines);
+        if (!changed) continue;
+
+        changedCount++;
+        changedPaths.add(imported.filepath);
+
+        desc.translations[this.lang] = importedLines;
+        desc.isMissing = importedLines.length !== engLen || importedLines.some(v => String(v ?? '').trim() === '');
+        desc.hasChanges = true;
+        desc.needsReview = false;
+
+        const st = this.localDescs.status[imported.filepath] || {};
+        st.needsReview = false;
+        this.localDescs.status[imported.filepath] = st;
+
+        if (!localDesc) {
+          localDesc = {
+            filedir: desc.filedir,
+            filename: desc.filename,
+            filepath: desc.filepath,
+            hasChanges: true,
+            isMissing: desc.isMissing,
+            name: desc.name,
+            remarks: desc.remarks,
+            stats: desc.stats,
+            variables: desc.variables,
+            translations: {
+              English: desc.translations.English,
+            }
+          };
+          localDesc.translations[this.lang] = importedLines;
+          this.localDescs.descs.push(localDesc);
+          oldWorkspaceMap.set(desc.filepath, localDesc);
+        } else {
+          localDesc.hasChanges = true;
+          localDesc.isMissing = desc.isMissing;
+          if (!localDesc.translations) localDesc.translations = {};
+          localDesc.translations.English = desc.translations.English;
+          localDesc.translations[this.lang] = importedLines;
+        }
+      }
+
+      if (!this.testMode && changedCount > 0 && window.OfflineStore && typeof window.OfflineStore.addRevision === 'function') {
+        for (const imported of importedDescs) {
+          const desc = sourceMap.get(imported?.filepath);
+          if (!desc?.filepath) continue;
+          if (!changedPaths.has(desc.filepath)) continue;
+
+          const lines = Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : [];
+          const rev = {
+            filepath: desc.filepath,
+            filename: desc.filename,
+            filedir: desc.filedir,
+            lang: this.lang,
+            savedAt: now,
+            note: 'Import translated',
+            isMissing: !!desc.isMissing,
+            translations: lines,
+          };
+
+          try {
+            const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang);
+            if (!latest || !arrayEquals(latest.translations, lines)) await window.OfflineStore.addRevision(rev);
+          } catch (_) {
+          }
+
+          const st = this.localDescs.status[desc.filepath] || {};
+          st.lastTranslatedAt = now;
+          st.lastEditedAt = now;
+          this.localDescs.status[desc.filepath] = st;
+        }
+      }
+
+      await this.saveLocalDescs();
+      this.loadingProgress = 100;
+      this.filterDesc();
+
+      if (changedCount === 0) {
+        alert('No translation changes detected.');
+      }
     },
     // Applies local workspace translations and status flags on top of the source descs.
     // For each file in descs it:

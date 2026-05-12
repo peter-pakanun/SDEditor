@@ -217,6 +217,62 @@ input:focus, button:focus, textarea:focus {
   z-index: 2;
 }
 
+.importDialogOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 2000;
+}
+
+.box.importDialogBox {
+  width: min(520px, calc(100vw - 2.5em));
+  padding: 1.5em 2em;
+}
+
+.importDialogButtons {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6em;
+  margin-top: 1em;
+}
+
+.importDialogOption {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6em;
+}
+
+.importDialogBtn {
+  width: 100%;
+  text-align: left;
+}
+
+.importDialogBtn.primary {
+  background-color: var(--color-accent);
+  color: #000;
+  font-size: 15px;
+  padding: 0.75em 1em;
+}
+
+.importDialogBtn.primary:hover {
+  filter: brightness(1.05);
+}
+
+.importDialogCaption {
+  opacity: 0.9;
+}
+
+.importDialogHint {
+  margin-top: 0.9em;
+  opacity: 0.85;
+}
+
 .box {
   background-color: var(--color-bg2);
   box-shadow: 2px 2px 2px var(--color-shadow);

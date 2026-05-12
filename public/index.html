@@ -79,9 +79,12 @@
         <div class="pagination">
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
-          <button @click="importUpdateZipClicked" title="Import update ZIP">📦</button>
+          <button @click="importUpdateZipClicked" title="Import ZIP">📦</button>
           <form ref="importUpdateZipFileForm" style="display: none;">
             <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
+          </form>
+          <form ref="importTranslatedZipFileForm" style="display: none;">
+            <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
           </form>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
@@ -102,6 +105,23 @@
             <option value="review">Need review only</option>
             <option value="all">Show All</option>
           </select>
+        </div>
+      </div>
+
+      <div v-if="importDialogVisible" class="importDialogOverlay" @click.self="closeImportDialog">
+        <div class="box importDialogBox">
+          <h3>Import</h3>
+          <div class="importDialogButtons">
+            <div class="importDialogOption">
+              <button class="importDialogBtn primary" @click="importNextVersionZipClicked">🆕📦 Import Next Version</button>
+              <div class="importDialogCaption">This is what you normally do when you get a new export.</div>
+            </div>
+            <div class="importDialogOption">
+              <button class="importDialogBtn" @click="importTranslatedZipClicked">🔁📦 Import Translated</button>
+              <div class="importDialogCaption">This is rarely used; it is for when you want to move translated data between PCs.</div>
+            </div>
+          </div>
+          <div class="importDialogHint">Click outside to cancel.</div>
         </div>
       </div>
 
