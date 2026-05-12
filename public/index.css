@@ -190,23 +190,6 @@ input:focus, button:focus, textarea:focus {
 
 .textHL>.HLter span[data-hl-id].hlPopupActive {
   box-shadow: 0 0 0 1px var(--color-accent);
-  animation: hlPopupPulse 300ms ease-out 1;
-}
-
-.textHL>.HLter span[data-hl-id].hlPopupActive.vocab {
-  box-shadow: 0 0 0 1px var(--color-accent);
-  animation-name: hlPopupPulse;
-}
-
-@keyframes hlPopupPulse {
-  0% {
-    box-shadow:
-      0 0 0 0px var(--color-accent),
-      0 0 0 6px color-mix(in srgb, var(--color-accent) 35%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 1px var(--color-accent);
-  }
 }
 
 .textHL>.HLter span[data-hl-id]:hover {
@@ -564,11 +547,9 @@ button, label, th, td, input[type="checkbox"] {
   padding: 0.15em 0.35em;
 }
 
-.side .dictRow.hlPopupDictActive,
 .side .dictAltRow.hlPopupDictActive {
   border-radius: 2px;
   box-shadow: 0 0 0 1px var(--color-accent);
-  animation: hlPopupPulse 300ms ease-out 1;
 }
 
 .side details.dictTlnote {

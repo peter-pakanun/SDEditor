@@ -892,20 +892,22 @@ const config = Vue.defineComponent({
     syncHlPopupEnglishHighlight() {
       if (!this.editorVisible) return;
 
-      if (!this.hlPopup.visible) {
-        for (const el of (this._hlPopupActiveEnglishEls || [])) {
-          el?.classList?.remove?.('hlPopupActive');
+      let blockCount = (this.editorBlocks || []).length;
+      for (let i = 0; i < blockCount; i++) {
+        let r = this.$refs["englishHLter_" + i];
+        if (!r?.querySelectorAll) continue;
+        for (const el of r.querySelectorAll('span[data-hl-id].hlPopupActive')) {
+          el.classList.remove('hlPopupActive');
         }
-        this._hlPopupActiveEnglishEls = [];
-        this._hlPopupActiveKey = "";
-
-        if (this._hlPopupDictActiveEl?.classList) {
-          this._hlPopupDictActiveEl.classList.remove('hlPopupDictActive');
-        }
-        this._hlPopupDictActiveEl = null;
-        this._hlPopupDictActiveKey = "";
-        return;
       }
+
+      if (document?.querySelectorAll) {
+        for (const el of document.querySelectorAll('.side .dictAltRow.hlPopupDictActive')) {
+          el.classList.remove('hlPopupDictActive');
+        }
+      }
+
+      if (!this.hlPopup.visible) return;
 
       let editorIndex = this.hlPopup.editorIndex;
       let root = this.$refs["englishHLter_" + editorIndex];
@@ -917,62 +919,29 @@ const config = Vue.defineComponent({
       let ids = Array.isArray(item.hlIds) ? item.hlIds : [];
       let idSet = new Set(ids.map(v => String(v)));
       let value = String(item.value ?? "");
-      let dictEntryId = String(item.dictEntryId || "");
       let dictAltId = String(item.dictAltId || "");
-
-      let nextKey = `${editorIndex}|${Array.from(idSet).join(",")}|${value}|${dictEntryId}|${dictAltId}`;
-      if (this._hlPopupActiveKey === nextKey) return;
-      this._hlPopupActiveKey = nextKey;
 
       let esc = (s) => {
         if (window?.CSS?.escape) return window.CSS.escape(String(s));
         return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       };
 
-      for (const el of (this._hlPopupActiveEnglishEls || [])) {
-        el?.classList?.remove?.('hlPopupActive');
-      }
-      this._hlPopupActiveEnglishEls = [];
-
       if (idSet.size > 0) {
         for (const id of idSet) {
           let el = root.querySelector(`span[data-hl-id="${esc(id)}"]`);
           if (!el?.classList) continue;
           el.classList.add('hlPopupActive');
-          this._hlPopupActiveEnglishEls.push(el);
         }
       } else if (value) {
         for (const el of root.querySelectorAll(`span[data-hl-id][dataValue="${esc(value)}"]`)) {
           el.classList.add('hlPopupActive');
-          this._hlPopupActiveEnglishEls.push(el);
         }
       }
 
-      if (!dictAltId || !document?.querySelector) {
-        if (this._hlPopupDictActiveEl?.classList) {
-          this._hlPopupDictActiveEl.classList.remove('hlPopupDictActive');
-        }
-        this._hlPopupDictActiveEl = null;
-        this._hlPopupDictActiveKey = "";
-        return;
-      }
-
-      let nextDictKey = `${dictEntryId}|alt|${dictAltId}`;
-      if (this._hlPopupDictActiveKey === nextDictKey && this._hlPopupDictActiveEl?.isConnected) return;
-
-      if (this._hlPopupDictActiveEl?.classList) {
-        this._hlPopupDictActiveEl.classList.remove('hlPopupDictActive');
-      }
+      if (!dictAltId || !document?.querySelector) return;
 
       let dictEl = document.querySelector(`.side .dictAltRow[data-dict-alt-id="${esc(dictAltId)}"]`);
-      if (dictEl?.classList) {
-        dictEl.classList.add('hlPopupDictActive');
-        this._hlPopupDictActiveEl = dictEl;
-        this._hlPopupDictActiveKey = nextDictKey;
-      } else {
-        this._hlPopupDictActiveEl = null;
-        this._hlPopupDictActiveKey = "";
-      }
+      if (dictEl?.classList) dictEl.classList.add('hlPopupDictActive');
     },
     insertTranslationText(editorIndex, text, options = {}) {
       let el = this.$refs["translation_" + editorIndex];
