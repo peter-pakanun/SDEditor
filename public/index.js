@@ -902,7 +902,7 @@ const config = Vue.defineComponent({
       }
 
       if (document?.querySelectorAll) {
-        for (const el of document.querySelectorAll('.side .dictAltRow.hlPopupDictActive')) {
+        for (const el of document.querySelectorAll('.side .dictRow.hlPopupDictActive, .side .dictAltRow.hlPopupDictActive')) {
           el.classList.remove('hlPopupDictActive');
         }
       }
@@ -919,6 +919,7 @@ const config = Vue.defineComponent({
       let ids = Array.isArray(item.hlIds) ? item.hlIds : [];
       let idSet = new Set(ids.map(v => String(v)));
       let value = String(item.value ?? "");
+      let dictEntryId = String(item.dictEntryId || "");
       let dictAltId = String(item.dictAltId || "");
 
       let esc = (s) => {
@@ -938,9 +939,14 @@ const config = Vue.defineComponent({
         }
       }
 
-      if (!dictAltId || !document?.querySelector) return;
+      if (!document?.querySelector) return;
 
-      let dictEl = document.querySelector(`.side .dictAltRow[data-dict-alt-id="${esc(dictAltId)}"]`);
+      let dictEl = null;
+      if (dictAltId) {
+        dictEl = document.querySelector(`.side .dictAltRow[data-dict-alt-id="${esc(dictAltId)}"]`);
+      } else if (dictEntryId) {
+        dictEl = document.querySelector(`.side .dictRow[data-dict-id="${esc(dictEntryId)}"]`);
+      }
       if (dictEl?.classList) dictEl.classList.add('hlPopupDictActive');
     },
     insertTranslationText(editorIndex, text, options = {}) {
