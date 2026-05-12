@@ -38,6 +38,7 @@
         <button @click="settingsSaveClose">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>
+        <button @click.stop.prevent="startFromScratch" title="Delete local translated workspace and history">Start from scratch</button>
         <form ref="importSettingsFileForm">
           <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
             accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
