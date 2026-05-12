@@ -53,7 +53,7 @@
         <template v-if="loadingProgress == 0 && needsPostMigrationImport">
           <h2>Attention! Post-migration import required</h2>
           <h3>We found existing translations in your workspace, but the source (English) strings are missing.</h3>
-          <h3>Please Drag & drop the original StatDescriptions.zip you last used with this tool (not the translated export).</h3>
+          <h3>Please Drag & drop the original <u>StatDescriptions.zip</u> you <b>last used</b> with this tool (not the _Translated export).</h3>
           <h3>If you don't want to restore your translations and version history, click the button below.</h3>
           <button @click.stop.prevent="startFromScratch">Start from scratch</button>
         </template>
