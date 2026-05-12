@@ -171,12 +171,7 @@ const config = Vue.defineComponent({
     } catch (_) {
     }
     if (localDescs) this.localDescs = localDescs;
-
-    if (!this.localDescs || typeof this.localDescs !== 'object') {
-      this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
-    }
-    if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
-    if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+    this.ensureLocalDescsReady();
 
     this.needsInitialSettings = !this.lang;
 
@@ -406,6 +401,13 @@ const config = Vue.defineComponent({
         return null;
       }
     },
+    ensureLocalDescsReady() {
+      if (!this.localDescs || typeof this.localDescs !== 'object') {
+        this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
+      }
+      if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
+      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+    },
     async settingsSaveClose() {
       if (!this.lang) {
         alert('Please select a language.');
@@ -430,7 +432,7 @@ const config = Vue.defineComponent({
 
       desc.needsReview = false;
       this.editorShowEnglishDiff = false;
-      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      this.ensureLocalDescsReady();
       const st = this.localDescs.status[desc.filepath] || {};
       st.needsReview = false;
       st.reviewedAt = Date.now();
@@ -1565,12 +1567,9 @@ const config = Vue.defineComponent({
     countZipTxtFiles(zip) {
       if (!zip?.files) return 0;
       let n = 0;
-      for (let filepath in zip.files) {
-        if (!zip.files.hasOwnProperty(filepath)) continue;
+      for (const filepath of getZipTxtFilepaths(zip)) {
         const entry = zip.files[filepath];
         if (entry?.dir) continue;
-        let ext = filepath.split('.').pop().toLocaleLowerCase();
-        if (ext.toLocaleLowerCase() !== 'txt') continue;
         n++;
       }
       return n;
@@ -1588,9 +1587,7 @@ const config = Vue.defineComponent({
 
       this.localDescs.lastModified = file.lastModified;
       this.localDescs.size = file.size;
-
-      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
-      if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
+      this.ensureLocalDescsReady();
 
       let zip;
       this.loadingProgress = 0.001;
@@ -1623,15 +1620,7 @@ const config = Vue.defineComponent({
         }
       }
 
-      let parseFuncs = [];
-      for (let filepath in zip.files) {
-        if (zip.files.hasOwnProperty(filepath)) {
-          let ext = filepath.split('.').pop().toLocaleLowerCase();
-          if (ext.toLocaleLowerCase() == 'txt') {
-            parseFuncs.push(parseFile(filepath, zip.files[filepath], this.lang));
-          }
-        }
-      }
+      const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
 
       let parsed = await allProgress(parseFuncs, (p) => {
         const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
@@ -1688,9 +1677,10 @@ const config = Vue.defineComponent({
         nextDesc.translations.English = nextEng;
         nextDesc.translations[this.lang] = merged;
 
-        nextDesc.isMissing = merged.length !== engLen || merged.some(v => String(v ?? '').trim() === '');
+        nextDesc.isMissing = computeIsMissing(engLen, merged);
         nextDesc.needsReview = isPostMigrationImport ? false : needsReview;
-        nextDesc.hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
+        const hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
+        nextDesc.hasChanges = hasChanges;
 
         const st = this.localDescs.status[filepath] || {};
         st.deleted = false;
@@ -1703,34 +1693,11 @@ const config = Vue.defineComponent({
 
         let localDesc = oldLocal;
         if (!localDesc) {
-          localDesc = {
-            filedir: nextDesc.filedir,
-            filename: nextDesc.filename,
-            filepath: nextDesc.filepath,
-            hasChanges: isPostMigrationImport && hadOldWorkspaceTranslation,
-            isMissing: nextDesc.isMissing,
-            name: nextDesc.name,
-            remarks: nextDesc.remarks,
-            stats: nextDesc.stats,
-            variables: nextDesc.variables,
-            translations: {
-              English: nextEng,
-            }
-          };
-          localDesc.translations[this.lang] = merged;
+          localDesc = makeLocalDesc(nextDesc, this.lang, merged, { hasChanges, isMissing: nextDesc.isMissing });
           this.localDescs.descs.push(localDesc);
+          oldWorkspaceMap.set(nextDesc.filepath, localDesc);
         } else {
-          localDesc.filedir = nextDesc.filedir;
-          localDesc.filename = nextDesc.filename;
-          localDesc.name = nextDesc.name;
-          localDesc.remarks = nextDesc.remarks;
-          localDesc.stats = nextDesc.stats;
-          localDesc.variables = nextDesc.variables;
-          if (!localDesc.translations) localDesc.translations = {};
-          localDesc.translations.English = nextEng;
-          localDesc.translations[this.lang] = merged;
-          localDesc.hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
-          localDesc.isMissing = nextDesc.isMissing;
+          updateLocalDesc(localDesc, nextDesc, this.lang, merged, { hasChanges, isMissing: nextDesc.isMissing });
         }
 
         if (prevDesc && !arrayEquals(prevEng, nextEng)) {
@@ -1798,8 +1765,7 @@ const config = Vue.defineComponent({
         if (!confirm('This does not look like StatDescriptions_Translated.zip. Import anyway?')) return;
       }
 
-      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
-      if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
+      this.ensureLocalDescsReady();
 
       this.loadingProgress = 0.001;
 
@@ -1833,13 +1799,7 @@ const config = Vue.defineComponent({
         }
       }
 
-      let parseFuncs = [];
-      for (let filepath in zip.files) {
-        if (!zip.files.hasOwnProperty(filepath)) continue;
-        let ext = filepath.split('.').pop().toLocaleLowerCase();
-        if (ext.toLocaleLowerCase() !== 'txt') continue;
-        parseFuncs.push(parseFile(filepath, zip.files[filepath], this.lang));
-      }
+      const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
 
       let parsed = await allProgress(parseFuncs, (p) => {
         const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
@@ -1930,7 +1890,7 @@ const config = Vue.defineComponent({
         changedPaths.add(imported.filepath);
 
         desc.translations[this.lang] = importedLines;
-        desc.isMissing = importedLines.length !== engLen || importedLines.some(v => String(v ?? '').trim() === '');
+        desc.isMissing = computeIsMissing(engLen, importedLines);
         desc.hasChanges = true;
         desc.needsReview = false;
 
@@ -1939,29 +1899,11 @@ const config = Vue.defineComponent({
         this.localDescs.status[imported.filepath] = st;
 
         if (!localDesc) {
-          localDesc = {
-            filedir: desc.filedir,
-            filename: desc.filename,
-            filepath: desc.filepath,
-            hasChanges: true,
-            isMissing: desc.isMissing,
-            name: desc.name,
-            remarks: desc.remarks,
-            stats: desc.stats,
-            variables: desc.variables,
-            translations: {
-              English: desc.translations.English,
-            }
-          };
-          localDesc.translations[this.lang] = importedLines;
+          localDesc = makeLocalDesc(desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
           this.localDescs.descs.push(localDesc);
           oldWorkspaceMap.set(desc.filepath, localDesc);
         } else {
-          localDesc.hasChanges = true;
-          localDesc.isMissing = desc.isMissing;
-          if (!localDesc.translations) localDesc.translations = {};
-          localDesc.translations.English = desc.translations.English;
-          localDesc.translations[this.lang] = importedLines;
+          updateLocalDesc(localDesc, desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
         }
       }
 
@@ -2033,7 +1975,7 @@ const config = Vue.defineComponent({
           desc.hasChanges = !!localDesc.hasChanges;
         }
 
-        desc.isMissing = merged.length !== engLen || merged.some(v => String(v ?? "").trim() === "");
+        desc.isMissing = computeIsMissing(engLen, merged);
 
         const st = statusByPath[desc.filepath];
         desc.needsReview = !!st?.needsReview;
@@ -2221,14 +2163,13 @@ const config = Vue.defineComponent({
       if (this.editorCompareActive) return;
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
-      let isMissing = false;
       for (const editorBlock of this.editorBlocks) {
         let ui = editorBlock?.translation ?? "";
-        if (!String(ui).trim()) isMissing = true;
         let normalizedUi = editorBlock?.isMultiline ? this.decodeEscapedNewlines(ui) : ui;
         newTranslations.push(this.encodeNewlines(normalizedUi));
       }
 
+      const isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, newTranslations);
       if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
 
       let lineMismatchInfo = [];
@@ -2258,35 +2199,20 @@ const config = Vue.defineComponent({
 
       if (desc.needsReview && desc.hasChanges) {
         desc.needsReview = false;
-        if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+        this.ensureLocalDescsReady();
         const st = this.localDescs.status[desc.filepath] || {};
         st.needsReview = false;
         this.localDescs.status[desc.filepath] = st;
       }
 
       // save to localDescs too
+      this.ensureLocalDescsReady();
       let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
-      if (localDesc) {
-        localDesc.isMissing = desc.isMissing;
-        localDesc.hasChanges = desc.hasChanges;
-        localDesc.translations[this.lang] = newTranslations;
+      if (!localDesc) {
+        localDesc = makeLocalDesc(desc, this.lang, newTranslations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
+        this.localDescs.descs.push(localDesc);
       } else {
-        let cloneDesc = {
-          filedir: desc.filedir,
-          filename: desc.filename,
-          filepath: desc.filepath,
-          hasChanges: desc.hasChanges,
-          isMissing: desc.isMissing,
-          name: desc.name,
-          remarks: desc.remarks,
-          stats: desc.stats,
-          variables: desc.variables,
-          translations: {
-            English: desc.translations.English,
-          }
-        }
-        cloneDesc.translations[this.lang] = newTranslations;
-        this.localDescs.descs.push(cloneDesc);
+        updateLocalDesc(localDesc, desc, this.lang, newTranslations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
       }
       this.saveLocalDescs();
       this.commitRevision(desc, newTranslations, { note: 'Save' });
@@ -2449,40 +2375,25 @@ const config = Vue.defineComponent({
       if (this.editorCompareActive) this.exitEditorCompareMode();
 
       const lines = Array.isArray(rev.translations) ? rev.translations : [];
-      desc.isMissing = lines.some(v => !String(v ?? '').trim());
+      desc.isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, lines);
       if (!arrayEquals(desc.translations[this.lang], lines)) desc.hasChanges = true;
       desc.translations[this.lang] = lines;
 
       if (desc.needsReview && desc.hasChanges) {
         desc.needsReview = false;
-        if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+        this.ensureLocalDescsReady();
         const st = this.localDescs.status[desc.filepath] || {};
         st.needsReview = false;
         this.localDescs.status[desc.filepath] = st;
       }
 
+      this.ensureLocalDescsReady();
       let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
-      if (localDesc) {
-        localDesc.isMissing = desc.isMissing;
-        localDesc.hasChanges = desc.hasChanges;
-        localDesc.translations[this.lang] = lines;
+      if (!localDesc) {
+        localDesc = makeLocalDesc(desc, this.lang, lines, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
+        this.localDescs.descs.push(localDesc);
       } else {
-        let cloneDesc = {
-          filedir: desc.filedir,
-          filename: desc.filename,
-          filepath: desc.filepath,
-          hasChanges: desc.hasChanges,
-          isMissing: desc.isMissing,
-          name: desc.name,
-          remarks: desc.remarks,
-          stats: desc.stats,
-          variables: desc.variables,
-          translations: {
-            English: desc.translations.English,
-          }
-        }
-        cloneDesc.translations[this.lang] = lines;
-        this.localDescs.descs.push(cloneDesc);
+        updateLocalDesc(localDesc, desc, this.lang, lines, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
       }
 
       await this.saveLocalDescs();
@@ -2518,7 +2429,7 @@ const config = Vue.defineComponent({
       } catch (_) {
       }
 
-      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      this.ensureLocalDescsReady();
       const st = this.localDescs.status[desc.filepath] || {};
       st.lastTranslatedAt = rev.savedAt;
       st.lastEditedAt = rev.savedAt;

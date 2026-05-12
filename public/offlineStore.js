@@ -61,77 +61,73 @@
     return _dbPromise;
   }
 
-  async function kvGet(key) {
+  async function withStore(storeName, mode, fn) {
     const db = await openDb();
-    const tx = db.transaction([STORE_KV], 'readonly');
-    const store = tx.objectStore(STORE_KV);
-    const row = await requestToPromise(store.get(key));
+    const tx = db.transaction([storeName], mode);
+    const store = tx.objectStore(storeName);
+    const out = await fn(store, tx);
     await txDone(tx);
-    return row ? row.value : undefined;
+    return out;
+  }
+
+  async function kvGet(key) {
+    return withStore(STORE_KV, 'readonly', async (store) => {
+      const row = await requestToPromise(store.get(key));
+      return row ? row.value : undefined;
+    });
   }
 
   async function kvSet(key, value) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_KV], 'readwrite');
-    const store = tx.objectStore(STORE_KV);
-    store.put({ key, value });
-    await txDone(tx);
+    return withStore(STORE_KV, 'readwrite', async (store) => {
+      store.put({ key, value });
+    });
   }
 
   async function kvDel(key) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_KV], 'readwrite');
-    const store = tx.objectStore(STORE_KV);
-    store.delete(key);
-    await txDone(tx);
+    return withStore(STORE_KV, 'readwrite', async (store) => {
+      store.delete(key);
+    });
   }
 
   async function revisionAdd(rev) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_REVISIONS], 'readwrite');
-    const store = tx.objectStore(STORE_REVISIONS);
-    const id = await requestToPromise(store.add(rev));
-    await txDone(tx);
-    return id;
+    return withStore(STORE_REVISIONS, 'readwrite', async (store) => {
+      return requestToPromise(store.add(rev));
+    });
   }
 
   async function revisionGet(id) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_REVISIONS], 'readonly');
-    const store = tx.objectStore(STORE_REVISIONS);
-    const row = await requestToPromise(store.get(Number(id)));
-    await txDone(tx);
-    return row || undefined;
+    return withStore(STORE_REVISIONS, 'readonly', async (store) => {
+      const row = await requestToPromise(store.get(Number(id)));
+      return row || undefined;
+    });
   }
 
   async function revisionList(filepath, lang, limit = 50) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_REVISIONS], 'readonly');
-    const store = tx.objectStore(STORE_REVISIONS);
-    const idx = store.index('by_file_lang_time');
-    const range = IDBKeyRange.bound([filepath, lang, 0], [filepath, lang, Number.MAX_SAFE_INTEGER]);
-    const items = [];
+    return withStore(STORE_REVISIONS, 'readonly', async (store) => {
+      const idx = store.index('by_file_lang_time');
+      const range = IDBKeyRange.bound([filepath, lang, 0], [filepath, lang, Number.MAX_SAFE_INTEGER]);
+      const items = [];
 
-    await new Promise((resolve, reject) => {
-      const req = idx.openCursor(range, 'prev');
-      req.onerror = () => reject(req.error || new Error('IndexedDB cursor failed'));
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (!cursor) {
-          resolve();
-          return;
-        }
-        items.push(cursor.value);
-        if (items.length >= limit) {
-          resolve();
-          return;
-        }
-        cursor.continue();
-      };
+      await new Promise((resolve, reject) => {
+        const req = idx.openCursor(range, 'prev');
+        req.onerror = () => reject(req.error || new Error('IndexedDB cursor failed'));
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          items.push(cursor.value);
+          if (items.length >= limit) {
+            resolve();
+            return;
+          }
+          cursor.continue();
+        };
+      });
+
+      return items;
     });
-
-    await txDone(tx);
-    return items;
   }
 
   async function revisionLatest(filepath, lang) {
@@ -140,11 +136,9 @@
   }
 
   async function revisionClearAll() {
-    const db = await openDb();
-    const tx = db.transaction([STORE_REVISIONS], 'readwrite');
-    const store = tx.objectStore(STORE_REVISIONS);
-    store.clear();
-    await txDone(tx);
+    return withStore(STORE_REVISIONS, 'readwrite', async (store) => {
+      store.clear();
+    });
   }
 
   async function migrateFromLocalStorageIfNeeded() {

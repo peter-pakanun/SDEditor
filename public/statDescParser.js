@@ -196,14 +196,9 @@ function parseDesc(filepath, text, lang) {
     }
   }
 
-  desc.isMissing = desc.translations.English?.length !== desc.translations[lang]?.length;
-  if (desc.translations[lang]?.length)
-  for (const translation of desc.translations[lang]) {
-    if (translation.trim() == "") {
-      desc.isMissing = true;
-      break;
-    }
-  }
+  const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
+  const trLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
+  desc.isMissing = computeIsMissing(engLen, trLines);
 
   if (desc.translations.English[0].indexOf('[DNT') == 0 || desc.translations.English[0].indexOf('DNT ') == 0) desc.isDNT = true;
 
