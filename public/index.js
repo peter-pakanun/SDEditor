@@ -1268,6 +1268,16 @@ const config = Vue.defineComponent({
         }
       }
 
+      if (this.editorVisible && e.code === "Escape") {
+        const t = e.target;
+        const inEditor = t && typeof t.closest === "function" ? t.closest(".editor") : null;
+        if (!inEditor) {
+          this.editorEsc(e);
+          e.preventDefault();
+          return;
+        }
+      }
+
       if (e.shiftKey && e.code === 'Enter') {
         this.openFirstFile();
       }
