@@ -167,6 +167,15 @@ const config = Vue.defineComponent({
       this.saveSettings();
       this.scheduleEditorHLterRefresh();
     },
+    "hlPopup.visible"() {
+      this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+    },
+    "hlPopup.selectedIndex"() {
+      this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+    },
+    "hlPopup.editorIndex"() {
+      this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+    },
     shiftEnterSave() {
       this.saveSettings();
     },
@@ -708,6 +717,9 @@ const config = Vue.defineComponent({
           this.syncHlScroll('translation', i);
         });
       }
+      if (this.hlPopup.visible) {
+        this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+      }
     },
     scheduleEditorHLterRefresh() {
       if (!this.editorVisible) return;
@@ -727,6 +739,7 @@ const config = Vue.defineComponent({
       let HLs = editorBlock?.HLs || [];
       let items = [];
       let seen = new Map();
+      let seenValue = new Map();
       for (const hl of HLs) {
         if (hl?.dictId) {
           let dictIdList = [hl.dictId];
@@ -773,6 +786,9 @@ const config = Vue.defineComponent({
               let existingItem = seen.get(key);
               if (existingItem) {
                 existingItem.exactFromContext = existingItem.exactFromContext || exactFromContext;
+                if (hl?._hlId && Array.isArray(existingItem.hlIds) && !existingItem.hlIds.includes(hl._hlId)) {
+                  existingItem.hlIds.push(hl._hlId);
+                }
                 continue;
               }
               let item = {
@@ -781,7 +797,8 @@ const config = Vue.defineComponent({
                 matchText: p.find,
                 matchTextLower: p.find.toLowerCase(),
                 isAlt: !p.isMain,
-                exactFromContext
+                exactFromContext,
+                hlIds: hl?._hlId ? [hl._hlId] : []
               };
               seen.set(key, item);
               items.push(item);
@@ -793,11 +810,18 @@ const config = Vue.defineComponent({
 
         let value = hl?.replace || hl?.find || "";
         if (!value) continue;
-        if (seen.has(value)) continue;
-        seen.set(value, true);
+        let existingValueItem = seenValue.get(value);
+        if (existingValueItem) {
+          if (hl?._hlId && Array.isArray(existingValueItem.hlIds) && !existingValueItem.hlIds.includes(hl._hlId)) {
+            existingValueItem.hlIds.push(hl._hlId);
+          }
+          continue;
+        }
         let label = hl?.replace && hl.replace !== hl.find ? `${hl.find} → ${hl.replace}` : `${hl.find}`;
         let matchText = String(hl?.find || "").trim();
-        items.push({ label, value, matchText, matchTextLower: matchText.toLowerCase(), isAlt: false });
+        let item = { label, value, matchText, matchTextLower: matchText.toLowerCase(), isAlt: false, hlIds: hl?._hlId ? [hl._hlId] : [] };
+        seenValue.set(value, item);
+        items.push(item);
       }
       return items;
     },
@@ -861,6 +885,39 @@ const config = Vue.defineComponent({
       if (next < 0) next = len - 1;
       if (next >= len) next = 0;
       this.hlPopup.selectedIndex = next;
+    },
+    syncHlPopupEnglishHighlight() {
+      if (!this.editorVisible) return;
+
+      let blockCount = (this.editorBlocks || []).length;
+      for (let i = 0; i < blockCount; i++) {
+        let r = this.$refs["englishHLter_" + i];
+        if (!r?.querySelectorAll) continue;
+        for (const el of r.querySelectorAll('span[data-hl-id].hlPopupActive')) {
+          el.classList.remove('hlPopupActive');
+        }
+      }
+
+      if (!this.hlPopup.visible) return;
+
+      let editorIndex = this.hlPopup.editorIndex;
+      let root = this.$refs["englishHLter_" + editorIndex];
+      if (!root?.querySelectorAll) return;
+
+      let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
+      if (!item) return;
+
+      let ids = Array.isArray(item.hlIds) ? item.hlIds : [];
+      let idSet = new Set(ids.map(v => String(v)));
+      let value = String(item.value ?? "");
+
+      for (const el of root.querySelectorAll('span[data-hl-id]')) {
+        let id = el.getAttribute('data-hl-id') || "";
+        let dv = el.getAttribute('dataValue') || "";
+        if ((idSet.size > 0 && idSet.has(id)) || (!idSet.size && value && dv === value)) {
+          el.classList.add('hlPopupActive');
+        }
+      }
     },
     insertTranslationText(editorIndex, text, options = {}) {
       let el = this.$refs["translation_" + editorIndex];

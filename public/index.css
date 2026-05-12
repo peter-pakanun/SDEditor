@@ -4,6 +4,7 @@
   --color-element: #BCBCBC;
   --color-element-alt: #AEAEAE;
   --color-element-highlight: #8E8E8E;
+  --color-accent: #D46A00;
   --color-line-diff: rgba(200, 0, 0, 0.22);
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #000;
@@ -15,6 +16,7 @@
   --color-element: #2F3136;
   --color-element-alt: #36393F;
   --color-element-highlight: #677BC4;
+  --color-accent: #FFB86B;
   --color-line-diff: rgba(255, 120, 120, 0.22);
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #D8D9DA;
@@ -46,7 +48,7 @@ textarea:read-only {
   background-color: var(--color-element);
 }
 input:focus, button:focus, textarea:focus {
-  outline: 1px solid var(--color-element-highlight);
+  outline: 1px solid var(--color-accent);
 }
 
 ::-webkit-scrollbar {
@@ -56,7 +58,7 @@ input:focus, button:focus, textarea:focus {
   background: var(--color-element-alt);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-element-highlight);
+  background: var(--color-accent);
 }
 
 .textHL {
@@ -114,7 +116,7 @@ input:focus, button:focus, textarea:focus {
 }
 
 .multilineField {
-  border-color: var(--color-element-highlight);
+  border-color: var(--color-accent);
   background-color: var(--color-element);
 }
 
@@ -178,13 +180,33 @@ input:focus, button:focus, textarea:focus {
 .textHL>.HLter span[data-hl-id] {
   pointer-events: all;
   cursor: pointer;
-  background-color: var(--color-element-highlight);
-  opacity: 0.3;
+  background-color: color-mix(in srgb, var(--color-element-highlight) 30%, transparent);
   border-radius: 2px;
 }
 
 .textHL>.HLter span[data-hl-id].vocab {
-  background-color: var(--color-font);
+  background-color: color-mix(in srgb, var(--color-font) 30%, transparent);
+}
+
+.textHL>.HLter span[data-hl-id].hlPopupActive {
+  box-shadow: 0 0 0 1px var(--color-accent);
+  animation: hlPopupPulse 300ms ease-out 1;
+}
+
+.textHL>.HLter span[data-hl-id].hlPopupActive.vocab {
+  box-shadow: 0 0 0 1px var(--color-accent);
+  animation-name: hlPopupPulse;
+}
+
+@keyframes hlPopupPulse {
+  0% {
+    box-shadow:
+      0 0 0 0px var(--color-accent),
+      0 0 0 6px color-mix(in srgb, var(--color-accent) 35%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 1px var(--color-accent);
+  }
 }
 
 .textHL>.HLter span[data-hl-id]:hover {
