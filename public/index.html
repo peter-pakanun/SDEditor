@@ -276,10 +276,10 @@
                 </div>
                 <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
               </div>
-              <div class="historyCompareBar" v-if="historySelectedA || historySelectedB">
+              <div class="historyCompareBar" v-if="historyItems.length > 0">
                 <button @click="clearHistorySelection()">Clear</button>
-                <span v-if="historySelectedA && !historySelectedB">Pick another revision to compare</span>
-                <span v-if="historySelectedA && historySelectedB">Comparing {{ formatHistoryTime(historySelectedA.savedAt) }} → {{ formatHistoryTime(historySelectedB.savedAt) }}</span>
+                <span v-if="!historySelectedB">Click a revision to compare against current</span>
+                <span v-else>Comparing current → {{ formatHistoryTime(historySelectedB.savedAt) }}</span>
               </div>
               <div v-if="historyDiffHtml" class="historyDiff" v-html="historyDiffHtml"></div>
             </div>

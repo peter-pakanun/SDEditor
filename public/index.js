@@ -2256,11 +2256,13 @@ const config = Vue.defineComponent({
         this.historyLoading = false;
       }
 
-      this.historySelectedA = null;
+      this.historySelectedA = this.historyItems?.[0] || null;
       this.historySelectedB = null;
       this.historyDiffHtml = '';
       this.historyFilepath = filepath;
       this.historyLang = lang;
+
+      if (this.editorCompareActive) this.exitEditorCompareMode();
     },
     setHistoryMode(mode) {
       if (mode !== 'translation' && mode !== 'source') return;
@@ -2269,18 +2271,34 @@ const config = Vue.defineComponent({
     },
     pickHistoryRevision(rev) {
       if (!rev) return;
-      if (!this.historySelectedA || (this.historySelectedA && this.historySelectedB)) {
-        this.historySelectedA = rev;
+      const cur = this.historyItems?.[0] || null;
+      if (!cur) return;
+
+      const sameRev = (a, b) => {
+        if (!a || !b) return false;
+        if (a.id != null && b.id != null) return String(a.id) === String(b.id);
+        return String(a.savedAt) === String(b.savedAt) && String(a.lang) === String(b.lang) && String(a.filepath) === String(b.filepath);
+      };
+
+      this.historySelectedA = cur;
+
+      if (sameRev(rev, cur)) {
         this.historySelectedB = null;
         this.historyDiffHtml = '';
         if (this.editorCompareActive) this.exitEditorCompareMode();
         return;
       }
-      if (this.historySelectedA && !this.historySelectedB) {
-        this.historySelectedB = rev;
-        this.historyDiffHtml = this.buildHistoryDiffHtml(this.historySelectedA, this.historySelectedB);
-        this.enterEditorCompareModeFromHistory();
+
+      if (this.historySelectedB && sameRev(rev, this.historySelectedB)) {
+        this.historySelectedB = null;
+        this.historyDiffHtml = '';
+        if (this.editorCompareActive) this.exitEditorCompareMode();
+        return;
       }
+
+      this.historySelectedB = rev;
+      this.historyDiffHtml = this.buildHistoryDiffHtml(cur, rev);
+      this.enterEditorCompareModeFromHistory();
     },
     enterEditorCompareModeFromHistory() {
       if (!this.editorVisible) return;
@@ -2341,9 +2359,10 @@ const config = Vue.defineComponent({
       }
     },
     clearHistorySelection() {
-      this.historySelectedA = null;
+      this.historySelectedA = this.historyItems?.[0] || null;
       this.historySelectedB = null;
       this.historyDiffHtml = '';
+      if (this.editorCompareActive) this.exitEditorCompareMode();
     },
     formatHistoryTime(ts) {
       if (!ts) return '';
