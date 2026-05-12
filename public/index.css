@@ -564,6 +564,13 @@ button, label, th, td, input[type="checkbox"] {
   padding: 0.15em 0.35em;
 }
 
+.side .dictRow.hlPopupDictActive,
+.side .dictAltRow.hlPopupDictActive {
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--color-accent);
+  animation: hlPopupPulse 300ms ease-out 1;
+}
+
 .side details.dictTlnote {
   margin-top: 0.35em;
 }

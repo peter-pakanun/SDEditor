@@ -155,7 +155,7 @@
           <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided">
               <div>
-                <div class="dictRow">
+                <div class="dictRow" :data-dict-id="word._id">
                   <input type="text" v-model="word.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryEntryFindMatched(word) }">
                   <input type="text" v-model="word.replace" placeholder="Replace">
                 </div>
@@ -163,7 +163,7 @@
                   <span>Alternates</span>
                   <button @click="addDictionaryAltRow(word)">➕</button>
                 </div>
-                <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id">
+                <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
                   <input type="text" v-model="alt.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
                   <input type="text" v-model="alt.replace" placeholder="Replace">
                   <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
