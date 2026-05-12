@@ -12,7 +12,7 @@
 <body>
   <div id="app">
 
-    <div class="settingPage centerContainer" v-if="showSetting || lang == ''">
+    <div class="settingPage centerContainer" v-if="showSetting || needsInitialSettings">
       <div class="box">
         <h3>Language to translate</h3>
         <select v-model="lang">
@@ -35,7 +35,7 @@
         <input type="checkbox" id="shiftEnterSave" name="shiftEnterSave" v-model="shiftEnterSave">
         <label for="shiftEnterSave"> Shift + Enter to Save</label>
         <br>
-        <button @click="showSetting = false">💾</button>
+        <button @click="settingsSaveClose">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>
         <form ref="importSettingsFileForm">
@@ -45,22 +45,43 @@
       </div>
     </div>
 
-    <div class="droparea centerContainer loadingPage" v-if="loadingProgress < 100 && lang !== ''" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
+    <div class="droparea centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="loadingProgress < 100 && lang !== '' && !needsInitialSettings" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
         </div>
-        <h1 v-if="loadingProgress == 0">Drop StatDescriptions.zip Here!</h1>
-        <h1 v-if="loadingProgress > 0 && loadingProgress < 100">Loading: {{ loadingProgress.toFixed(2) }}%</h1>
+        <template v-if="loadingProgress == 0 && needsPostMigrationImport">
+          <h2>Post-migration import required</h2>
+          <h3>We found existing translations in your workspace, but the source (English) strings are missing.</h3>
+          <h3>Drag & drop the original StatDescriptions.zip (not the translated export).</h3>
+          <h3>Your translations are already restored from the previous browser storage.</h3>
+          <button @click.stop.prevent="startFromScratch">Start from scratch</button>
+        </template>
+        <div class="loadingText" v-if="loadingProgress == 0 && !needsPostMigrationImport">
+          <h1>Drop StatDescriptions.zip Here!</h1>
+        </div>
+        <div class="loadingText" v-if="loadingProgress > 0 && loadingProgress < 99.95">
+          <h1>Loading: {{ loadingProgress.toFixed(2) }}%</h1>
+        </div>
+        <template v-if="loadingProgress >= 99.95 && loadingProgress < 100">
+          <div class="loadingText">
+            <h1>Finalizing import…</h1>
+            <h3>Writing revision history to offline storage. This can take a moment.</h3>
+          </div>
+        </template>
       </div>
     </div>
 
 
-    <div v-if="loadingProgress >= 100 && !editorVisible" @dragover="(e) => e.preventDefault()" @drop="importFileDropped">
+    <div v-if="loadingProgress >= 100 && !editorVisible && !needsInitialSettings" @dragover="(e) => e.preventDefault()" @drop="fileDropped">
       <div class="topbar">
         <div class="pagination">
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
+          <button @click="importUpdateZipClicked" title="Import update ZIP">📦</button>
+          <form ref="importUpdateZipFileForm" style="display: none;">
+            <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
+          </form>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
@@ -68,7 +89,8 @@
         </div>
         <div>
           <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="New translation in localStorage from this session">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="Files with saved translations">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" title="Source changed since last translation save">
           <span></span>
           <input id="searchInp" ref="searchInput" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
 
@@ -76,6 +98,7 @@
             <option value="new">New statfiles</option>
             <option value="blank">Blank only</option>
             <option value="done">Done only</option>
+            <option value="review">Need review only</option>
             <option value="all">Show All</option>
           </select>
         </div>
@@ -94,9 +117,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges }" @click="editFile(desc.filepath)">
+          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview }" @click="editFile(desc.filepath)">
             <td v-bind:title="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
-            <td v-bind:title="desc.filename">{{ desc.filename }}</td>
+            <td v-bind:title="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
             <td><span v-html="desc.english"></span></td>
             <td class="translationTr"><span v-html="desc.translation"></span></td>
           </tr>
@@ -108,25 +131,39 @@
       <div class="edit">
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
-          <button @click="editorSave" title="Save (Ctrl+S)">💾</button>
+          <button @click="editorSave" :disabled="editorCompareActive" title="Save (Ctrl+S)">💾</button>
           <button @click="editorExit" title="Exit (ESC)">❌</button>
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+          <div v-if="editorCompareActive" class="compareBanner">
+            <span>{{ editorCompareTitle }}</span>
+            <button @click="exitEditorCompareMode">Exit compare</button>
+          </div>
+          <div v-if="editorCurrentEditingDesc.needsReview" class="needsReviewBanner">
+            <span>⚠ Source changed since your last translation save.</span>
+            <button @click="sideTab = 'history'; setHistoryMode('source')">Show source history</button>
+            <button @click="toggleEditorEnglishDiff">Toggle inline diff</button>
+            <button @click="confirmTranslationUnchanged">Confirm unchanged</button>
+          </div>
         </div>
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
             <div class="textHL" :class="{ multiline: editorBlock.isMultiline }">
-              <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
-              <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
-              <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+              <div v-if="editorShowEnglishDiff" class="englishDiff" v-html="editorBlock.englishDiffHtml"></div>
+              <template v-else>
+                <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
+                <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
+                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+              </template>
             </div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
-          <input v-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="refreshEditorBlockMeta(editorBlock, index)">
+          <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
+          <input v-else-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="refreshEditorBlockMeta(editorBlock, index)">
           <div v-else class="textHL multiline">
-            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
+            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
             <div class="HLter" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
@@ -146,8 +183,9 @@
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
             <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
+            <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
           </div>
-          <button @click="sideAddClicked()">➕</button>
+          <button v-if="sideTab !== 'history'" @click="sideAddClicked()">➕</button>
         </div>
 
         <div v-if="sideTab === 'dictionary'">
@@ -196,6 +234,36 @@
             </div>
           </div>
         </div>
+
+        <div v-if="sideTab === 'history'" class="historyPanel">
+          <div v-if="!editorCurrentEditingDesc" class="historyEmpty">Open a file to see history</div>
+          <div v-else>
+            <div class="historyMeta">
+              <div class="historyTitle">{{ editorCurrentEditingDesc.filename }}</div>
+              <div class="historySubtitle">
+                <button class="historyModeBtn" :class="{ active: historyMode === 'translation' }" @click="setHistoryMode('translation')">Translation</button>
+                <button class="historyModeBtn" :class="{ active: historyMode === 'source' }" @click="setHistoryMode('source')">Source</button>
+                <span>{{ historyMode === 'source' ? 'English' : lang }}</span>
+              </div>
+            </div>
+            <div v-if="historyLoading" class="historyLoading">Loading…</div>
+            <div v-else>
+              <div class="historyList">
+                <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
+                  <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
+                  <button v-if="historyMode !== 'source'" class="historyRestore" title="Restore" @click="restoreHistoryRevision(rev)">↩</button>
+                </div>
+                <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
+              </div>
+              <div class="historyCompareBar" v-if="historySelectedA || historySelectedB">
+                <button @click="clearHistorySelection()">Clear</button>
+                <span v-if="historySelectedA && !historySelectedB">Pick another revision to compare</span>
+                <span v-if="historySelectedA && historySelectedB">Comparing {{ formatHistoryTime(historySelectedA.savedAt) }} → {{ formatHistoryTime(historySelectedB.savedAt) }}</span>
+              </div>
+              <div v-if="historyDiffHtml" class="historyDiff" v-html="historyDiffHtml"></div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="fixed clipboard">
@@ -217,11 +285,13 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.0/vue.global.prod.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.3.0/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/8.0.1/diff.min.js"></script>
   <script src="FileSaver.js"></script>
   <script src="dummyFiles.js"></script>
   <script src="statDescParser.js"></script>
   <script src="helper.js"></script>
   <script src="regexEngine.js"></script>
+  <script src="offlineStore.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

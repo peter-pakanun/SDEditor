@@ -226,14 +226,47 @@ input:focus, button:focus, textarea:focus {
 
 .droparea>div {
   display: flex;
+  align-items: center;
+  gap: 3em;
 }
 .droparea>div>* {
-  display: inline-block;
-  line-height: 46px;
-  height: 46px;
+  height: auto;
+  line-height: 1.35;
+}
+.droparea .loadingText {
+  max-width: 900px;
+}
+.droparea .loadingText h1,
+.droparea .loadingText h2,
+.droparea .loadingText h3 {
+  margin: 0;
+}
+.droparea .loadingText h3 {
+  margin-top: 0.35em;
+  font-weight: 500;
+}
+.droparea.postMigration>div {
+  display: block;
+  max-width: 900px;
+}
+.droparea.postMigration>div>* {
+  display: block;
+  height: auto;
+  line-height: 1.35;
+}
+.droparea.postMigration h2 {
+  margin: 0 0 0.6em 0;
+}
+.droparea.postMigration h3 {
+  margin: 0.2em 0;
+  font-weight: 500;
+}
+.droparea.postMigration button {
+  margin-top: 1em;
+  width: 100%;
 }
 .spinnerCon {
-  margin-right: 3em;
+  margin-right: 0;
 }
 
 .topbar {
@@ -326,6 +359,89 @@ tr.isMissing:nth-child(even)>td.translationTr {
 
 tbody>tr:hover.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.3);
+}
+
+tr.needsReview>td {
+  box-shadow: inset 3px 0 0 rgba(255, 180, 0, 0.75);
+  background-color: rgba(255, 180, 0, 0.08);
+}
+
+tr.needsReview:nth-child(even)>td {
+  background-color: rgba(255, 180, 0, 0.12);
+}
+
+tbody>tr:hover.needsReview>td {
+  background-color: rgba(255, 180, 0, 0.3);
+}
+
+tr.needsReview {
+  background-color: rgba(255, 180, 0, 0.08);
+}
+
+tr.needsReview:nth-child(even) {
+  background-color: rgba(255, 180, 0, 0.12);
+}
+
+tbody>tr:hover.needsReview {
+  background-color: rgba(255, 180, 0, 0.3);
+}
+
+table#table tbody tr.needsReview td {
+  background-color: rgba(255, 180, 0, 0.08);
+}
+
+table#table tbody tr.needsReview:nth-child(even) td {
+  background-color: rgba(255, 180, 0, 0.12);
+}
+
+table#table tbody tr:hover.needsReview td {
+  background-color: rgba(255, 180, 0, 0.3);
+}
+
+.needsReviewBanner {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  margin-top: 0.5em;
+  padding: 0.4em 0.6em;
+  background: rgba(255, 180, 0, 0.12);
+  border: 1px solid rgba(255, 180, 0, 0.35);
+}
+
+.compareBanner {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  margin-top: 0.5em;
+  padding: 0.4em 0.6em;
+  background: rgba(80, 160, 255, 0.12);
+  border: 1px solid rgba(80, 160, 255, 0.35);
+}
+
+.englishDiff {
+  background: var(--color-element);
+  border: 1px solid black;
+  padding: 0.35em 0.6em;
+  line-height: 1.35em;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.diffInlineAdd {
+  background: rgba(0, 128, 0, 0.18);
+}
+
+.diffInlineDel {
+  background: rgba(200, 0, 0, 0.18);
+  text-decoration: line-through;
+}
+
+.historyModeBtn {
+  padding: 0.15em 0.5em;
+}
+
+.historyModeBtn.active {
+  background-color: var(--color-element-highlight);
 }
 
 button, label, th, td, input[type="checkbox"] {
@@ -499,6 +615,99 @@ button, label, th, td, input[type="checkbox"] {
   line-height: 1.2em;
 }
 
+.historyPanel {
+  padding-top: 0.5em;
+}
+
+.historyMeta {
+  padding: 0.5em 0.6em;
+  background-color: var(--color-bg2);
+  margin-top: 0.5em;
+}
+
+.historyTitle {
+  font-weight: 600;
+}
+
+.historySubtitle {
+  opacity: 0.85;
+  font-size: 0.9em;
+}
+
+.historyList {
+  margin-top: 0.5em;
+}
+
+.historyItem {
+  display: flex;
+  gap: 0.4em;
+  align-items: center;
+  margin-top: 0.35em;
+}
+
+.historyPick {
+  flex-grow: 1;
+  text-align: left;
+}
+
+.historyPick.current {
+  font-weight: 700;
+}
+
+.historyItem.selectedA .historyPick {
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.historyItem.selectedB .historyPick {
+  box-shadow: inset -3px 0 0 var(--color-element-highlight);
+}
+
+.historyItem:first-child .historyPick {
+  font-weight: 600;
+}
+
+.historyCompareBar {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  margin-top: 0.5em;
+}
+
+.historyDiff {
+  margin-top: 0.5em;
+  background-color: var(--color-element);
+  border: 1px solid black;
+  max-height: 40vh;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.diffLine {
+  white-space: pre;
+  padding: 0 0.4em;
+}
+
+.diffLine.add {
+  background: rgba(0, 128, 0, 0.15);
+}
+
+.diffLine.del {
+  background: rgba(200, 0, 0, 0.15);
+}
+
+.diffPrefix {
+  display: inline-block;
+  width: 1.2em;
+  opacity: 0.75;
+}
+
+.historyLoading,
+.historyEmpty {
+  margin-top: 0.6em;
+  opacity: 0.85;
+}
+
 .side .dictRow {
   display: flex;
   gap: 0.4em;
@@ -641,4 +850,3 @@ button, label, th, td, input[type="checkbox"] {
   padding: 0.6em;
   opacity: 0.8;
 }
-

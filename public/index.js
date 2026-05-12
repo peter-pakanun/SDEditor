@@ -1,4 +1,4 @@
-let localStorageInitialized = false;
+let offlineStoreReady = false;
 
 const urlParams = new URLSearchParams(window.location.search);
 const TEST_MODE = (() => {
@@ -11,7 +11,7 @@ const URL_LANG = urlParams.get('lang');
 const config = Vue.defineComponent({
   data() {
     return {
-      localStorageInitialized: false,
+      offlineStoreReady: false,
       testMode: TEST_MODE,
       langs: [
         "Thai",
@@ -28,17 +28,21 @@ const config = Vue.defineComponent({
       lang: "",
       theme: 'grey',
       showSetting: false,
+      needsInitialSettings: true,
       loadingProgress: 0.001,
       descs: [],
       localDescs: {
         descs: [],
         lastModified: 0,
-        size: 0
+        size: 0,
+        status: {}
       },
+      sourceLoaded: false,
       filteredDescs: [],
       statistic: {
         hasChanges: 0,
-        isMissing: 0
+        isMissing: 0,
+        needsReview: 0
       },
       currentSort: "english",
       currentSortDir: 'asc',
@@ -57,10 +61,23 @@ const config = Vue.defineComponent({
       regexFilter: '',
       dictionaryFlashId: '',
 
+      historyItems: [],
+      historyLoading: false,
+      historySelectedA: null,
+      historySelectedB: null,
+      historyDiffHtml: '',
+      historyFilepath: '',
+      historyLang: '',
+      historyMode: 'translation',
+
       editorVisible: false,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
       editorOriginalTranslations: [],
+      editorShowEnglishDiff: false,
+      editorCompareActive: false,
+      editorCompareMode: 'translation',
+      editorCompareTitle: '',
       hlPopup: {
         visible: false,
         editorIndex: 0,
@@ -77,6 +94,7 @@ const config = Vue.defineComponent({
         {
           english: "+1 to Maximum [EnergyShield|Energy Shield] per {0} [ItemEvasion|Item Evasion] on Equipped Body Armour",
           englishHLter: "+1 to Maximum <span>[EnergyShield|Energy Shield]</span> per <span>{0}%</span> <span>[ItemEvasion|Item Evasion]</span> on Equipped Body Armour",
+          englishDiffHtml: "",
           translation: "",
           metaLinesEn: 0,
           metaLinesTr: 0,
@@ -111,9 +129,10 @@ const config = Vue.defineComponent({
       editorClipboard: ""
     }
   },
-  mounted() {
+  async mounted() {
     if (this.testMode) {
       this.lang = (URL_LANG && this.langs.includes(URL_LANG)) ? URL_LANG : (this.langs[0] || "Thai");
+      this.needsInitialSettings = false;
       this.loadingProgress = 0;
       this.ensureDictionaryIds();
       document.addEventListener('keydown', this.handleKeydown);
@@ -121,40 +140,64 @@ const config = Vue.defineComponent({
       return;
     }
 
-    let settings = localStorage.getItem('settings');
-    if (settings) {
-      try {
-        settings = JSON.parse(settings);
-      } catch (error) {
-        alert('Cannot read Localstorage!!\nFile maybe corrupted!');
-        if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
-          localStorage.removeItem('settings');
-        }
-        window.location.reload();
-        return;
-      }
-      this.importSettings(settings);
-    }
-
-    let localDescs = localStorage.getItem('localDescs');
-    if (localDescs) {
-      try {
-        localDescs = JSON.parse(localDescs);
-      } catch (error) {
-        alert('Cannot read Localstorage!!\nFile maybe corrupted!');
-        if (prompt('Do you want to clear localStorage!?\nThis process cannot be undone!\n\nAnswer "YES" to confirm.') == "YES") {
-          localStorage.removeItem('localDescs');
-        }
-        window.location.reload();
-        return;
-      }
-      if (localDescs) this.localDescs = localDescs;
+    const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
+    if (!canUseOfflineStore) {
+      alert('This app requires IndexedDB for offline storage, but your browser does not support it.');
+      return;
     }
 
     this.loadingProgress = 0;
-    localStorageInitialized = true;
+
+    try {
+      await window.OfflineStore.migrateFromLocalStorageIfNeeded();
+    } catch (_) {
+    }
+
+    let settings;
+    try {
+      settings = await window.OfflineStore.getSettings();
+      console.log('settings inside OfflineStore:', settings);
+    } catch (_) {
+    }
+    if (settings) this.importSettings(settings);
+
+
+    let localDescs;
+    try {
+      localDescs = await window.OfflineStore.getWorkspace();
+    } catch (_) {
+    }
+    if (localDescs) this.localDescs = localDescs;
+
+    if (!this.localDescs || typeof this.localDescs !== 'object') {
+      this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
+    }
+    if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
+    if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+
+    this.needsInitialSettings = !this.lang;
+
+    let source;
+    try {
+      source = await window.OfflineStore.getSource();
+    } catch (_) {
+    }
+    if (Array.isArray(source) && source.length > 0) {
+      this.descs = source;
+      this.sourceLoaded = true;
+      this.applyWorkspaceOverlay();
+      this.filterDesc();
+      this.loadingProgress = 99.999;
+    }
+
+    if (!this.sourceLoaded) this.loadingProgress = 0;
+    offlineStoreReady = true;
+    this.offlineStoreReady = true;
     this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
+
+    await this.saveSettings();
+    if (this.sourceLoaded) this.loadingProgress = 100;
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
@@ -180,7 +223,14 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     lang() {
-      this.saveSettings();
+      if (this.sourceLoaded) {
+        this.applyWorkspaceOverlay();
+        this.filterDesc();
+      }
+      if (this.sideTab === 'history') this.refreshHistory();
+    },
+    sideTab() {
+      if (this.sideTab === 'history') this.refreshHistory();
     },
     theme(newTheme) {
       document.documentElement.setAttribute('data-theme', newTheme);
@@ -201,6 +251,26 @@ const config = Vue.defineComponent({
     }
   },
   computed: {
+    needsPostMigrationImport() {
+      if (this.sourceLoaded) return false;
+      const ws = this.localDescs?.descs;
+      if (!Array.isArray(ws) || ws.length === 0) return false;
+      for (const d of ws) {
+        if (!d || typeof d !== 'object') continue;
+        const translations = d.translations;
+        if (!translations || typeof translations !== 'object') continue;
+        if (this.lang) {
+          const lines = translations[this.lang];
+          if (Array.isArray(lines) && lines.some(v => String(v ?? '').trim() !== '')) return true;
+        }
+        for (const k of Object.keys(translations)) {
+          if (k === 'English') continue;
+          const lines = translations[k];
+          if (Array.isArray(lines) && lines.some(v => String(v ?? '').trim() !== '')) return true;
+        }
+      }
+      return false;
+    },
     pageCount() {
       return Math.ceil(this.filteredDescs.length / this.pageSize);
     },
@@ -322,6 +392,103 @@ const config = Vue.defineComponent({
     }
   },
   methods: {
+    toPlainForStorage(v) {
+      try {
+        if (typeof structuredClone === 'function') return structuredClone(v);
+      } catch (_) {
+      }
+      try {
+        return JSON.parse(JSON.stringify(v));
+      } catch (_) {
+        return null;
+      }
+    },
+    async settingsSaveClose() {
+      if (!this.lang) {
+        alert('Please select a language.');
+        return;
+      }
+      await this.saveSettings();
+      this.needsInitialSettings = false;
+      this.showSetting = false;
+    },
+    toggleEditorEnglishDiff() {
+      this.editorShowEnglishDiff = !this.editorShowEnglishDiff;
+      if (this.editorShowEnglishDiff) this.prepareEditorEnglishDiff();
+    },
+    async confirmTranslationUnchanged() {
+      const desc = this.editorCurrentEditingDesc;
+      if (!desc || !desc.needsReview) return;
+      const msg =
+        "Confirm that the translation does NOT need changes for this source revision?\n\n" +
+        "This will clear the Needs Review flag for this file.\n" +
+        "Only do this if you're sure the English changes don't affect the translation.";
+      if (!confirm(msg)) return;
+
+      desc.needsReview = false;
+      this.editorShowEnglishDiff = false;
+      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      const st = this.localDescs.status[desc.filepath] || {};
+      st.needsReview = false;
+      st.reviewedAt = Date.now();
+      st.reviewedReason = 'confirmed-unchanged';
+      this.localDescs.status[desc.filepath] = st;
+
+      const localDesc = (this.localDescs.descs || []).find(o => o && o.filepath == desc.filepath);
+      if (localDesc) {
+        localDesc.hasChanges = true;
+        desc.hasChanges = true;
+      }
+
+      await this.saveLocalDescs();
+      this.filterDesc();
+      alert('Marked as reviewed (unchanged).');
+    },
+    async prepareEditorEnglishDiff() {
+      if (!this.editorVisible) return;
+      if (!this.editorCurrentEditingDesc) return;
+      if (!this.editorCurrentEditingDesc.needsReview) return;
+
+      const diffApi = (window.Diff && typeof window.Diff.diffWordsWithSpace === 'function') ? window.Diff : null;
+      if (!diffApi) {
+        for (const b of (this.editorBlocks || [])) b.englishDiffHtml = escapeHtml(String(b?.english ?? ''));
+        return;
+      }
+
+      const filepath = this.editorCurrentEditingDesc.filepath;
+      let prevEng = null;
+      try {
+        const items = await window.OfflineStore.listRevisions(filepath, 'English', 2);
+        if (Array.isArray(items) && items.length >= 2) prevEng = items[1]?.translations;
+      } catch (_) {
+      }
+      const curEng = Array.isArray(this.editorCurrentEditingDesc?.translations?.English) ? this.editorCurrentEditingDesc.translations.English : [];
+
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        const b = this.editorBlocks[i];
+        const oldRaw = Array.isArray(prevEng) ? (prevEng[i] ?? '') : '';
+        const newRaw = curEng[i] ?? '';
+        const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
+        const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
+        b.englishDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+      }
+    },
+    renderInlineDiffHtml(oldStr, newStr) {
+      const diffApi = window.Diff;
+      if (!diffApi) return escapeHtml(String(newStr ?? ''));
+      let parts;
+      try {
+        parts = diffApi.diffWordsWithSpace(String(oldStr ?? ''), String(newStr ?? ''));
+      } catch (_) {
+        parts = [{ value: String(newStr ?? '') }];
+      }
+      return (parts || []).map(p => {
+        const v = escapeHtml(String(p?.value ?? ''));
+        if (p?.added) return `<span class="diffInlineAdd">${v}</span>`;
+        if (p?.removed) return `<span class="diffInlineDel">${v}</span>`;
+        return v;
+      }).join('');
+    },
     isMultilineText(text) {
       let s = text ?? "";
       return typeof s === "string" && (s.includes("\\n") || s.includes("\n"));
@@ -1115,25 +1282,63 @@ const config = Vue.defineComponent({
       e.preventDefault();
       if (e.dataTransfer.files.length !== 1) return; // only accpet one file at a time
 
-      if (
-        e.dataTransfer.files[0].lastModified !== this.localDescs.lastModified &&
-        e.dataTransfer.files[0].size !== this.localDescs.size
-      ) {
-        if (prompt(
-          "This seems like a new file, Do you want to start anew?\n" +
-          "Type 'YES' to confirm\n" +
-          "All your work on last file will be lost!!") !== 'YES'
-        ) return;
-        this.localDescs.lastModified = e.dataTransfer.files[0].lastModified;
-        this.localDescs.size = e.dataTransfer.files[0].size;
-        this.localDescs.descs = [];
-        this.saveLocalDescs();
+      const file = e.dataTransfer.files[0];
+      await this.importUpdateZipFile(file);
+    },
+
+    importUpdateZipClicked() {
+      this.$refs.importUpdateZipFile?.click?.();
+    },
+    async importUpdateZipChanged(e) {
+      const file = e?.target?.files?.[0];
+      if (!file) return;
+      await this.importUpdateZipFile(file);
+      this.$refs.importUpdateZipFileForm?.reset?.();
+    },
+
+    async startFromScratch() {
+      const msg =
+        "This will DELETE all of your local translated workspace data and ALL revision history stored in this browser.\n\n" +
+        "You will lose your working translated files and history.\n\n" +
+        "Type YES to proceed:";
+      const typed = (prompt(msg) || "").trim();
+      if (typed !== "YES") return;
+      if (!confirm("Last warning: This cannot be undone. Proceed?")) return;
+      try {
+        await window.OfflineStore?.clearWorkspace?.();
+      } catch (_) {
       }
+      try {
+        await window.OfflineStore?.clearSource?.();
+      } catch (_) {
+      }
+      try {
+        await window.OfflineStore?.clearRevisions?.();
+      } catch (_) {
+      }
+      location.reload();
+    },
+
+    async importUpdateZipFile(file) {
+      if (!file) return;
+      if (!offlineStoreReady) return;
+      if (!this.lang) {
+        alert('Please select a language in Settings first.');
+        return;
+      }
+
+      const isPostMigrationImport = !!this.needsPostMigrationImport;
+
+      this.localDescs.lastModified = file.lastModified;
+      this.localDescs.size = file.size;
+
+      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
 
       let zip;
       this.loadingProgress = 0.001;
       try {
-        zip = await new JSZip().loadAsync(e.dataTransfer.files[0]);
+        zip = await new JSZip().loadAsync(file);
       } catch (error) {
         this.loadingProgress = 0;
         alert('Cannot open this file');
@@ -1150,125 +1355,195 @@ const config = Vue.defineComponent({
         }
       }
 
-      let descs = await allProgress(parseFuncs, (p) => {
-        this.loadingProgress = 0.001 + (p * 0.99999);
+      let parsed = await allProgress(parseFuncs, (p) => {
+        const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+        this.loadingProgress = percent;
       });
+      const nextSource = parsed.filter(Boolean);
 
-      this.descs = descs.filter(Boolean);
+      const prevSource = Array.isArray(this.descs) ? this.descs : [];
+      const prevSourceMap = new Map(prevSource.map(d => [d.filepath, d]));
+      const nextSourceMap = new Map(nextSource.map(d => [d.filepath, d]));
+      const oldWorkspaceMap = new Map((this.localDescs.descs || []).map(d => [d.filepath, d]));
+      const now = Date.now();
 
-      this.importDescs(this.localDescs.descs);
-
-      this.filterDesc();
-    },
-    async importFileDropped(e) {
-      e.preventDefault();
-
-      if (!confirm('Do you want to load your local changes from this file?')) return;
-
-      if (e.dataTransfer.files.length !== 1) return;
-      let zip;
-      this.loadingProgress = 0.001;
-      try {
-        zip = await new JSZip().loadAsync(e.dataTransfer.files[0]);
-      } catch (error) {
-        this.loadingProgress = 0;
-        alert('Cannot open this file');
-        return;
+      for (const prev of prevSource) {
+        if (!prev || !prev.filepath) continue;
+        if (nextSourceMap.has(prev.filepath)) continue;
+        const st = this.localDescs.status[prev.filepath] || {};
+        st.deletedAt = now;
+        st.deleted = true;
+        this.localDescs.status[prev.filepath] = st;
       }
 
-      let parseFuncs = [];
-      for (let filepath in zip.files) {
-        if (zip.files.hasOwnProperty(filepath)) {
-          let ext = filepath.split('.').pop().toLocaleLowerCase();
-          if (ext.toLocaleLowerCase() == 'txt') {
-            parseFuncs.push(parseFile(filepath, zip.files[filepath], this.lang));
+      for (const nextDesc of nextSource) {
+        const filepath = nextDesc.filepath;
+        const prevDesc = prevSourceMap.get(filepath);
+        const prevEng = Array.isArray(prevDesc?.translations?.English) ? prevDesc.translations.English : [];
+        const nextEng = Array.isArray(nextDesc?.translations?.English) ? nextDesc.translations.English : [];
+
+        const oldLocal = oldWorkspaceMap.get(filepath);
+        const oldWorkspaceLines = Array.isArray(oldLocal?.translations?.[this.lang]) ? oldLocal.translations[this.lang] : [];
+        const hadOldWorkspaceTranslation = oldWorkspaceLines.some(v => String(v ?? '').trim() !== '');
+        const oldLinesRaw = Array.isArray(oldLocal?.translations?.[this.lang]) ? oldLocal.translations[this.lang] : (Array.isArray(prevDesc?.translations?.[this.lang]) ? prevDesc.translations[this.lang] : []);
+        const importedLinesRaw = Array.isArray(nextDesc?.translations?.[this.lang]) ? nextDesc.translations[this.lang] : [];
+
+        const engLen = nextEng.length;
+        let needsReview = false;
+        const merged = [];
+        for (let i = 0; i < engLen; i++) {
+          const imported = String(importedLinesRaw[i] ?? '');
+          if (imported.trim() !== '') {
+            merged.push(importedLinesRaw[i]);
+            continue;
           }
-        }
-      }
-
-      let descs = await allProgress(parseFuncs, (p) => {
-        this.loadingProgress = 0.001 + (p * 0.99999);
-      });
-
-      let descsToImport = descs.filter(Boolean);
-      this.importDescs(descsToImport);
-      this.filterDesc();
-    },
-    importDescs(descsToImport) {
-      // check if it is safe to import new desc
-      for (const importingDesc of descsToImport) {
-        let oldDesc = this.getDescByFilepath(importingDesc.filepath);
-        if (!oldDesc) {
-          alert(`${importingDesc.filepath} not found in working table! Aborting!`);
-          return;
-        }
-        if (oldDesc.name !== importingDesc.name) {
-          alert(`${importingDesc.filepath} stat name mismatched! Aborting!`);
-          return;
-        }
-        if (!arrayEquals(oldDesc.stats, importingDesc.stats)) {
-          alert(`${importingDesc.filepath} stats definition mismatched! Aborting!`);
-          return;
-        }
-        if (!arrayEquals(oldDesc.variables, importingDesc.variables)) {
-          alert(`${importingDesc.filepath} variables definition mismatched! Aborting!`);
-          return;
-        }
-        if (!arrayEquals(oldDesc.remarks, importingDesc.remarks)) {
-          alert(`${importingDesc.filepath} remarks mismatched! Aborting!`);
-          return;
-        }
-        if (!arrayEquals(oldDesc.translations.English, importingDesc.translations.English)) {
-          alert(`${importingDesc.filepath} original English string changed! Aborting!`);
-          return;
-        }
-      }
-
-      // Look like it is safe to import, then we import!
-      for (const importingDesc of descsToImport) {
-        let oldDesc = this.getDescByFilepath(importingDesc.filepath);
-        if (!arrayEquals(oldDesc.translations[this.lang], importingDesc.translations[this.lang])) oldDesc.hasChanges = true;
-        oldDesc.translations[this.lang] = importingDesc.translations[this.lang];
-        oldDesc.isMissing = oldDesc.translations[this.lang].length !== oldDesc.translations.English.length;
-        for (const translation of oldDesc.translations[this.lang]) {
-          if (translation?.trim() == "") {
-            oldDesc.isMissing = true;
-            break;
+          const old = String(oldLinesRaw[i] ?? '');
+          if (old.trim() !== '') {
+            merged.push(oldLinesRaw[i]);
+            if (!isPostMigrationImport) needsReview = true;
+          } else {
+            merged.push('');
           }
         }
 
-        // save to localDescs too
-        let localDesc = this.localDescs.descs.find(o => o.filepath == oldDesc.filepath);
-        if (localDesc) {
-          localDesc.isMissing = oldDesc.isMissing;
-          localDesc.hasChanges = oldDesc.hasChanges;
-          localDesc.translations[this.lang] = oldDesc.translations[this.lang];
-        } else {
-          let cloneDesc = {
-            filedir: oldDesc.filedir,
-            filename: oldDesc.filename,
-            filepath: oldDesc.filepath,
-            hasChanges: oldDesc.hasChanges,
-            isMissing: oldDesc.isMissing,
-            name: oldDesc.name,
-            remarks: oldDesc.remarks,
-            stats: oldDesc.stats,
-            variables: oldDesc.variables,
+        if (!nextDesc.translations) nextDesc.translations = { English: nextEng };
+        nextDesc.translations.English = nextEng;
+        nextDesc.translations[this.lang] = merged;
+
+        nextDesc.isMissing = merged.length !== engLen || merged.some(v => String(v ?? '').trim() === '');
+        nextDesc.needsReview = isPostMigrationImport ? false : needsReview;
+        nextDesc.hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
+
+        const st = this.localDescs.status[filepath] || {};
+        st.deleted = false;
+        st.deletedAt = 0;
+        st.lastImportedAt = now;
+        st.needsReview = isPostMigrationImport ? false : needsReview;
+        if (prevDesc && !arrayEquals(prevEng, nextEng)) st.lastSourceAt = now;
+        if (!prevDesc) st.lastSourceAt = now;
+        this.localDescs.status[filepath] = st;
+
+        let localDesc = oldLocal;
+        if (!localDesc) {
+          localDesc = {
+            filedir: nextDesc.filedir,
+            filename: nextDesc.filename,
+            filepath: nextDesc.filepath,
+            hasChanges: isPostMigrationImport && hadOldWorkspaceTranslation,
+            isMissing: nextDesc.isMissing,
+            name: nextDesc.name,
+            remarks: nextDesc.remarks,
+            stats: nextDesc.stats,
+            variables: nextDesc.variables,
             translations: {
-              English: oldDesc.translations.English,
+              English: nextEng,
             }
+          };
+          localDesc.translations[this.lang] = merged;
+          this.localDescs.descs.push(localDesc);
+        } else {
+          localDesc.filedir = nextDesc.filedir;
+          localDesc.filename = nextDesc.filename;
+          localDesc.name = nextDesc.name;
+          localDesc.remarks = nextDesc.remarks;
+          localDesc.stats = nextDesc.stats;
+          localDesc.variables = nextDesc.variables;
+          if (!localDesc.translations) localDesc.translations = {};
+          localDesc.translations.English = nextEng;
+          localDesc.translations[this.lang] = merged;
+          localDesc.hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
+          localDesc.isMissing = nextDesc.isMissing;
+        }
+
+        if (prevDesc && !arrayEquals(prevEng, nextEng)) {
+          const rev = {
+            filepath: nextDesc.filepath,
+            filename: nextDesc.filename,
+            filedir: nextDesc.filedir,
+            lang: 'English',
+            savedAt: now,
+            note: 'Source update',
+            isMissing: false,
+            translations: nextEng,
+          };
+          try {
+            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English');
+            if (!latest || !arrayEquals(latest.translations, nextEng)) await window.OfflineStore.addRevision(rev);
+          } catch (_) {
           }
-          cloneDesc.translations[this.lang] = oldDesc.translations[this.lang];
-          this.localDescs.descs.push(cloneDesc);
+        } else if (!prevDesc) {
+          const rev = {
+            filepath: nextDesc.filepath,
+            filename: nextDesc.filename,
+            filedir: nextDesc.filedir,
+            lang: 'English',
+            savedAt: now,
+            note: 'Source import',
+            isMissing: false,
+            translations: nextEng,
+          };
+          try {
+            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English');
+            if (!latest) await window.OfflineStore.addRevision(rev);
+          } catch (_) {
+          }
         }
       }
 
-      this.saveLocalDescs();
+      this.descs = nextSource;
+      this.sourceLoaded = true;
+
+      await this.saveLocalDescs();
+      if (window.OfflineStore && typeof window.OfflineStore.setSource === 'function') {
+        try {
+          await window.OfflineStore.setSource(nextSource);
+        } catch (_) {
+        }
+      }
+
+      this.loadingProgress = 100;
+      this.filterDesc();
+    },
+    // Applies local workspace translations and status flags on top of the source descs.
+    // For each file in descs it:
+    // 1. Overlays the current language translations from localDescs.descs (or keeps source ones if none).
+    // 2. Copies hasChanges flag from localDescs if present.
+    // 3. Sets isMissing if any translation line is blank or count mismatch.
+    // 4. Copies needsReview flag from localDescs.status.
+    applyWorkspaceOverlay() {
+      const overlay = Array.isArray(this.localDescs?.descs) ? this.localDescs.descs : [];
+      const localByPath = new Map();
+      for (const o of overlay) {
+        if (!o || !o.filepath) continue;
+        localByPath.set(o.filepath, o);
+      }
+      const statusByPath = (this.localDescs?.status && typeof this.localDescs.status === 'object') ? this.localDescs.status : {};
+
+      for (const desc of this.descs || []) {
+        const localDesc = localByPath.get(desc.filepath);
+        const raw = Array.isArray(localDesc?.translations?.[this.lang])
+          ? localDesc.translations[this.lang]
+          : (Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : []);
+        const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
+        const merged = Array.from({ length: engLen }).map((_, i) => raw[i] ?? "");
+        if (!desc.translations) desc.translations = { English: [] };
+        desc.translations[this.lang] = merged;
+
+        if (localDesc && typeof localDesc?.hasChanges !== 'undefined') {
+          desc.hasChanges = !!localDesc.hasChanges;
+        }
+
+        desc.isMissing = merged.length !== engLen || merged.some(v => String(v ?? "").trim() === "");
+
+        const st = statusByPath[desc.filepath];
+        desc.needsReview = !!st?.needsReview;
+      }
     },
     filterDesc() {
       this.filteredDescs = [];
       this.statistic.hasChanges = 0;
       this.statistic.isMissing = 0;
+      this.statistic.needsReview = 0;
       for (const desc of this.descs) {
         if (this.hideDNT && desc.isDNT) continue;
         if (desc.hasChanges) {
@@ -1279,10 +1554,14 @@ const config = Vue.defineComponent({
         } else {
           if (this.showOnlyMissing) continue;
         }
+        if (desc.needsReview) {
+          this.statistic.needsReview++;
+        }
 
-        if (this.filterSelect == "new" && !desc.isMissing && !desc.hasChanges) continue;
+        if (this.filterSelect == "new" && !desc.isMissing && !desc.hasChanges && !desc.needsReview) continue;
         if (this.filterSelect == "blank" && !desc.isMissing) continue;
         if (this.filterSelect == "done" && !desc.hasChanges) continue;
+        if (this.filterSelect == "review" && !desc.needsReview) continue;
 
         if (
           this.searchText.trim() == "" ||
@@ -1300,6 +1579,7 @@ const config = Vue.defineComponent({
             translation: translationHtml.replaceAll("\\n", "<br />"),
             isMissing: desc.isMissing,
             hasChanges: desc.hasChanges,
+            needsReview: !!desc.needsReview,
           });
         }
       }
@@ -1344,6 +1624,9 @@ const config = Vue.defineComponent({
       this.closeHlPopup();
       this.editorBlocks = [];
       this.editorOriginalTranslations = [];
+      this.editorShowEnglishDiff = false;
+      this.editorCompareActive = false;
+      this.editorCompareTitle = '';
       this.editorCurrentEditingDesc = desc;
       for (let i = 0; i < desc.translations.English.length; i++) {
         let englishRaw = desc.translations.English[i] || "";
@@ -1369,8 +1652,10 @@ const config = Vue.defineComponent({
           english,
           englishHLter,
           HLs,
+          englishDiffHtml: escapeHtml(String(english ?? '')),
           translation,
           translationHLter,
+          translationDiffHtml: escapeHtml(String(translation ?? '')),
           multilineLineMismatch,
           metaLinesEn: engStats.lines,
           metaLinesTr: trStats.lines,
@@ -1393,6 +1678,11 @@ const config = Vue.defineComponent({
           this.syncHlScroll('translation', i);
         }
       });
+      if (this.sideTab === 'history') this.refreshHistory();
+      if (desc.needsReview) {
+        this.editorShowEnglishDiff = true;
+        this.prepareEditorEnglishDiff();
+      }
     },
     copySpanToTranslation(e, editorBlock, editorIndex) {
       this.$refs['translation_' + editorIndex].focus();
@@ -1455,6 +1745,7 @@ const config = Vue.defineComponent({
       if (this.shiftEnterSave) this.editorSave();
     },
     editorSave() {
+      if (this.editorCompareActive) return;
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
       let isMissing = false;
@@ -1492,6 +1783,14 @@ const config = Vue.defineComponent({
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
       desc.translations[this.lang] = newTranslations;
 
+      if (desc.needsReview && desc.hasChanges) {
+        desc.needsReview = false;
+        if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+        const st = this.localDescs.status[desc.filepath] || {};
+        st.needsReview = false;
+        this.localDescs.status[desc.filepath] = st;
+      }
+
       // save to localDescs too
       let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
       if (localDesc) {
@@ -1517,12 +1816,241 @@ const config = Vue.defineComponent({
         this.localDescs.descs.push(cloneDesc);
       }
       this.saveLocalDescs();
+      this.commitRevision(desc, newTranslations, { note: 'Save' });
 
       this.saveSettings();
       this.closeHlPopup();
       this.editorOriginalTranslations = (this.editorBlocks || []).map(b => b?.translation ?? "");
       this.editorVisible = false;
       this.filterDesc();
+    },
+    async refreshHistory() {
+      if (!this.editorCurrentEditingDesc) {
+        this.historyItems = [];
+        this.historySelectedA = null;
+        this.historySelectedB = null;
+        this.historyDiffHtml = '';
+        this.historyFilepath = '';
+        this.historyLang = '';
+        return;
+      }
+      const filepath = this.editorCurrentEditingDesc.filepath;
+      const lang = this.historyMode === 'source' ? 'English' : this.lang;
+
+      this.historyLoading = true;
+      try {
+        if (window.OfflineStore && typeof window.OfflineStore.listRevisions === 'function') {
+          const items = await window.OfflineStore.listRevisions(filepath, lang, 100);
+          this.historyItems = (Array.isArray(items) ? items : []).map((it, idx) => {
+            if (idx !== 0) return it;
+            return {
+              ...it,
+              note: `${it?.note ? String(it.note) + ' ' : ''}(current)`
+            };
+          });
+        } else {
+          this.historyItems = [];
+        }
+      } catch (_) {
+        this.historyItems = [];
+      } finally {
+        this.historyLoading = false;
+      }
+
+      this.historySelectedA = null;
+      this.historySelectedB = null;
+      this.historyDiffHtml = '';
+      this.historyFilepath = filepath;
+      this.historyLang = lang;
+    },
+    setHistoryMode(mode) {
+      if (mode !== 'translation' && mode !== 'source') return;
+      this.historyMode = mode;
+      if (this.sideTab === 'history') this.refreshHistory();
+    },
+    pickHistoryRevision(rev) {
+      if (!rev) return;
+      if (!this.historySelectedA || (this.historySelectedA && this.historySelectedB)) {
+        this.historySelectedA = rev;
+        this.historySelectedB = null;
+        this.historyDiffHtml = '';
+        if (this.editorCompareActive) this.exitEditorCompareMode();
+        return;
+      }
+      if (this.historySelectedA && !this.historySelectedB) {
+        this.historySelectedB = rev;
+        this.historyDiffHtml = this.buildHistoryDiffHtml(this.historySelectedA, this.historySelectedB);
+        this.enterEditorCompareModeFromHistory();
+      }
+    },
+    enterEditorCompareModeFromHistory() {
+      if (!this.editorVisible) return;
+      if (!this.editorCurrentEditingDesc) return;
+      if (!this.historySelectedA || !this.historySelectedB) return;
+
+      const mode = this.historyMode === 'source' ? 'source' : 'translation';
+      this.editorCompareActive = true;
+      this.editorCompareMode = mode;
+      const aLabel = this.formatHistoryTime(this.historySelectedA?.savedAt);
+      const bLabel = this.formatHistoryTime(this.historySelectedB?.savedAt);
+      this.editorCompareTitle = `${mode === 'source' ? 'Source' : 'Translation'} compare: ${aLabel} → ${bLabel}`;
+
+      if (mode === 'source') {
+        this.editorShowEnglishDiff = true;
+      } else {
+        this.editorShowEnglishDiff = false;
+      }
+
+      const aLines = Array.isArray(this.historySelectedA?.translations) ? this.historySelectedA.translations : [];
+      const bLines = Array.isArray(this.historySelectedB?.translations) ? this.historySelectedB.translations : [];
+      const curEng = Array.isArray(this.editorCurrentEditingDesc?.translations?.English) ? this.editorCurrentEditingDesc.translations.English : [];
+      const curTr = Array.isArray(this.editorCurrentEditingDesc?.translations?.[this.lang]) ? this.editorCurrentEditingDesc.translations[this.lang] : [];
+
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        const block = this.editorBlocks[i];
+        if (!block) continue;
+
+        if (mode === 'source') {
+          const oldRaw = aLines[i] ?? '';
+          const newRaw = bLines[i] ?? '';
+          const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
+          const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
+          block.englishDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+          const engRaw = curEng[i] ?? '';
+          const engStr = this.isMultilineText(engRaw) ? this.decodeEscapedNewlines(String(engRaw)) : String(engRaw);
+          block.english = engStr;
+          const trRaw = curTr[i] ?? '';
+          block.translationDiffHtml = escapeHtml(String(trRaw ?? ''));
+        } else {
+          const oldRaw = aLines[i] ?? '';
+          const newRaw = bLines[i] ?? '';
+          const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
+          const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
+          block.translationDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+          const engRaw = curEng[i] ?? '';
+          const engStr = this.isMultilineText(engRaw) ? this.decodeEscapedNewlines(String(engRaw)) : String(engRaw);
+          block.english = engStr;
+        }
+      }
+    },
+    exitEditorCompareMode() {
+      this.editorCompareActive = false;
+      this.editorCompareTitle = '';
+      this.editorShowEnglishDiff = false;
+      if (this.editorCurrentEditingDesc) {
+        this.editFile(this.editorCurrentEditingDesc.filepath);
+      }
+    },
+    clearHistorySelection() {
+      this.historySelectedA = null;
+      this.historySelectedB = null;
+      this.historyDiffHtml = '';
+    },
+    formatHistoryTime(ts) {
+      if (!ts) return '';
+      try {
+        return new Date(ts).toLocaleString();
+      } catch (_) {
+        return String(ts);
+      }
+    },
+    buildHistoryDiffHtml(aRev, bRev) {
+      const aLines = Array.isArray(aRev?.translations) ? aRev.translations : [];
+      const bLines = Array.isArray(bRev?.translations) ? bRev.translations : [];
+      const edits = myersLineDiff(aLines, bLines);
+      return renderUnifiedLineDiff(edits);
+    },
+    async restoreHistoryRevision(rev) {
+      const desc = this.editorCurrentEditingDesc;
+      if (!desc || !rev) return;
+      if (this.historyMode === 'source' || String(rev?.lang) === 'English') {
+        alert('Restoring source English text is disabled.');
+        return;
+      }
+      if (desc.filepath !== rev.filepath || this.lang !== rev.lang) {
+        alert('Cannot restore: revision does not match the currently opened file/language.');
+        return;
+      }
+      if (!confirm('Restore this revision?')) return;
+
+      if (this.editorCompareActive) this.exitEditorCompareMode();
+
+      const lines = Array.isArray(rev.translations) ? rev.translations : [];
+      desc.isMissing = lines.some(v => !String(v ?? '').trim());
+      if (!arrayEquals(desc.translations[this.lang], lines)) desc.hasChanges = true;
+      desc.translations[this.lang] = lines;
+
+      if (desc.needsReview && desc.hasChanges) {
+        desc.needsReview = false;
+        if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+        const st = this.localDescs.status[desc.filepath] || {};
+        st.needsReview = false;
+        this.localDescs.status[desc.filepath] = st;
+      }
+
+      let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
+      if (localDesc) {
+        localDesc.isMissing = desc.isMissing;
+        localDesc.hasChanges = desc.hasChanges;
+        localDesc.translations[this.lang] = lines;
+      } else {
+        let cloneDesc = {
+          filedir: desc.filedir,
+          filename: desc.filename,
+          filepath: desc.filepath,
+          hasChanges: desc.hasChanges,
+          isMissing: desc.isMissing,
+          name: desc.name,
+          remarks: desc.remarks,
+          stats: desc.stats,
+          variables: desc.variables,
+          translations: {
+            English: desc.translations.English,
+          }
+        }
+        cloneDesc.translations[this.lang] = lines;
+        this.localDescs.descs.push(cloneDesc);
+      }
+
+      await this.saveLocalDescs();
+      await this.commitRevision(desc, lines, { note: 'Restore' });
+      this.filterDesc();
+      if (this.editorVisible) this.editFile(desc.filepath);
+      await this.refreshHistory();
+    },
+    async commitRevision(desc, translations, { note } = {}) {
+      if (!desc || !Array.isArray(translations)) return;
+      if (this.testMode) return;
+      if (!(window.OfflineStore && typeof window.OfflineStore.addRevision === 'function')) return;
+
+      const rev = {
+        filepath: desc.filepath,
+        filename: desc.filename,
+        filedir: desc.filedir,
+        lang: this.lang,
+        savedAt: Date.now(),
+        note: note || '',
+        isMissing: !!desc.isMissing,
+        translations: translations,
+      };
+
+      try {
+        const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang);
+        if (latest && arrayEquals(latest.translations, translations)) return;
+      } catch (_) {
+      }
+
+      try {
+        await window.OfflineStore.addRevision(rev);
+      } catch (_) {
+      }
+
+      if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
+      const st = this.localDescs.status[desc.filepath] || {};
+      st.lastTranslatedAt = rev.savedAt;
+      st.lastEditedAt = rev.savedAt;
+      this.localDescs.status[desc.filepath] = st;
+      await this.saveLocalDescs();
     },
     editorEsc(e) {
       if (e?.defaultPrevented) return;
@@ -1541,8 +2069,8 @@ const config = Vue.defineComponent({
       this.closeHlPopup();
       this.editorVisible = false;
     },
-    saveSettings() {
-      if (!localStorageInitialized) return;
+    async saveSettings() {
+      if (!offlineStoreReady) return;
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
@@ -1553,8 +2081,14 @@ const config = Vue.defineComponent({
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
       }
-      let buffer = JSON.stringify(settings);
-      localStorage.setItem('settings', buffer);
+      if (window.OfflineStore && typeof window.OfflineStore.setSettings === 'function') {
+        try {
+          const plain = this.toPlainForStorage(settings);
+          if (!plain) throw new Error('Cannot serialize settings');
+          await window.OfflineStore.setSettings(plain);
+        } catch (_) {
+        }
+      }
     },
     exportSettingsClicked() {
       let settings = {
@@ -1607,9 +2141,16 @@ const config = Vue.defineComponent({
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
     },
-    saveLocalDescs() {
-      if (!localStorageInitialized) return;
-      localStorage.setItem('localDescs', JSON.stringify(this.localDescs));
+    async saveLocalDescs() {
+      if (!offlineStoreReady) return;
+      if (window.OfflineStore && typeof window.OfflineStore.setWorkspace === 'function') {
+        try {
+          const plain = this.toPlainForStorage(this.localDescs);
+          if (!plain) throw new Error('Cannot serialize workspace');
+          await window.OfflineStore.setWorkspace(plain);
+        } catch (_) {
+        }
+      }
     },
     useRegex(editorBlock) {
       this.sideTab = 'regex';
@@ -1703,7 +2244,9 @@ const config = Vue.defineComponent({
     },
     async exportZip(doFullExport) {
       if (doFullExport && !confirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes")) return;
-      let descsToExport = doFullExport ? this.descs : this.descs.filter(o => o.hasChanges);
+      let descsToExport = doFullExport
+        ? (this.descs || []).filter(o => !o.needsReview)
+        : (this.descs || []).filter(o => o.hasChanges);
       if (!descsToExport.length) {
         alert(`There're no files to be export!`);
         return;
@@ -1724,6 +2267,99 @@ const config = Vue.defineComponent({
     }
   },
 });
+
+function myersLineDiff(aLines, bLines) {
+  const a = Array.isArray(aLines) ? aLines : [];
+  const b = Array.isArray(bLines) ? bLines : [];
+  const N = a.length;
+  const M = b.length;
+  const max = N + M;
+
+  let v = new Map();
+  v.set(1, 0);
+  const trace = [];
+
+  for (let d = 0; d <= max; d++) {
+    const vNew = new Map();
+    for (let k = -d; k <= d; k += 2) {
+      let x;
+      const vKMinus = v.get(k - 1);
+      const vKPlus = v.get(k + 1);
+      if (k === -d || (k !== d && (vKMinus ?? -Infinity) < (vKPlus ?? -Infinity))) {
+        x = vKPlus ?? 0;
+      } else {
+        x = (vKMinus ?? 0) + 1;
+      }
+      let y = x - k;
+      while (x < N && y < M && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      vNew.set(k, x);
+      if (x >= N && y >= M) {
+        trace.push(vNew);
+        return myersBacktrack(trace, a, b);
+      }
+    }
+    trace.push(vNew);
+    v = vNew;
+  }
+  return a.map(line => ({ type: 'equal', line }));
+}
+
+function myersBacktrack(trace, a, b) {
+  let x = a.length;
+  let y = b.length;
+  const edits = [];
+
+  for (let d = trace.length - 1; d >= 0; d--) {
+    const v = trace[d];
+    const k = x - y;
+    const prevV = d > 0 ? trace[d - 1] : new Map([[0, 0]]);
+    let prevK;
+
+    const prevKMinus = prevV.get(k - 1);
+    const prevKPlus = prevV.get(k + 1);
+    if (k === -d || (k !== d && (prevKMinus ?? -Infinity) < (prevKPlus ?? -Infinity))) {
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+    const prevX = prevV.get(prevK) ?? 0;
+    const prevY = prevX - prevK;
+
+    while (x > prevX && y > prevY) {
+      edits.push({ type: 'equal', line: a[x - 1] });
+      x--;
+      y--;
+    }
+
+    if (d === 0) break;
+
+    if (x === prevX) {
+      edits.push({ type: 'insert', line: b[y - 1] });
+      y--;
+    } else {
+      edits.push({ type: 'delete', line: a[x - 1] });
+      x--;
+    }
+  }
+
+  edits.reverse();
+  return edits;
+}
+
+function renderUnifiedLineDiff(edits) {
+  const safeEdits = Array.isArray(edits) ? edits : [];
+  return safeEdits.map(e => {
+    const type = e?.type;
+    const rawLine = e?.line ?? '';
+    const line = escapeHtml(String(rawLine));
+    if (type === 'insert') return `<div class="diffLine add"><span class="diffPrefix">+</span>${line}</div>`;
+    if (type === 'delete') return `<div class="diffLine del"><span class="diffPrefix">-</span>${line}</div>`;
+    return `<div class="diffLine"><span class="diffPrefix"> </span>${line}</div>`;
+  }).join('');
+}
 
 const app = Vue.createApp(config);
 app.mount('#app');
