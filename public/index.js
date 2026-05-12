@@ -559,17 +559,19 @@ const config = Vue.defineComponent({
       }
     },
     addDictionaryAltPair(word, find, replace) {
-      if (!word) return;
+      if (!word) return "";
       let f = String(find ?? "").trim();
-      if (!f) return;
+      if (!f) return "";
       let pairs = this.getDictionaryDefinitionPairs(word);
-      if (pairs.some(p => (p?.find || "").trim().toLowerCase() === f.toLowerCase())) return;
+      if (pairs.some(p => (p?.find || "").trim().toLowerCase() === f.toLowerCase())) return "";
       if (!Array.isArray(word.alts)) word.alts = [];
+      let id = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
       word.alts.unshift({
-        _id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        _id: id,
         find: f,
         replace: String(replace ?? word?.replace ?? "")
       });
+      return id;
     },
     computeTextStats(text) {
       let s = this.normalizeNewlines(text ?? "");
@@ -853,11 +855,11 @@ const config = Vue.defineComponent({
       HLs.sort((a, b) => b.index - a.index); // sort deacending
       for (let i = 0; i < HLs.length; i++) {
         const HL = HLs[i];
-        let title = `Click / Alt+${HLs.length-i} = Paste below&#10;Ctrl+Click = Copy to Clipboard`;
+        let title = `Click / Alt+${HLs.length-i} = Paste below&#10;Alt+Click = Copy to Clipboard`;
         if (HL?.isKeywordPopup) {
           title += HL?.dictId
-            ? `&#10;Alt+Click = Jump to Dictionary`
-            : `&#10;Alt+Click = Add to Dictionary`;
+            ? `&#10;Ctrl+Click = Jump to Dictionary`
+            : `&#10;Ctrl+Click = Add to Dictionary`;
         }
         let tag = `<span class='${HL.replace ? "vocab" : ""}' title='${title}' data-hl-id="${HL._hlId}" dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
@@ -912,6 +914,15 @@ const config = Vue.defineComponent({
       let seenValue = new Map();
       for (const hl of HLs) {
         if (hl?.dictId) {
+          let kwTagName = "";
+          let kwDynamicContent = "";
+          if (hl?.isKeywordPopup) {
+            kwTagName = unescapeHtml(hl.tagName || "").trim();
+            kwDynamicContent = unescapeHtml(hl.dynamicContent || "").trim();
+            if (kwDynamicContent.includes("<")) kwDynamicContent = "";
+            kwDynamicContent = kwDynamicContent.trim();
+          }
+
           let dictIdList = [hl.dictId];
           if (hl?.isKeywordPopup && Array.isArray(hl?.dictIds) && hl.dictIds.length > 0) {
             dictIdList = hl.dictIds.slice();
@@ -960,6 +971,8 @@ const config = Vue.defineComponent({
                   existingItem.hlIds.push(hl._hlId);
                 }
                 existingItem.dictEntryId = existingItem.dictEntryId || dictEntry._id;
+                if (kwTagName) existingItem.kwTagName = existingItem.kwTagName || kwTagName;
+                if (kwDynamicContent) existingItem.kwDynamicContent = existingItem.kwDynamicContent || kwDynamicContent;
                 continue;
               }
               let item = {
@@ -971,7 +984,9 @@ const config = Vue.defineComponent({
                 exactFromContext,
                 hlIds: hl?._hlId ? [hl._hlId] : [],
                 dictEntryId: dictEntry._id,
-                dictAltId: p.isMain ? "" : (p?._id || "")
+                dictAltId: p.isMain ? "" : (p?._id || ""),
+                kwTagName,
+                kwDynamicContent
               };
               seen.set(key, item);
               items.push(item);
@@ -992,7 +1007,17 @@ const config = Vue.defineComponent({
         }
         let label = hl?.replace && hl.replace !== hl.find ? `${hl.find} → ${hl.replace}` : `${hl.find}`;
         let matchText = String(hl?.find || "").trim();
-        let item = { label, value, matchText, matchTextLower: matchText.toLowerCase(), isAlt: false, hlIds: hl?._hlId ? [hl._hlId] : [] };
+        let kw = this.parseKeywordPopupTagText(value);
+        let item = {
+          label,
+          value,
+          matchText,
+          matchTextLower: matchText.toLowerCase(),
+          isAlt: false,
+          hlIds: hl?._hlId ? [hl._hlId] : [],
+          kwTagName: kw?.tagName || "",
+          kwDynamicContent: kw?.dynamicContent || ""
+        };
         seenValue.set(value, item);
         items.push(item);
       }
@@ -1050,6 +1075,176 @@ const config = Vue.defineComponent({
       if (options.refocus && this.editorVisible) {
         this.$nextTick(() => this.$refs["translation_" + editorIndex]?.focus?.());
       }
+    },
+    parseKeywordPopupTagText(text) {
+      let raw = String(text ?? "");
+      let regex = new RegExp(keywordPopupTagRegex, "i");
+      let m = regex.exec(raw);
+      if (!m) return null;
+      let tagName = String(m[2] ?? "").trim();
+      let dynamicContent = String(m[3] ?? "").trim();
+      if (!tagName) return null;
+      return { tagName, dynamicContent };
+    },
+    getHlPopupKeywordInfo(item) {
+      if (!item) return null;
+      let tagName = String(item?.kwTagName || "").trim();
+      let dynamicContent = String(item?.kwDynamicContent || "").trim();
+      if (!tagName) {
+        let parsed = this.parseKeywordPopupTagText(item.value);
+        if (parsed) {
+          tagName = parsed.tagName;
+          dynamicContent = parsed.dynamicContent;
+        }
+      }
+      if (!tagName) return null;
+      if (dynamicContent.includes("<")) dynamicContent = "";
+      dynamicContent = dynamicContent.trim();
+      return { tagName, dynamicContent };
+    },
+    ensureDictionaryKeywordTag(tagName, altFind = "") {
+      let tn = String(tagName ?? "").trim();
+      if (!tn) return { dictId: "", created: false, addedAlt: false };
+      let alt = String(altFind ?? "").trim();
+
+      this.sideTab = "dictionary";
+      this.dictionaryFilter = "";
+
+      let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === tn.toLowerCase());
+      if (existing) {
+        let addedAlt = false;
+        let createdAltId = "";
+        if (alt) {
+          let pairs = this.getDictionaryDefinitionPairs(existing);
+          if (!pairs.some(p => String(p?.find || "").trim().toLowerCase() === alt.toLowerCase())) {
+            createdAltId = this.addDictionaryAltPair(existing, alt, existing?.replace ?? "");
+            addedAlt = true;
+          }
+        }
+        this.dictionaryFlashId = existing._id || '';
+        if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
+        this._dictFlashTimer = setTimeout(() => {
+          if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
+        }, 320);
+        if (addedAlt && createdAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: createdAltId });
+        else this.focusDictionaryEntryReplaceInput(existing._id);
+        return { dictId: existing._id || "", created: false, addedAlt };
+      }
+
+      let createdAltId = "";
+      let entry = {
+        _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        find: tn,
+        replace: tn,
+        alts: alt ? [{ _id: (createdAltId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`), find: alt, replace: tn }] : [],
+        tlnote: ""
+      };
+      this.dictionary.unshift(entry);
+      this.dictionaryFlashId = entry._id;
+      if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
+      this._dictFlashTimer = setTimeout(() => {
+        if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
+      }, 320);
+      if (createdAltId) this.focusDictionaryEntryReplaceInput(entry._id, { altId: createdAltId });
+      else this.focusDictionaryEntryReplaceInput(entry._id);
+      return { dictId: entry._id, created: true, addedAlt: !!alt };
+    },
+    canCreateDictionaryEntryFromHlPopupItem(item) {
+      if (!item) return false;
+      let info = this.getHlPopupKeywordInfo(item);
+      if (!info) return false;
+      let tagNameLower = info.tagName.toLowerCase();
+      if (!tagNameLower) return false;
+
+      let alt = String(info.dynamicContent ?? "").trim();
+
+      let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === tagNameLower);
+      if (!existing) return true;
+      if (!alt) return false;
+
+      let pairs = this.getDictionaryDefinitionPairs(existing);
+      if (pairs.some(p => String(p?.find || "").trim().toLowerCase() === alt.toLowerCase())) return false;
+      return true;
+    },
+    canJumpToDictionaryFromHlPopupItem(item) {
+      if (!item) return false;
+      return !!item.dictEntryId;
+    },
+    jumpToDictionaryFromHlPopupItem(item) {
+      let dictId = String(item?.dictEntryId || "");
+      if (!dictId) return false;
+      let entry = (this.dictionary || []).find(d => String(d?._id) === dictId);
+      if (!entry) return false;
+      let altId = String(item?.dictAltId || "");
+      this.closeHlPopup();
+      this.sideTab = "dictionary";
+      this.dictionaryFilter = "";
+      this.dictionaryFlashId = entry._id || '';
+      if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
+      this._dictFlashTimer = setTimeout(() => {
+        if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
+      }, 320);
+      if (altId) this.focusDictionaryEntryReplaceInput(entry._id, { altId });
+      else this.focusDictionaryEntryReplaceInput(entry._id);
+      return true;
+    },
+    hlPopupCtrlEnterAction() {
+      let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
+      if (!item) return false;
+      if (this.canCreateDictionaryEntryFromHlPopupItem(item)) {
+        return this.createDictionaryEntryFromHlPopupSelection();
+      }
+      if (this.canJumpToDictionaryFromHlPopupItem(item)) {
+        return this.jumpToDictionaryFromHlPopupItem(item);
+      }
+      return false;
+    },
+    hlPopupCtrlEnterPillText(item) {
+      if (!item) return "";
+      if (this.canCreateDictionaryEntryFromHlPopupItem(item)) {
+        let info = this.getHlPopupKeywordInfo(item);
+        if (!info) return "";
+        let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === info.tagName.toLowerCase());
+        return existing ? "Ctrl+Enter Add alt" : "Ctrl+Enter Add";
+      }
+      if (this.canJumpToDictionaryFromHlPopupItem(item)) {
+        return "Ctrl+Enter Edit";
+      }
+      return "";
+    },
+    focusDictionaryEntryReplaceInput(dictId, options = {}) {
+      if (!dictId) return;
+      let esc = (s) => {
+        if (window?.CSS?.escape) return window.CSS.escape(String(s));
+        return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      };
+      this.$nextTick(() => {
+        let altId = String(options?.altId || "");
+        if (altId) {
+          let altRow = document?.querySelector?.(`.side .dictAltRow[data-dict-id="${esc(dictId)}"][data-dict-alt-id="${esc(altId)}"]`);
+          let altInput = altRow?.querySelector?.('input:nth-of-type(2)');
+          altRow?.scrollIntoView?.({ block: "nearest" });
+          altInput?.focus?.();
+          altInput?.select?.();
+          return;
+        }
+
+        let row = document?.querySelector?.(`.side .dictRow[data-dict-id="${esc(dictId)}"]`);
+        let input = row?.querySelector?.('input:nth-of-type(2)');
+        row?.scrollIntoView?.({ block: "nearest" });
+        input?.focus?.();
+        input?.select?.();
+      });
+    },
+    createDictionaryEntryFromHlPopupSelection() {
+      let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
+      if (!this.canCreateDictionaryEntryFromHlPopupItem(item)) return false;
+      let info = this.getHlPopupKeywordInfo(item);
+      if (!info) return false;
+
+      this.closeHlPopup();
+      let r = this.ensureDictionaryKeywordTag(info.tagName, info.dynamicContent);
+      return r.created || r.addedAlt;
     },
     moveHlPopupSelection(delta) {
       let len = this.hlPopup.filtered.length;
@@ -1260,6 +1455,12 @@ const config = Vue.defineComponent({
           e.preventDefault();
           this.moveHlPopupSelection(-1);
           return;
+        }
+        if (e.ctrlKey && e.code === "Enter") {
+          if (this.hlPopupCtrlEnterAction()) {
+            e.preventDefault();
+            return;
+          }
         }
         if (e.code === "Enter") {
           e.preventDefault();
@@ -2004,34 +2205,7 @@ const config = Vue.defineComponent({
       let alt = unescapeHtml(HL.dynamicContent || "").trim();
       if (alt.includes("<")) alt = "";
       alt = alt.trim();
-
-      this.sideTab = 'dictionary';
-      this.dictionaryFilter = "";
-
-      let existing = (this.dictionary || []).find(d => (d?.find || "").trim().toLowerCase() === tagName.toLowerCase());
-      if (existing) {
-        if (alt) this.addDictionaryAltPair(existing, alt, existing?.replace ?? "");
-        this.dictionaryFlashId = existing._id || '';
-        if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
-        this._dictFlashTimer = setTimeout(() => {
-          if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
-        }, 320);
-        return;
-      }
-
-      let entry = {
-        _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
-        find: tagName,
-        replace: tagName,
-        alts: alt ? [{ _id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: alt, replace: tagName }] : [],
-        tlnote: ""
-      };
-      this.dictionary.unshift(entry);
-      this.dictionaryFlashId = entry._id;
-      if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
-      this._dictFlashTimer = setTimeout(() => {
-        if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
-      }, 320);
+      this.ensureDictionaryKeywordTag(tagName, alt);
     },
     hotkeyPasteHL(e, editorBlock, editorIndex) {
       let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);

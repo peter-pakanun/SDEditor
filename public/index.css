@@ -880,12 +880,31 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .hlPopupItem {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
   padding: 0.4em 0.6em;
   cursor: pointer;
   user-select: none;
+  min-width: 0;
+}
+
+.hlPopupItemLabel {
+  flex: 1 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.hlPopupHotkeyPill {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  padding: 0.12em 0.5em;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.1);
+  opacity: 0.9;
 }
 
 .hlPopupItem.active,

@@ -175,7 +175,7 @@
               <template v-else>
                 <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
                 <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
-                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="copySpanToClipboard" @click.alt="altClickHighlight($event, editorBlock)" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
             </div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
@@ -295,7 +295,10 @@
         <div class="hlPopup" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px' }" @mousedown.stop>
           <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
           <div class="hlPopupList">
-            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">{{ item.label }}</div>
+            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">
+              <span class="hlPopupItemLabel">{{ item.label }}</span>
+              <span v-if="i === hlPopup.selectedIndex && hlPopupCtrlEnterPillText(item)" class="hlPopupHotkeyPill">{{ hlPopupCtrlEnterPillText(item) }}</span>
+            </div>
             <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
           </div>
         </div>
