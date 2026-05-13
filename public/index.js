@@ -878,14 +878,14 @@ const config = Vue.defineComponent({
       let modifiedText = escapedText;
       let HLs = [];
       let nextHlId = 1;
-      let addHL = (index, find) => {
-        HLs.push({ _hlId: nextHlId++, index, find });
+      let addHL = (index, find, className = "") => {
+        HLs.push({ _hlId: nextHlId++, index, find, className });
       };
       let m;
 
       let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
       while (m = keywordPopupRegex.exec(modifiedText)) {
-        addHL(m.index, m[0]);
+        addHL(m.index, m[0], "vocab");
         let mask = '*'.repeat(m[0].length);
         modifiedText = modifiedText.substring(0, m.index) + mask + modifiedText.substring(m.index + m[0].length);
       }
@@ -897,7 +897,8 @@ const config = Vue.defineComponent({
 
       HLs.sort((a, b) => b.index - a.index);
       for (const HL of HLs) {
-        let tag = `<span data-hl-id="${HL._hlId}">${HL.find}</span>`;
+        let cls = HL.className ? ` class='${HL.className}'` : "";
+        let tag = `<span${cls} data-hl-id="${HL._hlId}">${HL.find}</span>`;
         hlter = hlter.substring(0, HL.index) + tag + hlter.substring(HL.index + HL.find.length);
       }
       return hlter;
