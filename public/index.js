@@ -1867,6 +1867,8 @@ const config = Vue.defineComponent({
       const oldWorkspaceMap = new Map((this.localDescs.descs || []).filter(Boolean).map(d => [d.filepath, d]));
       const now = Date.now();
       let changedCount = 0;
+      let reviewClearedCount = 0;
+      let trackedCount = 0;
       const changedPaths = new Set();
 
       for (const imported of importedDescs) {
@@ -1884,7 +1886,35 @@ const config = Vue.defineComponent({
         const existingLines = Array.from({ length: engLen }).map((_, i) => existing[i] ?? "");
 
         const changed = !arrayEquals(existingLines, importedLines);
-        if (!changed) continue;
+        const hasAnyTranslation = importedLines.some(v => String(v ?? '').trim() !== '');
+        if (hasAnyTranslation) {
+          const st = this.localDescs.status[imported.filepath] || {};
+          if (st.needsReview || desc.needsReview) {
+            desc.needsReview = false;
+            st.needsReview = false;
+            this.localDescs.status[imported.filepath] = st;
+            reviewClearedCount++;
+          }
+        }
+
+        if (!changed) {
+          if (hasAnyTranslation) {
+            desc.translations[this.lang] = importedLines;
+            desc.isMissing = computeIsMissing(engLen, importedLines);
+            desc.hasChanges = true;
+            desc.needsReview = false;
+
+            if (!localDesc) {
+              localDesc = makeLocalDesc(desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
+              this.localDescs.descs.push(localDesc);
+              oldWorkspaceMap.set(desc.filepath, localDesc);
+            } else {
+              updateLocalDesc(localDesc, desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
+            }
+            trackedCount++;
+          }
+          continue;
+        }
 
         changedCount++;
         changedPaths.add(imported.filepath);
@@ -1942,8 +1972,13 @@ const config = Vue.defineComponent({
       this.loadingProgress = 100;
       this.filterDesc();
 
-      if (changedCount === 0) {
+      if (changedCount === 0 && reviewClearedCount === 0 && trackedCount === 0) {
         alert('No translation changes detected.');
+      } else if (changedCount === 0) {
+        const lines = [];
+        if (reviewClearedCount > 0) lines.push(`Cleared needs-review on ${reviewClearedCount} file(s).`);
+        if (trackedCount > 0) lines.push(`Marked ${trackedCount} file(s) for export.`);
+        alert(lines.join('\n'));
       }
     },
     // Applies local workspace translations and status flags on top of the source descs.
