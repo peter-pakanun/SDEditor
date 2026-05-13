@@ -76,6 +76,26 @@ function getZipTxtFilepaths(zip) {
   return out;
 }
 
+/**
+ * @param {import('jszip').JSZipObject} zipObject
+ * @param {string} [lang]
+ */
+async function decodeZipTxtFile(zipObject, lang) {
+  let data = await zipObject.async('uint8array');
+  // @ts-ignore
+  let blob = new Blob([data]);
+  const reader = new FileReader();
+  // convert to promise
+  return new Promise((resolve, reject) => {
+    reader.readAsText(blob, 'utf-16le');
+    reader.onload = function () {
+      let text = String(reader.result)?.replace(/^\uFEFF/, '');
+      resolve(text);
+    };
+    reader.onerror = reject;
+  });
+}
+
 function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing } = {}) {
   const english = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
   const local = {

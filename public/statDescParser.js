@@ -24,12 +24,7 @@
  * @returns {Promise<StatDesc|false>}
  */
 async function parseFile(filepath, zipObject, lang) {
-  let data = await zipObject.async('uint8array');
-  let blob = new Blob([data]);
-  let text = await blob.text();
-
-  // remove Byte order mark
-  text = text.replace(/^\uFEFF/, '');
+  let text = await decodeZipTxtFile(zipObject, lang);
 
   // find description mark
   let count = (text.match(/^description/gim) ?? []).length;
