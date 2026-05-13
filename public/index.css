@@ -3,7 +3,8 @@
   --color-bg2: #C2C2C2;
   --color-element: #BCBCBC;
   --color-element-alt: #AEAEAE;
-  --color-element-highlight: #8E8E8E;
+  /* --color-element-highlight: #8E8E8E; */
+  --color-element-highlight: #51619bff;
   --color-accent: #D46A00;
   --color-line-diff: rgba(200, 0, 0, 0.22);
   --color-shadow: rgba(0, 0, 0, 0.3);
