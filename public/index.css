@@ -777,6 +777,25 @@ button, label, th, td, input[type="checkbox"] {
   opacity: 0.85;
 }
 
+.side .twoSided.dictEntryBlock {
+  position: relative;
+}
+
+.side .twoSided.dictEntryBlock > button.dictDeleteBtn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: calc(0.15em * var(--density)) calc(0.35em * var(--density));
+}
+
+.side .twoSided.dictEntryBlock > div {
+  width: 100%;
+}
+
+.side .twoSided.dictEntryBlock .dictRow {
+  padding-right: calc(2.6em * var(--density));
+}
+
 .side .dictRow {
   display: flex;
   gap: calc(0.4em * var(--density));
