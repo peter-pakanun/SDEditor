@@ -513,6 +513,18 @@ const config = Vue.defineComponent({
           i += km[0].length;
           continue;
         }
+        if (s[i] === '@') {
+          flushText();
+          segments.push({ type: "rightAlign" });
+          i++;
+          continue;
+        }
+        if (s[i] === '\n') {
+          flushText();
+          segments.push({ type: "break" });
+          i++;
+          continue;
+        }
         let gm = gggRe.exec(slice);
         if (gm && gm.index === 0) {
           flushText();
