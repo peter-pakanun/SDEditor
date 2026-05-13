@@ -38,7 +38,7 @@ html, body {
 }
 
 input, button, select, textarea {
-  line-height: calc(1.5em * var(--density));
+  line-height: calc(2em * var(--density));
   padding: calc(0.5em * var(--density)) calc(1em * var(--density));
   box-sizing: border-box;
   color: var(--color-font);
@@ -72,7 +72,7 @@ input:focus, button:focus, textarea:focus {
   --padding-top: calc(0.5em * var(--density));
   --padding-left: calc(1em * var(--density));
   font-size: calc(14px * var(--density));
-  line-height: calc(1.5em * var(--density));
+  line-height: calc(2em * var(--density));
   display: block;
 }
 
@@ -491,7 +491,7 @@ table#table tbody tr:hover.needsReview td {
   background: var(--color-element);
   border: 1px solid black;
   padding: calc(0.35em * var(--density)) calc(0.6em * var(--density));
-  line-height: calc(1.35em * var(--density));
+  line-height: calc(2em * var(--density));
   font-size: calc(13px * var(--density));
   white-space: pre-wrap;
 }
@@ -543,7 +543,7 @@ button, label, th, td, input[type="checkbox"] {
 .editor select,
 .editor textarea {
   padding: calc(0.35em * var(--density)) calc(0.75em * var(--density));
-  line-height: calc(1.25em * var(--density));
+  line-height: calc(2em * var(--density));
   font-size: calc(13px * var(--density));
 }
 
@@ -681,7 +681,7 @@ button, label, th, td, input[type="checkbox"] {
 .side select,
 .side textarea {
   padding: calc(0.25em * var(--density)) calc(0.5em * var(--density));
-  line-height: calc(1.2em * var(--density));
+  line-height: calc(2em * var(--density));
 }
 
 .historyPanel {
