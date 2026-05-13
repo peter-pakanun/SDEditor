@@ -991,9 +991,11 @@ const config = Vue.defineComponent({
               if (hl?.isKeywordPopup) {
                 let tn = unescapeHtml(hl.tagName || "").trim();
                 if (!tn) tn = p.find;
+                // [tagName|find] → [tagName|replace]
                 value = `[${tn}|${p?.replace ?? ""}]`;
-                label = value + (p.find && p.find !== tn ? ` (${p.find})` : "");
+                label = `[${tn}|${p?.find ?? ""}] → ${value}`;
               } else {
+                // find → replace
                 value = p?.replace || p?.find || "";
                 label = p?.replace && p.replace !== p.find ? `${p.find} → ${p.replace}` : `${p.find}`;
               }
