@@ -2146,12 +2146,12 @@ const config = Vue.defineComponent({
         let translation = isMultiline ? this.decodeEscapedNewlines(translationRaw) : translationRaw;
         let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(english);
         let englishHLter = baseEnglishHLter;
-        let translationHLter = "";
+        let translationHLter = this.buildTagHLter(translation ?? "");
         let multilineLineMismatch = false;
         if (isMultiline) {
           let diff = this.computeMultilineLineMismatch(english, translation);
           englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
-          translationHLter = this.wrapHlterByLines(escapeHtml(translation ?? ""), diff.trMismatch);
+          translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? ""), diff.trMismatch);
           multilineLineMismatch = diff.mismatch;
         }
         this.editorOriginalTranslations.push(translation);
