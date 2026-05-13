@@ -766,7 +766,8 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewKw {
-  font-weight: 700;
+  /* Mandela Effect got me, it wasn't bold */
+  /* font-weight: 700; */
   text-decoration: underline;
   text-underline-offset: 2px;
 }
