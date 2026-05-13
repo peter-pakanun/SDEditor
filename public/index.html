@@ -182,10 +182,13 @@
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
-          <input v-else-if="!editorBlock.isMultiline" type="text" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="refreshEditorBlockMeta(editorBlock, index)">
+          <div v-else-if="!editorBlock.isMultiline" class="textHL">
+            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+          </div>
           <div v-else class="textHL multiline">
             <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
-            <div class="HLter" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
             <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" title="Lines (translation / english)"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>

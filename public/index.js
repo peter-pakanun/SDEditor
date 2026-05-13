@@ -594,6 +594,12 @@ const config = Vue.defineComponent({
         this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
       }
     },
+    translationInput(editorBlock, editorIndex) {
+      this.refreshEditorBlockMeta(editorBlock, editorIndex);
+      if (!editorBlock?.isMultiline) {
+        editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "");
+      }
+    },
     computeMultilineLineMismatch(english, translation) {
       let eng = this.normalizeNewlines(english ?? "");
       let tr = this.normalizeNewlines(translation ?? "");
@@ -650,13 +656,13 @@ const config = Vue.defineComponent({
       editorBlock.HLs = HLs;
       if (!editorBlock.isMultiline) {
         editorBlock.englishHLter = baseEnglishHLter;
-        editorBlock.translationHLter = "";
+        editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "");
         editorBlock.multilineLineMismatch = false;
         return;
       }
       let diff = this.computeMultilineLineMismatch(editorBlock.english, editorBlock.translation);
       editorBlock.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
-      editorBlock.translationHLter = this.wrapHlterByLines(escapeHtml(editorBlock.translation ?? ""), diff.trMismatch);
+      editorBlock.translationHLter = this.wrapHlterByLines(this.buildTagHLter(editorBlock.translation ?? ""), diff.trMismatch);
       editorBlock.multilineLineMismatch = diff.mismatch;
     },
     syncHlScroll(kind, index) {
@@ -866,6 +872,36 @@ const config = Vue.defineComponent({
 
       return { englishHLter, HLs };
     },
+    buildTagHLter(text) {
+      let escapedText = escapeHtml(text ?? "");
+      let hlter = escapedText;
+      let modifiedText = escapedText;
+      let HLs = [];
+      let nextHlId = 1;
+      let addHL = (index, find) => {
+        HLs.push({ _hlId: nextHlId++, index, find });
+      };
+      let m;
+
+      let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
+      while (m = keywordPopupRegex.exec(modifiedText)) {
+        addHL(m.index, m[0]);
+        let mask = '*'.repeat(m[0].length);
+        modifiedText = modifiedText.substring(0, m.index) + mask + modifiedText.substring(m.index + m[0].length);
+      }
+
+      let gggRegex = new RegExp(gggVarTagRegex, 'igm');
+      while (m = gggRegex.exec(modifiedText)) {
+        addHL(m.index, m[1]);
+      }
+
+      HLs.sort((a, b) => b.index - a.index);
+      for (const HL of HLs) {
+        let tag = `<span data-hl-id="${HL._hlId}">${HL.find}</span>`;
+        hlter = hlter.substring(0, HL.index) + tag + hlter.substring(HL.index + HL.find.length);
+      }
+      return hlter;
+    },
     refreshEditorHLter() {
       if (!this.editorVisible) return;
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
@@ -874,13 +910,13 @@ const config = Vue.defineComponent({
         editorBlock.HLs = HLs;
         if (!editorBlock.isMultiline) {
           editorBlock.englishHLter = baseEnglishHLter;
-          editorBlock.translationHLter = "";
+          editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "");
           editorBlock.multilineLineMismatch = false;
           continue;
         }
         let diff = this.computeMultilineLineMismatch(editorBlock.english, editorBlock.translation);
         editorBlock.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
-        editorBlock.translationHLter = this.wrapHlterByLines(escapeHtml(editorBlock.translation ?? ""), diff.trMismatch);
+        editorBlock.translationHLter = this.wrapHlterByLines(this.buildTagHLter(editorBlock.translation ?? ""), diff.trMismatch);
         editorBlock.multilineLineMismatch = diff.mismatch;
         this.$nextTick(() => {
           this.syncHlScroll('english', i);

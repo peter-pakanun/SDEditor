@@ -184,6 +184,11 @@ input:focus, button:focus, textarea:focus {
   border-radius: 2px;
 }
 
+.textHL>.HLter.noPointer span[data-hl-id] {
+  pointer-events: none;
+  cursor: default;
+}
+
 .textHL>.HLter span[data-hl-id].vocab {
   background-color: color-mix(in srgb, var(--color-font) 30%, transparent);
 }
