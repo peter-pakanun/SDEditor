@@ -727,6 +727,7 @@ button, label, th, td, input[type="checkbox"] {
   min-width: 0;
   display: flex;
   justify-content: center;
+  margin-bottom: calc(2.5em * var(--density));
 }
 
 .gamePreviewWindow {
