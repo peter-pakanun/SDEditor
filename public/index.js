@@ -1372,7 +1372,7 @@ const config = Vue.defineComponent({
       if (editorBlock.isMultiline) {
         this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
       } else {
-        this.refreshEditorBlockMeta(editorBlock, editorIndex);
+        this.translationInput(editorBlock, editorIndex);
       }
       this.$nextTick(() => {
         el.focus?.();
