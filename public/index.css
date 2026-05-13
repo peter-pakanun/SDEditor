@@ -30,12 +30,16 @@ html, body {
   margin: 0;
   padding: 0;
   width: 100%;
-  font-size: 12px;
+}
+
+.appRoot {
+  --density: 1;
+  font-size: calc(12px * var(--density));
 }
 
 input, button, select, textarea {
-  line-height: 1.5em;
-  padding: 0.5em 1em;
+  line-height: calc(1.5em * var(--density));
+  padding: calc(0.5em * var(--density)) calc(1em * var(--density));
   box-sizing: border-box;
   color: var(--color-font);
   background-color: var(--color-element-alt);
@@ -65,9 +69,10 @@ input:focus, button:focus, textarea:focus {
 .textHL {
   position: relative;
   overflow: hidden;
-  --padding-top: 0.5em;
-  --padding-left: 1em;
-  font-size: 14px;
+  --padding-top: calc(0.5em * var(--density));
+  --padding-left: calc(1em * var(--density));
+  font-size: calc(14px * var(--density));
+  line-height: calc(1.5em * var(--density));
   display: block;
 }
 
@@ -96,6 +101,8 @@ input:focus, button:focus, textarea:focus {
   z-index: 1;
   white-space: pre;
   pointer-events: none;
+  font: inherit;
+  line-height: inherit;
 }
 
 .textHL.multiline>.HLter {
@@ -136,9 +143,9 @@ input:focus, button:focus, textarea:focus {
 
 .fieldMeta {
   display: flex;
-  gap: 0.4em;
+  gap: calc(0.4em * var(--density));
   align-items: center;
-  padding: 0.25em 0.05em 0.05em 0.05em;
+  padding: calc(0.25em * var(--density)) calc(0.05em * var(--density)) calc(0.05em * var(--density)) calc(0.05em * var(--density));
   color: var(--color-font);
   opacity: 0.85;
   user-select: none;
@@ -147,8 +154,8 @@ input:focus, button:focus, textarea:focus {
 .metaPill {
   display: inline-flex;
   align-items: center;
-  gap: 0.45em;
-  padding: 0.15em 0.55em;
+  gap: calc(0.45em * var(--density));
+  padding: calc(0.15em * var(--density)) calc(0.55em * var(--density));
   border-radius: 999px;
   background-color: var(--color-element);
   background: color-mix(in srgb, var(--color-element) 70%, transparent);
@@ -168,12 +175,12 @@ input:focus, button:focus, textarea:focus {
 
 .metaIcon {
   opacity: 0.85;
-  font-size: 11px;
+  font-size: calc(11px * var(--density));
   line-height: 1;
 }
 
 .metaNum {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--density));
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
@@ -238,20 +245,20 @@ input:focus, button:focus, textarea:focus {
 
 .box.importDialogBox {
   width: min(520px, calc(100vw - 2.5em));
-  padding: 1.5em 2em;
+  padding: calc(1.5em * var(--density)) calc(2em * var(--density));
 }
 
 .importDialogButtons {
   display: flex;
   flex-direction: column;
-  gap: 1.6em;
-  margin-top: 1em;
+  gap: calc(1.6em * var(--density));
+  margin-top: calc(1em * var(--density));
 }
 
 .importDialogOption {
   display: flex;
   flex-direction: column;
-  gap: 0.6em;
+  gap: calc(0.6em * var(--density));
 }
 
 .importDialogBtn {
@@ -262,8 +269,8 @@ input:focus, button:focus, textarea:focus {
 .importDialogBtn.primary {
   background-color: var(--color-accent);
   color: #000;
-  font-size: 15px;
-  padding: 0.75em 1em;
+  font-size: calc(15px * var(--density));
+  padding: calc(0.75em * var(--density)) calc(1em * var(--density));
 }
 
 .importDialogBtn.primary:hover {
@@ -275,21 +282,21 @@ input:focus, button:focus, textarea:focus {
 }
 
 .importDialogHint {
-  margin-top: 0.9em;
+  margin-top: calc(0.9em * var(--density));
   opacity: 0.85;
 }
 
 .box {
   background-color: var(--color-bg2);
   box-shadow: 2px 2px 2px var(--color-shadow);
-  padding: 3em 5em;
+  padding: calc(3em * var(--density)) calc(5em * var(--density));
   border-radius: 5px;
 }
 
 .droparea>div {
   display: flex;
   align-items: center;
-  gap: 3em;
+  gap: calc(3em * var(--density));
 }
 .droparea>div>* {
   height: auto;
@@ -304,7 +311,7 @@ input:focus, button:focus, textarea:focus {
   margin: 0;
 }
 .droparea .loadingText h3 {
-  margin-top: 0.35em;
+  margin-top: calc(0.35em * var(--density));
   font-weight: 500;
 }
 .droparea.postMigration>div {
@@ -317,14 +324,14 @@ input:focus, button:focus, textarea:focus {
   line-height: 1.35;
 }
 .droparea.postMigration h2 {
-  margin: 0 0 0.6em 0;
+  margin: 0 0 calc(0.6em * var(--density)) 0;
 }
 .droparea.postMigration h3 {
-  margin: 0.2em 0;
+  margin: calc(0.2em * var(--density)) 0;
   font-weight: 500;
 }
 .droparea.postMigration button {
-  margin-top: 1em;
+  margin-top: calc(1em * var(--density));
   width: 100%;
 }
 .spinnerCon {
@@ -340,13 +347,13 @@ input:focus, button:focus, textarea:focus {
 
 .topbar>div {
   display: inline-block;
-  padding: 1em 1.5em;
+  padding: calc(1em * var(--density)) calc(1.5em * var(--density));
 }
 
 .topbar>div>button,
 .topbar>div>input {
   vertical-align: middle;
-  margin-right: 0.5em;
+  margin-right: calc(0.5em * var(--density));
   width: 4em;
 }
 
@@ -380,7 +387,7 @@ th {
   background-color: var(--color-bg2);
 }
 th, td {
-  padding: 1em;
+  padding: calc(1em * var(--density));
   text-align: left;
   overflow-x: auto;
 }
@@ -463,9 +470,9 @@ table#table tbody tr:hover.needsReview td {
 .needsReviewBanner {
   display: flex;
   align-items: center;
-  gap: 0.6em;
-  margin-top: 0.5em;
-  padding: 0.4em 0.6em;
+  gap: calc(0.6em * var(--density));
+  margin-top: calc(0.5em * var(--density));
+  padding: calc(0.4em * var(--density)) calc(0.6em * var(--density));
   background: rgba(255, 180, 0, 0.12);
   border: 1px solid rgba(255, 180, 0, 0.35);
 }
@@ -473,9 +480,9 @@ table#table tbody tr:hover.needsReview td {
 .compareBanner {
   display: flex;
   align-items: center;
-  gap: 0.6em;
-  margin-top: 0.5em;
-  padding: 0.4em 0.6em;
+  gap: calc(0.6em * var(--density));
+  margin-top: calc(0.5em * var(--density));
+  padding: calc(0.4em * var(--density)) calc(0.6em * var(--density));
   background: rgba(80, 160, 255, 0.12);
   border: 1px solid rgba(80, 160, 255, 0.35);
 }
@@ -483,9 +490,9 @@ table#table tbody tr:hover.needsReview td {
 .englishDiff {
   background: var(--color-element);
   border: 1px solid black;
-  padding: 0.35em 0.6em;
-  line-height: 1.35em;
-  font-size: 13px;
+  padding: calc(0.35em * var(--density)) calc(0.6em * var(--density));
+  line-height: calc(1.35em * var(--density));
+  font-size: calc(13px * var(--density));
   white-space: pre-wrap;
 }
 
@@ -499,7 +506,7 @@ table#table tbody tr:hover.needsReview td {
 }
 
 .historyModeBtn {
-  padding: 0.15em 0.5em;
+  padding: calc(0.15em * var(--density)) calc(0.5em * var(--density));
 }
 
 .historyModeBtn.active {
@@ -523,7 +530,7 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .editor>* {
-  padding: 0px 0.35em;
+  padding: 0px calc(0.35em * var(--density));
   box-sizing: border-box;
 }
 
@@ -535,36 +542,36 @@ button, label, th, td, input[type="checkbox"] {
 .editor button,
 .editor select,
 .editor textarea {
-  padding: 0.35em 0.75em;
-  line-height: 1.25em;
-  font-size: 13px;
+  padding: calc(0.35em * var(--density)) calc(0.75em * var(--density));
+  line-height: calc(1.25em * var(--density));
+  font-size: calc(13px * var(--density));
 }
 
 .editor h1 {
-  font-size: 18px;
+  font-size: calc(18px * var(--density));
   margin: 0;
 }
 
 .editor h3 {
-  font-size: 12px;
-  margin: 0.4em 0 0.6em 0;
+  font-size: calc(12px * var(--density));
+  margin: calc(0.4em * var(--density)) 0 calc(0.6em * var(--density)) 0;
   font-weight: 600;
 }
 
 .editor .twoSided {
   align-items: center;
-  gap: 0.5em;
+  gap: calc(0.5em * var(--density));
 }
 
 .editor .textHL {
-  font-size: 13px;
-  --padding-top: 0.35em;
-  --padding-left: 0.75em;
+  font-size: calc(13px * var(--density));
+  --padding-top: calc(0.35em * var(--density));
+  --padding-left: calc(0.75em * var(--density));
 }
 
 .editor>.fixed {
   position: fixed;
-  height: calc(100% - 120px);
+  height: calc(100% - (120px * var(--density)));
   z-index: 1;
   top: 0;
   overflow-y: auto;
@@ -581,9 +588,9 @@ button, label, th, td, input[type="checkbox"] {
   right: 0;
   bottom: 0;
   width: var(--side-width);
-  height: 120px;
+  height: calc(120px * var(--density));
   overflow: hidden;
-  padding: 0.6em;
+  padding: calc(0.6em * var(--density));
 }
 .editor>.clipboard>textarea {
   width: 100%;
@@ -605,13 +612,13 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .editBlock {
-  padding: 0.6em 1em;
+  padding: calc(0.6em * var(--density)) calc(1em * var(--density));
   background-color: var(--color-bg2);
-  margin-top: 0.6em;
+  margin-top: calc(0.6em * var(--density));
 }
 .side .editBlock {
-  padding: 0.5em 0.6em;
-  margin-top: 0.5em;
+  padding: calc(0.5em * var(--density)) calc(0.6em * var(--density));
+  margin-top: calc(0.5em * var(--density));
   position: relative;
   transition: transform 140ms ease, box-shadow 320ms ease;
 }
@@ -650,14 +657,14 @@ button, label, th, td, input[type="checkbox"] {
   position: sticky;
   top: 0;
   background-color: var(--color-bg);
-  padding-top: 0.25em;
-  padding-bottom: 0.25em;
+  padding-top: calc(0.25em * var(--density));
+  padding-bottom: calc(0.25em * var(--density));
   z-index: 2;
 }
 
 .sideTabs {
   display: flex;
-  gap: 0.25em;
+  gap: calc(0.25em * var(--density));
 }
 
 .tabBtn.active {
@@ -666,25 +673,25 @@ button, label, th, td, input[type="checkbox"] {
 
 .sideFilter {
   width: 100%;
-  margin-top: 0.5em;
+  margin-top: calc(0.5em * var(--density));
 }
 
 .side input,
 .side button,
 .side select,
 .side textarea {
-  padding: 0.25em 0.5em;
-  line-height: 1.2em;
+  padding: calc(0.25em * var(--density)) calc(0.5em * var(--density));
+  line-height: calc(1.2em * var(--density));
 }
 
 .historyPanel {
-  padding-top: 0.5em;
+  padding-top: calc(0.5em * var(--density));
 }
 
 .historyMeta {
-  padding: 0.5em 0.6em;
+  padding: calc(0.5em * var(--density)) calc(0.6em * var(--density));
   background-color: var(--color-bg2);
-  margin-top: 0.5em;
+  margin-top: calc(0.5em * var(--density));
 }
 
 .historyTitle {
@@ -693,18 +700,18 @@ button, label, th, td, input[type="checkbox"] {
 
 .historySubtitle {
   opacity: 0.85;
-  font-size: 0.9em;
+  font-size: calc(0.9em * var(--density));
 }
 
 .historyList {
-  margin-top: 0.5em;
+  margin-top: calc(0.5em * var(--density));
 }
 
 .historyItem {
   display: flex;
-  gap: 0.4em;
+  gap: calc(0.4em * var(--density));
   align-items: center;
-  margin-top: 0.35em;
+  margin-top: calc(0.35em * var(--density));
 }
 
 .historyPick {
@@ -730,24 +737,24 @@ button, label, th, td, input[type="checkbox"] {
 
 .historyCompareBar {
   display: flex;
-  gap: 0.5em;
+  gap: calc(0.5em * var(--density));
   align-items: center;
-  margin-top: 0.5em;
+  margin-top: calc(0.5em * var(--density));
 }
 
 .historyDiff {
-  margin-top: 0.5em;
+  margin-top: calc(0.5em * var(--density));
   background-color: var(--color-element);
   border: 1px solid black;
   max-height: 40vh;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 12px;
+  font-size: calc(12px * var(--density));
 }
 
 .diffLine {
   white-space: pre;
-  padding: 0 0.4em;
+  padding: 0 calc(0.4em * var(--density));
 }
 
 .diffLine.add {
@@ -766,13 +773,13 @@ button, label, th, td, input[type="checkbox"] {
 
 .historyLoading,
 .historyEmpty {
-  margin-top: 0.6em;
+  margin-top: calc(0.6em * var(--density));
   opacity: 0.85;
 }
 
 .side .dictRow {
   display: flex;
-  gap: 0.4em;
+  gap: calc(0.4em * var(--density));
   flex-grow: 1;
 }
 
@@ -788,34 +795,34 @@ button, label, th, td, input[type="checkbox"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5em;
-  margin-top: 0.35em;
+  gap: calc(0.5em * var(--density));
+  margin-top: calc(0.35em * var(--density));
   opacity: 0.9;
 }
 
 .side .dictAltHeader > span {
-  font-size: 0.9em;
+  font-size: calc(0.9em * var(--density));
 }
 
 .side .dictAltHeader > button {
-  padding: 0.15em 0.35em;
+  padding: calc(0.15em * var(--density)) calc(0.35em * var(--density));
 }
 
 .side .dictAltRow {
   display: flex;
-  gap: 0.4em;
-  margin-top: 0.25em;
-  padding-left: 0.9em;
+  gap: calc(0.4em * var(--density));
+  margin-top: calc(0.25em * var(--density));
+  padding-left: calc(0.9em * var(--density));
   opacity: 0.95;
 }
 
 .side .dictAltRow > input {
   width: 50%;
-  font-size: 0.9em;
+  font-size: calc(0.9em * var(--density));
 }
 
 .side .dictAltRow > button {
-  padding: 0.15em 0.35em;
+  padding: calc(0.15em * var(--density)) calc(0.35em * var(--density));
 }
 
 .side .dictRow.hlPopupDictActive,
@@ -825,7 +832,7 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .side details.dictTlnote {
-  margin-top: 0.35em;
+  margin-top: calc(0.35em * var(--density));
 }
 
 .side details.dictTlnote > summary {
@@ -835,15 +842,15 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .side details.dictTlnote > textarea {
-  margin-top: 0.35em;
+  margin-top: calc(0.35em * var(--density));
   resize: vertical;
 }
 .edit>.editBlock>* {
-  margin: 0.6em 0;
+  margin: calc(0.6em * var(--density)) 0;
 }
 .inputField {
   display: flex;
-  gap: 0.4em;
+  gap: calc(0.4em * var(--density));
   align-items: center;
 }
 .inputField>input, .inputField>.textHL {
@@ -869,13 +876,13 @@ button, label, th, td, input[type="checkbox"] {
   background-color: var(--color-bg2);
   border: 1px solid black;
   box-shadow: 2px 2px 4px var(--color-shadow);
-  padding: 0.5em;
+  padding: calc(0.5em * var(--density));
   border-radius: 4px;
 }
 
 .hlPopupFilter {
   width: 100%;
-  margin-bottom: 0.5em;
+  margin-bottom: calc(0.5em * var(--density));
 }
 
 .hlPopupList {
@@ -888,8 +895,8 @@ button, label, th, td, input[type="checkbox"] {
 .hlPopupItem {
   display: flex;
   align-items: center;
-  gap: 0.6em;
-  padding: 0.4em 0.6em;
+  gap: calc(0.6em * var(--density));
+  padding: calc(0.4em * var(--density)) calc(0.6em * var(--density));
   cursor: pointer;
   user-select: none;
   min-width: 0;
@@ -905,8 +912,8 @@ button, label, th, td, input[type="checkbox"] {
 
 .hlPopupHotkeyPill {
   flex: 0 0 auto;
-  font-size: 0.78em;
-  padding: 0.12em 0.5em;
+  font-size: calc(0.78em * var(--density));
+  padding: calc(0.12em * var(--density)) calc(0.5em * var(--density));
   border-radius: 999px;
   border: 1px solid rgba(0, 0, 0, 0.55);
   background: rgba(0, 0, 0, 0.1);
@@ -920,7 +927,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .hlPopupItem.alt {
   opacity: 0.92;
-  padding-left: 1.2em;
+  padding-left: calc(1.2em * var(--density));
 }
 
 .hlPopupItem.exact {
@@ -928,6 +935,10 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .hlPopupEmpty {
-  padding: 0.6em;
+  padding: calc(0.6em * var(--density));
   opacity: 0.8;
+}
+
+[data-density="spacious"] {
+  --density: 1.3;
 }

@@ -56,6 +56,7 @@ const config = Vue.defineComponent({
       hideDNT: true,
       highlightDict: true,
       shiftEnterSave: false,
+      uiDensity: 'compact',
 
       sideTab: 'dictionary',
       dictionaryFilter: '',
@@ -2551,6 +2552,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
+        uiDensity: this.uiDensity,
       }
       if (window.OfflineStore && typeof window.OfflineStore.setSettings === 'function') {
         try {
@@ -2571,6 +2573,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
+        uiDensity: this.uiDensity,
       }
       let settingsStr = JSON.stringify(settings, null, 2);
       var settingsBlob = new Blob([settingsStr], {});
@@ -2611,6 +2614,11 @@ const config = Vue.defineComponent({
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
+      if (settings.uiDensity === 'compact' || settings.uiDensity === 'spacious') {
+        this.uiDensity = settings.uiDensity;
+      } else {
+        this.uiDensity = 'compact';
+      }
     },
     async saveLocalDescs() {
       if (!offlineStoreReady) return;

@@ -11,6 +11,7 @@
 </head>
 <body>
   <div id="app">
+    <div class="appRoot" :data-density="uiDensity">
 
     <div class="settingPage centerContainer" v-if="showSetting || needsInitialSettings">
       <div class="box">
@@ -26,6 +27,13 @@
           </select>
         </div>
         <h3>Other settings</h3>
+        <div class="inputField">
+          <label for="uiDensity">UI density</label>
+          <select id="uiDensity" v-model="uiDensity">
+            <option value="compact">Compact</option>
+            <option value="spacious">Spacious</option>
+          </select>
+        </div>
         <input type="checkbox" id="hideDNT" name="hideDNT" v-model="hideDNT">
         <label for="hideDNT"> Hide DNT</label>
         <br>
@@ -308,6 +316,7 @@
       </div>
     </div>
 
+    </div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.0/vue.global.prod.js"></script>
