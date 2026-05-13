@@ -689,10 +689,11 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewLabel {
-  font-size: calc(11px * var(--density));
+  font-size: calc(18px * var(--density));
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #b8b4ad;
+  margin: 0;
 }
 
 .gamePreviewFrameBtns {
