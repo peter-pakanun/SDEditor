@@ -180,7 +180,7 @@ input:focus, button:focus, textarea:focus {
 .textHL>.HLter span[data-hl-id] {
   pointer-events: all;
   cursor: pointer;
-  background-color: color-mix(in srgb, var(--color-element-highlight) 30%, transparent);
+  background-color: color-mix(in srgb, var(--color-element-highlight) 25%, transparent);
   border-radius: 2px;
 }
 
@@ -190,7 +190,7 @@ input:focus, button:focus, textarea:focus {
 }
 
 .textHL>.HLter span[data-hl-id].vocab {
-  background-color: color-mix(in srgb, var(--color-font) 30%, transparent);
+  background-color: color-mix(in srgb, var(--color-font) 15%, transparent);
 }
 
 .textHL>.HLter span[data-hl-id].hlPopupActive {
