@@ -29,6 +29,7 @@ Then open the printed URL (defaults to `http://127.0.0.1:3333/`) and drop `StatD
   - Ctrl+Click 💾 to do a full export
 - Import local changes:
   - After the table loads, you can drag & drop a previously exported ZIP to re-import your edits
+- Translator workflow guide: see [docs/workflow.md](docs/workflow.md).
 
 ## Debug / Test Mode
 
