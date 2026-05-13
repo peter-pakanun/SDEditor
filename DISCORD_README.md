@@ -2,6 +2,7 @@
 *browser-based editor for `StatDescriptions.zip` (translation stat files).*
 You can access the live version [here](<https://sdeditor.pages.dev/>), or if you prefer not to use online version you can clone the [repo](<https://github.com/peter-pakanun/SDEditor>) and run it locally. 
 ## How to use
+[Read Translator full workflow here](https://discord.com/channels/709860422940885013/1503917539338752162/1503917543532925068)
 1) Open the [web app](<https://sdeditor.pages.dev/>) and pick your target language
 2) Drag & drop `StatDescriptions.zip` into the page
 3) Click any row to edit, then save
