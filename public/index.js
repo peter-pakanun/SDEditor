@@ -515,11 +515,7 @@ const config = Vue.defineComponent({
     },
     safeExactRegex(pattern, flags = "igm") {
       let p = String(pattern ?? "");
-      try {
-        return new RegExp("^" + p + "$", flags);
-      } catch (e) {
-        return new RegExp("^" + escapeRegExp(p) + "$", flags);
-      }
+      return new RegExp("^" + escapeRegExp(p) + "$", flags);
     },
     getDictionaryDefinitionPairs(entry) {
       let mainFind = String(entry?.find ?? "").trim();

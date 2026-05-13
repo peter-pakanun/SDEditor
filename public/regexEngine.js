@@ -17,44 +17,52 @@ function regexEngineLookup(str, dictionary, words = []) {
   //   dictionary.sort((a, b) => b.find.length - a.find.length);
   // };
   for (const dict of dictionary) {
-    let regex = new RegExp("^" + dict.find + "$", 'igm');
-    let match = regex.exec(str);
-    if (!match) continue;
+    let isDictionaryEntry = Array.isArray(dict?.alts) || String(dict?._id || "").startsWith("d_");
+    let defs = isDictionaryEntry ? getDictEntryDefinitionsWithMeta(dict) : [{ find: String(dict?.find ?? "").trim(), replace: dict?.replace }];
 
-    let replace = dict.replace;
-    let failed = false;
-    let failStr = "";
+    for (const def of defs) {
+      let find = String(def?.find ?? "").trim();
+      if (!find) continue;
+      let findPattern = isDictionaryEntry ? escapeRegExp(find) : find;
+      let regex = new RegExp("^" + findPattern + "$", 'igm');
+      let match = regex.exec(str);
+      if (!match) continue;
 
-    let m;
-    while (m = /\$(R?)(\d+)/.exec(replace)) {
-      let isRecursive = m[1] == 'R';
-      let index = parseInt(m[2]);
-      let captured = match[index];
-      if (isRecursive) {
-        let r = regexEngineLookup(captured, dictionary);
-        replace = replace.replace(m[0], r.replace);
-        words.push(...r.words)
-        if (r.failed) {
-          failed = true;
-          failStr = r.failStr;
-        }
-      } else {
-        let transformed = checkKeywordPopupTag(captured, '🔖');
-        if (!transformed || !transformed.word) {
-          words.push(captured);
-          replace = replace.replace(m[0], '🔖')
+      let replace = def?.replace;
+      let failed = false;
+      let failStr = "";
+
+      let m;
+      while (m = /\$(R?)(\d+)/.exec(replace)) {
+        let isRecursive = m[1] == 'R';
+        let index = parseInt(m[2]);
+        let captured = match[index];
+        if (isRecursive) {
+          let r = regexEngineLookup(captured, dictionary);
+          replace = replace.replace(m[0], r.replace);
+          words.push(...r.words)
+          if (r.failed) {
+            failed = true;
+            failStr = r.failStr;
+          }
         } else {
-          words.push(transformed.word);
-          replace = replace.replace(m[0], transformed.replace);
+          let transformed = checkKeywordPopupTag(captured, '🔖');
+          if (!transformed || !transformed.word) {
+            words.push(captured);
+            replace = replace.replace(m[0], '🔖')
+          } else {
+            words.push(transformed.word);
+            replace = replace.replace(m[0], transformed.replace);
+          }
         }
       }
-    }
 
-    return {
-      replace,
-      words,
-      failed,
-      failStr
+      return {
+        replace,
+        words,
+        failed,
+        failStr
+      }
     }
   }
 
@@ -171,7 +179,7 @@ function regexEngineCreate(str, dictionary) {
         if (lower.includes("less")) continue;
         if (lower.includes("second")) continue;
 
-        let pattern = def.isMain ? def.find : escapeRegExp(def.find);
+        let pattern = escapeRegExp(def.find);
         let regex = new RegExp("\\b(" + pattern + ")\\b", "ig");
         if (m = regex.exec(f)) {
           for (let i = 0; i < m.length; i++) {
