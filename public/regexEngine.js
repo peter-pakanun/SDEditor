@@ -292,3 +292,14 @@ function getDictEntryDefinitionsWithMeta(dictEntry) {
   }
   return out;
 }
+
+/**
+ * @param {string} fullMatch e.g. "{0}", "{0}%", "@{1}"
+ * @returns {string} brace-inner identity so "{0}" and "{0}%" share the same key
+ */
+function getGggVarIdentityKey(fullMatch) {
+  let s = String(fullMatch ?? "");
+  let m = /^[@+\-]?\{([^}]*)\}\%?$/.exec(s);
+  if (!m) return s;
+  return m[1] != null ? m[1] : "";
+}

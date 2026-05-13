@@ -130,7 +130,12 @@ const config = Vue.defineComponent({
           replace: "ไฟ"
         },
       ],
-      editorClipboard: ""
+      editorClipboard: "",
+
+      gamePreviewFrame: "m",
+      gamePreviewFonts: null,
+      previewGggVars: {},
+      gamePreviewSegments: []
     }
   },
   async mounted() {
@@ -388,6 +393,21 @@ const config = Vue.defineComponent({
         let replace = (regex?.replace || "").toLowerCase();
         return find.includes(f) || replace.includes(f) || `${find} ${replace}`.includes(f);
       });
+    },
+    gamePreviewFontFamily() {
+      return this.getGamePreviewFontFamily(this.lang);
+    },
+    gamePreviewVarKeyList() {
+      let seen = new Set();
+      let out = [];
+      for (const seg of this.gamePreviewSegments || []) {
+        if (seg?.type !== "var") continue;
+        let k = String(seg.key ?? "");
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(k);
+      }
+      return out;
     }
   },
   methods: {
@@ -401,6 +421,96 @@ const config = Vue.defineComponent({
       } catch (_) {
         return null;
       }
+    },
+    getGamePreviewFontFamily(lang) {
+      let map = this.gamePreviewFonts;
+      if (map && typeof map === "object" && !Array.isArray(map) && lang && map[lang]) {
+        return String(map[lang]);
+      }
+      if (lang === "Thai") return '"Kanit", sans-serif';
+      return '"Fontin", serif';
+    },
+    defaultPreviewVarValue(key) {
+      let k = String(key ?? "");
+      if (k === "") return "?";
+      if (/^\d+$/.test(k)) return k;
+      return k;
+    },
+    mergePreviewGggVars(keysOrder) {
+      let prev = this.previewGggVars && typeof this.previewGggVars === "object" ? this.previewGggVars : {};
+      let next = {};
+      for (let i = 0; i < (keysOrder || []).length; i++) {
+        let k = keysOrder[i];
+        let ks = String(k);
+        if (Object.prototype.hasOwnProperty.call(prev, ks)) {
+          next[ks] = prev[ks];
+        } else {
+          next[ks] = this.defaultPreviewVarValue(ks);
+        }
+      }
+      this.previewGggVars = next;
+    },
+    buildGamePreviewSegments(decodedString) {
+      let s = String(decodedString ?? "");
+      let kwRe = new RegExp("^" + keywordPopupTagRegex, "i");
+      let gggRe = new RegExp("^" + gggVarTagRegex, "i");
+      let segments = [];
+      let keysOrder = [];
+      let keySeen = new Set();
+      let i = 0;
+      let textBuf = "";
+      let flushText = () => {
+        if (textBuf) {
+          segments.push({ type: "text", text: textBuf });
+          textBuf = "";
+        }
+      };
+      while (i < s.length) {
+        let slice = s.slice(i);
+        let km = kwRe.exec(slice);
+        if (km && km.index === 0) {
+          flushText();
+          let tagName = String(km[2] ?? "").trim();
+          let dynamicContent = String(km[3] ?? "").trim();
+          let display = dynamicContent || tagName;
+          segments.push({ type: "kw", text: display });
+          i += km[0].length;
+          continue;
+        }
+        let gm = gggRe.exec(slice);
+        if (gm && gm.index === 0) {
+          flushText();
+          let full = gm[0];
+          let key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
+          let ks = String(key);
+          if (!keySeen.has(ks)) {
+            keySeen.add(ks);
+            keysOrder.push(ks);
+          }
+          let trailingPercent = full.endsWith("%");
+          segments.push({ type: "var", key: ks, trailingPercent });
+          i += full.length;
+          continue;
+        }
+        textBuf += s[i];
+        i++;
+      }
+      flushText();
+      return { segments, keysOrder };
+    },
+    refreshGamePreview() {
+      if (!this.editorVisible) return;
+      let block = this.editorBlocks?.[this.editorFocusedIndex];
+      let raw = block?.translation ?? "";
+      let decoded = this.decodeEscapedNewlines(raw);
+      let { segments, keysOrder } = this.buildGamePreviewSegments(decoded);
+      this.mergePreviewGggVars(keysOrder);
+      this.gamePreviewSegments = segments;
+    },
+    setGamePreviewFrame(v) {
+      if (v !== "s" && v !== "m" && v !== "l") return;
+      this.gamePreviewFrame = v;
+      this.saveSettings();
     },
     ensureLocalDescsReady() {
       if (!this.localDescs || typeof this.localDescs !== 'object') {
@@ -600,6 +710,7 @@ const config = Vue.defineComponent({
       if (!editorBlock?.isMultiline) {
         editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "");
       }
+      this.refreshGamePreview();
     },
     computeMultilineLineMismatch(english, translation) {
       let eng = this.normalizeNewlines(english ?? "");
@@ -700,6 +811,7 @@ const config = Vue.defineComponent({
       }
       if (typeof editorIndex === "number") this.refreshEditorBlockHLter(editorIndex);
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
+      this.refreshGamePreview();
     },
     loadDummyData() {
       let desc1 = parseDesc("test/dummy1.txt", dummyFile1, this.lang);
@@ -938,6 +1050,7 @@ const config = Vue.defineComponent({
     },
     setEditorFocus(index) {
       this.editorFocusedIndex = index;
+      this.refreshGamePreview();
       if (this.hlPopup.visible) {
         this.openHlPopup(index);
       }
@@ -2190,6 +2303,7 @@ const config = Vue.defineComponent({
           this.syncHlScroll('english', i);
           this.syncHlScroll('translation', i);
         }
+        this.refreshGamePreview();
       });
       if (this.sideTab === 'history') this.refreshHistory();
       if (desc.needsReview) {
@@ -2555,6 +2669,8 @@ const config = Vue.defineComponent({
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         uiDensity: this.uiDensity,
+        gamePreviewFrame: this.gamePreviewFrame,
+        gamePreviewFonts: this.gamePreviewFonts,
       }
       if (window.OfflineStore && typeof window.OfflineStore.setSettings === 'function') {
         try {
@@ -2576,6 +2692,8 @@ const config = Vue.defineComponent({
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         uiDensity: this.uiDensity,
+        gamePreviewFrame: this.gamePreviewFrame,
+        gamePreviewFonts: this.gamePreviewFonts,
       }
       let settingsStr = JSON.stringify(settings, null, 2);
       var settingsBlob = new Blob([settingsStr], {});
@@ -2620,6 +2738,12 @@ const config = Vue.defineComponent({
         this.uiDensity = settings.uiDensity;
       } else {
         this.uiDensity = 'compact';
+      }
+      if (settings.gamePreviewFrame === 's' || settings.gamePreviewFrame === 'm' || settings.gamePreviewFrame === 'l') {
+        this.gamePreviewFrame = settings.gamePreviewFrame;
+      }
+      if (settings.gamePreviewFonts && typeof settings.gamePreviewFonts === 'object' && !Array.isArray(settings.gamePreviewFonts)) {
+        this.gamePreviewFonts = settings.gamePreviewFonts;
       }
     },
     async saveLocalDescs() {
@@ -2682,6 +2806,7 @@ const config = Vue.defineComponent({
         editorBlock.translation = editorBlock.translation.replace('🔖', word.replace);
       }
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
+      this.refreshGamePreview();
     },
     addRegex(find="", replace="") {
       this.editorRegexes.unshift({ find, replace });

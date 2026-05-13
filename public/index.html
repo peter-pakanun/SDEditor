@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <link href="https://fonts.googleapis.com/css2?family=Sarabun&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="spinner.css">
   <link rel="stylesheet" href="index.css">
   <title>SDEditor</title>
@@ -158,6 +159,36 @@
 
     <div class="editor" v-if="editorVisible" @keydown.ctrl.s.prevent.stop="editorSave" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
+        <div class="gamePreviewStrip">
+          <div class="gamePreviewToolbar twoSided">
+            <span class="gamePreviewLabel">In-game preview</span>
+            <div class="gamePreviewFrameBtns">
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" title="Small frame" @click="setGamePreviewFrame('s')">▢</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" title="Medium frame" @click="setGamePreviewFrame('m')">▣</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" title="Large frame" @click="setGamePreviewFrame('l')">▦</button>
+            </div>
+          </div>
+          <div class="gamePreviewMainRow">
+            <div v-if="gamePreviewVarKeyList.length > 0" class="gamePreviewVarsColumn">
+              <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
+                <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
+                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :aria-label="'Variable {' + k + '}'">
+              </div>
+            </div>
+            <div class="gamePreviewFrameWrap">
+              <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
+                <template v-for="(seg, si) in gamePreviewSegments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
+                  <span v-if="seg.type === 'text'" class="gamePreviewText">{{ seg.text }}</span>
+                  <span v-else-if="seg.type === 'kw'" class="gamePreviewKw">{{ seg.text }}</span>
+                  <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay">
+                    <span class="gamePreviewVarValue">{{ previewGggVars[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
+                  </span>
+                </template>
+                <span v-if="gamePreviewSegments.length === 0" class="gamePreviewEmpty">(empty)</span>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
           <button @click="editorSave" :disabled="editorCompareActive" title="Save (Ctrl+S)">💾</button>

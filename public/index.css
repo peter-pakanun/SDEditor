@@ -611,6 +611,185 @@ button, label, th, td, input[type="checkbox"] {
   margin-right: var(--side-width);
 }
 
+/* Optional: add Fontin-*.woff2 under public/fonts/ to use the in-game face */
+@font-face {
+  font-family: "Fontin";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Fontin"), url("fonts/Fontin-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Fontin";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local("Fontin Bold"), url("fonts/Fontin-Bold.woff2") format("woff2");
+}
+
+.gamePreviewStrip {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  margin: 0 calc(-0.35em * var(--density)) calc(0.75em * var(--density));
+  padding: calc(0.55em * var(--density)) calc(0.6em * var(--density));
+  background: #121214;
+  color: #e8e6e3;
+  border-bottom: 1px solid #2a2a30;
+  box-sizing: border-box;
+}
+
+.gamePreviewToolbar {
+  align-items: center;
+  margin-bottom: calc(0.45em * var(--density));
+}
+
+.gamePreviewLabel {
+  font-size: calc(11px * var(--density));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #b8b4ad;
+}
+
+.gamePreviewFrameBtns {
+  display: flex;
+  gap: calc(0.25em * var(--density));
+}
+
+.gamePreviewFrameBtn {
+  padding: calc(0.2em * var(--density)) calc(0.45em * var(--density));
+  line-height: 1.2;
+  font-size: calc(14px * var(--density));
+  background: #1e1e24;
+  color: #c8c4bc;
+  border: 1px solid #3a3a44;
+  cursor: pointer;
+}
+
+.gamePreviewFrameBtn:hover {
+  background: #2a2a32;
+}
+
+.gamePreviewFrameBtn.active {
+  border-color: #8b7355;
+  background: #2a2620;
+  color: #f0ebe4;
+}
+
+.gamePreviewMainRow {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(0.75em * var(--density));
+}
+
+.gamePreviewVarsColumn {
+  flex: 0 0 auto;
+  min-width: 6.5em;
+  max-width: 12em;
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.35em * var(--density));
+  padding-top: calc(0.15em * var(--density));
+}
+
+.gamePreviewVarField {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.12em * var(--density));
+}
+
+.gamePreviewVarLabel {
+  font-size: calc(10px * var(--density));
+  font-weight: 600;
+  color: #9a958c;
+  font-family: ui-monospace, monospace;
+}
+
+.gamePreviewStrip .gamePreviewVarInput {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: calc(0.22em * var(--density)) calc(0.4em * var(--density));
+  font-size: calc(12px * var(--density));
+  line-height: 1.35;
+  color: #f0ebe4;
+  background: #1e1e24;
+  border: 1px solid #4a4338;
+}
+
+.gamePreviewStrip .gamePreviewVarInput:focus {
+  outline: 1px solid #8b7355;
+}
+
+.gamePreviewFrameWrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.gamePreviewWindow {
+  display: inline-block;
+  max-width: 100%;
+  padding: calc(0.55em * var(--density)) calc(0.75em * var(--density));
+  background: #0b0b0d;
+  border: 1px solid #4a4338;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+  color: #dcd6cf;
+  font-size: calc(14px * var(--density));
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+  box-sizing: border-box;
+}
+
+.gamePreviewWindow--s {
+  width: 100%;
+  max-width: 320px;
+}
+
+.gamePreviewWindow--m {
+  width: 100%;
+  max-width: 480px;
+}
+
+.gamePreviewWindow--l {
+  width: 100%;
+  max-width: 720px;
+}
+
+.gamePreviewText {
+  white-space: pre-wrap;
+}
+
+.gamePreviewKw {
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gamePreviewVarDisplay {
+  display: inline;
+  white-space: normal;
+}
+
+.gamePreviewVarValue {
+  font-weight: 600;
+  color: #f4ede3;
+}
+
+.gamePreviewVarPct {
+  font-weight: 600;
+}
+
+.gamePreviewEmpty {
+  color: #6a6560;
+  font-style: italic;
+}
+
 .editBlock {
   padding: calc(0.6em * var(--density)) calc(1em * var(--density));
   background-color: var(--color-bg2);
