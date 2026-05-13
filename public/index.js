@@ -992,7 +992,7 @@ const config = Vue.defineComponent({
                 let tn = unescapeHtml(hl.tagName || "").trim();
                 if (!tn) tn = p.find;
                 // [tagName|find] → [tagName|replace]
-                value = `[${tn}|${p?.replace ?? ""}]`;
+                value = `[${tn}|${p?.replace ?? p?.find ?? ""}]`;
                 label = `[${tn}|${p?.find ?? ""}] → ${value}`;
               } else {
                 // find → replace
