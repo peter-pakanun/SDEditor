@@ -1048,6 +1048,13 @@ const config = Vue.defineComponent({
         this.refreshEditorHLter();
       }, 150);
     },
+    /** Rebuild english HLs immediately so foundDictionarySet / filteredDictionary match the current dictionary (avoids focus loss when a debounced refresh later re-sorts the sidebar list). */
+    syncEditorHlterWithDictionaryNow() {
+      if (!this.editorVisible) return;
+      if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
+      this._hlterRefreshTimer = null;
+      this.refreshEditorHLter();
+    },
     setEditorFocus(index) {
       this.editorFocusedIndex = index;
       this.refreshGamePreview();
@@ -1277,6 +1284,7 @@ const config = Vue.defineComponent({
         this._dictFlashTimer = setTimeout(() => {
           if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
         }, 320);
+        this.syncEditorHlterWithDictionaryNow();
         if (addedAlt && createdAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: createdAltId });
         else this.focusDictionaryEntryReplaceInput(existing._id);
         return { dictId: existing._id || "", created: false, addedAlt };
@@ -1296,6 +1304,7 @@ const config = Vue.defineComponent({
       this._dictFlashTimer = setTimeout(() => {
         if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
       }, 320);
+      this.syncEditorHlterWithDictionaryNow();
       if (createdAltId) this.focusDictionaryEntryReplaceInput(entry._id, { altId: createdAltId });
       else this.focusDictionaryEntryReplaceInput(entry._id);
       return { dictId: entry._id, created: true, addedAlt: !!alt };
