@@ -779,7 +779,8 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewVarValue {
-  font-weight: 600;
+  /* Mandela Effect got me, it wasn't bold */
+  /* font-weight: 600; */
   color: #f4ede3;
 }
 
