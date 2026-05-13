@@ -9,6 +9,20 @@ const TEST_MODE = (() => {
 const URL_LANG = urlParams.get('lang');
 const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
 
+/** BCP 47 tags for <input>/<textarea lang> so the browser spellchecker matches Settings → language. */
+const SETTINGS_LANG_TO_BCP47 = {
+  Thai: "th",
+  Portuguese: "pt",
+  German: "de",
+  Russian: "ru",
+  Spanish: "es",
+  French: "fr",
+  "Traditional Chinese": "zh-Hant",
+  "Simplified Chinese": "zh-Hans",
+  Korean: "ko",
+  Japanese: "ja",
+};
+
 /** CSS font-family stacks */
 const GAME_PREVIEW_FONT_STACKS = {
   Thai: '"Kanit", sans-serif',
@@ -288,6 +302,12 @@ const config = Vue.defineComponent({
         }
       }
       return false;
+    },
+    /** BCP 47 tag for translation `<input>` / `<textarea>` `lang` (browser spellcheck follows this in Chromium). */
+    translationEditorBcp47() {
+      if (!this.lang) return undefined;
+      const code = SETTINGS_LANG_TO_BCP47[this.lang];
+      return code || undefined;
     },
     pageCount() {
       return Math.ceil(this.filteredDescs.length / this.pageSize);

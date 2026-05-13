@@ -173,7 +173,7 @@
             <div v-if="gamePreviewVarKeyList.length > 0" class="gamePreviewVarsColumn">
               <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
                 <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
-                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :aria-label="'Variable {' + k + '}'">
+                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :lang="translationEditorBcp47" :aria-label="'Variable {' + k + '}'">
               </div>
             </div>
             <div class="gamePreviewFrameWrap">
@@ -213,8 +213,8 @@
             <div class="textHL" :class="{ multiline: editorBlock.isMultiline }">
               <div v-if="editorShowEnglishDiff" class="englishDiff" v-html="editorBlock.englishDiffHtml"></div>
               <template v-else>
-                <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly v-model="editorBlock.english" tabindex="-1">
-                <textarea v-else placeholder="English" readonly v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
+                <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
+                <textarea v-else placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
                 <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
             </div>
@@ -223,11 +223,11 @@
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
-            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
+            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
             <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div v-else class="textHL multiline">
-            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
+            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
             <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
@@ -237,7 +237,7 @@
           </div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
-            <input type="text" placeholder="Replace" v-model="word.replace" @input="doTranslationReplace(editorBlock, true)">
+            <input type="text" placeholder="Replace" v-model="word.replace" :lang="translationEditorBcp47" @input="doTranslationReplace(editorBlock, true)">
           </div>
         </div>
       </div>
@@ -258,21 +258,21 @@
             <div class="twoSided dictEntryBlock">
               <div>
                 <div class="dictRow" :data-dict-id="word._id">
-                  <input type="text" v-model="word.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryEntryFindMatched(word) }">
-                  <input type="text" v-model="word.replace" placeholder="Replace">
+                  <input type="text" v-model="word.find" placeholder="Find" lang="en" :class="{ dictExactMatchFind: isDictionaryEntryFindMatched(word) }">
+                  <input type="text" v-model="word.replace" placeholder="Replace" :lang="translationEditorBcp47">
                 </div>
                 <div class="dictAltHeader">
                   <span>Alternates</span>
                   <button @click="addDictionaryAltRow(word)">➕</button>
                 </div>
                 <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
-                  <input type="text" v-model="alt.find" placeholder="Find" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
-                  <input type="text" v-model="alt.replace" placeholder="Replace">
+                  <input type="text" v-model="alt.find" placeholder="Find" lang="en" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
+                  <input type="text" v-model="alt.replace" placeholder="Replace" :lang="translationEditorBcp47">
                   <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
                 </div>
                 <details class="dictTlnote">
                   <summary>TL note</summary>
-                  <textarea rows="3" v-model="word.tlnote" placeholder="Translator note (shared)"></textarea>
+                  <textarea rows="3" v-model="word.tlnote" placeholder="Translator note (shared)" :lang="translationEditorBcp47"></textarea>
                 </details>
               </div>
               <button class="dictDeleteBtn" @click="removeVocab(word)">🗑️</button>
@@ -331,7 +331,7 @@
       </div>
 
       <div class="fixed clipboard">
-        <textarea placeholder="📋 Clipboard" v-model.lazy="editorClipboard"></textarea>
+        <textarea placeholder="📋 Clipboard" v-model.lazy="editorClipboard" :lang="translationEditorBcp47"></textarea>
       </div>
 
       <div v-if="hlPopup.visible" class="hlPopupBackdrop" @mousedown="closeHlPopup">
