@@ -611,6 +611,7 @@ button, label, th, td, input[type="checkbox"] {
   margin-right: var(--side-width);
 }
 
+/* A font by Jos Buivenga (exljbris) -> www.exljbris.com */
 /* Optional: add Fontin-*.woff2 under public/fonts/ to use the in-game face */
 @font-face {
   font-family: "Fontin";
@@ -626,6 +627,48 @@ button, label, th, td, input[type="checkbox"] {
   font-weight: 700;
   font-display: swap;
   src: local("Fontin Bold"), url("fonts/Fontin-Bold.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Fontin Smallcaps";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Fontin SmallCaps"), local("Fontin Smallcaps"), url("fonts/Fontin-SmallCaps.woff2") format("woff2");
+}
+
+/* Japanese UI (Metadata); add Koruri-Regular.woff2 under public/fonts/ — see fonts/FONTS.md */
+@font-face {
+  font-family: "Koruri Regular";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Koruri";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
+}
+
+/* Latin body (PoE); optional — see fonts/FONTS.md */
+@font-face {
+  font-family: "Friz Quadrata ITC";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Friz Quadrata";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
 }
 
 .gamePreviewStrip {

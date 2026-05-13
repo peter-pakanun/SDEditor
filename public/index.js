@@ -9,6 +9,20 @@ const TEST_MODE = (() => {
 const URL_LANG = urlParams.get('lang');
 const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
 
+/** CSS font-family stacks */
+const GAME_PREVIEW_FONT_STACKS = {
+  Thai: '"Kanit", sans-serif',
+  "Traditional Chinese": '"Noto Sans TC", sans-serif',
+  "Simplified Chinese": '"Noto Sans SC", sans-serif',
+  Korean: '"Spoqa Han Sans Neo", "Noto Sans KR", sans-serif',
+  Japanese: '"Koruri Regular", "Koruri", "Noto Sans JP", sans-serif',
+  Spanish: '"Fontin Smallcaps", "Fontin", "Noto Serif", serif',
+  French: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  Portuguese: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  German: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  Russian: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+};
+
 const config = Vue.defineComponent({
   data() {
     return {
@@ -427,8 +441,10 @@ const config = Vue.defineComponent({
       if (map && typeof map === "object" && !Array.isArray(map) && lang && map[lang]) {
         return String(map[lang]);
       }
-      if (lang === "Thai") return '"Kanit", sans-serif';
-      return '"Fontin", serif';
+      if (lang && Object.prototype.hasOwnProperty.call(GAME_PREVIEW_FONT_STACKS, lang)) {
+        return GAME_PREVIEW_FONT_STACKS[lang];
+      }
+      return '"Fontin", "Noto Serif", serif';
     },
     defaultPreviewVarValue(key) {
       let k = String(key ?? "");
