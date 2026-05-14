@@ -184,9 +184,9 @@
               <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
                 <template v-for="(seg, si) in gamePreviewSegments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                   <span v-if="seg.type === 'text'" class="gamePreviewText">{{ seg.text }}</span>
-                  <span v-else-if="seg.type === 'kw'" class="gamePreviewKw">{{ seg.text }}</span>
+                  <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :title="seg.full">{{ seg.text }}</span>
                   <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay">
-                    <span class="gamePreviewVarValue">{{ previewGggVars[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
+                    <span class="gamePreviewVarValue" :title="seg.full">{{ seg.prefix + previewGggVars[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                   </span>
                   <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                   <span v-else-if="seg.type === 'break'" class="gamePreviewBreak"></span>

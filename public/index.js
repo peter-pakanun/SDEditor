@@ -509,7 +509,7 @@ const config = Vue.defineComponent({
           let tagName = String(km[2] ?? "").trim();
           let dynamicContent = String(km[3] ?? "").trim();
           let display = dynamicContent || tagName;
-          segments.push({ type: "kw", text: display });
+          segments.push({ type: "kw", text: display, full: km[0] });
           i += km[0].length;
           continue;
         }
@@ -535,8 +535,9 @@ const config = Vue.defineComponent({
             keySeen.add(ks);
             keysOrder.push(ks);
           }
+          let prefix = ["@", "+", "-"].includes(full[0]) ? full[0] : "";
           let trailingPercent = full.endsWith("%");
-          segments.push({ type: "var", key: ks, trailingPercent });
+          segments.push({ type: "var", key: ks, trailingPercent, full, prefix });
           i += full.length;
           continue;
         }
