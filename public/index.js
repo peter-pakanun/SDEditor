@@ -222,14 +222,14 @@ const config = Vue.defineComponent({
       this.loadingProgress = 99.999;
     }
 
-    if (!this.sourceLoaded) this.loadingProgress = 0;
+    if (!this.sourceLoaded) this.loadingProgress = 100;
     offlineStoreReady = true;
     this.offlineStoreReady = true;
     this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
 
     await this.saveSettings();
-    if (this.sourceLoaded) this.loadingProgress = 100;
+    this.loadingProgress = 100;
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
@@ -1706,14 +1706,6 @@ const config = Vue.defineComponent({
         this.editFile(firstDesc.filepath);
       }
     },
-    async fileDropped(e) {
-      e.preventDefault();
-      if (e.dataTransfer.files.length !== 1) return; // only accpet one file at a time
-
-      const file = e.dataTransfer.files[0];
-      await this.importUpdateZipFile(file);
-    },
-
     importUpdateZipClicked() {
       this.importDialogVisible = true;
     },
@@ -1728,6 +1720,9 @@ const config = Vue.defineComponent({
     },
     importNextVersionZipClicked() {
       this.closeImportDialog();
+      this.$refs.importUpdateZipFile?.click?.();
+    },
+    importPreviousVersionZipClicked() {
       this.$refs.importUpdateZipFile?.click?.();
     },
     importTranslatedZipClicked() {

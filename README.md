@@ -4,7 +4,7 @@ Browser-based editor for `StatDescriptions.zip` (stat description translation fi
 
 ## Features
 
-- Load `StatDescriptions.zip` via drag & drop
+- Load `StatDescriptions.zip` via the import button
 - Filter/search and paginate entries
 - Edit translations with dictionary + regex helpers
 - Highlights and metadata to help catch mismatches (lines / `{}` variables / `[]` tags)
@@ -20,15 +20,16 @@ npm install
 node server.js
 ```
 
-Then open the printed URL (defaults to `http://127.0.0.1:3333/`) and drop `StatDescriptions.zip` into the page.
+Then open the printed URL (defaults to `http://127.0.0.1:3333/`), select your language, and use the 📦 **Import** button to load `StatDescriptions.zip`.
 
 ## Usage Notes
 
 - Export:
   - Click 💾 to export files you changed in this session
   - Ctrl+Click 💾 to do a full export
-- Import local changes:
-  - After the table loads, you can drag & drop a previously exported ZIP to re-import your edits
+- Import:
+  - After the table loads, click 📦 to import a ZIP file
+  - You can import a previously exported `StatDescriptions_Translated.zip` to restore your edits
 - Translator workflow guide: see [docs/workflow.md](docs/workflow.md).
 
 ## Debug / Test Mode

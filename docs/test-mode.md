@@ -1,8 +1,8 @@
 # Test Mode (Automation / AI)
 
-SDEditor normally starts by asking you to drag & drop `StatDescriptions.zip` into the browser.
+SDEditor normally starts with an empty table and requires you to use the 📦 **Import** button to load `StatDescriptions.zip`.
 
-For debugging and automation (including AI-driven testing), the app supports a `testMode` that skips file drag & drop and loads built-in dummy data instead.
+For debugging and automation (including AI-driven testing), the app supports a `testMode` that skips the import requirement and loads built-in dummy data instead.
 
 ## Usage
 

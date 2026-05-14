@@ -293,44 +293,44 @@ input:focus, button:focus, textarea:focus {
   border-radius: 5px;
 }
 
-.droparea>div {
+.loadingContainer>div {
   display: flex;
   align-items: center;
   gap: calc(3em * var(--density));
 }
-.droparea>div>* {
+.loadingContainer>div>* {
   height: auto;
   line-height: 1.35;
 }
-.droparea .loadingText {
+.loadingContainer .loadingText {
   max-width: 900px;
 }
-.droparea .loadingText h1,
-.droparea .loadingText h2,
-.droparea .loadingText h3 {
+.loadingContainer .loadingText h1,
+.loadingContainer .loadingText h2,
+.loadingContainer .loadingText h3 {
   margin: 0;
 }
-.droparea .loadingText h3 {
+.loadingContainer .loadingText h3 {
   margin-top: calc(0.35em * var(--density));
   font-weight: 500;
 }
-.droparea.postMigration>div {
+.loadingContainer.postMigration>div {
   display: block;
   max-width: 900px;
 }
-.droparea.postMigration>div>* {
+.loadingContainer.postMigration>div>* {
   display: block;
   height: auto;
   line-height: 1.35;
 }
-.droparea.postMigration h2 {
+.loadingContainer.postMigration h2 {
   margin: 0 0 calc(0.6em * var(--density)) 0;
 }
-.droparea.postMigration h3 {
+.loadingContainer.postMigration h3 {
   margin: calc(0.2em * var(--density)) 0;
   font-weight: 500;
 }
-.droparea.postMigration button {
+.loadingContainer.postMigration button {
   margin-top: calc(1em * var(--density));
   width: 100%;
 }

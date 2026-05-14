@@ -61,10 +61,10 @@ So it is “missing translation content”, not “missing file”.
 Get StatDescriptions.zip
         |
         v
-Import StatDescriptions.zip (drag & drop)
+Pick language in Settings (⚙️)
         |
         v
-Pick language in Settings (⚙️) and save
+Click 📦 Import button and select StatDescriptions.zip
         |
         v
 Edit files -> Save in editor
@@ -81,10 +81,15 @@ Use this when you get a new `StatDescriptions.zip` export (new patch, new data).
 New StatDescriptions.zip arrives
         |
         v
-Import -> 🆕📦 Import Next Version
+Click 📦 Import and select it
         |
         v
-Some files become "Review"
+A dialog appears with two options:
+   - 🆕📦 Import Next Version (normal import)
+   - 🔁📦 Import Translated (restore previous work)
+        |
+        v
+If using Import Next Version, some files may become "Review"
         |
         +-------------------------------+
         |                               |
@@ -96,9 +101,30 @@ Open file and edit + Save        If translation still OK:
 Notes:
 
 - “Review” is used when the app had to carry forward older translation lines (because the new source didn’t provide them). It’s a warning that the English changed and you should verify the translation still makes sense.
+- If you do an export while there're still some “Review” left, those translated strings will be discarded.
 - When you “Confirm unchanged”, the app clears Review and marks the file as Done so you can export it.
 
-### C) Move Your Work Between PCs (Import Translated)
+### C) Post-Migration: Restore Translations from Previous Version
+
+If you previously used a different version of `StatDescriptions.zip` and need to restore your translations:
+
+```
+You notice your translations are missing but workspace data exists
+        |
+        v
+A prompt shows: "Attention! Post-migration import required"
+        |
+        v
+Click 📦 Import Previous Version and select the OLD StatDescriptions.zip you used before
+        |
+        v
+Your translations are restored with revision history
+```
+
+- **Import Previous Version** is for when you switched game versions and want to recover your old translation data.
+- Use **Start from scratch** if you want to discard old data and begin fresh.
+
+### D) Move Your Work Between PCs (Import Translated)
 
 This is the “continue on a different computer” workflow.
 
@@ -111,10 +137,13 @@ Export 💾 (normal)  -> StatDescriptions_Translated.zip
 PC B:
 
 ```
-Import the same StatDescriptions.zip version
+Click 📦 Import and select the current StatDescriptions.zip version
         |
         v
-Import -> 🔁📦 Import Translated (pick StatDescriptions_Translated.zip)
+Dialog appears - Click 🔁📦 Import Translated
+        |
+        v
+Select your StatDescriptions_Translated.zip from PC A
         |
         v
 Continue translating, then Export 💾
@@ -127,8 +156,7 @@ Important:
 
 ## Quick “Which Button Do I Use?”
 
-- You got a fresh `StatDescriptions.zip` from a game update → **🆕📦 Import Next Version**
-- You want to continue the same work on another PC → **🔁📦 Import Translated**
+- You got a fresh `StatDescriptions.zip` from a game update → **🆕📦 Import Next Version**- You need to recover old translations (post-migration) → **📦 Import Previous Version**- You want to continue the same work on another PC → **🔁📦 Import Translated**
 - You want to export only what you’re working on → **💾 click**
 - You want a bigger “release” export of everything reviewed → **💾 Ctrl+Click**
 
