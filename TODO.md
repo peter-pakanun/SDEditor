@@ -1,7 +1,7 @@
 # TODO
 - [x] In statfiles with several lines, compare these lines and mark differences with another color
 - [x] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with ctrl+click, or paste them below with single click
-- [ ] Add function of viewing/comparing files, that were changed for set period of time
+- [x] Add function of viewing/comparing files, that were changed for set period of time
 - [x] Add sorting variant "like in Missing***"
 - [x] Add counter of files, that needed to be translated
 - [x] Saving a file with empty translation field with remove it from list. Add a confirmation window please
@@ -10,3 +10,9 @@
 - [x] Make an option not to remove translated in one session files from the list, but to mark them with other color like green
 - [x] Make a small clipboard window on page with translation, under dictionary and regex to past and copy and text
 - [x] Make a full name of file appear on translation page
+- [ ] Refactor file navigation, add a hotkey to navigate to next/previous file and with shift to skip translated files
+- [ ] Refactor to 3 layers of data: master, staged, changed
+  - Master layer: original files, readonly, only update on importing next version
+  - Staged layer: when user save a file, it is added to this layer
+    - When you export files, you export only files from this layer
+  - Changed layer: when user change a file, the changes are added to this layer
