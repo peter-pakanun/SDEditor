@@ -2,14 +2,14 @@
 *browser-based editor for `StatDescriptions.zip` (translation stat files).*
 You can access the live version [here](<https://sdeditor.pages.dev/>), or if you prefer not to use online version you can clone the [repo](<https://github.com/peter-pakanun/SDEditor>) and run it locally. 
 ## How to use
-[Read Translator full workflow here](https://discord.com/channels/709860422940885013/1503917539338752162/1503917543532925068)
+[Read Translator full workflow here](#)
 1) Open the [web app](<https://sdeditor.pages.dev/>) and pick your target language
 2) Drag & drop `StatDescriptions.zip` into the page
 3) Click any row to edit, then save
 4) Click :floppy_disk: to export `StatDescriptions_Translated.zip` (**Ctrl + Click :floppy_disk:** = full export)
 ## Threads
-:pencil: [Patch notes](https://discord.com/channels/709860422940885013/1503456085841936495)
-:bug: [Suggestions / Bug reports](https://discord.com/channels/709860422940885013/1503456576487424071)
+:pencil: [Patch notes](#)
+:bug: [Suggestions / Bug reports](#)
 ## Notes
 - Your in-progress edits are stored in your browser (`localStorage`)
 - You can drag & drop a previously exported ZIP onto the table to re-import edits
