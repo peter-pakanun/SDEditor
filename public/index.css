@@ -673,6 +673,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .gamePreviewStrip {
   position: sticky;
+  height: calc(160px * var(--density));
   top: 0;
   z-index: 40;
   margin: 0 calc(-0.35em * var(--density)) calc(0.75em * var(--density));
@@ -684,6 +685,10 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewToolbar {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 40;
   align-items: center;
   margin-bottom: calc(0.45em * var(--density));
 }
@@ -723,18 +728,21 @@ button, label, th, td, input[type="checkbox"] {
 
 .gamePreviewMainRow {
   display: flex;
-  align-items: flex-start;
+  height: 100%;
+  align-items: center;
   gap: calc(0.75em * var(--density));
 }
 
 .gamePreviewVarsColumn {
   flex: 0 0 auto;
+  height: 100%;
+  overflow-y: auto;
   min-width: 6.5em;
   max-width: 12em;
   display: flex;
   flex-direction: column;
   gap: calc(0.35em * var(--density));
-  padding-top: calc(0.15em * var(--density));
+  padding: calc(0.15em * var(--density));
 }
 
 .gamePreviewVarField {
@@ -771,7 +779,6 @@ button, label, th, td, input[type="checkbox"] {
   min-width: 0;
   display: flex;
   justify-content: center;
-  margin-bottom: calc(2.5em * var(--density));
 }
 
 .gamePreviewWindow {

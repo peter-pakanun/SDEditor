@@ -172,7 +172,7 @@
       <div class="edit">
         <div class="gamePreviewStrip">
           <div class="gamePreviewToolbar twoSided">
-            <span class="gamePreviewLabel">👾 In-game preview</span>
+            <!-- <span class="gamePreviewLabel">👾 In-game preview</span> -->
             <div class="gamePreviewFrameBtns">
               <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" title="Small frame" @click="setGamePreviewFrame('s')">▢</button>
               <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" title="Medium frame" @click="setGamePreviewFrame('m')">▣</button>
@@ -180,12 +180,6 @@
             </div>
           </div>
           <div class="gamePreviewMainRow">
-            <div v-if="gamePreviewVarKeyList.length > 0" class="gamePreviewVarsColumn">
-              <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
-                <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
-                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :lang="translationEditorBcp47" :aria-label="'Variable {' + k + '}'">
-              </div>
-            </div>
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
                 <template v-for="(seg, si) in gamePreviewSegments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
@@ -198,6 +192,13 @@
                   <span v-else-if="seg.type === 'break'" class="gamePreviewBreak"></span>
                 </template>
                 <span v-if="gamePreviewSegments.length === 0" class="gamePreviewEmpty">(empty)</span>
+              </div>
+            </div>
+            <div v-if="gamePreviewVarKeyList.length > 0" class="gamePreviewVarsColumn">
+              <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
+                <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
+                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :lang="translationEditorBcp47"
+                  :aria-label="'Variable {' + k + '}'">
               </div>
             </div>
           </div>
