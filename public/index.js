@@ -1640,6 +1640,17 @@ const config = Vue.defineComponent({
         return;
       }
 
+      // Ctrl+S: Save in editor or Export in table view
+      if (e.ctrlKey && e.code === "KeyS") {
+        e.preventDefault();
+        if (this.editorVisible) {
+          this.editorSave();
+        } else {
+          this.exportZip(false);
+        }
+        return;
+      }
+
       if (e.ctrlKey && (e.code === "Space" || e.key === " ")) {
         if (!this.editorVisible) return;
         e.preventDefault();
