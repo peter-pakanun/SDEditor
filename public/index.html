@@ -15,6 +15,13 @@
   <div id="app">
     <div class="appRoot" :data-density="uiDensity">
 
+    <form ref="importUpdateZipFileForm" style="display: none;">
+      <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
+    </form>
+    <form ref="importTranslatedZipFileForm" style="display: none;">
+      <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
+    </form>
+
     <div class="settingPage centerContainer" v-if="showSetting || needsInitialSettings">
       <div class="box">
         <h3>Language to translate</h3>
@@ -99,12 +106,6 @@
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importUpdateZipClicked" title="Import ZIP">📦</button>
-          <form ref="importUpdateZipFileForm" style="display: none;">
-            <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
-          </form>
-          <form ref="importTranslatedZipFileForm" style="display: none;">
-            <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
-          </form>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
