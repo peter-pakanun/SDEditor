@@ -1707,7 +1707,7 @@ const config = Vue.defineComponent({
       }
     },
     importUpdateZipClicked() {
-      this.importDialogVisible = true;
+      this.$refs.importUpdateZipFile?.click?.();
     },
     async importUpdateZipChanged(e) {
       const file = e?.target?.files?.[0];
