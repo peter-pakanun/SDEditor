@@ -222,14 +222,14 @@ const config = Vue.defineComponent({
       this.loadingProgress = 99.999;
     }
 
-    if (!this.sourceLoaded) this.loadingProgress = 100;
+    if (!this.sourceLoaded) this.loadingProgress = 0;
     offlineStoreReady = true;
     this.offlineStoreReady = true;
     this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
 
     await this.saveSettings();
-    this.loadingProgress = 100;
+    if (this.sourceLoaded) this.loadingProgress = 100;
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
