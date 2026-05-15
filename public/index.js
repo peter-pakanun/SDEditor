@@ -1,3 +1,4 @@
+// Guess what "I'll make a simple Vue runtime app and just refactor later" did to me...
 let offlineStoreReady = false;
 
 const urlParams = new URLSearchParams(window.location.search);
