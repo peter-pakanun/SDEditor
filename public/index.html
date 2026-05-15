@@ -52,6 +52,9 @@
         <input type="checkbox" id="shiftEnterSave" name="shiftEnterSave" v-model="shiftEnterSave">
         <label for="shiftEnterSave"> Shift + Enter to Save</label>
         <br>
+        <input type="checkbox" id="autoOpenNextFile" name="autoOpenNextFile" v-model="autoOpenNextFile">
+        <label for="autoOpenNextFile"> Auto open next file on save</label>
+        <br>
         <button @click="settingsSaveClose">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>

@@ -85,6 +85,7 @@ const config = Vue.defineComponent({
       hideDNT: true,
       highlightDict: true,
       shiftEnterSave: false,
+      autoOpenNextFile: true,
       uiDensity: 'compact',
 
       sideTab: 'dictionary',
@@ -253,6 +254,9 @@ const config = Vue.defineComponent({
       this.$nextTick(() => this.syncHlPopupEnglishHighlight());
     },
     shiftEnterSave() {
+      this.saveSettings();
+    },
+    autoOpenNextFile() {
       this.saveSettings();
     },
     lang() {
@@ -1646,7 +1650,11 @@ const config = Vue.defineComponent({
       if (e.ctrlKey && e.code === "KeyS") {
         e.preventDefault();
         if (this.editorVisible) {
-          this.editorSave();
+          if (this.autoOpenNextFile) {
+            this.saveAndSkipFile();
+          } else {
+            this.editorSave();
+          }
         } else {
           this.exportZip(false);
         }
@@ -2785,6 +2793,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
+        autoOpenNextFile: this.autoOpenNextFile,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -2808,6 +2817,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
+        autoOpenNextFile: this.autoOpenNextFile,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -2851,6 +2861,7 @@ const config = Vue.defineComponent({
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
+      if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
       if (settings.uiDensity === 'compact' || settings.uiDensity === 'spacious') {
         this.uiDensity = settings.uiDensity;
       } else {
