@@ -1786,9 +1786,6 @@ const config = Vue.defineComponent({
       this.closeImportDialog();
       this.$refs.importUpdateZipFile?.click?.();
     },
-    importPreviousVersionZipClicked() {
-      this.$refs.importUpdateZipFile?.click?.();
-    },
     importTranslatedZipClicked() {
       this.closeImportDialog();
       this.$refs.importTranslatedZipFile?.click?.();
