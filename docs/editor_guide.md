@@ -137,21 +137,24 @@ See [regex_guide.md](regex_guide.md) for detailed information on how to use Rege
 
 ## Keyboard Shortcuts
 
+### Global Shortcuts
+
+| Shortcut              | Action                                            |
+|-----------------------|---------------------------------------------------|
+| **Ctrl + >**          | Save and open next file                           |
+| **Ctrl + <**          | Save and open previous file                       |
+| **Ctrl + Shift + >**  | Exit and open next file                           |
+| **Ctrl + Shift + <**  | Exit and open previous file                       | 
+| **Ctrl + F**          | Focus on search box                               |
+
 ### In the Main Editor
 
 | Shortcut                   | Action                                                  |
 |----------------------------|---------------------------------------------------------|
 | **Ctrl + Space** or **[`** | Open Autocomplete Popup (Dictionary suggestions)        |
+| **Ctrl + S**               | Save the file                                           |
 | **Escape**                 | Close the file without saving                           |
 | **Alt + 1-9 / 0**          | Insert highlighted item #1-#10 from English             |
-| **Ctrl + F**               | Focus on search box (in the file list)                  |
-| **Ctrl + S**               | Save the file                                           |
-
-### In the File List
-| Shortcut                   | Action                                                  |
-|----------------------------|---------------------------------------------------------|
-| **Shift + Enter**          | Open the first file in the current filtered list        |
-| **Ctrl + F**               | Focus on search box (in the file list)                  |
 
 ## Creating/Editing Dictionary Entries from Keywords
 

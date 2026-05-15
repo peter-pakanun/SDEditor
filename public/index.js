@@ -1700,8 +1700,16 @@ const config = Vue.defineComponent({
         }
       }
 
-      if (e.shiftKey && e.code === 'Enter') {
-        this.openFirstFile();
+      // Ctrl + >: save and open next file
+      if (e.ctrlKey && e.code === 'Period') {
+        e.preventDefault();
+        console.log(e.shiftKey);
+        this.saveAndSkipFile(true, e.shiftKey);
+      }
+      // Ctrl + <: save and open previous file
+      if (e.ctrlKey && e.code === 'Comma') {
+        e.preventDefault();
+        this.saveAndSkipFile(false, e.shiftKey);
       }
       
       if (e.ctrlKey && e.code === 'KeyF') {
@@ -1717,7 +1725,47 @@ const config = Vue.defineComponent({
       if (this.descsDisplay.length > 0) {
         let firstDesc = this.descsDisplay[0];
         this.editFile(firstDesc.filepath);
+        return true;
       }
+      return false;
+    },
+    saveAndSkipFile(isNext = true, noSave = false) {
+      if (this.editorVisible) {
+        if (noSave) {
+          this.editorEsc();
+        } else {
+          this.editorSave();
+        }
+        this.editorVisible = true;
+      } else {
+        if (!this.openFirstFile()) return;
+      }
+      let idx = this.descsDisplay.findIndex(d => d.filepath === (this.editorVisible ? this.editorCurrentEditingDesc?.filepath : null));
+
+      let targetIdx = idx >= 0 ? idx + (isNext ? 1 : -1) : 0;
+      console.log(targetIdx);
+      
+      // page boundary
+      if (targetIdx < 0) {
+        if (this.currentPage > 0) {
+          this.prevPage();
+          targetIdx = this.descsDisplay.length - 1;
+        } else {
+          alert("No more files.");
+          return;
+        }
+      } else if (targetIdx >= this.descsDisplay.length) {
+        if (this.currentPage < this.pageCount) {
+          this.nextPage();
+          targetIdx = 0;
+        } else {
+          alert("No more files.");
+          return;
+        }
+      }
+
+      this.editFile(this.descsDisplay[targetIdx].filepath);
+      return;
     },
     importUpdateZipClicked() {
       this.$refs.importUpdateZipFile?.click?.();
