@@ -1,5 +1,5 @@
 # SDEditor
-*browser-based editor for `StatDescriptions.zip` (translation stat files).*
+*browser-based editor for `StatDescriptions.zip` (stat translation).*
 You can access the live version [here](<https://sdeditor.pages.dev/>), or if you prefer not to use online version you can clone the [repo](<https://github.com/peter-pakanun/SDEditor>) and run it locally. 
 ## How to use
 [Full Editor Guide](#)
@@ -9,8 +9,8 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 4) Click 💾 to export `StatDescriptions_Translated.zip` and submit your work
 > Your in-progress edits are stored in your browser (`indexedDB`)
 ## Threads
-:pencil: [Patch Notes](#)
 :bug: [Bug Reports / Feature Requests](#)
+:pencil: [Patch Notes](#)
 ## Keyboard shortcuts
 - **Ctrl + Space:** during editing to open the autocomplete menu
   - **Autocomplete menu:** while it’s open, **Ctrl + Enter** will jump to/edit the matching Dictionary entry, or create one (and focus the right Replace field)
