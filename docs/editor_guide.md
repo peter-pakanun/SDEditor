@@ -174,24 +174,24 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 ## Keyboard Shortcuts
 
 ### Global Shortcuts
-
-| Shortcut              | Action                                            |
-|-----------------------|---------------------------------------------------|
-| **Ctrl + >**          | Save and open next file                           |
-| **Ctrl + Shift + >**  | Open next file without saving                     |
-| **Ctrl + <**          | Save and open previous file                       |
-| **Ctrl + Shift + <**  | Open previous file without saving                 | 
-| **Ctrl + F**          | Focus on search box                               |
-
+```
+| Shortcut          | Action                                            |
+|-------------------|---------------------------------------------------|
+| Ctrl + >          | Save and open next file                           |
+| Ctrl + Shift + >  | Open next file without saving                     |
+| Ctrl + <          | Save and open previous file                       |
+| Ctrl + Shift + <  | Open previous file without saving                 | 
+| Ctrl + F          | Focus on search box                               |
+```
 ### In the Main Editor
-
-| Shortcut                   | Action                                       |
-|----------------------------|----------------------------------------------|
-| **Ctrl + Space** or **[**  | Open Autocomplete Popup                      |
-| **Ctrl + S**               | Save the file                                |
-| **Escape**                 | Close the file without saving                |
-| **Alt + 1-9 / 0**          | Insert highlighted item #1-#10 from English  |
-
+```
+| Shortcut           | Action                                       |
+|--------------------|----------------------------------------------|
+| Ctrl + Space or [  | Open Autocomplete Popup                      |
+| Ctrl + S           | Save the file                                |
+| Escape             | Close the file without saving                |
+| Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
+```
 ## Creating/Editing Dictionary Entries from Keywords
 
 When you click on a **keyword tag** (`[TagName|...]`) in the English text, you can:
