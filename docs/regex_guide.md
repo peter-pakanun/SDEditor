@@ -86,12 +86,12 @@ WIP
 
 ## When to Use Regex vs. Dictionary
 
-| Use **Dictionary** if... | Use **Regex** if... |
-|---|---|
-| You're translating a simple word or phrase | The text has variations or multiple parts to reorder |
-| The translation is always the same | Different variables need different positions |
-| You want quick lookups | The pattern applies to many similar texts |
-| The term appears in many contexts | The term appears in a specific pattern |
+| Use **Dictionary** if...                    | Use **Regex** if...                                   |
+|---------------------------------------------|-------------------------------------------------------|
+| You're translating a simple word or phrase  | The text has variations or multiple parts to reorder  |
+| The translation is always the same          | Different variables need different positions          |
+| You want quick lookups                      | The pattern applies to many similar texts             |
+| The term appears in many contexts           | The term appears in a specific pattern                |
 
 ## Resources
 
