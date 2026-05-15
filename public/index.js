@@ -2462,6 +2462,8 @@ const config = Vue.defineComponent({
     },
     editorSave() {
       if (this.editorCompareActive) return;
+      if (!this.editorHaveChanges()) return;
+
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
       for (const editorBlock of this.editorBlocks) {
@@ -2765,10 +2767,13 @@ const config = Vue.defineComponent({
       }
       this.editorExit();
     },
-    editorExit() {
+    editorHaveChanges() {
       let original = (this.editorOriginalTranslations || []).map(v => v ?? "");
       let current = (this.editorBlocks || []).map(b => b?.translation ?? "");
-      if (!arrayEquals(original, current) && !confirm('Are you sure you want to exit without saving?')) return;
+      return !arrayEquals(original, current);
+    },
+    editorExit() {
+      if (this.editorHaveChanges() && !confirm('Are you sure you want to exit without saving?')) return;
       this.saveSettings();
       this.closeHlPopup();
       this.editorVisible = false;
