@@ -1642,7 +1642,7 @@ const config = Vue.defineComponent({
         return;
       }
 
-      // Ctrl+S: Save in editor or Export in table view
+      // Ctrl + S: Save in editor or Export in table view
       if (e.ctrlKey && e.code === "KeyS") {
         e.preventDefault();
         if (this.editorVisible) {
@@ -1703,13 +1703,12 @@ const config = Vue.defineComponent({
       // Ctrl + >: save and open next file
       if (e.ctrlKey && e.code === 'Period') {
         e.preventDefault();
-        console.log(e.shiftKey);
-        this.saveAndSkipFile(true, e.shiftKey);
+        this.saveAndSkipFile(false, true);
       }
       // Ctrl + <: save and open previous file
       if (e.ctrlKey && e.code === 'Comma') {
         e.preventDefault();
-        this.saveAndSkipFile(false, e.shiftKey);
+        this.saveAndSkipFile(true, true);
       }
       
       if (e.ctrlKey && e.code === 'KeyF') {
@@ -1729,12 +1728,12 @@ const config = Vue.defineComponent({
       }
       return false;
     },
-    saveAndSkipFile(isNext = true, noSave = false) {
+    saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
       if (this.editorVisible) {
-        if (noSave) {
-          this.editorEsc();
+        if (noSaveIfNotChanged && !this.editorHaveChanges()) {
+          this.editorExit();
         } else {
-          this.editorSave();
+          if (!this.editorSave()) return;
         }
         this.editorVisible = true;
       } else {
@@ -1742,8 +1741,7 @@ const config = Vue.defineComponent({
       }
       let idx = this.descsDisplay.findIndex(d => d.filepath === (this.editorVisible ? this.editorCurrentEditingDesc?.filepath : null));
 
-      let targetIdx = idx >= 0 ? idx + (isNext ? 1 : -1) : 0;
-      console.log(targetIdx);
+      let targetIdx = idx >= 0 ? idx + (reverse ? -1 : 1) : 0;
       
       // page boundary
       if (targetIdx < 0) {
@@ -2458,8 +2456,8 @@ const config = Vue.defineComponent({
       if (this.shiftEnterSave) this.editorSave();
     },
     editorSave() {
-      if (this.editorCompareActive) return;
-      if (!this.editorHaveChanges()) return;
+      if (this.editorCompareActive) return false;
+      if (!this.editorHaveChanges()) return false;
 
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
@@ -2470,7 +2468,7 @@ const config = Vue.defineComponent({
       }
 
       const isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, newTranslations);
-      if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return;
+      if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return false;
 
       let lineMismatchInfo = [];
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
@@ -2482,16 +2480,16 @@ const config = Vue.defineComponent({
       if (lineMismatchInfo.length > 0) {
         let details = lineMismatchInfo.slice(0, 12).join("\n");
         let suffix = lineMismatchInfo.length > 12 ? `\n...and ${lineMismatchInfo.length - 12} more` : "";
-        if (!confirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return;
+        if (!confirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
       }
 
       let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
       let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
-      if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return;
+      if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return false;
 
       let newKeywordPopupTagCount = newTranslations.reduce((p, c) => p += countKeywordPopupTag(c), 0);
       let engKeywordPopupTagCount = desc.translations.English.reduce((p, c) => p += countKeywordPopupTag(c), 0);
-      if (newKeywordPopupTagCount != engKeywordPopupTagCount && !confirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return;
+      if (newKeywordPopupTagCount != engKeywordPopupTagCount && !confirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return false;
 
       desc.isMissing = isMissing;
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
@@ -2522,6 +2520,7 @@ const config = Vue.defineComponent({
       this.editorOriginalTranslations = (this.editorBlocks || []).map(b => b?.translation ?? "");
       this.editorVisible = false;
       this.filterDesc();
+      return true;
     },
     async refreshHistory() {
       if (!this.editorCurrentEditingDesc) {
