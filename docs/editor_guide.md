@@ -41,7 +41,7 @@ So it is “missing translation content”, not “missing file”.
 ### Opening a File
 
 1. Click on any row to open that file in the editor
-2. Or use **Ctrl + >** to open the first file from the current filtered list
+2. Or use **F2** to open the first file from the current filtered list
 
 ## The Editor Interface
 
@@ -175,20 +175,18 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 
 ### Global Shortcuts
 ```
-| Shortcut          | Action                                            |
-|-------------------|---------------------------------------------------|
-| Ctrl + >          | Save and open next file                           |
-| Ctrl + Shift + >  | Open next file without saving                     |
-| Ctrl + <          | Save and open previous file                       |
-| Ctrl + Shift + <  | Open previous file without saving                 | 
-| Ctrl + F          | Focus on search box                               |
+| Shortcut          | Action                                        |
+|-------------------|-----------------------------------------------|
+| F1 / Ctrl + <     | Move to previous file                         |
+| F2 / Ctrl + >     | Move to next file                             |
+| Ctrl + F          | Focus on search box                           |
 ```
 ### In the Main Editor
 ```
 | Shortcut           | Action                                       |
 |--------------------|----------------------------------------------|
 | Ctrl + Space or [  | Open Autocomplete Popup                      |
-| Ctrl + S           | Save the file                                |
+| Ctrl + S           | Save and open next file                      |
 | Escape             | Close the file without saving                |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
 ```
