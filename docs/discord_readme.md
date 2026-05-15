@@ -23,8 +23,3 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
   - **Ctrl + Click:** on the highlighted text to jump to the Dictionary entry (or create it if it doesn't exist)
   - **Alt + Click:** on the highlighted text to copy it
   - **Alt + number:** paste the highlighted text down by the order number, replacing the current selection
-
-![main screen](screenshots/main_screen.png)
-![editor screen](screenshots/editor_screen.png)
-![error demo](screenshots/error_demo.png)
-![alternates definition](screenshots/alternates_definition.png)
