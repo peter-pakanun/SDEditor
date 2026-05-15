@@ -8,7 +8,7 @@ Browser-based editor for `StatDescriptions.zip` (stat description translation fi
 - Filter/search and paginate entries
 - Edit translations with dictionary + regex helpers
 - Highlights and metadata to help catch mismatches (lines / `{}` variables / `[]` tags)
-- Saves your in-progress work to `localStorage`
+- Saves your in-progress work to `indexedDB`
 - Export a translated ZIP (`StatDescriptions_Translated.zip`)
 
 ## Quick Start (Local)

@@ -18,7 +18,7 @@ Example:
 ## Behavior
 
 - Loads a small built-in dummy dataset (no ZIP required).
-- Does not read or write `localStorage`, so your real saved settings/local changes won’t be modified.
+- Does not read or write `indexedDB`, so your real saved settings/local changes won’t be modified.
 
 ## Local server notes
 

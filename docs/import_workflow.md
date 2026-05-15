@@ -1,4 +1,4 @@
-# Workflow Guide (For Translators)
+# Import Workflow
 
 This app edits Path of Exile `StatDescriptions.zip` translation files in your browser.
 
@@ -6,7 +6,7 @@ There are two different “import” actions and two different “export” mode
 
 - **Import Next Version**: when you get a new `StatDescriptions.zip` from a game update.
 - **Import Translated**: when you want to move your translated work between PCs.
-- **Export (💾 click)**: exports your “tracked / done” files.
+- **Export (💾 click)**: exports your “tracked / done” files. you will use this mode most of the time.
 - **Export (💾 Ctrl+Click)**: exports a “full set” of files that are not flagged for review.
 
 ## Files You Will See
@@ -16,24 +16,8 @@ There are two different “import” actions and two different “export” mode
   - You always import this first for a given version.
 - `StatDescriptions_Translated.zip` (your work)
   - A ZIP of `.txt` files created by this app.
-  - Used either to share your work or to move it between PCs.
-
-## The Three Status Counters
-
-In the top bar you’ll see:
-
-- **Missing**: translation is incomplete for the current language (blank lines or line-count mismatch).
-- **Done**: the app considers this file “tracked for export”.
-- **Review**: the English source changed and you should re-check the translation.
-
-### What “Missing” Actually Means
-
-“Missing” is calculated from your current translation lines:
-
-- Any blank/empty translation line → Missing
-- Different number of lines compared to English → Missing
-
-So it is “missing translation content”, not “missing file”.
+  - **Main file to be submitted.**
+  - You can also use this file to share your work or to move it between PCs.
 
 ## The Two Export Modes (💾)
 
@@ -44,14 +28,14 @@ So it is “missing translation content”, not “missing file”.
                  |            |
         click (normal)   Ctrl+Click (full)
                  |            |
-     exports "Done" files   exports "Not Review" files
-       (tracked for export)   (Review flag is OFF)
+     exports "Done" files   exports "Full Set" files
+     (tracked for export)   (All file except needs Review)
 ```
 
 - **Normal export (click 💾)** includes files marked **Done**.
-  - Good for sending only the files you are actively working on (smaller ZIP).
-- **Full export (Ctrl+Click 💾)** includes files that are **not** marked Review.
-  - Good for building a “release” ZIP of everything you’ve reviewed.
+  - Main way to submit your work.
+- **Full export (Ctrl+Click 💾)** includes all files except those that need review.
+  - Good for building a “release” ZIP of everything (take a while to do).
 
 ## Common Workflows
 
@@ -61,16 +45,19 @@ So it is “missing translation content”, not “missing file”.
 Get StatDescriptions.zip
         |
         v
-Pick language in Settings (⚙️)
+Click 📦 Import button
         |
         v
-Click 📦 Import button and select StatDescriptions.zip
+Select 🆕📦 Import Next Version and select StatDescriptions.zip
         |
         v
-Edit files -> Save in editor
+Do the translations work -> Save in editor
         |
         v
 Export 💾 (normal) to produce StatDescriptions_Translated.zip
+        |
+        v
+Submit StatDescriptions_Translated.zip
 ```
 
 ### B) Game Update Arrives (Import Next Version)
@@ -81,21 +68,30 @@ Use this when you get a new `StatDescriptions.zip` export (new patch, new data).
 New StatDescriptions.zip arrives
         |
         v
-Click 📦 Import and select it
+Click 📦 Import button
         |
         v
-A dialog appears with two options:
-   - 🆕📦 Import Next Version (normal import)
-   - 🔁📦 Import Translated (restore previous work)
+Select 🆕📦 Import Next Version and select StatDescriptions.zip
         |
         v
-If using Import Next Version, some files may become "Review"
+Some files may become "Review"
         |
         +-------------------------------+
         |                               |
         v                               v
-Open file and edit + Save        If translation still OK:
-(clears Review)                  "Confirm unchanged"
+If translation needs review:        If translation still OK:
+(Edit file and Save)                "Confirm unchanged"
+        |                               |
+        +-------------------------------+
+        |
+        v
+Do the rest of the translations work -> Save in editor
+        |
+        v
+Export 💾 (normal) to produce StatDescriptions_Translated.zip
+        |
+        v
+Submit StatDescriptions_Translated.zip
 ```
 
 Notes:
@@ -104,27 +100,7 @@ Notes:
 - If you do an export while there're still some “Review” left, those translated strings will be discarded.
 - When you “Confirm unchanged”, the app clears Review and marks the file as Done so you can export it.
 
-### C) Post-Migration: Restore Translations from Previous Version
-
-If you previously used a different version of `StatDescriptions.zip` and need to restore your translations:
-
-```
-You notice your translations are missing but workspace data exists
-        |
-        v
-A prompt shows: "Attention! Post-migration import required"
-        |
-        v
-Click 📦 Import Previous Version and select the OLD StatDescriptions.zip you used before
-        |
-        v
-Your translations are restored with revision history
-```
-
-- **Import Previous Version** is for when you switched game versions and want to recover your old translation data.
-- Use **Start from scratch** if you want to discard old data and begin fresh.
-
-### D) Move Your Work Between PCs (Import Translated)
+### C) Move Your Work Between PCs / Share with Others (Import Translated)
 
 This is the “continue on a different computer” workflow.
 
@@ -134,29 +110,78 @@ PC A:
 Export 💾 (normal)  -> StatDescriptions_Translated.zip
 ```
 
-PC B:
+PC B / Other person PC:
 
 ```
-Click 📦 Import and select the current StatDescriptions.zip version
+Click 📦 Import button
         |
         v
-Dialog appears - Click 🔁📦 Import Translated
+(If you have not yet imported the current version of StatDescriptions.zip)
+Select 🆕📦 Import Next Version and select the same StatDescriptions.zip as PC A
         |
         v
-Select your StatDescriptions_Translated.zip from PC A
+Click 📦 Import button again
         |
         v
-Continue translating, then Export 💾
+Select 🔁📦 Import Translated and select your StatDescriptions_Translated.zip from PC A
+        |
+        v
+Your workspace is now synced with PC A
 ```
 
 Important:
 
-- Both PCs must use the matching `StatDescriptions.zip` version, otherwise import is blocked for safety.
+- Both PCs must use matching source `StatDescriptions.zip` version, otherwise import is blocked for safety.
 - Import Translated now also “tracks” imported files for export even if nothing changed, so a normal export on PC B will include the same set of files you exported on PC A (file counts match for transfer ZIPs).
+
+### D) Post-Migration: Restore Translations from Previous Version
+
+If you previously used an older version of `SDEditor` and need to restore your translations:
+
+```
+The app detects that you have a previous version data available
+        |
+        v
+A prompt shows: "Attention! Post-migration import required"
+        |
+        v
+Click 📦 Import Previous Version and select the OLD StatDescriptions.zip you used before the version update
+        |
+        v
+Your translations are restored with revision history
+        |
+        v
+Click 📦 Import button
+        |
+        v
+Select 🆕📦 Import Next Version and select the NEW StatDescriptions.zip you just got
+        |
+        v
+Some files may become "Review"
+        |
+        +-------------------------------+
+        |                               |
+        v                               v
+If translation needs review:        If translation still OK:
+(Edit file and Save)                "Confirm unchanged"
+        |                               |
+        +-------------------------------+
+        |
+        v
+Do the rest of the translations work -> Save in editor
+        |
+        v
+Export 💾 (normal) to produce StatDescriptions_Translated.zip
+        |
+        v
+Submit StatDescriptions_Translated.zip
+```
+
+- Use **Start from scratch** if you want to discard old data and begin fresh.
 
 ## Quick “Which Button Do I Use?”
 
-- You got a fresh `StatDescriptions.zip` from a game update → **🆕📦 Import Next Version**- You need to recover old translations (post-migration) → **📦 Import Previous Version**- You want to continue the same work on another PC → **🔁📦 Import Translated**
-- You want to export only what you’re working on → **💾 click**
-- You want a bigger “release” export of everything reviewed → **💾 Ctrl+Click**
-
+- You got a fresh `StatDescriptions.zip` from a game update → **🆕📦 Import Next Version**
+- You want to continue the same work on another PC → **🔁📦 Import Translated**
+- You want to submit your translations → **💾 click**
+- You want a bigger “release” export of everything → **💾 Ctrl+Click**

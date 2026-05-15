@@ -1,4 +1,4 @@
-# Regex Guide for Translators
+# Regex Guide
 
 This guide explains how to use **Regex** (pattern matching) for advanced translation replacements in the SDEditor.
 

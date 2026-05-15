@@ -1,4 +1,4 @@
-# Editor Guide for Translators
+# Editor Guide
 
 This guide explains how to use the SDEditor to translate game text efficiently.
 
@@ -8,13 +8,42 @@ The editor helps you translate game stat descriptions while maintaining formatti
 
 ## Getting Started
 
+### Importing StatDescriptions.zip
+
+Use the **📦 Import Zip** button in the top left corner to begin import process.
+For more details, see the [Import Workflow](import_workflow.md).
+
+### File Status Indicators
+
+In the file list, you'll see colors and counters indicating the state of each file:
+
+| Color       | Meaning                                                                                |
+|-------------|----------------------------------------------------------------------------------------|
+| **Red**     | Missing lines or line count mismatch                                                   |
+| **Green**   | Done and checked                                                                       |
+| **Yellow**  | Review required                                                                        |
+
+| Counter     | Meaning                                                                                |
+|-------------|----------------------------------------------------------------------------------------|
+| **Missing** | Translation has blank lines or doesn't match English line count                        |
+| **Done**    | You've saved changes to this file at least once and are “tracked for export”           |
+| **Review**  | The English source changed since your last save; consider re-checking your translation |
+
+#### What “Missing” Actually Means
+
+“Missing” is calculated from your current translation lines:
+
+- Any blank/empty translation line → Missing
+- Different number of lines compared to English → Missing
+
+So it is “missing translation content”, not “missing file”.
+
 ### Opening a File
 
-1. After importing `StatDescriptions.zip`, you'll see a table of all translation files
-2. Click on any row to open that file in the editor
-3. Or use **Shift + Enter** to open the first file from the current filtered list
+1. Click on any row to open that file in the editor
+2. Or use **Ctrl + >** to open the first file from the current filtered list
 
-### The Editor Interface
+## The Editor Interface
 
 The editor shows each string as a block:
 - **Top side (English)**: The original text you need to translate
@@ -47,6 +76,9 @@ Thai:      สร้างความเสียหาย [Fire|ไฟ] {0} �
 ```
 
 You can translate "Fire" to your language, but `[Fire]` must stay unchanged.
+If the display does not exist, you can create one.
+
+> 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space)** to insert this tag to speedup and ensure consistency.
 
 ### Line Breaks: Multi-line Blocks
 
@@ -72,7 +104,7 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 ### Opening the Helper Popup
 
-While editing a translation, press **Ctrl+Space** or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
+While editing a translation, press **Ctrl + Space** or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
 - Use **↑ / ↓ Arrow Keys** to navigate the list
 - Press **Enter** to insert the selected item into your translation at the cursor position
@@ -80,11 +112,12 @@ While editing a translation, press **Ctrl+Space** or **`[`** (left square bracke
 - Press **Escape** to close without inserting
 - Press **Ctrl + Enter** to jump to the Dictionary entry, or create a new one if it doesn't exist.
 
+> 💡 When you done creating a new Dictionary entry, press **Ctrl + Space** to call the Autocomplete Popup again can speed up your work.
+
 ### Alternative Ways to Insert
 
 - **Alt + 1 through 9** / **Alt + 0**: Quickly insert items #1-#10 from the highlighted English text
 - **Click an item in the Autocomplete Popup**: Same as pressing Enter
-- **Ctrl + Space**: Open/close the Autocomplete Popup manually while editing
 
 ### Dictionary (Word Replacements)
 
@@ -115,6 +148,7 @@ Main:
 Alternatives:
   Find: Hit              Replace: ปะทะ
   Find: Hits             Replace: การปะทะ
+  Find: Hits2            Replace: ถูกปะทะ
 ```
 
 When you later encounter "[HitDamage|Hit]" in the text, the Autocomplete Popup will show all available replacements, "HitDamage", "Hit", and "Hits" and highlighting the "Hit" as it matches exactly with the source text.
@@ -122,6 +156,8 @@ When you later encounter "[HitDamage|Hit]" in the text, the Autocomplete Popup w
 #### Dictionary Notes
 
 Use the **TL note** field to document why a term is translated a certain way or to remind yourself of context. Notes appear when you click on the "TL note" field.
+
+Autocomplete Popup will show only Dictionary entries that have the same main definition with the tag name of found keyword.
 
 ### Finding Used Dictionary Terms
 
@@ -133,7 +169,7 @@ When you're editing, the **Dictionary** panel automatically shows terms that are
 
 The **Regex** tab lets you define pattern-matching rules. These are useful for translating complex phrases with variations.
 
-See [regex_guide.md](regex_guide.md) for detailed information on how to use Regex replacements.
+See [Regex Guide](regex_guide.md) for detailed information on how to use Regex replacements.
 
 ## Keyboard Shortcuts
 
@@ -142,19 +178,19 @@ See [regex_guide.md](regex_guide.md) for detailed information on how to use Rege
 | Shortcut              | Action                                            |
 |-----------------------|---------------------------------------------------|
 | **Ctrl + >**          | Save and open next file                           |
+| **Ctrl + Shift + >**  | Open next file without saving                     |
 | **Ctrl + <**          | Save and open previous file                       |
-| **Ctrl + Shift + >**  | Exit and open next file                           |
-| **Ctrl + Shift + <**  | Exit and open previous file                       | 
+| **Ctrl + Shift + <**  | Open previous file without saving                 | 
 | **Ctrl + F**          | Focus on search box                               |
 
 ### In the Main Editor
 
-| Shortcut                   | Action                                                  |
-|----------------------------|---------------------------------------------------------|
-| **Ctrl + Space** or **[`** | Open Autocomplete Popup (Dictionary suggestions)        |
-| **Ctrl + S**               | Save the file                                           |
-| **Escape**                 | Close the file without saving                           |
-| **Alt + 1-9 / 0**          | Insert highlighted item #1-#10 from English             |
+| Shortcut                   | Action                                       |
+|----------------------------|----------------------------------------------|
+| **Ctrl + Space** or **[**  | Open Autocomplete Popup                      |
+| **Ctrl + S**               | Save the file                                |
+| **Escape**                 | Close the file without saving                |
+| **Alt + 1-9 / 0**          | Insert highlighted item #1-#10 from English  |
 
 ## Creating/Editing Dictionary Entries from Keywords
 
@@ -173,6 +209,7 @@ If you see a keyword in the English text that isn't in your Dictionary yet:
 1. **Ctrl + Click** the keyword in the English text or **Ctrl + Space** to open the Autocomplete Popup and **Ctrl + Enter** while selecting the keyword
 2. A new Dictionary entry is created and appears in the Dictionary panel
 3. Add your translation in the "Replace" field
+4. (Optional) **Ctrl + Space** to open the Autocomplete Popup again and select the keyword you just created to insert it back into the translation.
 
 ## Saving Your Translation
 
@@ -207,19 +244,8 @@ If the number of `[]` keyword tags differs, this is usually an **error**. Check 
 
 The **History** panel on the right shows all saved versions of the current file. You can:
 
-- Click two different history entries to compare them side-by-side
-- See what changed between versions
-- Verify your edits before exporting
-
-## File Status Indicators
-
-In the file list, you'll see colors and counters indicating the state of each file:
-
-| Status      | Meaning                                                                                |
-|-------------|----------------------------------------------------------------------------------------|
-| **Missing** | Translation has blank lines or doesn't match English line count                        |
-| **Done**    | You've saved changes to this file at least once                                        |
-| **Review**  | The English source changed since your last save; consider re-checking your translation |
+- Click a different history entry to compare it with the current version
+- Revert to a specific version by clicking on the revert button next to the version entry
 
 ## Managing Your Work
 
@@ -230,6 +256,8 @@ If the English source was updated but your translation still fits (typo, etc.), 
 1. Open the file in the editor
 2. Click **"Confirm unchanged"** button (appears when "Review" flag is set)
 3. This clears the "Review" flag without requiring you to edit the translation.
+
+> **Note**: All file which haven't been reviewed will **not be exported**, you will have to translate them again next export.
 
 ### Exporting Your Work
 
@@ -249,8 +277,12 @@ Click the **Export** button at the top of the editor to export your work. This c
 
 ## What Happens During Import/Export
 
-See [import_workflow.md](import_workflow.md) for details on:
+See [Import Workflow](import_workflow.md) for details on:
 - What "Missing" files mean during export
 - How "Done" and "Review" flags affect export
 - Managing multiple game versions
 - How to transfer translations between your PCs
+
+## Bug Reports / Feature Requests
+
+If you encounter any bugs or have feature requests, please post them on the [Bug Reports / Feature Requests thread](#)
