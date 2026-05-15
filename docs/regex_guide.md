@@ -22,8 +22,8 @@ Find:    (.+) Resistance
 Replace: ความเสียหาย $1
 
 Matches → Replacement:
-  "[Resistances|Fire] Resistance"      → "ความเสียหาย [Fire|ไฟ]"
-  "[Resistances|Cold] Resistance"      → "ความเสียหาย [Cold|น้ำแข็ง]"
+  "[Resistances|Fire] Resistance"      → "ความเสียหาย [Resistances|ไฟ]"
+  "[Resistances|Cold] Resistance"      → "ความเสียหาย [Resistances|น้ำแข็ง]"
 ```
 
 The `(.+)` part means "capture any character(s) one or more times".
