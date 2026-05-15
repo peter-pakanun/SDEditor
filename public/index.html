@@ -75,7 +75,7 @@
           <h3>If you don't want to restore your translations and version history, click the button below.</h3>
           <div class="importDialogButtons">
             <div class="importDialogOption">
-              <button class="importDialogBtn primary" @click="importPreviousVersionZipClicked">📦 Import Previous Version</button>
+              <button class="importDialogBtn primary" @click="showImportUpdateZipDialog">📦 Import Previous Version</button>
             </div>
             <div class="importDialogOption">
               <button class="importDialogBtn" @click.stop.prevent="startFromScratch">Start from scratch</button>
@@ -83,9 +83,10 @@
           </div>
         </template>
         <div class="loadingText" v-if="loadingProgress == 0 && !needsPostMigrationImport">
-          <h1>Ready to translate</h1>
-          <h3>Use the 📦 Import button to get started.</h3>
-          <button @click="importUpdateZipClicked" title="Import ZIP">📦 Import StatDescriptions.zip</button>
+          <p>Welcome to <b>SDEditor!</b></p>
+          <p>Read the <a href="https://github.com/peter-pakanun/SDEditor/blob/master/docs/editor_guide.md" target="_blank">Editor guide</a> for more information.</p>
+          <button @click="showImportUpdateZipDialog" title="Import ZIP">📦 Import StatDescriptions.zip</button>
+          <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>
         <div class="loadingText" v-if="loadingProgress > 0 && loadingProgress < 99.95">
           <h1>Loading: {{ loadingProgress.toFixed(2) }}%</h1>
@@ -105,7 +106,7 @@
         <div class="pagination">
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
-          <button @click="importUpdateZipClicked" title="Import ZIP">📦</button>
+          <button @click="importZipClicked" title="Import ZIP">📦</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>

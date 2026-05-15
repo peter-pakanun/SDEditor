@@ -1767,8 +1767,11 @@ const config = Vue.defineComponent({
       this.editFile(this.descsDisplay[targetIdx].filepath);
       return;
     },
-    importUpdateZipClicked() {
+    showImportUpdateZipDialog() {
       this.$refs.importUpdateZipFile?.click?.();
+    },
+    importZipClicked() {
+      this.importDialogVisible = true;
     },
     async importUpdateZipChanged(e) {
       const file = e?.target?.files?.[0];
