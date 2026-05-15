@@ -6,8 +6,8 @@ There are two different “import” actions and two different “export” mode
 
 - **Import Next Version**: when you get a new `StatDescriptions.zip` from a game update.
 - **Import Translated**: when you want to move your translated work between PCs.
-- **Export (💾 click)**: exports your “tracked / done” files. you will use this mode most of the time.
-- **Export (💾 Ctrl+Click)**: exports a “full set” of files that are not flagged for review.
+- **Export (:floppy_disk: click)**: exports your “tracked / done” files. you will use this mode most of the time.
+- **Export (:floppy_disk: Ctrl+Click)**: exports a “full set” of files that are not flagged for review.
 
 ## Files You Will See
 
@@ -16,25 +16,25 @@ There are two different “import” actions and two different “export” mode
   - You always import this first for a given version.
 - `StatDescriptions_Translated.zip` (your work)
   - A ZIP of `.txt` files created by this app.
-  - **Main file to be submitted.**
+  - **__Main file to be submitted.__**
   - You can also use this file to share your work or to move it between PCs.
 
-## The Two Export Modes (💾)
+## The Two Export Modes (:floppy_disk:)
 
 ```
              +----------------------+
              |       Export 💾      |
              +----------------------+
                  |            |
-        click (normal)   Ctrl+Click (full)
+        Click (normal)      Ctrl+Click (full)
                  |            |
      exports "Done" files   exports "Full Set" files
      (tracked for export)   (All file except needs Review)
 ```
 
-- **Normal export (click 💾)** includes files marked **Done**.
+- **Normal export (click :floppy_disk:)** includes files marked **Done**.
   - Main way to submit your work.
-- **Full export (Ctrl+Click 💾)** includes all files except those that need review.
+- **Full export (Ctrl+Click :floppy_disk:)** includes all files except those that need review.
   - Good for building a “release” ZIP of everything (take a while to do).
 
 ## Common Workflows
