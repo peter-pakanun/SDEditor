@@ -16,7 +16,7 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
   - **When you’re done:** **Ctrl + Space** again to use the entry you just created, this will go back to the translation field
 - **Ctrl + S:** save the current file
 - **Ctrl + F:** focus on the search bar
-- **F1 / F2 or Ctrl + < / Ctrl + >:** move to the previous/next file, saving the current file if it has changes
+- **F1** / **F2** or **Ctrl + Comma** / **Ctrl + Period**: move to the previous/next file, saving the current file if it has changes
 - **Highlighted text**: in the source file there is a highlighted text that you can interact with
   - **Click:** on the highlighted text to paste it down, replacing the current selection
   - **Ctrl + Click:** on the highlighted text to jump to the Dictionary entry (or create it if it doesn't exist)
