@@ -1708,15 +1708,17 @@ const config = Vue.defineComponent({
         }
       }
 
-      // Ctrl + >: save and open next file
-      if (e.ctrlKey && e.code === 'Period') {
+      // F2 or Ctrl + >: save and open next file
+      if (e.code === "F2" || (e.ctrlKey && e.code === "Period")) {
         e.preventDefault();
         this.saveAndSkipFile(false, true);
+        return;
       }
-      // Ctrl + <: save and open previous file
-      if (e.ctrlKey && e.code === 'Comma') {
+      // F1 or Ctrl + <: save and open previous file
+      if (e.code === "F1" || (e.ctrlKey && e.code === "Comma")) {
         e.preventDefault();
         this.saveAndSkipFile(true, true);
+        return;
       }
       
       if (e.ctrlKey && e.code === 'KeyF') {
