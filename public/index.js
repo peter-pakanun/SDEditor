@@ -716,6 +716,7 @@ const config = Vue.defineComponent({
     removeDictionaryAltRow(word, alt) {
       if (!word || !Array.isArray(word.alts)) return;
       let id = alt?._id;
+      if (!confirm(`Are you sure you want to remove alternate definition of ${String(alt?.find ?? "")}?`)) return;
       if (id) {
         word.alts = word.alts.filter(a => String(a?._id) !== String(id));
       } else {
