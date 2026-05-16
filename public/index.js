@@ -2520,7 +2520,13 @@ const config = Vue.defineComponent({
       document.execCommand("insertText", false, text);
     },
     editorShiftEnter() {
-      if (this.shiftEnterSave) this.editorSave();
+      if (this.shiftEnterSave) {
+        if (this.autoOpenNextFile) {
+          this.saveAndSkipFile();
+        } else {
+          this.editorSave();
+        }
+      }
     },
     editorSave() {
       if (this.editorCompareActive) return false;
