@@ -166,7 +166,13 @@ const config = Vue.defineComponent({
       gamePreviewFrame: "m",
       gamePreviewFonts: null,
       previewGggVars: {},
-      gamePreviewSegments: []
+      gamePreviewSegments: [],
+      
+      // Multi-instance detection
+      showMultiInstanceGate: false,
+      instanceTabId: Math.random().toString(36).substr(2, 9),
+      multiInstanceCheckTimer: null,
+      multiInstanceBypass: false,
     }
   },
   async mounted() {
@@ -179,6 +185,10 @@ const config = Vue.defineComponent({
       this.loadDummyData();
       return;
     }
+
+    // Check for multiple instances early
+    this.checkMultipleInstances();
+    this.startMultiInstanceCheck();
 
     const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
     if (!canUseOfflineStore) {
@@ -236,6 +246,13 @@ const config = Vue.defineComponent({
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
+    // Clean up multi-instance detection
+    if (this.multiInstanceCheckTimer) {
+      clearInterval(this.multiInstanceCheckTimer);
+    }
+    if (this._broadcastChannel) {
+      this._broadcastChannel.close();
+    }
   },
   watch: {
     hideDNT() {
@@ -3063,7 +3080,108 @@ const config = Vue.defineComponent({
       });
       this.loadingProgress = 100;
       saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
-    }
+    },
+    
+    // Multi-instance detection methods
+    checkMultipleInstances() {
+      // Use localStorage with heartbeat pattern to detect multiple instances
+      const storageKey = 'sdeditor_instance_heartbeat';
+      const currentTime = Date.now();
+      const heartbeatInterval = 1000; // 1 second
+      const timeoutThreshold = 5000; // 5 seconds - if no update, consider instance dead
+      
+      try {
+        // Check if we can use BroadcastChannel (better option)
+        if (typeof BroadcastChannel !== 'undefined') {
+          try {
+            const channel = new BroadcastChannel('sdeditor-instances');
+            channel.onmessage = (event) => {
+              if (event.data.type === 'instance_check' && event.data.id !== this.instanceTabId) {
+                // Another instance detected
+                if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
+                  this.showMultiInstanceGate = true;
+                }
+              }
+            };
+            // Announce this instance
+            channel.postMessage({ type: 'instance_check', id: this.instanceTabId });
+            this._broadcastChannel = channel;
+            return;
+          } catch (e) {
+            // BroadcastChannel not available, fall back to localStorage
+          }
+        }
+        
+        // Fallback: localStorage heartbeat
+        let instances = {};
+        try {
+          const stored = localStorage.getItem(storageKey);
+          if (stored) {
+            instances = JSON.parse(stored);
+          }
+        } catch (_) {
+          // localStorage parsing failed
+        }
+        
+        // Clean up dead instances
+        for (const id in instances) {
+          if (currentTime - instances[id] > timeoutThreshold) {
+            delete instances[id];
+          }
+        }
+        
+        // Register this instance
+        instances[this.instanceTabId] = currentTime;
+        
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(instances));
+        } catch (_) {
+          // localStorage write failed
+        }
+        
+        // Check if multiple instances exist (more than just this one)
+        if (Object.keys(instances).length > 1) {
+          if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
+            this.showMultiInstanceGate = true;
+          }
+        }
+      } catch (e) {
+        // If all detection fails, silently continue
+      }
+    },
+    
+    startMultiInstanceCheck() {
+      // Start periodic checks for multiple instances
+      if (this.multiInstanceCheckTimer) {
+        clearInterval(this.multiInstanceCheckTimer);
+      }
+      
+      this.multiInstanceCheckTimer = setInterval(() => {
+        if (!this.multiInstanceBypass) {
+          this.checkMultipleInstances();
+        }
+      }, 2000); // Check every 2 seconds
+    },
+    
+    bypassMultiInstanceGate() {
+      // User chose to continue anyway
+      this.multiInstanceBypass = true;
+      this.showMultiInstanceGate = false;
+    },
+    
+    closeAllButThis() {
+      // Provide user guidance - we can't close other tabs directly for security reasons
+      const message = 'Since browsers prevent programmatic closing of other tabs for security reasons, ' +
+        'you will need to manually close other instances of SDEditor in your browser tabs/windows. ' +
+        'After closing them, this message will disappear automatically.\n\n' +
+        'To proceed with this instance, click "Continue Anyway" below.';
+      alert(message);
+    },
+    
+    closeThisInstance() {
+      // Close this instance
+      window.close();
+    },
   },
 });
 
