@@ -124,6 +124,7 @@ const config = Vue.defineComponent({
         y: 0,
         width: 0
       },
+      hlPopupReturnInfo: null,
       editorBlocks: [
         {
           english: "+1 to Maximum [EnergyShield|Energy Shield] per {0} [ItemEvasion|Item Evasion] on Equipped Body Armour",
@@ -1266,6 +1267,7 @@ const config = Vue.defineComponent({
     openHlPopup(editorIndex, options = {}) {
       if (!this.editorVisible) return;
       if (editorIndex == null) editorIndex = this.editorFocusedIndex || 0;
+      this.hlPopupReturnInfo = null;
       this.hlPopup.editorIndex = editorIndex;
       this.hlPopup.openedByBracket = !!options.openedByBracket;
       this.hlPopup.items = this.buildHlPopupItems(editorIndex);
@@ -1370,6 +1372,7 @@ const config = Vue.defineComponent({
       let tagNameLower = info.tagName.toLowerCase();
       if (!tagNameLower) return false;
 
+      this.hlPopupReturnInfo = item;
       let alt = String(info.dynamicContent ?? "").trim();
 
       let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === tagNameLower);
@@ -1390,6 +1393,7 @@ const config = Vue.defineComponent({
       let entry = (this.dictionary || []).find(d => String(d?._id) === dictId);
       if (!entry) return false;
       let altId = String(item?.dictAltId || "");
+      this.hlPopupReturnInfo = item;
       this.closeHlPopup();
       this.sideTab = "dictionary";
       this.dictionaryFilter = "";
@@ -1569,6 +1573,12 @@ const config = Vue.defineComponent({
       let item = this.hlPopup.filtered[this.hlPopup.selectedIndex];
       if (!item) return;
       this.insertHlPopupItem(item);
+    },
+    onDictionaryReplaceEnter(e) {
+      if (!this.hlPopupReturnInfo) return;
+      let returnInfo = this.hlPopupReturnInfo;
+      this.hlPopupReturnInfo = null;
+      this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true });
     },
     translationKeydown(e, editorIndex) {
       if (e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) {
