@@ -355,7 +355,7 @@
         <div class="hlPopup" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px' }" @mousedown.stop>
           <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
           <div class="hlPopupList">
-            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">
+            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch, mustCreate: item.mustCreate }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">
               <span class="hlPopupItemLabel">{{ item.label }}</span>
               <span v-if="i === hlPopup.selectedIndex && hlPopupCtrlEnterPillText(item)" class="hlPopupHotkeyPill">{{ hlPopupCtrlEnterPillText(item) }}</span>
             </div>

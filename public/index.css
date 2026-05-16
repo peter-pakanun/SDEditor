@@ -1197,6 +1197,11 @@ button, label, th, td, input[type="checkbox"] {
   font-weight: 700;
 }
 
+.hlPopupItem.mustCreate {
+  font-weight: 700;
+  color: var(--color-accent);
+}
+
 .hlPopupEmpty {
   padding: calc(0.6em * var(--density));
   opacity: 0.8;

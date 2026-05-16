@@ -1155,6 +1155,7 @@ const config = Vue.defineComponent({
             keywordTagNameLower = unescapeHtml(hl.tagName || "").trim().toLowerCase();
           }
 
+          let itemToAdds = [];
           for (const dictId of uniqueDictIds) {
             let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(dictId));
             if (!dictEntry) continue;
@@ -1193,7 +1194,8 @@ const config = Vue.defineComponent({
                 value,
                 matchText: p.find,
                 matchTextLower: p.find.toLowerCase(),
-                isAlt: !p.isMain,
+                // isAlt: !p.isMain,
+                isAlt: true,
                 exactFromContext,
                 hlIds: hl?._hlId ? [hl._hlId] : [],
                 dictEntryId: dictEntry._id,
@@ -1202,13 +1204,39 @@ const config = Vue.defineComponent({
                 kwDynamicContent
               };
               seen.set(key, item);
-              items.push(item);
+              itemToAdds.push(item);
             }
+          }
+          
+          // Check if we got any exact matches
+          let exactMatchItem = itemToAdds.find(item => item.exactFromContext);
+          if (!exactMatchItem) {
+            // We have a dictionary entry that does not match the context exactly
+            // Add an option to create a new dictionary entry
+            let item = {
+              label: `${hl.find} → create a new alternative...`,
+              value: hl.find,
+              matchText: hl.find,
+              matchTextLower: hl.find.toLowerCase(),
+              isAlt: false,
+              exactFromContext: true,
+              hlIds: [],
+              kwTagName,
+              kwDynamicContent,
+              mustCreate: true
+            };
+            items.push(item, ...itemToAdds.filter(item => item.isAlt));
+          } else {
+            // We have an exact match
+            // set it as the exact match
+            exactMatchItem.isAlt = false;
+            items.push(exactMatchItem, ...itemToAdds.filter(item => item.isAlt));
           }
 
           continue;
         }
 
+        // No association with a dictionary entry
         let value = hl?.replace || hl?.find || "";
         if (!value) continue;
         let existingValueItem = seenValue.get(value);
@@ -1218,7 +1246,12 @@ const config = Vue.defineComponent({
           }
           continue;
         }
-        let label = hl?.replace && hl.replace !== hl.find ? `${hl.find} → ${hl.replace}` : `${hl.find}`;
+        let label = hl.find;
+        let mustCreate = false;
+        if (hl.isKeywordPopup) {
+          label = `${hl.find} → create a new dictionary entry...`;
+          mustCreate = true;
+        }
         let matchText = String(hl?.find || "").trim();
         let kw = this.parseKeywordPopupTagText(value);
         let item = {
@@ -1229,7 +1262,8 @@ const config = Vue.defineComponent({
           isAlt: false,
           hlIds: hl?._hlId ? [hl._hlId] : [],
           kwTagName: kw?.tagName || "",
-          kwDynamicContent: kw?.dynamicContent || ""
+          kwDynamicContent: kw?.dynamicContent || "",
+          mustCreate
         };
         seenValue.set(value, item);
         items.push(item);
@@ -1429,6 +1463,18 @@ const config = Vue.defineComponent({
         return "Ctrl+Enter Edit";
       }
       return "";
+    },
+    hlPopupEnterAction() {
+      let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
+      if (!item) {
+        this.insertHlPopupSelection();
+      }
+
+      if (item.mustCreate) {
+        return this.createDictionaryEntryFromHlPopupSelection();
+      }
+
+      this.insertHlPopupSelection();
     },
     focusDictionaryEntryReplaceInput(dictId, options = {}) {
       if (!dictId) return;
@@ -1702,8 +1748,8 @@ const config = Vue.defineComponent({
           }
         }
         if (e.code === "Enter") {
+          this.hlPopupEnterAction();
           e.preventDefault();
-          this.insertHlPopupSelection();
           return;
         }
       }
