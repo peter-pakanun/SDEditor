@@ -107,6 +107,7 @@ const config = Vue.defineComponent({
       editorVisible: false,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
+      editorFocusedColumnIndex: 0,
       editorOriginalTranslations: [],
       editorShowEnglishDiff: false,
       editorCompareActive: false,
@@ -122,6 +123,7 @@ const config = Vue.defineComponent({
         selectedIndex: 0,
         x: 0,
         y: 0,
+        columnIndex: 0,
         width: 0
       },
       hlPopupReturnInfo: null,
@@ -131,8 +133,13 @@ const config = Vue.defineComponent({
           englishHLter: "+1 to Maximum <span>[EnergyShield|Energy Shield]</span> per <span>{0}%</span> <span>[ItemEvasion|Item Evasion]</span> on Equipped Body Armour",
           englishDiffHtml: "",
           translation: "",
+          isTable: false,
+          isMultiline: false,
+          tableColumns: [],
           metaLinesEn: 0,
           metaLinesTr: 0,
+          metaColsEn: 0,
+          metaColsTr: 0,
           metaVarsEn: 0,
           metaVarsTr: 0,
           metaKwEn: 0,
@@ -516,7 +523,6 @@ const config = Vue.defineComponent({
       let segments = [];
       let keysOrder = [];
       let keySeen = new Set();
-      let i = 0;
       let textBuf = "";
       let flushText = () => {
         if (textBuf) {
@@ -524,48 +530,73 @@ const config = Vue.defineComponent({
           textBuf = "";
         }
       };
-      while (i < s.length) {
-        let slice = s.slice(i);
-        let km = kwRe.exec(slice);
-        if (km && km.index === 0) {
-          flushText();
-          let tagName = String(km[2] ?? "").trim();
-          let dynamicContent = String(km[3] ?? "").trim();
-          let display = dynamicContent || tagName;
-          segments.push({ type: "kw", text: display, full: km[0] });
-          i += km[0].length;
-          continue;
-        }
-        if (s[i] === '@') {
-          flushText();
-          segments.push({ type: "rightAlign" });
-          i++;
-          continue;
-        }
-        if (s[i] === '\n') {
-          flushText();
-          segments.push({ type: "break" });
-          i++;
-          continue;
-        }
-        let gm = gggRe.exec(slice);
-        if (gm && gm.index === 0) {
-          flushText();
-          let full = gm[0];
-          let key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
-          let ks = String(key);
-          if (!keySeen.has(ks)) {
-            keySeen.add(ks);
-            keysOrder.push(ks);
+
+      let scanInline = (part, allowBreaks = true) => {
+        let i = 0;
+        while (i < part.length) {
+          let slice = part.slice(i);
+          let km = kwRe.exec(slice);
+          if (km && km.index === 0) {
+            flushText();
+            let tagName = String(km[2] ?? "").trim();
+            let dynamicContent = String(km[3] ?? "").trim();
+            let display = dynamicContent || tagName;
+            segments.push({ type: "kw", text: display, full: km[0] });
+            i += km[0].length;
+            continue;
           }
-          let prefix = ["@", "+", "-"].includes(full[0]) ? full[0] : "";
-          let trailingPercent = full.endsWith("%");
-          segments.push({ type: "var", key: ks, trailingPercent, full, prefix });
-          i += full.length;
-          continue;
+          let gm = gggRe.exec(slice);
+          if (gm && gm.index === 0) {
+            flushText();
+            let full = gm[0];
+            let key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
+            let ks = String(key);
+            if (!keySeen.has(ks)) {
+              keySeen.add(ks);
+              keysOrder.push(ks);
+            }
+            let prefix = ["@", "+", "-"].includes(full[0]) ? full[0] : "";
+            let trailingPercent = full.endsWith("%");
+            segments.push({ type: "var", key: ks, trailingPercent, full, prefix });
+            i += full.length;
+            continue;
+          }
+          if (part[i] === '@' && this.isTableDelimiterAt(part, i)) {
+            flushText();
+            segments.push({ type: "rightAlign" });
+            i++;
+            continue;
+          }
+          if (allowBreaks && part[i] === '\n') {
+            flushText();
+            segments.push({ type: "break" });
+            i++;
+            continue;
+          }
+          textBuf += part[i];
+          i++;
         }
-        textBuf += s[i];
-        i++;
+      };
+
+      if (this.isTableText(s)) {
+        let columns = this.splitTableColumns(s).map(col => this.normalizeNewlines(col));
+        let columnLines = columns.map(col => String(col).split("\n"));
+        let rowCount = columnLines.reduce((max, lines) => Math.max(max, lines.length), 0);
+        for (let row = 0; row < rowCount; row++) {
+          for (let col = 0; col < columnLines.length; col++) {
+            if (col > 0) {
+              flushText();
+              segments.push({ type: "rightAlign" });
+            }
+            scanInline(columnLines[col]?.[row] ?? "", false);
+          }
+          if (row < rowCount - 1) {
+            flushText();
+            segments.push({ type: "break" });
+          }
+        }
+      } else {
+        scanInline(s, true);
       }
       flushText();
       return { segments, keysOrder };
@@ -696,6 +727,109 @@ const config = Vue.defineComponent({
       if (typeof s !== "string") return s;
       return s.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
     },
+    isTableDelimiterAt(text, index) {
+      let s = String(text ?? "");
+      return s[index] === "@";
+    },
+    splitTableColumns(text) {
+      let s = String(text ?? "");
+      let columns = [];
+      let buf = "";
+      for (let i = 0; i < s.length; i++) {
+        if (this.isTableDelimiterAt(s, i)) {
+          columns.push(buf);
+          buf = "";
+          continue;
+        }
+        buf += s[i];
+      }
+      columns.push(buf);
+      return columns;
+    },
+    isTableText(text) {
+      let s = text ?? "";
+      if (typeof s !== "string" || !s.includes("@")) return false;
+      return this.splitTableColumns(s).length > 1;
+    },
+    joinTableColumns(columns) {
+      let values = (columns || []).map(v => String(v ?? ""));
+      if (values.every(v => v === "")) return "";
+      return values.join("@");
+    },
+    editorRefName(kind, index, columnIndex = null) {
+      if (columnIndex === null || columnIndex === undefined) return `${kind}_${index}`;
+      return `${kind}_${index}_${columnIndex}`;
+    },
+    getEditorRef(kind, index, columnIndex = null) {
+      let r = this.$refs?.[this.editorRefName(kind, index, columnIndex)];
+      if (Array.isArray(r)) r = r[0];
+      return r;
+    },
+    getEditorColumn(editorBlock, columnIndex = null) {
+      if (!editorBlock?.isTable) return editorBlock;
+      let idx = Number.isInteger(columnIndex) ? columnIndex : 0;
+      return editorBlock.tableColumns?.[idx] || editorBlock.tableColumns?.[0] || null;
+    },
+    makeEditorTableColumn(english, translation, englishExists = true, translationExists = true) {
+      let column = {
+        english: String(english ?? ""),
+        translation: String(translation ?? ""),
+        englishHLter: "",
+        translationHLter: "",
+        englishDiffHtml: escapeHtml(String(english ?? "")),
+        translationDiffHtml: escapeHtml(String(translation ?? "")),
+        HLs: [],
+        isMultiline: this.isMultilineText(String(english ?? "")) || this.isMultilineText(String(translation ?? "")),
+        multilineLineMismatch: false,
+        englishExists,
+        translationExists
+      };
+      this.refreshEditorTableColumnHLter(column);
+      return column;
+    },
+    buildEditorTableColumns(english, translation) {
+      let englishColumns = this.splitTableColumns(english);
+      let translationColumns = this.splitTableColumns(translation);
+      let count = Math.max(englishColumns.length, translationColumns.length);
+      let columns = [];
+      for (let i = 0; i < count; i++) {
+        columns.push(this.makeEditorTableColumn(
+          englishColumns[i] ?? "",
+          translationColumns[i] ?? "",
+          i < englishColumns.length,
+          i < translationColumns.length
+        ));
+      }
+      return columns;
+    },
+    refreshEditorTableColumnHLter(column) {
+      if (!column) return;
+      column.isMultiline = this.isMultilineText(column.english ?? "") || this.isMultilineText(column.translation ?? "");
+      let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(column.english);
+      column.HLs = HLs;
+      if (!column.isMultiline) {
+        column.englishHLter = baseEnglishHLter;
+        column.translationHLter = this.buildTagHLter(column.translation ?? "");
+        column.multilineLineMismatch = false;
+        return;
+      }
+      let diff = this.computeMultilineLineMismatch(column.english, column.translation);
+      column.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+      column.translationHLter = this.wrapHlterByLines(this.buildTagHLter(column.translation ?? ""), diff.trMismatch);
+      column.multilineLineMismatch = diff.mismatch;
+    },
+    syncEditorBlockFromTableColumns(editorBlock) {
+      if (!editorBlock?.isTable) return;
+      let columns = editorBlock.tableColumns || [];
+      editorBlock.translation = this.joinTableColumns(columns.map(col => col?.translation ?? ""));
+      editorBlock.isMultiline = columns.some(col => col?.isMultiline || this.isMultilineText(col?.english ?? "") || this.isMultilineText(col?.translation ?? ""));
+      editorBlock.multilineLineMismatch = columns.some(col => col?.multilineLineMismatch);
+    },
+    rebuildEditorTableColumnsFromStrings(editorBlock) {
+      if (!editorBlock?.isTable) return;
+      editorBlock.tableColumns = this.buildEditorTableColumns(editorBlock.english ?? "", editorBlock.translation ?? "");
+      this.syncEditorBlockFromTableColumns(editorBlock);
+    },
     safeExactRegex(pattern, flags = "igm") {
       let p = String(pattern ?? "");
       return new RegExp("^" + escapeRegExp(p) + "$", flags);
@@ -757,9 +891,18 @@ const config = Vue.defineComponent({
     },
     computeTextStats(text) {
       let s = this.normalizeNewlines(text ?? "");
-      let lines = String(s).length <= 0 ? 0 : String(s).split("\n").length;
+      let columns = this.isTableText(String(s)) ? this.splitTableColumns(String(s)) : [String(s)];
+      let lines;
+      if (String(s).length <= 0) {
+        lines = 0;
+      } else if (columns.length > 1) {
+        lines = columns.reduce((max, col) => Math.max(max, String(col).split("\n").length), 0);
+      } else {
+        lines = String(s).split("\n").length;
+      }
       return {
         lines,
+        cols: String(s).length <= 0 ? 0 : columns.length,
         vars: countGGGVarTag(String(s)),
         kw: countKeywordPopupTag(String(s))
       };
@@ -770,15 +913,23 @@ const config = Vue.defineComponent({
       let tr = this.computeTextStats(editorBlock.translation ?? "");
       editorBlock.metaLinesEn = eng.lines;
       editorBlock.metaLinesTr = tr.lines;
+      editorBlock.metaColsEn = eng.cols;
+      editorBlock.metaColsTr = tr.cols;
       editorBlock.metaVarsEn = eng.vars;
       editorBlock.metaVarsTr = tr.vars;
       editorBlock.metaKwEn = eng.kw;
       editorBlock.metaKwTr = tr.kw;
-      if (typeof editorIndex === "number" && editorBlock.isMultiline) {
+      if (typeof editorIndex === "number" && editorBlock.isMultiline && !editorBlock.isTable) {
         this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
       }
     },
     translationInput(editorBlock, editorIndex) {
+      if (editorBlock?.isTable) {
+        this.syncEditorBlockFromTableColumns(editorBlock);
+        this.refreshEditorBlockMeta(editorBlock, editorIndex);
+        this.refreshGamePreview();
+        return;
+      }
       this.refreshEditorBlockMeta(editorBlock, editorIndex);
       if (!editorBlock?.isMultiline) {
         editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "");
@@ -837,6 +988,13 @@ const config = Vue.defineComponent({
       if (!this.editorVisible) return;
       let editorBlock = this.editorBlocks?.[editorIndex];
       if (!editorBlock) return;
+      if (editorBlock.isTable) {
+        for (let i = 0; i < (editorBlock.tableColumns || []).length; i++) {
+          this.refreshEditorTableColumnHLter(editorBlock.tableColumns[i]);
+        }
+        this.syncEditorBlockFromTableColumns(editorBlock);
+        return;
+      }
       let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
       editorBlock.HLs = HLs;
       if (!editorBlock.isMultiline) {
@@ -850,11 +1008,9 @@ const config = Vue.defineComponent({
       editorBlock.translationHLter = this.wrapHlterByLines(this.buildTagHLter(editorBlock.translation ?? ""), diff.trMismatch);
       editorBlock.multilineLineMismatch = diff.mismatch;
     },
-    syncHlScroll(kind, index) {
-      let inputEl = this.$refs?.[`${kind}_` + index];
-      let hlterEl = this.$refs?.[`${kind}HLter_` + index];
-      if (Array.isArray(inputEl)) inputEl = inputEl[0];
-      if (Array.isArray(hlterEl)) hlterEl = hlterEl[0];
+    syncHlScroll(kind, index, columnIndex = null) {
+      let inputEl = this.getEditorRef(kind, index, columnIndex);
+      let hlterEl = this.getEditorRef(`${kind}HLter`, index, columnIndex);
       if (!inputEl || !hlterEl) return;
       hlterEl.style.transform = `translate(${-inputEl.scrollLeft}px, ${-inputEl.scrollTop}px)`;
     },
@@ -871,12 +1027,30 @@ const config = Vue.defineComponent({
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
         let b = this.editorBlocks[i];
         if (!b?.isMultiline) continue;
+        if (b.isTable) {
+          for (let col = 0; col < (b.tableColumns || []).length; col++) {
+            if (!b.tableColumns[col]?.isMultiline) continue;
+            this.autosizeTextarea(this.getEditorRef("english", i, col), { minHeight: 72, maxHeight: 220 });
+            this.autosizeTextarea(this.getEditorRef("translation", i, col), { minHeight: 84, maxHeight: 260 });
+          }
+          continue;
+        }
         this.autosizeTextarea(this.$refs["english_" + i], { minHeight: 72, maxHeight: 220 });
         this.autosizeTextarea(this.$refs["translation_" + i], { minHeight: 84, maxHeight: 260 });
       }
     },
     normalizeMultilineEditorBlock(editorBlock, editorIndex) {
       if (!editorBlock?.isMultiline) return;
+      if (editorBlock.isTable) {
+        this.syncEditorBlockFromTableColumns(editorBlock);
+        if (typeof editorIndex === "number") {
+          this.refreshEditorBlockHLter(editorIndex);
+          this.refreshEditorBlockMeta(editorBlock, editorIndex);
+          this.$nextTick(() => this.autosizeEditorMultilineFields());
+        }
+        this.refreshGamePreview();
+        return;
+      }
       let next = this.decodeEscapedNewlines(editorBlock.translation || "");
       if (next !== editorBlock.translation) editorBlock.translation = next;
       if (typeof editorIndex === "number") {
@@ -884,6 +1058,24 @@ const config = Vue.defineComponent({
       }
       if (typeof editorIndex === "number") this.refreshEditorBlockHLter(editorIndex);
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
+      this.refreshGamePreview();
+    },
+    tableColumnInput(editorBlock, editorIndex, columnIndex) {
+      let column = editorBlock?.tableColumns?.[columnIndex];
+      if (!column) return;
+      let next = column.isMultiline ? this.decodeEscapedNewlines(column.translation || "") : column.translation;
+      if (next !== column.translation) column.translation = next;
+      this.refreshEditorTableColumnHLter(column);
+      this.syncEditorBlockFromTableColumns(editorBlock);
+      if (typeof editorIndex === "number") {
+        this.refreshEditorBlockMeta(editorBlock, editorIndex);
+        if (column.isMultiline) {
+          this.$nextTick(() => {
+            this.autosizeTextarea(this.getEditorRef("translation", editorIndex, columnIndex), { minHeight: 84, maxHeight: 260 });
+            this.syncHlScroll("translation", editorIndex, columnIndex);
+          });
+        }
+      }
       this.refreshGamePreview();
     },
     loadDummyData() {
@@ -1093,6 +1285,21 @@ const config = Vue.defineComponent({
       if (!this.editorVisible) return;
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
         let editorBlock = this.editorBlocks[i];
+        if (editorBlock.isTable) {
+          for (let col = 0; col < (editorBlock.tableColumns || []).length; col++) {
+            this.refreshEditorTableColumnHLter(editorBlock.tableColumns[col]);
+          }
+          this.syncEditorBlockFromTableColumns(editorBlock);
+          this.refreshEditorBlockMeta(editorBlock, i);
+          this.$nextTick(() => {
+            for (let col = 0; col < (editorBlock.tableColumns || []).length; col++) {
+              if (!editorBlock.tableColumns[col]?.isMultiline) continue;
+              this.syncHlScroll('english', i, col);
+              this.syncHlScroll('translation', i, col);
+            }
+          });
+          continue;
+        }
         let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
         editorBlock.HLs = HLs;
         if (!editorBlock.isMultiline) {
@@ -1128,16 +1335,18 @@ const config = Vue.defineComponent({
       this._hlterRefreshTimer = null;
       this.refreshEditorHLter();
     },
-    setEditorFocus(index) {
+    setEditorFocus(index, columnIndex = 0) {
       this.editorFocusedIndex = index;
+      this.editorFocusedColumnIndex = Number.isInteger(columnIndex) ? columnIndex : 0;
       this.refreshGamePreview();
       if (this.hlPopup.visible) {
-        this.openHlPopup(index);
+        this.openHlPopup(index, { columnIndex: this.editorFocusedColumnIndex });
       }
     },
-    buildHlPopupItems(editorIndex) {
+    buildHlPopupItems(editorIndex, columnIndex = 0) {
       let editorBlock = this.editorBlocks?.[editorIndex];
-      let HLs = editorBlock?.HLs || [];
+      let source = this.getEditorColumn(editorBlock, columnIndex);
+      let HLs = source?.HLs || [];
       let items = [];
       let seen = new Map();
       let seenValue = new Map();
@@ -1288,8 +1497,9 @@ const config = Vue.defineComponent({
       }
       return items;
     },
-    positionHlPopup(editorIndex) {
-      let el = this.$refs["translation_" + editorIndex];
+    positionHlPopup(editorIndex, columnIndex = 0) {
+      let editorBlock = this.editorBlocks?.[editorIndex];
+      let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
       if (!el?.getBoundingClientRect) return;
       let rect = el.getBoundingClientRect();
       let width = Math.min(Math.max(rect.width, 260), 640);
@@ -1319,19 +1529,22 @@ const config = Vue.defineComponent({
     openHlPopup(editorIndex, options = {}) {
       if (!this.editorVisible) return;
       if (editorIndex == null) editorIndex = this.editorFocusedIndex || 0;
+      let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (this.editorFocusedColumnIndex || 0);
       this.hlPopupReturnInfo = null;
       this.hlPopup.editorIndex = editorIndex;
+      this.hlPopup.columnIndex = columnIndex;
       this.hlPopup.openedByBracket = !!options.openedByBracket;
-      this.hlPopup.items = this.buildHlPopupItems(editorIndex);
+      this.hlPopup.items = this.buildHlPopupItems(editorIndex, columnIndex);
       this.hlPopup.filter = "";
       this.applyHlPopupFilter();
-      this.positionHlPopup(editorIndex);
+      this.positionHlPopup(editorIndex, columnIndex);
       this.hlPopup.visible = true;
       let focusFilter = options.focusFilter !== false;
       if (focusFilter) this.$nextTick(() => this.$refs.hlPopupFilter?.focus());
     },
     closeHlPopup(options = {}) {
       let editorIndex = this.hlPopup.editorIndex;
+      let columnIndex = this.hlPopup.columnIndex || 0;
       this.hlPopup.visible = false;
       this.hlPopup.openedByBracket = false;
       this.hlPopup.filter = "";
@@ -1339,7 +1552,10 @@ const config = Vue.defineComponent({
       this.hlPopup.filtered = [];
       this.hlPopup.selectedIndex = 0;
       if (options.refocus && this.editorVisible) {
-        this.$nextTick(() => this.$refs["translation_" + editorIndex]?.focus?.());
+        this.$nextTick(() => {
+          let editorBlock = this.editorBlocks?.[editorIndex];
+          this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null)?.focus?.();
+        });
       }
     },
     parseKeywordPopupTagText(text) {
@@ -1541,10 +1757,21 @@ const config = Vue.defineComponent({
 
       let blockCount = (this.editorBlocks || []).length;
       for (let i = 0; i < blockCount; i++) {
-        let r = this.$refs["englishHLter_" + i];
-        if (!r?.querySelectorAll) continue;
-        for (const el of r.querySelectorAll('span[data-hl-id].hlPopupActive')) {
-          el.classList.remove('hlPopupActive');
+        let block = this.editorBlocks[i];
+        if (block?.isTable) {
+          for (let col = 0; col < (block.tableColumns || []).length; col++) {
+            let r = this.getEditorRef("englishHLter", i, col);
+            if (!r?.querySelectorAll) continue;
+            for (const el of r.querySelectorAll('span[data-hl-id].hlPopupActive')) {
+              el.classList.remove('hlPopupActive');
+            }
+          }
+        } else {
+          let r = this.getEditorRef("englishHLter", i);
+          if (!r?.querySelectorAll) continue;
+          for (const el of r.querySelectorAll('span[data-hl-id].hlPopupActive')) {
+            el.classList.remove('hlPopupActive');
+          }
         }
       }
 
@@ -1557,7 +1784,8 @@ const config = Vue.defineComponent({
       if (!this.hlPopup.visible) return;
 
       let editorIndex = this.hlPopup.editorIndex;
-      let root = this.$refs["englishHLter_" + editorIndex];
+      let activeBlock = this.editorBlocks?.[editorIndex];
+      let root = this.getEditorRef("englishHLter", editorIndex, activeBlock?.isTable ? (this.hlPopup.columnIndex || 0) : null);
       if (!root?.querySelectorAll) return;
 
       let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
@@ -1597,8 +1825,10 @@ const config = Vue.defineComponent({
       if (dictEl?.classList) dictEl.classList.add('hlPopupDictActive');
     },
     insertTranslationText(editorIndex, text, options = {}) {
-      let el = this.$refs["translation_" + editorIndex];
       let editorBlock = this.editorBlocks?.[editorIndex];
+      let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (editorBlock?.isTable ? (this.hlPopup.columnIndex || this.editorFocusedColumnIndex || 0) : null);
+      let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
+      let target = editorBlock?.isTable ? editorBlock.tableColumns?.[columnIndex] : editorBlock;
       if (!el || !editorBlock) {
         document.execCommand("insertText", false, text);
         return;
@@ -1615,8 +1845,10 @@ const config = Vue.defineComponent({
         start = start - 1;
       }
       let newValue = value.slice(0, start) + text + value.slice(end);
-      editorBlock.translation = newValue;
-      if (editorBlock.isMultiline) {
+      if (target) target.translation = newValue;
+      if (editorBlock.isTable) {
+        this.tableColumnInput(editorBlock, editorIndex, columnIndex);
+      } else if (editorBlock.isMultiline) {
         this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
       } else {
         this.translationInput(editorBlock, editorIndex);
@@ -1630,7 +1862,7 @@ const config = Vue.defineComponent({
     insertHlPopupItem(item) {
       let editorIndex = this.hlPopup.editorIndex;
       let deleteOpeningBracket = this.hlPopup.openedByBracket;
-      this.insertTranslationText(editorIndex, item.value, { deleteOpeningBracket });
+      this.insertTranslationText(editorIndex, item.value, { deleteOpeningBracket, columnIndex: this.hlPopup.columnIndex || 0 });
       this.closeHlPopup({ refocus: true });
     },
     insertHlPopupSelection() {
@@ -1642,14 +1874,14 @@ const config = Vue.defineComponent({
       if (!this.hlPopupReturnInfo) return;
       let returnInfo = this.hlPopupReturnInfo;
       this.hlPopupReturnInfo = null;
-      this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true });
+      this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
     },
-    translationKeydown(e, editorIndex) {
+    translationKeydown(e, editorIndex, columnIndex = 0) {
       if (e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!this.editorVisible) return;
-        this.setEditorFocus(editorIndex);
+        this.setEditorFocus(editorIndex, columnIndex);
         if (!this.hlPopup.visible) {
-          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: true }), 0);
+          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: true, columnIndex }), 0);
         }
         return;
       }
@@ -1689,7 +1921,7 @@ const config = Vue.defineComponent({
       if (e.code === "Backspace" && !this.hlPopup.filter) {
         e.preventDefault();
         if (this.hlPopup.openedByBracket) {
-          this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true });
+          this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
         }
         this.closeHlPopup({ refocus: true });
       }
@@ -2452,14 +2684,25 @@ const config = Vue.defineComponent({
       for (let i = 0; i < desc.translations.English.length; i++) {
         let englishRaw = desc.translations.English[i] || "";
         let translationRaw = desc.translations[this.lang]?.[i] || "";
+        let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
+        let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
+        let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
         let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
-        let english = isMultiline ? this.decodeEscapedNewlines(englishRaw) : englishRaw;
-        let translation = isMultiline ? this.decodeEscapedNewlines(translationRaw) : translationRaw;
+        let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
+        let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
         let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(english);
         let englishHLter = baseEnglishHLter;
         let translationHLter = this.buildTagHLter(translation ?? "");
         let multilineLineMismatch = false;
-        if (isMultiline) {
+        let tableColumns = [];
+        if (isTable) {
+          tableColumns = this.buildEditorTableColumns(english, translation);
+          isMultiline = tableColumns.some(col => col.isMultiline);
+          multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
+          englishHLter = "";
+          translationHLter = "";
+          HLs = [];
+        } else if (isMultiline) {
           let diff = this.computeMultilineLineMismatch(english, translation);
           englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
           translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? ""), diff.trMismatch);
@@ -2469,7 +2712,9 @@ const config = Vue.defineComponent({
         let engStats = this.computeTextStats(english);
         let trStats = this.computeTextStats(translation);
         this.editorBlocks.push({
+          isTable,
           isMultiline,
+          tableColumns,
           english,
           englishHLter,
           HLs,
@@ -2480,6 +2725,8 @@ const config = Vue.defineComponent({
           multilineLineMismatch,
           metaLinesEn: engStats.lines,
           metaLinesTr: trStats.lines,
+          metaColsEn: engStats.cols,
+          metaColsTr: trStats.cols,
           metaVarsEn: engStats.vars,
           metaVarsTr: trStats.vars,
           metaKwEn: engStats.kw,
@@ -2490,11 +2737,21 @@ const config = Vue.defineComponent({
       }
       this.editorVisible = true;
       this.editorFocusedIndex = 0;
+      this.editorFocusedColumnIndex = 0;
       this.$nextTick(() => {
-        this.$refs['translation_0'].focus();
+        let firstBlock = this.editorBlocks?.[0];
+        this.getEditorRef("translation", 0, firstBlock?.isTable ? 0 : null)?.focus?.();
         this.autosizeEditorMultilineFields();
         for (let i = 0; i < (this.editorBlocks || []).length; i++) {
           if (!this.editorBlocks[i]?.isMultiline) continue;
+          if (this.editorBlocks[i]?.isTable) {
+            for (let col = 0; col < (this.editorBlocks[i].tableColumns || []).length; col++) {
+              if (!this.editorBlocks[i].tableColumns[col]?.isMultiline) continue;
+              this.syncHlScroll('english', i, col);
+              this.syncHlScroll('translation', i, col);
+            }
+            continue;
+          }
           this.syncHlScroll('english', i);
           this.syncHlScroll('translation', i);
         }
@@ -2506,9 +2763,10 @@ const config = Vue.defineComponent({
         this.prepareEditorEnglishDiff();
       }
     },
-    copySpanToTranslation(e, editorBlock, editorIndex) {
-      this.$refs['translation_' + editorIndex].focus();
-      document.execCommand("insertText", false, e.target.getAttribute('datavalue'));
+    copySpanToTranslation(e, editorBlock, editorIndex, columnIndex = 0) {
+      let text = e.target.getAttribute('datavalue') || "";
+      this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null)?.focus?.();
+      this.insertTranslationText(editorIndex, text, { columnIndex });
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
@@ -2529,12 +2787,13 @@ const config = Vue.defineComponent({
       alt = alt.trim();
       this.ensureDictionaryKeywordTag(tagName, alt);
     },
-    hotkeyPasteHL(e, editorBlock, editorIndex) {
+    hotkeyPasteHL(e, editorBlock, editorIndex, columnIndex = 0) {
       let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);
       if (id < 0) return;
-      if (!editorBlock.HLs[id]) return;
-      let text = editorBlock.HLs[id].replace || editorBlock.HLs[id].find;
-      document.execCommand("insertText", false, text);
+      let source = this.getEditorColumn(editorBlock, columnIndex);
+      if (!source?.HLs?.[id]) return;
+      let text = source.HLs[id].replace || source.HLs[id].find;
+      this.insertTranslationText(editorIndex, text, { columnIndex });
     },
     editorShiftEnter() {
       if (this.shiftEnterSave) {
@@ -2552,6 +2811,7 @@ const config = Vue.defineComponent({
       let desc = this.editorCurrentEditingDesc;
       let newTranslations = [];
       for (const editorBlock of this.editorBlocks) {
+        if (editorBlock?.isTable) this.syncEditorBlockFromTableColumns(editorBlock);
         let ui = editorBlock?.translation ?? "";
         let normalizedUi = editorBlock?.isMultiline ? this.decodeEscapedNewlines(ui) : ui;
         newTranslations.push(this.encodeNewlines(normalizedUi));
@@ -2571,6 +2831,20 @@ const config = Vue.defineComponent({
         let details = lineMismatchInfo.slice(0, 12).join("\n");
         let suffix = lineMismatchInfo.length > 12 ? `\n...and ${lineMismatchInfo.length - 12} more` : "";
         if (!confirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
+      }
+
+      let columnMismatchInfo = [];
+      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+        let b = this.editorBlocks[i];
+        if (!b?.isTable) continue;
+        let engCols = this.computeTextStats(b?.english ?? "").cols;
+        let trCols = this.computeTextStats(b?.translation ?? "").cols;
+        if (engCols !== trCols) columnMismatchInfo.push(`#${i + 1}: ${trCols}/${engCols}`);
+      }
+      if (columnMismatchInfo.length > 0) {
+        let details = columnMismatchInfo.slice(0, 12).join("\n");
+        let suffix = columnMismatchInfo.length > 12 ? `\n...and ${columnMismatchInfo.length - 12} more` : "";
+        if (!confirm(`Number of table columns mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
       }
 
       let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
@@ -2992,7 +3266,11 @@ const config = Vue.defineComponent({
       let editorIndex = this.editorBlocks?.indexOf?.(editorBlock);
       if (typeof editorIndex !== "number" || editorIndex < 0) editorIndex = undefined;
       editorBlock.translation = editorBlock.translationReplace;
-      if (typeof editorIndex === "number") this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
+      if (editorBlock.isTable) {
+        this.rebuildEditorTableColumnsFromStrings(editorBlock);
+      } else if (typeof editorIndex === "number") {
+        this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
+      }
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
         for (const replacerObj of this.dictionary) {
@@ -3015,6 +3293,7 @@ const config = Vue.defineComponent({
         if (!word.replace) word.replace = "";
         editorBlock.translation = editorBlock.translation.replace('🔖', word.replace);
       }
+      if (editorBlock.isTable) this.rebuildEditorTableColumnsFromStrings(editorBlock);
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
       this.refreshGamePreview();
     },

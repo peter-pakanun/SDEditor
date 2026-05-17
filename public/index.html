@@ -254,7 +254,27 @@
         </div>
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
-            <div class="textHL" :class="{ multiline: editorBlock.isMultiline }">
+            <div v-if="editorBlock.isTable && !editorShowEnglishDiff" class="tableEditorStack" :style="{ '--table-columns': editorBlock.tableColumns.length }">
+              <div class="tableEditorRow">
+                <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
+                  <div class="textHL" :class="{ multiline: column.isMultiline }">
+                    <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
+                    <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
+                    <div class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
+                  </div>
+                </div>
+              </div>
+              <div v-if="!(editorCompareActive && editorCompareMode === 'translation')" class="tableEditorRow tableEditorTranslation">
+                <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
+                  <div class="textHL" :class="{ multiline: column.isMultiline }">
+                    <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorCompareActive" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)">
+                    <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorCompareActive" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)"></textarea>
+                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-else class="textHL" :class="{ multiline: editorBlock.isMultiline }">
               <div v-if="editorShowEnglishDiff" class="englishDiff" v-html="editorBlock.englishDiffHtml"></div>
               <template v-else>
                 <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
@@ -262,10 +282,12 @@
                 <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
             </div>
+            <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table content">@</div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
+          <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
             <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorCompareActive" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
             <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
@@ -276,6 +298,7 @@
           </div>
           <div class="fieldMeta">
             <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" title="Lines (translation / english)"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
+            <span v-if="editorBlock.isTable" class="metaPill" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table columns (translation / english)"><span class="metaIcon">@</span><span class="metaNum">{{ editorBlock.metaColsTr }}/{{ editorBlock.metaColsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" title="Variable tags (translation / english)"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" title="Keyword tags (translation / english)"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
           </div>

@@ -209,6 +209,35 @@ input:focus, button:focus, textarea:focus {
   box-shadow: 0 0 0 1px var(--color-element-highlight);
 }
 
+.tableEditorStack {
+  overflow-x: auto;
+  padding-bottom: calc(0.15em * var(--density));
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.tableEditorRow {
+  display: grid;
+  grid-template-columns: repeat(var(--table-columns, 1), minmax(12em, 1fr));
+  gap: calc(0.45em * var(--density));
+  width: 100%;
+  min-width: max-content;
+}
+
+.tableEditorCell {
+  min-width: 0;
+  position: relative;
+}
+
+.tableEditorCell.missingSource,
+.tableEditorCell.missingTranslation {
+  box-shadow: 0 0 0 1px var(--color-line-diff) inset;
+}
+
+.tableEditorTranslation {
+  margin-top: calc(0.35em * var(--density));
+}
+
 .centerContainer {
   position: fixed;
   top: 0;
