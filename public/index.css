@@ -211,7 +211,7 @@ input:focus, button:focus, textarea:focus {
 
 .tableEditorStack {
   overflow-x: auto;
-  padding-bottom: calc(0.15em * var(--density));
+  padding: calc(0.15em * var(--density));
   flex-grow: 1;
   min-width: 0;
 }
