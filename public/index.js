@@ -1383,6 +1383,7 @@ const config = Vue.defineComponent({
           }
 
           let itemToAdds = [];
+          let exactMatchItem = null;
           for (const dictId of uniqueDictIds) {
             let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(dictId));
             if (!dictEntry) continue;
@@ -1414,6 +1415,7 @@ const config = Vue.defineComponent({
                 existingItem.dictEntryId = existingItem.dictEntryId || dictEntry._id;
                 if (kwTagName) existingItem.kwTagName = existingItem.kwTagName || kwTagName;
                 if (kwDynamicContent) existingItem.kwDynamicContent = existingItem.kwDynamicContent || kwDynamicContent;
+                if (exactFromContext && !exactMatchItem) exactMatchItem = existingItem;
                 continue;
               }
               let item = {
@@ -1431,15 +1433,16 @@ const config = Vue.defineComponent({
                 kwDynamicContent
               };
               seen.set(key, item);
+              if (exactFromContext && !exactMatchItem) exactMatchItem = item;
               itemToAdds.push(item);
             }
           }
           
           // Check if we got any exact matches
-          let exactMatchItem = itemToAdds.find(item => item.exactFromContext);
           if (!exactMatchItem) {
             // We have a dictionary entry that does not match the context exactly
             // Add an option to create a new dictionary entry
+            console.log(`No exact match for ${hl.find}`);
             let item = {
               label: `${hl.find} → create a new alternative...`,
               value: hl.find,
@@ -1457,7 +1460,11 @@ const config = Vue.defineComponent({
             // We have an exact match
             // set it as the exact match
             exactMatchItem.isAlt = false;
-            items.push(exactMatchItem, ...itemToAdds.filter(item => item.isAlt));
+            let exactMatchItemIsNew = itemToAdds.includes(exactMatchItem);
+            items.push(
+              ...(exactMatchItemIsNew ? [exactMatchItem] : []),
+              ...itemToAdds.filter(item => item.isAlt && item !== exactMatchItem)
+            );
           }
 
           continue;
@@ -1473,6 +1480,7 @@ const config = Vue.defineComponent({
           }
           continue;
         }
+        console.log(`No association with a dictionary entry: ${value}`);
         let label = hl.find;
         let mustCreate = false;
         if (hl.isKeywordPopup) {
