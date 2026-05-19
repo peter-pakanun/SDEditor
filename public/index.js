@@ -1896,13 +1896,13 @@ const config = Vue.defineComponent({
 
       if (!this.hlPopup.visible) return;
 
-      if (e.code === "Escape") {
+      if (e.key === "Escape") {
         e.preventDefault();
         this.closeHlPopup({ refocus: true });
         return;
       }
 
-      if (e.code === "Backspace") {
+      if (e.key === "Backspace") {
         if (this.hlPopup.filter) {
           e.preventDefault();
           this.hlPopup.filter = this.hlPopup.filter.slice(0, -1);
@@ -1921,12 +1921,12 @@ const config = Vue.defineComponent({
     },
     hlPopupFilterKeydown(e) {
       if (!this.hlPopup.visible) return;
-      if (e.code === "Escape") {
+      if (e.key === "Escape") {
         e.preventDefault();
         this.closeHlPopup({ refocus: true });
         return;
       }
-      if (e.code === "Backspace" && !this.hlPopup.filter) {
+      if (e.key === "Backspace" && !this.hlPopup.filter) {
         e.preventDefault();
         if (this.hlPopup.openedByBracket) {
           this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
@@ -1954,7 +1954,7 @@ const config = Vue.defineComponent({
       return true;
     },
     handleKeydown(e) {
-      if (this.importDialogVisible && e.code === "Escape") {
+      if (this.importDialogVisible && e.key === "Escape") {
         e.preventDefault();
         this.closeImportDialog();
         return;
@@ -1984,35 +1984,35 @@ const config = Vue.defineComponent({
       }
 
       if (this.hlPopup.visible) {
-        if (e.code === "Escape") {
+        if (e.key === "Escape") {
           e.preventDefault();
           this.closeHlPopup({ refocus: true });
           return;
         }
-        if (e.code === "ArrowDown") {
+        if (e.key === "ArrowDown") {
           e.preventDefault();
           this.moveHlPopupSelection(1);
           return;
         }
-        if (e.code === "ArrowUp") {
+        if (e.key === "ArrowUp") {
           e.preventDefault();
           this.moveHlPopupSelection(-1);
           return;
         }
-        if (e.ctrlKey && e.code === "Enter") {
+        if (e.ctrlKey && e.key === "Enter") {
           if (this.hlPopupCtrlEnterAction()) {
             e.preventDefault();
             return;
           }
         }
-        if (e.code === "Enter") {
+        if (e.key === "Enter") {
           this.hlPopupEnterAction();
           e.preventDefault();
           return;
         }
       }
 
-      if (this.editorVisible && e.code === "Escape") {
+      if (this.editorVisible && e.key === "Escape") {
         const t = e.target;
         const inEditor = t && typeof t.closest === "function" ? t.closest(".editor") : null;
         if (!inEditor) {
@@ -2035,7 +2035,7 @@ const config = Vue.defineComponent({
         return;
       }
       
-      if (e.ctrlKey && e.code === 'KeyF') {
+      if (e.ctrlKey && e.code === "KeyF") {
         if (this.isActiveElementInSearchBox()) return;
         e.preventDefault();
         if (this.isActiveElementInEditorPane() && this.focusSidebarFilterInput()) return;
