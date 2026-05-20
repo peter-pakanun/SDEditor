@@ -1837,13 +1837,14 @@ const config = Vue.defineComponent({
       let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (editorBlock?.isTable ? (this.hlPopup.columnIndex || this.editorFocusedColumnIndex || 0) : null);
       let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
       let target = editorBlock?.isTable ? editorBlock.tableColumns?.[columnIndex] : editorBlock;
+      text = String(text ?? "");
       if (!el || !editorBlock) {
-        document.execCommand("insertText", false, text);
+        if (typeof document.execCommand === "function") document.execCommand("insertText", false, text);
         return;
       }
       if (typeof el.selectionStart !== "number" || typeof el.selectionEnd !== "number") {
         if (el?.focus) el.focus();
-        document.execCommand("insertText", false, text);
+        if (typeof document.execCommand === "function") document.execCommand("insertText", false, text);
         return;
       }
       let value = el.value || "";
@@ -1852,15 +1853,49 @@ const config = Vue.defineComponent({
       if (options.deleteOpeningBracket && start > 0 && value[start - 1] === "[") {
         start = start - 1;
       }
-      let newValue = value.slice(0, start) + text + value.slice(end);
-      if (target) target.translation = newValue;
-      if (editorBlock.isTable) {
-        this.tableColumnInput(editorBlock, editorIndex, columnIndex);
-      } else if (editorBlock.isMultiline) {
-        this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
-      } else {
-        this.translationInput(editorBlock, editorIndex);
+      let syncEditedValue = () => {
+        if (target) target.translation = el.value || "";
+        if (editorBlock.isTable) {
+          this.tableColumnInput(editorBlock, editorIndex, columnIndex);
+        } else if (editorBlock.isMultiline) {
+          this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
+        } else {
+          this.translationInput(editorBlock, editorIndex);
+        }
+      };
+
+      el.focus?.();
+      el.setSelectionRange?.(start, end);
+      let expectedValue = value.slice(0, start) + text + value.slice(end);
+      let usedNativeEdit = false;
+      if (typeof document.execCommand === "function") {
+        if (!text && start !== end) {
+          usedNativeEdit = document.execCommand("delete", false, null);
+        } else {
+          usedNativeEdit = document.execCommand("insertText", false, text);
+        }
       }
+      if (!usedNativeEdit || el.value !== expectedValue) {
+        if (typeof el.setRangeText === "function") {
+          el.setRangeText(text, start, end, "end");
+        } else {
+          el.value = expectedValue;
+          let fallbackCaret = start + text.length;
+          el.setSelectionRange?.(fallbackCaret, fallbackCaret);
+        }
+        let inputEvent;
+        try {
+          inputEvent = new InputEvent("input", {
+            bubbles: true,
+            inputType: text ? "insertText" : "deleteContentBackward",
+            data: text
+          });
+        } catch (_) {
+          inputEvent = new Event("input", { bubbles: true });
+        }
+        el.dispatchEvent(inputEvent);
+      }
+      syncEditedValue();
       this.$nextTick(() => {
         el.focus?.();
         let caret = start + text.length;
