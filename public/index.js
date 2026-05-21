@@ -51,6 +51,7 @@ const config = Vue.defineComponent({
       gameVersionSelected: false,
       pendingSingleVersionMigration: null,
       migrationInProgress: false,
+      versionStorageLoading: false,
       langs: [
         "French",
         "German",
@@ -305,6 +306,7 @@ const config = Vue.defineComponent({
       return GAME_VERSIONS[this.gameVersion]?.label || '';
     },
     needsPostMigrationImport() {
+      if (this.versionStorageLoading) return false;
       if (this.sourceLoaded) return false;
       const ws = this.localDescs?.descs;
       if (!Array.isArray(ws) || ws.length === 0) return false;
@@ -612,7 +614,9 @@ const config = Vue.defineComponent({
       await this.loadVersionedStorage();
     },
     async loadVersionedStorage() {
+      this.versionStorageLoading = true;
       this.resetVersionedState();
+      this.loadingProgress = 0.001;
 
       let localDescs;
       try {
@@ -634,8 +638,11 @@ const config = Vue.defineComponent({
         this.filterDesc();
         this.loadingProgress = 100;
       } else {
+        this.versionStorageLoading = false;
         this.loadingProgress = 0;
+        return;
       }
+      this.versionStorageLoading = false;
     },
     getGamePreviewFontFamily(lang) {
       let map = this.gamePreviewFonts;

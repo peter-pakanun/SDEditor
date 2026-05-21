@@ -161,7 +161,11 @@
           <button @click="showImportUpdateZipDialog" title="Import ZIP">📦 Import StatDescriptions.zip</button>
           <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>
-        <div class="loadingText" v-if="loadingProgress > 0 && loadingProgress < 99.95">
+        <div class="loadingText" v-if="loadingProgress == 0.001">
+          <h1>Initializing...</h1>
+          <h3>Please wait while we initialize the workspace. This can take a moment.</h3> 
+        </div>
+        <div class="loadingText" v-if="loadingProgress > 0.001 && loadingProgress < 99.95">
           <h1>Loading: {{ loadingProgress.toFixed(2) }}%</h1>
         </div>
         <template v-if="loadingProgress >= 99.95 && loadingProgress < 100">
