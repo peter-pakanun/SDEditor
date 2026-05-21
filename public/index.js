@@ -133,7 +133,8 @@ const config = Vue.defineComponent({
         x: 0,
         y: 0,
         columnIndex: 0,
-        width: 0
+        width: 0,
+        selectedTranslationText: ""
       },
       hlPopupReturnInfo: null,
       editorBlocks: [
@@ -1678,6 +1679,15 @@ const config = Vue.defineComponent({
       this.hlPopup.y = Math.round(top);
       this.hlPopup.width = Math.round(width);
     },
+    getTranslationSelectionText(editorIndex, columnIndex = 0) {
+      let editorBlock = this.editorBlocks?.[editorIndex];
+      let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
+      if (!el || typeof el.selectionStart !== "number" || typeof el.selectionEnd !== "number") return "";
+      let start = Math.min(el.selectionStart, el.selectionEnd);
+      let end = Math.max(el.selectionStart, el.selectionEnd);
+      if (start === end) return "";
+      return String(el.value || "").slice(start, end);
+    },
     applyHlPopupFilter() {
       let filter = (this.hlPopup.filter || "").trim().toLowerCase();
       if (!filter) {
@@ -1700,6 +1710,7 @@ const config = Vue.defineComponent({
       this.hlPopup.editorIndex = editorIndex;
       this.hlPopup.columnIndex = columnIndex;
       this.hlPopup.openedByBracket = !!options.openedByBracket;
+      this.hlPopup.selectedTranslationText = this.getTranslationSelectionText(editorIndex, columnIndex);
       this.hlPopup.items = this.buildHlPopupItems(editorIndex, columnIndex);
       this.hlPopup.filter = "";
       this.applyHlPopupFilter();
@@ -1717,6 +1728,7 @@ const config = Vue.defineComponent({
       this.hlPopup.items = [];
       this.hlPopup.filtered = [];
       this.hlPopup.selectedIndex = 0;
+      this.hlPopup.selectedTranslationText = "";
       if (options.refocus && this.editorVisible) {
         this.$nextTick(() => {
           let editorBlock = this.editorBlocks?.[editorIndex];
@@ -1750,10 +1762,11 @@ const config = Vue.defineComponent({
       dynamicContent = dynamicContent.trim();
       return { tagName, dynamicContent };
     },
-    ensureDictionaryKeywordTag(tagName, altFind = "") {
+    ensureDictionaryKeywordTag(tagName, altFind = "", replaceText = "") {
       let tn = String(tagName ?? "").trim();
       if (!tn) return { dictId: "", created: false, addedAlt: false };
       let alt = String(altFind ?? "").trim();
+      let replace = String(replaceText ?? "");
 
       this.sideTab = "dictionary";
       this.dictionaryFilter = "";
@@ -1765,7 +1778,7 @@ const config = Vue.defineComponent({
         if (alt) {
           let pairs = this.getDictionaryDefinitionPairs(existing);
           if (!pairs.some(p => String(p?.find || "").trim().toLowerCase() === alt.toLowerCase())) {
-            createdAltId = this.addDictionaryAltPair(existing, alt, existing?.replace ?? "");
+            createdAltId = this.addDictionaryAltPair(existing, alt, replace || existing?.replace || "");
             addedAlt = true;
           }
         }
@@ -1784,8 +1797,8 @@ const config = Vue.defineComponent({
       let entry = {
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
         find: tn,
-        replace: tn,
-        alts: alt ? [{ _id: (createdAltId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`), find: alt, replace: tn }] : [],
+        replace: replace || tn,
+        alts: alt ? [{ _id: (createdAltId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`), find: alt, replace: replace || tn }] : [],
         tlnote: ""
       };
       this.dictionary.unshift(entry);
@@ -1827,6 +1840,16 @@ const config = Vue.defineComponent({
       let entry = (this.dictionary || []).find(d => String(d?._id) === dictId);
       if (!entry) return false;
       let altId = String(item?.dictAltId || "");
+      let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
+      if (selectedText) {
+        if (altId) {
+          let alt = Array.isArray(entry.alts) ? entry.alts.find(a => String(a?._id) === altId) : null;
+          if (alt) alt.replace = selectedText;
+        } else {
+          entry.replace = selectedText;
+        }
+        this.syncEditorHlterWithDictionaryNow();
+      }
       this.hlPopupReturnInfo = item;
       this.closeHlPopup();
       this.sideTab = "dictionary";
@@ -1906,8 +1929,9 @@ const config = Vue.defineComponent({
       let info = this.getHlPopupKeywordInfo(item);
       if (!info) return false;
 
+      let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
       this.closeHlPopup();
-      let r = this.ensureDictionaryKeywordTag(info.tagName, info.dynamicContent);
+      let r = this.ensureDictionaryKeywordTag(info.tagName, info.dynamicContent, selectedText);
       return r.created || r.addedAlt;
     },
     moveHlPopupSelection(delta) {
