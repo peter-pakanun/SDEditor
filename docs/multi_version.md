@@ -31,11 +31,11 @@ If the ZIP looks like a different version from the one currently selected, SDEdi
 
 Version-specific data is stored separately in IndexedDB:
 
-| Data            | PoE1             | PoE2                   |
-|-----------------|------------------|------------------------|
-| Source ZIP data | `kv.source_poe1` | `kv.source_poe2`       |
+| Data            | PoE1                | PoE2                |
+|-----------------|---------------------|---------------------|
+| Source ZIP data | `kv.source_poe1`    | `kv.source_poe2`    |
 | Workspace       | `kv.workspace_poe1` | `kv.workspace_poe2` |
-| History         | `revisions_poe1` | `revisions_poe2`       |
+| History         | `revisions_poe1`    | `revisions_poe2`    |
 
 The old single-version `kv.source`, `kv.workspace`, and `revisions` data are left intact as a backup.
 
