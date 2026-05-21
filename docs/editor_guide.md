@@ -62,8 +62,8 @@ These are placeholders that the game fills in at runtime. They **must** be prese
 
 **Example:**
 ```
-English:   {0:+d} to maximum Life
-Thai:      พลังชีวิตสูงสุด {0:+d}
+English:   Deals {0}% more damage
+Thai:      สร้างความเสียหาย เพิ่มขึ้น อีก {0}%
 ```
 
 ### KeywordPopups Tags: `[TagName]` or `[TagName|Display]`
@@ -75,14 +75,17 @@ These create interactive tooltips in the game. They have two parts:
 
 **Example:**
 ```
+English:   Deals {0}% more damage with [HitDamage|Hits]
+Thai:      สร้างความเสียหาย [HitDamage|ปะทะ] เพิ่มขึ้น อีก {0}%
+
 English:   Deals {0} to {1} [Fire] Damage
 Thai:      สร้างความเสียหาย [Fire|ไฟ] {0} ถึง {1}
 ```
 
-You can translate "Fire" to your language, but `[Fire]` must stay unchanged.
-If the display does not exist, you can create one.
+You can translate `Hits` to your language, but `HitDamage` must stay unchanged.
+Sometime the source text use the same display as the tag name, e.g. `[Fire]`, you can translate it to your language by adding the display part yourself, e.g. `[Fire|ไฟ]`.
 
-> 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space)** to insert this tag to speedup and ensure consistency.
+> 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space)** to insert these tags to speedup and ensure consistency.
 
 ### Line Breaks: Multi-line Blocks
 
@@ -116,7 +119,7 @@ While editing a translation, press **Ctrl + Space** or **`[`** (left square brac
 - Press **Escape** to close without inserting
 - Press **Ctrl + Enter** to jump to the Dictionary entry, or create a new one if it doesn't exist.
 
-> 💡 When you done creating a new Dictionary entry, press **Ctrl + Space** to call the Autocomplete Popup again can speed up your work.
+> 💡 When you done creating a new Dictionary entry, press **Enter** to quickly insert it back into your translation at the cursor position.
 
 ### Alternative Ways to Insert
 
@@ -211,14 +214,15 @@ If you see a keyword in the English text that isn't in your Dictionary yet:
 1. **Ctrl + Click** the keyword in the English text or **Ctrl + Space** to open the Autocomplete Popup and **Ctrl + Enter** while selecting the keyword
 2. A new Dictionary entry is created and appears in the Dictionary panel
 3. Add your translation in the "Replace" field
-4. (Optional) **Ctrl + Space** to open the Autocomplete Popup again and select the keyword you just created to insert it back into the translation.
+4. (Optional) **Enter** to quickly insert it back into your translation at the cursor position.
 
 ## Saving Your Translation
 
 **Click the 💾 button** at the top of the editor to save your work, or use:
 - **Ctrl + S**: Save the file
+- **F1/F2**: Save and open previous/next file
 
-When you save:
+**When you save:**
 - Your translation is stored locally in your browser
 - A revision/history entry is created (view in the **History** tab on the right)
 - Mismatch warnings appear if your translation doesn't match the English version ask you to review before saving
@@ -253,13 +257,13 @@ The **History** panel on the right shows all saved versions of the current file.
 
 ### Confirming Unchanged Translations
 
-If the English source was updated but your translation still fits (typo, etc.), you can manually confirm it hasn't changed:
+If the English source was updated but your translation still fits (source typo, etc.), you can manually confirm it hasn't changed:
 
 1. Open the file in the editor
 2. Click **"Confirm unchanged"** button (appears when "Review" flag is set)
 3. This clears the "Review" flag without requiring you to edit the translation.
 
-> **Note**: All file which haven't been reviewed will **not be exported**, you will have to translate them again next export.
+> **Note**: All file which haven't been reviewed will **not be exported**, you will have to translate them again next export if you don't confirm them. So it is important to review your translations before exporting.
 
 ### Exporting Your Work
 
