@@ -65,7 +65,7 @@ const config = Vue.defineComponent({
         "Traditional Chinese",
       ],
       lang: "",
-      theme: 'grey',
+      theme: 'light',
       showSetting: false,
       needsInitialSettings: true,
       loadingProgress: 0.001,

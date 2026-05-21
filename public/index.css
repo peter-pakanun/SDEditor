@@ -1,4 +1,16 @@
 :root {
+  --color-bg: #F5F7FB;
+  --color-bg2: #E9EDF5;
+  --color-element: #FFFFFF;
+  --color-element-alt: #DDE3EE;
+  --color-element-highlight: #4E6BD6;
+  --color-accent: #C76519;
+  --color-line-diff: rgba(210, 48, 48, 0.18);
+  --color-shadow: rgba(36, 48, 70, 0.22);
+  --color-font: #172033;
+}
+
+[data-theme="grey"] {
   --color-bg: #CCC;
   --color-bg2: #C2C2C2;
   --color-element: #BCBCBC;
@@ -1214,7 +1226,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .hlPopupItem.active,
 .hlPopupItem:hover {
-  background-color: var(--color-element-highlight);
+  background-color: color-mix(in srgb, var(--color-element-highlight) 20%, transparent);
 }
 
 .hlPopupItem.alt {
