@@ -2,6 +2,8 @@
 
 This app edits Path of Exile `StatDescriptions.zip` translation files in your browser.
 
+SDEditor supports separate PoE1 and PoE2 workspaces. Pick the game version on launch before importing. For details, see [Multi-Version Support](multi_version.md).
+
 There are two different “import” actions and two different “export” modes. They are meant for different situations:
 
 - **Import Next Version**: when you get a new `StatDescriptions.zip` from a game update.
@@ -14,6 +16,7 @@ There are two different “import” actions and two different “export” mode
 - `StatDescriptions.zip` (source)
   - The English source + translation blocks.
   - You always import this first for a given version.
+  - Full ZIP imports are auto-detected as PoE1 or PoE2. If the ZIP looks like the other version, SDEditor asks before switching.
 - `StatDescriptions_Translated.zip` (your work)
   - A ZIP of `.txt` files created by this app.
   - **__Main file to be submitted.__**

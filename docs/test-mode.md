@@ -19,6 +19,7 @@ Example:
 
 - Loads a small built-in dummy dataset (no ZIP required).
 - Does not read or write `indexedDB`, so your real saved settings/local changes won’t be modified.
+- Skips the launch version selector and uses PoE1 for the browser title/test state.
 
 ## Local server notes
 

@@ -8,6 +8,10 @@ The editor helps you translate game stat descriptions while maintaining formatti
 
 ## Getting Started
 
+### Choosing PoE1 Or PoE2
+
+When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Dictionary and Regex entries are shared. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
+
 ### Importing StatDescriptions.zip
 
 Use the **📦 Import Zip** button in the top left corner to begin import process.

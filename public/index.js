@@ -9,6 +9,10 @@ const TEST_MODE = (() => {
 })();
 const URL_LANG = urlParams.get('lang');
 const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
+const GAME_VERSIONS = {
+  poe1: { id: 'poe1', label: 'PoE1', title: 'Path of Exile 1' },
+  poe2: { id: 'poe2', label: 'PoE2', title: 'Path of Exile 2' },
+};
 
 /** BCP 47 tags for <input>/<textarea lang> so the browser spellchecker matches Settings → language. */
 const SETTINGS_LANG_TO_BCP47 = {
@@ -43,6 +47,10 @@ const config = Vue.defineComponent({
     return {
       offlineStoreReady: false,
       testMode: TEST_MODE,
+      gameVersion: "",
+      gameVersionSelected: false,
+      pendingSingleVersionMigration: null,
+      migrationInProgress: false,
       langs: [
         "French",
         "German",
@@ -184,6 +192,9 @@ const config = Vue.defineComponent({
   },
   async mounted() {
     if (this.testMode) {
+      this.gameVersion = 'poe1';
+      this.gameVersionSelected = true;
+      this.updateDocumentTitle();
       this.lang = (URL_LANG && this.langs.includes(URL_LANG)) ? URL_LANG : (this.langs[0] || "Thai");
       this.needsInitialSettings = false;
       this.loadingProgress = 0;
@@ -219,37 +230,14 @@ const config = Vue.defineComponent({
     if (settings) this.importSettings(settings);
 
 
-    let localDescs;
-    try {
-      localDescs = await window.OfflineStore.getWorkspace();
-    } catch (_) {
-    }
-    if (localDescs) this.localDescs = localDescs;
-    this.ensureLocalDescsReady();
-
     this.needsInitialSettings = !this.lang;
-
-    let source;
-    try {
-      source = await window.OfflineStore.getSource();
-    } catch (_) {
-    }
-    if (Array.isArray(source) && source.length > 0) {
-      this.descs = source;
-      this.sourceLoaded = true;
-      this.applyWorkspaceOverlay();
-      this.filterDesc();
-      this.loadingProgress = 99.999;
-    }
-
-    if (!this.sourceLoaded) this.loadingProgress = 0;
     offlineStoreReady = true;
     this.offlineStoreReady = true;
     this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
 
     await this.saveSettings();
-    if (this.sourceLoaded) this.loadingProgress = 100;
+    this.updateDocumentTitle();
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
@@ -313,6 +301,9 @@ const config = Vue.defineComponent({
     }
   },
   computed: {
+    gameVersionLabel() {
+      return GAME_VERSIONS[this.gameVersion]?.label || '';
+    },
     needsPostMigrationImport() {
       if (this.sourceLoaded) return false;
       const ws = this.localDescs?.descs;
@@ -484,6 +475,166 @@ const config = Vue.defineComponent({
         return JSON.parse(JSON.stringify(v));
       } catch (_) {
         return null;
+      }
+    },
+    normalizeGameVersion(version) {
+      const v = String(version || '').toLowerCase();
+      return v === 'poe2' ? 'poe2' : 'poe1';
+    },
+    formatGameVersion(version) {
+      const v = this.normalizeGameVersion(version);
+      return GAME_VERSIONS[v]?.label || v.toUpperCase();
+    },
+    updateDocumentTitle() {
+      document.title = this.gameVersionSelected && this.gameVersionLabel
+        ? `SDEditor - ${this.gameVersionLabel}`
+        : 'SDEditor';
+    },
+    detectGameVersionFromFilepaths(filepaths) {
+      const paths = (Array.isArray(filepaths) ? filepaths : [])
+        .map(p => String(p || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase())
+        .filter(Boolean);
+
+      for (const path of paths) {
+        if (path.includes('specific_skill_stat_descriptions/explosive_grenade')) return 'poe2';
+      }
+
+      for (const path of paths) {
+        const marker = 'specific_skill_stat_descriptions/';
+        const idx = path.indexOf(marker);
+        if (idx < 0) continue;
+        const rest = path.slice(idx + marker.length);
+        const parts = rest.split('/').filter(Boolean);
+        if (parts.length >= 2) return 'poe2';
+      }
+
+      return 'poe1';
+    },
+    detectGameVersionFromDescs(descs) {
+      const paths = [];
+      for (const desc of (Array.isArray(descs) ? descs : [])) {
+        if (desc?.filepath) paths.push(desc.filepath);
+      }
+      return this.detectGameVersionFromFilepaths(paths);
+    },
+    detectGameVersionFromZip(zip) {
+      return this.detectGameVersionFromFilepaths(getZipTxtFilepaths(zip));
+    },
+    resetVersionedState() {
+      this.descs = [];
+      this.filteredDescs = [];
+      this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
+      this.sourceLoaded = false;
+      this.editorVisible = false;
+      this.editorCurrentEditingDesc = null;
+      this.historyItems = [];
+      this.historySelectedA = null;
+      this.historySelectedB = null;
+      this.historyDiffHtml = '';
+      this.loadingProgress = 0;
+      this.ensureLocalDescsReady();
+      this.filterDesc();
+    },
+    async selectGameVersion(version) {
+      await this.activateGameVersion(version, { checkMigration: true });
+    },
+    async activateGameVersion(version, { checkMigration = true } = {}) {
+      const v = this.normalizeGameVersion(version);
+      this.gameVersion = v;
+      this.gameVersionSelected = true;
+      window.OfflineStore?.setGameVersion?.(v);
+      this.updateDocumentTitle();
+
+      if (checkMigration) {
+        await this.prepareSingleVersionMigration();
+        if (this.pendingSingleVersionMigration) return;
+      }
+
+      await this.loadVersionedStorage();
+    },
+    async prepareSingleVersionMigration() {
+      this.pendingSingleVersionMigration = null;
+      if (!(window.OfflineStore && typeof window.OfflineStore.hasMigratedFromSingleVersion === 'function')) return;
+
+      let migrated = false;
+      try {
+        migrated = !!(await window.OfflineStore.hasMigratedFromSingleVersion());
+      } catch (_) {
+      }
+      if (migrated) return;
+
+      let legacySource;
+      let legacyWorkspace;
+      let legacyRevisionCount = 0;
+      try {
+        legacySource = await window.OfflineStore.getLegacySource?.();
+        legacyWorkspace = await window.OfflineStore.getLegacyWorkspace?.();
+        legacyRevisionCount = Number(await window.OfflineStore.getLegacyRevisionCount?.()) || 0;
+      } catch (_) {
+      }
+
+      const workspaceDescs = Array.isArray(legacyWorkspace?.descs) ? legacyWorkspace.descs : [];
+      const sourceDescs = Array.isArray(legacySource) ? legacySource : [];
+      if (sourceDescs.length === 0 && workspaceDescs.length === 0 && legacyRevisionCount === 0) return;
+
+      const detectedVersion = this.detectGameVersionFromDescs(sourceDescs.length > 0 ? sourceDescs : workspaceDescs);
+      this.pendingSingleVersionMigration = {
+        detectedVersion,
+        selectedVersion: this.gameVersion,
+        sourceCount: sourceDescs.length,
+        workspaceCount: workspaceDescs.length,
+        revisionCount: legacyRevisionCount,
+      };
+    },
+    async confirmSingleVersionMigration() {
+      if (this.migrationInProgress) return;
+      const pending = this.pendingSingleVersionMigration;
+      if (!pending) return;
+      const targetVersion = this.normalizeGameVersion(pending.detectedVersion);
+      this.migrationInProgress = true;
+      this.gameVersion = targetVersion;
+      this.gameVersionSelected = true;
+      window.OfflineStore?.setGameVersion?.(targetVersion);
+      this.updateDocumentTitle();
+      this.loadingProgress = 0.001;
+
+      try {
+        await window.OfflineStore.copyLegacyToVersion(targetVersion);
+      } catch (error) {
+        this.loadingProgress = 0;
+        this.migrationInProgress = false;
+        alert('Migration failed. Your old data was left untouched.');
+        return;
+      }
+
+      this.pendingSingleVersionMigration = null;
+      this.migrationInProgress = false;
+      await this.loadVersionedStorage();
+    },
+    async loadVersionedStorage() {
+      this.resetVersionedState();
+
+      let localDescs;
+      try {
+        localDescs = await window.OfflineStore.getWorkspace(this.gameVersion);
+      } catch (_) {
+      }
+      if (localDescs) this.localDescs = localDescs;
+      this.ensureLocalDescsReady();
+
+      let source;
+      try {
+        source = await window.OfflineStore.getSource(this.gameVersion);
+      } catch (_) {
+      }
+      if (Array.isArray(source) && source.length > 0) {
+        this.descs = source;
+        this.sourceLoaded = true;
+        this.applyWorkspaceOverlay();
+        this.filterDesc();
+        this.loadingProgress = 100;
+      } else {
+        this.loadingProgress = 0;
       }
     },
     getGamePreviewFontFamily(lang) {
@@ -677,7 +828,7 @@ const config = Vue.defineComponent({
       const filepath = this.editorCurrentEditingDesc.filepath;
       let prevEng = null;
       try {
-        const items = await window.OfflineStore.listRevisions(filepath, 'English', 2);
+        const items = await window.OfflineStore.listRevisions(filepath, 'English', 2, this.gameVersion);
         if (Array.isArray(items) && items.length >= 2) prevEng = items[1]?.translations;
       } catch (_) {
       }
@@ -2156,8 +2307,8 @@ const config = Vue.defineComponent({
 
     async startFromScratch() {
       const ok = this.confirmProceedByTypingYes(
-        "This will DELETE all of your local translated workspace data and ALL revision history stored in this browser.\n\n" +
-        "You will lose your working translated files and history.\n\n" +
+        `This will DELETE your ${this.formatGameVersion(this.gameVersion)} translated workspace data and ${this.formatGameVersion(this.gameVersion)} revision history stored in this browser.\n\n` +
+        "You will lose your working translated files and history for the selected version.\n\n" +
         "Type YES to proceed:",
         { confirmMessage: "Last warning: This cannot be undone. Proceed?" }
       );
@@ -2223,6 +2374,26 @@ const config = Vue.defineComponent({
         this.loadingProgress = 100;
         alert('No .txt files found in this ZIP.');
         return;
+      }
+      const detectedGameVersion = this.detectGameVersionFromZip(zip);
+      if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
+        const detectedLabel = this.formatGameVersion(detectedGameVersion);
+        const currentLabel = this.formatGameVersion(this.gameVersion);
+        const ok = confirm(
+          `This StatDescriptions.zip looks like ${detectedLabel}, but you are currently working in ${currentLabel}.\n\n` +
+          `Switch to ${detectedLabel} and import it there?`
+        );
+        if (!ok) {
+          this.loadingProgress = 100;
+          return;
+        }
+        await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
+        if (this.pendingSingleVersionMigration) {
+          this.loadingProgress = 0;
+          alert('Please finish or skip the migration before importing this ZIP.');
+          return;
+        }
+        this.loadingProgress = 0.001;
       }
       if (txtFileCount < ZIP_TXT_FILE_COUNT_THRESHOLD) {
         const ok = this.confirmProceedByTypingYes(
@@ -2331,8 +2502,8 @@ const config = Vue.defineComponent({
             translations: nextEng,
           };
           try {
-            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English');
-            if (!latest || !arrayEquals(latest.translations, nextEng)) await window.OfflineStore.addRevision(rev);
+            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English', this.gameVersion);
+            if (!latest || !arrayEquals(latest.translations, nextEng)) await window.OfflineStore.addRevision(rev, this.gameVersion);
           } catch (_) {
           }
         } else if (!prevDesc) {
@@ -2347,8 +2518,8 @@ const config = Vue.defineComponent({
             translations: nextEng,
           };
           try {
-            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English');
-            if (!latest) await window.OfflineStore.addRevision(rev);
+            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English', this.gameVersion);
+            if (!latest) await window.OfflineStore.addRevision(rev, this.gameVersion);
           } catch (_) {
           }
         }
@@ -2360,7 +2531,7 @@ const config = Vue.defineComponent({
       await this.saveLocalDescs();
       if (window.OfflineStore && typeof window.OfflineStore.setSource === 'function') {
         try {
-          await window.OfflineStore.setSource(nextSource);
+          await window.OfflineStore.setSource(nextSource, this.gameVersion);
         } catch (_) {
         }
       }
@@ -2575,8 +2746,8 @@ const config = Vue.defineComponent({
           };
 
           try {
-            const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang);
-            if (!latest || !arrayEquals(latest.translations, lines)) await window.OfflineStore.addRevision(rev);
+            const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang, this.gameVersion);
+            if (!latest || !arrayEquals(latest.translations, lines)) await window.OfflineStore.addRevision(rev, this.gameVersion);
           } catch (_) {
           }
 
@@ -2945,7 +3116,7 @@ const config = Vue.defineComponent({
       this.historyLoading = true;
       try {
         if (window.OfflineStore && typeof window.OfflineStore.listRevisions === 'function') {
-          const items = await window.OfflineStore.listRevisions(filepath, lang, 100);
+          const items = await window.OfflineStore.listRevisions(filepath, lang, 100, this.gameVersion);
           this.historyItems = (Array.isArray(items) ? items : []).map((it, idx) => {
             if (idx !== 0) return it;
             return {
@@ -3144,13 +3315,13 @@ const config = Vue.defineComponent({
       };
 
       try {
-        const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang);
+        const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang, this.gameVersion);
         if (latest && arrayEquals(latest.translations, translations)) return;
       } catch (_) {
       }
 
       try {
-        await window.OfflineStore.addRevision(rev);
+        await window.OfflineStore.addRevision(rev, this.gameVersion);
       } catch (_) {
       }
 
@@ -3279,7 +3450,7 @@ const config = Vue.defineComponent({
         try {
           const plain = this.toPlainForStorage(this.localDescs);
           if (!plain) throw new Error('Cannot serialize workspace');
-          await window.OfflineStore.setWorkspace(plain);
+          await window.OfflineStore.setWorkspace(plain, this.gameVersion);
         } catch (_) {
         }
       }

@@ -1326,6 +1326,19 @@ button, label, th, td, input[type="checkbox"] {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
+.multiInstanceGateButtons button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+  transform: none;
+  box-shadow: none;
+}
+
+.multiInstanceGateButtons button:disabled:hover {
+  opacity: 0.65;
+  transform: none;
+  box-shadow: none;
+}
+
 .multiInstanceGateButtons .btnSecondary {
   background-color: var(--color-element-alt);
   color: var(--color-font);
@@ -1333,4 +1346,108 @@ button, label, th, td, input[type="checkbox"] {
 
 .multiInstanceGateButtons .btnSecondary:hover {
   background-color: var(--color-element-highlight);
+}
+
+.versionGate {
+  z-index: 10001;
+}
+
+.versionGateContent {
+  max-width: 680px;
+}
+
+.versionGateButtons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(1em * var(--density));
+  margin-top: calc(1.5em * var(--density));
+}
+
+.versionChoiceBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(150px * var(--density));
+  border: 2px solid var(--color-accent);
+  border-radius: 8px;
+  background: var(--color-element-alt);
+  color: var(--color-font);
+  cursor: pointer;
+  transition: transform 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.versionChoiceBtn:hover {
+  transform: translateY(-2px);
+  background: var(--color-element-highlight);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
+}
+
+.versionChoiceMain {
+  font-size: calc(52px * var(--density));
+  line-height: 1;
+  font-weight: 800;
+  color: var(--color-accent);
+}
+
+.versionChoiceSub {
+  margin-top: calc(0.6em * var(--density));
+  font-size: calc(13px * var(--density));
+  opacity: 0.85;
+}
+
+.versionBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(48px * var(--density));
+  height: calc(28px * var(--density));
+  padding: 0 calc(0.75em * var(--density));
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  color: var(--color-accent);
+  background: var(--color-bg2);
+  font-weight: 700;
+}
+
+.migrationProgress {
+  display: flex;
+  align-items: center;
+  gap: calc(0.75em * var(--density));
+  margin-top: calc(1em * var(--density));
+  padding: calc(0.85em * var(--density));
+  border-radius: 4px;
+  background: var(--color-element-alt);
+  color: var(--color-font);
+  line-height: 1.4;
+}
+
+.migrationProgressSpinner {
+  width: calc(18px * var(--density));
+  height: calc(18px * var(--density));
+  flex: 0 0 auto;
+  border: 3px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: migrationSpin 0.8s linear infinite;
+}
+
+@keyframes migrationSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .versionGateButtons {
+    grid-template-columns: 1fr;
+  }
+
+  .versionChoiceBtn {
+    min-height: calc(118px * var(--density));
+  }
+
+  .versionChoiceMain {
+    font-size: calc(40px * var(--density));
+  }
 }

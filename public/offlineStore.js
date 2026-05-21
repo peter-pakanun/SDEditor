@@ -1,14 +1,22 @@
 (() => {
   const DB_NAME = 'sdeditor';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
 
   const STORE_KV = 'kv';
-  const STORE_REVISIONS = 'revisions';
+  const STORE_REVISIONS_LEGACY = 'revisions';
+  const STORE_REVISIONS_POE1 = 'revisions_poe1';
+  const STORE_REVISIONS_POE2 = 'revisions_poe2';
+  const REVISION_STORES = [STORE_REVISIONS_LEGACY, STORE_REVISIONS_POE1, STORE_REVISIONS_POE2];
 
   const KV_SETTINGS = 'settings';
-  const KV_WORKSPACE = 'workspace';
-  const KV_SOURCE = 'source';
+  const KV_WORKSPACE_LEGACY = 'workspace';
+  const KV_SOURCE_LEGACY = 'source';
+  const KV_WORKSPACE_PREFIX = 'workspace_';
+  const KV_SOURCE_PREFIX = 'source_';
   const KV_MIGRATED = 'migratedFromLocalStorage';
+  const KV_MIGRATED_SINGLE_VERSION = 'migratedFromSingleVersion';
+
+  let currentGameVersion = 'poe1';
 
   function isAvailable() {
     return typeof indexedDB !== 'undefined' && indexedDB;
@@ -46,10 +54,12 @@
           db.createObjectStore(STORE_KV, { keyPath: 'key' });
         }
 
-        if (!db.objectStoreNames.contains(STORE_REVISIONS)) {
-          const store = db.createObjectStore(STORE_REVISIONS, { keyPath: 'id', autoIncrement: true });
-          store.createIndex('by_file_lang_time', ['filepath', 'lang', 'savedAt']);
-          store.createIndex('by_file_time', ['filepath', 'savedAt']);
+        for (const storeName of REVISION_STORES) {
+          if (!db.objectStoreNames.contains(storeName)) {
+            const store = db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+            store.createIndex('by_file_lang_time', ['filepath', 'lang', 'savedAt']);
+            store.createIndex('by_file_time', ['filepath', 'savedAt']);
+          }
         }
       };
       req.onsuccess = () => {
@@ -89,21 +99,44 @@
     });
   }
 
-  async function revisionAdd(rev) {
-    return withStore(STORE_REVISIONS, 'readwrite', async (store) => {
+  function normalizeGameVersion(version) {
+    const v = String(version || currentGameVersion || '').toLowerCase();
+    if (v === 'poe2') return 'poe2';
+    return 'poe1';
+  }
+
+  function revisionStoreName(version) {
+    return normalizeGameVersion(version) === 'poe2' ? STORE_REVISIONS_POE2 : STORE_REVISIONS_POE1;
+  }
+
+  function workspaceKey(version) {
+    return KV_WORKSPACE_PREFIX + normalizeGameVersion(version);
+  }
+
+  function sourceKey(version) {
+    return KV_SOURCE_PREFIX + normalizeGameVersion(version);
+  }
+
+  function setGameVersion(version) {
+    currentGameVersion = normalizeGameVersion(version);
+    return currentGameVersion;
+  }
+
+  async function revisionAdd(rev, version) {
+    return withStore(revisionStoreName(version), 'readwrite', async (store) => {
       return requestToPromise(store.add(rev));
     });
   }
 
-  async function revisionGet(id) {
-    return withStore(STORE_REVISIONS, 'readonly', async (store) => {
+  async function revisionGet(id, version) {
+    return withStore(revisionStoreName(version), 'readonly', async (store) => {
       const row = await requestToPromise(store.get(Number(id)));
       return row || undefined;
     });
   }
 
-  async function revisionList(filepath, lang, limit = 50) {
-    return withStore(STORE_REVISIONS, 'readonly', async (store) => {
+  async function revisionList(filepath, lang, limit = 50, version) {
+    return withStore(revisionStoreName(version), 'readonly', async (store) => {
       const idx = store.index('by_file_lang_time');
       const range = IDBKeyRange.bound([filepath, lang, 0], [filepath, lang, Number.MAX_SAFE_INTEGER]);
       const items = [];
@@ -130,15 +163,46 @@
     });
   }
 
-  async function revisionLatest(filepath, lang) {
-    const items = await revisionList(filepath, lang, 1);
+  async function revisionLatest(filepath, lang, version) {
+    const items = await revisionList(filepath, lang, 1, version);
     return items[0] || undefined;
   }
 
-  async function revisionClearAll() {
-    return withStore(STORE_REVISIONS, 'readwrite', async (store) => {
+  async function revisionClearAll(version) {
+    return withStore(revisionStoreName(version), 'readwrite', async (store) => {
       store.clear();
     });
+  }
+
+  async function storeCount(storeName) {
+    return withStore(storeName, 'readonly', async (store) => {
+      return requestToPromise(store.count());
+    });
+  }
+
+  async function revisionCopyAll(fromStoreName, toStoreName) {
+    const db = await openDb();
+    const tx = db.transaction([fromStoreName, toStoreName], 'readwrite');
+    const fromStore = tx.objectStore(fromStoreName);
+    const toStore = tx.objectStore(toStoreName);
+
+    await new Promise((resolve, reject) => {
+      const req = fromStore.openCursor();
+      req.onerror = () => reject(req.error || new Error('IndexedDB cursor failed'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const value = { ...cursor.value };
+        delete value.id;
+        toStore.add(value);
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
   }
 
   async function migrateFromLocalStorageIfNeeded() {
@@ -163,7 +227,7 @@
     console.log('localStorage localDescs', workspace);
 
     if (settings) await kvSet(KV_SETTINGS, settings);
-    if (workspace) await kvSet(KV_WORKSPACE, workspace);
+    if (workspace) await kvSet(KV_WORKSPACE_LEGACY, workspace);
 
     // try {
     //   if (settings) {
@@ -184,19 +248,36 @@
 
   window.OfflineStore = {
     isAvailable,
+    normalizeGameVersion,
+    setGameVersion,
     migrateFromLocalStorageIfNeeded,
     getSettings: () => kvGet(KV_SETTINGS),
     setSettings: (settings) => kvSet(KV_SETTINGS, settings),
-    getWorkspace: () => kvGet(KV_WORKSPACE),
-    setWorkspace: (workspace) => kvSet(KV_WORKSPACE, workspace),
-    getSource: () => kvGet(KV_SOURCE),
-    setSource: (source) => kvSet(KV_SOURCE, source),
-    clearWorkspace: () => kvDel(KV_WORKSPACE),
-    clearSource: () => kvDel(KV_SOURCE),
-    clearRevisions: () => revisionClearAll(),
+    getWorkspace: (version) => kvGet(workspaceKey(version)),
+    setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
+    getSource: (version) => kvGet(sourceKey(version)),
+    setSource: (source, version) => kvSet(sourceKey(version), source),
+    clearWorkspace: (version) => kvDel(workspaceKey(version)),
+    clearSource: (version) => kvDel(sourceKey(version)),
+    clearRevisions: (version) => revisionClearAll(version),
     addRevision: revisionAdd,
     listRevisions: revisionList,
     getRevision: revisionGet,
     getLatestRevision: revisionLatest,
+    getLegacyWorkspace: () => kvGet(KV_WORKSPACE_LEGACY),
+    getLegacySource: () => kvGet(KV_SOURCE_LEGACY),
+    getLegacyRevisionCount: () => storeCount(STORE_REVISIONS_LEGACY),
+    hasMigratedFromSingleVersion: () => kvGet(KV_MIGRATED_SINGLE_VERSION),
+    setMigratedFromSingleVersion: (value) => kvSet(KV_MIGRATED_SINGLE_VERSION, !!value),
+    copyLegacyToVersion: async (version) => {
+      const v = normalizeGameVersion(version);
+      const legacyWorkspace = await kvGet(KV_WORKSPACE_LEGACY);
+      const legacySource = await kvGet(KV_SOURCE_LEGACY);
+      if (typeof legacyWorkspace !== 'undefined') await kvSet(workspaceKey(v), legacyWorkspace);
+      if (typeof legacySource !== 'undefined') await kvSet(sourceKey(v), legacySource);
+      await revisionCopyAll(STORE_REVISIONS_LEGACY, revisionStoreName(v));
+      await kvSet(KV_MIGRATED_SINGLE_VERSION, true);
+      return { workspace: legacyWorkspace, source: legacySource };
+    },
   };
 })();

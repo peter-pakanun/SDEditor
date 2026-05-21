@@ -22,7 +22,50 @@
       <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
     </form>
 
-    <div class="settingPage centerContainer" v-if="showSetting || needsInitialSettings">
+    <div class="multiInstanceGate versionGate" v-if="!testMode && !gameVersionSelected">
+      <div class="multiInstanceGateContent versionGateContent">
+        <h2>Select Game Version</h2>
+        <p>Choose the Path of Exile version you are translating. Source files, workspace data, and history are stored separately for each version.</p>
+        <div class="versionGateButtons">
+          <button class="versionChoiceBtn" @click="selectGameVersion('poe1')">
+            <span class="versionChoiceMain">PoE1</span>
+            <span class="versionChoiceSub">Path of Exile 1</span>
+          </button>
+          <button class="versionChoiceBtn" @click="selectGameVersion('poe2')">
+            <span class="versionChoiceMain">PoE2</span>
+            <span class="versionChoiceSub">Path of Exile 2</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="multiInstanceGate versionGate" v-if="pendingSingleVersionMigration">
+      <div class="multiInstanceGateContent versionGateContent">
+        <h2>Move Existing Data?</h2>
+        <p>
+          We found SDEditor data from before PoE1/PoE2 split storage. It looks like <strong>{{ formatGameVersion(pendingSingleVersionMigration.detectedVersion) }}</strong> data.
+        </p>
+        <div class="multiInstanceGateWarning">
+          This copies your old source, workspace, and revision history into the new {{ formatGameVersion(pendingSingleVersionMigration.detectedVersion) }} storage. The old data is left untouched as a backup.
+        </div>
+        <p>
+          Source files: <strong>{{ pendingSingleVersionMigration.sourceCount }}</strong><br>
+          Workspace files: <strong>{{ pendingSingleVersionMigration.workspaceCount }}</strong><br>
+          History entries: <strong>{{ pendingSingleVersionMigration.revisionCount }}</strong>
+        </p>
+        <div class="migrationProgress" v-if="migrationInProgress">
+          <div class="migrationProgressSpinner"></div>
+          <span>Copying your old data into the new {{ formatGameVersion(pendingSingleVersionMigration.detectedVersion) }} storage…</span>
+        </div>
+        <div class="multiInstanceGateButtons">
+          <button class="btnPrimary" :disabled="migrationInProgress" @click="confirmSingleVersionMigration">
+            {{ migrationInProgress ? 'Copying…' : 'Copy To ' + formatGameVersion(pendingSingleVersionMigration.detectedVersion) }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settingPage centerContainer" v-if="gameVersionSelected && (showSetting || needsInitialSettings)">
       <div class="box">
         <h3>Language to translate</h3>
         <select v-model="lang">
@@ -58,7 +101,7 @@
         <button @click="settingsSaveClose">💾</button>
         <button @click="exportSettingsClicked" title="Export settings">📤</button>
         <button @click="importSettingsClicked" title="Import settings">📥</button>
-        <button @click.stop.prevent="startFromScratch" title="Delete local translated workspace and history">Start from scratch</button>
+        <button @click.stop.prevent="startFromScratch" title="Delete selected-version translated workspace and history">Start from scratch</button>
         <form ref="importSettingsFileForm">
           <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
             accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
@@ -93,7 +136,7 @@
       </div>
     </div>
 
-    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="loadingProgress < 100 && lang !== '' && !needsInitialSettings">
+    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && loadingProgress < 100 && lang !== '' && !needsInitialSettings">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
@@ -131,9 +174,10 @@
     </div>
 
 
-    <div v-if="loadingProgress >= 100 && !editorVisible && !needsInitialSettings">
+    <div v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings">
       <div class="topbar">
         <div class="pagination">
+          <!-- <span class="versionBadge">{{ gameVersionLabel }}</span> -->
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" title="Import ZIP">📦</button>
