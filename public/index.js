@@ -827,12 +827,6 @@ const config = Vue.defineComponent({
       if (!this.editorCurrentEditingDesc) return;
       if (!this.editorCurrentEditingDesc.needsReview) return;
 
-      const diffApi = (window.Diff && typeof window.Diff.diffWordsWithSpace === 'function') ? window.Diff : null;
-      if (!diffApi) {
-        for (const b of (this.editorBlocks || [])) b.englishDiffHtml = escapeHtml(String(b?.english ?? ''));
-        return;
-      }
-
       const filepath = this.editorCurrentEditingDesc.filepath;
       let prevEng = null;
       try {
@@ -846,9 +840,7 @@ const config = Vue.defineComponent({
         const b = this.editorBlocks[i];
         const oldRaw = Array.isArray(prevEng) ? (prevEng[i] ?? '') : '';
         const newRaw = curEng[i] ?? '';
-        const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
-        const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
-        b.englishDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+        this.applyEditorEnglishDiff(b, oldRaw, newRaw, newRaw);
       }
     },
     renderInlineDiffHtml(oldStr, newStr) {
@@ -866,6 +858,38 @@ const config = Vue.defineComponent({
         if (p?.removed) return `<span class="diffInlineDel">${v}</span>`;
         return v;
       }).join('');
+    },
+    getEditorDisplayText(raw) {
+      const s = String(raw ?? '');
+      const decoded = this.decodeEscapedNewlines(s);
+      return (this.isTableText(decoded) || this.isMultilineText(s)) ? decoded : s;
+    },
+    applyEditorEnglishDiff(block, oldRaw, newRaw, tableRaw = newRaw) {
+      if (!block) return;
+      const oldStr = this.getEditorDisplayText(oldRaw);
+      const newStr = this.getEditorDisplayText(newRaw);
+      block.englishDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+      if (block.isTable) {
+        this.applyEditorTableEnglishDiff(block, oldStr, newStr, this.getEditorDisplayText(tableRaw));
+      }
+    },
+    applyEditorTableEnglishDiff(block, oldStr, newStr, tableStr = newStr) {
+      if (!block?.isTable) return;
+      const oldColumns = this.isTableText(oldStr) ? this.splitTableColumns(oldStr) : [String(oldStr ?? '')];
+      const newColumns = this.isTableText(newStr) ? this.splitTableColumns(newStr) : [String(newStr ?? '')];
+      const tableColumns = this.isTableText(tableStr) ? this.splitTableColumns(tableStr) : [String(tableStr ?? '')];
+      if (!Array.isArray(block.tableColumns)) block.tableColumns = [];
+      const count = Math.max(block.tableColumns.length, oldColumns.length, newColumns.length, tableColumns.length);
+      for (let i = 0; i < count; i++) {
+        if (!block.tableColumns[i]) {
+          block.tableColumns[i] = this.makeEditorTableColumn(tableColumns[i] ?? newColumns[i] ?? '', '', i < tableColumns.length, false);
+        }
+        const column = block.tableColumns[i];
+        column.english = String(tableColumns[i] ?? newColumns[i] ?? '');
+        column.englishExists = i < tableColumns.length;
+        column.englishDiffHtml = this.renderInlineDiffHtml(oldColumns[i] ?? '', newColumns[i] ?? '');
+        this.refreshEditorTableColumnHLter(column);
+      }
     },
     isMultilineText(text) {
       let s = text ?? "";
@@ -3238,22 +3262,20 @@ const config = Vue.defineComponent({
         if (mode === 'source') {
           const oldRaw = aLines[i] ?? '';
           const newRaw = bLines[i] ?? '';
-          const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
-          const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
-          block.englishDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+          this.applyEditorEnglishDiff(block, oldRaw, newRaw, curEng[i] ?? newRaw);
           const engRaw = curEng[i] ?? '';
-          const engStr = this.isMultilineText(engRaw) ? this.decodeEscapedNewlines(String(engRaw)) : String(engRaw);
+          const engStr = this.getEditorDisplayText(engRaw);
           block.english = engStr;
           const trRaw = curTr[i] ?? '';
           block.translationDiffHtml = escapeHtml(String(trRaw ?? ''));
         } else {
           const oldRaw = aLines[i] ?? '';
           const newRaw = bLines[i] ?? '';
-          const oldStr = this.isMultilineText(oldRaw) ? this.decodeEscapedNewlines(String(oldRaw)) : String(oldRaw);
-          const newStr = this.isMultilineText(newRaw) ? this.decodeEscapedNewlines(String(newRaw)) : String(newRaw);
+          const oldStr = this.getEditorDisplayText(oldRaw);
+          const newStr = this.getEditorDisplayText(newRaw);
           block.translationDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
           const engRaw = curEng[i] ?? '';
-          const engStr = this.isMultilineText(engRaw) ? this.decodeEscapedNewlines(String(engRaw)) : String(engRaw);
+          const engStr = this.getEditorDisplayText(engRaw);
           block.english = engStr;
         }
       }

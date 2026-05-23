@@ -303,10 +303,11 @@
         </div>
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
           <div class="inputField">
-            <div v-if="editorBlock.isTable && !editorShowEnglishDiff" class="tableEditorStack" :style="{ '--table-columns': editorBlock.tableColumns.length }">
+            <div v-if="editorBlock.isTable" class="tableEditorStack" :style="{ '--table-columns': editorBlock.tableColumns.length }">
               <div class="tableEditorRow">
                 <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
-                  <div class="textHL" :class="{ multiline: column.isMultiline }">
+                  <div v-if="editorShowEnglishDiff" class="englishDiff tableEnglishDiff" v-html="column.englishDiffHtml"></div>
+                  <div v-else class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
                     <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
                     <div class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>

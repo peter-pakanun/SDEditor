@@ -250,6 +250,10 @@ input:focus, button:focus, textarea:focus {
   margin-top: calc(0.35em * var(--density));
 }
 
+.tableEnglishDiff {
+  min-height: calc(2em * var(--density));
+}
+
 .centerContainer {
   position: fixed;
   top: 0;
