@@ -333,6 +333,9 @@ const config = Vue.defineComponent({
       const code = SETTINGS_LANG_TO_BCP47[this.lang];
       return code || undefined;
     },
+    editorTranslationReadOnly() {
+      return this.editorCompareActive && this.editorCompareMode === 'translation';
+    },
     pageCount() {
       return Math.ceil(this.filteredDescs.length / this.pageSize);
     },
@@ -3074,7 +3077,7 @@ const config = Vue.defineComponent({
       }
     },
     editorSave() {
-      if (this.editorCompareActive) return false;
+      if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
       let desc = this.editorCurrentEditingDesc;
@@ -3283,10 +3286,13 @@ const config = Vue.defineComponent({
     exitEditorCompareMode() {
       this.editorCompareActive = false;
       this.editorCompareTitle = '';
-      this.editorShowEnglishDiff = false;
-      if (this.editorCurrentEditingDesc) {
-        this.editFile(this.editorCurrentEditingDesc.filepath);
-      }
+      this.editorShowEnglishDiff = !!this.editorCurrentEditingDesc?.needsReview;
+      this.refreshEditorHLter();
+      if (this.editorShowEnglishDiff) this.prepareEditorEnglishDiff();
+      this.$nextTick(() => {
+        this.autosizeEditorMultilineFields();
+        this.refreshGamePreview();
+      });
     },
     clearHistorySelection() {
       this.historySelectedA = this.historyItems?.[0] || null;
