@@ -285,6 +285,8 @@
         </div>
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
+          <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" :title="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
+          <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" :title="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
           <button @click="editorSave" :disabled="editorTranslationReadOnly" title="Save (Ctrl+S)">💾</button>
           <button @click="editorExit" title="Exit (ESC)">❌</button>
         </div>
@@ -324,7 +326,7 @@
                   <div class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)">
                     <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)"></textarea>
-                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
+                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index, colIndex)">{{ column.translationHLter }}</div>
                   </div>
                 </div>
               </div>
@@ -345,17 +347,19 @@
           <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
             <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)">{{ editorBlock.translationHLter }}</div>
           </div>
           <div v-else class="textHL multiline">
             <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
             <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" title="Lines (translation / english)"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
             <span v-if="editorBlock.isTable" class="metaPill" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table columns (translation / english)"><span class="metaIcon">@</span><span class="metaNum">{{ editorBlock.metaColsTr }}/{{ editorBlock.metaColsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" title="Variable tags (translation / english)"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" title="Keyword tags (translation / english)"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
+            <span v-if="editorBlock.diagnosticWarningCount > 0" class="metaPill diagnosticWarningPill" :title="blockDiagnosticTitle(editorBlock, 'warning')"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount }}</span></span>
+            <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" :title="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
           </div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
@@ -481,6 +485,7 @@
   <script src="helper.js"></script>
   <script src="statDescParser.js"></script>
   <script src="regexEngine.js"></script>
+  <script src="translationDiagnostics.js"></script>
   <script src="offlineStore.js"></script>
   <script src="index.js"></script>
 </body>

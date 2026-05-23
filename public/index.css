@@ -6,6 +6,10 @@
   --color-element-highlight: #4E6BD6;
   --color-accent: #C76519;
   --color-line-diff: rgba(210, 48, 48, 0.18);
+  --color-diagnostic-warning: rgba(255, 198, 41, 0.42);
+  --color-diagnostic-warning-border: #9B6900;
+  --color-diagnostic-error: rgba(230, 54, 68, 0.32);
+  --color-diagnostic-error-border: #B00020;
   --color-shadow: rgba(36, 48, 70, 0.22);
   --color-font: #172033;
 }
@@ -19,6 +23,10 @@
   --color-element-highlight: #51619bff;
   --color-accent: #D46A00;
   --color-line-diff: rgba(200, 0, 0, 0.22);
+  --color-diagnostic-warning: rgba(255, 190, 40, 0.45);
+  --color-diagnostic-warning-border: #8A5A00;
+  --color-diagnostic-error: rgba(210, 40, 54, 0.34);
+  --color-diagnostic-error-border: #A50016;
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #000;
 }
@@ -31,6 +39,10 @@
   --color-element-highlight: #677BC4;
   --color-accent: #FFB86B;
   --color-line-diff: rgba(255, 120, 120, 0.22);
+  --color-diagnostic-warning: rgba(255, 198, 41, 0.34);
+  --color-diagnostic-warning-border: #D69B16;
+  --color-diagnostic-error: rgba(255, 72, 92, 0.34);
+  --color-diagnostic-error-border: #FF6073;
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-font: #D8D9DA;
 }
@@ -185,6 +197,23 @@ input:focus, button:focus, textarea:focus {
   font-weight: 700;
 }
 
+.metaPill.diagnosticWarningPill {
+  background-color: var(--color-diagnostic-warning);
+  border-color: var(--color-diagnostic-warning-border);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-warning) 45%, transparent) inset;
+}
+
+.metaPill.diagnosticErrorPill {
+  background-color: var(--color-diagnostic-error);
+  border-color: var(--color-diagnostic-error-border);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-error) 45%, transparent) inset;
+}
+
+.metaPill.diagnosticWarningPill .metaNum,
+.metaPill.diagnosticErrorPill .metaNum {
+  font-weight: 700;
+}
+
 .metaIcon {
   opacity: 0.85;
   font-size: calc(11px * var(--density));
@@ -204,6 +233,11 @@ input:focus, button:focus, textarea:focus {
   border-radius: 2px;
 }
 
+.textHL>.HLter .tagRange {
+  background-color: color-mix(in srgb, var(--color-element-highlight) 25%, transparent);
+  border-radius: 2px;
+}
+
 .textHL>.HLter.noPointer span[data-hl-id] {
   pointer-events: none;
   cursor: default;
@@ -211,6 +245,30 @@ input:focus, button:focus, textarea:focus {
 
 .textHL>.HLter span[data-hl-id].vocab {
   background-color: color-mix(in srgb, var(--color-font) 15%, transparent);
+}
+
+.textHL>.HLter .tagRange.vocab {
+  background-color: color-mix(in srgb, var(--color-font) 15%, transparent);
+}
+
+.textHL>.HLter .diagnosticRange {
+  border-radius: 2px;
+  cursor: help;
+  pointer-events: all;
+}
+
+.textHL>.HLter .diagnosticRange.diagWarning {
+  background-color: var(--color-diagnostic-warning);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-warning-border) 45%, transparent) inset;
+}
+
+.textHL>.HLter .diagnosticRange.diagError {
+  background-color: var(--color-diagnostic-error);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-error-border) 45%, transparent) inset;
+}
+
+.textHL>.HLter .diagnosticRange:hover {
+  box-shadow: 0 0 0 1px currentColor;
 }
 
 .textHL>.HLter span[data-hl-id].hlPopupActive {
@@ -572,6 +630,29 @@ button, label, th, td, input[type="checkbox"] {
 
 .editor {
   --side-width: 480px;
+}
+
+.editorDiagPill {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(0.35em * var(--density));
+  padding: calc(0.2em * var(--density)) calc(0.65em * var(--density));
+  border: 1px solid;
+  border-radius: 999px;
+  line-height: calc(1.6em * var(--density));
+  font-size: calc(12px * var(--density));
+  font-weight: 700;
+  user-select: none;
+}
+
+.editorDiagPill.warning {
+  background-color: var(--color-diagnostic-warning);
+  border-color: var(--color-diagnostic-warning-border);
+}
+
+.editorDiagPill.error {
+  background-color: var(--color-diagnostic-error);
+  border-color: var(--color-diagnostic-error-border);
 }
 
 .editor>* {
