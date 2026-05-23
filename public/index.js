@@ -894,6 +894,22 @@ const config = Vue.defineComponent({
         this.refreshEditorTableColumnHLter(column);
       }
     },
+    buildEditorTableTranslationDiffColumns(block, oldStr, newStr) {
+      if (!block?.isTable) return [];
+      const oldColumns = this.isTableText(oldStr) ? this.splitTableColumns(oldStr) : [String(oldStr ?? '')];
+      const newColumns = this.isTableText(newStr) ? this.splitTableColumns(newStr) : [String(newStr ?? '')];
+      const tableCount = Array.isArray(block.tableColumns) ? block.tableColumns.length : 0;
+      const count = Math.max(tableCount, oldColumns.length, newColumns.length);
+      let columns = [];
+      for (let i = 0; i < count; i++) {
+        columns.push({
+          translationDiffHtml: this.renderInlineDiffHtml(oldColumns[i] ?? '', newColumns[i] ?? ''),
+          oldTranslationExists: i < oldColumns.length,
+          newTranslationExists: i < newColumns.length
+        });
+      }
+      return columns;
+    },
     isMultilineText(text) {
       let s = text ?? "";
       return typeof s === "string" && (s.includes("\\n") || s.includes("\n"));
@@ -955,6 +971,14 @@ const config = Vue.defineComponent({
       if (!editorBlock?.isTable) return editorBlock;
       let idx = Number.isInteger(columnIndex) ? columnIndex : 0;
       return editorBlock.tableColumns?.[idx] || editorBlock.tableColumns?.[0] || null;
+    },
+    editorTableColumnCount(editorBlock) {
+      if (!editorBlock?.isTable) return 1;
+      const tableCount = Array.isArray(editorBlock.tableColumns) ? editorBlock.tableColumns.length : 0;
+      const compareCount = this.editorCompareActive && this.editorCompareMode === 'translation' && Array.isArray(editorBlock.translationCompareColumns)
+        ? editorBlock.translationCompareColumns.length
+        : 0;
+      return Math.max(1, tableCount, compareCount);
     },
     makeEditorTableColumn(english, translation, englishExists = true, translationExists = true) {
       let column = {
@@ -2994,6 +3018,7 @@ const config = Vue.defineComponent({
           translation,
           translationHLter,
           translationDiffHtml: escapeHtml(String(translation ?? '')),
+          translationCompareColumns: [],
           multilineLineMismatch,
           metaLinesEn: engStats.lines,
           metaLinesTr: trStats.lines,
@@ -3271,12 +3296,16 @@ const config = Vue.defineComponent({
           block.english = engStr;
           const trRaw = curTr[i] ?? '';
           block.translationDiffHtml = escapeHtml(String(trRaw ?? ''));
+          block.translationCompareColumns = [];
         } else {
           const oldRaw = aLines[i] ?? '';
           const newRaw = bLines[i] ?? '';
           const oldStr = this.getEditorDisplayText(oldRaw);
           const newStr = this.getEditorDisplayText(newRaw);
           block.translationDiffHtml = this.renderInlineDiffHtml(oldStr, newStr);
+          block.translationCompareColumns = block.isTable
+            ? this.buildEditorTableTranslationDiffColumns(block, oldStr, newStr)
+            : [];
           const engRaw = curEng[i] ?? '';
           const engStr = this.getEditorDisplayText(engRaw);
           block.english = engStr;
