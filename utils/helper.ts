@@ -124,3 +124,16 @@ function updateLocalDesc(localDesc, desc, lang, lines, { hasChanges, isMissing }
   if (Array.isArray(desc?.translations?.English)) localDesc.translations.English = desc.translations.English;
   if (lang) localDesc.translations[lang] = Array.isArray(lines) ? lines : [];
 }
+
+export {
+  allProgress,
+  arrayEquals,
+  arrayMove,
+  escapeHtml,
+  unescapeHtml,
+  computeIsMissing,
+  getZipTxtFilepaths,
+  decodeZipTxtFile,
+  makeLocalDesc,
+  updateLocalDesc,
+};

@@ -1,3 +1,5 @@
+import { computeIsMissing, decodeZipTxtFile } from "./helper";
+
 /**
  * @typedef {Object} tempTranslation
  * @property {number} count
@@ -255,3 +257,11 @@ function strEncodeUTF16(str) {
   }
   return bufView;
 }
+
+export {
+  parseFile,
+  parseDesc,
+  descEncode,
+  generateTranslationBlock,
+  strEncodeUTF16,
+};

@@ -1,5 +1,4 @@
-(function (global) {
-  const LEVEL_WARNING = "warning";
+const LEVEL_WARNING = "warning";
   const LEVEL_ERROR = "error";
 
   const OPENERS = {
@@ -209,16 +208,5 @@
       errorCount: countLevel(diagnostics, LEVEL_ERROR)
     };
   }
+export { LEVEL_WARNING, LEVEL_ERROR, analyze };
 
-  const api = {
-    LEVEL_WARNING,
-    LEVEL_ERROR,
-    analyze
-  };
-
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = api;
-  }
-
-  global.TranslationDiagnostics = api;
-})(typeof window !== "undefined" ? window : globalThis);

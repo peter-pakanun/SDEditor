@@ -1,65 +1,76 @@
 # SDEditor — Agent Guide
 
-Minimal, verified facts for working in this repo.
+Verified facts for working in this repo after the Nuxt migration.
 
 ## Project
 
-- **PoE StatDescriptions.zip translation editor** — vanilla JS SPA, Vue 3 loaded via CDN, Express dev server.
-- Single monolithic Vue 3 Options API component in `public/index.js` (~3000 lines). No build step, no bundler, no router.
+- **PoE StatDescriptions.zip translation editor** migrated to **Nuxt 3 + Vue 3 + TypeScript + Pinia**.
+- The app is client-side rendered (`ssr: false`) because ZIP parsing, file downloads, and IndexedDB are browser-only workflows.
+- Legacy Express is no longer the application server. Nuxt/Nitro serves development and production builds.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `node server.js` | Start dev server on `http://127.0.0.1:3333` |
-| `node server.js --no-open` | Skip browser auto-open |
-| `node server.js --log-requests` | Enable request logging |
+| `npm install` | Install Nuxt/Vue/testing dependencies |
+| `npm run dev -- --host 127.0.0.1 --port 3333` | Start Nuxt dev server |
+| `npm run build` | Production build |
+| `npm run preview` | Preview production build |
+| `npm run test:unit` | Run Vitest unit tests |
+| `npm run test:e2e` | Run Playwright end-to-end tests |
+| `npm test` | Run unit and e2e tests |
 
-Env vars: `PORT` (3333), `HOST` (127.0.0.1), `NO_OPEN_BROWSER`, `LOG_REQUESTS`, `CI`, `SDEDITOR_NO_OPEN`.
+Environment variables are documented in `.env.example`:
 
-`npm test` is a stub (exits 1). There are no tests, no linter, no formatter, no type checker.
+- `NUXT_PUBLIC_APP_NAME`
+- `NUXT_PUBLIC_LOG_LEVEL`
+- `NUXT_PUBLIC_MONITORING_ENDPOINT`
+- `NITRO_PRESET`
 
-## Key source files (all in `public/`)
+## Structure
 
-- `index.html` — entrypoint, loads Vue 3 / JSZip / jsdiff from CDN
-- `index.js` — entire app component
-- `statDescParser.js` — ZIP parser (UTF-16LE with BOM)
-- `regexEngine.js` — regex / dictionary matching engine
-- `translationDiagnostics.js` — translation warning/error scanner used by editor highlights and save guards
-- `offlineStore.js` — IndexedDB persistence (DB `sdeditor`, stores `kv` + `revisions`)
-- `helper.js` — utility functions
-- `dummyFiles.js` — test data (3 files, 10 languages)
-- `FileSaver.js` — client-side file download (not in package.json)
+- `app.vue` — Nuxt app shell
+- `pages/index.vue` — main editor route
+- `pages/version/[gameVersion].vue` — dynamic route for `poe1` / `poe2`
+- `components/editor/` — client-only editor host and migrated editor component
+- `legacy/sdeEditorTemplate.html` — compatibility template extracted from the old `public/index.html`
+- `legacy/sdeEditorOptions.ts` — migrated Options API shell; imports modules instead of CDN globals
+- `stores/editor.ts` — Pinia state extracted from old `data()`
+- `utils/` — parser, ZIP helpers, regex engine, diagnostics, IndexedDB adapter, constants, logging
+- `plugins/monitoring.client.ts` — client error logging/monitoring hook
+- `tests/unit/` — Vitest tests
+- `tests/e2e/` — Playwright tests
+- `docs/migration_nuxt.md` — migration and deployment notes
+
+## Key Source Files
+
+- `utils/statDescParser.ts` — StatDescription parser and UTF-16LE BOM encoder
+- `utils/regexEngine.ts` — regex/dictionary matching engine
+- `utils/translationDiagnostics.ts` — translation warning/error scanner
+- `utils/offlineStore.ts` — IndexedDB persistence (DB `sdeditor`, stores `kv` + revisions)
+- `utils/helper.ts` — shared ZIP/local-desc helpers
+- `utils/dummyFiles.ts` — test-mode data
+- `stores/editor.ts` — editor state managed by Pinia
 
 ## Testing
 
-- No test framework. Manual testing via `?testMode=1` URL param (e.g. `http://127.0.0.1:3333/?testMode=1&lang=Thai`).
-- Test mode loads `dummyFiles.js` and bypasses IndexedDB entirely.
-- Combine `--no-open` with test mode for automated runs.
-
-## Toolchain quirks
-
-- **CDN deps not in package.json:** Vue 3, JSZip, jsdiff loaded from CDN in `index.html`.
-- **npm packages** (`express`, `opn`) are only for the dev server.
-- **TypeScript is installed** (`tsconfig.json`, `checkJs: false`, `noEmit: true`) — purely for IDE intellisense via `types/vue-global.d.ts`, does not compile or check JS.
-- **UTF-16LE with BOM** — StatDescription files use this encoding; parser reads via `FileReader.readAsText(blob, 'utf-16le')` and encodes manually with `Uint16Array`.
+- Test mode remains available at `http://127.0.0.1:3333/?testMode=1&lang=Thai`.
+- Unit tests use Vitest + happy-dom.
+- E2E tests use Playwright and start the Nuxt dev server automatically.
 
 ## Conventions
 
-- No automated code quality tooling. Edit JS directly.
+- Keep browser-only logic behind client-only components/plugins or `import.meta.client` guards.
+- Prefer extracting new behavior into `components/`, `stores/`, `composables/`, or `utils/` instead of growing `legacy/sdeEditorOptions.ts`.
+- Do not reintroduce CDN script dependencies, Express-only serving, bundler alternatives, or global browser modules.
+- Preserve UTF-16LE with BOM behavior for StatDescription export.
 - Git commit style: conventional prefixes (`feat:`, `fix:`, `style:`, `refactor:`, `docs:`).
-- Two CSS themes via `[data-theme]` on `<html>`: `grey` and `dark`. UI density via `--density` custom property.
 
 ## Docs
 
-- `/docs/editor_guide.md` — full editor UI walkthrough
-- `/docs/import_workflow.md` — import/export workflow
-- `/docs/regex_guide.md` — regex pattern reference
-- `/docs/test-mode.md` — test mode details
-- `/TODO.md` — developer TODO list
-
-## What NOT to do
-
-- Do not introduce build steps, bundlers, or frameworks not already present.
-- Do not add test frameworks unless explicitly asked — there is no test infrastructure.
-- Do not expect TypeScript to catch errors — `checkJs: false`.
+- `docs/migration_nuxt.md` — Nuxt migration, environment, and deployment
+- `docs/editor_guide.md` — editor UI walkthrough
+- `docs/import_workflow.md` — import/export workflow
+- `docs/regex_guide.md` — regex pattern reference
+- `docs/test-mode.md` — test mode details
+- `TODO.md` — developer TODO list

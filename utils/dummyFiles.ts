@@ -58,3 +58,5 @@ const dummyFile3 = String.raw`description
 	1
 		# "Can tattoo [Rune|Runes] onto your body, gaining\nadditional [Rune]-only sockets:\n• 1 Helmet socket\n• 2 Body Armour sockets\n• 1 Gloves socket\n• 1 Boots socket"
 `;
+
+export { dummyFile1, dummyFile2, dummyFile3 };

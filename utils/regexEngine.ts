@@ -74,9 +74,9 @@ function regexEngineLookup(str, dictionary, words = []) {
   }
 }
 
-let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
+const gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
-let keywordPopupTagRegex = "(\\[([^\\]|]+)(?:\\|([^\\]]*))?\\])";
+const keywordPopupTagRegex = "(\\[([^\\]|]+)(?:\\|([^\\]]*))?\\])";
 
 /**
  * @param {string} str the string to check
@@ -303,3 +303,18 @@ function getGggVarIdentityKey(fullMatch) {
   if (!m) return s;
   return m[1] != null ? m[1] : "";
 }
+
+export {
+  escapeRegExp,
+  regexEngineLookup,
+  checkKeywordPopupTag,
+  countGGGVarTag,
+  countKeywordPopupTag,
+  regexEngineCreate,
+  lookupKeywordPopupReplacement,
+  lookupKeywordPopupReplacementInfo,
+  getDictEntryDefinitionsWithMeta,
+  getGggVarIdentityKey,
+  keywordPopupTagRegex,
+  gggVarTagRegex,
+};

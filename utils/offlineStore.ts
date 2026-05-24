@@ -1,5 +1,4 @@
-(() => {
-  const DB_NAME = 'sdeditor';
+const DB_NAME = 'sdeditor';
   const DB_VERSION = 2;
 
   const STORE_KV = 'kv';
@@ -245,8 +244,7 @@
 
     await kvSet(KV_MIGRATED, true);
   }
-
-  window.OfflineStore = {
+export const OfflineStore = {
     isAvailable,
     normalizeGameVersion,
     setGameVersion,
@@ -280,4 +278,4 @@
       return { workspace: legacyWorkspace, source: legacySource };
     },
   };
-})();
+

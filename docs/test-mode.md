@@ -21,11 +21,12 @@ Example:
 - Does not read or write `indexedDB`, so your real saved settings/local changes won’t be modified.
 - Skips the launch version selector and uses PoE1 for the browser title/test state.
 
-## Local server notes
+## Local Dev Server
 
-When running locally, [server.js](file:///d:/WorkDir/SDEditor/server.js) auto-opens a browser by default.
+Start Nuxt locally with:
 
-Disable auto-open for automation runs with:
+```bash
+npm run dev -- --host 127.0.0.1 --port 3333
+```
 
-- `node server.js --no-open`
-- or `NO_OPEN_BROWSER=1 node server.js`
+Playwright uses the same URL in `playwright.config.ts` and starts the dev server automatically for `npm run test:e2e`.

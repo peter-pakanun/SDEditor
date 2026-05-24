@@ -1,13 +1,9 @@
 {
+  "extends": "./.nuxt/tsconfig.json",
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "allowJs": true,
-    "checkJs": false,
-    "noEmit": true,
+    "types": ["vitest/globals", "node"],
+    "strict": false,
     "noImplicitAny": false,
     "skipLibCheck": true
-  },
-  "include": ["public/index.js", "types/**/*.d.ts"]
+  }
 }

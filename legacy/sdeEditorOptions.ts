@@ -1,200 +1,71 @@
-// Guess what "I'll make a simple Vue runtime app and just refactor later" did to me...
+import { defineComponent, nextTick } from "vue";
+import { mapWritableState } from "pinia";
+import { useRoute, useRuntimeConfig } from "#imports";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
+import * as Diff from "diff";
+import * as TranslationDiagnostics from "~/utils/translationDiagnostics";
+import { useEditorStore, EDITOR_STATE_KEYS } from "~/stores/editor";
+import { createLogger } from "~/utils/logger";
+import {
+  GAME_PREVIEW_FONT_STACKS,
+  GAME_VERSIONS,
+  SETTINGS_LANG_TO_BCP47,
+  ZIP_TXT_FILE_COUNT_THRESHOLD,
+} from "~/utils/constants";
+import { getInitialUrlLang } from "~/utils/runtime";
+import {
+  allProgress,
+  arrayEquals,
+  arrayMove,
+  computeIsMissing,
+  escapeHtml,
+  getZipTxtFilepaths,
+  makeLocalDesc,
+  unescapeHtml,
+  updateLocalDesc,
+} from "~/utils/helper";
+import {
+  parseFile,
+  parseDesc,
+  descEncode,
+} from "~/utils/statDescParser";
+import {
+  countGGGVarTag,
+  countKeywordPopupTag,
+  getGggVarIdentityKey,
+  lookupKeywordPopupReplacementInfo,
+  regexEngineCreate,
+  regexEngineLookup,
+  keywordPopupTagRegex,
+  gggVarTagRegex,
+} from "~/utils/regexEngine";
+import { OfflineStore } from "~/utils/offlineStore";
+import { dummyFile1, dummyFile2, dummyFile3 } from "~/utils/dummyFiles";
+
+declare global {
+  interface Window {
+    OfflineStore?: typeof OfflineStore;
+  }
+}
+
+if (import.meta.client) {
+  window.OfflineStore = OfflineStore;
+}
+
 let offlineStoreReady = false;
+const URL_LANG = getInitialUrlLang();
 
-const urlParams = new URLSearchParams(window.location.search);
-const TEST_MODE = (() => {
-  if (!urlParams.has('testMode')) return false;
-  let v = (urlParams.get('testMode') || '').toLowerCase();
-  return v === '' || v === '1' || v === 'true' || v === 'yes';
-})();
-const URL_LANG = urlParams.get('lang');
-const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
-const GAME_VERSIONS = {
-  poe1: { id: 'poe1', label: 'PoE1', title: 'Path of Exile 1' },
-  poe2: { id: 'poe2', label: 'PoE2', title: 'Path of Exile 2' },
-};
-
-/** BCP 47 tags for <input>/<textarea lang> so the browser spellchecker matches Settings → language. */
-const SETTINGS_LANG_TO_BCP47 = {
-  Thai: "th",
-  Portuguese: "pt",
-  German: "de",
-  Russian: "ru",
-  Spanish: "es",
-  French: "fr",
-  "Traditional Chinese": "zh-Hant",
-  "Simplified Chinese": "zh-Hans",
-  Korean: "ko",
-  Japanese: "ja",
-};
-
-/** CSS font-family stacks */
-const GAME_PREVIEW_FONT_STACKS = {
-  Thai: '"Kanit", sans-serif',
-  "Traditional Chinese": '"Noto Sans TC", sans-serif',
-  "Simplified Chinese": '"Noto Sans SC", sans-serif',
-  Korean: '"Spoqa Han Sans Neo", "Noto Sans KR", sans-serif',
-  Japanese: '"Koruri Regular", "Koruri", "Noto Sans JP", sans-serif',
-  Spanish: '"Fontin Smallcaps", "Fontin", "Noto Serif", serif',
-  French: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Portuguese: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  German: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Russian: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-};
-
-const config = Vue.defineComponent({
-  data() {
-    return {
-      offlineStoreReady: false,
-      testMode: TEST_MODE,
-      gameVersion: "",
-      gameVersionSelected: false,
-      pendingSingleVersionMigration: null,
-      migrationInProgress: false,
-      versionStorageLoading: false,
-      langs: [
-        "French",
-        "German",
-        "Japanese",
-        "Korean",
-        "Portuguese",
-        "Russian",
-        "Simplified Chinese",
-        "Spanish",
-        "Thai",
-        "Traditional Chinese",
-      ],
-      lang: "",
-      theme: 'light',
-      showSetting: false,
-      needsInitialSettings: true,
-      loadingProgress: 0.001,
-      descs: [],
-      localDescs: {
-        descs: [],
-        lastModified: 0,
-        size: 0,
-        status: {}
-      },
-      sourceLoaded: false,
-      filteredDescs: [],
-      statistic: {
-        hasChanges: 0,
-        isMissing: 0,
-        needsReview: 0
-      },
-      currentSort: "english",
-      currentSortDir: 'asc',
-      currentSortIcon: '▲',
-      pageSize: 20,
-      paginationPadding: 2,
-      currentPage: 1,
-      searchText: "",
-      filterSelect: "new",
-      hideDNT: true,
-      highlightDict: true,
-      shiftEnterSave: false,
-      autoOpenNextFile: true,
-      uiDensity: 'compact',
-
-      sideTab: 'dictionary',
-      dictionaryFilter: '',
-      regexFilter: '',
-      dictionaryFlashId: '',
-
-      importDialogVisible: false,
-
-      historyItems: [],
-      historyLoading: false,
-      historySelectedA: null,
-      historySelectedB: null,
-      historyDiffHtml: '',
-      historyFilepath: '',
-      historyLang: '',
-      historyMode: 'translation',
-
-      editorVisible: false,
-      editorCurrentEditingDesc: null,
-      editorFocusedIndex: 0,
-      editorFocusedColumnIndex: 0,
-      editorOriginalTranslations: [],
-      editorShowEnglishDiff: false,
-      editorCompareActive: false,
-      editorCompareMode: 'translation',
-      editorCompareTitle: '',
-      hlPopup: {
-        visible: false,
-        editorIndex: 0,
-        openedByBracket: false,
-        items: [],
-        filtered: [],
-        filter: "",
-        selectedIndex: 0,
-        x: 0,
-        y: 0,
-        columnIndex: 0,
-        width: 0,
-        selectedTranslationText: ""
-      },
-      hlPopupReturnInfo: null,
-      editorBlocks: [
-        {
-          english: "+1 to Maximum [EnergyShield|Energy Shield] per {0} [ItemEvasion|Item Evasion] on Equipped Body Armour",
-          englishHLter: "+1 to Maximum <span>[EnergyShield|Energy Shield]</span> per <span>{0}%</span> <span>[ItemEvasion|Item Evasion]</span> on Equipped Body Armour",
-          englishDiffHtml: "",
-          translation: "",
-          isTable: false,
-          isMultiline: false,
-          tableColumns: [],
-          translationDiagnostics: [],
-          diagnosticWarningCount: 0,
-          diagnosticErrorCount: 0,
-          metaLinesEn: 0,
-          metaLinesTr: 0,
-          metaColsEn: 0,
-          metaColsTr: 0,
-          metaVarsEn: 0,
-          metaVarsTr: 0,
-          metaKwEn: 0,
-          metaKwTr: 0,
-          translationReplace: "",
-          words: []
-        },
-      ],
-      editorRegexes: [
-        {
-          find: "(.+) per (\\d+%) \\b(.+)\\b Quality",
-          replace: "$R1 ต่อคุณภาพของ $3 ทุกๆ $2"
-        },
-        {
-          find: "Buff Grants (.+)",
-          replace: "บัฟมอบม็อด $R1"
-        },
-        {
-          find: "([^ ]+) (increased|reduced) \\b(.+)\\b Damage",
-          replace: "$2ความเสียหาย $3 $1"
-        }
-      ],
-      dictionary: [
-        {
-          find: "Fire",
-          replace: "ไฟ"
-        },
-      ],
-      editorClipboard: "",
-
-      gamePreviewFrame: "m",
-      gamePreviewFonts: null,
-      previewGggVars: {},
-      gamePreviewSegments: [],
-      
-      // Multi-instance detection
-      showMultiInstanceGate: false,
-      instanceTabId: Math.random().toString(36).substr(2, 9),
-      multiInstanceCheckTimer: null,
-      multiInstanceBypass: false,
-    }
+export default defineComponent({
+  name: "SdeEditorApp",
+  setup() {
+    const editorStore = useEditorStore();
+    const route = useRoute();
+    const runtimeConfig = useRuntimeConfig();
+    const logger = createLogger("SdeEditorApp", runtimeConfig.public.logLevel);
+    return { editorStore, route, logger };
   },
+
   async mounted() {
     if (this.testMode) {
       this.gameVersion = 'poe1';
@@ -234,6 +105,12 @@ const config = Vue.defineComponent({
     }
     if (settings) this.importSettings(settings);
 
+    const routedVersion = Array.isArray(this.route?.params?.gameVersion)
+      ? this.route.params.gameVersion[0]
+      : this.route?.params?.gameVersion;
+    if (routedVersion && GAME_VERSIONS[this.normalizeGameVersion(routedVersion)]) {
+      await this.activateGameVersion(routedVersion, { checkMigration: true });
+    }
 
     this.needsInitialSettings = !this.lang;
     offlineStoreReady = true;
@@ -244,7 +121,7 @@ const config = Vue.defineComponent({
     await this.saveSettings();
     this.updateDocumentTitle();
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('keydown', this.handleKeydown);
     // Clean up multi-instance detection
     if (this.multiInstanceCheckTimer) {
@@ -306,6 +183,7 @@ const config = Vue.defineComponent({
     }
   },
   computed: {
+    ...mapWritableState(useEditorStore, EDITOR_STATE_KEYS),
     gameVersionLabel() {
       return GAME_VERSIONS[this.gameVersion]?.label || '';
     },
@@ -373,7 +251,7 @@ const config = Vue.defineComponent({
       return btns;
     },
     descsDisplay() {
-      descsToDisplay = this.filteredDescs.sort((a, b) => {
+      let descsToDisplay = this.filteredDescs.sort((a, b) => {
         let modifier = 1;
         this.currentSortIcon = '▲';
         if (this.currentSortDir === 'desc') {
@@ -862,7 +740,7 @@ const config = Vue.defineComponent({
       }
     },
     renderInlineDiffHtml(oldStr, newStr) {
-      const diffApi = window.Diff;
+      const diffApi = Diff;
       if (!diffApi) return escapeHtml(String(newStr ?? ''));
       let parts;
       try {
@@ -1141,8 +1019,8 @@ const config = Vue.defineComponent({
       return { diagnostics: [], warningCount: 0, errorCount: 0 };
     },
     analyzeTranslationDiagnostics(text) {
-      if (window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function") {
-        return window.TranslationDiagnostics.analyze(text);
+      if (TranslationDiagnostics && typeof TranslationDiagnostics.analyze === "function") {
+        return TranslationDiagnostics.analyze(text);
       }
       return this.emptyTranslationDiagnostics();
     },
@@ -3141,7 +3019,7 @@ const config = Vue.defineComponent({
           });
         }
       }
-      Vue.nextTick(() => {
+      nextTick(() => {
         if (this.currentPage > this.pageCount) this.gotoPage(1);
         if (this.currentPage < 1) this.gotoPage(1);
       });
@@ -4104,5 +3982,3 @@ function renderUnifiedLineDiff(edits) {
   }).join('');
 }
 
-const app = Vue.createApp(config);
-app.mount('#app');

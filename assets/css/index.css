@@ -744,7 +744,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Fontin"), url("fonts/Fontin-Regular.woff2") format("woff2");
+  src: local("Fontin"), url("/fonts/Fontin-Regular.woff2") format("woff2");
 }
 
 @font-face {
@@ -752,7 +752,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: local("Fontin Bold"), url("fonts/Fontin-Bold.woff2") format("woff2");
+  src: local("Fontin Bold"), url("/fonts/Fontin-Bold.woff2") format("woff2");
 }
 
 @font-face {
@@ -760,7 +760,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Fontin SmallCaps"), local("Fontin Smallcaps"), url("fonts/Fontin-SmallCaps.woff2") format("woff2");
+  src: local("Fontin SmallCaps"), local("Fontin Smallcaps"), url("/fonts/Fontin-SmallCaps.woff2") format("woff2");
 }
 
 /* Japanese UI (Metadata); add Koruri-Regular.woff2 under public/fonts/ — see fonts/FONTS.md */
@@ -769,7 +769,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
+  src: local("Koruri Regular"), url("/fonts/Koruri-Regular.woff2") format("woff2");
 }
 
 @font-face {
@@ -777,7 +777,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
+  src: local("Koruri Regular"), url("/fonts/Koruri-Regular.woff2") format("woff2");
 }
 
 /* Latin body (PoE); optional — see fonts/FONTS.md */
@@ -786,7 +786,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
+  src: local("Friz Quadrata ITC"), url("/fonts/FrizQuadrataITC.woff2") format("woff2");
 }
 
 @font-face {
@@ -794,7 +794,7 @@ button, label, th, td, input[type="checkbox"] {
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
+  src: local("Friz Quadrata ITC"), url("/fonts/FrizQuadrataITC.woff2") format("woff2");
 }
 
 .gamePreviewStrip {
