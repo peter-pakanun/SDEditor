@@ -118,6 +118,28 @@
     }
   }
 
+  function scanDashBoundaries(text, addDiagnostic) {
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== "-") continue;
+
+      const prev = i > 0 ? text[i - 1] : "";
+      const next = i + 1 < text.length ? text[i + 1] : "";
+      const isLineStart = i === 0 || prev === "\n" || prev === "\r";
+      const isLineEnd = i + 1 === text.length || next === "\n" || next === "\r";
+      const touchesWhitespace = /[ \t]/.test(prev) || /[ \t]/.test(next);
+
+      if (!isLineStart && !isLineEnd && !touchesWhitespace) continue;
+
+      addDiagnostic(
+        LEVEL_WARNING,
+        "dash-boundary",
+        "Dash should not start or end a line, or touch whitespace",
+        i,
+        i + 1
+      );
+    }
+  }
+
   function scanTags(text, addDiagnostic) {
     const stack = [];
 
@@ -194,6 +216,7 @@
     const addDiagnostic = makeAddDiagnostic(text, diagnostics);
 
     scanWhitespace(text, addDiagnostic);
+    scanDashBoundaries(text, addDiagnostic);
     scanTags(text, addDiagnostic);
 
     diagnostics.sort((a, b) => {
