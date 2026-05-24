@@ -1343,8 +1343,7 @@ const config = Vue.defineComponent({
         if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.end };
       }
       if (translationTags.length > 0) return { start: translationTags[0].start, end: translationTags[0].end };
-      if (translationLine.end > translationLine.start) return { start: translationLine.start, end: translationLine.end };
-      return { start: translationLine.start, end: translationLine.start };
+      return null;
     },
     buildGggVarIdentityDiagnostics(english, translation) {
       const englishLines = this.splitLinesWithOffsets(english);
@@ -1365,13 +1364,16 @@ const config = Vue.defineComponent({
 
         const range = this.findGggVarIdentityMismatchRange(englishCounts, translationLine, translationTags);
         const linePart = max > 1 ? ` on line ${i + 1}` : "";
-        diagnostics.push({
+        const diagnostic = {
           level: "error",
           code: "variable-tag-identity-mismatch",
-          message: `Variable tag mismatch${linePart}: English has ${this.formatGggVarIdentityCounts(englishCounts)}; translation has ${this.formatGggVarIdentityCounts(translationCounts)}.`,
-          start: range.start,
-          end: range.end
-        });
+          message: `Variable tag mismatch${linePart}: English has ${this.formatGggVarIdentityCounts(englishCounts)}; translation has ${this.formatGggVarIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
       }
 
       return diagnostics;
@@ -1415,8 +1417,7 @@ const config = Vue.defineComponent({
         if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.end };
       }
       if (translationTags.length > 0) return { start: translationTags[0].start, end: translationTags[0].end };
-      if (translationLine.end > translationLine.start) return { start: translationLine.start, end: translationLine.end };
-      return { start: translationLine.start, end: translationLine.start };
+      return null;
     },
     buildKeywordPopupTagNameDiagnostics(english, translation) {
       const englishLines = this.splitLinesWithOffsets(english);
@@ -1437,13 +1438,16 @@ const config = Vue.defineComponent({
 
         const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, translationLine, translationTags);
         const linePart = max > 1 ? ` on line ${i + 1}` : "";
-        diagnostics.push({
+        const diagnostic = {
           level: "error",
           code: "keyword-popup-tag-name-mismatch",
-          message: `KeywordPopups tagName mismatch${linePart}: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`,
-          start: range.start,
-          end: range.end
-        });
+          message: `KeywordPopups tagName mismatch${linePart}: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
       }
 
       return diagnostics;
@@ -1567,11 +1571,6 @@ const config = Vue.defineComponent({
       let tr = this.normalizeNewlines(translation ?? "");
       let engLines = String(eng).split("\n");
       let trLines = String(tr).split("\n");
-      let eVarTotal = countGGGVarTag(String(eng));
-      let tVarTotal = countGGGVarTag(String(tr));
-      let eKwTotal = countKeywordPopupTag(String(eng));
-      let tKwTotal = countKeywordPopupTag(String(tr));
-      let tagMismatch = eVarTotal !== tVarTotal || eKwTotal !== tKwTotal;
       let max = Math.max(engLines.length, trLines.length);
       let engMismatch = new Array(engLines.length).fill(false);
       let trMismatch = new Array(trLines.length).fill(false);
@@ -1587,16 +1586,12 @@ const config = Vue.defineComponent({
           continue;
         }
       }
-      if (tagMismatch) {
-        engMismatch.fill(true);
-        trMismatch.fill(true);
-      }
       return {
         engLines,
         trLines,
         engMismatch,
         trMismatch,
-        mismatch: tagMismatch || engMismatch.some(Boolean) || trMismatch.some(Boolean)
+        mismatch: engMismatch.some(Boolean) || trMismatch.some(Boolean)
       };
     },
     wrapHlterByLines(html, mismatchLines) {
