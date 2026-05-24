@@ -118,17 +118,47 @@
     }
   }
 
+  function isLineBreak(ch) {
+    return ch === "\n" || ch === "\r";
+  }
+
+  function isVariableTagStartAt(text, index) {
+    if (text[index] !== "{") return false;
+    for (let i = index + 1; i < text.length; i++) {
+      if (isLineBreak(text[i])) return false;
+      if (text[i] === "}") return true;
+    }
+    return false;
+  }
+
+  function isVariableTagEndBefore(text, index) {
+    let end = index - 1;
+    if (text[end] === "%") end -= 1;
+    if (text[end] !== "}") return false;
+
+    for (let i = end - 1; i >= 0; i--) {
+      if (isLineBreak(text[i])) return false;
+      if (text[i] === "{") return true;
+    }
+    return false;
+  }
+
+  function isDashNextToVariableTag(text, index) {
+    return isVariableTagStartAt(text, index + 1) || isVariableTagEndBefore(text, index);
+  }
+
   function scanDashBoundaries(text, addDiagnostic) {
     for (let i = 0; i < text.length; i++) {
       if (text[i] !== "-") continue;
 
       const prev = i > 0 ? text[i - 1] : "";
       const next = i + 1 < text.length ? text[i + 1] : "";
-      const isLineStart = i === 0 || prev === "\n" || prev === "\r";
-      const isLineEnd = i + 1 === text.length || next === "\n" || next === "\r";
+      const isLineStart = i === 0 || isLineBreak(prev);
+      const isLineEnd = i + 1 === text.length || isLineBreak(next);
       const touchesWhitespace = /[ \t]/.test(prev) || /[ \t]/.test(next);
 
       if (!isLineStart && !isLineEnd && !touchesWhitespace) continue;
+      if (isDashNextToVariableTag(text, i)) continue;
 
       addDiagnostic(
         LEVEL_WARNING,
