@@ -17,11 +17,11 @@ function goHome() {
 
 <template>
   <div class="appRoot" data-density="compact">
-    <div class="settingPage centerContainer">
-      <div class="box">
+    <div class="settingPage centerContainer fixed inset-0 z-[2] flex items-center justify-center bg-app-bg">
+      <div class="box rounded-[5px] bg-app-bg2 px-[calc(5em*var(--density))] py-[calc(3em*var(--density))] shadow-app">
         <h1>{{ title }}</h1>
         <p>{{ message }}</p>
-        <button class="btnPrimary" type="button" @click="goHome">Back to editor</button>
+        <button class="btnPrimary bg-app-accent text-app-bg" type="button" @click="goHome">Back to editor</button>
       </div>
     </div>
   </div>

@@ -1,9 +1,9 @@
 <template>
   <div class="appRoot" :data-density="uiDensity">
-    <form ref="importUpdateZipFileForm" style="display: none;">
+    <form ref="importUpdateZipFileForm" class="hidden">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
     </form>
-    <form ref="importTranslatedZipFileForm" style="display: none;">
+    <form ref="importTranslatedZipFileForm" class="hidden">
       <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
     </form>
 
@@ -20,14 +20,14 @@
       @confirm="confirmSingleVersionMigration"
     />
 
-    <div class="settingPage centerContainer" v-if="gameVersionSelected && (showSetting || needsInitialSettings)">
-      <div class="box">
+    <div class="settingPage centerContainer fixed inset-0 z-[2] flex items-center justify-center bg-app-bg" v-if="gameVersionSelected && (showSetting || needsInitialSettings)">
+      <div class="box rounded-[5px] bg-app-bg2 px-[calc(5em*var(--density))] py-[calc(3em*var(--density))] shadow-app">
         <h3>Language to translate</h3>
         <select v-model="lang">
           <option v-for="lang in langs">{{ lang }}</option>
         </select>
         <h3>Theme</h3>
-        <div class="inputField">
+        <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow">
           <select v-model="theme">
             <option value="light">Light</option>
             <option value="grey">Grey</option>
@@ -35,7 +35,7 @@
           </select>
         </div>
         <h3>Other settings</h3>
-        <div class="inputField">
+        <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow">
           <label for="uiDensity">UI density</label>
           <select id="uiDensity" v-model="uiDensity">
             <option value="compact">Compact</option>
@@ -60,7 +60,7 @@
         <button @click.stop.prevent="startFromScratch" title="Delete selected-version translated workspace and history">Start from scratch</button>
         <form ref="importSettingsFileForm">
           <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
-            accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
+            accept="application/json" class="invisible w-0 p-0">
         </form>
       </div>
     </div>
@@ -82,22 +82,22 @@
     />
 
     <div v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings">
-      <div class="topbar">
+      <div class="topbar flex items-center justify-between bg-app-bg2 [&>div>button]:mr-[calc(0.5em*var(--density))] [&>div>button]:w-[4em] [&>div>button]:align-middle [&>div>input]:mr-[calc(0.5em*var(--density))] [&>div>input]:w-[7em] [&>div>input]:align-middle [&>div]:inline-block [&>div]:px-[calc(1.5em*var(--density))] [&>div]:py-[calc(1em*var(--density))]">
         <div class="pagination">
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" title="Import ZIP">📦</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
-          <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
+          <button v-for="n in pageButtons" @click="gotoPage(n)" :class="currentPage == n ? 'bg-app-highlight' : ''">{{ n }}</button>
           <button @click="nextPage">⯈</button>
         </div>
         <div>
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="Files with saved translations">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" title="Source changed since last translation save">
+          <input class="!w-[9em]" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
+          <input class="!w-[9em]" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="Files with saved translations">
+          <input class="!w-[9em]" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" title="Source changed since last translation save">
           <span></span>
-          <input id="searchInp" ref="searchInput" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
+          <input id="searchInp" ref="searchInput" class="!w-[10em] transition-[width] duration-300 ease-in-out focus:!w-[20em]" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
 
           <select v-model="filterSelect">
             <option value="new">New statfiles</option>
@@ -126,8 +126,13 @@
       />
     </div>
 
-    <div class="editor" v-if="editorVisible" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
-      <div class="edit">
+    <div
+      class="editor [--side-width:480px] [&_button]:!px-[calc(0.75em*var(--density))] [&_button]:!py-[calc(0.35em*var(--density))] [&_button]:!text-[calc(13px*var(--density))] [&_button]:!leading-[calc(2em*var(--density))] [&_h1]:m-0 [&_h1]:text-[calc(18px*var(--density))] [&_h3]:my-[calc(0.4em*var(--density))] [&_h3]:mb-[calc(0.6em*var(--density))] [&_h3]:text-[calc(12px*var(--density))] [&_h3]:font-semibold [&_input]:!px-[calc(0.75em*var(--density))] [&_input]:!py-[calc(0.35em*var(--density))] [&_input]:!text-[calc(13px*var(--density))] [&_input]:!leading-[calc(2em*var(--density))] [&_select]:!px-[calc(0.75em*var(--density))] [&_select]:!py-[calc(0.35em*var(--density))] [&_select]:!text-[calc(13px*var(--density))] [&_select]:!leading-[calc(2em*var(--density))] [&_textarea]:!px-[calc(0.75em*var(--density))] [&_textarea]:!py-[calc(0.35em*var(--density))] [&_textarea]:!text-[calc(13px*var(--density))] [&_textarea]:!leading-[calc(2em*var(--density))]"
+      v-if="editorVisible"
+      @keydown.esc="editorEsc"
+      @keydown.shift.enter="editorShiftEnter"
+    >
+      <div class="edit box-border mr-[var(--side-width)] px-[calc(0.35em*var(--density))] [&::-webkit-scrollbar]:w-0">
         <EditorGamePreview
           :game-preview-frame="gamePreviewFrame"
           :game-preview-font-family="gamePreviewFontFamily"
@@ -159,12 +164,12 @@
           @confirm-unchanged="confirmTranslationUnchanged"
         />
 
-        <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
-          <div class="inputField">
-            <div v-if="editorBlock.isTable" class="tableEditorStack" :style="{ '--table-columns': editorTableColumnCount(editorBlock) }">
-              <div class="tableEditorRow">
-                <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
-                  <div v-if="editorShowEnglishDiff" class="englishDiff tableEnglishDiff" v-html="column.englishDiffHtml"></div>
+        <div class="editBlock mt-[calc(0.6em*var(--density))] bg-app-bg2 px-[calc(1em*var(--density))] py-[calc(0.6em*var(--density))] [&>*]:my-[calc(0.6em*var(--density))] [&_input]:block [&_input]:w-full [&_textarea]:block [&_textarea]:w-full" v-for="(editorBlock, index) in editorBlocks">
+          <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow">
+            <div v-if="editorBlock.isTable" class="tableEditorStack min-w-0 grow overflow-x-auto p-[calc(0.15em*var(--density))]" :style="{ '--table-columns': editorTableColumnCount(editorBlock) }">
+              <div class="tableEditorRow grid w-full min-w-max grid-cols-[repeat(var(--table-columns,_1),_minmax(12em,_1fr))] gap-[calc(0.45em*var(--density))]">
+                <div class="tableEditorCell relative min-w-0" v-for="(column, colIndex) in editorBlock.tableColumns" :class="!column.englishExists || !column.translationExists ? 'shadow-[inset_0_0_0_1px_var(--color-line-diff)]' : ''">
+                  <div v-if="editorShowEnglishDiff" class="englishDiff tableEnglishDiff min-h-[calc(2em*var(--density))] whitespace-pre-wrap border border-black bg-app-element px-[calc(0.6em*var(--density))] py-[calc(0.35em*var(--density))] text-[calc(13px*var(--density))] leading-[calc(2em*var(--density))]" v-html="column.englishDiffHtml"></div>
                   <div v-else class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
                     <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
@@ -172,102 +177,110 @@
                   </div>
                 </div>
               </div>
-              <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="tableEditorRow tableEditorTranslation">
-                <div class="tableEditorCell" v-for="(diffColumn, colIndex) in editorBlock.translationCompareColumns" :class="{ missingTranslation: !diffColumn.oldTranslationExists || !diffColumn.newTranslationExists }">
-                  <div class="englishDiff tableEnglishDiff" v-html="diffColumn.translationDiffHtml"></div>
+              <div v-if="editorCompareActive && editorCompareMode === 'translation'" class="tableEditorRow tableEditorTranslation mt-[calc(0.35em*var(--density))] grid w-full min-w-max grid-cols-[repeat(var(--table-columns,_1),_minmax(12em,_1fr))] gap-[calc(0.45em*var(--density))]">
+                <div class="tableEditorCell relative min-w-0" v-for="(diffColumn, colIndex) in editorBlock.translationCompareColumns" :class="!diffColumn.oldTranslationExists || !diffColumn.newTranslationExists ? 'shadow-[inset_0_0_0_1px_var(--color-line-diff)]' : ''">
+                  <div class="englishDiff tableEnglishDiff min-h-[calc(2em*var(--density))] whitespace-pre-wrap border border-black bg-app-element px-[calc(0.6em*var(--density))] py-[calc(0.35em*var(--density))] text-[calc(13px*var(--density))] leading-[calc(2em*var(--density))]" v-html="diffColumn.translationDiffHtml"></div>
                 </div>
               </div>
-              <div v-else class="tableEditorRow tableEditorTranslation">
-                <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
+              <div v-else class="tableEditorRow tableEditorTranslation mt-[calc(0.35em*var(--density))] grid w-full min-w-max grid-cols-[repeat(var(--table-columns,_1),_minmax(12em,_1fr))] gap-[calc(0.45em*var(--density))]">
+                <div class="tableEditorCell relative min-w-0" v-for="(column, colIndex) in editorBlock.tableColumns" :class="!column.englishExists || !column.translationExists ? 'shadow-[inset_0_0_0_1px_var(--color-line-diff)]' : ''">
                   <div class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)">
-                    <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)"></textarea>
+                    <textarea v-else class="multilineField border-app-accent bg-app-element" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)"></textarea>
                     <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index, colIndex)"></div>
                   </div>
                 </div>
               </div>
             </div>
             <div v-else class="textHL" :class="{ multiline: editorBlock.isMultiline }">
-              <div v-if="editorShowEnglishDiff" class="englishDiff" v-html="editorBlock.englishDiffHtml"></div>
+              <div v-if="editorShowEnglishDiff" class="englishDiff whitespace-pre-wrap border border-black bg-app-element px-[calc(0.6em*var(--density))] py-[calc(0.35em*var(--density))] text-[calc(13px*var(--density))] leading-[calc(2em*var(--density))]" v-html="editorBlock.englishDiffHtml"></div>
               <template v-else>
                 <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
                 <textarea v-else placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
                 <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)"></div>
               </template>
             </div>
-            <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table content">@</div>
-            <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
+            <div v-if="editorBlock.isTable" class="multilineIcon flex select-none items-center px-[0.5em] opacity-[0.85]" :class="editorBlock.metaColsTr !== editorBlock.metaColsEn ? 'font-bold text-[#B00000]' : ''" title="Table content">@</div>
+            <div v-if="editorBlock.isMultiline" class="multilineIcon flex select-none items-center px-[0.5em] opacity-[0.85]" :class="editorBlock.multilineLineMismatch ? 'font-bold text-[#B00000]' : ''" title="Multiline content">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
-          <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
+          <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff whitespace-pre-wrap border border-black bg-app-element px-[calc(0.6em*var(--density))] py-[calc(0.35em*var(--density))] text-[calc(13px*var(--density))] leading-[calc(2em*var(--density))]" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
             <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
             <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)"></div>
           </div>
           <div v-else class="textHL multiline">
-            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
+            <textarea class="multilineField border-app-accent bg-app-element" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
             <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)"></div>
           </div>
           <EditorBlockMeta
             :editor-block="editorBlock"
             :block-diagnostic-title="blockDiagnosticTitle"
           />
-          <div class="inputField" v-for="word in editorBlock.words">
+          <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" :lang="translationEditorBcp47" @input="doTranslationReplace(editorBlock, true)">
           </div>
         </div>
       </div>
 
-      <div class="side fixed">
-        <div class="twoSided sideHeader">
-          <div class="sideTabs">
-            <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
-            <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
-            <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
+      <div class="side fixed right-0 top-0 z-[1] box-border h-[calc(100%_-_(120px*var(--density)))] w-[var(--side-width)] overflow-y-auto overflow-x-hidden px-[calc(0.35em*var(--density))] [&::-webkit-scrollbar]:w-0 [&_button]:!px-[calc(0.5em*var(--density))] [&_button]:!py-[calc(0.25em*var(--density))] [&_button]:!leading-[calc(2em*var(--density))] [&_input]:!px-[calc(0.5em*var(--density))] [&_input]:!py-[calc(0.25em*var(--density))] [&_input]:!leading-[calc(2em*var(--density))] [&_select]:!px-[calc(0.5em*var(--density))] [&_select]:!py-[calc(0.25em*var(--density))] [&_select]:!leading-[calc(2em*var(--density))] [&_textarea]:!px-[calc(0.5em*var(--density))] [&_textarea]:!py-[calc(0.25em*var(--density))] [&_textarea]:!leading-[calc(2em*var(--density))]">
+        <div class="twoSided sideHeader sticky top-0 z-[2] flex items-center justify-between gap-[calc(0.5em*var(--density))] bg-app-bg py-[calc(0.25em*var(--density))]">
+          <div class="sideTabs flex gap-[calc(0.25em*var(--density))]">
+            <button class="tabBtn" :class="sideTab === 'dictionary' ? 'bg-app-highlight' : ''" @click="sideTab = 'dictionary'">📚 Dictionary</button>
+            <button class="tabBtn" :class="sideTab === 'regex' ? 'bg-app-highlight' : ''" @click="sideTab = 'regex'">📑 Regex</button>
+            <button class="tabBtn" :class="sideTab === 'history' ? 'bg-app-highlight' : ''" @click="sideTab = 'history'">🕒 History</button>
           </div>
           <button v-if="sideTab !== 'history'" @click="sideAddClicked()">➕</button>
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <input class="sideFilter" type="text" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
-          <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
-            <div class="twoSided dictEntryBlock">
-              <div>
-                <div class="dictRow" :data-dict-id="word._id">
-                  <input type="text" v-model="word.find" placeholder="Find" lang="en" :class="{ dictExactMatchFind: isDictionaryEntryFindMatched(word) }">
+          <input class="sideFilter mt-[calc(0.5em*var(--density))] w-full" type="text" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
+          <div
+            class="editBlock relative mt-[calc(0.5em*var(--density))] bg-app-bg2 px-[calc(0.6em*var(--density))] py-[calc(0.5em*var(--density))] transition-[transform,box-shadow] duration-[320ms] before:absolute before:bottom-0 before:left-0 before:top-0 before:w-[4px] before:bg-transparent before:content-[''] after:pointer-events-none after:absolute after:inset-0 after:bg-app-highlight after:opacity-0 after:transition-opacity after:duration-[320ms] after:content-[''] [&_input]:block [&_input]:w-full [&_textarea]:block [&_textarea]:w-full"
+            v-for="word in filteredDictionary"
+            :key="word._id"
+            :class="[
+              isDictionaryEntryFound(word) ? 'shadow-[inset_0_0_0_1px_var(--color-element-highlight)] before:bg-app-highlight' : '',
+              word._id === dictionaryFlashId ? '-translate-x-[6px] after:opacity-20' : '',
+            ]"
+          >
+            <div class="twoSided dictEntryBlock relative flex justify-between">
+              <div class="w-full flex-1">
+                <div class="dictRow flex grow gap-[calc(0.4em*var(--density))] pr-[calc(2.6em*var(--density))] [&>input]:w-1/2" :data-dict-id="word._id">
+                  <input type="text" v-model="word.find" placeholder="Find" lang="en" :class="isDictionaryEntryFindMatched(word) ? 'shadow-[inset_3px_0_0_var(--color-element-highlight)]' : ''">
                   <input type="text" v-model="word.replace" placeholder="Replace" :lang="translationEditorBcp47" @keydown.enter="onDictionaryReplaceEnter">
                 </div>
-                <div class="dictAltHeader">
-                  <span>Alternates</span>
-                  <button @click="addDictionaryAltRow(word)">➕</button>
+                <div class="dictAltHeader mt-[calc(0.35em*var(--density))] flex items-center justify-between gap-[calc(0.5em*var(--density))] opacity-90">
+                  <span class="text-[calc(0.9em*var(--density))]">Alternates</span>
+                  <button class="!px-[calc(0.35em*var(--density))] !py-[calc(0.15em*var(--density))]" @click="addDictionaryAltRow(word)">➕</button>
                 </div>
-                <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
-                  <input type="text" v-model="alt.find" placeholder="Find" lang="en" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
+                <div class="dictAltRow mt-[calc(0.25em*var(--density))] flex gap-[calc(0.4em*var(--density))] pl-[calc(0.9em*var(--density))] opacity-95 [&>button]:!px-[calc(0.35em*var(--density))] [&>button]:!py-[calc(0.15em*var(--density))] [&>input]:w-1/2 [&>input]:text-[calc(0.9em*var(--density))]" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
+                  <input type="text" v-model="alt.find" placeholder="Find" lang="en" :class="isDictionaryAltFindMatched(word, alt) ? 'shadow-[inset_3px_0_0_var(--color-element-highlight)]' : ''">
                   <input type="text" v-model="alt.replace" placeholder="Replace" :lang="translationEditorBcp47" @keydown.enter="onDictionaryReplaceEnter">
                   <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
                 </div>
-                <details class="dictTlnote">
-                  <summary>TL note</summary>
-                  <textarea rows="3" v-model="word.tlnote" placeholder="Translator note (shared)" :lang="translationEditorBcp47"></textarea>
+                <details class="dictTlnote mt-[calc(0.35em*var(--density))]">
+                  <summary class="cursor-pointer select-none opacity-[0.85]">TL note</summary>
+                  <textarea class="mt-[calc(0.35em*var(--density))] resize-y" rows="3" v-model="word.tlnote" placeholder="Translator note (shared)" :lang="translationEditorBcp47"></textarea>
                 </details>
               </div>
-              <button class="dictDeleteBtn" @click="removeVocab(word)">🗑️</button>
+              <button class="dictDeleteBtn absolute right-0 top-0 !px-[calc(0.35em*var(--density))] !py-[calc(0.15em*var(--density))]" @click="removeVocab(word)">🗑️</button>
             </div>
           </div>
         </div>
 
         <div v-if="sideTab === 'regex'">
-          <input class="sideFilter" type="text" v-model="regexFilter" ref="regexFilterInput" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
-          <div class="editBlock" v-for="regex in filteredRegexes">
-            <div class="twoSided">
-              <div>
-                <div class="inputField">
+          <input class="sideFilter mt-[calc(0.5em*var(--density))] w-full" type="text" v-model="regexFilter" ref="regexFilterInput" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
+          <div class="editBlock relative mt-[calc(0.5em*var(--density))] bg-app-bg2 px-[calc(0.6em*var(--density))] py-[calc(0.5em*var(--density))] transition-[transform,box-shadow] duration-[320ms] before:absolute before:bottom-0 before:left-0 before:top-0 before:w-[4px] before:bg-transparent before:content-[''] after:pointer-events-none after:absolute after:inset-0 after:bg-app-highlight after:opacity-0 after:transition-opacity after:duration-[320ms] after:content-[''] [&_input]:block [&_input]:w-full [&_textarea]:block [&_textarea]:w-full" v-for="regex in filteredRegexes">
+            <div class="twoSided flex justify-between gap-[calc(0.5em*var(--density))]">
+              <div class="flex-1">
+                <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow">
                   <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off" placeholder="Find (regex)">
                   <button @click="moveRegexUp(regex)">🡩</button>
                 </div>
-                <div class="inputField">
+                <div class="inputField flex items-center gap-[calc(0.4em*var(--density))] [&>.textHL]:grow [&>input]:grow">
                   <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off" placeholder="Replace">
                   <button @click="moveRegexDown(regex)">🡫</button>
                 </div>
@@ -277,7 +290,7 @@
           </div>
         </div>
 
-        <div v-if="sideTab === 'history'" class="historyPanel">
+        <div v-if="sideTab === 'history'" class="historyPanel pt-[calc(0.5em*var(--density))]">
           <EditorHistoryPanel
             :current-desc="editorCurrentEditingDesc"
             :history-mode="historyMode"
@@ -301,15 +314,26 @@
         :translation-editor-bcp47="translationEditorBcp47"
       />
 
-      <div v-if="hlPopup.visible" class="hlPopupBackdrop" @mousedown="closeHlPopup">
-        <div class="hlPopup" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px' }" @mousedown.stop>
-          <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
-          <div class="hlPopupList">
-            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch, mustCreate: item.mustCreate }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">
-              <span class="hlPopupItemLabel">{{ item.label }}</span>
-              <span v-if="i === hlPopup.selectedIndex && hlPopupCtrlEnterPillText(item)" class="hlPopupHotkeyPill">{{ hlPopupCtrlEnterPillText(item) }}</span>
+      <div v-if="hlPopup.visible" class="hlPopupBackdrop fixed inset-0 z-50" @mousedown="closeHlPopup">
+        <div class="hlPopup fixed rounded border border-black bg-app-bg2 p-[calc(0.5em*var(--density))] shadow-popup" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px' }" @mousedown.stop>
+          <input class="hlPopupFilter mb-[calc(0.5em*var(--density))] w-full" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
+          <div class="hlPopupList max-h-[40vh] overflow-auto border border-black bg-app-element">
+            <div
+              v-for="(item, i) in hlPopup.filtered"
+              class="hlPopupItem flex min-w-0 cursor-pointer select-none items-center gap-[calc(0.6em*var(--density))] px-[calc(0.6em*var(--density))] py-[calc(0.4em*var(--density))] hover:bg-[color-mix(in_srgb,var(--color-element-highlight)_20%,transparent)]"
+              :class="[
+                i === hlPopup.selectedIndex ? 'bg-[color-mix(in_srgb,var(--color-element-highlight)_20%,transparent)]' : '',
+                item.isAlt ? 'pl-[calc(1.2em*var(--density))] opacity-[0.92]' : '',
+                item.exactMatch ? 'font-bold' : '',
+                item.mustCreate ? 'font-bold text-app-accent' : '',
+              ]"
+              @mouseenter="hlPopup.selectedIndex = i"
+              @mousedown.prevent="insertHlPopupItem(item)"
+            >
+              <span class="hlPopupItemLabel min-w-0 flex-auto overflow-hidden text-ellipsis whitespace-nowrap">{{ item.label }}</span>
+              <span v-if="i === hlPopup.selectedIndex && hlPopupCtrlEnterPillText(item)" class="hlPopupHotkeyPill flex-none rounded-full border border-[rgba(0,0,0,0.55)] bg-[rgba(0,0,0,0.1)] px-[calc(0.5em*var(--density))] py-[calc(0.12em*var(--density))] text-[calc(0.78em*var(--density))] opacity-90">{{ hlPopupCtrlEnterPillText(item) }}</span>
             </div>
-            <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
+            <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty p-[calc(0.6em*var(--density))] opacity-80">No highlights</div>
           </div>
         </div>
       </div>
