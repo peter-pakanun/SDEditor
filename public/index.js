@@ -1351,6 +1351,29 @@ const config = Vue.defineComponent({
       const max = Math.max(englishLines.length, translationLines.length);
       const diagnostics = [];
 
+      if (max > 1) {
+        const englishTags = this.extractGggVarIdentityTags(english);
+        const translationTags = this.extractGggVarIdentityTags(translation);
+        const englishCounts = this.countGggVarIdentityTags(englishTags);
+        const translationCounts = this.countGggVarIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) return diagnostics;
+
+        const range = this.findGggVarIdentityMismatchRange(englishCounts, null, translationTags);
+        const diagnostic = {
+          level: "error",
+          code: "variable-tag-identity-mismatch",
+          message: `Variable tag mismatch: English has ${this.formatGggVarIdentityCounts(englishCounts)}; translation has ${this.formatGggVarIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
+        return diagnostics;
+      }
+
       for (let i = 0; i < max; i++) {
         const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
         const translationLine = translationLines[i] || { text: "", start: String(translation ?? "").length, end: String(translation ?? "").length };
@@ -1424,6 +1447,29 @@ const config = Vue.defineComponent({
       const translationLines = this.splitLinesWithOffsets(translation);
       const max = Math.max(englishLines.length, translationLines.length);
       const diagnostics = [];
+
+      if (max > 1) {
+        const englishTags = this.extractKeywordPopupIdentityTags(english);
+        const translationTags = this.extractKeywordPopupIdentityTags(translation);
+        const englishCounts = this.countKeywordPopupIdentityTags(englishTags);
+        const translationCounts = this.countKeywordPopupIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) return diagnostics;
+
+        const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, null, translationTags);
+        const diagnostic = {
+          level: "error",
+          code: "keyword-popup-tag-name-mismatch",
+          message: `KeywordPopups tagName mismatch: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
+        return diagnostics;
+      }
 
       for (let i = 0; i < max; i++) {
         const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
