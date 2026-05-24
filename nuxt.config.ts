@@ -1,8 +1,11 @@
 export default defineNuxtConfig({
   ssr: false,
   compatibilityDate: "2026-05-24",
-  modules: ["@pinia/nuxt"],
-  css: ["~/assets/css/spinner.css", "~/assets/css/index.css"],
+  modules: ["@pinia/nuxt", "@nuxtjs/tailwindcss"],
+  tailwindcss: {
+    cssPath: "~/assets/css/tailwind.css",
+    viewer: false,
+  },
   devtools: { enabled: false },
   runtimeConfig: {
     public: {
