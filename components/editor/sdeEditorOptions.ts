@@ -42,6 +42,18 @@ import {
 } from "~/utils/regexEngine";
 import { OfflineStore } from "~/utils/offlineStore";
 import { dummyFile1, dummyFile2, dummyFile3 } from "~/utils/dummyFiles";
+import EditorActionBar from "~/components/editor/EditorActionBar.vue";
+import EditorBlockMeta from "~/components/editor/EditorBlockMeta.vue";
+import EditorClipboardDock from "~/components/editor/EditorClipboardDock.vue";
+import EditorFileListTable from "~/components/editor/EditorFileListTable.vue";
+import EditorGamePreview from "~/components/editor/EditorGamePreview.vue";
+import EditorHistoryPanel from "~/components/editor/EditorHistoryPanel.vue";
+import EditorImportDialog from "~/components/editor/EditorImportDialog.vue";
+import EditorLoadingPanel from "~/components/editor/EditorLoadingPanel.vue";
+import EditorMigrationGate from "~/components/editor/EditorMigrationGate.vue";
+import EditorMultiInstanceGate from "~/components/editor/EditorMultiInstanceGate.vue";
+import EditorStatusBanners from "~/components/editor/EditorStatusBanners.vue";
+import EditorVersionGate from "~/components/editor/EditorVersionGate.vue";
 
 declare global {
   interface Window {
@@ -58,6 +70,20 @@ const URL_LANG = getInitialUrlLang();
 
 export default defineComponent({
   name: "SdeEditorApp",
+  components: {
+    EditorActionBar,
+    EditorBlockMeta,
+    EditorClipboardDock,
+    EditorFileListTable,
+    EditorGamePreview,
+    EditorHistoryPanel,
+    EditorImportDialog,
+    EditorLoadingPanel,
+    EditorMigrationGate,
+    EditorMultiInstanceGate,
+    EditorStatusBanners,
+    EditorVersionGate,
+  },
   setup() {
     const editorStore = useEditorStore();
     const route = useRoute();
@@ -669,6 +695,10 @@ export default defineComponent({
       if (v !== "s" && v !== "m" && v !== "l") return;
       this.gamePreviewFrame = v;
       this.saveSettings();
+    },
+    updatePreviewGggVar({ key, value }) {
+      if (!this.previewGggVars || typeof this.previewGggVars !== "object") this.previewGggVars = {};
+      this.previewGggVars[String(key)] = String(value ?? "");
     },
     ensureLocalDescsReady() {
       if (!this.localDescs || typeof this.localDescs !== 'object') {

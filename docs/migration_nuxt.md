@@ -5,8 +5,7 @@ SDEditor has been migrated from a static Vue CDN prototype served by Express to 
 ## Structure
 
 - `pages/` contains routable Nuxt pages. `/` opens the editor and `/version/:gameVersion` can preselect `poe1` or `poe2`.
-- `components/editor/` contains the client-only editor host and the migrated editor component.
-- `legacy/` keeps the compatibility template and Options API shell while the large editor surface is split further over time.
+- `components/editor/` contains the client-only editor host, the main editor app, extracted editor panels/gates, and the remaining Options API shell.
 - `stores/` contains Pinia state. The former top-level `data()` object now lives in `stores/editor.ts`.
 - `utils/` contains the parser, ZIP helpers, regex engine, diagnostics, IndexedDB adapter, runtime constants, and logging utilities as ES modules.
 - `plugins/monitoring.client.ts` captures Vue, browser, and unhandled promise errors and optionally posts them to `NUXT_PUBLIC_MONITORING_ENDPOINT`.
@@ -62,4 +61,4 @@ docker run --rm -p 3000:3000 sdeditor
 
 ## Migration Notes
 
-The first migration keeps the existing editor behavior intact by preserving the proven template and methods, while moving state, dependencies, and reusable logic into Nuxt-managed modules. Future refactors can continue extracting focused components from `legacy/sdeEditorTemplate.html` without changing parser/storage behavior.
+The first migration kept the existing editor behavior intact by preserving the proven template and methods, while moving state, dependencies, and reusable logic into Nuxt-managed modules. The former legacy template has now been split into focused Vue components under `components/editor/`; future refactors can continue extracting logic from `components/editor/sdeEditorOptions.ts` without changing parser/storage behavior.

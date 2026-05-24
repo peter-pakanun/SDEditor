@@ -32,9 +32,7 @@ Environment variables are documented in `.env.example`:
 - `app.vue` — Nuxt app shell
 - `pages/index.vue` — main editor route
 - `pages/version/[gameVersion].vue` — dynamic route for `poe1` / `poe2`
-- `components/editor/` — client-only editor host and migrated editor component
-- `legacy/sdeEditorTemplate.html` — compatibility template extracted from the old `public/index.html`
-- `legacy/sdeEditorOptions.ts` — migrated Options API shell; imports modules instead of CDN globals
+- `components/editor/` — client-only editor host, migrated editor app, extracted editor UI components, and remaining Options API shell
 - `stores/editor.ts` — Pinia state extracted from old `data()`
 - `utils/` — parser, ZIP helpers, regex engine, diagnostics, IndexedDB adapter, constants, logging
 - `plugins/monitoring.client.ts` — client error logging/monitoring hook
@@ -61,7 +59,7 @@ Environment variables are documented in `.env.example`:
 ## Conventions
 
 - Keep browser-only logic behind client-only components/plugins or `import.meta.client` guards.
-- Prefer extracting new behavior into `components/`, `stores/`, `composables/`, or `utils/` instead of growing `legacy/sdeEditorOptions.ts`.
+- Prefer extracting new behavior into `components/`, `stores/`, `composables/`, or `utils/` instead of growing `components/editor/sdeEditorOptions.ts`.
 - Do not reintroduce CDN script dependencies, Express-only serving, bundler alternatives, or global browser modules.
 - Preserve UTF-16LE with BOM behavior for StatDescription export.
 - Git commit style: conventional prefixes (`feat:`, `fix:`, `style:`, `refactor:`, `docs:`).
