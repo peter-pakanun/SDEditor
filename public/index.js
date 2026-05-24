@@ -1140,19 +1140,128 @@ const config = Vue.defineComponent({
     emptyTranslationDiagnostics() {
       return { diagnostics: [], warningCount: 0, errorCount: 0 };
     },
-    analyzeTranslationDiagnostics(text) {
-      if (window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function") {
-        return window.TranslationDiagnostics.analyze(text);
-      }
-      return this.emptyTranslationDiagnostics();
+    analyzeTranslationDiagnostics(text, english = null) {
+      const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
+        ? window.TranslationDiagnostics.analyze(text)
+        : this.emptyTranslationDiagnostics();
+      return this.addGggVarIdentityDiagnostics(result, english, text);
     },
     refreshTranslationDiagnostics(target) {
       if (!target) return this.emptyTranslationDiagnostics();
-      const result = this.analyzeTranslationDiagnostics(target.translation ?? "");
+      const result = this.analyzeTranslationDiagnostics(target.translation ?? "", target.english ?? null);
       target.translationDiagnostics = result.diagnostics;
       target.diagnosticWarningCount = result.warningCount;
       target.diagnosticErrorCount = result.errorCount;
       return result;
+    },
+    addGggVarIdentityDiagnostics(result, english, translation) {
+      const base = result && typeof result === "object" ? result : this.emptyTranslationDiagnostics();
+      const diagnostics = Array.isArray(base.diagnostics) ? [...base.diagnostics] : [];
+      if (english === null || english === undefined) {
+        return {
+          diagnostics,
+          warningCount: diagnostics.filter(d => d.level === "warning").length,
+          errorCount: diagnostics.filter(d => d.level === "error").length
+        };
+      }
+
+      diagnostics.push(...this.buildGggVarIdentityDiagnostics(english, translation));
+      diagnostics.sort((a, b) => {
+        if (a.start !== b.start) return a.start - b.start;
+        if (a.end !== b.end) return a.end - b.end;
+        if (a.level === b.level) return 0;
+        return a.level === "error" ? -1 : 1;
+      });
+
+      return {
+        diagnostics,
+        warningCount: diagnostics.filter(d => d.level === "warning").length,
+        errorCount: diagnostics.filter(d => d.level === "error").length
+      };
+    },
+    splitLinesWithOffsets(text) {
+      const source = String(text ?? "");
+      const lines = [];
+      let start = 0;
+      for (let i = 0; i < source.length; i++) {
+        if (source[i] !== "\n") continue;
+        lines.push({ text: source.slice(start, i), start, end: i });
+        start = i + 1;
+      }
+      lines.push({ text: source.slice(start), start, end: source.length });
+      return lines;
+    },
+    extractGggVarIdentityTags(text, offset = 0) {
+      const source = String(text ?? "");
+      const regex = new RegExp(gggVarTagRegex, "igm");
+      const tags = [];
+      let m;
+      while (m = regex.exec(source)) {
+        const full = m[1] || m[0];
+        const key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
+        tags.push({
+          full,
+          key: String(key),
+          start: offset + m.index,
+          end: offset + m.index + full.length
+        });
+      }
+      return tags;
+    },
+    countGggVarIdentityTags(tags) {
+      const counts = {};
+      for (const tag of (Array.isArray(tags) ? tags : [])) {
+        const key = String(tag?.key ?? "");
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return counts;
+    },
+    formatGggVarIdentityCounts(counts) {
+      return Object.keys(counts || {})
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(key => `{${key}}${counts[key] > 1 ? ` x${counts[key]}` : ""}`)
+        .join(", ") || "none";
+    },
+    findGggVarIdentityMismatchRange(englishCounts, translationLine, translationTags) {
+      const seen = {};
+      for (const tag of translationTags) {
+        const key = String(tag.key ?? "");
+        seen[key] = (seen[key] || 0) + 1;
+        if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.end };
+      }
+      if (translationTags.length > 0) return { start: translationTags[0].start, end: translationTags[0].end };
+      if (translationLine.end > translationLine.start) return { start: translationLine.start, end: translationLine.end };
+      return { start: translationLine.start, end: translationLine.start };
+    },
+    buildGggVarIdentityDiagnostics(english, translation) {
+      const englishLines = this.splitLinesWithOffsets(english);
+      const translationLines = this.splitLinesWithOffsets(translation);
+      const max = Math.max(englishLines.length, translationLines.length);
+      const diagnostics = [];
+
+      for (let i = 0; i < max; i++) {
+        const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
+        const translationLine = translationLines[i] || { text: "", start: String(translation ?? "").length, end: String(translation ?? "").length };
+        const englishTags = this.extractGggVarIdentityTags(englishLine.text);
+        const translationTags = this.extractGggVarIdentityTags(translationLine.text, translationLine.start);
+        const englishCounts = this.countGggVarIdentityTags(englishTags);
+        const translationCounts = this.countGggVarIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) continue;
+
+        const range = this.findGggVarIdentityMismatchRange(englishCounts, translationLine, translationTags);
+        const linePart = max > 1 ? ` on line ${i + 1}` : "";
+        diagnostics.push({
+          level: "error",
+          code: "variable-tag-identity-mismatch",
+          message: `Variable tag mismatch${linePart}: English has ${this.formatGggVarIdentityCounts(englishCounts)}; translation has ${this.formatGggVarIdentityCounts(translationCounts)}.`,
+          start: range.start,
+          end: range.end
+        });
+      }
+
+      return diagnostics;
     },
     syncEditorBlockDiagnosticsFromTableColumns(editorBlock) {
       if (!editorBlock?.isTable) return;
@@ -3197,7 +3306,7 @@ const config = Vue.defineComponent({
         let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
         let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(english);
         let englishHLter = baseEnglishHLter;
-        let translationDiagnosticResult = this.analyzeTranslationDiagnostics(translation ?? "");
+        let translationDiagnosticResult = this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
         let translationHLter = this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
         let multilineLineMismatch = false;
         let tableColumns = [];
