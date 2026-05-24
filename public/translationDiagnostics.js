@@ -156,8 +156,10 @@
       const isLineStart = i === 0 || isLineBreak(prev);
       const isLineEnd = i + 1 === text.length || isLineBreak(next);
       const touchesWhitespace = /[ \t]/.test(prev) || /[ \t]/.test(next);
+      const isSurroundedByWhitespace = /[ \t]/.test(prev) && /[ \t]/.test(next);
 
       if (!isLineStart && !isLineEnd && !touchesWhitespace) continue;
+      if (isSurroundedByWhitespace) continue;
       if (isDashNextToVariableTag(text, i)) continue;
 
       addDiagnostic(
