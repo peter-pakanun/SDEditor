@@ -1144,7 +1144,7 @@ const config = Vue.defineComponent({
       const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
         ? window.TranslationDiagnostics.analyze(text)
         : this.emptyTranslationDiagnostics();
-      return this.addGggVarIdentityDiagnostics(result, english, text);
+      return this.addTagIdentityDiagnostics(result, english, text);
     },
     refreshTranslationDiagnostics(target) {
       if (!target) return this.emptyTranslationDiagnostics();
@@ -1154,7 +1154,7 @@ const config = Vue.defineComponent({
       target.diagnosticErrorCount = result.errorCount;
       return result;
     },
-    addGggVarIdentityDiagnostics(result, english, translation) {
+    addTagIdentityDiagnostics(result, english, translation) {
       const base = result && typeof result === "object" ? result : this.emptyTranslationDiagnostics();
       const diagnostics = Array.isArray(base.diagnostics) ? [...base.diagnostics] : [];
       if (english === null || english === undefined) {
@@ -1166,6 +1166,7 @@ const config = Vue.defineComponent({
       }
 
       diagnostics.push(...this.buildGggVarIdentityDiagnostics(english, translation));
+      diagnostics.push(...this.buildKeywordPopupTagNameDiagnostics(english, translation));
       diagnostics.sort((a, b) => {
         if (a.start !== b.start) return a.start - b.start;
         if (a.end !== b.end) return a.end - b.end;
@@ -1256,6 +1257,78 @@ const config = Vue.defineComponent({
           level: "error",
           code: "variable-tag-identity-mismatch",
           message: `Variable tag mismatch${linePart}: English has ${this.formatGggVarIdentityCounts(englishCounts)}; translation has ${this.formatGggVarIdentityCounts(translationCounts)}.`,
+          start: range.start,
+          end: range.end
+        });
+      }
+
+      return diagnostics;
+    },
+    extractKeywordPopupIdentityTags(text, offset = 0) {
+      const source = String(text ?? "");
+      const regex = new RegExp(keywordPopupTagRegex, "igm");
+      const tags = [];
+      let m;
+      while (m = regex.exec(source)) {
+        const full = m[1] || m[0];
+        const tagName = String(m[2] ?? "").trim();
+        tags.push({
+          full,
+          key: tagName,
+          start: offset + m.index,
+          end: offset + m.index + full.length
+        });
+      }
+      return tags;
+    },
+    countKeywordPopupIdentityTags(tags) {
+      const counts = {};
+      for (const tag of (Array.isArray(tags) ? tags : [])) {
+        const key = String(tag?.key ?? "");
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return counts;
+    },
+    formatKeywordPopupIdentityCounts(counts) {
+      return Object.keys(counts || {})
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(key => `[${key}]${counts[key] > 1 ? ` x${counts[key]}` : ""}`)
+        .join(", ") || "none";
+    },
+    findKeywordPopupTagNameMismatchRange(englishCounts, translationLine, translationTags) {
+      const seen = {};
+      for (const tag of translationTags) {
+        const key = String(tag.key ?? "");
+        seen[key] = (seen[key] || 0) + 1;
+        if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.end };
+      }
+      if (translationTags.length > 0) return { start: translationTags[0].start, end: translationTags[0].end };
+      if (translationLine.end > translationLine.start) return { start: translationLine.start, end: translationLine.end };
+      return { start: translationLine.start, end: translationLine.start };
+    },
+    buildKeywordPopupTagNameDiagnostics(english, translation) {
+      const englishLines = this.splitLinesWithOffsets(english);
+      const translationLines = this.splitLinesWithOffsets(translation);
+      const max = Math.max(englishLines.length, translationLines.length);
+      const diagnostics = [];
+
+      for (let i = 0; i < max; i++) {
+        const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
+        const translationLine = translationLines[i] || { text: "", start: String(translation ?? "").length, end: String(translation ?? "").length };
+        const englishTags = this.extractKeywordPopupIdentityTags(englishLine.text);
+        const translationTags = this.extractKeywordPopupIdentityTags(translationLine.text, translationLine.start);
+        const englishCounts = this.countKeywordPopupIdentityTags(englishTags);
+        const translationCounts = this.countKeywordPopupIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) continue;
+
+        const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, translationLine, translationTags);
+        const linePart = max > 1 ? ` on line ${i + 1}` : "";
+        diagnostics.push({
+          level: "error",
+          code: "keyword-popup-tag-name-mismatch",
+          message: `KeywordPopups tagName mismatch${linePart}: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`,
           start: range.start,
           end: range.end
         });
