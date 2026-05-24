@@ -42,6 +42,36 @@ const GAME_PREVIEW_FONT_STACKS = {
   Russian: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
 };
 
+const AppTooltip = {
+  props: {
+    state: {
+      type: Object,
+      required: true
+    }
+  },
+  computed: {
+    lines() {
+      return String(this.state?.text || "").split(/\r?\n/);
+    },
+    tooltipStyle() {
+      return {
+        left: `${this.state?.x || 0}px`,
+        top: `${this.state?.y || 0}px`,
+        maxWidth: `${this.state?.maxWidth || 360}px`
+      };
+    }
+  },
+  template: `
+    <div v-if="state.visible && state.text" class="appTooltip" :style="tooltipStyle" role="tooltip">
+      <div v-for="(line, i) in lines" :key="i">{{ line || ' ' }}</div>
+    </div>
+  `
+};
+
+function escapeTooltipAttr(value) {
+  return escapeHtml(String(value ?? "")).replace(/\r\n|\r|\n/g, "&#10;");
+}
+
 const config = Vue.defineComponent({
   data() {
     return {
@@ -135,6 +165,13 @@ const config = Vue.defineComponent({
         columnIndex: 0,
         width: 0,
         selectedTranslationText: ""
+      },
+      tooltip: {
+        visible: false,
+        text: "",
+        x: 0,
+        y: 0,
+        maxWidth: 360
       },
       hlPopupReturnInfo: null,
       editorBlocks: [
@@ -982,6 +1019,81 @@ const config = Vue.defineComponent({
       if (Array.isArray(r)) r = r[0];
       return r;
     },
+    normalizeTooltipText(value) {
+      if (value == null) return "";
+      if (Array.isArray(value)) return value.map(v => String(v ?? "")).filter(Boolean).join("\n");
+      if (typeof value === "object") return String(value.text ?? value.label ?? "");
+      return String(value);
+    },
+    placeTooltip(e, text) {
+      const safeText = this.normalizeTooltipText(text);
+      if (!safeText.trim()) {
+        this.hideTooltip();
+        return;
+      }
+      const lines = safeText.split(/\r?\n/);
+      const maxLineLength = Math.max(8, ...lines.map(line => line.length));
+      const maxWidth = Math.min(360, Math.max(180, maxLineLength * 7 + 28));
+      const estimatedHeight = Math.min(320, Math.max(34, lines.length * 18 + 18));
+      let x = Number(e?.clientX || 0) + 14;
+      let y = Number(e?.clientY || 0) + 18;
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
+      if (x + maxWidth > viewportWidth - 8) x = Math.max(8, viewportWidth - maxWidth - 8);
+      if (y + estimatedHeight > viewportHeight - 8) y = Math.max(8, Number(e?.clientY || 0) - estimatedHeight - 12);
+      this.tooltip = {
+        visible: true,
+        text: safeText,
+        x,
+        y,
+        maxWidth
+      };
+    },
+    showTooltip(e, text) {
+      this.placeTooltip(e, text);
+    },
+    hideTooltip() {
+      if (!this.tooltip.visible) return;
+      this.tooltip.visible = false;
+      this.tooltip.text = "";
+    },
+    htmlTooltipMouseMove(e) {
+      const root = e?.currentTarget;
+      const target = e?.target?.closest?.("[data-tooltip]");
+      if (!root || !target || !root.contains(target)) {
+        this.hideTooltip();
+        return;
+      }
+      this.showTooltip(e, target.getAttribute("data-tooltip"));
+    },
+    getTooltipElementAtPoint(root, x, y, selector = "[data-tooltip]") {
+      if (!root || typeof root.querySelectorAll !== "function") return null;
+      const targets = root.querySelectorAll(selector);
+      for (const target of targets) {
+        for (const rect of target.getClientRects()) {
+          if (
+            x >= rect.left - 1 &&
+            x <= rect.right + 1 &&
+            y >= rect.top - 1 &&
+            y <= rect.bottom + 1
+          ) {
+            return target;
+          }
+        }
+      }
+      return null;
+    },
+    translationTooltipMouseMove(e, editorIndex, columnIndex = null) {
+      const editorBlock = this.editorBlocks?.[editorIndex];
+      const refColumn = editorBlock?.isTable ? columnIndex : null;
+      const hlterEl = this.getEditorRef("translationHLter", editorIndex, refColumn);
+      const target = this.getTooltipElementAtPoint(hlterEl, e?.clientX || 0, e?.clientY || 0, ".diagnosticRange[data-tooltip]");
+      if (!target) {
+        this.hideTooltip();
+        return;
+      }
+      this.showTooltip(e, target.getAttribute("data-tooltip"));
+    },
     getEditorColumn(editorBlock, columnIndex = null) {
       if (!editorBlock?.isTable) return editorBlock;
       let idx = Number.isInteger(columnIndex) ? columnIndex : 0;
@@ -1529,12 +1641,6 @@ const config = Vue.defineComponent({
       if (!inputEl || !hlterEl) return;
       hlterEl.style.transform = `translate(${-inputEl.scrollLeft}px, ${-inputEl.scrollTop}px)`;
     },
-    diagnosticHighlightMouseDown(e, editorIndex, columnIndex = null) {
-      if (!e?.target?.classList?.contains("diagnosticRange")) return;
-      const editorBlock = this.editorBlocks?.[editorIndex];
-      const refColumn = editorBlock?.isTable ? columnIndex : null;
-      this.getEditorRef("translation", editorIndex, refColumn)?.focus?.();
-    },
     autosizeTextarea(el, options = {}) {
       if (!el || el.tagName !== "TEXTAREA") return;
       let minHeight = options.minHeight ?? 72;
@@ -1758,13 +1864,17 @@ const config = Vue.defineComponent({
       HLs.sort((a, b) => b.index - a.index); // sort deacending
       for (let i = 0; i < HLs.length; i++) {
         const HL = HLs[i];
-        let title = `Click / Alt+${HLs.length-i} = Paste below&#10;Alt+Click = Copy to Clipboard`;
+        let tooltipLines = [
+          `Click / Alt+${HLs.length-i} = Paste below`,
+          "Alt+Click = Copy to Clipboard"
+        ];
         if (HL?.isKeywordPopup) {
-          title += HL?.dictId
-            ? `&#10;Ctrl+Click = Jump to Dictionary`
-            : `&#10;Ctrl+Click = Add to Dictionary`;
+          tooltipLines.push(HL?.dictId
+            ? "Ctrl+Click = Jump to Dictionary"
+            : "Ctrl+Click = Add to Dictionary");
         }
-        let tag = `<span class='${HL.replace ? "vocab" : ""}' title='${title}' data-hl-id="${HL._hlId}" dataValue="${HL.replace ? HL.replace : HL.find}">${HL.find}</span>`;
+        const dataValue = escapeHtml(String(HL.replace ? HL.replace : unescapeHtml(HL.find)));
+        let tag = `<span class="${HL.replace ? "vocab" : ""}" data-tooltip="${escapeTooltipAttr(tooltipLines.join("\n"))}" data-hl-id="${HL._hlId}" dataValue="${dataValue}">${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
       }
       HLs.sort((a, b) => a.index - b.index); // sort acending
@@ -1865,7 +1975,7 @@ const config = Vue.defineComponent({
         }
 
         let attrs = classes.length ? ` class="${classes.join(" ")}"` : "";
-        if (messages.length) attrs += ` title="${escapeHtml(messages.join("\n"))}"`;
+        if (messages.length) attrs += ` data-tooltip="${escapeTooltipAttr(messages.join("\n"))}"`;
         html += `<span${attrs}>${escapeHtml(raw)}</span>`;
       }
       return html;
@@ -4287,4 +4397,35 @@ function renderUnifiedLineDiff(edits) {
 }
 
 const app = Vue.createApp(config);
+
+app.component('app-tooltip', AppTooltip);
+
+app.directive('tooltip', {
+  mounted(el, binding) {
+    el.__sdTooltipValue = binding.value;
+    const show = (e) => binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
+    const hide = () => binding.instance?.hideTooltip?.();
+    el.__sdTooltipHandlers = { show, hide };
+    el.addEventListener('mouseenter', show);
+    el.addEventListener('mousemove', show);
+    el.addEventListener('mouseleave', hide);
+    el.addEventListener('blur', hide);
+    el.removeAttribute('title');
+  },
+  updated(el, binding) {
+    el.__sdTooltipValue = binding.value;
+    el.removeAttribute('title');
+  },
+  unmounted(el) {
+    const handlers = el.__sdTooltipHandlers;
+    if (!handlers) return;
+    el.removeEventListener('mouseenter', handlers.show);
+    el.removeEventListener('mousemove', handlers.show);
+    el.removeEventListener('mouseleave', handlers.hide);
+    el.removeEventListener('blur', handlers.hide);
+    delete el.__sdTooltipHandlers;
+    delete el.__sdTooltipValue;
+  }
+});
+
 app.mount('#app');

@@ -100,9 +100,9 @@
         <label for="autoOpenNextFile"> Auto open next file on save</label>
         <br>
         <button @click="settingsSaveClose">💾</button>
-        <button @click="exportSettingsClicked" title="Export settings">📤</button>
-        <button @click="importSettingsClicked" title="Import settings">📥</button>
-        <button @click.stop.prevent="startFromScratch" title="Delete selected-version translated workspace and history">Start from scratch</button>
+        <button @click="exportSettingsClicked" v-tooltip="'Export settings'" aria-label="Export settings">📤</button>
+        <button @click="importSettingsClicked" v-tooltip="'Import settings'" aria-label="Import settings">📥</button>
+        <button @click.stop.prevent="startFromScratch" v-tooltip="'Delete selected-version translated workspace and history'">Start from scratch</button>
         <form ref="importSettingsFileForm">
           <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
             accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
@@ -159,7 +159,7 @@
         <div class="loadingText" v-if="loadingProgress == 0 && !needsPostMigrationImport">
           <p>Welcome to <b>SDEditor!</b></p>
           <p>Read the <a href="https://github.com/peter-pakanun/SDEditor/blob/master/docs/editor_guide.md" target="_blank">Editor guide</a> for more information.</p>
-          <button @click="showImportUpdateZipDialog" title="Import ZIP">📦 Import StatDescriptions.zip</button>
+          <button @click="showImportUpdateZipDialog" v-tooltip="'Import ZIP'">📦 Import StatDescriptions.zip</button>
           <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>
         <div class="loadingText" v-if="loadingProgress == 0.001">
@@ -183,18 +183,18 @@
       <div class="topbar">
         <div class="pagination">
           <!-- <span class="versionBadge">{{ gameVersionLabel }}</span> -->
-          <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" title="Ctrl + Click to do a full export">💾</button>
+          <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Ctrl + Click to do a full export'" aria-label="Export ZIP">💾</button>
           <button @click="showSetting = true">⚙️</button>
-          <button @click="importZipClicked" title="Import ZIP">📦</button>
+          <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
           <button @click="nextPage">⯈</button>
         </div>
         <div>
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" title="File missing translation">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" title="Files with saved translations">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" title="Source changed since last translation save">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" v-tooltip="'File missing translation'">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" v-tooltip="'Files with saved translations'">
+          <input style="width: 9em;" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" v-tooltip="'Source changed since last translation save'">
           <span></span>
           <input id="searchInp" ref="searchInput" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
 
@@ -239,8 +239,8 @@
         </thead>
         <tbody>
           <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview }" @click="editFile(desc.filepath)">
-            <td v-bind:title="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
-            <td v-bind:title="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
+            <td v-tooltip="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
+            <td v-tooltip="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
             <td><span v-html="desc.english"></span></td>
             <td class="translationTr"><span v-html="desc.translation"></span></td>
           </tr>
@@ -254,9 +254,9 @@
           <div class="gamePreviewToolbar twoSided">
             <!-- <span class="gamePreviewLabel">👾 In-game preview</span> -->
             <div class="gamePreviewFrameBtns">
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" title="Small frame" @click="setGamePreviewFrame('s')">▢</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" title="Medium frame" @click="setGamePreviewFrame('m')">▣</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" title="Large frame" @click="setGamePreviewFrame('l')">▦</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" v-tooltip="'Small frame'" aria-label="Small frame" @click="setGamePreviewFrame('s')">▢</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" v-tooltip="'Medium frame'" aria-label="Medium frame" @click="setGamePreviewFrame('m')">▣</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" v-tooltip="'Large frame'" aria-label="Large frame" @click="setGamePreviewFrame('l')">▦</button>
             </div>
           </div>
           <div class="gamePreviewMainRow">
@@ -264,9 +264,9 @@
               <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
                 <template v-for="(seg, si) in gamePreviewSegments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                   <span v-if="seg.type === 'text'" class="gamePreviewText">{{ seg.text }}</span>
-                  <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :title="seg.full">{{ seg.text }}</span>
+                  <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" v-tooltip="seg.full">{{ seg.text }}</span>
                   <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay">
-                    <span class="gamePreviewVarValue" :title="seg.full">{{ seg.prefix + previewGggVars[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
+                    <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + previewGggVars[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                   </span>
                   <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                   <span v-else-if="seg.type === 'break'" class="gamePreviewBreak"></span>
@@ -285,10 +285,10 @@
         </div>
         <div class="twoSided">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
-          <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" :title="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
-          <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" :title="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
-          <button @click="editorSave" :disabled="editorTranslationReadOnly" title="Save (Ctrl+S)">💾</button>
-          <button @click="editorExit" title="Exit (ESC)">❌</button>
+          <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" v-tooltip="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
+          <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" v-tooltip="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
+          <button @click="editorSave" :disabled="editorTranslationReadOnly" v-tooltip="'Save (Ctrl+S)'" aria-label="Save">💾</button>
+          <button @click="editorExit" v-tooltip="'Exit (ESC)'" aria-label="Exit">❌</button>
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
@@ -312,7 +312,7 @@
                   <div v-else class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
                     <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
-                    <div class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
+                    <div class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
                   </div>
                 </div>
               </div>
@@ -324,9 +324,9 @@
               <div v-else class="tableEditorRow tableEditorTranslation">
                 <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
                   <div class="textHL" :class="{ multiline: column.isMultiline }">
-                    <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)">
-                    <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)"></textarea>
-                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index, colIndex)">{{ column.translationHLter }}</div>
+                    <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip">
+                    <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex)" @scroll="syncHlScroll('translation', index, colIndex)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip"></textarea>
+                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
                   </div>
                 </div>
               </div>
@@ -336,30 +336,30 @@
               <template v-else>
                 <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
                 <textarea v-else placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
-                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
             </div>
-            <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table content">@</div>
-            <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" title="Multiline content">↵</div>
+            <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" v-tooltip="'Table content'">@</div>
+            <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" v-tooltip="'Multiline content'">↵</div>
             <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
-            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)">
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)">{{ editorBlock.translationHLter }}</div>
+            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip">
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div v-else class="textHL multiline">
-            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)"></textarea>
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter" @mousedown="diagnosticHighlightMouseDown($event, index)">{{ editorBlock.translationHLter }}</div>
+            <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index)" @scroll="syncHlScroll('translation', index)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip"></textarea>
+            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
-            <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" title="Lines (translation / english)"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
-            <span v-if="editorBlock.isTable" class="metaPill" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" title="Table columns (translation / english)"><span class="metaIcon">@</span><span class="metaNum">{{ editorBlock.metaColsTr }}/{{ editorBlock.metaColsEn }}</span></span>
-            <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" title="Variable tags (translation / english)"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
-            <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" title="Keyword tags (translation / english)"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
-            <span v-if="editorBlock.diagnosticWarningCount > 0" class="metaPill diagnosticWarningPill" :title="blockDiagnosticTitle(editorBlock, 'warning')"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount }}</span></span>
-            <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" :title="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" v-tooltip="'Lines (translation / english)'"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
+            <span v-if="editorBlock.isTable" class="metaPill" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" v-tooltip="'Table columns (translation / english)'"><span class="metaIcon">@</span><span class="metaNum">{{ editorBlock.metaColsTr }}/{{ editorBlock.metaColsEn }}</span></span>
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" v-tooltip="'Variable tags (translation / english)'"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
+            <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" v-tooltip="'Keyword tags (translation / english)'"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
+            <span v-if="editorBlock.diagnosticWarningCount > 0" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning')"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount }}</span></span>
+            <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
           </div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
@@ -441,7 +441,7 @@
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
                   <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
-                  <button v-if="historyMode !== 'source'" class="historyRestore" title="Restore" @click="restoreHistoryRevision(rev)">↩</button>
+                  <button v-if="historyMode !== 'source'" class="historyRestore" v-tooltip="'Restore'" aria-label="Restore" @click="restoreHistoryRevision(rev)">↩</button>
                 </div>
                 <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
               </div>
@@ -473,6 +473,8 @@
         </div>
       </div>
     </div>
+
+    <app-tooltip :state="tooltip"></app-tooltip>
 
     </div>
   </div>

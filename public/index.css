@@ -253,8 +253,7 @@ input:focus, button:focus, textarea:focus {
 
 .textHL>.HLter .diagnosticRange {
   border-radius: 2px;
-  cursor: help;
-  pointer-events: all;
+  pointer-events: none;
 }
 
 .textHL>.HLter .diagnosticRange.diagWarning {
@@ -265,10 +264,6 @@ input:focus, button:focus, textarea:focus {
 .textHL>.HLter .diagnosticRange.diagError {
   background-color: var(--color-diagnostic-error);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-error-border) 45%, transparent) inset;
-}
-
-.textHL>.HLter .diagnosticRange:hover {
-  box-shadow: 0 0 0 1px currentColor;
 }
 
 .textHL>.HLter span[data-hl-id].hlPopupActive {
@@ -1252,6 +1247,22 @@ button, label, th, td, input[type="checkbox"] {
 .editBlock textarea {
   display: block;
   width: 100%;
+}
+
+.appTooltip {
+  position: fixed;
+  z-index: 10002;
+  pointer-events: none;
+  padding: calc(0.45em * var(--density)) calc(0.65em * var(--density));
+  color: var(--color-font);
+  background: color-mix(in srgb, var(--color-bg2) 94%, black);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 55%, var(--color-shadow));
+  border-radius: 4px;
+  box-shadow: 0 8px 20px var(--color-shadow);
+  font-size: calc(12px * var(--density));
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .hlPopupBackdrop {
