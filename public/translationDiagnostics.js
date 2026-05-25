@@ -177,10 +177,19 @@
 
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
+      const current = stack[stack.length - 1];
+
+      if (ch === "|" && current?.open === "[") {
+        current.hasDynamicSeparator = true;
+        continue;
+      }
 
       if (Object.prototype.hasOwnProperty.call(OPENERS, ch)) {
-        if (stack.length > 0) {
-          const current = stack[stack.length - 1];
+        const isAllowedVariableInKeywordDynamicPart = ch === "{"
+          && current?.open === "["
+          && current.hasDynamicSeparator;
+
+        if (stack.length > 0 && !isAllowedVariableInKeywordDynamicPart) {
           addDiagnostic(
             LEVEL_ERROR,
             "nested-tags",
