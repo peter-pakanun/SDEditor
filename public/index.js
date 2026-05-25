@@ -1812,6 +1812,9 @@ const config = Vue.defineComponent({
         hl._hlId = nextHlId++;
         HLs.push(hl);
       };
+      let overlapsExistingHL = (start, end) => {
+        return HLs.some(hl => start < hl.index + hl.find.length && hl.index < end);
+      };
       let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
         if (!text) return;
         for (const dictEntry of this.dictionary || []) {
@@ -1861,9 +1864,11 @@ const config = Vue.defineComponent({
       // highlight ggg var tag
       let regex = new RegExp(gggVarTagRegex, 'igm');
       while (m = regex.exec(modifiedEnglish)) {
+        const found = m[1] || m[0];
+        if (overlapsExistingHL(m.index, m.index + found.length)) continue;
         addHL({
           index: m.index,
-          find: m[1]
+          find: found
         });
       }
 
@@ -1884,10 +1889,8 @@ const config = Vue.defineComponent({
           let escapedFind = escapeRegExp(d.pair.find);
           let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
           while (m = regex.exec(modifiedEnglish)) {
-            // skip if it is within a keyword popup tag
-            if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
-            // skip if it is within a ggg var tag
-            if (HLs.some(hl => hl.index <= m.index && m.index < hl.index + hl.find.length)) continue;
+            // skip if it overlaps a tag highlight
+            if (overlapsExistingHL(m.index, m.index + m[0].length)) continue;
             addHL({
               index: m.index,
               find: m[0],
