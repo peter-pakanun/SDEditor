@@ -147,6 +147,12 @@
     return isVariableTagStartAt(text, index + 1) || isVariableTagEndBefore(text, index);
   }
 
+  function isMarkdownListMarker(text, index) {
+    const prev = index > 0 ? text[index - 1] : "";
+    const next = index + 1 < text.length ? text[index + 1] : "";
+    return (index === 0 || isLineBreak(prev)) && /[ \t]/.test(next);
+  }
+
   function scanDashBoundaries(text, addDiagnostic) {
     for (let i = 0; i < text.length; i++) {
       if (text[i] !== "-") continue;
@@ -160,6 +166,7 @@
 
       if (!isLineStart && !isLineEnd && !touchesWhitespace) continue;
       if (isSurroundedByWhitespace) continue;
+      if (isMarkdownListMarker(text, i)) continue;
       if (isDashNextToVariableTag(text, i)) continue;
 
       addDiagnostic(
