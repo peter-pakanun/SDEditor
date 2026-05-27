@@ -3,7 +3,7 @@
 You can access the live version [here](<https://sdeditor.pages.dev/>), or if you prefer not to use online version you can clone the [repo](<https://github.com/peter-pakanun/SDEditor>) and run it locally.
 
 ## How to use
-[Full Editor Guide](#)
+[**Full Editor Guide**](#)
 1) Open the [web app](<https://sdeditor.pages.dev/>) and pick your target language, theme, size
 2) Import `StatDescriptions.zip`
 3) Click any row to edit
