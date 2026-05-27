@@ -156,6 +156,7 @@ const config = Vue.defineComponent({
         visible: false,
         editorIndex: 0,
         openedByBracket: false,
+        openedByChar: "",
         items: [],
         filtered: [],
         filter: "",
@@ -194,6 +195,8 @@ const config = Vue.defineComponent({
           metaVarsTr: 0,
           metaKwEn: 0,
           metaKwTr: 0,
+          metaDecorEn: 0,
+          metaDecorTr: 0,
           translationReplace: "",
           words: []
         },
@@ -732,6 +735,7 @@ const config = Vue.defineComponent({
     },
     buildGamePreviewSegments(decodedString) {
       let s = String(decodedString ?? "");
+      let decorRe = new RegExp("^" + textDecorationTagRegex, "i");
       let kwRe = new RegExp("^" + keywordPopupTagRegex, "i");
       let gggRe = new RegExp("^" + gggVarTagRegex, "i");
       let segments = [];
@@ -749,6 +753,12 @@ const config = Vue.defineComponent({
         let i = 0;
         while (i < part.length) {
           let slice = part.slice(i);
+          let dm = decorRe.exec(slice);
+          if (dm && dm.index === 0) {
+            scanInline(String(dm[3] ?? ""), allowBreaks);
+            i += dm[0].length;
+            continue;
+          }
           let km = kwRe.exec(slice);
           if (km && km.index === 0) {
             flushText();
@@ -1246,7 +1256,8 @@ const config = Vue.defineComponent({
         lines,
         cols: String(s).length <= 0 ? 0 : columns.length,
         vars: countGGGVarTag(String(s)),
-        kw: countKeywordPopupTag(String(s))
+        kw: countKeywordPopupTag(String(s)),
+        decor: countTextDecorationTag(String(s))
       };
     },
     emptyTranslationDiagnostics() {
@@ -1279,6 +1290,7 @@ const config = Vue.defineComponent({
 
       diagnostics.push(...this.buildGggVarIdentityDiagnostics(english, translation));
       diagnostics.push(...this.buildKeywordPopupTagNameDiagnostics(english, translation));
+      diagnostics.push(...this.buildTextDecorationTagNameDiagnostics(english, translation));
       diagnostics.sort((a, b) => {
         if (a.start !== b.start) return a.start - b.start;
         if (a.end !== b.end) return a.end - b.end;
@@ -1498,6 +1510,107 @@ const config = Vue.defineComponent({
 
       return diagnostics;
     },
+    extractTextDecorationIdentityTags(text, offset = 0) {
+      const source = String(text ?? "");
+      const regex = new RegExp(textDecorationTagRegex, "igm");
+      const tags = [];
+      let m;
+      while (m = regex.exec(source)) {
+        const full = m[1] || m[0];
+        const tagName = String(m[2] ?? "").trim();
+        tags.push({
+          full,
+          key: tagName,
+          start: offset + m.index,
+          end: offset + m.index + full.length,
+          openerEnd: offset + m.index + `<${tagName}>`.length
+        });
+      }
+      return tags;
+    },
+    countTextDecorationIdentityTags(tags) {
+      const counts = {};
+      for (const tag of (Array.isArray(tags) ? tags : [])) {
+        const key = String(tag?.key ?? "");
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return counts;
+    },
+    formatTextDecorationIdentityCounts(counts) {
+      return Object.keys(counts || {})
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(key => `<${key}>${counts[key] > 1 ? ` x${counts[key]}` : ""}`)
+        .join(", ") || "none";
+    },
+    findTextDecorationTagNameMismatchRange(englishCounts, translationLine, translationTags) {
+      const seen = {};
+      for (const tag of translationTags) {
+        const key = String(tag.key ?? "");
+        seen[key] = (seen[key] || 0) + 1;
+        if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.openerEnd || tag.end };
+      }
+      if (translationTags.length > 0) {
+        const tag = translationTags[0];
+        return { start: tag.start, end: tag.openerEnd || tag.end };
+      }
+      return null;
+    },
+    buildTextDecorationTagNameDiagnostics(english, translation) {
+      const englishLines = this.splitLinesWithOffsets(english);
+      const translationLines = this.splitLinesWithOffsets(translation);
+      const max = Math.max(englishLines.length, translationLines.length);
+      const diagnostics = [];
+
+      if (max > 1) {
+        const englishTags = this.extractTextDecorationIdentityTags(english);
+        const translationTags = this.extractTextDecorationIdentityTags(translation);
+        const englishCounts = this.countTextDecorationIdentityTags(englishTags);
+        const translationCounts = this.countTextDecorationIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) return diagnostics;
+
+        const range = this.findTextDecorationTagNameMismatchRange(englishCounts, null, translationTags);
+        const diagnostic = {
+          level: "error",
+          code: "text-decoration-tag-name-mismatch",
+          message: `Text decoration tagName mismatch: English has ${this.formatTextDecorationIdentityCounts(englishCounts)}; translation has ${this.formatTextDecorationIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
+        return diagnostics;
+      }
+
+      for (let i = 0; i < max; i++) {
+        const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
+        const translationLine = translationLines[i] || { text: "", start: String(translation ?? "").length, end: String(translation ?? "").length };
+        const englishTags = this.extractTextDecorationIdentityTags(englishLine.text);
+        const translationTags = this.extractTextDecorationIdentityTags(translationLine.text, translationLine.start);
+        const englishCounts = this.countTextDecorationIdentityTags(englishTags);
+        const translationCounts = this.countTextDecorationIdentityTags(translationTags);
+        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
+        if (!mismatched) continue;
+
+        const range = this.findTextDecorationTagNameMismatchRange(englishCounts, translationLine, translationTags);
+        const linePart = max > 1 ? ` on line ${i + 1}` : "";
+        const diagnostic = {
+          level: "error",
+          code: "text-decoration-tag-name-mismatch",
+          message: `Text decoration tagName mismatch${linePart}: English has ${this.formatTextDecorationIdentityCounts(englishCounts)}; translation has ${this.formatTextDecorationIdentityCounts(translationCounts)}.`
+        };
+        if (range) {
+          diagnostic.start = range.start;
+          diagnostic.end = range.end;
+        }
+        diagnostics.push(diagnostic);
+      }
+
+      return diagnostics;
+    },
     syncEditorBlockDiagnosticsFromTableColumns(editorBlock) {
       if (!editorBlock?.isTable) return;
       let diagnostics = [];
@@ -1594,6 +1707,8 @@ const config = Vue.defineComponent({
       editorBlock.metaVarsTr = tr.vars;
       editorBlock.metaKwEn = eng.kw;
       editorBlock.metaKwTr = tr.kw;
+      editorBlock.metaDecorEn = eng.decor;
+      editorBlock.metaDecorTr = tr.decor;
       if (typeof editorIndex === "number" && editorBlock.isMultiline && !editorBlock.isTable) {
         this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
       }
@@ -1813,7 +1928,10 @@ const config = Vue.defineComponent({
         HLs.push(hl);
       };
       let overlapsExistingHL = (start, end) => {
-        return HLs.some(hl => start < hl.index + hl.find.length && hl.index < end);
+        return HLs.some(hl => start < (hl.protectedEnd ?? (hl.index + hl.find.length)) && hl.index < end);
+      };
+      let maskRange = (value, start, end) => {
+        return value.substring(0, start) + '*'.repeat(Math.max(0, end - start)) + value.substring(end);
       };
       let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
         if (!text) return;
@@ -1830,6 +1948,25 @@ const config = Vue.defineComponent({
         }
       };
       let m;
+
+      // highlight text decoration tag names <tagName>{{text}}, but keep the body unhighlighted
+      let escapedTextDecorationRegex = new RegExp(`(&lt;(${textDecorationTagNameRegex})&gt;\\{\\{([\\s\\S]*?)\\}\\})`, 'igm');
+      while (m = escapedTextDecorationRegex.exec(modifiedEnglish)) {
+        let tagName = m[2];
+        let opener = `&lt;${tagName}&gt;`;
+        let value = `<${tagName}>{{}}`;
+        addHL({
+          index: m.index,
+          find: opener,
+          protectedEnd: m.index + m[0].length,
+          tagName,
+          isTextDecoration: true,
+          replace: value,
+          label: `<${tagName}>{{_}}`,
+          caretOffset: `<${tagName}>{{`.length
+        });
+        modifiedEnglish = maskRange(modifiedEnglish, m.index, m.index + m[0].length);
+      }
 
       // highlight KeywordPopup tags [TagName|format] or [TagName]
       let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
@@ -1918,7 +2055,8 @@ const config = Vue.defineComponent({
             : "Ctrl+Click = Add to Dictionary");
         }
         const dataValue = escapeHtml(String(HL.replace ? HL.replace : unescapeHtml(HL.find)));
-        let tag = `<span class="${HL.replace ? "vocab" : ""}" data-tooltip="${escapeTooltipAttr(tooltipLines.join("\n"))}" data-hl-id="${HL._hlId}" dataValue="${dataValue}">${HL.find}</span>`;
+        const caretOffset = Number.isInteger(HL.caretOffset) ? ` data-caret-offset="${HL.caretOffset}"` : "";
+        let tag = `<span class="${HL.replace ? "vocab" : ""}" data-tooltip="${escapeTooltipAttr(tooltipLines.join("\n"))}" data-hl-id="${HL._hlId}" dataValue="${dataValue}"${caretOffset}>${HL.find}</span>`;
         englishHLter = englishHLter.substring(0, HL.index) + tag + englishHLter.substring(HL.index + HL.find.length);
       }
       HLs.sort((a, b) => a.index - b.index); // sort acending
@@ -1930,6 +2068,19 @@ const config = Vue.defineComponent({
       let modifiedText = source;
       let ranges = [];
       let m;
+
+      let textDecorationRegex = new RegExp(textDecorationTagRegex, 'igm');
+      while (m = textDecorationRegex.exec(modifiedText)) {
+        const tagName = String(m[2] ?? "");
+        const openerLength = `<${tagName}>`.length;
+        ranges.push({
+          start: m.index,
+          end: m.index + openerLength,
+          classes: ["tagRange", "vocab"]
+        });
+        let mask = '*'.repeat(m[0].length);
+        modifiedText = modifiedText.substring(0, m.index) + mask + modifiedText.substring(m.index + m[0].length);
+      }
 
       let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
       while (m = keywordPopupRegex.exec(modifiedText)) {
@@ -2106,6 +2257,31 @@ const config = Vue.defineComponent({
       let seen = new Map();
       let seenValue = new Map();
       for (const hl of HLs) {
+        if (hl?.isTextDecoration) {
+          let value = hl?.replace || "";
+          if (!value) continue;
+          let existingValueItem = seenValue.get(value);
+          if (existingValueItem) {
+            if (hl?._hlId && Array.isArray(existingValueItem.hlIds) && !existingValueItem.hlIds.includes(hl._hlId)) {
+              existingValueItem.hlIds.push(hl._hlId);
+            }
+            continue;
+          }
+          let label = hl?.label || value;
+          let item = {
+            label,
+            value,
+            matchText: label,
+            matchTextLower: label.toLowerCase(),
+            isAlt: false,
+            hlIds: hl?._hlId ? [hl._hlId] : [],
+            caretOffset: hl.caretOffset
+          };
+          seenValue.set(value, item);
+          items.push(item);
+          continue;
+        }
+
         if (hl?.dictId) {
           let kwTagName = "";
           let kwDynamicContent = "";
@@ -2306,6 +2482,7 @@ const config = Vue.defineComponent({
       this.hlPopup.editorIndex = editorIndex;
       this.hlPopup.columnIndex = columnIndex;
       this.hlPopup.openedByBracket = !!options.openedByBracket;
+      this.hlPopup.openedByChar = String(options.openedByChar || "");
       this.hlPopup.selectedTranslationText = this.getTranslationSelectionText(editorIndex, columnIndex);
       this.hlPopup.items = this.buildHlPopupItems(editorIndex, columnIndex);
       this.hlPopup.filter = "";
@@ -2320,6 +2497,7 @@ const config = Vue.defineComponent({
       let columnIndex = this.hlPopup.columnIndex || 0;
       this.hlPopup.visible = false;
       this.hlPopup.openedByBracket = false;
+      this.hlPopup.openedByChar = "";
       this.hlPopup.filter = "";
       this.hlPopup.items = [];
       this.hlPopup.filtered = [];
@@ -2631,6 +2809,9 @@ const config = Vue.defineComponent({
       if (options.deleteOpeningBracket && start > 0 && value[start - 1] === "[") {
         start = start - 1;
       }
+      if (options.deleteOpeningChar && start > 0 && value[start - 1] === options.deleteOpeningChar) {
+        start = start - 1;
+      }
       let syncEditedValue = () => {
         if (target) target.translation = el.value || "";
         if (editorBlock.isTable) {
@@ -2676,14 +2857,15 @@ const config = Vue.defineComponent({
       syncEditedValue();
       this.$nextTick(() => {
         el.focus?.();
-        let caret = start + text.length;
+        let caret = start + (Number.isInteger(options.caretOffset) ? options.caretOffset : text.length);
         el.setSelectionRange?.(caret, caret);
       });
     },
     insertHlPopupItem(item) {
       let editorIndex = this.hlPopup.editorIndex;
       let deleteOpeningBracket = this.hlPopup.openedByBracket;
-      this.insertTranslationText(editorIndex, item.value, { deleteOpeningBracket, columnIndex: this.hlPopup.columnIndex || 0 });
+      let deleteOpeningChar = this.hlPopup.openedByChar || "";
+      this.insertTranslationText(editorIndex, item.value, { deleteOpeningBracket, deleteOpeningChar, columnIndex: this.hlPopup.columnIndex || 0, caretOffset: item.caretOffset });
       this.closeHlPopup({ refocus: true });
     },
     insertHlPopupSelection() {
@@ -2698,11 +2880,11 @@ const config = Vue.defineComponent({
       this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
     },
     translationKeydown(e, editorIndex, columnIndex = 0) {
-      if (e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if ((e.key === "[" || e.key === "<") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!this.editorVisible) return;
         this.setEditorFocus(editorIndex, columnIndex);
         if (!this.hlPopup.visible) {
-          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: true, columnIndex }), 0);
+          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: e.key === "[", openedByChar: e.key, columnIndex }), 0);
         }
         return;
       }
@@ -2741,8 +2923,8 @@ const config = Vue.defineComponent({
       }
       if (e.key === "Backspace" && !this.hlPopup.filter) {
         e.preventDefault();
-        if (this.hlPopup.openedByBracket) {
-          this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
+        if (this.hlPopup.openedByBracket || this.hlPopup.openedByChar) {
+          this.insertTranslationText(this.hlPopup.editorIndex, "", { deleteOpeningBracket: true, deleteOpeningChar: this.hlPopup.openedByChar || "", columnIndex: this.hlPopup.columnIndex || 0 });
         }
         this.closeHlPopup({ refocus: true });
       }
@@ -3593,6 +3775,8 @@ const config = Vue.defineComponent({
           metaVarsTr: trStats.vars,
           metaKwEn: engStats.kw,
           metaKwTr: trStats.kw,
+          metaDecorEn: engStats.decor,
+          metaDecorTr: trStats.decor,
           translationReplace: "",
           words: []
         })
@@ -3627,8 +3811,10 @@ const config = Vue.defineComponent({
     },
     copySpanToTranslation(e, editorBlock, editorIndex, columnIndex = 0) {
       let text = e.target.getAttribute('datavalue') || "";
+      let caretOffsetRaw = e.target.getAttribute('data-caret-offset');
+      let caretOffset = caretOffsetRaw == null ? null : Number(caretOffsetRaw);
       this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null)?.focus?.();
-      this.insertTranslationText(editorIndex, text, { columnIndex });
+      this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: Number.isInteger(caretOffset) ? caretOffset : undefined });
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))
@@ -3655,7 +3841,7 @@ const config = Vue.defineComponent({
       let source = this.getEditorColumn(editorBlock, columnIndex);
       if (!source?.HLs?.[id]) return;
       let text = source.HLs[id].replace || source.HLs[id].find;
-      this.insertTranslationText(editorIndex, text, { columnIndex });
+      this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: source.HLs[id].caretOffset });
     },
     editorShiftEnter() {
       if (this.shiftEnterSave) {
@@ -3732,6 +3918,10 @@ const config = Vue.defineComponent({
       let newKeywordPopupTagCount = newTranslations.reduce((p, c) => p += countKeywordPopupTag(c), 0);
       let engKeywordPopupTagCount = desc.translations.English.reduce((p, c) => p += countKeywordPopupTag(c), 0);
       if (newKeywordPopupTagCount != engKeywordPopupTagCount && !confirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return false;
+
+      let newTextDecorationTagCount = newTranslations.reduce((p, c) => p += countTextDecorationTag(c), 0);
+      let engTextDecorationTagCount = desc.translations.English.reduce((p, c) => p += countTextDecorationTag(c), 0);
+      if (newTextDecorationTagCount != engTextDecorationTagCount && !confirm("Number of text decoration tags (<tag>{{}} tag) mismatched!\nDo you want to save anyway?")) return false;
 
       desc.isMissing = isMissing;
       if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;

@@ -47,6 +47,12 @@
     return Math.max(start + 1, end);
   }
 
+  function makeOffsetAddDiagnostic(addDiagnostic, offset) {
+    return function addOffsetDiagnostic(level, code, message, start, end, extra) {
+      addDiagnostic(level, code, message, offset + start, offset + end, extra);
+    };
+  }
+
   function findSimpleTagEnd(text, start, closeChar) {
     for (let i = start + 1; i < text.length; i++) {
       if (text[i] === "\n" || text[i] === "\r") return start + 1;
@@ -179,10 +185,70 @@
     }
   }
 
+  function findTextDecorationAt(text, index) {
+    if (text[index] !== "<") return null;
+    const nameMatch = /^<([A-Za-z][A-Za-z0-9_:\-]*)>/.exec(text.slice(index));
+    if (!nameMatch) return null;
+    const opener = nameMatch[0];
+    const bodyStart = index + opener.length;
+    if (text.slice(bodyStart, bodyStart + 2) !== "{{") {
+      if (text[bodyStart] === "{") {
+        return {
+          malformed: true,
+          start: index,
+          end: lineEndForRange(text, index),
+          message: "Malformed text decoration tag. Expected {{ after tag name."
+        };
+      }
+      return null;
+    }
+
+    const contentStart = bodyStart + 2;
+    const closeIndex = text.indexOf("}}", contentStart);
+    if (closeIndex < 0) {
+      return {
+        malformed: true,
+        start: index,
+        end: lineEndForRange(text, index),
+        message: "Malformed text decoration tag. Missing closing }}."
+      };
+    }
+
+    return {
+      malformed: false,
+      start: index,
+      openerEnd: bodyStart,
+      contentStart,
+      contentEnd: closeIndex,
+      end: closeIndex + 2,
+      tagName: nameMatch[1]
+    };
+  }
+
   function scanTags(text, addDiagnostic) {
     const stack = [];
 
     for (let i = 0; i < text.length; i++) {
+      const textDecoration = findTextDecorationAt(text, i);
+      if (textDecoration) {
+        if (textDecoration.malformed) {
+          addDiagnostic(
+            LEVEL_WARNING,
+            "malformed-text-decoration-tag",
+            textDecoration.message,
+            textDecoration.start,
+            textDecoration.end
+          );
+          i = Math.max(i, textDecoration.end - 1);
+          continue;
+        }
+
+        const inner = text.slice(textDecoration.contentStart, textDecoration.contentEnd);
+        scanTags(inner, makeOffsetAddDiagnostic(addDiagnostic, textDecoration.contentStart));
+        i = textDecoration.end - 1;
+        continue;
+      }
+
       const ch = text[i];
       const current = stack[stack.length - 1];
 

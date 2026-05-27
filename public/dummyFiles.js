@@ -47,10 +47,11 @@ const dummyFile1 = String.raw`description
 
 const dummyFile2 = String.raw`description
 	1 unique_facebreaker_unarmed_attack_damage_+1%_final_per_X_strength
-	3
+	4
 		1|# "Column A: 1% more [UnarmedDamage|Unarmed Damage] per {0} [Strength]@Column B: Additional text {1}"
 		#|-1 "1% less [UnarmedDamage|Unarmed Damage] per {0} [Strength]" negate 1
 		# # "Preview left A\nPreview left B@Preview right a\nPreview right b"
+		# # "<enchanted>{{Excavated Chests have {0}% chance to contain additional [BlackScytheArtifact|Black Scythe Artifacts]}}"
 `;
 
 const dummyFile3 = String.raw`description

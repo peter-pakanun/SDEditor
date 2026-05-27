@@ -46,7 +46,7 @@ function regexEngineLookup(str, dictionary, words = []) {
             failStr = r.failStr;
           }
         } else {
-          let transformed = checkKeywordPopupTag(captured, '🔖');
+          let transformed = checkKeywordPopupTag(captured, '🔖') || checkTextDecorationTag(captured, '🔖');
           if (!transformed || !transformed.word) {
             words.push(captured);
             replace = replace.replace(m[0], '🔖')
@@ -78,6 +78,9 @@ let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
 let keywordPopupTagRegex = "(\\[([^\\]|]+)(?:\\|([^\\]]*))?\\])";
 
+let textDecorationTagNameRegex = "[A-Za-z][A-Za-z0-9_:\\-]*";
+let textDecorationTagRegex = `(<(${textDecorationTagNameRegex})>\\{\\{([\\s\\S]*?)\\}\\})`;
+
 /**
  * @param {string} str the string to check
  * @param {string} replacer the string to use in place of the found string
@@ -94,6 +97,25 @@ function checkKeywordPopupTag(str, replacer = '') {
     find: str,
     word: defaultValue || tagName,
     replace: replacer ? `[${tagName}|${replacer}]` : `[${tagName}${defaultValue ? `|${defaultValue}` : ''}]`
+  };
+}
+
+/**
+ * @param {string} str the string to check
+ * @param {string} replacer the string to use in place of the found text body
+ * @returns {{find: string, word: string | null, replace: string | null} | null}
+ * if the string is not a text decoration tag, it returns null
+ */
+function checkTextDecorationTag(str, replacer = '') {
+  let regex = new RegExp(textDecorationTagRegex, 'ig');
+  let match = regex.exec(str);
+  if (!match) return null;
+  let tagName = match[2];
+  let text = match[3] || '';
+  return {
+    find: str,
+    word: text || tagName,
+    replace: `<${tagName}>{{${replacer || text}}}`
   };
 }
 
@@ -117,6 +139,15 @@ function countKeywordPopupTag(str) {
 
 /**
  * @param {string} str
+ * @returns {number}
+ */
+function countTextDecorationTag(str) {
+  let m = str?.match(new RegExp(textDecorationTagRegex, 'gi'));
+  return m?.length || 0;
+}
+
+/**
+ * @param {string} str
  * @param {any} dictionary
  * @returns {any}
  */
@@ -127,6 +158,14 @@ function regexEngineCreate(str, dictionary) {
 
   // keyword popup tag
   if (m = f.match(new RegExp(keywordPopupTagRegex, 'ig'))) {
+    for (const match of m) {
+      f = f.replace(match, "(.+)");
+      r = r.replace(match, "\u200B");
+    }
+  }
+
+  // text decoration tag
+  if (m = f.match(new RegExp(textDecorationTagRegex, 'ig'))) {
     for (const match of m) {
       f = f.replace(match, "(.+)");
       r = r.replace(match, "\u200B");
