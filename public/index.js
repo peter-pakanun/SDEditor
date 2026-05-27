@@ -227,6 +227,7 @@ const config = Vue.defineComponent({
       gamePreviewFrame: "m",
       gamePreviewFonts: null,
       previewGggVars: {},
+      gamePreviewSourceSegments: [],
       gamePreviewSegments: [],
       
       // Multi-instance detection
@@ -514,10 +515,17 @@ const config = Vue.defineComponent({
     gamePreviewFontFamily() {
       return this.getGamePreviewFontFamily(this.lang);
     },
+    gamePreviewSourceFontFamily() {
+      return this.getGamePreviewFontFamily("English");
+    },
     gamePreviewVarKeyList() {
       let seen = new Set();
       let out = [];
-      for (const seg of this.gamePreviewSegments || []) {
+      let segments = [
+        ...(this.gamePreviewSourceSegments || []),
+        ...(this.gamePreviewSegments || []),
+      ];
+      for (const seg of segments) {
         if (seg?.type !== "var") continue;
         let k = String(seg.key ?? "");
         if (seen.has(k)) continue;
@@ -715,10 +723,7 @@ const config = Vue.defineComponent({
       return '"Fontin", "Noto Serif", serif';
     },
     defaultPreviewVarValue(key) {
-      let k = String(key ?? "");
-      if (k === "") return "?";
-      if (/^\d+$/.test(k)) return k;
-      return k;
+      return "10";
     },
     mergePreviewGggVars(keysOrder) {
       let prev = this.previewGggVars && typeof this.previewGggVars === "object" ? this.previewGggVars : {};
@@ -846,11 +851,16 @@ const config = Vue.defineComponent({
     refreshGamePreview() {
       if (!this.editorVisible) return;
       let block = this.editorBlocks?.[this.editorFocusedIndex];
-      let raw = block?.translation ?? "";
-      let decoded = this.decodeEscapedNewlines(raw);
-      let { segments, keysOrder } = this.buildGamePreviewSegments(decoded);
+      let sourceRaw = block?.english ?? "";
+      let translationRaw = block?.translation ?? "";
+      let sourceDecoded = this.decodeEscapedNewlines(sourceRaw);
+      let translationDecoded = this.decodeEscapedNewlines(translationRaw);
+      let sourcePreview = this.buildGamePreviewSegments(sourceDecoded);
+      let translationPreview = this.buildGamePreviewSegments(translationDecoded);
+      let keysOrder = [...sourcePreview.keysOrder, ...translationPreview.keysOrder];
       this.mergePreviewGggVars(keysOrder);
-      this.gamePreviewSegments = segments;
+      this.gamePreviewSourceSegments = sourcePreview.segments;
+      this.gamePreviewSegments = translationPreview.segments;
     },
     setGamePreviewFrame(v) {
       if (v !== "s" && v !== "m" && v !== "l") return;
