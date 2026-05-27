@@ -297,11 +297,19 @@
                 </div>
               </div>
             </div>
-            <div v-if="gamePreviewVarKeyList.length > 0" class="gamePreviewVarsColumn">
-              <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
-                <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
-                <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :lang="translationEditorBcp47"
-                  :aria-label="'Variable {' + k + '}'">
+            <div class="gamePreviewVarsColumn" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
+              <div class="gamePreviewVarsPanel" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
+                <div v-if="gamePreviewVarKeyList.length === 0" class="gamePreviewVarField gamePreviewVarsPlaceholder">
+                  <div class="gamePreviewVarLabel">{}</div>
+                  <div class="gamePreviewVarInput gamePreviewVarInputPlaceholder">No variables</div>
+                </div>
+                <template v-else>
+                  <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
+                    <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
+                    <input type="text" class="gamePreviewVarInput" v-model="previewGggVars[k]" :lang="translationEditorBcp47"
+                      :aria-label="'Variable {' + k + '}'">
+                  </div>
+                </template>
               </div>
             </div>
           </div>

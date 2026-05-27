@@ -857,15 +857,37 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewVarsColumn {
-  flex: 0 0 auto;
+  flex: 0 0 12em;
+  width: 12em;
   height: 100%;
   overflow-y: auto;
-  min-width: 6.5em;
+  min-width: 12em;
   max-width: 12em;
   display: flex;
   flex-direction: column;
   gap: calc(0.35em * var(--density));
   padding: calc(0.15em * var(--density));
+}
+
+.gamePreviewVarsColumn.isEmpty {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.gamePreviewVarsPanel {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.55em * var(--density));
+  width: 100%;
+  min-height: calc(4.8em * var(--density));
+  padding: calc(0.6em * var(--density)) calc(0.45em * var(--density));
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--color-element) 45%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--color-element-alt) 80%, var(--color-font));
+}
+
+.gamePreviewVarsPanel.isEmpty {
+  justify-content: center;
 }
 
 .gamePreviewVarField {
@@ -874,11 +896,17 @@ button, label, th, td, input[type="checkbox"] {
   gap: calc(0.12em * var(--density));
 }
 
+.gamePreviewVarsPlaceholder {
+  opacity: 0.72;
+  text-align: center;
+}
+
 .gamePreviewVarLabel {
   font-size: calc(10px * var(--density));
   font-weight: 600;
   color: var(--color-font);
   font-family: ui-monospace, monospace;
+  text-align: center;
 }
 
 .gamePreviewStrip .gamePreviewVarInput {
@@ -891,6 +919,12 @@ button, label, th, td, input[type="checkbox"] {
   color: var(--color-font);
   background: var(--color-element);
   border: 1px solid var(--color-element-alt);
+}
+
+.gamePreviewStrip .gamePreviewVarInputPlaceholder {
+  color: color-mix(in srgb, var(--color-font) 64%, transparent);
+  text-align: center;
+  user-select: none;
 }
 
 .gamePreviewStrip .gamePreviewVarInput:focus {
