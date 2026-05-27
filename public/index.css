@@ -941,6 +941,7 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewKw {
   /* Mandela Effect got me, it wasn't bold */
   /* font-weight: 700; */
+  color: inherit;
   text-decoration: underline;
   text-decoration-style: dashed;
   text-decoration-thickness: 1.5px;
@@ -955,11 +956,15 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewVarValue {
   /* Mandela Effect got me, it wasn't bold */
   /* font-weight: 600; */
-  color: var(--color-font);
+  color: inherit;
 }
 
 .gamePreviewVarPct {
   font-weight: 600;
+}
+
+.gamePreviewDecor--enchanted {
+  color: #c8f7ff;
 }
 
 .gamePreviewEmpty {

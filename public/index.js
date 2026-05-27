@@ -743,20 +743,33 @@ const config = Vue.defineComponent({
       let keysOrder = [];
       let keySeen = new Set();
       let textBuf = "";
+      let textDecorTag = "";
       let flushText = () => {
         if (textBuf) {
-          segments.push({ type: "text", text: textBuf });
+          let seg = { type: "text", text: textBuf };
+          if (textDecorTag) seg.decorTag = textDecorTag;
+          segments.push(seg);
           textBuf = "";
+          textDecorTag = "";
         }
       };
+      let appendText = (text, decorTag = "") => {
+        let normalizedDecorTag = String(decorTag ?? "").trim().toLowerCase();
+        if (textBuf && textDecorTag !== normalizedDecorTag) flushText();
+        textDecorTag = normalizedDecorTag;
+        textBuf += text;
+      };
 
-      let scanInline = (part, allowBreaks = true) => {
+      let scanInline = (part, allowBreaks = true, decorTag = "") => {
         let i = 0;
+        let activeDecorTag = String(decorTag ?? "").trim().toLowerCase();
         while (i < part.length) {
           let slice = part.slice(i);
           let dm = decorRe.exec(slice);
           if (dm && dm.index === 0) {
-            scanInline(String(dm[3] ?? ""), allowBreaks);
+            flushText();
+            scanInline(String(dm[3] ?? ""), allowBreaks, dm[2]);
+            flushText();
             i += dm[0].length;
             continue;
           }
@@ -766,7 +779,9 @@ const config = Vue.defineComponent({
             let tagName = String(km[2] ?? "").trim();
             let dynamicContent = String(km[3] ?? "").trim();
             let display = dynamicContent || tagName;
-            segments.push({ type: "kw", text: display, full: km[0] });
+            let seg = { type: "kw", text: display, full: km[0] };
+            if (activeDecorTag) seg.decorTag = activeDecorTag;
+            segments.push(seg);
             i += km[0].length;
             continue;
           }
@@ -782,7 +797,9 @@ const config = Vue.defineComponent({
             }
             let prefix = ["@", "+", "-"].includes(full[0]) ? full[0] : "";
             let trailingPercent = full.endsWith("%");
-            segments.push({ type: "var", key: ks, trailingPercent, full, prefix });
+            let seg = { type: "var", key: ks, trailingPercent, full, prefix };
+            if (activeDecorTag) seg.decorTag = activeDecorTag;
+            segments.push(seg);
             i += full.length;
             continue;
           }
@@ -798,7 +815,7 @@ const config = Vue.defineComponent({
             i++;
             continue;
           }
-          textBuf += part[i];
+          appendText(part[i], activeDecorTag);
           i++;
         }
       };
