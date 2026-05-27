@@ -165,6 +165,7 @@ const config = Vue.defineComponent({
         y: 0,
         columnIndex: 0,
         width: 0,
+        maxHeight: 0,
         selectedTranslationText: ""
       },
       tooltip: {
@@ -2435,20 +2436,56 @@ const config = Vue.defineComponent({
       }
       return items;
     },
-    positionHlPopup(editorIndex, columnIndex = 0) {
+    getHlPopupAnchorRects(editorIndex, columnIndex = 0) {
       let editorBlock = this.editorBlocks?.[editorIndex];
-      let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
-      if (!el?.getBoundingClientRect) return;
-      let rect = el.getBoundingClientRect();
+      let refColumn = editorBlock?.isTable ? columnIndex : null;
+      let translationEl = this.getEditorRef("translation", editorIndex, refColumn);
+      if (!translationEl?.getBoundingClientRect) return null;
+
+      let translationRect = translationEl.getBoundingClientRect();
+      let sourceEl = this.getEditorRef("english", editorIndex, refColumn)
+        || this.getEditorRef("englishHLter", editorIndex, refColumn);
+      let sourceRect = sourceEl?.closest?.(".textHL")?.getBoundingClientRect?.()
+        || sourceEl?.getBoundingClientRect?.()
+        || translationRect;
+
+      return { sourceRect, translationRect };
+    },
+    positionHlPopup(editorIndex, columnIndex = 0) {
+      let rects = this.getHlPopupAnchorRects(editorIndex, columnIndex);
+      if (!rects) return;
+      let rect = rects.translationRect;
+      let sourceRect = rects.sourceRect || rect;
+      let avoidTop = Math.min(sourceRect.top, rect.top);
+      let avoidBottom = Math.max(sourceRect.bottom, rect.bottom);
+      let gap = 6;
+      let margin = 8;
+      let viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      let popupEl = this.$refs?.hlPopupPanel;
+      let popupRect = popupEl?.getBoundingClientRect?.();
+      let popupHeight = Math.ceil(popupRect?.height || Math.min(360, Math.max(180, viewportHeight * 0.48)));
       let width = Math.min(Math.max(rect.width, 260), 640);
       let left = Math.min(rect.left, window.innerWidth - width - 8);
       if (left < 8) left = 8;
-      let top = rect.bottom + 6;
-      if (top > window.innerHeight - 120) top = rect.top - 6;
-      if (top < 8) top = 8;
+
+      let belowSpace = Math.max(0, viewportHeight - avoidBottom - gap - margin);
+      let aboveSpace = Math.max(0, avoidTop - gap - margin);
+      let placeAbove = belowSpace < popupHeight && aboveSpace > belowSpace;
+      let available = placeAbove ? aboveSpace : belowSpace;
+      let maxHeight = Math.max(96, Math.min(popupHeight, available || popupHeight));
+      let top = placeAbove
+        ? avoidTop - gap - maxHeight
+        : avoidBottom + gap;
+
+      if (top < margin) top = margin;
+      if (viewportHeight && top + maxHeight > viewportHeight - margin) {
+        top = Math.max(margin, viewportHeight - margin - maxHeight);
+      }
+
       this.hlPopup.x = Math.round(left);
       this.hlPopup.y = Math.round(top);
       this.hlPopup.width = Math.round(width);
+      this.hlPopup.maxHeight = Math.round(maxHeight);
     },
     getTranslationSelectionText(editorIndex, columnIndex = 0) {
       let editorBlock = this.editorBlocks?.[editorIndex];
@@ -2489,7 +2526,10 @@ const config = Vue.defineComponent({
       this.positionHlPopup(editorIndex, columnIndex);
       this.hlPopup.visible = true;
       let focusFilter = options.focusFilter !== false;
-      if (focusFilter) this.$nextTick(() => this.$refs.hlPopupFilter?.focus());
+      this.$nextTick(() => {
+        this.positionHlPopup(editorIndex, columnIndex);
+        if (focusFilter) this.$refs.hlPopupFilter?.focus();
+      });
     },
     closeHlPopup(options = {}) {
       let editorIndex = this.hlPopup.editorIndex;
@@ -2501,6 +2541,7 @@ const config = Vue.defineComponent({
       this.hlPopup.items = [];
       this.hlPopup.filtered = [];
       this.hlPopup.selectedIndex = 0;
+      this.hlPopup.maxHeight = 0;
       this.hlPopup.selectedTranslationText = "";
       if (options.refocus && this.editorVisible) {
         this.$nextTick(() => {
