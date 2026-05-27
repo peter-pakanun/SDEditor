@@ -974,8 +974,7 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewWindow {
-  display: flex;
-  flex-wrap: wrap;
+  display: block;
   max-width: 100%;
   min-height: calc(2.7em * var(--density));
   padding: calc(0.4em * var(--density)) calc(0.75em * var(--density));
@@ -989,6 +988,19 @@ button, label, th, td, input[type="checkbox"] {
   word-break: break-word;
   vertical-align: top;
   box-sizing: border-box;
+}
+
+.gamePreviewWindow:has(.gamePreviewRightAlign) {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: center;
+}
+
+.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewText,
+.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewKw,
+.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewVarDisplay {
+  min-width: 0;
 }
 
 .gamePreviewWindow--s {
@@ -1007,6 +1019,7 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewText {
+  line-height: inherit;
   white-space: pre-wrap;
 }
 
@@ -1014,6 +1027,7 @@ button, label, th, td, input[type="checkbox"] {
   /* Mandela Effect got me, it wasn't bold */
   /* font-weight: 700; */
   color: inherit;
+  line-height: inherit;
   text-decoration: underline;
   text-decoration-style: dashed;
   text-decoration-thickness: 1.5px;
@@ -1022,6 +1036,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .gamePreviewVarDisplay {
   display: inline;
+  line-height: inherit;
   white-space: normal;
 }
 
@@ -1045,12 +1060,22 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewRightAlign {
+  display: inline-block;
+  width: 2ch;
+}
+
+.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewRightAlign {
   flex-grow: 1;
+  width: auto;
 }
 
 .gamePreviewBreak {
-  flex-basis: 100%;
+  display: block;
   height: 0;
+}
+
+.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewBreak {
+  flex-basis: 100%;
 }
 
 .editBlock {
