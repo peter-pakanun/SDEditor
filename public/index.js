@@ -1928,7 +1928,7 @@ const config = Vue.defineComponent({
         HLs.push(hl);
       };
       let overlapsExistingHL = (start, end) => {
-        return HLs.some(hl => start < (hl.protectedEnd ?? (hl.index + hl.find.length)) && hl.index < end);
+        return HLs.some(hl => start < hl.index + hl.find.length && hl.index < end);
       };
       let maskRange = (value, start, end) => {
         return value.substring(0, start) + '*'.repeat(Math.max(0, end - start)) + value.substring(end);
@@ -1958,14 +1958,13 @@ const config = Vue.defineComponent({
         addHL({
           index: m.index,
           find: opener,
-          protectedEnd: m.index + m[0].length,
           tagName,
           isTextDecoration: true,
           replace: value,
           label: `<${tagName}>{{_}}`,
           caretOffset: `<${tagName}>{{`.length
         });
-        modifiedEnglish = maskRange(modifiedEnglish, m.index, m.index + m[0].length);
+        modifiedEnglish = maskRange(modifiedEnglish, m.index, m.index + opener.length);
       }
 
       // highlight KeywordPopup tags [TagName|format] or [TagName]
@@ -2078,8 +2077,8 @@ const config = Vue.defineComponent({
           end: m.index + openerLength,
           classes: ["tagRange", "vocab"]
         });
-        let mask = '*'.repeat(m[0].length);
-        modifiedText = modifiedText.substring(0, m.index) + mask + modifiedText.substring(m.index + m[0].length);
+        let mask = '*'.repeat(openerLength);
+        modifiedText = modifiedText.substring(0, m.index) + mask + modifiedText.substring(m.index + openerLength);
       }
 
       let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
