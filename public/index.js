@@ -122,6 +122,7 @@ const config = Vue.defineComponent({
       searchText: "",
       filterSelect: "new",
       hideDNT: true,
+      hideSourceInPreviewPanel: false,
       highlightDict: true,
       shiftEnterSave: false,
       autoOpenNextFile: true,
@@ -522,7 +523,7 @@ const config = Vue.defineComponent({
       let seen = new Set();
       let out = [];
       let segments = [
-        ...(this.gamePreviewSourceSegments || []),
+        ...(this.hideSourceInPreviewPanel ? [] : (this.gamePreviewSourceSegments || [])),
         ...(this.gamePreviewSegments || []),
       ];
       for (const seg of segments) {
@@ -4300,6 +4301,7 @@ const config = Vue.defineComponent({
         lang: this.lang,
         theme: this.theme,
         hideDNT: this.hideDNT,
+        hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
@@ -4324,6 +4326,7 @@ const config = Vue.defineComponent({
         lang: this.lang,
         theme: this.theme,
         hideDNT: this.hideDNT,
+        hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
@@ -4368,6 +4371,7 @@ const config = Vue.defineComponent({
       if (settings.lang) this.lang = settings.lang;
       if (settings.theme) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
+      if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;

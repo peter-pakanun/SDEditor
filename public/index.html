@@ -90,6 +90,9 @@
         <input type="checkbox" id="hideDNT" name="hideDNT" v-model="hideDNT">
         <label for="hideDNT"> Hide DNT</label>
         <br>
+        <input type="checkbox" id="hideSourceInPreviewPanel" name="hideSourceInPreviewPanel" v-model="hideSourceInPreviewPanel">
+        <label for="hideSourceInPreviewPanel"> Hide source in preview panel</label>
+        <br>
         <input type="checkbox" id="highlightDict" name="highlightDict" v-model="highlightDict">
         <label for="highlightDict"> Highlight words from Dictionary</label>
         <br>
@@ -262,7 +265,7 @@
           <div class="gamePreviewMainRow">
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewFramesColumn">
-                <div class="gamePreviewLine">
+                <div v-if="!hideSourceInPreviewPanel" class="gamePreviewLine">
                   <div class="gamePreviewLineLabel">EN</div>
                   <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily }">
                     <template v-for="(seg, si) in gamePreviewSourceSegments" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
