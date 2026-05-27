@@ -1021,6 +1021,18 @@ const config = Vue.defineComponent({
       if (values.every(v => v === "")) return "";
       return values.join("@");
     },
+    getSerializableTableColumns(editorBlock) {
+      let columns = Array.isArray(editorBlock?.tableColumns) ? editorBlock.tableColumns : [];
+      let end = columns.length;
+      while (end > 0) {
+        const column = columns[end - 1];
+        const sourceColumnRemoved = column?.englishExists === false;
+        const translationEmpty = String(column?.translation ?? "") === "";
+        if (!sourceColumnRemoved || !translationEmpty) break;
+        end--;
+      }
+      return columns.slice(0, end);
+    },
     editorRefName(kind, index, columnIndex = null) {
       if (columnIndex === null || columnIndex === undefined) return `${kind}_${index}`;
       return `${kind}_${index}_${columnIndex}`;
@@ -1173,7 +1185,8 @@ const config = Vue.defineComponent({
     syncEditorBlockFromTableColumns(editorBlock) {
       if (!editorBlock?.isTable) return;
       let columns = editorBlock.tableColumns || [];
-      editorBlock.translation = this.joinTableColumns(columns.map(col => col?.translation ?? ""));
+      let serializableColumns = this.getSerializableTableColumns(editorBlock);
+      editorBlock.translation = this.joinTableColumns(serializableColumns.map(col => col?.translation ?? ""));
       editorBlock.isMultiline = columns.some(col => col?.isMultiline || this.isMultilineText(col?.english ?? "") || this.isMultilineText(col?.translation ?? ""));
       editorBlock.multilineLineMismatch = columns.some(col => col?.multilineLineMismatch);
       this.syncEditorBlockDiagnosticsFromTableColumns(editorBlock);
