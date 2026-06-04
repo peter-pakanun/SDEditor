@@ -1029,7 +1029,7 @@ button, label, th, td, input[type="checkbox"] {
   color: inherit;
   line-height: inherit;
   text-decoration: underline;
-  text-decoration-style: dashed;
+  text-decoration-style: solid;
   text-decoration-thickness: 1.5px;
   text-underline-offset: 2px;
 }
