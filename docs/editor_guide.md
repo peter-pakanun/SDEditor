@@ -1,4 +1,5 @@
 # Editor Guide
+> For Discord user, while reading this guide you can navigate the history using Discord client's history navigation (Alt + Left/Right)
 
 This guide explains how to use the SDEditor to translate game text efficiently.
 
@@ -15,23 +16,23 @@ When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Sou
 ### Importing StatDescriptions.zip
 
 Use the **📦 Import Zip** button in the top left corner to begin import process.
-For more details, see the [Import Workflow](import_workflow.md).
+For more details, see the [**Import Workflow**](import_workflow.md).
 
 ### File Status Indicators
 
 In the file list, you'll see colors and counters indicating the state of each file:
 
-| Color       | Meaning                                                                                |
-|-------------|----------------------------------------------------------------------------------------|
-| **Red**     | Missing lines or line count mismatch                                                   |
-| **Green**   | Done and checked                                                                       |
-| **Yellow**  | Review required                                                                        |
+| Color   | Meaning                                                                                |
+|---------|----------------------------------------------------------------------------------------|
+| Red     | Missing lines or line count mismatch                                                   |
+| Green   | Done and checked                                                                       |
+| Yellow  | Review required                                                                        |
 
-| Counter     | Meaning                                                                                |
-|-------------|----------------------------------------------------------------------------------------|
-| **Missing** | Translation has blank lines or doesn't match English line count                        |
-| **Done**    | You've saved changes to this file at least once and are “tracked for export”           |
-| **Review**  | The English source changed since your last save; consider re-checking your translation |
+| Counter | Meaning                                                                                |
+|---------|----------------------------------------------------------------------------------------|
+| Missing | Translation has blank lines or doesn't match English line count                        |
+| Done    | You've saved changes to this file at least once and are “tracked for export”           |
+| Review  | The English source changed since your last save; consider re-checking your translation |
 
 #### What “Missing” Actually Means
 
@@ -171,6 +172,10 @@ Autocomplete Popup will show only Dictionary entries that have the same main def
 When you're editing, the **Dictionary** panel automatically shows terms that are used in the current block's English text, highlighted and sorted to the top. This helps you find the right replacements quickly.
 
 **Ctrl+Click on a highlighted English term**: Jump directly to that term in the Dictionary.
+
+### Backing up your Dictionary
+
+You can backup your dictionary, regex and settings using the **📤 Export settings** button inside the setting screen.
 
 ### Regex (Pattern-Based Replacements)
 
