@@ -4,11 +4,11 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 
 ## How to use
 [**Full Editor Guide**](#)
-1) Open the [web app](<https://sdeditor.pages.dev/>) and pick your target language, theme, size
-2) Import `StatDescriptions.zip`
-3) Click any row to edit
+1) Open the [**web app**](<https://sdeditor.pages.dev/>) and pick your target language and settings
+2) Import `StatDescriptions.zip` using the 📦 Import Next Version button
+3) Click any row or use `F1/F2` hotkey to edit
 4) While editing, use `Ctrl + Space` to open the autocomplete menu
-5) Click 💾 to export `StatDescriptions_Translated.zip` and submit your work
+5) After you are done, click on 💾 to export `StatDescriptions_Translated.zip` and submit your work
 > Your in-progress edits are stored in your browser (`indexedDB`)
 ## Keyboard shortcuts
 - **Ctrl + Space:** during editing to open the autocomplete menu
