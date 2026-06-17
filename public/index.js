@@ -3114,7 +3114,10 @@ const config = Vue.defineComponent({
       if (e.ctrlKey && e.code === "KeyF") {
         if (this.isActiveElementInSearchBox()) return;
         e.preventDefault();
-        if (this.isActiveElementInEditorPane() && this.focusSidebarFilterInput()) return;
+        if (this.editorVisible) {
+          this.focusSidebarFilterInput();
+          return;
+        }
         this.$refs.searchInput?.focus();
         this.$refs.searchInput?.select();
       }
