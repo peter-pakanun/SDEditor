@@ -102,6 +102,9 @@
         <input type="checkbox" id="autoOpenNextFile" name="autoOpenNextFile" v-model="autoOpenNextFile">
         <label for="autoOpenNextFile"> Auto open next file on save</label>
         <br>
+        <input type="checkbox" id="filterShortcutCtrlD" name="filterShortcutCtrlD" v-model="filterShortcutCtrlD">
+        <label for="filterShortcutCtrlD"> Use Ctrl + D for filter shortcut</label>
+        <br>
         <button @click="settingsSaveClose">💾</button>
         <button @click="exportSettingsClicked" v-tooltip="'Export settings'" aria-label="Export settings">📤</button>
         <button @click="importSettingsClicked" v-tooltip="'Import settings'" aria-label="Import settings">📥</button>

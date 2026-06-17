@@ -126,6 +126,7 @@ const config = Vue.defineComponent({
       highlightDict: true,
       shiftEnterSave: false,
       autoOpenNextFile: true,
+      filterShortcutCtrlD: false,
       uiDensity: 'compact',
 
       sideTab: 'dictionary',
@@ -318,6 +319,9 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     autoOpenNextFile() {
+      this.saveSettings();
+    },
+    filterShortcutCtrlD() {
       this.saveSettings();
     },
     lang() {
@@ -3029,6 +3033,9 @@ const config = Vue.defineComponent({
       ref.select?.();
       return true;
     },
+    isFilterFocusShortcut(e) {
+      return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
+    },
     handleKeydown(e) {
       if (this.importDialogVisible && e.key === "Escape") {
         e.preventDefault();
@@ -3111,8 +3118,11 @@ const config = Vue.defineComponent({
         return;
       }
       
-      if (e.ctrlKey && e.code === "KeyF") {
-        if (this.isActiveElementInSearchBox()) return;
+      if (this.isFilterFocusShortcut(e)) {
+        if (this.isActiveElementInSearchBox()) {
+          if (this.filterShortcutCtrlD) e.preventDefault();
+          return;
+        }
         e.preventDefault();
         if (this.editorVisible) {
           this.focusSidebarFilterInput();
@@ -4308,6 +4318,7 @@ const config = Vue.defineComponent({
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
+        filterShortcutCtrlD: this.filterShortcutCtrlD,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -4333,6 +4344,7 @@ const config = Vue.defineComponent({
         highlightDict: this.highlightDict,
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
+        filterShortcutCtrlD: this.filterShortcutCtrlD,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -4378,6 +4390,7 @@ const config = Vue.defineComponent({
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
+      if (typeof settings.filterShortcutCtrlD !== 'undefined') this.filterShortcutCtrlD = !!settings.filterShortcutCtrlD;
       if (settings.uiDensity === 'compact' || settings.uiDensity === 'spacious') {
         this.uiDensity = settings.uiDensity;
       } else {
