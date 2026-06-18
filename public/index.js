@@ -135,6 +135,7 @@ const config = Vue.defineComponent({
       dictionaryFlashId: '',
 
       importDialogVisible: false,
+      duplicateLangImportWarning: null,
 
       historyItems: [],
       historyLoading: false,
@@ -3037,6 +3038,11 @@ const config = Vue.defineComponent({
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
     },
     handleKeydown(e) {
+      if (this.duplicateLangImportWarning && e.key === "Escape") {
+        e.preventDefault();
+        this.closeDuplicateLangImportWarning();
+        return;
+      }
       if (this.importDialogVisible && e.key === "Escape") {
         e.preventDefault();
         this.closeImportDialog();
@@ -3193,6 +3199,9 @@ const config = Vue.defineComponent({
     closeImportDialog() {
       this.importDialogVisible = false;
     },
+    closeDuplicateLangImportWarning() {
+      this.duplicateLangImportWarning = null;
+    },
     importNextVersionZipClicked() {
       this.closeImportDialog();
       this.$refs.importUpdateZipFile?.click?.();
@@ -3247,6 +3256,38 @@ const config = Vue.defineComponent({
       }
       return n;
     },
+    collectDuplicateLangEntries(parsed) {
+      const out = [];
+      for (const desc of parsed || []) {
+        if (!desc || !Array.isArray(desc.duplicateLangEntries)) continue;
+        for (const entry of desc.duplicateLangEntries) {
+          out.push({
+            filepath: entry?.filepath || desc.filepath || '(unknown file)',
+            lang: entry?.lang || '(unknown language)',
+            line: Number.isFinite(entry?.line) ? entry.line : 0
+          });
+        }
+      }
+      out.sort((a, b) => {
+        const fileCmp = String(a.filepath).localeCompare(String(b.filepath));
+        if (fileCmp !== 0) return fileCmp;
+        const langCmp = String(a.lang).localeCompare(String(b.lang));
+        if (langCmp !== 0) return langCmp;
+        return (a.line || 0) - (b.line || 0);
+      });
+      return out;
+    },
+    rejectImportForDuplicateLangEntries(parsed, file, importMode) {
+      const entries = this.collectDuplicateLangEntries(parsed);
+      if (entries.length === 0) return false;
+      this.loadingProgress = this.sourceLoaded ? 100 : 0;
+      this.duplicateLangImportWarning = {
+        fileName: file?.name || 'Selected ZIP',
+        importMode,
+        entries
+      };
+      return true;
+    },
 
     async importUpdateZipFile(file) {
       if (!file) return;
@@ -3257,10 +3298,6 @@ const config = Vue.defineComponent({
       }
 
       const isPostMigrationImport = !!this.needsPostMigrationImport;
-
-      this.localDescs.lastModified = file.lastModified;
-      this.localDescs.size = file.size;
-      this.ensureLocalDescsReady();
 
       let zip;
       this.loadingProgress = 0.001;
@@ -3319,7 +3356,12 @@ const config = Vue.defineComponent({
         const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
         this.loadingProgress = percent;
       });
+      if (this.rejectImportForDuplicateLangEntries(parsed, file, 'Import Next Version')) return;
       const nextSource = parsed.filter(Boolean);
+
+      this.localDescs.lastModified = file.lastModified;
+      this.localDescs.size = file.size;
+      this.ensureLocalDescsReady();
 
       const prevSource = Array.isArray(this.descs) ? this.descs : [];
       const prevSourceMap = new Map(prevSource.map(d => [d.filepath, d]));
@@ -3498,6 +3540,7 @@ const config = Vue.defineComponent({
         const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
         this.loadingProgress = percent;
       });
+      if (this.rejectImportForDuplicateLangEntries(parsed, file, 'Import Translated')) return;
       const importedDescs = parsed.filter(Boolean);
 
       const sourceMap = new Map((this.descs || []).filter(Boolean).map(d => [d.filepath, d]));

@@ -14,6 +14,7 @@
  * @property {string[]} remarks 
  * @property {Object.<string,tempTranslation>} tempTranslations
  * @property {Object.<string,string[]>} translations 
+ * @property {{filepath:string, lang:string, line:number}[]} [duplicateLangEntries]
  * @property {boolean} isDNT 
  * @property {boolean} [isMissing] 
  */
@@ -64,12 +65,15 @@ function parseDesc(filepath, text, lang) {
     remarks: [],
     tempTranslations: {},
     translations: {},
+    duplicateLangEntries: [],
     isDNT: false
   };
 
   let curLang = "English"; // first translation block langauge
   let lines = text.split("\n");
-  for (let line of lines) {
+  let duplicateLangIndex = 0;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    let line = lines[lineIndex];
     line = line.trim();
     if (line == '') continue; // ignore empty line
 
@@ -151,12 +155,13 @@ function parseDesc(filepath, text, lang) {
         return false;
       }
       if (desc.tempTranslations[nextLang]) {
-        alert(
-          'ERROR: Malform description file\n' +
-          'Duplicate Lang declaration detected\n' +
-          filepath + '\n\nLang: ' + curLang
-        );
-        delete desc.tempTranslations[nextLang];
+        desc.duplicateLangEntries.push({
+          filepath,
+          lang: nextLang,
+          line: lineIndex + 1
+        });
+        curLang = `__duplicate_lang_${duplicateLangIndex++}__${nextLang}`;
+        continue;
       }
       curLang = nextLang;
       continue;
@@ -186,6 +191,10 @@ function parseDesc(filepath, text, lang) {
   // remove the count and replace the translation block with the array of all the text in that langauge
   for (let lang in desc.tempTranslations) {
     if (desc.tempTranslations.hasOwnProperty(lang)) {
+      if (lang.indexOf('__duplicate_lang_') === 0) {
+        delete desc.tempTranslations[lang];
+        continue;
+      }
       desc.translations[lang] = desc.tempTranslations[lang].content;
       delete desc.tempTranslations[lang];
     }

@@ -143,6 +143,31 @@
       </div>
     </div>
 
+    <div class="multiInstanceGate" v-if="duplicateLangImportWarning">
+      <div class="multiInstanceGateContent duplicateLangImportGateContent">
+        <h2>Duplicate Language Entries Detected</h2>
+        <p>
+          Import rejected for <strong>{{ duplicateLangImportWarning.fileName }}</strong>. One or more StatDescription files contain duplicated <code>lang</code> blocks, which can corrupt translation history if imported.
+        </p>
+        <div class="multiInstanceGateWarning">
+          Please notify GGG about the export issue, or remove the duplicated language entries from the ZIP before importing again.
+        </div>
+        <h3 style="margin-top: calc(1.5em * var(--density)); margin-bottom: calc(0.75em * var(--density));">
+          Duplicated entries ({{ duplicateLangImportWarning.entries.length }})
+        </h3>
+        <div class="duplicateLangImportList">
+          <div class="duplicateLangImportItem" v-for="(entry, i) in duplicateLangImportWarning.entries" :key="i">
+            <strong>{{ entry.lang }}</strong>
+            <span>{{ entry.filepath }}</span>
+            <em v-if="entry.line">line {{ entry.line }}</em>
+          </div>
+        </div>
+        <div class="multiInstanceGateButtons">
+          <button class="btnPrimary" @click="closeDuplicateLangImportWarning">OK</button>
+        </div>
+      </div>
+    </div>
+
     <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && loadingProgress < 100 && lang !== '' && !needsInitialSettings">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">

@@ -1513,6 +1513,47 @@ button, label, th, td, input[type="checkbox"] {
   font-weight: 700;
 }
 
+.duplicateLangImportGateContent {
+  max-width: min(880px, 92vw);
+}
+
+.duplicateLangImportList {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.5em * var(--density));
+  max-height: min(42vh, 420px);
+  overflow: auto;
+  padding: calc(0.75em * var(--density));
+  background: var(--color-bg);
+  border: 1px solid var(--color-element-alt);
+  border-radius: 4px;
+}
+
+.duplicateLangImportItem {
+  display: grid;
+  grid-template-columns: minmax(9em, 14em) minmax(0, 1fr) auto;
+  gap: calc(0.8em * var(--density));
+  align-items: baseline;
+  padding-bottom: calc(0.5em * var(--density));
+  border-bottom: 1px solid var(--color-element-alt);
+  color: var(--color-font);
+}
+
+.duplicateLangImportItem:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.duplicateLangImportItem span {
+  overflow-wrap: anywhere;
+}
+
+.duplicateLangImportItem em {
+  opacity: 0.75;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .multiInstanceGateButtons {
   display: flex;
   gap: calc(1em * var(--density));
