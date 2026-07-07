@@ -136,6 +136,7 @@ const config = Vue.defineComponent({
 
       importDialogVisible: false,
       duplicateLangImportWarning: null,
+      pendingDuplicateLangImport: null,
 
       historyItems: [],
       historyLoading: false,
@@ -3040,7 +3041,6 @@ const config = Vue.defineComponent({
     handleKeydown(e) {
       if (this.duplicateLangImportWarning && e.key === "Escape") {
         e.preventDefault();
-        this.closeDuplicateLangImportWarning();
         return;
       }
       if (this.importDialogVisible && e.key === "Escape") {
@@ -3201,6 +3201,7 @@ const config = Vue.defineComponent({
     },
     closeDuplicateLangImportWarning() {
       this.duplicateLangImportWarning = null;
+      this.pendingDuplicateLangImport = null;
     },
     importNextVersionZipClicked() {
       this.closeImportDialog();
@@ -3256,40 +3257,102 @@ const config = Vue.defineComponent({
       }
       return n;
     },
-    collectDuplicateLangEntries(parsed) {
-      const out = [];
-      for (const desc of parsed || []) {
-        if (!desc || !Array.isArray(desc.duplicateLangEntries)) continue;
-        for (const entry of desc.duplicateLangEntries) {
-          out.push({
-            filepath: entry?.filepath || desc.filepath || '(unknown file)',
-            lang: entry?.lang || '(unknown language)',
-            line: Number.isFinite(entry?.line) ? entry.line : 0
+    collectDuplicateLangGroups(parsed) {
+      const groups = [];
+      for (let descIndex = 0; descIndex < (parsed || []).length; descIndex++) {
+        const desc = parsed[descIndex];
+        if (!desc || !Array.isArray(desc.duplicateLangGroups)) continue;
+        for (let groupIndex = 0; groupIndex < desc.duplicateLangGroups.length; groupIndex++) {
+          const group = desc.duplicateLangGroups[groupIndex];
+          const options = (group?.options || []).map(option => ({
+            id: option?.id || `${group?.lang || 'lang'}-${option?.occurrence || 0}`,
+            lang: option?.lang || group?.lang || '(unknown language)',
+            line: Number.isFinite(option?.line) ? option.line : 0,
+            occurrence: Number.isFinite(option?.occurrence) ? option.occurrence : 1,
+            content: Array.isArray(option?.content) ? option.content.slice() : []
+          }));
+          if (options.length < 2) continue;
+          groups.push({
+            id: `${descIndex}:${groupIndex}:${group?.lang || 'lang'}`,
+            descIndex,
+            filepath: group?.filepath || desc.filepath || '(unknown file)',
+            lang: group?.lang || '(unknown language)',
+            selectedOptionId: '',
+            options
           });
         }
       }
-      out.sort((a, b) => {
+      groups.sort((a, b) => {
         const fileCmp = String(a.filepath).localeCompare(String(b.filepath));
         if (fileCmp !== 0) return fileCmp;
-        const langCmp = String(a.lang).localeCompare(String(b.lang));
-        if (langCmp !== 0) return langCmp;
-        return (a.line || 0) - (b.line || 0);
+        return String(a.lang).localeCompare(String(b.lang));
       });
-      return out;
+      return groups;
     },
-    rejectImportForDuplicateLangEntries(parsed, file, importMode) {
-      const entries = this.collectDuplicateLangEntries(parsed);
-      if (entries.length === 0) return false;
+    isDuplicateLangResolutionComplete() {
+      const groups = this.duplicateLangImportWarning?.groups;
+      return Array.isArray(groups) && groups.length > 0 && groups.every(group => !!group.selectedOptionId);
+    },
+    duplicateLangResolutionRemainingCount() {
+      const groups = this.duplicateLangImportWarning?.groups || [];
+      return groups.filter(group => !group.selectedOptionId).length;
+    },
+    startDuplicateLangResolution(parsed, file, { mode, importMode, isPostMigrationImport } = {}) {
+      const groups = this.collectDuplicateLangGroups(parsed);
+      if (groups.length === 0) return false;
       this.loadingProgress = this.sourceLoaded ? 100 : 0;
+      this.pendingDuplicateLangImport = {
+        mode,
+        file,
+        parsed,
+        isPostMigrationImport: !!isPostMigrationImport
+      };
       this.duplicateLangImportWarning = {
         fileName: file?.name || 'Selected ZIP',
         importMode,
-        entries
+        groups
       };
       return true;
     },
+    applyDuplicateLangSelections(parsed, groups) {
+      for (const group of groups || []) {
+        const desc = parsed?.[group.descIndex];
+        const selected = (group.options || []).find(option => option.id === group.selectedOptionId);
+        if (!desc || !selected) continue;
+        if (!desc.translations || typeof desc.translations !== 'object') desc.translations = {};
+        desc.translations[group.lang] = selected.content.slice();
+        if (group.lang === 'English') {
+          const firstLine = String(desc.translations.English?.[0] || '');
+          desc.isDNT = firstLine.indexOf('[DNT') === 0 || firstLine.indexOf('DNT ') === 0;
+        }
+        const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
+        const trLines = Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : [];
+        desc.isMissing = computeIsMissing(engLen, trLines);
+      }
+    },
+    async confirmDuplicateLangImportResolution() {
+      if (!this.isDuplicateLangResolutionComplete()) return;
+      const pending = this.pendingDuplicateLangImport;
+      const warning = this.duplicateLangImportWarning;
+      if (!pending || !warning) return;
 
-    async importUpdateZipFile(file) {
+      this.applyDuplicateLangSelections(pending.parsed, warning.groups);
+      this.duplicateLangImportWarning = null;
+      this.pendingDuplicateLangImport = null;
+      this.loadingProgress = 0.001;
+
+      if (pending.mode === 'update') {
+        await this.importUpdateZipFile(pending.file, pending.parsed, {
+          isPostMigrationImport: pending.isPostMigrationImport
+        });
+        return;
+      }
+      if (pending.mode === 'translated') {
+        await this.importTranslatedZipFile(pending.file, pending.parsed);
+      }
+    },
+
+    async importUpdateZipFile(file, resolvedParsed = null, options = {}) {
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
@@ -3297,66 +3360,69 @@ const config = Vue.defineComponent({
         return;
       }
 
-      const isPostMigrationImport = !!this.needsPostMigrationImport;
+      const isPostMigrationImport = typeof options.isPostMigrationImport === 'boolean' ? options.isPostMigrationImport : !!this.needsPostMigrationImport;
 
-      let zip;
-      this.loadingProgress = 0.001;
-      try {
-        zip = await new JSZip().loadAsync(file);
-      } catch (error) {
-        this.loadingProgress = 0;
-        alert('Cannot open this file');
-        return;
-      }
-
-      const txtFileCount = this.countZipTxtFiles(zip);
-      if (txtFileCount === 0) {
-        this.loadingProgress = 100;
-        alert('No .txt files found in this ZIP.');
-        return;
-      }
-      const detectedGameVersion = this.detectGameVersionFromZip(zip);
-      if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
-        const detectedLabel = this.formatGameVersion(detectedGameVersion);
-        const currentLabel = this.formatGameVersion(this.gameVersion);
-        const ok = confirm(
-          `This StatDescriptions.zip looks like ${detectedLabel}, but you are currently working in ${currentLabel}.\n\n` +
-          `Switch to ${detectedLabel} and import it there?`
-        );
-        if (!ok) {
-          this.loadingProgress = 100;
-          return;
-        }
-        await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
-        if (this.pendingSingleVersionMigration) {
-          this.loadingProgress = 0;
-          alert('Please finish or skip the migration before importing this ZIP.');
-          return;
-        }
+      let parsed = resolvedParsed;
+      if (!parsed) {
+        let zip;
         this.loadingProgress = 0.001;
-      }
-      if (txtFileCount < ZIP_TXT_FILE_COUNT_THRESHOLD) {
-        const ok = this.confirmProceedByTypingYes(
-          "This ZIP looks smaller than a full StatDescriptions export.\n\n" +
-          `Found only ${txtFileCount} .txt files (expected ~${ZIP_TXT_FILE_COUNT_THRESHOLD}+).\n\n` +
-          "This might be a partial export or the translated ZIP.\n" +
-          "Importing it as a Next Version update can mark many source files as deleted.\n\n" +
-          "Type YES to proceed:",
-          { confirmMessage: "Last warning: Import anyway?" }
-        );
-        if (!ok) {
-          this.loadingProgress = 100;
+        try {
+          zip = await new JSZip().loadAsync(file);
+        } catch (error) {
+          this.loadingProgress = 0;
+          alert('Cannot open this file');
           return;
         }
+
+        const txtFileCount = this.countZipTxtFiles(zip);
+        if (txtFileCount === 0) {
+          this.loadingProgress = 100;
+          alert('No .txt files found in this ZIP.');
+          return;
+        }
+        const detectedGameVersion = this.detectGameVersionFromZip(zip);
+        if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
+          const detectedLabel = this.formatGameVersion(detectedGameVersion);
+          const currentLabel = this.formatGameVersion(this.gameVersion);
+          const ok = confirm(
+            `This StatDescriptions.zip looks like ${detectedLabel}, but you are currently working in ${currentLabel}.\n\n` +
+            `Switch to ${detectedLabel} and import it there?`
+          );
+          if (!ok) {
+            this.loadingProgress = 100;
+            return;
+          }
+          await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
+          if (this.pendingSingleVersionMigration) {
+            this.loadingProgress = 0;
+            alert('Please finish or skip the migration before importing this ZIP.');
+            return;
+          }
+          this.loadingProgress = 0.001;
+        }
+        if (txtFileCount < ZIP_TXT_FILE_COUNT_THRESHOLD) {
+          const ok = this.confirmProceedByTypingYes(
+            "This ZIP looks smaller than a full StatDescriptions export.\n\n" +
+            `Found only ${txtFileCount} .txt files (expected ~${ZIP_TXT_FILE_COUNT_THRESHOLD}+).\n\n` +
+            "This might be a partial export or the translated ZIP.\n" +
+            "Importing it as a Next Version update can mark many source files as deleted.\n\n" +
+            "Type YES to proceed:",
+            { confirmMessage: "Last warning: Import anyway?" }
+          );
+          if (!ok) {
+            this.loadingProgress = 100;
+            return;
+          }
+        }
+
+        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
+
+        parsed = await allProgress(parseFuncs, (p) => {
+          const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+          this.loadingProgress = percent;
+        });
+        if (this.startDuplicateLangResolution(parsed, file, { mode: 'update', importMode: 'Import Next Version', isPostMigrationImport })) return;
       }
-
-      const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
-
-      let parsed = await allProgress(parseFuncs, (p) => {
-        const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
-        this.loadingProgress = percent;
-      });
-      if (this.rejectImportForDuplicateLangEntries(parsed, file, 'Import Next Version')) return;
       const nextSource = parsed.filter(Boolean);
 
       this.localDescs.lastModified = file.lastModified;
@@ -3485,7 +3551,7 @@ const config = Vue.defineComponent({
       this.filterDesc();
     },
 
-    async importTranslatedZipFile(file) {
+    async importTranslatedZipFile(file, resolvedParsed = null) {
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
@@ -3496,51 +3562,54 @@ const config = Vue.defineComponent({
         alert('Please import the latest StatDescriptions.zip first.');
         return;
       }
-      if (String(file?.name || '').toLowerCase() !== 'statdescriptions_translated.zip') {
-        if (!confirm('This does not look like StatDescriptions_Translated.zip. Import anyway?')) return;
+      let parsed = resolvedParsed;
+      if (!parsed) {
+        if (String(file?.name || '').toLowerCase() !== 'statdescriptions_translated.zip') {
+          if (!confirm('This does not look like StatDescriptions_Translated.zip. Import anyway?')) return;
+        }
+
+        this.loadingProgress = 0.001;
+
+        let zip;
+        try {
+          zip = await new JSZip().loadAsync(file);
+        } catch (error) {
+          this.loadingProgress = 100;
+          alert('Cannot open this file');
+          return;
+        }
+
+        const txtFileCount = this.countZipTxtFiles(zip);
+        if (txtFileCount === 0) {
+          this.loadingProgress = 100;
+          alert('No .txt files found in this ZIP.');
+          return;
+        }
+        if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD) {
+          const ok = this.confirmProceedByTypingYes(
+            "This ZIP looks like a full StatDescriptions export.\n\n" +
+            `Found ${txtFileCount} .txt files (expected less than ${ZIP_TXT_FILE_COUNT_THRESHOLD} for a translated transfer ZIP).\n\n` +
+            "This import mode is meant for moving translated data between PCs.\n" +
+            "If you actually got a new export from the game data, use Import Next Version instead.\n\n" +
+            "Type YES to proceed:",
+            { confirmMessage: "Last warning: Import as translated anyway?" }
+          );
+          if (!ok) {
+            this.loadingProgress = 100;
+            return;
+          }
+        }
+
+        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
+
+        parsed = await allProgress(parseFuncs, (p) => {
+          const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+          this.loadingProgress = percent;
+        });
+        if (this.startDuplicateLangResolution(parsed, file, { mode: 'translated', importMode: 'Import Translated' })) return;
       }
 
       this.ensureLocalDescsReady();
-
-      this.loadingProgress = 0.001;
-
-      let zip;
-      try {
-        zip = await new JSZip().loadAsync(file);
-      } catch (error) {
-        this.loadingProgress = 100;
-        alert('Cannot open this file');
-        return;
-      }
-
-      const txtFileCount = this.countZipTxtFiles(zip);
-      if (txtFileCount === 0) {
-        this.loadingProgress = 100;
-        alert('No .txt files found in this ZIP.');
-        return;
-      }
-      if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD) {
-        const ok = this.confirmProceedByTypingYes(
-          "This ZIP looks like a full StatDescriptions export.\n\n" +
-          `Found ${txtFileCount} .txt files (expected less than ${ZIP_TXT_FILE_COUNT_THRESHOLD} for a translated transfer ZIP).\n\n` +
-          "This import mode is meant for moving translated data between PCs.\n" +
-          "If you actually got a new export from the game data, use Import Next Version instead.\n\n" +
-          "Type YES to proceed:",
-          { confirmMessage: "Last warning: Import as translated anyway?" }
-        );
-        if (!ok) {
-          this.loadingProgress = 100;
-          return;
-        }
-      }
-
-      const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
-
-      let parsed = await allProgress(parseFuncs, (p) => {
-        const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
-        this.loadingProgress = percent;
-      });
-      if (this.rejectImportForDuplicateLangEntries(parsed, file, 'Import Translated')) return;
       const importedDescs = parsed.filter(Boolean);
 
       const sourceMap = new Map((this.descs || []).filter(Boolean).map(d => [d.filepath, d]));

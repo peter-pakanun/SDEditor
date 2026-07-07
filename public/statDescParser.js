@@ -15,6 +15,7 @@
  * @property {Object.<string,tempTranslation>} tempTranslations
  * @property {Object.<string,string[]>} translations 
  * @property {{filepath:string, lang:string, line:number}[]} [duplicateLangEntries]
+ * @property {{filepath:string, lang:string, options:{id:string, lang:string, line:number, occurrence:number, content:string[]}[]}[]} [duplicateLangGroups]
  * @property {boolean} isDNT 
  * @property {boolean} [isMissing] 
  */
@@ -66,12 +67,18 @@ function parseDesc(filepath, text, lang) {
     tempTranslations: {},
     translations: {},
     duplicateLangEntries: [],
+    duplicateLangGroups: [],
     isDNT: false
   };
 
   let curLang = "English"; // first translation block langauge
   let lines = text.split("\n");
   let duplicateLangIndex = 0;
+  let langOccurrences = { English: 1 };
+  let translationBlockInfos = {
+    English: { lang: "English", line: 1, occurrence: 1 }
+  };
+  let duplicateLangGroupsByLang = {};
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     let line = lines[lineIndex];
     line = line.trim();
@@ -155,14 +162,38 @@ function parseDesc(filepath, text, lang) {
         return false;
       }
       if (desc.tempTranslations[nextLang]) {
+        let occurrence = (langOccurrences[nextLang] || 1) + 1;
+        langOccurrences[nextLang] = occurrence;
+        let duplicateKey = `__duplicate_lang_${duplicateLangIndex++}__${nextLang}`;
+        translationBlockInfos[duplicateKey] = {
+          lang: nextLang,
+          line: lineIndex + 1,
+          occurrence
+        };
+        if (!duplicateLangGroupsByLang[nextLang]) {
+          duplicateLangGroupsByLang[nextLang] = {
+            filepath,
+            lang: nextLang,
+            optionKeys: [nextLang],
+            options: []
+          };
+          desc.duplicateLangGroups.push(duplicateLangGroupsByLang[nextLang]);
+        }
+        duplicateLangGroupsByLang[nextLang].optionKeys.push(duplicateKey);
         desc.duplicateLangEntries.push({
           filepath,
           lang: nextLang,
           line: lineIndex + 1
         });
-        curLang = `__duplicate_lang_${duplicateLangIndex++}__${nextLang}`;
+        curLang = duplicateKey;
         continue;
       }
+      langOccurrences[nextLang] = 1;
+      translationBlockInfos[nextLang] = {
+        lang: nextLang,
+        line: lineIndex + 1,
+        occurrence: 1
+      };
       curLang = nextLang;
       continue;
     }
@@ -186,6 +217,20 @@ function parseDesc(filepath, text, lang) {
     }
     
     desc.tempTranslations[curLang].content.push(content);
+  }
+
+  for (let group of desc.duplicateLangGroups) {
+    group.options = group.optionKeys.map(key => {
+      let info = translationBlockInfos[key] || { lang: group.lang, line: 0, occurrence: 1 };
+      return {
+        id: key,
+        lang: info.lang,
+        line: info.line,
+        occurrence: info.occurrence,
+        content: (desc.tempTranslations[key]?.content || []).slice()
+      };
+    });
+    delete group.optionKeys;
   }
 
   // remove the count and replace the translation block with the array of all the text in that langauge

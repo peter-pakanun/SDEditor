@@ -1514,14 +1514,14 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .duplicateLangImportGateContent {
-  max-width: min(880px, 92vw);
+  max-width: min(980px, 94vw);
 }
 
 .duplicateLangImportList {
   display: flex;
   flex-direction: column;
-  gap: calc(0.5em * var(--density));
-  max-height: min(42vh, 420px);
+  gap: calc(0.9em * var(--density));
+  max-height: min(48vh, 520px);
   overflow: auto;
   padding: calc(0.75em * var(--density));
   background: var(--color-bg);
@@ -1529,29 +1529,89 @@ button, label, th, td, input[type="checkbox"] {
   border-radius: 4px;
 }
 
-.duplicateLangImportItem {
-  display: grid;
-  grid-template-columns: minmax(9em, 14em) minmax(0, 1fr) auto;
-  gap: calc(0.8em * var(--density));
-  align-items: baseline;
-  padding-bottom: calc(0.5em * var(--density));
+.duplicateLangImportGroup {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.45em * var(--density));
+  padding-bottom: calc(0.9em * var(--density));
   border-bottom: 1px solid var(--color-element-alt);
-  color: var(--color-font);
 }
 
-.duplicateLangImportItem:last-child {
+.duplicateLangImportGroup:last-child {
   border-bottom: 0;
   padding-bottom: 0;
 }
 
-.duplicateLangImportItem span {
-  overflow-wrap: anywhere;
+.duplicateLangImportGroupHeader {
+  display: grid;
+  grid-template-columns: minmax(8em, 13em) minmax(0, 1fr);
+  gap: calc(0.8em * var(--density));
+  align-items: baseline;
+  color: var(--color-font);
 }
 
-.duplicateLangImportItem em {
+.duplicateLangImportGroupHeader span {
+  overflow-wrap: anywhere;
+  opacity: 0.85;
+}
+
+.duplicateLangImportOption {
+  display: grid;
+  grid-template-columns: auto minmax(7em, 10em) minmax(0, 1fr);
+  gap: calc(0.75em * var(--density));
+  align-items: start;
+  padding: calc(0.65em * var(--density));
+  background: var(--color-bg2);
+  border: 1px solid var(--color-element-alt);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.duplicateLangImportOption:has(input:checked) {
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.duplicateLangImportOption input {
+  margin-top: calc(0.25em * var(--density));
+}
+
+.duplicateLangImportOptionMeta {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.2em * var(--density));
+  color: var(--color-font);
+}
+
+.duplicateLangImportOptionMeta em {
   opacity: 0.75;
   font-style: normal;
-  white-space: nowrap;
+}
+
+.duplicateLangImportPreview {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.25em * var(--density));
+  max-height: calc(8em * var(--density));
+  overflow: auto;
+  padding: calc(0.45em * var(--density));
+  background: var(--color-bg);
+  border-radius: 4px;
+  color: var(--color-font);
+}
+
+.duplicateLangImportPreviewLine {
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.duplicateLangImportStatus {
+  margin-bottom: 0;
+  opacity: 0.85;
+}
+
+.duplicateLangImportGateContent .multiInstanceGateButtons button:disabled {
+  cursor: not-allowed;
 }
 
 .multiInstanceGateButtons {
