@@ -473,6 +473,22 @@ input:focus, button:focus, textarea:focus {
   width: auto;
   margin-right: 0;
 }
+.topbar>div>button.diagnosticScanButton {
+  width: auto;
+  min-width: 10em;
+}
+
+.diagnosticScanSummary {
+  display: inline-block;
+  margin-left: calc(0.4em * var(--density));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.diagnosticScanButton:disabled {
+  opacity: 0.75;
+  cursor: progress;
+}
 
 
 table {
@@ -563,6 +579,18 @@ table#table tbody tr.needsReview:nth-child(even) td {
 
 table#table tbody tr:hover.needsReview td {
   background-color: rgba(255, 180, 0, 0.3);
+}
+table#table tbody tr.diagnosticError td,
+table#table tbody tr.diagnosticError:nth-child(even) td {
+  background-color: var(--color-diagnostic-error);
+}
+
+table#table tbody tr.diagnosticError td:first-child {
+  box-shadow: inset 4px 0 0 var(--color-diagnostic-error-border);
+}
+
+table#table tbody tr:hover.diagnosticError td {
+  background-color: color-mix(in srgb, var(--color-diagnostic-error) 75%, var(--color-element-highlight));
 }
 
 .needsReviewBanner {

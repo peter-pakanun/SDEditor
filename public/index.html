@@ -231,6 +231,10 @@
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Ctrl + Click to do a full export'" aria-label="Export ZIP">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
+          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="scanAllDiagnostics" v-tooltip="'Scan every file using the same warning/error diagnostics shown in the editor'">
+            {{ diagnosticScanRunning ? ('Scanning ' + diagnosticScanProcessed + '/' + diagnosticScanTotal) : 'Scan diagnostics' }}
+          </button>
+          <span v-if="diagnosticScanCompleted" class="diagnosticScanSummary">Error files: {{ diagnosticScanErrorFileCount }} | Warning files: {{ diagnosticScanWarningFileCount }}</span>
           <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
           <button @click="prevPage">⯇</button>
           <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
@@ -248,6 +252,7 @@
             <option value="blank">Blank only</option>
             <option value="done">Done only</option>
             <option value="review">Need review only</option>
+            <option value="diagnosticError">Diagnostic errors only</option>
             <option value="all">Show All</option>
           </select>
         </div>
@@ -283,8 +288,8 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview }" @click="editFile(desc.filepath)">
-            <td v-tooltip="desc.filedir">{{ elipsisRenderer(desc.filedir) }}</td>
+          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticError: desc.hasDiagnosticError }" @click="editFile(desc.filepath)">
+            <td v-tooltip="desc.hasDiagnosticError ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : '') + elipsisRenderer(desc.filedir) }}</td>
             <td v-tooltip="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
             <td><span v-html="desc.english"></span></td>
             <td class="translationTr"><span v-html="desc.translation"></span></td>

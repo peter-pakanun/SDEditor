@@ -121,6 +121,14 @@ const config = Vue.defineComponent({
       currentPage: 1,
       searchText: "",
       filterSelect: "new",
+      diagnosticScanResults: {},
+      diagnosticScanRunning: false,
+      diagnosticScanCompleted: false,
+      diagnosticScanProcessed: 0,
+      diagnosticScanTotal: 0,
+      diagnosticScanErrorFileCount: 0,
+      diagnosticScanWarningFileCount: 0,
+      diagnosticScanRunId: 0,
       hideDNT: true,
       hideSourceInPreviewPanel: false,
       highlightDict: true,
@@ -327,6 +335,7 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     lang() {
+      this.clearDiagnosticScanResults();
       if (this.sourceLoaded) {
         this.applyWorkspaceOverlay();
         this.filterDesc();
@@ -598,6 +607,7 @@ const config = Vue.defineComponent({
       return this.detectGameVersionFromFilepaths(getZipTxtFilepaths(zip));
     },
     resetVersionedState() {
+      this.clearDiagnosticScanResults();
       this.descs = [];
       this.filteredDescs = [];
       this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
@@ -1316,6 +1326,126 @@ const config = Vue.defineComponent({
         ? window.TranslationDiagnostics.analyze(text)
         : this.emptyTranslationDiagnostics();
       return this.addTagIdentityDiagnostics(result, english, text);
+    },
+    analyzeDescDiagnostics(desc, lang = this.lang) {
+      const englishLines = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
+      const translationLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
+      let warningCount = 0;
+      let errorCount = 0;
+
+      for (let i = 0; i < englishLines.length; i++) {
+        const englishRaw = englishLines[i] || "";
+        const translationRaw = translationLines[i] || "";
+        const decodedEnglish = this.decodeEscapedNewlines(englishRaw);
+        const decodedTranslation = this.decodeEscapedNewlines(translationRaw);
+        const isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
+        const isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
+        const english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
+        const translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
+
+        if (isTable) {
+          const englishColumns = this.splitTableColumns(english);
+          const translationColumns = this.splitTableColumns(translation);
+          const columnCount = Math.max(englishColumns.length, translationColumns.length);
+          for (let columnIndex = 0; columnIndex < columnCount; columnIndex++) {
+            const result = this.analyzeTranslationDiagnostics(
+              translationColumns[columnIndex] ?? "",
+              englishColumns[columnIndex] ?? ""
+            );
+            warningCount += Number(result.warningCount || 0);
+            errorCount += Number(result.errorCount || 0);
+          }
+        } else {
+          const result = this.analyzeTranslationDiagnostics(translation, english);
+          warningCount += Number(result.warningCount || 0);
+          errorCount += Number(result.errorCount || 0);
+        }
+      }
+
+      return {
+        warningCount,
+        errorCount,
+        hasDiagnosticWarning: warningCount > 0,
+        hasDiagnosticError: errorCount > 0,
+      };
+    },
+    getDiagnosticScanTitle(result) {
+      if (!result) return "";
+      const warnings = Number(result.warningCount || 0);
+      const errors = Number(result.errorCount || 0);
+      return `Diagnostic scan: ${errors} error(s), ${warnings} warning(s)`;
+    },
+    recountDiagnosticScanFiles() {
+      const results = Object.values(this.diagnosticScanResults || {});
+      this.diagnosticScanErrorFileCount = results.filter(result => result?.hasDiagnosticError).length;
+      this.diagnosticScanWarningFileCount = results.filter(result => result?.hasDiagnosticWarning).length;
+    },
+    clearDiagnosticScanResults() {
+      this.diagnosticScanRunId++;
+      this.diagnosticScanResults = {};
+      this.diagnosticScanRunning = false;
+      this.diagnosticScanCompleted = false;
+      this.diagnosticScanProcessed = 0;
+      this.diagnosticScanTotal = 0;
+      this.diagnosticScanErrorFileCount = 0;
+      this.diagnosticScanWarningFileCount = 0;
+    },
+    updateScannedDescDiagnostics(desc) {
+      if (!this.diagnosticScanCompleted || !desc?.filepath) return;
+      const result = this.analyzeDescDiagnostics(desc);
+      this.diagnosticScanResults = {
+        ...this.diagnosticScanResults,
+        [desc.filepath]: result,
+      };
+      this.recountDiagnosticScanFiles();
+    },
+    async scanAllDiagnostics() {
+      if (this.diagnosticScanRunning) return;
+      const descs = Array.isArray(this.descs) ? [...this.descs] : [];
+      const scanLang = this.lang;
+      const runId = ++this.diagnosticScanRunId;
+      const results = {};
+      let errorFileCount = 0;
+      let warningFileCount = 0;
+
+      this.diagnosticScanResults = {};
+      this.diagnosticScanRunning = true;
+      this.diagnosticScanCompleted = false;
+      this.diagnosticScanProcessed = 0;
+      this.diagnosticScanTotal = descs.length;
+      this.diagnosticScanErrorFileCount = 0;
+      this.diagnosticScanWarningFileCount = 0;
+      this.filterDesc();
+
+      try {
+        for (let i = 0; i < descs.length; i++) {
+          if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
+          const desc = descs[i];
+          const result = this.analyzeDescDiagnostics(desc, scanLang);
+          results[desc.filepath] = result;
+          if (result.hasDiagnosticError) errorFileCount++;
+          if (result.hasDiagnosticWarning) warningFileCount++;
+          this.diagnosticScanProcessed = i + 1;
+
+          if ((i + 1) % 25 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
+          }
+        }
+
+        if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
+        this.diagnosticScanResults = results;
+        this.diagnosticScanErrorFileCount = errorFileCount;
+        this.diagnosticScanWarningFileCount = warningFileCount;
+        this.diagnosticScanCompleted = true;
+        this.diagnosticScanRunning = false;
+        this.filterDesc();
+      } catch (error) {
+        if (runId !== this.diagnosticScanRunId) return;
+        console.error("Diagnostic scan failed:", error);
+        this.diagnosticScanRunning = false;
+        alert("The diagnostic scan could not be completed.");
+      }
     },
     refreshTranslationDiagnostics(target) {
       if (!target) return this.emptyTranslationDiagnostics();
@@ -3538,6 +3668,7 @@ const config = Vue.defineComponent({
 
       this.descs = nextSource;
       this.sourceLoaded = true;
+      this.clearDiagnosticScanResults();
 
       await this.saveLocalDescs();
       if (window.OfflineStore && typeof window.OfflineStore.setSource === 'function') {
@@ -3775,6 +3906,7 @@ const config = Vue.defineComponent({
 
       await this.saveLocalDescs();
       this.loadingProgress = 100;
+      this.clearDiagnosticScanResults();
       this.filterDesc();
 
       if (changedCount === 0 && reviewClearedCount === 0 && trackedCount === 0) {
@@ -3840,10 +3972,12 @@ const config = Vue.defineComponent({
           this.statistic.needsReview++;
         }
 
+        const diagnosticResult = this.diagnosticScanResults?.[desc.filepath] || null;
         if (this.filterSelect == "new" && !desc.isMissing && !desc.hasChanges && !desc.needsReview) continue;
         if (this.filterSelect == "blank" && !desc.isMissing) continue;
         if (this.filterSelect == "done" && !desc.hasChanges) continue;
         if (this.filterSelect == "review" && !desc.needsReview) continue;
+        if (this.filterSelect == "diagnosticError" && !diagnosticResult?.hasDiagnosticError) continue;
 
         if (
           this.searchText.trim() == "" ||
@@ -3862,6 +3996,10 @@ const config = Vue.defineComponent({
             isMissing: desc.isMissing,
             hasChanges: desc.hasChanges,
             needsReview: !!desc.needsReview,
+            hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
+            diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
+            diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
+            diagnosticScanTitle: this.getDiagnosticScanTitle(diagnosticResult),
           });
         }
       }
@@ -4157,6 +4295,7 @@ const config = Vue.defineComponent({
       this.closeHlPopup();
       this.editorOriginalTranslations = (this.editorBlocks || []).map(b => b?.translation ?? "");
       this.editorVisible = false;
+      this.updateScannedDescDiagnostics(desc);
       this.filterDesc();
       return true;
     },
@@ -4359,6 +4498,7 @@ const config = Vue.defineComponent({
 
       await this.saveLocalDescs();
       await this.commitRevision(desc, lines, { note: 'Restore' });
+      this.updateScannedDescDiagnostics(desc);
       this.filterDesc();
       if (this.editorVisible) this.editFile(desc.filepath);
       await this.refreshHistory();
