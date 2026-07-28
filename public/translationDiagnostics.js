@@ -159,7 +159,16 @@
     return (index === 0 || isLineBreak(prev)) && /[ \t]/.test(next);
   }
 
-  function scanDashBoundaries(text, addDiagnostic) {
+  function isGermanDashSpacingException(text, index, lang) {
+    if (String(lang || "").toLocaleLowerCase() !== "german") return false;
+    const beforeDash = text.slice(0, index);
+    const afterDash = text.slice(index);
+    return /^-[ \t]+(?:und|oder)(?=$|[ \t\r\n,.;:!?])/.test(afterDash)
+      || /(?:^|[ \t\r\n])(?:und|oder)[ \t]+$/.test(beforeDash)
+      || /,[ \t]+$/.test(beforeDash);
+  }
+
+  function scanDashBoundaries(text, addDiagnostic, lang) {
     for (let i = 0; i < text.length; i++) {
       if (text[i] !== "-") continue;
 
@@ -176,6 +185,7 @@
       if (isNegativeNumber) continue;
       if (isMarkdownListMarker(text, i)) continue;
       if (isDashNextToVariableTag(text, i)) continue;
+      if (isGermanDashSpacingException(text, i, lang)) continue;
 
       addDiagnostic(
         LEVEL_WARNING,
@@ -326,13 +336,13 @@
     return diagnostics.filter(d => d.level === level).length;
   }
 
-  function analyze(value) {
+  function analyze(value, options = {}) {
     const text = String(value ?? "");
     const diagnostics = [];
     const addDiagnostic = makeAddDiagnostic(text, diagnostics);
 
     scanWhitespace(text, addDiagnostic);
-    scanDashBoundaries(text, addDiagnostic);
+    scanDashBoundaries(text, addDiagnostic, options.lang);
     scanTags(text, addDiagnostic);
 
     diagnostics.sort((a, b) => {

@@ -1321,9 +1321,9 @@ const config = Vue.defineComponent({
     emptyTranslationDiagnostics() {
       return { diagnostics: [], warningCount: 0, errorCount: 0 };
     },
-    analyzeTranslationDiagnostics(text, english = null) {
+    analyzeTranslationDiagnostics(text, english = null, lang = this.lang) {
       const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
-        ? window.TranslationDiagnostics.analyze(text)
+        ? window.TranslationDiagnostics.analyze(text, { lang })
         : this.emptyTranslationDiagnostics();
       return this.addTagIdentityDiagnostics(result, english, text);
     },
@@ -1350,13 +1350,14 @@ const config = Vue.defineComponent({
           for (let columnIndex = 0; columnIndex < columnCount; columnIndex++) {
             const result = this.analyzeTranslationDiagnostics(
               translationColumns[columnIndex] ?? "",
-              englishColumns[columnIndex] ?? ""
+              englishColumns[columnIndex] ?? "",
+              lang
             );
             warningCount += Number(result.warningCount || 0);
             errorCount += Number(result.errorCount || 0);
           }
         } else {
-          const result = this.analyzeTranslationDiagnostics(translation, english);
+          const result = this.analyzeTranslationDiagnostics(translation, english, lang);
           warningCount += Number(result.warningCount || 0);
           errorCount += Number(result.errorCount || 0);
         }
