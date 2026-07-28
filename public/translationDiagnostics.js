@@ -169,9 +169,11 @@
       const isLineEnd = i + 1 === text.length || isLineBreak(next);
       const touchesWhitespace = /[ \t]/.test(prev) || /[ \t]/.test(next);
       const isSurroundedByWhitespace = /[ \t]/.test(prev) && /[ \t]/.test(next);
+      const isNegativeNumber = /\d/.test(next);
 
       if (!isLineStart && !isLineEnd && !touchesWhitespace) continue;
       if (isSurroundedByWhitespace) continue;
+      if (isNegativeNumber) continue;
       if (isMarkdownListMarker(text, i)) continue;
       if (isDashNextToVariableTag(text, i)) continue;
 
