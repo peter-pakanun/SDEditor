@@ -253,6 +253,7 @@
             <option value="done">Done only</option>
             <option value="review">Need review only</option>
             <option value="diagnosticError">Diagnostic errors only</option>
+            <option value="diagnosticWarning">Diagnostic warnings only</option>
             <option value="all">Show All</option>
           </select>
         </div>
@@ -288,8 +289,8 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticError: desc.hasDiagnosticError }" @click="editFile(desc.filepath)">
-            <td v-tooltip="desc.hasDiagnosticError ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : '') + elipsisRenderer(desc.filedir) }}</td>
+          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @click="editFile(desc.filepath)">
+            <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
             <td v-tooltip="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
             <td><span v-html="desc.english"></span></td>
             <td class="translationTr"><span v-html="desc.translation"></span></td>

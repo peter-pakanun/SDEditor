@@ -580,6 +580,20 @@ table#table tbody tr.needsReview:nth-child(even) td {
 table#table tbody tr:hover.needsReview td {
   background-color: rgba(255, 180, 0, 0.3);
 }
+
+table#table tbody tr.diagnosticWarning td,
+table#table tbody tr.diagnosticWarning:nth-child(even) td {
+  background-color: var(--color-diagnostic-warning);
+}
+
+table#table tbody tr.diagnosticWarning td:first-child {
+  box-shadow: inset 4px 0 0 var(--color-diagnostic-warning-border);
+}
+
+table#table tbody tr:hover.diagnosticWarning td {
+  background-color: color-mix(in srgb, var(--color-diagnostic-warning) 75%, var(--color-element-highlight));
+}
+
 table#table tbody tr.diagnosticError td,
 table#table tbody tr.diagnosticError:nth-child(even) td {
   background-color: var(--color-diagnostic-error);

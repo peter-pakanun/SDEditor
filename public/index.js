@@ -3978,6 +3978,7 @@ const config = Vue.defineComponent({
         if (this.filterSelect == "done" && !desc.hasChanges) continue;
         if (this.filterSelect == "review" && !desc.needsReview) continue;
         if (this.filterSelect == "diagnosticError" && !diagnosticResult?.hasDiagnosticError) continue;
+        if (this.filterSelect == "diagnosticWarning" && !diagnosticResult?.hasDiagnosticWarning) continue;
 
         if (
           this.searchText.trim() == "" ||
@@ -3996,6 +3997,7 @@ const config = Vue.defineComponent({
             isMissing: desc.isMissing,
             hasChanges: desc.hasChanges,
             needsReview: !!desc.needsReview,
+            hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
             hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
             diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
             diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
