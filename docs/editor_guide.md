@@ -86,7 +86,7 @@ Thai:      สร้างความเสียหาย [Fire|ไฟ] {0} �
 You can translate `Hits` to your language, but `HitDamage` must stay unchanged.
 Sometime the source text use the same display as the tag name, e.g. `[Fire]`, you can translate it to your language by adding the display part yourself, e.g. `[Fire|ไฟ]`.
 
-> 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space by default)** to insert these tags to speed up your work and ensure consistency.
+> 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space by default, matching VS Code's primary binding)** to insert these tags to speed up your work and ensure consistency.
 
 ### Line Breaks: Multi-line Blocks
 
@@ -114,7 +114,9 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
-Like VS Code, SDEditor does not run editor shortcuts while an IME composition is active. **Ctrl + Space** remains the default, but **Settings → Autocomplete popup shortcut** can change it to **Ctrl + I** or **Disabled**. Disabling the keybinding does not disable the `[` trigger.
+SDEditor follows VS Code for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the `[` trigger.
+
+> **Upgrade note:** The default key has not changed: it remains **Ctrl + Space**. Existing saved shortcut choices are preserved, while users who have not selected one receive the default above. IME handling is based on the browser's composition state, not the selected translation language.
 
 - Use **↑ / ↓ Arrow Keys** to navigate the list
 - Press **Enter** to insert the selected item into your translation at the cursor position
@@ -199,7 +201,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 ```
 | Shortcut           | Action                                       |
 |--------------------|----------------------------------------------|
-| Configured shortcut or [ | Open Autocomplete Popup                |
+| Ctrl + Space (default), Ctrl + I (optional), or [ | Open Autocomplete Popup |
 | Ctrl + S           | Save and open next file                      |
 | Escape             | Close the file without saving                |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |

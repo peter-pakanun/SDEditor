@@ -7,11 +7,11 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 1) Open the [**web app**](<https://sdeditor.pages.dev/>) and pick your target language and settings
 2) Import `StatDescriptions.zip` using the 📦 Import Next Version button
 3) Click any row or use `F1/F2` hotkey to edit
-4) While editing, use `Ctrl + Space` to open the autocomplete menu
+4) While editing, use `Ctrl + Space` (VS Code's primary binding) to open the autocomplete menu
 5) After you are done, click on 💾 to export `StatDescriptions_Translated.zip` and submit your work
 > Your in-progress edits are stored in your browser (`indexedDB`)
 ## Keyboard shortcuts
-- **Ctrl + Space (default):** during editing to open the autocomplete menu. SDEditor leaves keys to an active IME composition; the binding can be changed to **Ctrl + I** or disabled in Settings, and `[` will still open the menu.
+- **Ctrl + Space (default; VS Code primary):** during editing to open the autocomplete menu. SDEditor leaves keys to any active IME composition, including Japanese, Chinese, and Korean. The binding can be changed to the VS Code alternative **Ctrl + I** or disabled in Settings, and `[` will still open the menu. Existing saved shortcut choices are preserved after an update.
   - **Autocomplete menu:** while it’s open, **Ctrl + Enter** will jump to/edit the matching Dictionary entry, or create one (and focus the right Replace field)
   - **When you’re done:** use the configured autocomplete shortcut again (or `[`) to use the entry you just created; this returns to the translation field
 - **Ctrl + S:** save the current file
