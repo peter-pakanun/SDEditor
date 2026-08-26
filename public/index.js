@@ -135,6 +135,7 @@ const config = Vue.defineComponent({
       shiftEnterSave: false,
       autoOpenNextFile: true,
       filterShortcutCtrlD: false,
+      autocompleteShortcut: 'ctrl-i',
       uiDensity: 'compact',
 
       sideTab: 'dictionary',
@@ -332,6 +333,9 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     filterShortcutCtrlD() {
+      this.saveSettings();
+    },
+    autocompleteShortcut() {
       this.saveSettings();
     },
     lang() {
@@ -3178,6 +3182,15 @@ const config = Vue.defineComponent({
     isFilterFocusShortcut(e) {
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
     },
+    isAutocompleteShortcut(e) {
+      if (!e || this.autocompleteShortcut === "disabled") return false;
+      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return false;
+      if (this.autocompleteShortcut === "ctrl-space") {
+        return e.code === "Space" || e.key === " ";
+      }
+      return this.autocompleteShortcut === "ctrl-i"
+        && (e.code === "KeyI" || String(e.key || "").toLowerCase() === "i");
+    },
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
       if (this.duplicateLangImportWarning && e.key === "Escape") {
@@ -3205,7 +3218,7 @@ const config = Vue.defineComponent({
         return;
       }
 
-      if (e.ctrlKey && (e.code === "Space" || e.key === " ")) {
+      if (this.isAutocompleteShortcut(e)) {
         if (!this.editorVisible) return;
         e.preventDefault();
         if (this.hlPopup.visible) this.closeHlPopup({ refocus: true });
@@ -4587,6 +4600,7 @@ const config = Vue.defineComponent({
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
+        autocompleteShortcut: this.autocompleteShortcut,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -4613,6 +4627,7 @@ const config = Vue.defineComponent({
         shiftEnterSave: this.shiftEnterSave,
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
+        autocompleteShortcut: this.autocompleteShortcut,
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -4659,6 +4674,9 @@ const config = Vue.defineComponent({
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
       if (typeof settings.filterShortcutCtrlD !== 'undefined') this.filterShortcutCtrlD = !!settings.filterShortcutCtrlD;
+      if (["ctrl-i", "ctrl-space", "disabled"].includes(settings.autocompleteShortcut)) {
+        this.autocompleteShortcut = settings.autocompleteShortcut;
+      }
       if (settings.uiDensity === 'compact' || settings.uiDensity === 'spacious') {
         this.uiDensity = settings.uiDensity;
       } else {

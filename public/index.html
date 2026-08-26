@@ -87,6 +87,14 @@
             <option value="spacious">Spacious</option>
           </select>
         </div>
+        <div class="inputField">
+          <label for="autocompleteShortcut">Autocomplete popup shortcut</label>
+          <select id="autocompleteShortcut" v-model="autocompleteShortcut">
+            <option value="ctrl-i">Ctrl + I (IME-friendly)</option>
+            <option value="ctrl-space">Ctrl + Space</option>
+            <option value="disabled">Disabled (use [ to open)</option>
+          </select>
+        </div>
         <input type="checkbox" id="hideDNT" name="hideDNT" v-model="hideDNT">
         <label for="hideDNT"> Hide DNT</label>
         <br>
