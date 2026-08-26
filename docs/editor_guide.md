@@ -114,7 +114,7 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
-SDEditor follows VS Code for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the `[` trigger.
+SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/reference/default-keybindings) for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the `[` trigger. If the operating system intercepts **Ctrl + Space** before it reaches the browser, select **Ctrl + I** or **Disabled** and use `[`.
 
 > **Upgrade note:** The default key has not changed: it remains **Ctrl + Space**. Existing saved shortcut choices are preserved, while users who have not selected one receive the default above. IME handling is based on the browser's composition state, not the selected translation language.
 
