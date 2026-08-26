@@ -112,9 +112,11 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 ### Opening the Helper Popup
 
-While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
+While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or enter a literal ASCII **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
-SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/reference/default-keybindings) for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the `[` trigger. If the operating system intercepts **Ctrl + Space** before it reaches the browser, select **Ctrl + I** or **Disabled** and use `[`.
+SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/reference/default-keybindings) for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the literal `[` trigger. If the operating system intercepts **Ctrl + Space** before it reaches the browser, select **Ctrl + I**, or use literal `[` from an alphanumeric/direct-input mode.
+
+> **IME punctuation:** Autocomplete reacts to the character committed into the translation, not the physical key. A Zhuyin IME that commits ASCII `[` opens autocomplete after composition ends. Japanese Hiragana normally commits `「` from the same physical key; SDEditor leaves that legitimate punctuation unchanged, so use the configured shortcut or switch temporarily to alphanumeric/direct input for `[`.
 
 > **Upgrade note:** The default key has not changed: it remains **Ctrl + Space**. Existing saved shortcut choices are preserved, while users who have not selected one receive the default above. IME handling is based on the browser's composition state, not the selected translation language.
 
@@ -201,7 +203,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 ```
 | Shortcut           | Action                                       |
 |--------------------|----------------------------------------------|
-| Ctrl + Space (default), Ctrl + I (optional), or [ | Open Autocomplete Popup |
+| Ctrl + Space (default), Ctrl + I (optional), or literal [ | Open Autocomplete Popup |
 | Ctrl + S           | Save and open next file                      |
 | Escape             | Close the file without saving                |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |

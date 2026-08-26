@@ -1910,6 +1910,7 @@ const config = Vue.defineComponent({
         editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "", diagnostics.diagnostics);
       }
       this.refreshGamePreview();
+      this.queueCommittedAutocompleteTrigger(e, editorIndex);
     },
     computeMultilineLineMismatch(english, translation) {
       let eng = this.normalizeNewlines(english ?? "");
@@ -2027,6 +2028,7 @@ const config = Vue.defineComponent({
       if (typeof editorIndex === "number") this.refreshEditorBlockHLter(editorIndex);
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
       this.refreshGamePreview();
+      this.queueCommittedAutocompleteTrigger(e, editorIndex);
     },
     tableColumnInput(editorBlock, editorIndex, columnIndex, e) {
       if (this.isImeComposingEvent(e)) return;
@@ -2046,6 +2048,7 @@ const config = Vue.defineComponent({
         }
       }
       this.refreshGamePreview();
+      this.queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex);
     },
     loadDummyData() {
       let desc1 = parseDesc("test/dummy1.txt", dummyFile1, this.lang);
@@ -3033,8 +3036,7 @@ const config = Vue.defineComponent({
       let end = el.selectionEnd;
       if (options.deleteOpeningBracket && start > 0 && value[start - 1] === "[") {
         start = start - 1;
-      }
-      if (options.deleteOpeningChar && start > 0 && value[start - 1] === options.deleteOpeningChar) {
+      } else if (options.deleteOpeningChar && start > 0 && value[start - 1] === options.deleteOpeningChar) {
         start = start - 1;
       }
       let syncEditedValue = () => {
@@ -3108,13 +3110,41 @@ const config = Vue.defineComponent({
     isImeComposingEvent(e) {
       return !!e?.isComposing || e?.keyCode === 229;
     },
+    queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex = 0, options = {}) {
+      if (!e || this.isImeComposingEvent(e)) return;
+      if (e.type === "input") {
+        if (e.isTrusted === false) return;
+        let inputType = String(e.inputType || "");
+        if (inputType !== "insertText" && inputType !== "insertCompositionText") return;
+        if (e.data !== "[") return;
+      } else if (e.type !== "compositionend") return;
+      let committedChars = Array.from(String(e.data || ""));
+      if (committedChars[committedChars.length - 1] !== "[") return;
+      let compositionTarget = options.compositionTarget || e.target;
+      setTimeout(() => {
+        if (!this.editorVisible || this.hlPopup.visible) return;
+        let editorBlock = this.editorBlocks?.[editorIndex];
+        if (!editorBlock) return;
+        let el = this.getEditorRef("translation", editorIndex, editorBlock.isTable ? columnIndex : null);
+        if (!el || el !== compositionTarget || document.activeElement !== el) return;
+        let caret = el.selectionStart;
+        if (typeof caret !== "number" || caret < 1 || (el.value || "").slice(caret - 1, caret) !== "[") return;
+        this.setEditorFocus(editorIndex, columnIndex);
+        this.openHlPopup(editorIndex, { openedByBracket: true, openedByChar: "[", columnIndex });
+      }, 0);
+    },
+    translationCompositionEnd(e, editorIndex, columnIndex = 0) {
+      this.queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex, { compositionTarget: e?.target });
+    },
     translationKeydown(e, editorIndex, columnIndex = 0) {
       if (this.isImeComposingEvent(e)) return;
       if ((e.key === "[" || e.key === "<") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!this.editorVisible) return;
         this.setEditorFocus(editorIndex, columnIndex);
         if (!this.hlPopup.visible) {
-          setTimeout(() => this.openHlPopup(editorIndex, { openedByBracket: e.key === "[", openedByChar: e.key, columnIndex }), 0);
+          setTimeout(() => {
+            if (!this.hlPopup.visible) this.openHlPopup(editorIndex, { openedByBracket: e.key === "[", openedByChar: e.key, columnIndex });
+          }, 0);
         }
         return;
       }
