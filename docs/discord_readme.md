@@ -11,9 +11,9 @@ You can access the live version [here](<https://sdeditor.pages.dev/>), or if you
 5) After you are done, click on 💾 to export `StatDescriptions_Translated.zip` and submit your work
 > Your in-progress edits are stored in your browser (`indexedDB`)
 ## Keyboard shortcuts
-- **Ctrl + Space:** during editing to open the autocomplete menu. SDEditor leaves keys to an active IME composition; if your operating system also uses this shortcut, it can be disabled in Settings and `[` will still open the menu.
+- **Ctrl + Space (default):** during editing to open the autocomplete menu. SDEditor leaves keys to an active IME composition; the binding can be changed to **Ctrl + I** or disabled in Settings, and `[` will still open the menu.
   - **Autocomplete menu:** while it’s open, **Ctrl + Enter** will jump to/edit the matching Dictionary entry, or create one (and focus the right Replace field)
-  - **When you’re done:** press **Ctrl + Space** again (or `[` if the keybinding is disabled) to use the entry you just created; this returns to the translation field
+  - **When you’re done:** use the configured autocomplete shortcut again (or `[`) to use the entry you just created; this returns to the translation field
 - **Ctrl + S:** save the current file
 - **Ctrl + F:** focus on the search bar
 - **F1** / **F2** or **Ctrl + Comma** / **Ctrl + Period**: move to the previous/next file, saving the current file if it has changes

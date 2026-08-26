@@ -112,9 +112,9 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 ### Opening the Helper Popup
 
-While editing a translation, press **Ctrl + Space** or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
+While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
-Like VS Code, SDEditor does not run editor shortcuts while an IME composition is active. If Ctrl + Space is also configured as an operating-system or IME shortcut, you can set **Settings → Autocomplete popup shortcut** to **Disabled** and use the `[` trigger instead.
+Like VS Code, SDEditor does not run editor shortcuts while an IME composition is active. **Ctrl + Space** remains the default, but **Settings → Autocomplete popup shortcut** can change it to **Ctrl + I** or **Disabled**. Disabling the keybinding does not disable the `[` trigger.
 
 - Use **↑ / ↓ Arrow Keys** to navigate the list
 - Press **Enter** to insert the selected item into your translation at the cursor position
@@ -199,7 +199,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 ```
 | Shortcut           | Action                                       |
 |--------------------|----------------------------------------------|
-| Ctrl + Space or [  | Open Autocomplete Popup                      |
+| Configured shortcut or [ | Open Autocomplete Popup                |
 | Ctrl + S           | Save and open next file                      |
 | Escape             | Close the file without saving                |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
@@ -218,7 +218,7 @@ This is faster than manually typing the keyword in the Dictionary panel.
 
 If you see a keyword in the English text that isn't in your Dictionary yet:
 
-1. **Ctrl + Click** the keyword in the English text or use **Ctrl + Space** / **`[`** to open the Autocomplete Popup, then press **Ctrl + Enter** while selecting the keyword
+1. **Ctrl + Click** the keyword in the English text or use the configured shortcut / **`[`** to open the Autocomplete Popup, then press **Ctrl + Enter** while selecting the keyword
 2. A new Dictionary entry is created and appears in the Dictionary panel
 3. Add your translation in the "Replace" field
 4. (Optional) **Enter** to quickly insert it back into your translation at the cursor position.
