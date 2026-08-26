@@ -1892,7 +1892,8 @@ const config = Vue.defineComponent({
         this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
       }
     },
-    translationInput(editorBlock, editorIndex) {
+    translationInput(editorBlock, editorIndex, e) {
+      if (this.isImeComposingEvent(e)) return;
       if (editorBlock?.isTable) {
         this.syncEditorBlockFromTableColumns(editorBlock);
         this.refreshEditorBlockMeta(editorBlock, editorIndex);
@@ -2001,7 +2002,8 @@ const config = Vue.defineComponent({
         this.autosizeTextarea(this.$refs["translation_" + i], { minHeight: 84, maxHeight: 260 });
       }
     },
-    normalizeMultilineEditorBlock(editorBlock, editorIndex) {
+    normalizeMultilineEditorBlock(editorBlock, editorIndex, e) {
+      if (this.isImeComposingEvent(e)) return;
       if (!editorBlock?.isMultiline) return;
       if (editorBlock.isTable) {
         this.syncEditorBlockFromTableColumns(editorBlock);
@@ -2022,7 +2024,8 @@ const config = Vue.defineComponent({
       if (typeof editorIndex === "number") this.refreshEditorBlockMeta(editorBlock, editorIndex);
       this.refreshGamePreview();
     },
-    tableColumnInput(editorBlock, editorIndex, columnIndex) {
+    tableColumnInput(editorBlock, editorIndex, columnIndex, e) {
+      if (this.isImeComposingEvent(e)) return;
       let column = editorBlock?.tableColumns?.[columnIndex];
       if (!column) return;
       let next = column.isMultiline ? this.decodeEscapedNewlines(column.translation || "") : column.translation;
@@ -3092,12 +3095,17 @@ const config = Vue.defineComponent({
       this.insertHlPopupItem(item);
     },
     onDictionaryReplaceEnter(e) {
+      if (this.isImeComposingEvent(e)) return;
       if (!this.hlPopupReturnInfo) return;
       let returnInfo = this.hlPopupReturnInfo;
       this.hlPopupReturnInfo = null;
       this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
     },
+    isImeComposingEvent(e) {
+      return !!e?.isComposing || e?.keyCode === 229;
+    },
     translationKeydown(e, editorIndex, columnIndex = 0) {
+      if (this.isImeComposingEvent(e)) return;
       if ((e.key === "[" || e.key === "<") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!this.editorVisible) return;
         this.setEditorFocus(editorIndex, columnIndex);
@@ -3133,6 +3141,7 @@ const config = Vue.defineComponent({
       }
     },
     hlPopupFilterKeydown(e) {
+      if (this.isImeComposingEvent(e)) return;
       if (!this.hlPopup.visible) return;
       if (e.key === "Escape") {
         e.preventDefault();
@@ -3170,6 +3179,7 @@ const config = Vue.defineComponent({
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
     },
     handleKeydown(e) {
+      if (this.isImeComposingEvent(e)) return;
       if (this.duplicateLangImportWarning && e.key === "Escape") {
         e.preventDefault();
         return;
@@ -4183,6 +4193,7 @@ const config = Vue.defineComponent({
       this.ensureDictionaryKeywordTag(tagName, alt);
     },
     hotkeyPasteHL(e, editorBlock, editorIndex, columnIndex = 0) {
+      if (this.isImeComposingEvent(e)) return;
       let id = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'].indexOf(e.code);
       if (id < 0) return;
       let source = this.getEditorColumn(editorBlock, columnIndex);
@@ -4190,7 +4201,8 @@ const config = Vue.defineComponent({
       let text = source.HLs[id].replace || source.HLs[id].find;
       this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: source.HLs[id].caretOffset });
     },
-    editorShiftEnter() {
+    editorShiftEnter(e) {
+      if (this.isImeComposingEvent(e)) return;
       if (this.shiftEnterSave) {
         if (this.autoOpenNextFile) {
           this.saveAndSkipFile();
@@ -4541,6 +4553,7 @@ const config = Vue.defineComponent({
       await this.saveLocalDescs();
     },
     editorEsc(e) {
+      if (this.isImeComposingEvent(e)) return;
       if (e?.defaultPrevented) return;
       if (this.hlPopup.visible) {
         e?.preventDefault();
