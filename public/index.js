@@ -135,7 +135,7 @@ const config = Vue.defineComponent({
       shiftEnterSave: false,
       autoOpenNextFile: true,
       filterShortcutCtrlD: false,
-      autocompleteShortcut: 'ctrl-i',
+      autocompleteShortcut: 'ctrl-space',
       uiDensity: 'compact',
 
       sideTab: 'dictionary',
@@ -3185,11 +3185,8 @@ const config = Vue.defineComponent({
     isAutocompleteShortcut(e) {
       if (!e || this.autocompleteShortcut === "disabled") return false;
       if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return false;
-      if (this.autocompleteShortcut === "ctrl-space") {
-        return e.code === "Space" || e.key === " ";
-      }
-      return this.autocompleteShortcut === "ctrl-i"
-        && (e.code === "KeyI" || String(e.key || "").toLowerCase() === "i");
+      return this.autocompleteShortcut === "ctrl-space"
+        && (e.code === "Space" || e.key === " ");
     },
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
@@ -4674,7 +4671,7 @@ const config = Vue.defineComponent({
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
       if (typeof settings.filterShortcutCtrlD !== 'undefined') this.filterShortcutCtrlD = !!settings.filterShortcutCtrlD;
-      if (["ctrl-i", "ctrl-space", "disabled"].includes(settings.autocompleteShortcut)) {
+      if (["ctrl-space", "disabled"].includes(settings.autocompleteShortcut)) {
         this.autocompleteShortcut = settings.autocompleteShortcut;
       }
       if (settings.uiDensity === 'compact' || settings.uiDensity === 'spacious') {
