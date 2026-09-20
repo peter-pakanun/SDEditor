@@ -43,6 +43,14 @@ const dummyFile1 = String.raw`description
 	2
 		# # table_only "Dégâts de [Poison|Poison] prévus enmmagasinés (plafond)@{0}% ({1})"
 		# # "Emmagasine {0} % des Dégâts de [Poison|Poison] prévus, jusqu'à {1}\nInflige des Dégâts [Physical|Physiques] équivalents au [Poison|Poison] Emmagasiné"
+	lang "Polish"
+	2
+		# # table_only "Zgromadzone oczekiwane obrażenia od [Poison|trucizny] (maks.)@{0}% ({1})"
+		# # "Gromadzi {0}% oczekiwanych obrażeń od [Poison|trucizny], do {1}\nZadaje obrażenia [Physical|fizyczne] równe zgromadzonej [Poison|truciźnie]"
+	lang "Turkish"
+	2
+		# # table_only "Depolanan beklenen [Poison|Zehir] hasarı (sınır)@{0}% ({1})"
+		# # "Beklenen [Poison|Zehir] hasarının {0}% kadarını, en fazla {1} depolar\nDepolanan [Poison|Zehre] eşit [Physical|Fiziksel] hasar verir"
 `;
 
 const dummyFile2 = String.raw`description

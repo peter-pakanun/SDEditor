@@ -28,7 +28,7 @@ Env vars: `PORT` (3333), `HOST` (127.0.0.1), `NO_OPEN_BROWSER`, `LOG_REQUESTS`, 
 - `translationDiagnostics.js` — translation warning/error scanner used by editor highlights and save guards
 - `offlineStore.js` — IndexedDB persistence (DB `sdeditor`, stores `kv` + `revisions`)
 - `helper.js` — utility functions
-- `dummyFiles.js` — test data (3 files, 10 languages)
+- `dummyFiles.js` — test data (3 files, 12 languages)
 - `FileSaver.js` — client-side file download (not in package.json)
 
 ## Testing

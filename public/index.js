@@ -26,6 +26,8 @@ const SETTINGS_LANG_TO_BCP47 = {
   "Simplified Chinese": "zh-Hans",
   Korean: "ko",
   Japanese: "ja",
+  Polish: "pl",
+  Turkish: "tr",
 };
 
 /** CSS font-family stacks */
@@ -40,6 +42,8 @@ const GAME_PREVIEW_FONT_STACKS = {
   Portuguese: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
   German: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
   Russian: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  Polish: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  Turkish: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
 };
 
 const AppTooltip = {
@@ -87,12 +91,14 @@ const config = Vue.defineComponent({
         "German",
         "Japanese",
         "Korean",
+        "Polish",
         "Portuguese",
         "Russian",
         "Simplified Chinese",
         "Spanish",
         "Thai",
         "Traditional Chinese",
+        "Turkish",
       ],
       lang: "",
       theme: 'light',
