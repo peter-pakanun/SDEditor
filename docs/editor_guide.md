@@ -48,6 +48,26 @@ So it is “missing translation content”, not “missing file”.
 1. Click on any row to open that file in the editor
 2. Or use **F2** to open the first file from the current filtered list
 
+### Scanning Diagnostics
+
+Click **Scan diagnostics** to check every loaded file in the selected language, including files hidden by search or filters. Use **Diagnostic warnings only** or **Diagnostic errors only** to narrow the results. Hover over a flagged file for details.
+
+The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations count as differences. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
+
+Open a flagged file to see alternative translations with their file paths and entry numbers below the affected block. Warnings update as you edit, and saving or restoring a translation refreshes the scan results for matching entries in other files. Inconsistencies are warnings, so the existing **save anyway** confirmation allows intentional variations. Changing language or importing another workspace clears the previous scan results.
+
+#### Dictionary Terminology
+
+Diagnostics also check the words and phrases in your current **Dictionary**, even when the complete English blocks differ. If a dictionary term occurs in the English, the translation must contain the entry's main **Replace** text or any of its alternate **Replace** texts. Otherwise a warning lists the term and its allowed translations below the affected block and in the scan details.
+
+All alternatives belong to the same allowed set: an alternate does not need to match the current English wording to allow its translation. For example, `Fire → ไฟ` with an alternate `Flame → เปลวไฟ` permits either `ไฟ` or `เปลวไฟ` when English contains `Fire` or `Flame`. An alternate may repeat the main **Find**, or leave **Find** blank when it only supplies another allowed translation. Empty replacements and unfinished entries with no usable translation do not create terminology rules.
+
+Source matching uses literal words and phrases, ignoring case; `Fire` does not match `Firestorm`. Longer overlapping phrases take priority, so a `Fire Damage` entry can define the phrase without also requiring the separate `Fire` translation at that occurrence. Target matching ignores case and whitespace formatting, and supports Thai/CJK wording without spaces. Table columns are checked separately; multiline text is checked within its block.
+
+Keyword tags use their dictionary entry's main **Find** to identify the term and check the translated display text. For example, `[Fire|ผิด]` does not pass just because the identifier `Fire` was preserved or `ไฟ` appears elsewhere. Decoration wrappers and variable identifiers do not count as translated wording. Runtime-generated display text is skipped when it cannot be checked reliably.
+
+Terminology warnings refresh when you edit translations or dictionary alternatives. If a diagnostic scan has already run, dictionary changes automatically refresh it after typing pauses. This is a check for allowed wording, not a word-alignment or occurrence-count check: it does not prove that every word was translated correctly. The separate identical-English check still reports differences between complete translations, even when both use allowed dictionary wording.
+
 ## The Editor Interface
 
 The editor shows each string as a block:

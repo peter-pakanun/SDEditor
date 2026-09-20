@@ -203,6 +203,17 @@ input:focus, button:focus, textarea:focus {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-warning) 45%, transparent) inset;
 }
 
+.consistencyWarning,
+.terminologyWarning {
+  margin: calc(0.4em * var(--density)) 0;
+  padding: calc(0.6em * var(--density));
+  border-left: 3px solid var(--color-diagnostic-warning-border);
+  background-color: var(--color-diagnostic-warning);
+  font-size: calc(12px * var(--density));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .metaPill.diagnosticErrorPill {
   background-color: var(--color-diagnostic-error);
   border-color: var(--color-diagnostic-error-border);

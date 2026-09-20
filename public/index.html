@@ -239,7 +239,7 @@
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Ctrl + Click to do a full export'" aria-label="Export ZIP">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
-          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="scanAllDiagnostics" v-tooltip="'Scan every file using the same warning/error diagnostics shown in the editor'">
+          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="scanAllDiagnostics" v-tooltip="'Scan every file for translation errors, dictionary terminology, and inconsistent translations of identical English entries in the selected language'">
             {{ diagnosticScanRunning ? ('Scanning ' + diagnosticScanProcessed + '/' + diagnosticScanTotal) : 'Scan diagnostics' }}
           </button>
           <span v-if="diagnosticScanCompleted" class="diagnosticScanSummary">Error files: {{ diagnosticScanErrorFileCount }} | Warning files: {{ diagnosticScanWarningFileCount }}</span>
@@ -446,9 +446,11 @@
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" v-tooltip="'Variable tags (translation / english)'"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" v-tooltip="'Keyword tags (translation / english)'"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaDecorTr !== editorBlock.metaDecorEn }" v-tooltip="'Text decoration tags (translation / english)'"><span class="metaIcon">&lt;&gt;</span><span class="metaNum">{{ editorBlock.metaDecorTr }}/{{ editorBlock.metaDecorEn }}</span></span>
-            <span v-if="editorBlock.diagnosticWarningCount > 0" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning')"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount }}</span></span>
+            <span v-if="editorBlock.diagnosticWarningCount > 0 || editorConsistencyDiagnostics[index]" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning', index)"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount + (editorConsistencyDiagnostics[index] ? 1 : 0) }}</span></span>
             <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
           </div>
+          <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning" role="note">{{ editorConsistencyDiagnostics[index].message }}</div>
+          <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
             <input type="text" placeholder="Replace" v-model="word.replace" :lang="translationEditorBcp47" @input="doTranslationReplace(editorBlock, true)">
@@ -576,6 +578,7 @@
   <script src="statDescParser.js"></script>
   <script src="regexEngine.js"></script>
   <script src="translationDiagnostics.js"></script>
+  <script src="terminologyDiagnostics.js"></script>
   <script src="offlineStore.js"></script>
   <script src="index.js"></script>
 </body>

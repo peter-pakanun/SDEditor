@@ -359,10 +359,113 @@
     };
   }
 
+  function normalizeConsistencyText(value) {
+    return String(value ?? "").replace(/\r\n?/g, "\n").replace(/\\n/g, "\n");
+  }
+
+  function addConsistencyEntry(index, english, translation, location) {
+    const source = normalizeConsistencyText(english);
+    if (!source) return;
+    const target = normalizeConsistencyText(translation);
+    let group = index.get(source);
+    if (!group) {
+      group = { variants: new Map(), entryCount: 0 };
+      index.set(source, group);
+    }
+    if (!group.variants.has(target)) group.variants.set(target, []);
+    group.variants.get(target).push(location);
+    group.entryCount++;
+  }
+
+  function createConsistencyIndex(descs, lang) {
+    const index = new Map();
+    for (const desc of (Array.isArray(descs) ? descs : [])) {
+      const english = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
+      const translations = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
+      for (let blockIndex = 0; blockIndex < english.length; blockIndex++) {
+        addConsistencyEntry(index, english[blockIndex], translations[blockIndex], {
+          filepath: String(desc?.filepath ?? ""),
+          blockIndex
+        });
+      }
+    }
+    return index;
+  }
+
+  function createEditedConsistencyIndex(index, filepath, entries) {
+    const edited = new Map();
+    const draftEntries = Array.isArray(entries) ? entries : [];
+    const editedFilepath = String(filepath ?? "");
+
+    // Only copy groups used by this draft, replacing every saved entry from its file.
+    for (const entry of draftEntries) {
+      const source = normalizeConsistencyText(entry?.english);
+      if (!source || edited.has(source)) continue;
+      const group = { variants: new Map(), entryCount: 0 };
+      edited.set(source, group);
+      const savedGroup = index?.get(source);
+      for (const [translation, locations] of (savedGroup?.variants || [])) {
+        const peers = locations.filter(location => location.filepath !== editedFilepath)
+          .map(location => ({ ...location }));
+        if (peers.length === 0) continue;
+        group.variants.set(translation, peers);
+        group.entryCount += peers.length;
+      }
+    }
+
+    for (const entry of draftEntries) {
+      addConsistencyEntry(edited, entry?.english, entry?.translation, {
+        filepath: editedFilepath,
+        blockIndex: entry?.blockIndex
+      });
+    }
+    return edited;
+  }
+
+  function consistencyTranslationPreview(translation) {
+    if (translation === "") return "(empty translation)";
+    const quoted = JSON.stringify(translation);
+    if (quoted.length <= 160) return quoted;
+    let shortened = translation.slice(0, 155);
+    while (JSON.stringify(shortened + "...").length > 160) shortened = shortened.slice(0, -1);
+    return JSON.stringify(shortened + "...");
+  }
+
+  function getConsistencyDiagnostic(index, english, translation) {
+    const source = normalizeConsistencyText(english);
+    if (!source) return null;
+    const group = index?.get(source);
+    if (!group || group.variants.size < 2) return null;
+    const currentTranslation = normalizeConsistencyText(translation);
+    const examples = [];
+    const otherVariantCount = group.variants.size - (group.variants.has(currentTranslation) ? 1 : 0);
+    for (const [variant, locations] of group.variants) {
+      if (variant === currentTranslation) continue;
+      const location = locations[0];
+      examples.push(`${location.filepath} #${Number(location.blockIndex || 0) + 1}: ${consistencyTranslationPreview(variant)}`);
+      if (examples.length >= 3) break;
+    }
+    const omitted = otherVariantCount - examples.length;
+    let message = `Inconsistent translation: identical English has ${group.variants.size} different translations across ${group.entryCount} entries.`;
+    if (examples.length > 0) message += ` Other translations: ${examples.join("; ")}.`;
+    if (omitted > 0) message += ` ${omitted} more translation variant(s) omitted.`;
+    return {
+      level: LEVEL_WARNING,
+      code: "inconsistent-translation",
+      message,
+      variantCount: group.variants.size,
+      entryCount: group.entryCount
+    };
+  }
+
   const api = {
     LEVEL_WARNING,
     LEVEL_ERROR,
-    analyze
+    analyze,
+    normalizeConsistencyText,
+    createConsistencyIndex,
+    createEditedConsistencyIndex,
+    getConsistencyDiagnostic
   };
 
   if (typeof module !== "undefined" && module.exports) {
