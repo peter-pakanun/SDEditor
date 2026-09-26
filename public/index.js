@@ -1630,7 +1630,8 @@ const config = Vue.defineComponent({
         const key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
         tags.push({
           full,
-          key: String(key),
+          // Diagnostics distinguish percent values; preview inputs still share the bare identity.
+          key: `{${key}}${full.endsWith("%") ? "%" : ""}`,
           start: offset + m.index,
           end: offset + m.index + full.length
         });
@@ -1648,7 +1649,7 @@ const config = Vue.defineComponent({
     formatGggVarIdentityCounts(counts) {
       return Object.keys(counts || {})
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-        .map(key => `{${key}}${counts[key] > 1 ? ` x${counts[key]}` : ""}`)
+        .map(key => `${key}${counts[key] > 1 ? ` x${counts[key]}` : ""}`)
         .join(", ") || "none";
     },
     findGggVarIdentityMismatchRange(englishCounts, translationLine, translationTags) {

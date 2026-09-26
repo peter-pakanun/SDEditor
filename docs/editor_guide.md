@@ -89,6 +89,8 @@ The editor shows each string as a block:
 
 These are placeholders that the game fills in at runtime. They **must** be preserved exactly and in the same quantity in your translation.
 
+Diagnostics also require a `%` immediately after a variable to be preserved: `{1}` and `{1}%` are different forms. Adding or removing the suffix is an error in the scan and editor, and must be fixed before saving. Variables may be reordered, but each variable's plain and percentage occurrence counts must match the English.
+
 **Example:**
 ```
 English:   Deals {0}% more damage
