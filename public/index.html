@@ -415,6 +415,7 @@
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+          <div v-if="consistencyResolutionNotice" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</div>
           <div v-if="editorCompareActive" class="compareBanner">
             <span>{{ editorCompareTitle }}</span>
             <button @click="exitEditorCompareMode">Exit compare</button>
@@ -485,7 +486,10 @@
             <span v-if="editorBlock.diagnosticWarningCount > 0 || editorConsistencyDiagnostics[index]" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning', index)"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount + (editorConsistencyDiagnostics[index] ? 1 : 0) }}</span></span>
             <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
           </div>
-          <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning" role="note">{{ editorConsistencyDiagnostics[index].message }}</div>
+          <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning consistencyPrompt" role="note">
+            <div><strong>Inconsistent translations</strong><span>{{ editorConsistencyDiagnostics[index].variantCount }} versions across {{ editorConsistencyDiagnostics[index].entryCount }} entries with identical English</span></div>
+            <button @click="openConsistencyResolver(index)" :disabled="editorCompareActive">Compare &amp; resolve</button>
+          </div>
           <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
           <div class="inputField" v-for="word in editorBlock.words">
             <input type="text" placeholder="Captured" v-model="word.captured" readonly>
@@ -599,6 +603,86 @@
         </div>
       </div>
     </div>
+
+    <dialog ref="consistencyDialog" class="consistencyDialog" aria-labelledby="consistencyDialogTitle" @cancel.prevent="closeConsistencyResolver" @keydown.stop="consistencyDialogKeydown">
+      <template v-if="consistencyResolver">
+        <div class="consistencyDialogHeading">
+          <div>
+            <h2 id="consistencyDialogTitle">Resolve inconsistent translations</h2>
+            <p>{{ lang }} · {{ consistencyResolver.entryCount }} entries across {{ consistencyResolver.fileCount }} {{ consistencyResolver.fileCount === 1 ? 'file' : 'files' }} with identical English</p>
+          </div>
+          <button @click="closeConsistencyResolver" :disabled="consistencyResolverBusy" aria-label="Close translation comparison">✕</button>
+        </div>
+        <section class="consistencySource" aria-labelledby="consistencySourceTitle">
+          <h3 id="consistencySourceTitle">Shared English</h3>
+          <pre lang="en">{{ consistencyResolver.sourceEnglish }}</pre>
+        </section>
+        <div class="consistencyChoices">
+          <section v-if="consistencyCurrentChoice" class="consistencyChoice" aria-labelledby="consistencyCurrentTitle">
+            <div class="consistencyChoiceHeading">
+              <h3 id="consistencyCurrentTitle">This entry</h3>
+              <span>Current version</span>
+            </div>
+            <pre class="consistencyChoiceText" :lang="translationEditorBcp47">{{ consistencyCurrentChoice.text || 'Empty translation — applying this clears the matching entries' }}</pre>
+            <details class="consistencyLocations">
+              <summary>Used in {{ consistencyCurrentChoice.locations.length }} {{ consistencyCurrentChoice.locations.length === 1 ? 'entry' : 'entries' }}</summary>
+              <ul><li v-for="location in consistencyCurrentChoice.locations" :key="location.filepath + ':' + location.blockIndex">{{ location.filepath }} #{{ location.blockIndex + 1 }}</li></ul>
+            </details>
+            <div v-if="consistencyCurrentChoice.errors.length" class="consistencyChoiceIssues error" role="note">
+              <strong>Fix errors before using this version</strong>
+              <ul><li v-for="(diagnostic, diagnosticIndex) in consistencyCurrentChoice.errors" :key="diagnosticIndex">{{ diagnostic.message || diagnostic }}</li></ul>
+            </div>
+            <details v-if="consistencyCurrentChoice.warnings.length" class="consistencyChoiceIssues warning">
+              <summary>{{ consistencyCurrentChoice.warnings.length }} {{ consistencyCurrentChoice.warnings.length === 1 ? 'warning' : 'warnings' }} to review</summary>
+              <ul><li v-for="(diagnostic, diagnosticIndex) in consistencyCurrentChoice.warnings" :key="diagnosticIndex">{{ diagnostic.message || diagnostic }}</li></ul>
+            </details>
+            <div class="consistencyChoiceAction">
+              <p>Updates {{ consistencyCurrentChoice.changeCount }} {{ consistencyCurrentChoice.changeCount === 1 ? 'entry' : 'entries' }} in {{ consistencyCurrentChoice.changeFileCount }} {{ consistencyCurrentChoice.changeFileCount === 1 ? 'file' : 'files' }}</p>
+              <button @click="applyConsistencyVersion(consistencyCurrentChoice.text)" :disabled="consistencyResolverBusy || consistencyCurrentChoice.errors.length > 0">{{ consistencyCurrentChoice.text ? 'Use this version' : 'Use empty translation' }} for all {{ consistencyResolver.entryCount }} entries</button>
+            </div>
+          </section>
+          <section v-if="consistencyOtherChoice" class="consistencyChoice" aria-labelledby="consistencyOtherTitle">
+            <div class="consistencyChoiceHeading">
+              <label id="consistencyOtherTitle" for="consistencyOtherVersion">Compare with</label>
+              <select id="consistencyOtherVersion" v-model.number="consistencyOtherVersion" :disabled="consistencyResolverBusy">
+                <option v-for="version in consistencyAlternatives" :key="version.id" :value="version.id">{{ version.label }}</option>
+              </select>
+            </div>
+            <pre class="consistencyChoiceText" :lang="translationEditorBcp47">{{ consistencyOtherChoice.text || 'Empty translation — applying this clears the matching entries' }}</pre>
+            <details class="consistencyLocations">
+              <summary>Used in {{ consistencyOtherChoice.locations.length }} {{ consistencyOtherChoice.locations.length === 1 ? 'entry' : 'entries' }}</summary>
+              <ul><li v-for="location in consistencyOtherChoice.locations" :key="location.filepath + ':' + location.blockIndex">{{ location.filepath }} #{{ location.blockIndex + 1 }}</li></ul>
+            </details>
+            <div v-if="consistencyOtherChoice.errors.length" class="consistencyChoiceIssues error" role="note">
+              <strong>Fix errors before using this version</strong>
+              <ul><li v-for="(diagnostic, diagnosticIndex) in consistencyOtherChoice.errors" :key="diagnosticIndex">{{ diagnostic.message || diagnostic }}</li></ul>
+            </div>
+            <details v-if="consistencyOtherChoice.warnings.length" class="consistencyChoiceIssues warning">
+              <summary>{{ consistencyOtherChoice.warnings.length }} {{ consistencyOtherChoice.warnings.length === 1 ? 'warning' : 'warnings' }} to review</summary>
+              <ul><li v-for="(diagnostic, diagnosticIndex) in consistencyOtherChoice.warnings" :key="diagnosticIndex">{{ diagnostic.message || diagnostic }}</li></ul>
+            </details>
+            <div class="consistencyChoiceAction">
+              <p>Updates {{ consistencyOtherChoice.changeCount }} {{ consistencyOtherChoice.changeCount === 1 ? 'entry' : 'entries' }} in {{ consistencyOtherChoice.changeFileCount }} {{ consistencyOtherChoice.changeFileCount === 1 ? 'file' : 'files' }}</p>
+              <button @click="applyConsistencyVersion(consistencyOtherChoice.text)" :disabled="consistencyResolverBusy || consistencyOtherChoice.errors.length > 0">{{ consistencyOtherChoice.text ? 'Use this version' : 'Use empty translation' }} for all {{ consistencyResolver.entryCount }} entries</button>
+            </div>
+          </section>
+        </div>
+        <section class="consistencyDiff" aria-labelledby="consistencyDiffTitle">
+          <div class="consistencyDiffHeading">
+            <h3 id="consistencyDiffTitle">Differences: this entry → compared version</h3>
+            <label><input type="checkbox" v-model="consistencyShowWhitespace"> Show spaces &amp; line breaks</label>
+          </div>
+          <p class="consistencyDiffLegend"><span class="diffInlineDel">Removed from this entry</span><span class="diffInlineAdd">Added in compared version</span></p>
+          <div class="englishDiff" v-html="consistencyDiffHtml" :lang="translationEditorBcp47"></div>
+        </section>
+        <p v-if="consistencyResolverError" class="consistencyResolverError" role="alert">{{ consistencyResolverError }}</p>
+        <footer class="consistencyDialogFooter">
+          <p v-if="consistencyResolverBusy" role="status">Saving matching translations…</p>
+          <p>Choosing a version saves matching entries immediately. Other edits stay in your draft.</p>
+          <p>Previous translations remain in each file’s translation history.</p>
+        </footer>
+      </template>
+    </dialog>
 
     <div v-if="settingsImportDraft" class="cloudResolverBackdrop" @keydown.esc="cancelSettingsImport">
       <section class="cloudResolver cloudImportConfirm" role="dialog" aria-modal="true" aria-labelledby="settingsImportTitle">

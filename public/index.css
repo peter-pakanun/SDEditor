@@ -249,6 +249,311 @@ input:focus, button:focus, textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.consistencyPrompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  white-space: normal;
+}
+
+.consistencyPrompt strong,
+.consistencyPrompt span {
+  display: block;
+}
+
+.consistencyPrompt span {
+  margin-top: 3px;
+}
+
+.consistencyPrompt button {
+  flex-shrink: 0;
+  line-height: 1.5;
+  border-radius: 4px;
+}
+
+.consistencyResolutionNotice {
+  padding: 10px 12px;
+  margin: 10px 0;
+  border: 1px solid var(--color-element-highlight);
+  border-left-width: 4px;
+  background: var(--color-bg2);
+  line-height: 1.6;
+}
+
+.consistencyDialog {
+  box-sizing: border-box;
+  width: min(1100px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 40px);
+  padding: 24px;
+  overflow: auto;
+  color: var(--color-font);
+  background: var(--color-bg);
+  border: 1px solid var(--color-element-highlight);
+  border-radius: 10px;
+  box-shadow: 0 16px 60px var(--color-shadow);
+  font: inherit;
+  font-size: calc(13px * var(--density));
+  line-height: 1.6;
+}
+
+.consistencyDialog::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.consistencyDialog h2,
+.consistencyDialog h3,
+.consistencyDialog p,
+.consistencyDialog pre {
+  margin: 0;
+}
+
+.consistencyDialog h2 {
+  font-size: 1.5em;
+  line-height: 1.35;
+}
+
+.consistencyDialog h3 {
+  font-size: 1em;
+}
+
+.consistencyDialogHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.consistencyDialogHeading p {
+  margin-top: 6px;
+}
+
+.consistencyDialogHeading > button {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding: 5px 12px;
+  border-radius: 4px;
+}
+
+.consistencyDialog :focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+.consistencyDialog button:disabled,
+.consistencyDialog select:disabled,
+.consistencyPrompt button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.consistencySource {
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  background: var(--color-bg2);
+  border-left: 3px solid var(--color-element-highlight);
+  border-radius: 3px;
+}
+
+.consistencySource pre {
+  max-height: 9em;
+  overflow: auto;
+  margin-top: 4px;
+}
+
+.consistencyDialog pre,
+.consistencyDialog .englishDiff {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  line-height: 1.8;
+}
+
+.consistencyChoices {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.consistencyChoice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--color-element);
+  border: 1px solid var(--color-element-highlight);
+  border-radius: 6px;
+}
+
+.consistencyChoiceHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.consistencyChoiceHeading label {
+  font-weight: 700;
+}
+
+.consistencyChoiceHeading select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  line-height: 1.5;
+  border-radius: 4px;
+}
+
+.consistencyChoiceText {
+  flex-grow: 1;
+  padding: 12px;
+  min-height: 3.6em;
+  background: var(--color-bg);
+  border-radius: 3px;
+  font-size: 1.1em;
+}
+
+.consistencyLocations summary,
+.consistencyChoiceIssues summary {
+  cursor: pointer;
+}
+
+.consistencyLocations ul {
+  max-height: 10em;
+  overflow: auto;
+}
+
+.consistencyDialog ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+.consistencyChoiceIssues,
+.consistencyResolverError {
+  padding: 8px 12px;
+  border-left: 3px solid;
+  border-radius: 3px;
+}
+
+.consistencyChoiceIssues.warning {
+  background: var(--color-diagnostic-warning);
+  border-color: var(--color-diagnostic-warning-border);
+}
+
+.consistencyChoiceIssues.error,
+.consistencyResolverError {
+  background: var(--color-diagnostic-error);
+  border-color: var(--color-diagnostic-error-border);
+}
+
+.consistencyChoiceAction {
+  margin-top: auto;
+}
+
+.consistencyChoiceAction p {
+  margin-bottom: 8px;
+}
+
+.consistencyChoiceAction button {
+  width: 100%;
+  padding: 10px 12px;
+  color: white;
+  background: var(--color-element-highlight);
+  border: 1px solid var(--color-element-highlight);
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.consistencyDiff {
+  margin-top: 24px;
+}
+
+.consistencyDiffHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.consistencyDiffHeading label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.consistencyDiffHeading input {
+  margin: 0;
+}
+
+.consistencyDiffLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 0 12px;
+}
+
+.consistencyDiffLegend span {
+  padding: 1px 5px;
+}
+
+.consistencyDialog .diffInlineAdd {
+  background: rgba(24, 170, 75, 0.25);
+  border-bottom: 2px solid #23964c;
+}
+
+.consistencyDialog .diffInlineDel {
+  background: rgba(220, 60, 70, 0.25);
+  border-bottom: 2px solid #cc4555;
+}
+
+.consistencyDialog .englishDiff {
+  padding: 12px 16px;
+  border-color: var(--color-element-highlight);
+  border-radius: 4px;
+  font-size: 1.1em;
+}
+
+.consistencyDialog .consistencyResolverError {
+  margin-top: 16px;
+}
+
+.consistencyDialogFooter {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-element-alt);
+}
+
+.consistencyDialogFooter p + p {
+  margin-top: 4px;
+}
+
+@media (max-width: 700px) {
+  .consistencyPrompt {
+    flex-wrap: wrap;
+  }
+  .consistencyDialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    padding: 16px;
+  }
+  .consistencyChoices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .consistencyChoice {
+    padding: 12px;
+  }
+}
+
 .metaPill.diagnosticErrorPill {
   background-color: var(--color-diagnostic-error);
   border-color: var(--color-diagnostic-error-border);

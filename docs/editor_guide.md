@@ -62,7 +62,11 @@ Click **Scan diagnostics** to check every loaded file in the selected language, 
 
 The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations count as differences. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
 
-Open a flagged file to see alternative translations with their file paths and entry numbers below the affected block. Warnings update as you edit, and saving or restoring a translation refreshes the scan results for matching entries in other files. Inconsistencies are warnings, so the existing **save anyway** confirmation allows intentional variations. Changing language or importing another workspace clears the previous scan results.
+Open a flagged file and click **Compare & resolve** below the affected block. The comparison shows the full versions, their file locations and entry counts, and an inline diff. Pick another version from **Compare with** when there are more than two. Changes are highlighted character by character, including Thai text; enable **Show spaces & line breaks** to inspect small formatting differences.
+
+Click **Use this version for all N entries** on either side to save that version to every loaded entry with identical English in the selected language, including matches hidden by filters. Each button shows how many entries and files it will update. Matching drafts are included; unrelated unsaved edits stay in your editor. Invalid tags or a mismatched table column count must be fixed before a version can be applied. Empty versions are labeled explicitly. The workspace and before/after translation history are saved together, so previous saved translations can be restored from each file's **History** panel. A failed save leaves the entries unchanged.
+
+Warnings update as you edit, and saving, resolving, or restoring a translation refreshes scan results. Inconsistencies remain warnings, so you can close the comparison and use the existing **save anyway** confirmation for intentional variations. Changing language or importing another workspace clears the previous scan results.
 
 #### Dictionary Terminology
 

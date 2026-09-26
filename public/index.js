@@ -136,6 +136,12 @@ const config = Vue.defineComponent({
       diagnosticScanErrorFileCount: 0,
       diagnosticScanWarningFileCount: 0,
       diagnosticScanRunId: 0,
+      consistencyResolver: null,
+      consistencyResolverBusy: false,
+      consistencyResolverError: '',
+      consistencyOtherVersion: 0,
+      consistencyShowWhitespace: false,
+      consistencyResolutionNotice: '',
       hideDNT: true,
       hideSourceInPreviewPanel: false,
       highlightDict: true,
@@ -444,6 +450,23 @@ const config = Vue.defineComponent({
       const diagnostics = window.TranslationDiagnostics;
       const index = diagnostics.createEditedConsistencyIndex(this.translationConsistencyIndex, desc.filepath, entries);
       return entries.map(entry => diagnostics.getConsistencyDiagnostic(index, entry.english, entry.translation));
+    },
+    consistencyCurrentChoice() {
+      return this.consistencyResolver ? this.buildConsistencyChoice(this.consistencyResolver.currentTranslation) : null;
+    },
+    consistencyAlternatives() {
+      const resolver = this.consistencyResolver;
+      return (resolver?.versions || []).filter(version => version.text !== resolver.currentTranslation);
+    },
+    consistencyOtherChoice() {
+      const version = this.consistencyAlternatives.find(item => item.id === this.consistencyOtherVersion);
+      return version ? this.buildConsistencyChoice(version.text) : null;
+    },
+    consistencyDiffHtml() {
+      if (!this.consistencyCurrentChoice || !this.consistencyOtherChoice) return '';
+      return this.renderInlineDiffHtml(this.consistencyCurrentChoice.text, this.consistencyOtherChoice.text, {
+        characters: true, showWhitespace: this.consistencyShowWhitespace,
+      });
     },
     editorDiagnosticWarningCount() {
       return this.collectEditorDiagnostics("warning").length;
@@ -1001,17 +1024,20 @@ const config = Vue.defineComponent({
         this.applyEditorEnglishDiff(b, oldRaw, newRaw, newRaw);
       }
     },
-    renderInlineDiffHtml(oldStr, newStr) {
+    renderInlineDiffHtml(oldStr, newStr, options = {}) {
       const diffApi = window.Diff;
       if (!diffApi) return escapeHtml(String(newStr ?? ''));
       let parts;
       try {
-        parts = diffApi.diffWordsWithSpace(String(oldStr ?? ''), String(newStr ?? ''));
+        const diff = options.characters && diffApi.diffChars ? diffApi.diffChars : diffApi.diffWordsWithSpace;
+        parts = diff(String(oldStr ?? ''), String(newStr ?? ''));
       } catch (_) {
         parts = [{ value: String(newStr ?? '') }];
       }
       return (parts || []).map(p => {
-        const v = escapeHtml(String(p?.value ?? ''));
+        let value = String(p?.value ?? '');
+        if (options.showWhitespace) value = value.replace(/ /g, '·').replace(/\u00a0/g, '⍽').replace(/\t/g, '⇥   ').replace(/\n/g, '↵\n');
+        const v = escapeHtml(value);
         if (p?.added) return `<span class="diffInlineAdd">${v}</span>`;
         if (p?.removed) return `<span class="diffInlineDel">${v}</span>`;
         return v;
@@ -1368,6 +1394,200 @@ const config = Vue.defineComponent({
     },
     emptyTranslationDiagnostics() {
       return { diagnostics: [], warningCount: 0, errorCount: 0 };
+    },
+    getConsistencyResolutionEntries(sourceEnglish) {
+      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
+      const entries = [];
+      for (const desc of this.descs) {
+        for (let blockIndex = 0; blockIndex < (desc.translations?.English || []).length; blockIndex++) {
+          if (normalize(desc.translations.English[blockIndex]) !== sourceEnglish) continue;
+          const savedTranslation = String(desc.translations[this.lang]?.[blockIndex] ?? '');
+          const block = this.editorVisible && desc.filepath === this.editorCurrentEditingDesc?.filepath
+            ? this.editorBlocks[blockIndex] : null;
+          const draft = block?.isTable
+            ? this.joinTableColumns(this.getSerializableTableColumns(block).map(column => column.translation ?? ''))
+            : block?.translation;
+          entries.push({ filepath: desc.filepath, blockIndex, savedTranslation, translation: normalize(draft ?? savedTranslation) });
+        }
+      }
+      return entries;
+    },
+    async openConsistencyResolver(blockIndex) {
+      if (this.editorCompareActive || !this.editorVisible || this.consistencyResolverBusy) return;
+      const desc = this.editorCurrentEditingDesc;
+      const sourceEnglish = window.TranslationDiagnostics.normalizeConsistencyText(desc?.translations?.English?.[blockIndex]);
+      if (!sourceEnglish) return;
+      const entries = this.getConsistencyResolutionEntries(sourceEnglish);
+      const current = entries.find(entry => entry.filepath === desc.filepath && entry.blockIndex === blockIndex);
+      if (!current) return;
+      const variants = new Map();
+      for (const entry of entries) {
+        if (!variants.has(entry.translation)) variants.set(entry.translation, []);
+        variants.get(entry.translation).push({ filepath: entry.filepath, blockIndex: entry.blockIndex });
+      }
+      if (variants.size < 2) return;
+      const versions = Array.from(variants, ([text, locations], id) => ({
+        id, text, locations, label: `Version ${id + 1} · ${locations.length} ${locations.length === 1 ? 'entry' : 'entries'}`,
+      }));
+      this._consistencyReturnFocus = document.activeElement;
+      this.consistencyResolver = {
+        sourceEnglish, entries, versions, currentTranslation: current.translation,
+        filepath: desc.filepath, blockIndex, lang: this.lang, gameVersion: this.gameVersion,
+        entryCount: entries.length, fileCount: new Set(entries.map(entry => entry.filepath)).size,
+      };
+      this.consistencyOtherVersion = versions.find(version => version.text !== current.translation).id;
+      this.consistencyShowWhitespace = false;
+      this.consistencyResolverError = '';
+      this.consistencyResolutionNotice = '';
+      this.closeHlPopup();
+      this.hideTooltip();
+      await this.$nextTick();
+      this.$refs.consistencyDialog?.showModal();
+    },
+    closeConsistencyResolver() {
+      if (this.consistencyResolverBusy) return;
+      const blockIndex = this.consistencyResolver?.blockIndex ?? this.editorFocusedIndex ?? 0;
+      this.$refs.consistencyDialog?.close();
+      this.consistencyResolver = null;
+      this.consistencyResolverError = '';
+      this.$nextTick(() => {
+        if (this._consistencyReturnFocus?.isConnected) this._consistencyReturnFocus.focus();
+        else this.getEditorRef('translation', blockIndex, this.editorBlocks[blockIndex]?.isTable ? 0 : null)?.focus?.();
+        this._consistencyReturnFocus = null;
+      });
+    },
+    consistencyDialogKeydown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.closeConsistencyResolver();
+      } else if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') event.preventDefault();
+    },
+    buildConsistencyChoice(text) {
+      const resolver = this.consistencyResolver;
+      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
+      const changed = resolver.entries.filter(entry => entry.translation !== text || normalize(entry.savedTranslation) !== text);
+      const diagnostics = [];
+      const englishColumns = this.isTableText(resolver.sourceEnglish) || this.isTableText(text)
+        ? this.splitTableColumns(resolver.sourceEnglish) : [resolver.sourceEnglish];
+      const translationColumns = englishColumns.length > 1 || this.isTableText(text) ? this.splitTableColumns(text) : [text];
+      for (let i = 0; i < Math.max(englishColumns.length, translationColumns.length); i++) {
+        diagnostics.push(...this.analyzeTranslationDiagnostics(translationColumns[i] ?? '', englishColumns[i] ?? '', resolver.lang).diagnostics);
+      }
+      if (!text.trim()) diagnostics.push({ level: 'warning', message: 'Empty translation: applying this version clears all matching entries.' });
+      if (englishColumns.length !== translationColumns.length) diagnostics.push({ level: 'error', message: 'Match the English table column count before applying this version to all entries.' });
+      if (this.computeTextStats(text).lines !== this.computeTextStats(resolver.sourceEnglish).lines) {
+        diagnostics.push({ level: 'warning', message: 'The number of lines differs from English.' });
+      }
+      return {
+        text, locations: resolver.versions.find(version => version.text === text)?.locations || [],
+        changeCount: changed.length, changeFileCount: new Set(changed.map(entry => entry.filepath)).size,
+        errors: diagnostics.filter(item => item.level === 'error'), warnings: diagnostics.filter(item => item.level === 'warning'),
+      };
+    },
+    async applyConsistencyVersion(text) {
+      const resolver = this.consistencyResolver;
+      if (!resolver || this.consistencyResolverBusy || this.editorCompareActive) return false;
+      const originalBlocks = this.editorBlocks;
+      this.consistencyResolverError = '';
+      if (this.lang !== resolver.lang || this.gameVersion !== resolver.gameVersion
+        || !this.editorVisible || this.editorCurrentEditingDesc?.filepath !== resolver.filepath
+        || JSON.stringify(this.getConsistencyResolutionEntries(resolver.sourceEnglish)) !== JSON.stringify(resolver.entries)) {
+        this.consistencyResolverError = 'These entries changed while the comparison was open. Close it and compare again.';
+        return false;
+      }
+      if (!resolver.versions.some(version => version.text === text)) return false;
+      const choice = this.buildConsistencyChoice(text);
+      if (choice.errors.length) {
+        this.consistencyResolverError = 'Fix the errors in this version before applying it to other entries.';
+        return false;
+      }
+      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
+      const nextWorkspace = this.toPlainForStorage(this.localDescs);
+      if (!nextWorkspace) {
+        this.consistencyResolverError = 'The workspace could not be prepared for saving. No entries were changed.';
+        return false;
+      }
+      if (!Array.isArray(nextWorkspace.descs)) nextWorkspace.descs = [];
+      if (!nextWorkspace.status) nextWorkspace.status = {};
+      const encoded = this.encodeNewlines(text);
+      const updates = new Map();
+      const revisions = [];
+      const savedAt = Date.now();
+      // Stage all files first. Unrelated editor drafts never enter the stored snapshot.
+      for (const entry of resolver.entries) {
+        if (normalize(entry.savedTranslation) === text) continue;
+        if (!updates.has(entry.filepath)) {
+          const desc = this.getDescByFilepath(entry.filepath);
+          updates.set(entry.filepath, { desc, before: [...(desc.translations[resolver.lang] || [])], lines: [...(desc.translations[resolver.lang] || [])] });
+        }
+        updates.get(entry.filepath).lines[entry.blockIndex] = encoded;
+      }
+      for (const { desc, before, lines } of updates.values()) {
+        const isMissing = computeIsMissing(desc.translations.English.length, lines);
+        const local = nextWorkspace.descs.find(item => item.filepath === desc.filepath);
+        if (local) updateLocalDesc(local, desc, resolver.lang, lines, { hasChanges: true, isMissing });
+        else nextWorkspace.descs.push(makeLocalDesc(desc, resolver.lang, lines, { hasChanges: true, isMissing }));
+        nextWorkspace.status[desc.filepath] = { ...(nextWorkspace.status[desc.filepath] || {}), lastTranslatedAt: savedAt, lastEditedAt: savedAt };
+        const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: resolver.lang };
+        revisions.push(
+          { ...metadata, savedAt: savedAt - 1, note: 'Before consistency resolution', translations: before, isMissing: computeIsMissing(desc.translations.English.length, before) },
+          { ...metadata, savedAt, note: 'Resolve inconsistent translations', translations: lines, isMissing },
+        );
+      }
+      this.consistencyResolverBusy = true;
+      try {
+        if (updates.size && !this.testMode) {
+          if (!window.OfflineStore?.saveWorkspaceWithRevisions) throw new Error('Local storage is unavailable.');
+          const snapshot = this.toPlainForStorage({ workspace: nextWorkspace, revisions });
+          if (!snapshot) throw new Error('The workspace could not be serialized.');
+          await window.OfflineStore.saveWorkspaceWithRevisions(snapshot.workspace, snapshot.revisions, resolver.gameVersion);
+        }
+      } catch (error) {
+        this.consistencyResolverError = `Could not save the resolution. No entries were changed. ${error.message || error}`;
+        this.consistencyResolverBusy = false;
+        return false;
+      }
+      // A background settings sync can switch language while storage is committing.
+      // The committed batch belongs to its captured version; never replace another
+      // version's workspace or write into a newly opened editor.
+      const sameVersion = this.gameVersion === resolver.gameVersion;
+      const sameEditor = sameVersion && this.lang === resolver.lang && this.editorBlocks === originalBlocks
+        && this.editorCurrentEditingDesc?.filepath === resolver.filepath && this.editorVisible;
+      if (updates.size && sameVersion) this.localDescs = nextWorkspace;
+      for (const { desc, lines } of updates.values()) {
+        desc.translations[resolver.lang] = lines;
+        desc.hasChanges = true;
+        desc.isMissing = computeIsMissing(desc.translations.English.length, desc.translations[this.lang] || []);
+      }
+      // Only matching draft blocks and their save baselines advance; other drafts stay dirty.
+      for (const entry of resolver.entries) {
+        if (!sameEditor) break;
+        if (entry.filepath !== this.editorCurrentEditingDesc?.filepath) continue;
+        const block = this.editorBlocks[entry.blockIndex];
+        if (!block) continue;
+        block.translation = text;
+        block.isTable = this.isTableText(block.english) || this.isTableText(text);
+        block.isMultiline = this.isMultilineText(block.english) || this.isMultilineText(text);
+        if (block.isTable) this.rebuildEditorTableColumnsFromStrings(block);
+        else block.tableColumns = [];
+        block.translationReplace = '';
+        block.words = [];
+        this.editorOriginalTranslations[entry.blockIndex] = block.translation;
+        this.refreshEditorBlockMeta(block, entry.blockIndex);
+      }
+      if (sameEditor) {
+        this.refreshEditorHLter();
+        this.refreshGamePreview();
+      }
+      if (this.diagnosticScanCompleted || this.diagnosticScanRunning) {
+        this.clearDiagnosticScanResults();
+        await this.scanAllDiagnostics();
+      } else this.filterDesc();
+      this.consistencyResolutionNotice = `Applied this version to all ${resolver.entryCount} matching ${resolver.lang} entries in ${resolver.fileCount} files. ${choice.changeCount} entries updated. Other edits remain in draft.`;
+      if (this.sideTab === 'history') await this.refreshHistory();
+      this.consistencyResolverBusy = false;
+      this.closeConsistencyResolver();
+      return true;
     },
     analyzeTranslationDiagnostics(text, english = null, lang = this.lang) {
       const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
@@ -3354,6 +3574,13 @@ const config = Vue.defineComponent({
     },
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
+      if (this.consistencyResolver) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.closeConsistencyResolver();
+        } else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
+        return;
+      }
       if (this.duplicateLangImportWarning && e.key === "Escape") {
         e.preventDefault();
         return;
@@ -4222,6 +4449,7 @@ const config = Vue.defineComponent({
       return this.descs.find(o => o.filepath == filepath);
     },
     editFile(filepath) {
+      this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
         alert('Unexpected Error! cannot find the file you want to edit!');

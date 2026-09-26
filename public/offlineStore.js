@@ -151,6 +151,27 @@
     return currentGameVersion;
   }
 
+  // Persist a bulk translation change and its recovery history together. Queue
+  // every write synchronously so IndexedDB cannot commit a partial batch.
+  async function saveWorkspaceWithRevisions(workspace, revisions, version) {
+    if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
+    const gameVersion = normalizeGameVersion(version);
+    const revisionsStore = revisionStoreName(gameVersion);
+    const db = await openDb();
+    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const done = txDone(tx);
+    try {
+      tx.objectStore(STORE_KV).put({ key: workspaceKey(gameVersion), value: workspace });
+      const store = tx.objectStore(revisionsStore);
+      for (const revision of revisions) store.add(revision);
+    } catch (error) {
+      try { tx.abort(); } catch (_) {}
+      await done.catch(() => {});
+      throw error;
+    }
+    await done;
+  }
+
   async function revisionAdd(rev, version) {
     return withStore(revisionStoreName(version), 'readwrite', async (store) => {
       return requestToPromise(store.add(rev));
@@ -286,6 +307,7 @@
     updateHybridState,
     getWorkspace: (version) => kvGet(workspaceKey(version)),
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
+    saveWorkspaceWithRevisions,
     getSource: (version) => kvGet(sourceKey(version)),
     setSource: (source, version) => kvSet(sourceKey(version), source),
     clearWorkspace: (version) => kvDel(workspaceKey(version)),

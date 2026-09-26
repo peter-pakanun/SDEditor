@@ -1,0 +1,423 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const snapshot = value => JSON.parse(JSON.stringify(value));
+
+function loadEditor() {
+  let config;
+  const writes = [];
+  const dialogs = { opened: 0, closed: 0, focused: 0 };
+  const window = {
+    location: { search: '?testMode=1&lang=Thai' },
+    CloudUI: { mixin: {} },
+    OfflineStore: {
+      async saveWorkspaceWithRevisions(workspace, revisions, version) {
+        writes.push(snapshot({ workspace, revisions, version }));
+      },
+    },
+  };
+  const context = vm.createContext({
+    window, URLSearchParams, console, setTimeout, clearTimeout,
+    document: {
+      activeElement: { isConnected: true, focus() { dialogs.focused++; } },
+      querySelectorAll() { return []; },
+    },
+    alert(message) { throw new Error(`Unexpected alert: ${message}`); },
+    confirm(message) { throw new Error(`Unexpected confirmation: ${message}`); },
+    Vue: {
+      defineComponent(value) { config = value; return value; },
+      createApp() { return { component() {}, directive() {}, mount() {} }; },
+      nextTick(callback) { callback?.(); return Promise.resolve(); },
+    },
+  });
+  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
+  }
+  const editor = Object.assign(config.data(), config.methods, {
+    lang: 'Thai', gameVersion: 'poe1', dictionary: [],
+    // DOM layout/history fetching is unrelated to the resolver's model and persistence contract.
+    filterDesc() {}, refreshEditorHLter() {}, async refreshHistory() {},
+    refreshEditorTableColumnHLter(column) { this.refreshTranslationDiagnostics(column); },
+    $nextTick(callback) { callback?.(); return Promise.resolve(); },
+    $refs: {
+      consistencyDialog: {
+        open: false,
+        showModal() { this.open = true; dialogs.opened++; },
+        close() { this.open = false; dialogs.closed++; },
+      },
+    },
+  });
+  for (const [name, getter] of Object.entries(config.computed)) {
+    Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+  }
+  return { editor, window, writes, dialogs };
+}
+
+function description(name, english, thai) {
+  return {
+    filepath: `test/${name}.txt`, filedir: 'test', filename: `${name}.txt`,
+    translations: { English: [...english], Thai: [...thai], French: english.map((_, i) => `French ${name} ${i}`) },
+    hasChanges: false, isMissing: false, needsReview: true,
+  };
+}
+
+function openFile(editor, desc, drafts = desc.translations.Thai) {
+  editor.editorCurrentEditingDesc = desc;
+  editor.editorVisible = true;
+  editor.editorBlocks = desc.translations.English.map((english, i) => {
+    const translation = drafts[i] ?? '';
+    const block = {
+      english: editor.decodeEscapedNewlines(english),
+      translation: editor.decodeEscapedNewlines(translation),
+      isMultiline: editor.isMultilineText(english) || editor.isMultilineText(translation),
+      isTable: editor.isTableText(english) || editor.isTableText(translation),
+    };
+    if (block.isTable) block.tableColumns = editor.buildEditorTableColumns(block.english, block.translation);
+    return block;
+  });
+  editor.editorOriginalTranslations = desc.translations.Thai.map(text => editor.decodeEscapedNewlines(text));
+}
+
+function setup({ drafts = false, persistent = false } = {}) {
+  const harness = loadEditor();
+  const { editor } = harness;
+  const english = 'Damage {1}%';
+  const first = description('first', [english, 'Duration {2}', english], ['ความเสียหาย {1}%', 'ระยะเวลา {2}', 'ดาเมจ {1}%']);
+  const peer = description('peer', [english, 'Damage {1}% extra'], ['พลังโจมตี {1}%', 'เพิ่มเติม {1}%']);
+  editor.descs = [first, peer];
+  editor.localDescs = {
+    descs: snapshot(editor.descs), size: 123, lastModified: 7,
+    status: {
+      [first.filepath]: { needsReview: true, reviewedAt: 42, custom: 'retain first' },
+      [peer.filepath]: { needsReview: true, reviewedAt: 43, custom: 'retain peer' },
+    },
+  };
+  editor.testMode = !persistent;
+  openFile(editor, first, drafts ? ['ความเสียหายใหม่ {1}%', 'ระยะเวลาร่าง {2}', 'ดาเมจ {1}%'] : undefined);
+  return { ...harness, first, peer, english };
+}
+
+test('resolver groups all exact-source occurrences, including duplicate entries and the current draft', async () => {
+  const { editor, dialogs } = setup({ drafts: true });
+  await editor.openConsistencyResolver(0);
+  assert.equal(dialogs.opened, 1);
+  assert.equal(editor.consistencyResolver.entries.length, 3);
+  assert.equal(editor.consistencyCurrentChoice.text, 'ความเสียหายใหม่ {1}%');
+  assert.deepEqual(Array.from(editor.consistencyResolver.versions, version => version.text).sort(),
+    ['ความเสียหายใหม่ {1}%', 'ดาเมจ {1}%', 'พลังโจมตี {1}%'].sort());
+  assert.equal(editor.consistencyAlternatives.length, 2);
+  assert.ok(editor.consistencyOtherChoice);
+  await editor.closeConsistencyResolver();
+  assert.equal(editor.consistencyResolver, null);
+  assert.equal(dialogs.closed, 1);
+});
+
+test('accepting This persists every matching entry while preserving unrelated drafts, languages, and review state', async () => {
+  const { editor, first, peer, writes } = setup({ drafts: true });
+  const french = editor.descs.map(desc => snapshot(desc.translations.French));
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+
+  const chosen = 'ความเสียหายใหม่ {1}%';
+  assert.deepEqual(snapshot(first.translations.Thai), [chosen, 'ระยะเวลา {2}', chosen]);
+  assert.deepEqual(snapshot(peer.translations.Thai), [chosen, 'เพิ่มเติม {1}%']);
+  assert.deepEqual(Array.from(editor.editorBlocks, block => block.translation), [chosen, 'ระยะเวลาร่าง {2}', chosen]);
+  assert.deepEqual(snapshot(editor.editorOriginalTranslations), [chosen, 'ระยะเวลา {2}', chosen]);
+  assert.equal(editor.editorHaveChanges(), true, 'The unrelated draft must remain unsaved.');
+  assert.equal(editor.editorVisible, true);
+  assert.deepEqual(editor.descs.map(desc => snapshot(desc.translations.French)), french);
+  for (const desc of editor.descs) {
+    assert.equal(desc.needsReview, true);
+    assert.equal(editor.localDescs.status[desc.filepath].needsReview, true);
+    assert.equal(editor.localDescs.status[desc.filepath].custom, `retain ${desc.filename.replace('.txt', '')}`);
+    assert.deepEqual(snapshot(editor.localDescs.descs.find(item => item.filepath === desc.filepath).translations.Thai), snapshot(desc.translations.Thai));
+  }
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
+  assert.ok(editor.consistencyResolutionNotice);
+  assert.equal(writes.length, 0, 'Test mode must bypass IndexedDB.');
+});
+
+test('accepting another version advances matching editor baselines and clears a clean editor', async () => {
+  const { editor, first, peer } = setup();
+  await editor.openConsistencyResolver(0);
+  const chosen = peer.translations.Thai[0];
+  assert.equal(await editor.applyConsistencyVersion(chosen), true);
+  assert.equal(first.translations.Thai[0], chosen);
+  assert.equal(first.translations.Thai[2], chosen);
+  assert.equal(editor.editorBlocks[0].translation, chosen);
+  assert.equal(editor.editorBlocks[2].translation, chosen);
+  assert.equal(editor.editorHaveChanges(), false);
+});
+
+test('source grouping normalizes only newline representation and preserves whole-entry boundaries', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['Damage {1}%\\nDuration {2}'], ['หนึ่ง {1}%\\nสอง {2}']);
+  const peer = description('peer', ['Damage {1}%\r\nDuration {2}', 'Damage {1}%\\nDuration {2} ', 'Damage {1}%'],
+    ['แรก {1}%\nสอง {2}', 'ต่าง {1}%\\nสอง {2} ', 'เดี่ยว {1}%']);
+  editor.descs = [first, peer];
+  openFile(editor, first);
+  await editor.openConsistencyResolver(0);
+  assert.equal(editor.consistencyResolver.entries.length, 2);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+  assert.equal(peer.translations.Thai[0], first.translations.Thai[0]);
+  assert.equal(peer.translations.Thai[1], 'ต่าง {1}%\\nสอง {2} ');
+  assert.equal(peer.translations.Thai[2], 'เดี่ยว {1}%');
+});
+
+test('persistent apply stages workspace and before/after revisions before mutating the editor', async () => {
+  const { editor, window, first, peer } = setup({ drafts: true, persistent: true });
+  const before = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks });
+  let release;
+  let storageArgs;
+  const pendingStorage = new Promise(resolve => { release = resolve; });
+  window.OfflineStore.saveWorkspaceWithRevisions = async (workspace, revisions, version) => {
+    storageArgs = snapshot({ workspace, revisions, version });
+    await pendingStorage;
+  };
+  await editor.openConsistencyResolver(0);
+  const applying = editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text);
+  await Promise.resolve();
+  assert.ok(storageArgs, 'The atomic storage API must be called.');
+  assert.equal(editor.consistencyResolverBusy, true);
+  assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks }), before);
+  assert.equal(storageArgs.version, 'poe1');
+  assert.equal(storageArgs.revisions.length, 4, 'Each changed file needs restorable before and after snapshots.');
+  for (const desc of [first, peer]) {
+    const revisions = storageArgs.revisions.filter(revision => revision.filepath === desc.filepath);
+    assert.equal(revisions.length, 2);
+    assert.deepEqual(revisions[0].translations, snapshot(desc.translations.Thai));
+    assert.equal(revisions[1].translations[0], 'ความเสียหายใหม่ {1}%');
+    assert.equal(revisions[1].lang, 'Thai');
+  }
+  release();
+  assert.equal(await applying, true);
+  assert.equal(editor.consistencyResolverBusy, false);
+});
+
+test('storage rejection preserves all saved data, drafts, and baselines and leaves the resolver open', async () => {
+  const { editor, window, dialogs } = setup({ drafts: true, persistent: true });
+  await editor.openConsistencyResolver(0);
+  const before = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('QuotaExceededError'); };
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), false);
+  assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), before);
+  assert.ok(editor.consistencyResolver);
+  assert.match(editor.consistencyResolverError, /QuotaExceededError/);
+  assert.equal(editor.consistencyResolutionNotice, '');
+  assert.equal(editor.consistencyResolverBusy, false);
+  assert.equal(dialogs.closed, 0);
+});
+
+test('a language switch during atomic save preserves the new language editor and baselines', async () => {
+  const { editor, window, first } = setup({ drafts: true, persistent: true });
+  let release;
+  let savedVersion;
+  const pendingStorage = new Promise(resolve => { release = resolve; });
+  window.OfflineStore.saveWorkspaceWithRevisions = async (_workspace, _revisions, version) => {
+    savedVersion = version;
+    await pendingStorage;
+  };
+  await editor.openConsistencyResolver(0);
+  const chosen = editor.consistencyCurrentChoice.text;
+  const applying = editor.applyConsistencyVersion(chosen);
+  await Promise.resolve();
+  assert.equal(editor.consistencyResolverBusy, true);
+
+  editor.lang = 'French';
+  openFile(editor, first, ['French draft zero', 'French draft one', 'French draft two']);
+  editor.editorOriginalTranslations = [...first.translations.French];
+  const frenchEditor = snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  release();
+  assert.equal(await applying, true);
+  assert.equal(savedVersion, 'poe1');
+  assert.equal(first.translations.Thai[0], chosen, 'The original Thai save must still finish.');
+  assert.deepEqual(snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), frenchEditor);
+  assert.deepEqual(snapshot(first.translations.French), ['French first 0', 'French first 1', 'French first 2']);
+  assert.match(editor.consistencyResolutionNotice, /Thai/);
+});
+
+test('reopening the same file during atomic save preserves the new editor draft', async () => {
+  const { editor, window, first } = setup({ drafts: true, persistent: true });
+  let release;
+  const pendingStorage = new Promise(resolve => { release = resolve; });
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => pendingStorage;
+  await editor.openConsistencyResolver(0);
+  const applying = editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text);
+  await Promise.resolve();
+  openFile(editor, first, ['ร่างเปิดใหม่ {1}%', 'ระยะเวลาใหม่ {2}', 'ร่างแถวสอง {1}%']);
+  const reopenedEditor = snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  release();
+  assert.equal(await applying, true);
+  assert.deepEqual(snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), reopenedEditor);
+});
+
+test('a game version switch during atomic save preserves the new workspace and editor', async () => {
+  const { editor, window } = setup({ drafts: true, persistent: true });
+  let release;
+  let savedVersion;
+  const pendingStorage = new Promise(resolve => { release = resolve; });
+  window.OfflineStore.saveWorkspaceWithRevisions = async (_workspace, _revisions, version) => {
+    savedVersion = version;
+    await pendingStorage;
+  };
+  await editor.openConsistencyResolver(0);
+  const applying = editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text);
+  await Promise.resolve();
+
+  editor.gameVersion = 'poe2';
+  const newVersionDesc = description('first', ['PoE 2 damage {1}%'], ['ภาคสอง {1}%']);
+  editor.descs = [newVersionDesc];
+  editor.localDescs = { descs: snapshot(editor.descs), status: {}, lastModified: 999, size: 456 };
+  openFile(editor, newVersionDesc, ['ร่างภาคสอง {1}%']);
+  const poe2State = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  release();
+  assert.equal(await applying, true);
+  assert.equal(savedVersion, 'poe1');
+  assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), poe2State);
+});
+
+test('resolver rejects changed language, game version, saved peers, or current drafts', async () => {
+  const changes = [
+    editor => { editor.lang = 'French'; },
+    editor => { editor.gameVersion = 'poe2'; },
+    editor => { editor.descs[1].translations.Thai[0] = 'เปลี่ยนแล้ว {1}%'; },
+    editor => { editor.editorBlocks[0].translation = 'เปลี่ยนร่าง {1}%'; },
+    editor => { editor.descs[1].translations.English[0] = 'Other damage {1}%'; },
+  ];
+  for (const change of changes) {
+    const { editor, writes } = setup({ persistent: true });
+    await editor.openConsistencyResolver(0);
+    const chosen = editor.consistencyCurrentChoice.text;
+    change(editor);
+    const before = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks });
+    assert.equal(await editor.applyConsistencyVersion(chosen), false);
+    assert.ok(editor.consistencyResolverError);
+    assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks }), before);
+    assert.equal(writes.length, 0);
+  }
+});
+
+test('history compare cannot open or apply a consistency replacement', async () => {
+  for (const mode of ['source', 'translation']) {
+    const { editor } = setup();
+    editor.editorCompareActive = true;
+    editor.editorCompareMode = mode;
+    await editor.openConsistencyResolver(0);
+    assert.equal(editor.consistencyResolver, null);
+    editor.editorCompareActive = false;
+    await editor.openConsistencyResolver(0);
+    const chosen = editor.consistencyCurrentChoice.text;
+    editor.editorCompareActive = true;
+    assert.equal(await editor.applyConsistencyVersion(chosen), false);
+  }
+});
+
+test('percentage variable errors block bulk replacement without changing valid peers', async () => {
+  const { editor, first, peer } = setup();
+  editor.editorBlocks[0].translation = 'ความเสียหาย {1}';
+  await editor.openConsistencyResolver(0);
+  const before = snapshot(editor.descs);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), false);
+  assert.deepEqual(snapshot(editor.descs), before);
+  assert.equal(first.translations.Thai[0], 'ความเสียหาย {1}%');
+  assert.equal(peer.translations.Thai[0], 'พลังโจมตี {1}%');
+  assert.ok(editor.consistencyResolverError);
+});
+
+test('bulk validation checks percentage variables independently in table columns', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['{1}%@{1}'], ['{1}%@{1}']);
+  const peer = description('peer', ['{1}%@{1}'], ['{1}@{1}%']);
+  editor.descs = [first, peer];
+  openFile(editor, first);
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(peer.translations.Thai[0]), false);
+  assert.equal(first.translations.Thai[0], '{1}%@{1}');
+  assert.ok(editor.consistencyResolverError);
+});
+
+test('missing and excess table columns reject a version before storage or model changes', async () => {
+  for (const candidate of ['หนึ่ง', 'หนึ่ง@สอง@สาม']) {
+    const { editor, writes } = loadEditor();
+    const first = description('first', ['First@Second'], ['หนึ่ง@สอง']);
+    const peer = description('peer', ['First@Second'], [candidate]);
+    editor.descs = [first, peer];
+    editor.testMode = false;
+    openFile(editor, first);
+    await editor.openConsistencyResolver(0);
+    assert.ok(editor.buildConsistencyChoice(candidate).errors.some(error => /table column/i.test(error.message)));
+    const before = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+    assert.equal(await editor.applyConsistencyVersion(candidate), false);
+    assert.equal(writes.length, 0);
+    assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), before);
+  }
+});
+
+test('explicitly accepting an empty plain-text version clears all matching entries', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['Fire damage'], ['ความเสียหายไฟ']);
+  const peer = description('peer', ['Fire damage'], ['']);
+  peer.isMissing = true;
+  editor.descs = [first, peer];
+  openFile(editor, first);
+  await editor.openConsistencyResolver(0);
+  const empty = editor.buildConsistencyChoice('');
+  assert.equal(empty.errors.length, 0);
+  assert.ok(empty.warnings.some(warning => /Empty translation/.test(warning.message)));
+  assert.equal(await editor.applyConsistencyVersion(''), true);
+  assert.equal(first.translations.Thai[0], '');
+  assert.equal(peer.translations.Thai[0], '');
+  assert.equal(first.isMissing, true);
+  assert.equal(editor.editorBlocks[0].translation, '');
+  assert.equal(editor.editorOriginalTranslations[0], '');
+  assert.equal(editor.editorHaveChanges(), false);
+});
+
+test('valid table replacement updates every column and stays consistent after editor serialization', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['Damage {1}%@Duration {2}'], ['เสียหาย {1}%@เวลา {2}']);
+  const peer = description('peer', ['Damage {1}%@Duration {2}'], ['ความเสียหาย {1}%@ระยะเวลา {2}']);
+  editor.descs = [first, peer];
+  openFile(editor, first);
+  await editor.openConsistencyResolver(0);
+  const chosen = peer.translations.Thai[0];
+  assert.equal(editor.buildConsistencyChoice(chosen).errors.length, 0);
+  assert.equal(await editor.applyConsistencyVersion(chosen), true);
+  assert.equal(first.translations.Thai[0], chosen);
+  assert.deepEqual(Array.from(editor.editorBlocks[0].tableColumns, column => column.translation), ['ความเสียหาย {1}%', 'ระยะเวลา {2}']);
+  editor.syncEditorBlockFromTableColumns(editor.editorBlocks[0]);
+  assert.equal(editor.editorBlocks[0].translation, chosen);
+  assert.equal(editor.editorOriginalTranslations[0], chosen);
+  assert.equal(editor.editorHaveChanges(), false);
+  assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
+});
+
+test('unoffered translation values cannot be bulk applied', async () => {
+  const { editor } = setup();
+  await editor.openConsistencyResolver(0);
+  const before = snapshot(editor.descs);
+  assert.equal(await editor.applyConsistencyVersion('ข้อความที่ไม่เคยเสนอ {1}%'), false);
+  assert.deepEqual(snapshot(editor.descs), before);
+});
+
+test('shared inline diff escapes user HTML in both removed and added text', () => {
+  const { editor, window } = loadEditor();
+  const changes = [
+    { value: '<img src=x onerror=alert(1)>', removed: true },
+    { value: '<script>bad()</script>', added: true },
+  ];
+  window.Diff = { diffWordsWithSpace() { return changes; }, diffChars() { return changes; } };
+  const html = editor.renderInlineDiffHtml('old', 'new', { characters: true, showWhitespace: false });
+  assert.match(html, /diffInlineDel/);
+  assert.match(html, /diffInlineAdd/);
+  assert.match(html, /&lt;img/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<img|<script/);
+});
