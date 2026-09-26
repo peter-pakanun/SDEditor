@@ -77,6 +77,7 @@ function escapeTooltipAttr(value) {
 }
 
 const config = Vue.defineComponent({
+  mixins: [window.CloudUI.mixin],
   data() {
     return {
       offlineStoreReady: false,
@@ -284,14 +285,17 @@ const config = Vue.defineComponent({
 
     try {
       await window.OfflineStore.migrateFromLocalStorageIfNeeded();
-    } catch (_) {
+    } catch (error) {
+      this.cloudStorageError = 'Could not load existing browser storage. Reload to retry: ' + error.message;
+      return;
     }
 
     let settings;
     try {
       settings = await window.OfflineStore.getSettings();
-      console.log('settings inside OfflineStore:', settings);
-    } catch (_) {
+    } catch (error) {
+      this.cloudStorageError = 'Could not load existing settings. Reload to retry: ' + error.message;
+      return;
     }
     if (settings) this.importSettings(settings);
 
@@ -302,6 +306,13 @@ const config = Vue.defineComponent({
     this.ensureDictionaryIds();
     document.addEventListener('keydown', this.handleKeydown);
 
+    try { await this.initializeCloud(settings); }
+    catch (error) {
+      offlineStoreReady = false;
+      this.offlineStoreReady = false;
+      this.cloudStorageError = 'Could not initialize local backup storage. Reload to retry: ' + error.message;
+      return;
+    }
     await this.saveSettings();
     this.updateDocumentTitle();
   },
@@ -344,7 +355,8 @@ const config = Vue.defineComponent({
     autocompleteShortcut() {
       this.saveSettings();
     },
-    lang() {
+    lang(language, previous) {
+      this.cloudSelectLanguage(language, previous);
       this.clearDiagnosticScanResults();
       if (this.sourceLoaded) {
         this.applyWorkspaceOverlay();
@@ -372,7 +384,11 @@ const config = Vue.defineComponent({
         this.scheduleEditorHLterRefresh();
         this.scheduleDictionaryDiagnosticScan();
       }
-    }
+    },
+    hideSourceInPreviewPanel() { this.saveSettings(); },
+    uiDensity() { this.saveSettings(); },
+    editorRegexes: { deep: true, handler() { this.saveSettings(); } },
+    gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
   },
   computed: {
     gameVersionLabel() {
@@ -928,7 +944,7 @@ const config = Vue.defineComponent({
         alert('Please select a language.');
         return;
       }
-      await this.saveSettings();
+      if (await this.saveSettings() === false) return;
       this.needsInitialSettings = false;
       this.showSetting = false;
     },
@@ -4154,8 +4170,8 @@ const config = Vue.defineComponent({
           desc.translations.English?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||
           desc.translations[this.lang]?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase())
         ) {
-          let englishHtml = (desc.translations.English || []).join("<br />");
-          let translationHtml = (desc.translations[this.lang] || []).join("<br />");
+          let englishHtml = (desc.translations.English || []).map(line => escapeHtml(String(line ?? ''))).join("<br />");
+          let translationHtml = (desc.translations[this.lang] || []).map(line => escapeHtml(String(line ?? ''))).join("<br />");
           this.filteredDescs.push({
             filepath: desc.filepath,
             filedir: desc.filedir,
@@ -4731,7 +4747,8 @@ const config = Vue.defineComponent({
       this.editorVisible = false;
     },
     async saveSettings() {
-      if (!offlineStoreReady) return;
+      if (this._cloudApplying) return true;
+      if (!offlineStoreReady) return !!this.testMode;
       let settings = {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
@@ -4749,14 +4766,18 @@ const config = Vue.defineComponent({
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
       }
+      if (this._cloud) return this.cloudPersist(this.toPlainForStorage(settings));
       if (window.OfflineStore && typeof window.OfflineStore.setSettings === 'function') {
         try {
           const plain = this.toPlainForStorage(settings);
           if (!plain) throw new Error('Cannot serialize settings');
           await window.OfflineStore.setSettings(plain);
-        } catch (_) {
+        } catch (error) {
+          this.cloudStorageError = 'Could not save settings locally: ' + error.message;
+          return false;
         }
       }
+      return true;
     },
     exportSettingsClicked() {
       let settings = {
@@ -4786,22 +4807,18 @@ const config = Vue.defineComponent({
     importSettingsFileChanged(e) {
       var fr = new FileReader();
       let vueThis = this;
-      fr.onload = function () {
+      fr.onload = async function () {
         let settings;
         try {
           settings = JSON.parse(fr.result);
+          window.CloudSync.validateImport(settings);
         } catch (error) {
-          alert("This is not JSON settings file");
-          return;
-        }
-        if (prompt('Are you sure you want to overwrite current settings with this file?\n\nType "YES" to continue') !== "YES") {
+          vueThis.cloudStorageError = 'Could not import settings: ' + error.message;
           vueThis.$refs.importSettingsFileForm.reset();
           return;
         }
-
-        vueThis.importSettings(settings);
-        alert('Settings imported!');
-        vueThis.$refs.importSettingsFileForm.reset();
+        vueThis.settingsImportDraft = settings;
+        vueThis.settingsImportConfirm = '';
       }
       fr.readAsText(e.target.files[0]); 
     },
@@ -4810,7 +4827,7 @@ const config = Vue.defineComponent({
       this.dictionary = settings.dictionary || [];
       this.ensureDictionaryIds();
       this.editorClipboard = settings.editorClipboard || "";
-      if (settings.lang) this.lang = settings.lang;
+      this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
       if (settings.theme) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
@@ -4831,7 +4848,7 @@ const config = Vue.defineComponent({
       }
       if (settings.gamePreviewFonts && typeof settings.gamePreviewFonts === 'object' && !Array.isArray(settings.gamePreviewFonts)) {
         this.gamePreviewFonts = settings.gamePreviewFonts;
-      }
+      } else this.gamePreviewFonts = null;
     },
     async saveLocalDescs() {
       if (!offlineStoreReady) return;

@@ -14,6 +14,7 @@
 <body>
   <div id="app">
     <div class="appRoot" :data-density="uiDensity">
+    <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
@@ -67,8 +68,41 @@
 
     <div class="settingPage centerContainer" v-if="gameVersionSelected && (showSetting || needsInitialSettings)">
       <div class="box">
+        <section class="cloudSettings" aria-label="Cloud backup">
+          <h3>Cloud backup</h3>
+          <p class="cloudHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
+          <p v-if="testMode">Cloud backup is disabled in test mode.</p>
+          <template v-else>
+            <button v-if="!cloudSignedIn" @click="cloudLogin" :disabled="cloudBusy">Backup using Google account</button>
+            <p v-if="cloudLoginUrl"><a :href="cloudLoginUrl">Continue sign-in in this tab</a></p>
+            <template v-if="cloudUser">
+              <p><strong>{{ cloudUser.name || cloudUser.email }}</strong><br>{{ cloudUser.email }}</p>
+              <p v-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
+              <p v-else class="cloudWarning">Not configured — awaiting admin language assignment</p>
+            </template>
+            <p class="cloudStatus" :class="{ cloudWarning: cloudError }" role="status">{{ cloudStatus }}</p>
+            <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose a language below to keep your existing dictionary under that language before cloud backup.</p>
+            <div class="cloudActions">
+              <button v-if="cloudSignedIn" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
+              <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
+              <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve dictionary conflicts ({{ cloudConflicts.length }})</button>
+              <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
+              <button v-if="cloudRecoveryCount" @click="cloudDownloadRecovery">Download local recovery copies</button>
+            </div>
+            <div v-if="cloudAdminVisible" class="cloudAdmin">
+              <h4>Language assignments</h4>
+              <p>Users appear here after their first Google sign-in. Clearing an assignment stops cloud access and keeps their local work.</p>
+              <div v-for="user in cloudAdminUsers" :key="user.id" class="cloudAdminRow">
+                <span>{{ user.name || user.email }}<small>{{ user.email }}{{ user.isAdmin ? ' · Admin' : '' }}</small></span>
+                <select :value="user.language || ''" :aria-label="'Language for ' + user.email" @change="cloudAssign(user, $event)" :disabled="cloudBusy">
+                  <option value="">Not configured</option><option v-for="language in langs" :value="language">{{ language }}</option>
+                </select>
+              </div>
+            </div>
+          </template>
+        </section>
         <h3>Language to translate</h3>
-        <select v-model="lang">
+        <select v-model="lang" aria-label="Language to translate">
           <option v-for="lang in langs">{{ lang }}</option>
         </select>
         <h3>Theme</h3>
@@ -190,7 +224,7 @@
       </div>
     </div>
 
-    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && loadingProgress < 100 && lang !== '' && !needsInitialSettings">
+    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
@@ -215,6 +249,7 @@
           <button @click="showImportUpdateZipDialog" v-tooltip="'Import ZIP'">📦 Import StatDescriptions.zip</button>
           <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>
+        <button v-if="loadingProgress === 0" @click="showSetting = true" aria-label="Open settings and cloud backup">⚙️ Settings and cloud backup</button>
         <div class="loadingText" v-if="loadingProgress == 0.001">
           <h1>Initializing...</h1>
           <h3>Please wait while we initialize the workspace. This can take a moment.</h3> 
@@ -239,6 +274,7 @@
           <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Ctrl + Click to do a full export'" aria-label="Export ZIP">💾</button>
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
+          <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver" :aria-label="'Resolve ' + cloudConflicts.length + ' dictionary conflicts'" v-tooltip="'Resolve shared dictionary conflicts'">⚡ {{ cloudConflicts.length }}</button>
           <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="scanAllDiagnostics" v-tooltip="'Scan every file for translation errors, dictionary terminology, and inconsistent translations of identical English entries in the selected language'">
             {{ diagnosticScanRunning ? ('Scanning ' + diagnosticScanProcessed + '/' + diagnosticScanTotal) : 'Scan diagnostics' }}
           </button>
@@ -564,6 +600,35 @@
       </div>
     </div>
 
+    <div v-if="settingsImportDraft" class="cloudResolverBackdrop" @keydown.esc="cancelSettingsImport">
+      <section class="cloudResolver cloudImportConfirm" role="dialog" aria-modal="true" aria-labelledby="settingsImportTitle">
+        <h2 id="settingsImportTitle">Replace current settings?</h2>
+        <p>This imports the file's settings and dictionary for its language. A local recovery copy is saved first. Dictionary changes will sync when this account has access to that language.</p>
+        <label for="settingsImportConfirm">Type YES to continue</label>
+        <input id="settingsImportConfirm" v-model="settingsImportConfirm" autocomplete="off" @keydown.enter="confirmSettingsImport">
+        <div class="cloudResolverActions"><button @click="cancelSettingsImport">Cancel</button><button @click="confirmSettingsImport" :disabled="settingsImportConfirm !== 'YES'">Import settings</button></div>
+      </section>
+    </div>
+    <div v-if="cloudResolverVisible" class="cloudResolverBackdrop" @keydown.esc="cloudResolverVisible = false">
+      <section class="cloudResolver" role="dialog" aria-modal="true" aria-labelledby="cloudResolverTitle">
+        <div class="cloudResolverHeading"><div><h2 id="cloudResolverTitle">Resolve dictionary conflicts</h2><p>Choose which changes to keep. Independent changes are already combined in the result.</p></div><button @click="cloudResolverVisible = false" aria-label="Close dictionary conflicts">✕</button></div>
+        <template v-if="cloudConflict">
+          <p><strong>{{ (cloudConflict.local || cloudConflict.remote || cloudConflict.base).find }}</strong> · {{ cloudConflictIndex + 1 }} of {{ cloudConflicts.length }}</p>
+          <div class="cloudComparison">
+            <div class="cloudComparisonHead">Local · yours</div><div class="cloudComparisonHead cloudResultCell">Result</div><div class="cloudComparisonHead">Remote · shared</div>
+            <div class="cloudConflictCell"><h3>Alternates</h3><pre>{{ cloudDefinitionText(cloudConflict.localDefinitions) }}</pre><button v-if="cloudConflict.definitionsConflict" :aria-pressed="cloudDefinitionsChoice === 'local'" @click="cloudDefinitionsChoice = 'local'">Keep local alternates</button><span v-else>Automatically merged</span></div>
+            <div class="cloudConflictCell cloudResultCell"><h3>Alternates</h3><pre>{{ cloudDefinitionText(cloudResult) }}</pre><small v-if="cloudConflict.definitionsConflict && !cloudDefinitionsChoice">Preview · choose a side</small></div>
+            <div class="cloudConflictCell"><h3>Alternates</h3><pre>{{ cloudDefinitionText(cloudConflict.remoteDefinitions) }}</pre><button v-if="cloudConflict.definitionsConflict" :aria-pressed="cloudDefinitionsChoice === 'remote'" @click="cloudDefinitionsChoice = 'remote'">Keep remote alternates</button><span v-else>Automatically merged</span></div>
+            <div class="cloudConflictCell"><h3>TL note</h3><pre>{{ cloudConflict.localNote || '—' }}</pre><button v-if="cloudConflict.noteConflict" :disabled="!cloudResult" :aria-pressed="cloudNoteChoice === 'local'" @click="cloudNoteChoice = 'local'">Keep local note</button><span v-else>Automatically merged</span></div>
+            <div class="cloudConflictCell cloudResultCell"><h3>TL note</h3><pre>{{ cloudResult ? (cloudResult.tlnote || '—') : 'Entry deleted' }}</pre><small v-if="cloudResult && cloudConflict.noteConflict && !cloudNoteChoice">Preview · choose a side</small></div>
+            <div class="cloudConflictCell"><h3>TL note</h3><pre>{{ cloudConflict.remoteNote || '—' }}</pre><button v-if="cloudConflict.noteConflict" :disabled="!cloudResult" :aria-pressed="cloudNoteChoice === 'remote'" @click="cloudNoteChoice = 'remote'">Keep remote note</button><span v-else>Automatically merged</span></div>
+          </div>
+          <p v-if="cloudError" class="cloudWarning" role="alert">{{ cloudStatus }}</p>
+          <div class="cloudResolverActions"><button @click="cloudNextConflict(-1)" :disabled="cloudConflictIndex === 0 || cloudBusy">Previous</button><button @click="cloudNextConflict(1)" :disabled="cloudConflictIndex >= cloudConflicts.length - 1 || cloudBusy">Next</button><button class="cloudSaveResolution" @click="cloudSaveResolution" :disabled="!cloudResolutionReady || cloudBusy || !cloudSignedIn">{{ cloudBusy ? 'Saving…' : 'Save result' }}</button></div>
+        </template>
+        <p v-else>No dictionary conflicts remain.</p>
+      </section>
+    </div>
     <app-tooltip :state="tooltip"></app-tooltip>
 
     </div>
@@ -580,6 +645,9 @@
   <script src="translationDiagnostics.js"></script>
   <script src="terminologyDiagnostics.js"></script>
   <script src="offlineStore.js"></script>
+  <script src="dictionarySync.js"></script>
+  <script src="cloudSync.js"></script>
+  <script src="cloudUi.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

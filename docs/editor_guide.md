@@ -11,7 +11,13 @@ The editor helps you translate game stat descriptions while maintaining formatti
 
 ### Choosing PoE1 Or PoE2
 
-When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Dictionary and Regex entries are shared. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
+When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Both versions use the same Dictionary for the selected language and your personal Regex rules. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
+
+### Google Backup and Language Assignment
+
+Open **Settings → Cloud backup → Backup using Google account** to connect personal settings backup and your language's shared Dictionary. A new account shows **Not configured** until the administrator assigns a language through **Manage users**. Local editing remains available while waiting. Other selected languages keep local dictionaries.
+
+Settings and Regex rules are personal; dictionaries are shared among assigned translators. The editor clipboard, source ZIPs, translated files and history remain local. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for sync status, session renewal, recovery and account switching.
 
 ### Importing StatDescriptions.zip
 
@@ -49,6 +55,8 @@ So it is “missing translation content”, not “missing file”.
 2. Or use **F2** to open the first file from the current filtered list
 
 ### Scanning Diagnostics
+
+If a **⚡ count** button appears before **Scan diagnostics**, it opens shared Dictionary conflicts. Choose local content on the left or remote content on the right for **Alternates** and **TL note**, review the center result, and save it. Independent changes merge automatically. See [Resolve Dictionary Conflicts](cloud_backup.md#resolve-dictionary-conflicts).
 
 Click **Scan diagnostics** to check every loaded file in the selected language, including files hidden by search or filters. Use **Diagnostic warnings only** or **Diagnostic errors only** to narrow the results. Hover over a flagged file for details.
 
@@ -161,7 +169,7 @@ The **Dictionary** tab lets you define how specific terms should be translated.
 1. Click the **+** button below the "Dictionary" heading
 2. Enter a word or phrase in the "Find" field
 3. Enter the translation in the "Replace" field
-4. (Optional) Add a "Note" for your own reference
+4. (Optional) Add a **TL note** explaining the translation; it is shared with the Dictionary when cloud sync is enabled.
 
 **Example Dictionary Entries:**
 ```
@@ -189,7 +197,7 @@ When you later encounter "[HitDamage|Hit]" in the text, the Autocomplete Popup w
 
 #### Dictionary Notes
 
-Use the **TL note** field to document why a term is translated a certain way or to remind yourself of context. Notes appear when you click on the "TL note" field.
+Use the **TL note** field to document why a term is translated a certain way or explain its context. Notes appear when you click on the "TL note" field. With cloud sync enabled, these notes are part of the language's shared Dictionary.
 
 Autocomplete Popup will show only Dictionary entries that have the same main definition with the tag name of found keyword.
 
@@ -201,7 +209,9 @@ When you're editing, the **Dictionary** panel automatically shows terms that are
 
 ### Backing up your Dictionary
 
-You can backup your dictionary, regex and settings using the **📤 Export settings** button inside the setting screen.
+Use **Settings → 📤 Export settings** to download the current language's Dictionary, personal Regex rules, preferences and local editor clipboard. Select and export other languages separately when needed. **📥 Import settings** restores a standard settings export and keeps a recovery copy first.
+
+Google backup also synchronizes personal settings and the assigned language's shared Dictionary. It does not upload the clipboard or translation files. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for first-login restores, recovery archives and conflict resolution.
 
 ### Regex (Pattern-Based Replacements)
 

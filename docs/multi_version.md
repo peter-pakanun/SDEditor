@@ -13,7 +13,7 @@ The selected version controls:
 - Revision history
 - Browser tab title
 
-Dictionary, Regex, language, theme, and other editor settings are shared between versions.
+Both versions use the same Dictionary for a selected language. Dictionaries are separated by language and local/account profile. Regex rules, selected language, theme, and other preferences are shared between PoE1 and PoE2 within that profile. With Google backup enabled, Regex/preferences are personal and the assigned language's Dictionary is shared with its translators. See [Cloud Backup and Shared Dictionaries](cloud_backup.md).
 
 ## Auto-Detection
 
@@ -39,6 +39,8 @@ Version-specific data is stored separately in IndexedDB:
 ```
 The old single-version `kv.source`, `kv.workspace`, and `revisions` data are left intact as a backup.
 
+These source/workspace/history stores stay in the browser; Google backup does not upload them or split them into separate Google-account workspaces. Hybrid storage separately preserves settings, per-language dictionaries, synchronization state and recovery copies in IndexedDB.
+
 ## Migration From Older SDEditor Builds
 
 If your browser already has data from before multi-version support, SDEditor shows a migration screen after you choose a version.
@@ -51,3 +53,7 @@ The migration:
 - Leaves the old storage untouched as a backup.
 - Sets `kv.migratedFromSingleVersion` after a successful copy so the migration prompt does not appear again.
 - Shows a copying progress message while the migration is running and prevents starting the same migration twice.
+
+## Dictionary Migration for Cloud Backup
+
+The hybrid-storage upgrade attaches the previous Dictionary to its saved language and keeps the original settings locally. If no language was saved, choose one in Settings before attaching that dictionary. Switching languages opens separate dictionaries; it does not copy the original into each language. This automatic settings migration is independent of the confirmed PoE1/PoE2 workspace migration above. First cloud attachment merges the assigned language's dictionary and presents incompatible edits for local/remote selection.

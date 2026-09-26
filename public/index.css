@@ -203,6 +203,41 @@ input:focus, button:focus, textarea:focus {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-warning) 45%, transparent) inset;
 }
 
+.cloudSettings { border-bottom: 1px solid var(--color-element-highlight); padding-bottom: 18px; margin-bottom: 18px; max-width: 680px; }
+.cloudHelp, .cloudStatus { line-height: 1.65; }
+.cloudActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cloudWarning { color: var(--color-accent); font-weight: 600; }
+.cloudStorageError { position: fixed; top: 0; left: 0; right: 0; z-index: 20000; background: var(--color-element); border-bottom: 3px solid var(--color-diagnostic-error-border); padding: 12px 20px; }
+.cloudAdmin { margin-top: 18px; }
+.cloudAdminRow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-top: 1px solid var(--color-element-alt); padding: 10px 0; }
+.cloudAdminRow small { display: block; overflow-wrap: anywhere; }
+.cloudConflictButton { color: var(--color-accent); font-weight: bold; }
+.cloudResolverBackdrop { position: fixed; inset: 0; z-index: 15000; background: #0009; display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+.cloudResolver { background: var(--color-bg); color: var(--color-font); border: 1px solid var(--color-element-highlight); border-radius: 12px; box-shadow: 0 12px 50px #0006; padding: 24px; width: min(1150px, 100%); max-height: 94vh; overflow: auto; box-sizing: border-box; }
+.cloudResolverHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.cloudResolverHeading h2 { margin: 0; }
+.cloudResolverHeading p { line-height: 1.6; }
+.cloudComparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--color-element-highlight); border-radius: 6px; overflow: hidden; }
+.cloudComparisonHead { padding: 12px; font-weight: 700; background: var(--color-element-alt); border-bottom: 1px solid var(--color-element-highlight); }
+.cloudConflictCell { padding: 14px; min-width: 0; background: var(--color-element); border-bottom: 1px solid var(--color-element-alt); display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.cloudConflictCell h3 { margin: 0; font-size: 1em; }
+.cloudConflictCell pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.8; flex: 1; }
+.cloudConflictCell button { white-space: normal; line-height: 1.5; }
+.cloudResultCell { background: var(--color-bg2); border-left: 2px solid var(--color-element-highlight); border-right: 2px solid var(--color-element-highlight); }
+.cloudConflictCell button[aria-pressed="true"], .cloudSaveResolution { background: var(--color-element-highlight); color: white; }
+.cloudResolverActions { display: flex; gap: 10px; margin-top: 20px; }
+.cloudSaveResolution { margin-left: auto; }
+.cloudImportConfirm { max-width: 560px; }
+.cloudImportConfirm p { line-height: 1.7; }
+.cloudImportConfirm input { display: block; width: 100%; margin-top: 8px; }
+@media (max-width: 600px) {
+  .cloudResolverBackdrop { padding: 5px; }
+  .cloudResolver { padding: 10px; max-height: 98vh; }
+  .cloudComparisonHead, .cloudConflictCell { padding: 7px; }
+  .cloudConflictCell button { padding: 7px 4px; }
+  .cloudResolverActions { flex-wrap: wrap; }
+}
+
 .consistencyWarning,
 .terminologyWarning {
   margin: calc(0.4em * var(--density)) 0;
@@ -337,7 +372,11 @@ input:focus, button:focus, textarea:focus {
 .settingPage {
   background-color: var(--color-bg);
   z-index: 2;
+  overflow-y: auto;
+  padding: 20px;
+  box-sizing: border-box;
 }
+.settingPage > .box { max-height: calc(100vh - 40px); overflow-y: auto; max-width: 100%; box-sizing: border-box; }
 
 .importDialogOverlay {
   position: fixed;

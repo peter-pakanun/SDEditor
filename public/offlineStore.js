@@ -74,10 +74,39 @@
   async function withStore(storeName, mode, fn) {
     const db = await openDb();
     const tx = db.transaction([storeName], mode);
+    const done = txDone(tx);
     const store = tx.objectStore(storeName);
-    const out = await fn(store, tx);
-    await txDone(tx);
+    let out;
+    try { out = await fn(store, tx); } catch (error) {
+      try { tx.abort(); } catch (_) {}
+      await done.catch(() => {});
+      throw error;
+    }
+    await done;
     return out;
+  }
+
+  // Read/modify/write one durable hybrid snapshot in a single transaction. The
+  // callback must be synchronous so the transaction never becomes inactive.
+  async function updateHybridState(update) {
+    const db = await openDb();
+    const tx = db.transaction([STORE_KV], 'readwrite');
+    const done = txDone(tx);
+    const store = tx.objectStore(STORE_KV);
+    let result;
+    const req = store.get('hybrid_v1');
+    req.onsuccess = () => {
+      try {
+        result = update(req.result?.value);
+        if (result && typeof result.then === 'function') throw new Error('Hybrid storage update must be synchronous');
+        store.put({ key: 'hybrid_v1', value: result });
+      } catch (error) {
+        tx._hybridError = error;
+        tx.abort();
+      }
+    };
+    try { await done; } catch (error) { throw tx._hybridError || error; }
+    return result;
   }
 
   async function kvGet(key) {
@@ -253,6 +282,8 @@
     migrateFromLocalStorageIfNeeded,
     getSettings: () => kvGet(KV_SETTINGS),
     setSettings: (settings) => kvSet(KV_SETTINGS, settings),
+    getHybridState: () => kvGet('hybrid_v1'),
+    updateHybridState,
     getWorkspace: (version) => kvGet(workspaceKey(version)),
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
     getSource: (version) => kvGet(sourceKey(version)),

@@ -10,6 +10,8 @@ Browser-based editor for `StatDescriptions.zip` (stat description translation fi
 - Separate PoE1 and PoE2 source/workspace/history storage
 - Highlights and metadata to help catch mismatches (lines / `{}` variables / `[]` tags)
 - Saves your in-progress work to `indexedDB`
+- Optional Google account backup for personal settings and Regex rules
+- Shared dictionaries per assigned language, with local/remote conflict choices
 - Export a translated ZIP (`StatDescriptions_Translated.zip`)
 
 ## Quick Start (Local)
@@ -33,6 +35,7 @@ Then open the printed URL (defaults to `http://127.0.0.1:3333/`), choose PoE1 or
   - You can import a previously exported `StatDescriptions_Translated.zip` to restore your edits
 - Translator workflow guide: see [docs/workflow.md](docs/workflow.md).
 - PoE1/PoE2 storage and migration details: see [docs/multi_version.md](docs/multi_version.md).
+- Google sign-in, language assignment, shared dictionaries and recovery: see [docs/cloud_backup.md](docs/cloud_backup.md). Translation files and history remain local; cloud backup requires the separately deployed SDEditor API.
 
 ## Debug / Test Mode
 

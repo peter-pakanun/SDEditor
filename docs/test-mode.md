@@ -19,6 +19,7 @@ Example:
 
 - Loads a small built-in dummy dataset (no ZIP required).
 - Does not read or write `indexedDB`, so your real saved settings/local changes won’t be modified.
+- Disables Google login and cloud synchronization. Use a separate normal browser profile for persistent storage and API tests; see [Cloud Backup and Shared Dictionaries](cloud_backup.md#local-validation).
 - Skips the launch version selector and uses PoE1 for the browser title/test state.
 
 ## Local server notes
