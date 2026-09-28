@@ -61,6 +61,9 @@ html, body {
   font-size: calc(12px * var(--density));
 }
 
+.privacyLink { color: inherit; text-underline-offset: .2em; }
+.privacyLink:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
+
 input, button, select, textarea {
   line-height: calc(2em * var(--density));
   padding: calc(0.5em * var(--density)) calc(1em * var(--density));

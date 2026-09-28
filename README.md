@@ -36,6 +36,7 @@ Then open the printed URL (defaults to `http://127.0.0.1:3333/`), choose PoE1 or
 - Translator workflow guide: see [docs/workflow.md](docs/workflow.md).
 - PoE1/PoE2 storage and migration details: see [docs/multi_version.md](docs/multi_version.md).
 - Google sign-in, language assignment, shared dictionaries and recovery: see [docs/cloud_backup.md](docs/cloud_backup.md). Translation files and history remain local; cloud backup requires the separately deployed SDEditor API.
+- Public privacy policy: [https://sdeditor.pages.dev/policy](https://sdeditor.pages.dev/policy). The standalone `public/policy.html` page needs no login or JavaScript; Cloudflare Pages serves it at `/policy`, and the local server supports the same URL. After deploying, use that URL in Google Auth Platform's Branding privacy-policy field. Keep the policy, contact address, and update date aligned with the service's actual practices.
 
 ## Debug / Test Mode
 

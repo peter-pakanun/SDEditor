@@ -26,6 +26,7 @@
     <div class="multiInstanceGate versionGate" v-if="!testMode && !gameVersionSelected">
       <div class="multiInstanceGateContent versionGateContent">
         <h2>Select Game Version</h2>
+        <p>SDEditor is a translation editor for Path of Exile StatDescriptions files, with optional Google backup for settings and shared language dictionaries.</p>
         <p>Choose the Path of Exile version you are translating. Source files, workspace data, and history are stored separately for each version.</p>
         <div class="versionGateButtons">
           <button class="versionChoiceBtn" @click="selectGameVersion('poe1')">
@@ -37,6 +38,7 @@
             <span class="versionChoiceSub">Path of Exile 2</span>
           </button>
         </div>
+        <p><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a></p>
       </div>
     </div>
 
@@ -71,6 +73,7 @@
         <section class="cloudSettings" aria-label="Cloud backup">
           <h3>Cloud backup</h3>
           <p class="cloudHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
+          <p class="cloudHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
           <p v-if="testMode">Cloud backup is disabled in test mode.</p>
           <template v-else>
             <button v-if="!cloudSignedIn" @click="cloudLogin" :disabled="cloudBusy">Backup using Google account</button>
@@ -246,6 +249,7 @@
         <div class="loadingText" v-if="loadingProgress == 0 && !needsPostMigrationImport">
           <p>Welcome to <b>SDEditor!</b></p>
           <p>Read the <a href="https://github.com/peter-pakanun/SDEditor/blob/master/docs/editor_guide.md" target="_blank">Editor guide</a> for more information.</p>
+          <p><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a></p>
           <button @click="showImportUpdateZipDialog" v-tooltip="'Import ZIP'">📦 Import StatDescriptions.zip</button>
           <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>

@@ -25,6 +25,8 @@ if (LOG_REQUESTS) {
   });
 }
 
+// Cloudflare Pages serves policy.html at /policy; keep the local URL identical.
+app.get(['/policy', '/policy/'], (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'policy.html')));
 app.use(express.static(PUBLIC_DIR));
 
 app.listen(PORT, HOST, () => {

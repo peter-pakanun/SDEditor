@@ -1,0 +1,46 @@
+:root {
+  color-scheme: light dark;
+  --page: #f5f7fb;
+  --text: #172033;
+  --muted: #576378;
+  --line: #dbe2ee;
+  --link: #314fae;
+  --panel: #eaf0ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text); font: 16px/1.75 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--link); text-underline-offset: .2em; overflow-wrap: anywhere; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 2px; }
+.siteHeader, main, footer { width: min(100% - 48px, 840px); margin-inline: auto; }
+.siteHeader { padding-block: 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
+.brand { font-size: 20px; font-weight: 750; text-decoration: none; color: var(--text); }
+.policyIntro { padding-block: 48px 24px; }
+.eyebrow { margin: 0 0 12px; color: var(--link); font-size: 12px; font-weight: 750; letter-spacing: .15em; }
+h1 { margin: 0; font-size: clamp(34px, 6vw, 52px); line-height: 1.15; letter-spacing: -.04em; }
+.summary { max-width: 720px; margin-top: 24px; font-size: 19px; line-height: 1.7; }
+.updated { color: var(--muted); font-size: 14px; }
+.atAGlance { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px 28px; margin-block: 8px 40px; }
+h2 { margin: 0 0 16px; font-size: 22px; line-height: 1.4; letter-spacing: -.02em; }
+.atAGlance h2 { font-size: 18px; }
+p { margin: 0 0 16px; }
+ul { padding-left: 22px; margin: 0; }
+li { margin-block: 10px; }
+li:last-child { margin-bottom: 0; }
+section { padding-block: 28px; border-top: 1px solid var(--line); scroll-margin-top: 24px; }
+section ul { margin-bottom: 20px; }
+section p:last-child { margin-bottom: 0; }
+code { font-size: .9em; }
+footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding-block: 28px 40px; margin-top: 24px; border-top: 1px solid var(--line); font-size: 14px; }
+footer span { color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  :root { --page: #202225; --text: #e2e5ed; --muted: #b0b8c9; --line: #424957; --link: #b3c3ff; --panel: #292f40; }
+}
+@media (max-width: 520px) {
+  .siteHeader, main, footer { width: calc(100% - 32px); }
+  .siteHeader { padding-block: 18px; }
+  .policyIntro { padding-top: 32px; }
+  .summary { font-size: 17px; }
+  .atAGlance { padding: 20px; }
+  h2 { font-size: 20px; }
+}
