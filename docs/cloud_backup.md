@@ -48,6 +48,18 @@ Independent changes are already included in both candidates. A group without a c
 
 If one side deleted an entry while the other edited it, **Alternates** also lets you choose the surviving entry or **Entry deleted**. A deleted entry has no TL note to choose. If another translator updates the dictionary while you decide, the resolver refreshes and asks you to review again. Unresolved entries remain local; other compatible changes can continue syncing.
 
+## Shared Dictionary History
+
+Open **Settings → Cloud backup → Shared dictionary history** to inspect changes to your assigned language's shared dictionary, even without a translation workspace loaded. Each dictionary entry also has a small history icon beside its **Alternates** controls. That shortcut opens the same view with the entry's stable ID already selected. It occupies the existing control row and does not enlarge the entry box. Entries in a different, local-only language cannot use this shortcut.
+
+History records additions, changes, deletions and restores, with the translator's name, time, shared revision and changed fields. Filter by entry ID, text, translator, change type, how the change happened, or a date range. Date filters use UTC; displayed timestamps use your browser's local timezone. **Apply filters** refreshes the list, **Clear** removes the filters, and **Load more** retrieves older matching changes. **Automatic merge** and **Conflict resolved** identify decisions reported by the synchronizing editor; the API records the actual author and before/after contents of the committed change. Unsynchronized local edits do not appear here yet.
+
+Select a change to compare complete **Before** and **After** versions, including the main Find/Replace pair, ordered Alternates and TL note. Choose **Restore this version**, review the current shared entry alongside the proposed result, then **Confirm shared restore**. The restore keeps the same entry ID, affects everyone assigned to that language, and creates a new history event while preserving the older events. A version already matching the shared entry is labelled **Already current**. Selecting a version in which the entry does not exist deletes that entry; the confirmation makes this explicit.
+
+Before a restore is sent, the editor saves a local recovery copy. Any earlier cloud write awaiting confirmation must finish syncing first. If another translator changes the shared dictionary after the preview was loaded, the restore is rejected and you must select the history event again to review a fresh preview. Network-interrupted restores remain pending for **Sync now** to retry safely. Account changes, sign-out, language changes and expired sessions close the history view rather than displaying a previous account's results.
+
+History starts when the API's history migration is installed. Existing live entries receive an **Existing entry** baseline without an invented author. The version before that baseline is unavailable. Entries deleted before history recording began have no saved content to restore; the view reports this limitation. This shared dictionary history is separate from the editor's existing local translation-file **History** tab.
+
 ## Existing Data and Manual Exports
 
 On upgrade, the old dictionary is placed under its previously selected language. It is not copied into every language. If the old settings had no language, Settings asks you to choose one before attaching that dictionary. The original settings are retained locally as a recovery source. This is separate from the older PoE1/PoE2 workspace migration described in [Multi-Version Support](multi_version.md).
@@ -56,7 +68,7 @@ On upgrade, the old dictionary is placed under its previously selected language.
 
 **📥 Import settings** requires typing `YES` and keeps a recovery copy before replacing the current profile's settings and the imported language's dictionary. When signed in and assigned, imported changes enter the normal sync/merge workflow. Importing a file is not an administrator language assignment.
 
-**Download local recovery copies** appears after a first cloud-settings restore or a settings import. It downloads `sdeditor_local_recovery.json` with the retained original settings and dated copies. This is a recovery archive, not a file to import directly with **Import settings**. To restore a dated copy, make a standard settings JSON from that copy's `settings`, add `dictionary` from its `dictionaries[settings.lang]` and `editorClipboard` from the same copy, then use the normal import. The archive's `legacySettings` object can also be saved as a standard settings JSON. Keep the original archive unchanged while recovering.
+**Download local recovery copies** appears after a first cloud-settings restore, settings import or shared history restore. It downloads `sdeditor_local_recovery.json` with the retained original settings and dated copies. This is a recovery archive, not a file to import directly with **Import settings**. To restore a dated copy, make a standard settings JSON from that copy's `settings`, add `dictionary` from its `dictionaries[settings.lang]` and `editorClipboard` from the same copy, then use the normal import. The archive's `legacySettings` object can also be saved as a standard settings JSON. Keep the original archive unchanged while recovering.
 
 ## Local Validation
 
@@ -65,10 +77,13 @@ The frontend's `npm test` remains a stub. Run the focused merge checks and synta
 ```sh
 node scripts/test-dictionary-sync.cjs
 node scripts/test-cloud-sync.cjs
+node scripts/test-history-sync.cjs
+node scripts/test-history-ui.cjs
 node scripts/test-render-safety.cjs
 node --check public/dictionarySync.js
 node --check public/cloudSync.js
 node --check public/cloudUi.js
+node --check public/cloudHistoryUi.js
 node server.js --no-open
 ```
 

@@ -87,6 +87,7 @@
             <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose a language below to keep your existing dictionary under that language before cloud backup.</p>
             <div class="cloudActions">
               <button v-if="cloudSignedIn" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
+              <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
               <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
               <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve dictionary conflicts ({{ cloudConflicts.length }})</button>
               <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
@@ -103,6 +104,7 @@
               </div>
             </div>
           </template>
+          <p v-if="!cloudHistoryAvailable" class="cloudHelp">{{ cloudHistoryUnavailableReason }}</p>
         </section>
         <h3>Language to translate</h3>
         <select v-model="lang" aria-label="Language to translate">
@@ -523,6 +525,7 @@
                 </div>
                 <div class="dictAltHeader">
                   <span>Alternates</span>
+                  <button class="dictHistoryBtn" @click="cloudOpenHistory(word._id)" :disabled="!cloudEntryHistoryAvailable" :aria-label="'View shared history for ' + (word.find || 'this dictionary entry')" :title="cloudEntryHistoryHint"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
                   <button @click="addDictionaryAltRow(word)">➕</button>
                 </div>
                 <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
@@ -717,6 +720,54 @@
         <p v-else>No dictionary conflicts remain.</p>
       </section>
     </div>
+    <div v-if="cloudHistoryVisible" class="cloudResolverBackdrop cloudHistoryBackdrop" @keydown.esc.stop.prevent="cloudCloseHistory" @keydown.tab="cloudHistoryTrapFocus">
+      <section class="cloudResolver cloudHistoryDialog" ref="cloudHistoryDialog" role="dialog" aria-modal="true" aria-labelledby="cloudHistoryTitle" tabindex="-1">
+        <div class="cloudResolverHeading">
+          <div><h2 id="cloudHistoryTitle">Shared dictionary history</h2><p><strong>{{ cloudUser && cloudUser.language }}</strong> · See who changed each entry and restore an earlier version.</p></div>
+          <button ref="cloudHistoryClose" @click="cloudCloseHistory" aria-label="Close shared dictionary history">✕</button>
+        </div>
+        <p v-if="cloudHistoryCoverage" class="cloudHistoryCoverage">History recording began {{ cloudHistoryDate(cloudHistoryCoverage.startedAt) }}. Earlier entries appear as a baseline without author attribution.<span v-if="cloudHistoryCoverage.legacyDeletions"> {{ cloudHistoryCoverage.legacyDeletions }} earlier deletion(s) have no saved content to restore.</span> Automatic merge labels describe the synchronizing editor's merge decision.</p>
+        <form class="cloudHistoryFilters" @submit.prevent="cloudLoadHistory()">
+          <label>Search text<input type="search" v-model="cloudHistoryFilters.q" placeholder="Find, replacement or TL note" :disabled="cloudHistoryRestoring"></label>
+          <label>Entry ID<input type="text" v-model="cloudHistoryFilters.entryId" placeholder="All entries" :disabled="cloudHistoryRestoring"></label>
+          <label>Translator<select v-model="cloudHistoryFilters.actor" :disabled="cloudHistoryRestoring"><option value="">Everyone</option><option v-for="actor in cloudHistoryActors" :key="actor.id" :value="actor.id">{{ actor.name || 'Translator' }}</option></select></label>
+          <label>Change<select v-model="cloudHistoryFilters.action" :disabled="cloudHistoryRestoring"><option value="">All changes</option><option value="add">Added</option><option value="update">Changed</option><option value="delete">Deleted</option><option value="restore">Restored</option><option value="baseline">Existing entry</option></select></label>
+          <label>How it changed<select v-model="cloudHistoryFilters.origin" :disabled="cloudHistoryRestoring"><option value="">All sources</option><option value="edit">Edit</option><option value="auto_merge">Automatic merge</option><option value="conflict_resolution">Conflict resolved</option><option value="restore">History restore</option><option value="baseline">History baseline</option></select></label>
+          <label>From date (UTC)<input type="date" v-model="cloudHistoryFilters.from" :disabled="cloudHistoryRestoring"></label>
+          <label>Through date (UTC)<input type="date" v-model="cloudHistoryFilters.to" :disabled="cloudHistoryRestoring"></label>
+          <div class="cloudHistoryFilterActions"><button type="submit" :disabled="cloudHistoryLoading || cloudHistoryRestoring">Apply filters</button><button type="button" @click="cloudClearHistoryFilters" :disabled="cloudHistoryLoading || cloudHistoryRestoring">Clear</button></div>
+        </form>
+        <p v-if="cloudHistoryError" class="cloudWarning" role="alert">{{ cloudHistoryError }}</p>
+        <p v-if="cloudHistoryNotice" role="status">{{ cloudHistoryNotice }}</p>
+        <div class="cloudHistoryList" aria-label="Shared dictionary changes" :aria-busy="cloudHistoryLoading">
+          <button v-for="event in cloudHistoryItems" :key="event.id" type="button" class="cloudHistoryItem" :class="{ selected: cloudHistoryEvent && cloudHistoryEvent.id === event.id }" @click="cloudSelectHistoryEvent(event)" :disabled="cloudHistoryRestoring" :aria-pressed="!!cloudHistoryEvent && cloudHistoryEvent.id === event.id">
+            <span class="cloudHistoryItemTitle"><strong>{{ event.find || '(empty Find)' }}</strong><span class="cloudHistoryTag">{{ cloudHistoryAction(event) }}</span><span v-if="event.origin !== 'edit'" class="cloudHistoryTag">{{ cloudHistoryOrigin(event) }}</span></span>
+            <span>{{ cloudHistoryActor(event) }} · {{ cloudHistoryDate(event.createdAt) }}</span>
+            <span class="cloudHistoryItemMeta">{{ cloudHistoryChanges(event) }} · Revision {{ event.revision }} · ID {{ event.entryId }}</span>
+          </button>
+          <p v-if="!cloudHistoryLoading && !cloudHistoryItems.length">No shared changes match these filters. Local edits appear after they are synchronized.</p>
+        </div>
+        <div class="cloudHistoryPagination"><span>{{ cloudHistoryItems.length }} change(s) shown · Shared revision {{ cloudHistoryRevision }}</span><button v-if="cloudHistoryNextCursor" @click="cloudLoadHistory(true)" :disabled="cloudHistoryLoading || cloudHistoryRestoring">Load more</button><span v-if="cloudHistoryLoading" role="status">Loading history…</span></div>
+        <p v-if="cloudHistoryDetailLoading" role="status">Loading version…</p>
+        <section v-if="cloudHistoryEvent" class="cloudHistoryDetail" ref="cloudHistoryDetail" aria-label="Selected dictionary version">
+          <h3>{{ cloudHistoryAction(cloudHistoryEvent) }} · {{ cloudHistoryEvent.find || '(empty Find)' }}</h3>
+          <p>{{ cloudHistoryActor(cloudHistoryEvent) }} · {{ cloudHistoryDate(cloudHistoryEvent.createdAt) }} · {{ cloudHistoryOrigin(cloudHistoryEvent) }} · Revision {{ cloudHistoryEvent.revision }}</p>
+          <p class="cloudHistoryEntryId">Entry ID: {{ cloudHistoryEvent.entryId }}<span v-if="cloudHistoryEvent.sourceEventId"> · Restored from event {{ cloudHistoryEvent.sourceEventId }} ({{ cloudHistoryEvent.sourceVersion }})</span></p>
+          <div class="cloudHistoryVersions">
+            <div><h4>Before this change</h4><pre>{{ cloudHistoryEvent.canRestoreBefore ? cloudHistorySnapshotText(cloudHistoryEvent.before) : 'This version predates history recording and is unavailable.' }}</pre><button @click="cloudPrepareHistoryRestore('before')" :disabled="!cloudHistoryEvent.canRestoreBefore || cloudHistoryRestoring || cloudHistoryVersionCurrent('before')">{{ cloudHistoryVersionCurrent('before') ? 'Already current' : 'Restore this version' }}</button></div>
+            <div><h4>After this change</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryEvent.after) }}</pre><button @click="cloudPrepareHistoryRestore('after')" :disabled="!cloudHistoryEvent.canRestoreAfter || cloudHistoryRestoring || cloudHistoryVersionCurrent('after')">{{ cloudHistoryVersionCurrent('after') ? 'Already current' : 'Restore this version' }}</button></div>
+          </div>
+          <div v-if="cloudHistoryRestoreVersion" class="cloudHistoryRestorePreview" ref="cloudHistoryRestorePreview">
+            <h3>Review shared restore</h3>
+            <p>This changes the shared entry for all {{ cloudUser && cloudUser.language }} translators and keeps the same entry ID. Your current local version is preserved in a recovery copy.</p>
+            <div class="cloudHistoryVersions"><div><h4>Currently shared · revision {{ cloudHistoryEvent.currentRevision }}</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryEvent.current) }}</pre></div><div><h4>Result after restore</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryRestoreEntry) }}</pre></div></div>
+            <p v-if="!cloudHistoryRestoreEntry" class="cloudWarning">The selected version has no entry. Restoring it deletes this entry from the shared dictionary.</p>
+            <p>If the shared dictionary changes before saving, review a fresh version before trying again.</p>
+            <div class="cloudResolverActions"><button @click="cloudHistoryRestoreVersion = ''" :disabled="cloudHistoryRestoring">Cancel restore</button><button class="cloudSaveResolution" @click="cloudConfirmHistoryRestore" :disabled="cloudHistoryRestoring">{{ cloudHistoryRestoring ? 'Restoring…' : 'Confirm shared restore' }}</button></div>
+          </div>
+        </section>
+      </section>
+    </div>
     <app-tooltip :state="tooltip"></app-tooltip>
 
     </div>
@@ -736,6 +787,7 @@
   <script src="dictionarySync.js"></script>
   <script src="cloudSync.js"></script>
   <script src="cloudUi.js"></script>
+  <script src="cloudHistoryUi.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

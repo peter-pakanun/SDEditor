@@ -72,6 +72,22 @@
     for (const id of deletedIds) { entries.delete(id); deleted.add(id); }
     return { revision, entries: [...entries.values()], tombstones: [...deleted] };
   }
+  function autoMergedIds(merge, localEntries, remote, result, previous = []) {
+    const local = merge.normalizeEntries(localEntries);
+    const content = entry => entry && ({ find: entry.find, replace: entry.replace, tlnote: entry.tlnote, alts: entry.alts.map(a => ({ find: a.find, replace: a.replace })) });
+    const findKey = entry => entry.find.trim().toLowerCase();
+    return result.upserts.filter(entry => {
+      if (previous.includes(entry._id)) return true;
+      let own = local.find(row => row._id === entry._id);
+      if (!own) {
+        const matching = local.filter(row => findKey(row) === findKey(entry));
+        if (matching.length === 1 && remote.entries.filter(row => findKey(row) === findKey(entry)).length === 1) own = matching[0];
+      }
+      // Uploads already differ from the remote. A result that also differs from
+      // the local draft incorporated remote changes during automatic merging.
+      return own && !equal(content(own), content(entry));
+    }).map(entry => entry._id);
+  }
   class Client {
     constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks }) {
       this.store = store; this.merge = merge; this.fetcher = fetcher;
@@ -338,6 +354,8 @@
         const d = profile.dictionaries[language] ||= newDictionary();
         const baseline = accepted ? preserveConflictBases(accepted, d.conflicts) : d.base;
         result = this.merge.merge(baseline, d.entries, remote);
+        const priorAutoMerged = (d.autoMergedIds || []).filter(id => !accepted || !d.pendingWrite?.request.upserts.some(e => e._id === id));
+        d.autoMergedIds = autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
         d.entries = result.entries;
         d.conflicts = result.conflicts;
         d.base = preserveConflictBases(remote, result.conflicts);
@@ -349,6 +367,8 @@
     async syncDictionary(ctx, language) {
       const path = '/v1/dictionaries/' + encodeURIComponent(language);
       for (let attempt = 0; attempt < 4; attempt++) {
+        const historyRestore = this.state.profiles[ctx.profile].dictionaries[language]?.pendingHistoryRestore;
+        if (historyRestore) await this.sendHistoryRestore(ctx, language, historyRestore);
         const pendingWrite = this.state.profiles[ctx.profile].dictionaries[language]?.pendingWrite;
         if (pendingWrite) {
           try { await this.sendDictionaryWrite(ctx, language, pendingWrite); }
@@ -360,7 +380,9 @@
         const merged = await this.mergeRemote(ctx, language, remote);
         if (!merged || !this.current(ctx)) return;
         if (!merged.upserts.length && !merged.deletedIds.length) return;
-        const request = { baseRevision: remote.revision, mutationId: this.uuid(), upserts: merged.upserts, deletedIds: merged.deletedIds };
+        const automatic = new Set(this.state.profiles[ctx.profile].dictionaries[language].autoMergedIds || []);
+        const origins = Object.fromEntries(merged.upserts.filter(entry => automatic.has(entry._id)).map(entry => [entry._id, 'auto_merge']));
+        const request = { baseRevision: remote.revision, mutationId: this.uuid(), upserts: merged.upserts, deletedIds: merged.deletedIds, ...(Object.keys(origins).length ? { origins } : {}) };
         try {
           const write = { remote, request };
           await this.update((state, profile) => { profile.dictionaries[language].pendingWrite = write; }, ctx, false);
@@ -388,15 +410,16 @@
         const conflict = d.conflicts.find(c => c.id === id);
         if (!conflict || d.revision !== revision) throw new Error('The dictionary changed. Review the current conflict again.');
         if (d.pendingResolution) throw new Error('A previous resolution is still waiting to sync. Retry sync first.');
+        if (d.pendingHistoryRestore) throw new Error('A history restore is still waiting to sync. Retry sync first.');
         const entry = this.merge.resolve(conflict, choices);
-        d.pendingResolution = { id, entry, originalLocal: copy(d.entries.find(e => e._id === id) || null), revision, mutationId: this.uuid() };
+        d.pendingResolution = { id, entry, originalLocal: copy(d.entries.find(e => e._id === id) || null), revision, mutationId: this.uuid(), origin: 'conflict_resolution' };
       }, ctx, false);
       await this.sendResolution(ctx, language, this.state.profiles[ctx.profile].dictionaries[language].pendingResolution);
       this.notify(); this.schedule(0);
     }
     async sendResolution(ctx, language, pending) {
       try {
-        const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: { baseRevision: pending.revision, mutationId: pending.mutationId, upserts: pending.entry ? [pending.entry] : [], deletedIds: pending.entry ? [] : [pending.id] } }, ctx);
+        const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: { baseRevision: pending.revision, mutationId: pending.mutationId, upserts: pending.entry ? [pending.entry] : [], deletedIds: pending.entry ? [] : [pending.id], ...(pending.origin ? { origins: { [pending.id]: pending.origin } } : {}) } }, ctx);
         await this.update((state, profile) => {
           const d = profile.dictionaries[language];
           const current = d.entries.find(e => e._id === pending.id) || null;
@@ -418,6 +441,100 @@
           await this.mergeRemote(ctx, language, remote);
           this.notify();
           throw new Error('Another translator updated this dictionary. Review the refreshed result before saving.');
+        }
+        throw error;
+      }
+    }
+    historyContext() {
+      const ctx = this.context();
+      if (!ctx.token || !ctx.language) throw new Error('Sign in with an assigned language to view shared history.');
+      return ctx;
+    }
+    assertHistoryContext(ctx) {
+      if (!this.current(ctx) || this.state.auth?.user.language !== ctx.language) throw Object.assign(new Error('Account or assigned language changed. Open history again.'), { stale: true });
+    }
+    async getDictionaryHistory(filters = {}) {
+      const ctx = this.historyContext();
+      const params = new URLSearchParams();
+      for (const key of ['entryId', 'q', 'actor', 'action', 'origin', 'from', 'to', 'cursor', 'limit']) {
+        if (filters[key] !== undefined && filters[key] !== null && filters[key] !== '') params.set(key, String(filters[key]));
+      }
+      const result = await this.request('/v1/dictionaries/' + encodeURIComponent(ctx.language) + '/history?' + params, {}, ctx);
+      this.assertHistoryContext(ctx);
+      return result;
+    }
+    async getDictionaryHistoryEvent(id) {
+      const ctx = this.historyContext();
+      const result = await this.request('/v1/dictionaries/' + encodeURIComponent(ctx.language) + '/history/' + encodeURIComponent(id), {}, ctx);
+      this.assertHistoryContext(ctx);
+      return result;
+    }
+    async restoreDictionaryHistory(eventId, version, revision) {
+      if (!['before', 'after'].includes(version)) throw new Error('Choose a history version to restore.');
+      const ctx = this.historyContext();
+      await this.localQueue.catch(() => {});
+      while (this.running) await this.running;
+      this.assertHistoryContext(ctx);
+      clearTimeout(this.timer);
+      const run = async () => {
+        this.state = await this.store.getHybridState();
+        this.assertHistoryContext(ctx);
+        const path = '/v1/dictionaries/' + encodeURIComponent(ctx.language);
+        const existing = this.state.profiles[ctx.profile].dictionaries[ctx.language];
+        if (existing?.pendingHistoryRestore || existing?.pendingWrite || existing?.pendingResolution) throw new Error('Another dictionary change is waiting to sync. Use Sync now, then review the history version again.');
+        const event = await this.request(path + '/history/' + encodeURIComponent(eventId), {}, ctx);
+        const remote = await this.request(path, {}, ctx);
+        this.assertHistoryContext(ctx);
+        if (remote.revision !== revision || event.currentRevision !== revision) throw Object.assign(new Error('The shared dictionary changed. Refresh the history preview before restoring.'), { status: 409 });
+        if (event.action === 'baseline' && version === 'before') throw new Error('The version before history started is unavailable.');
+        const entry = event[version];
+        if (entry === undefined || (entry && entry._id !== event.entryId)) throw new Error('The selected history version is invalid.');
+        await this.update((state, profile) => {
+          this.assertHistoryContext(ctx);
+          const d = profile.dictionaries[ctx.language] ||= newDictionary();
+          profile.recovery.push({ at: Date.now(), reason: 'Before shared history restore', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
+          d.pendingHistoryRestore = { id: event.entryId, eventId, entry: copy(entry), originalLocal: copy(d.entries.find(e => e._id === event.entryId) || null), request: { baseRevision: revision, mutationId: this.uuid(), version } };
+        }, ctx, false);
+        const pending = this.state.profiles[ctx.profile].dictionaries[ctx.language].pendingHistoryRestore;
+        await this.sendHistoryRestore(ctx, ctx.language, pending);
+        this.status('History version restored · other local edits will continue syncing');
+        this.notify();
+      };
+      const operation = this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run();
+      this.running = operation.catch(() => {}).finally(() => { this.running = null; this.schedule(1000); });
+      try { await operation; }
+      catch (error) {
+        if (error.stale || error.status || !this.state.profiles[ctx.profile]?.dictionaries[ctx.language]?.pendingHistoryRestore) throw error;
+        throw new Error('Restore is saved locally but confirmation is pending. Use Sync now to retry safely. ' + error.message);
+      }
+    }
+    async sendHistoryRestore(ctx, language, pending) {
+      try {
+        const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language) + '/history/' + encodeURIComponent(pending.eventId) + '/restore', { method: 'POST', body: pending.request }, ctx);
+        await this.update((state, profile) => {
+          const d = profile.dictionaries[language];
+          const current = d.entries.find(e => e._id === pending.id) || null;
+          const rebased = this.merge.merge(
+            { entries: pending.originalLocal ? [pending.originalLocal] : [], tombstones: [], revision: 0 },
+            current ? [current] : [],
+            { entries: pending.entry ? [pending.entry] : [], tombstones: pending.entry ? [] : [pending.id], revision: response.appliedRevision || response.revision }
+          );
+          d.entries = d.entries.flatMap(e => e._id === pending.id ? rebased.entries : [e]);
+          if (!current) d.entries.push(...rebased.entries);
+          d.conflicts = d.conflicts.filter(c => c.id !== pending.id).concat(rebased.conflicts);
+          d.base = preserveConflictBases(acceptedSnapshot(d.base || { entries: [], tombstones: [] }, pending.entry ? [pending.entry] : [], pending.entry ? [] : [pending.id], response.appliedRevision || response.revision), d.conflicts);
+          d.pendingHistoryRestore = null;
+        }, ctx, false);
+        await this.mergeRemote(ctx, language, response);
+      } catch (error) {
+        if ([400, 404, 409, 413, 422].includes(error.status)) {
+          await this.update((state, profile) => { profile.dictionaries[language].pendingHistoryRestore = null; }, ctx, false);
+          if (error.status === 409) {
+            const remote = error.current || await this.request('/v1/dictionaries/' + encodeURIComponent(language), {}, ctx);
+            await this.mergeRemote(ctx, language, remote);
+            this.notify();
+            error.message = 'Another translator changed the dictionary. Refresh the history preview before restoring.';
+          }
         }
         throw error;
       }

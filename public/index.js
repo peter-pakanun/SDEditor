@@ -77,7 +77,7 @@ function escapeTooltipAttr(value) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,

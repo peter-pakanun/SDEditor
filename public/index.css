@@ -233,9 +233,37 @@ input:focus, button:focus, textarea:focus {
 .cloudImportConfirm { max-width: 560px; }
 .cloudImportConfirm p { line-height: 1.7; }
 .cloudImportConfirm input { display: block; width: 100%; margin-top: 8px; }
+.cloudHistoryBackdrop { z-index: 16000; }
+.cloudHistoryDialog { width: min(1080px, 100%); }
+.cloudHistoryDialog > .cloudResolverHeading { position: sticky; top: -24px; z-index: 2; margin: -24px -24px 0; padding: 24px 24px 4px; background: var(--color-bg); border-bottom: 1px solid var(--color-element-alt); }
+.cloudHistoryCoverage { padding: 10px 12px; background: var(--color-bg2); line-height: 1.6; }
+.cloudHistoryFilters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 12px; margin: 18px 0; }
+.cloudHistoryFilters label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.cloudHistoryFilters input, .cloudHistoryFilters select { width: 100%; min-width: 0; }
+.cloudHistoryFilterActions { display: flex; flex-wrap: wrap; gap: 6px; }
+.cloudHistoryList { display: flex; flex-direction: column; gap: 7px; max-height: 36vh; overflow: auto; }
+.cloudHistoryItem { display: flex; flex-direction: column; align-items: stretch; text-align: left; line-height: 1.65; gap: 4px; padding: 10px 12px; width: 100%; flex: none; background: var(--color-element); overflow-wrap: anywhere; cursor: pointer; }
+.cloudHistoryItem.selected { box-shadow: inset 3px 0 var(--color-element-highlight); border-color: var(--color-element-highlight); background: var(--color-bg2); }
+.cloudHistoryItemTitle { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.cloudHistoryTag { background: var(--color-element-alt); border-radius: 3px; padding: 1px 6px; font-size: 0.92em; }
+.cloudHistoryItemMeta, .cloudHistoryEntryId { opacity: 0.82; overflow-wrap: anywhere; }
+.cloudHistoryPagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.cloudHistoryDetail { border-top: 1px solid var(--color-element-highlight); margin-top: 20px; padding-top: 6px; }
+.cloudHistoryDetail p { line-height: 1.65; }
+.cloudHistoryVersions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cloudHistoryVersions > div { min-width: 0; padding: 14px; background: var(--color-element); border: 1px solid var(--color-element-alt); display: flex; flex-direction: column; align-items: flex-start; }
+.cloudHistoryVersions h4 { margin: 0; }
+.cloudHistoryVersions pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.8; width: 100%; flex: 1; }
+.cloudHistoryRestorePreview { padding: 12px; margin-top: 18px; border: 2px solid var(--color-element-highlight); background: var(--color-bg2); }
+@media (max-width: 760px) {
+  .cloudHistoryFilters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .cloudHistoryVersions { grid-template-columns: minmax(0, 1fr); }
+  .cloudHistoryRestorePreview { padding: 8px; }
+}
 @media (max-width: 600px) {
   .cloudResolverBackdrop { padding: 5px; }
   .cloudResolver { padding: 10px; max-height: 98vh; }
+  .cloudHistoryDialog > .cloudResolverHeading { top: -10px; margin: -10px -10px 0; padding: 10px 10px 4px; }
   .cloudComparisonHead, .cloudConflictCell { padding: 7px; }
   .cloudConflictCell button { padding: 7px 4px; }
   .cloudResolverActions { flex-wrap: wrap; }
@@ -1693,6 +1721,11 @@ button, label, th, td, input[type="checkbox"] {
 .side .dictAltHeader > button {
   padding: calc(0.15em * var(--density)) calc(0.35em * var(--density));
 }
+
+/* The history action shares the existing Alternates row; it adds no row or height. */
+.side .dictAltHeader > button.dictHistoryBtn { margin-left: auto; flex: 0 0 auto; }
+.dictHistoryBtn svg { display: inline-block; vertical-align: -3px; }
+.dictHistoryBtn:disabled { opacity: 0.45; }
 
 .side .dictAltRow {
   display: flex;
