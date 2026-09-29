@@ -137,7 +137,8 @@ test('accepting This persists every matching entry while preserving unrelated dr
     assert.equal(editor.localDescs.status[desc.filepath].custom, `retain ${desc.filename.replace('.txt', '')}`);
     assert.deepEqual(snapshot(editor.localDescs.descs.find(item => item.filepath === desc.filepath).translations.Thai), snapshot(desc.translations.Thai));
   }
-  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanCompleted, false, 'Resolving entries invalidates the previous manual scan without rerunning it.');
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
   assert.equal(editor.diagnosticScanWarningFileCount, 0);
   assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
   assert.ok(editor.consistencyResolutionNotice);

@@ -58,7 +58,7 @@ So it is “missing translation content”, not “missing file”.
 
 If a **⚡ count** button appears before **Scan diagnostics**, it opens shared Dictionary conflicts. Choose local content on the left or remote content on the right for **Alternates** and **TL note**, review the center result, and save it. Independent changes merge automatically. See [Resolve Dictionary Conflicts](cloud_backup.md#resolve-dictionary-conflicts).
 
-Click **Scan diagnostics** to check every loaded file in the selected language, including files hidden by search or filters. Use **Diagnostic warnings only** or **Diagnostic errors only** to narrow the results. Hover over a flagged file for details.
+Click **Scan diagnostics** to choose which checks to run. The selector has a checkbox for whitespace, dash spacing, tag syntax, variable tags, keyword popup tags, text decoration tags, inconsistent translations, and Dictionary terminology. Every check starts selected except **Dictionary terminology**. Start the scan to check every loaded file in the selected language, including files hidden by search or filters. Use **Diagnostic warnings only** or **Diagnostic errors only** to narrow the results. Hover over a flagged file for details.
 
 The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations count as differences. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
 
@@ -66,11 +66,11 @@ Open a flagged file and click **Compare & resolve** below the affected block. Th
 
 Click **Use this version for all N entries** on either side to save that version to every loaded entry with identical English in the selected language, including matches hidden by filters. Each button shows how many entries and files it will update. Matching drafts are included; unrelated unsaved edits stay in your editor. Invalid tags or a mismatched table column count must be fixed before a version can be applied. Empty versions are labeled explicitly. The workspace and before/after translation history are saved together, so previous saved translations can be restored from each file's **History** panel. A failed save leaves the entries unchanged.
 
-Warnings update as you edit, and saving, resolving, or restoring a translation refreshes scan results. Inconsistencies remain warnings, so you can close the comparison and use the existing **save anyway** confirmation for intentional variations. Changing language or importing another workspace clears the previous scan results.
+**Inconsistent translations** and **Dictionary terminology** run only when selected in a manual scan. Opening or editing a file does not run either check. After a scan, opening an unchanged entry shows its saved scan warnings; changing the entry hides those warnings until you scan again. Saving, resolving, or restoring translations, editing the Dictionary, changing language, and importing another workspace clear previous scan results without starting another scan. Run **Scan diagnostics** again when you want updated results. The other editor checks continue to update automatically, and tag errors still prevent saving regardless of the manual scan selection.
 
 #### Dictionary Terminology
 
-Diagnostics also check the words and phrases in your current **Dictionary**, even when the complete English blocks differ. If a dictionary term occurs in the English, the translation must contain the entry's main **Replace** text or any of its alternate **Replace** texts. Otherwise a warning lists the term and its allowed translations below the affected block and in the scan details.
+Select **Dictionary terminology** in the scan selector to check the words and phrases in your current **Dictionary**, even when the complete English blocks differ. This check is off by default. If a dictionary term occurs in the English, the translation must contain the entry's main **Replace** text or any of its alternate **Replace** texts. Otherwise a warning lists the term and its allowed translations below the unchanged affected block and in the scan details.
 
 All alternatives belong to the same allowed set: an alternate does not need to match the current English wording to allow its translation. For example, `Fire → ไฟ` with an alternate `Flame → เปลวไฟ` permits either `ไฟ` or `เปลวไฟ` when English contains `Fire` or `Flame`. An alternate may repeat the main **Find**, or leave **Find** blank when it only supplies another allowed translation. Empty replacements and unfinished entries with no usable translation do not create terminology rules.
 
@@ -78,7 +78,7 @@ Source matching uses literal words and phrases, ignoring case; `Fire` does not m
 
 Keyword tags use their dictionary entry's main **Find** to identify the term and check the translated display text. For example, `[Fire|ผิด]` does not pass just because the identifier `Fire` was preserved or `ไฟ` appears elsewhere. Decoration wrappers and variable identifiers do not count as translated wording. Runtime-generated display text is skipped when it cannot be checked reliably.
 
-Terminology warnings refresh when you edit translations or dictionary alternatives. If a diagnostic scan has already run, dictionary changes automatically refresh it after typing pauses. This is a check for allowed wording, not a word-alignment or occurrence-count check: it does not prove that every word was translated correctly. The separate identical-English check still reports differences between complete translations, even when both use allowed dictionary wording.
+Terminology warnings come from the last manual scan; edit translations or dictionary alternatives and scan again to check the updated wording. This is a check for allowed wording, not a word-alignment or occurrence-count check: it does not prove that every word was translated correctly. The separate identical-English check still reports differences between complete translations, even when both use allowed dictionary wording.
 
 ## The Editor Interface
 

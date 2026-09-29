@@ -134,7 +134,7 @@ test('extra percentage is included in the diagnostic highlight and disappears af
   assert.doesNotMatch(editor.buildTagHLter(block.translation, block.translationDiagnostics), /diagError/);
 });
 
-test('editorSave blocks a suffix mismatch and updates completed scan results after a valid save', async () => {
+test('editorSave blocks a suffix mismatch and clears completed scan results after a valid save', async () => {
   const { editor, alerts, confirmations } = loadEditor();
   const desc = fixtureDescription('save', 'Damage {1}%', 'ความเสียหายเดิม {1}');
   editor.descs = [desc];
@@ -162,7 +162,8 @@ test('editorSave blocks a suffix mismatch and updates completed scan results aft
   assert.equal(persisted, 1);
   assert.equal(editor.editorVisible, false);
   assert.equal(editor.editorBlocks[0].diagnosticErrorCount, 0);
-  assert.equal(editor.diagnosticScanResults[desc.filepath].hasDiagnosticError, false);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.equal(editor.diagnosticScanResults[desc.filepath], undefined);
   assert.equal(editor.diagnosticScanErrorFileCount, 0);
   assert.deepEqual(confirmations, []);
 });

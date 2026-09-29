@@ -312,6 +312,7 @@ input:focus, button:focus, textarea:focus {
   line-height: 1.6;
 }
 
+.diagnosticScanDialog,
 .consistencyDialog {
   box-sizing: border-box;
   width: min(1100px, calc(100vw - 32px));
@@ -329,6 +330,7 @@ input:focus, button:focus, textarea:focus {
   line-height: 1.6;
 }
 
+.diagnosticScanDialog::backdrop,
 .consistencyDialog::backdrop {
   background: rgba(0, 0, 0, 0.65);
 }
@@ -368,16 +370,84 @@ input:focus, button:focus, textarea:focus {
   border-radius: 4px;
 }
 
+.diagnosticScanDialog :focus-visible,
 .consistencyDialog :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
 }
 
+.diagnosticScanDialog button:disabled,
 .consistencyDialog button:disabled,
 .consistencyDialog select:disabled,
 .consistencyPrompt button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.diagnosticScanDialog {
+  width: min(560px, calc(100vw - 24px));
+  padding: clamp(16px, 4vw, 24px);
+}
+
+.diagnosticScanDialog h2 {
+  margin: 0;
+  font-size: 1.5em;
+}
+
+.diagnosticScanDialog p {
+  margin: 8px 0 16px;
+}
+
+.diagnosticScanOptions {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.diagnosticScanOptions legend {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.diagnosticScanOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.diagnosticScanOption:hover {
+  background: var(--color-bg2);
+}
+
+.diagnosticScanOption input {
+  flex: 0 0 auto;
+  margin: 4px 0 0;
+  accent-color: var(--color-accent);
+}
+
+.diagnosticScanOption strong,
+.diagnosticScanOption small {
+  display: block;
+}
+
+.diagnosticScanOption small,
+.diagnosticScanHint {
+  opacity: 0.8;
+}
+
+.diagnosticScanActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.diagnosticScanActions button {
+  padding: 7px 16px;
+  border-radius: 4px;
 }
 
 .consistencySource {

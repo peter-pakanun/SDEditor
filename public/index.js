@@ -9,6 +9,19 @@ const TEST_MODE = (() => {
 })();
 const URL_LANG = urlParams.get('lang');
 const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
+const DIAGNOSTIC_SCAN_TYPES = [
+  { key: 'whitespace', label: 'Whitespace', description: 'Leading, trailing, and repeated spaces.' },
+  { key: 'dash', label: 'Dash spacing', description: 'Dashes at line boundaries or next to spaces.' },
+  { key: 'tagSyntax', label: 'Tag syntax', description: 'Missing, extra, nested, or malformed tags.' },
+  { key: 'variables', label: 'Variable tags', description: 'Variable identities, counts, and percentage suffixes.' },
+  { key: 'keywords', label: 'Keyword popup tags', description: 'Keyword identities and counts compared with English.' },
+  { key: 'decorations', label: 'Text decoration tags', description: 'Decoration names and counts compared with English.' },
+  { key: 'consistency', label: 'Inconsistent translations', description: 'Different translations of identical complete English entries.' },
+  { key: 'terminology', label: 'Dictionary terminology', description: 'Terms that do not use an approved dictionary translation.' },
+];
+const defaultDiagnosticScanChecks = () => Object.fromEntries(
+  DIAGNOSTIC_SCAN_TYPES.map(type => [type.key, type.key !== 'terminology'])
+);
 const GAME_VERSIONS = {
   poe1: { id: 'poe1', label: 'PoE1', title: 'Path of Exile 1' },
   poe2: { id: 'poe2', label: 'PoE2', title: 'Path of Exile 2' },
@@ -129,6 +142,8 @@ const config = Vue.defineComponent({
       searchText: "",
       filterSelect: "new",
       diagnosticScanResults: {},
+      diagnosticScanTypes: DIAGNOSTIC_SCAN_TYPES,
+      diagnosticScanChecks: defaultDiagnosticScanChecks(),
       diagnosticScanRunning: false,
       diagnosticScanCompleted: false,
       diagnosticScanProcessed: 0,
@@ -430,26 +445,17 @@ const config = Vue.defineComponent({
     editorTranslationReadOnly() {
       return this.editorCompareActive && this.editorCompareMode === 'translation';
     },
-    translationConsistencyIndex() {
-      return window.TranslationDiagnostics.createConsistencyIndex(this.descs, this.lang);
-    },
     terminologyDictionary() {
       return window.TerminologyDiagnostics.compileDictionary(this.dictionary);
     },
     editorConsistencyDiagnostics() {
-      const desc = this.editorCurrentEditingDesc;
-      if (!this.editorVisible || !desc) return [];
-      const entries = (this.editorBlocks || []).map((block, blockIndex) => ({
-        // History comparisons can display older English; compare against the current source.
-        english: desc.translations.English[blockIndex] ?? "",
-        translation: block.isTable
-          ? this.joinTableColumns(this.getSerializableTableColumns(block).map(column => column.translation ?? ""))
-          : block.translation ?? "",
-        blockIndex,
-      }));
-      const diagnostics = window.TranslationDiagnostics;
-      const index = diagnostics.createEditedConsistencyIndex(this.translationConsistencyIndex, desc.filepath, entries);
-      return entries.map(entry => diagnostics.getConsistencyDiagnostic(index, entry.english, entry.translation));
+      return (this.editorBlocks || []).map((block, blockIndex) =>
+        this.getEditorDiagnosticScanResult(block, blockIndex)?.consistencyDiagnostics
+          .find(diagnostic => diagnostic.blockIndex === blockIndex) || null
+      );
+    },
+    hasDiagnosticScanSelection() {
+      return this.diagnosticScanTypes.some(type => this.diagnosticScanChecks[type.key]);
     },
     consistencyCurrentChoice() {
       return this.consistencyResolver ? this.buildConsistencyChoice(this.consistencyResolver.currentTranslation) : null;
@@ -1579,22 +1585,21 @@ const config = Vue.defineComponent({
         this.refreshEditorHLter();
         this.refreshGamePreview();
       }
-      if (this.diagnosticScanCompleted || this.diagnosticScanRunning) {
-        this.clearDiagnosticScanResults();
-        await this.scanAllDiagnostics();
-      } else this.filterDesc();
+      this.clearDiagnosticScanResults();
+      this.filterDesc();
       this.consistencyResolutionNotice = `Applied this version to all ${resolver.entryCount} matching ${resolver.lang} entries in ${resolver.fileCount} files. ${choice.changeCount} entries updated. Other edits remain in draft.`;
       if (this.sideTab === 'history') await this.refreshHistory();
       this.consistencyResolverBusy = false;
       this.closeConsistencyResolver();
       return true;
     },
-    analyzeTranslationDiagnostics(text, english = null, lang = this.lang) {
+    analyzeTranslationDiagnostics(text, english = null, lang = this.lang, checks = null) {
       const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
-        ? window.TranslationDiagnostics.analyze(text, { lang })
+        ? window.TranslationDiagnostics.analyze(text, { lang, checks })
         : this.emptyTranslationDiagnostics();
-      const analysis = this.addTagIdentityDiagnostics(result, english, text);
-      const terminology = english == null ? [] : window.TerminologyDiagnostics.analyze(
+      const analysis = this.addTagIdentityDiagnostics(result, english, text, checks);
+      // Terminology is opt-in for a manual scan, never part of editor/save validation.
+      const terminology = !checks?.terminology || english == null ? [] : window.TerminologyDiagnostics.analyze(
         english, text, this.terminologyDictionary, { lang }
       );
       return {
@@ -1603,7 +1608,8 @@ const config = Vue.defineComponent({
         errorCount: analysis.errorCount,
       };
     },
-    analyzeDescConsistencyDiagnostics(desc, lang = this.lang, index = this.translationConsistencyIndex) {
+    analyzeDescConsistencyDiagnostics(desc, lang = this.lang, index = null) {
+      if (!index) return [];
       const englishLines = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
       const translationLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
       const diagnostics = [];
@@ -1615,7 +1621,7 @@ const config = Vue.defineComponent({
       }
       return diagnostics;
     },
-    analyzeDescDiagnostics(desc, lang = this.lang, consistencyIndex = this.translationConsistencyIndex) {
+    analyzeDescDiagnostics(desc, lang = this.lang, consistencyIndex = null, checks = this.diagnosticScanChecks) {
       const englishLines = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
       const translationLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
       let warningCount = 0;
@@ -1646,27 +1652,32 @@ const config = Vue.defineComponent({
             const result = this.analyzeTranslationDiagnostics(
               translationColumns[columnIndex] ?? "",
               englishColumns[columnIndex] ?? "",
-              lang
+              lang,
+              checks
             );
             warningCount += Number(result.warningCount || 0);
             errorCount += Number(result.errorCount || 0);
             collectTerminology(result, i, columnIndex);
           }
         } else {
-          const result = this.analyzeTranslationDiagnostics(translation, english, lang);
+          const result = this.analyzeTranslationDiagnostics(translation, english, lang, checks);
           warningCount += Number(result.warningCount || 0);
           errorCount += Number(result.errorCount || 0);
           collectTerminology(result, i);
         }
       }
 
-      const consistencyDiagnostics = this.analyzeDescConsistencyDiagnostics(desc, lang, consistencyIndex);
+      const consistencyDiagnostics = checks.consistency
+        ? this.analyzeDescConsistencyDiagnostics(desc, lang, consistencyIndex) : [];
       warningCount += consistencyDiagnostics.length;
       return {
         warningCount,
         errorCount,
         consistencyDiagnostics,
         terminologyDiagnostics,
+        lang,
+        englishLines: [...englishLines],
+        translationLines: [...translationLines],
         hasDiagnosticWarning: warningCount > 0,
         hasDiagnosticError: errorCount > 0,
       };
@@ -1685,14 +1696,7 @@ const config = Vue.defineComponent({
         : "";
       return `Diagnostic scan: ${errors} error(s), ${warnings} warning(s)${details}${terminologyDetails}`;
     },
-    recountDiagnosticScanFiles() {
-      const results = Object.values(this.diagnosticScanResults || {});
-      this.diagnosticScanErrorFileCount = results.filter(result => result?.hasDiagnosticError).length;
-      this.diagnosticScanWarningFileCount = results.filter(result => result?.hasDiagnosticWarning).length;
-    },
     clearDiagnosticScanResults() {
-      if (this._dictionaryDiagnosticScanTimer) clearTimeout(this._dictionaryDiagnosticScanTimer);
-      this._dictionaryDiagnosticScanTimer = null;
       this.diagnosticScanRunId++;
       this.diagnosticScanResults = {};
       this.diagnosticScanRunning = false;
@@ -1703,51 +1707,36 @@ const config = Vue.defineComponent({
       this.diagnosticScanWarningFileCount = 0;
     },
     scheduleDictionaryDiagnosticScan() {
-      const rescan = this.diagnosticScanRunning || this.diagnosticScanCompleted || !!this._dictionaryDiagnosticScanTimer;
-      // Clear stale results immediately; wait until dictionary typing pauses to rescan.
+      // Dictionary edits invalidate the snapshot; only the scan button starts a new scan.
       this.clearDiagnosticScanResults();
       this.filterDesc();
-      if (!rescan) return;
-      this._dictionaryDiagnosticScanTimer = setTimeout(() => {
-        this._dictionaryDiagnosticScanTimer = null;
-        void this.scanAllDiagnostics();
-      }, 350);
     },
-    updateScannedDescDiagnostics(desc) {
-      // A save during a yielded scan invalidates its snapshot of translation groups.
-      if (this.diagnosticScanRunning) {
-        this.clearDiagnosticScanResults();
-        void this.scanAllDiagnostics();
-        return;
-      }
-      if (!this.diagnosticScanCompleted || !desc?.filepath) return;
-      const consistencyIndex = this.translationConsistencyIndex;
-      const results = {
-        ...this.diagnosticScanResults,
-        [desc.filepath]: this.analyzeDescDiagnostics(desc, this.lang, consistencyIndex),
-      };
-      // Fixing one translation can clear (or introduce) warnings in its peers.
-      for (const other of this.descs) {
-        if (other.filepath === desc.filepath || !results[other.filepath]) continue;
-        const previous = results[other.filepath];
-        const consistencyDiagnostics = this.analyzeDescConsistencyDiagnostics(other, this.lang, consistencyIndex);
-        const warningCount = previous.warningCount - (previous.consistencyDiagnostics?.length || 0) + consistencyDiagnostics.length;
-        results[other.filepath] = {
-          ...previous,
-          consistencyDiagnostics,
-          warningCount,
-          hasDiagnosticWarning: warningCount > 0,
-        };
-      }
-      this.diagnosticScanResults = results;
-      this.recountDiagnosticScanFiles();
+    updateScannedDescDiagnostics() {
+      // Saves/restores can affect peer consistency. Discard results without rescanning.
+      this.clearDiagnosticScanResults();
+    },
+    openDiagnosticScanDialog() {
+      if (this.diagnosticScanRunning) return;
+      this.diagnosticScanChecks = defaultDiagnosticScanChecks();
+      this.hideTooltip();
+      this.$refs.diagnosticScanDialog?.showModal();
+    },
+    closeDiagnosticScanDialog() {
+      this.$refs.diagnosticScanDialog?.close();
+    },
+    diagnosticScanDialogKeydown(event) {
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') event.preventDefault();
+    },
+    startDiagnosticScan() {
+      if (!this.hasDiagnosticScanSelection || this.diagnosticScanRunning) return;
+      this.closeDiagnosticScanDialog();
+      return this.scanAllDiagnostics();
     },
     async scanAllDiagnostics() {
-      if (this._dictionaryDiagnosticScanTimer) clearTimeout(this._dictionaryDiagnosticScanTimer);
-      this._dictionaryDiagnosticScanTimer = null;
-      if (this.diagnosticScanRunning) return;
+      if (this.diagnosticScanRunning || !this.hasDiagnosticScanSelection) return;
       const descs = Array.isArray(this.descs) ? [...this.descs] : [];
       const scanLang = this.lang;
+      const checks = { ...this.diagnosticScanChecks };
       const runId = ++this.diagnosticScanRunId;
       const results = {};
       let errorFileCount = 0;
@@ -1763,11 +1752,12 @@ const config = Vue.defineComponent({
       this.filterDesc();
 
       try {
-        const consistencyIndex = this.translationConsistencyIndex;
+        const consistencyIndex = checks.consistency
+          ? window.TranslationDiagnostics.createConsistencyIndex(descs, scanLang) : null;
         for (let i = 0; i < descs.length; i++) {
           if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
           const desc = descs[i];
-          const result = this.analyzeDescDiagnostics(desc, scanLang, consistencyIndex);
+          const result = this.analyzeDescDiagnostics(desc, scanLang, consistencyIndex, checks);
           results[desc.filepath] = result;
           if (result.hasDiagnosticError) errorFileCount++;
           if (result.hasDiagnosticWarning) warningFileCount++;
@@ -1801,7 +1791,7 @@ const config = Vue.defineComponent({
       target.diagnosticErrorCount = result.errorCount;
       return result;
     },
-    addTagIdentityDiagnostics(result, english, translation) {
+    addTagIdentityDiagnostics(result, english, translation, checks = null) {
       const base = result && typeof result === "object" ? result : this.emptyTranslationDiagnostics();
       const diagnostics = Array.isArray(base.diagnostics) ? [...base.diagnostics] : [];
       if (english === null || english === undefined) {
@@ -1812,9 +1802,9 @@ const config = Vue.defineComponent({
         };
       }
 
-      diagnostics.push(...this.buildGggVarIdentityDiagnostics(english, translation));
-      diagnostics.push(...this.buildKeywordPopupTagNameDiagnostics(english, translation));
-      diagnostics.push(...this.buildTextDecorationTagNameDiagnostics(english, translation));
+      if (!checks || checks.variables) diagnostics.push(...this.buildGggVarIdentityDiagnostics(english, translation));
+      if (!checks || checks.keywords) diagnostics.push(...this.buildKeywordPopupTagNameDiagnostics(english, translation));
+      if (!checks || checks.decorations) diagnostics.push(...this.buildTextDecorationTagNameDiagnostics(english, translation));
       diagnostics.sort((a, b) => {
         if (a.start !== b.start) return a.start - b.start;
         if (a.end !== b.end) return a.end - b.end;
@@ -2158,6 +2148,9 @@ const config = Vue.defineComponent({
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
         const block = this.editorBlocks[i];
         if (!block) continue;
+        for (const diagnostic of this.blockTerminologyDiagnostics(block, i)) {
+          if (!level || diagnostic.level === level) items.push(diagnostic);
+        }
         const consistency = this.editorConsistencyDiagnostics[i];
         if (consistency && (!level || consistency.level === level)) {
           items.push({ ...consistency, blockIndex: i });
@@ -2206,6 +2199,8 @@ const config = Vue.defineComponent({
       }
       const consistency = this.editorConsistencyDiagnostics[blockIndex];
       if (consistency && (!level || consistency.level === level)) diagnostics.unshift(consistency);
+      diagnostics.push(...this.blockTerminologyDiagnostics(editorBlock, blockIndex)
+        .filter(diagnostic => !level || diagnostic.level === level));
       const lines = diagnostics.slice(0, 8).map(d => {
         const prefix = Number.isInteger(d.columnIndex) ? `Column ${d.columnIndex + 1}: ` : "";
         return `${prefix}${d.message || d.code || "Translation diagnostic"}`;
@@ -2213,8 +2208,27 @@ const config = Vue.defineComponent({
       if (diagnostics.length > 8) lines.push(`...and ${diagnostics.length - 8} more`);
       return lines.join("\n");
     },
-    blockTerminologyDiagnostics(editorBlock) {
-      return (editorBlock?.translationDiagnostics || []).filter(d => d.code === "dictionary-terminology");
+    getEditorDiagnosticScanResult(editorBlock, blockIndex) {
+      if (!this.editorVisible || this.editorCompareActive || !this.diagnosticScanCompleted) return null;
+      const result = this.diagnosticScanResults[this.editorCurrentEditingDesc?.filepath];
+      if (!result || result.lang !== this.lang) return null;
+      const translation = editorBlock.isTable
+        ? this.joinTableColumns(this.getSerializableTableColumns(editorBlock).map(column => column.translation ?? ''))
+        : editorBlock.translation ?? '';
+      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
+      // Cached manual warnings belong only to the exact text that was scanned.
+      if (normalize(editorBlock.english) !== normalize(result.englishLines[blockIndex])
+        || normalize(translation) !== normalize(result.translationLines[blockIndex])) return null;
+      return result;
+    },
+    blockTerminologyDiagnostics(editorBlock, blockIndex = this.editorBlocks.indexOf(editorBlock)) {
+      return this.getEditorDiagnosticScanResult(editorBlock, blockIndex)?.terminologyDiagnostics
+        .filter(diagnostic => diagnostic.blockIndex === blockIndex) || [];
+    },
+    blockDiagnosticWarningCount(editorBlock, blockIndex) {
+      return Number(editorBlock.diagnosticWarningCount || 0)
+        + this.blockTerminologyDiagnostics(editorBlock, blockIndex).length
+        + (this.editorConsistencyDiagnostics[blockIndex] ? 1 : 0);
     },
     refreshEditorDiagnostics() {
       for (const editorBlock of (this.editorBlocks || [])) {

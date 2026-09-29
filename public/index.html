@@ -281,7 +281,7 @@
           <button @click="showSetting = true">⚙️</button>
           <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
           <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver" :aria-label="'Resolve ' + cloudConflicts.length + ' dictionary conflicts'" v-tooltip="'Resolve shared dictionary conflicts'">⚡ {{ cloudConflicts.length }}</button>
-          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="scanAllDiagnostics" v-tooltip="'Scan every file for translation errors, dictionary terminology, and inconsistent translations of identical English entries in the selected language'">
+          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="openDiagnosticScanDialog" v-tooltip="'Choose diagnostic types to scan in every loaded file for the selected language'">
             {{ diagnosticScanRunning ? ('Scanning ' + diagnosticScanProcessed + '/' + diagnosticScanTotal) : 'Scan diagnostics' }}
           </button>
           <span v-if="diagnosticScanCompleted" class="diagnosticScanSummary">Error files: {{ diagnosticScanErrorFileCount }} | Warning files: {{ diagnosticScanWarningFileCount }}</span>
@@ -489,7 +489,7 @@
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" v-tooltip="'Variable tags (translation / english)'"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" v-tooltip="'Keyword tags (translation / english)'"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaDecorTr !== editorBlock.metaDecorEn }" v-tooltip="'Text decoration tags (translation / english)'"><span class="metaIcon">&lt;&gt;</span><span class="metaNum">{{ editorBlock.metaDecorTr }}/{{ editorBlock.metaDecorEn }}</span></span>
-            <span v-if="editorBlock.diagnosticWarningCount > 0 || editorConsistencyDiagnostics[index]" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning', index)"><span class="metaIcon">!</span><span class="metaNum">{{ editorBlock.diagnosticWarningCount + (editorConsistencyDiagnostics[index] ? 1 : 0) }}</span></span>
+            <span v-if="blockDiagnosticWarningCount(editorBlock, index) > 0" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning', index)"><span class="metaIcon">!</span><span class="metaNum">{{ blockDiagnosticWarningCount(editorBlock, index) }}</span></span>
             <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
           </div>
           <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning consistencyPrompt" role="note">
@@ -610,6 +610,25 @@
         </div>
       </div>
     </div>
+
+    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @keydown.stop="diagnosticScanDialogKeydown">
+      <form @submit.prevent="startDiagnosticScan">
+        <h2 id="diagnosticScanDialogTitle">Scan diagnostics</h2>
+        <p id="diagnosticScanDialogDescription">Choose checks for every loaded file in {{ lang }}, including files hidden by filters.</p>
+        <fieldset class="diagnosticScanOptions">
+          <legend>Diagnostic types</legend>
+          <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
+            <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
+            <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
+          </label>
+        </fieldset>
+        <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
+        <div class="diagnosticScanActions">
+          <button type="button" @click="closeDiagnosticScanDialog">Cancel</button>
+          <button type="submit" :disabled="!hasDiagnosticScanSelection || diagnosticScanRunning">Start scan</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog ref="consistencyDialog" class="consistencyDialog" aria-labelledby="consistencyDialogTitle" @cancel.prevent="closeConsistencyResolver" @keydown.stop="consistencyDialogKeydown">
       <template v-if="consistencyResolver">

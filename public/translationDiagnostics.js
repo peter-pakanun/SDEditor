@@ -341,9 +341,9 @@
     const diagnostics = [];
     const addDiagnostic = makeAddDiagnostic(text, diagnostics);
 
-    scanWhitespace(text, addDiagnostic);
-    scanDashBoundaries(text, addDiagnostic, options.lang);
-    scanTags(text, addDiagnostic);
+    if (!options.checks || options.checks.whitespace) scanWhitespace(text, addDiagnostic);
+    if (!options.checks || options.checks.dash) scanDashBoundaries(text, addDiagnostic, options.lang);
+    if (!options.checks || options.checks.tagSyntax) scanTags(text, addDiagnostic);
 
     diagnostics.sort((a, b) => {
       if (a.start !== b.start) return a.start - b.start;
