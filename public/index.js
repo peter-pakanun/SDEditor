@@ -142,6 +142,7 @@ const config = Vue.defineComponent({
       searchText: "",
       filterSelect: "new",
       diagnosticScanResults: {},
+      diagnosticScanAppliedChecks: null,
       diagnosticScanTypes: DIAGNOSTIC_SCAN_TYPES,
       diagnosticScanChecks: defaultDiagnosticScanChecks(),
       diagnosticScanRunning: false,
@@ -1585,7 +1586,7 @@ const config = Vue.defineComponent({
         this.refreshEditorHLter();
         this.refreshGamePreview();
       }
-      this.clearDiagnosticScanResults();
+      this.refreshConsistencyResolutionDiagnostics(resolver);
       this.filterDesc();
       this.consistencyResolutionNotice = `Applied this version to all ${resolver.entryCount} matching ${resolver.lang} entries in ${resolver.fileCount} files. ${choice.changeCount} entries updated. Other edits remain in draft.`;
       if (this.sideTab === 'history') await this.refreshHistory();
@@ -1699,12 +1700,36 @@ const config = Vue.defineComponent({
     clearDiagnosticScanResults() {
       this.diagnosticScanRunId++;
       this.diagnosticScanResults = {};
+      this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = false;
       this.diagnosticScanCompleted = false;
       this.diagnosticScanProcessed = 0;
       this.diagnosticScanTotal = 0;
       this.diagnosticScanErrorFileCount = 0;
       this.diagnosticScanWarningFileCount = 0;
+    },
+    refreshConsistencyResolutionDiagnostics(resolver) {
+      if (this.lang !== resolver.lang || this.gameVersion !== resolver.gameVersion) return;
+      // An unfinished scan may have read the old translations before yielding.
+      if (this.diagnosticScanRunning) {
+        this.clearDiagnosticScanResults();
+        return;
+      }
+      if (!this.diagnosticScanCompleted || !this.diagnosticScanAppliedChecks) return;
+      const checks = this.diagnosticScanAppliedChecks;
+      const filepaths = new Set(resolver.entries.map(entry => entry.filepath));
+      const consistencyIndex = checks.consistency
+        ? window.TranslationDiagnostics.createConsistencyIndex(this.descs, resolver.lang) : null;
+      const results = { ...this.diagnosticScanResults };
+      // Include unchanged peers: their shared conflict is resolved too. Keep
+      // unrelated findings and use the completed scan's checks, not dialog edits.
+      for (const desc of this.descs) {
+        if (!filepaths.has(desc.filepath) || !results[desc.filepath]) continue;
+        results[desc.filepath] = this.analyzeDescDiagnostics(desc, resolver.lang, consistencyIndex, checks);
+      }
+      this.diagnosticScanResults = results;
+      this.diagnosticScanErrorFileCount = Object.values(results).filter(result => result.hasDiagnosticError).length;
+      this.diagnosticScanWarningFileCount = Object.values(results).filter(result => result.hasDiagnosticWarning).length;
     },
     scheduleDictionaryDiagnosticScan() {
       // Dictionary edits invalidate the snapshot; only the scan button starts a new scan.
@@ -1743,6 +1768,7 @@ const config = Vue.defineComponent({
       let warningFileCount = 0;
 
       this.diagnosticScanResults = {};
+      this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = true;
       this.diagnosticScanCompleted = false;
       this.diagnosticScanProcessed = 0;
@@ -1771,6 +1797,7 @@ const config = Vue.defineComponent({
 
         if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
         this.diagnosticScanResults = results;
+        this.diagnosticScanAppliedChecks = checks;
         this.diagnosticScanErrorFileCount = errorFileCount;
         this.diagnosticScanWarningFileCount = warningFileCount;
         this.diagnosticScanCompleted = true;

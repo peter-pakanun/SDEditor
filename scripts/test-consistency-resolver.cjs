@@ -53,7 +53,7 @@ function loadEditor() {
   for (const [name, getter] of Object.entries(config.computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
-  return { editor, window, writes, dialogs };
+  return { editor, window, writes, dialogs, config };
 }
 
 function description(name, english, thai) {
@@ -137,8 +137,12 @@ test('accepting This persists every matching entry while preserving unrelated dr
     assert.equal(editor.localDescs.status[desc.filepath].custom, `retain ${desc.filename.replace('.txt', '')}`);
     assert.deepEqual(snapshot(editor.localDescs.descs.find(item => item.filepath === desc.filepath).translations.Thai), snapshot(desc.translations.Thai));
   }
-  assert.equal(editor.diagnosticScanCompleted, false, 'Resolving entries invalidates the previous manual scan without rerunning it.');
-  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+  assert.equal(editor.diagnosticScanCompleted, true, 'Resolving entries must preserve the completed manual scan.');
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), [first.filepath, peer.filepath]);
+  assert.deepEqual(snapshot(editor.diagnosticScanResults[first.filepath].translationLines), snapshot(first.translations.Thai),
+    'Cached results use saved translations, never unrelated editor drafts.');
+  assert.equal(editor.diagnosticScanProcessed, 2);
+  assert.equal(editor.diagnosticScanTotal, 2);
   assert.equal(editor.diagnosticScanWarningFileCount, 0);
   assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
   assert.ok(editor.consistencyResolutionNotice);
@@ -155,6 +159,86 @@ test('accepting another version advances matching editor baselines and clears a 
   assert.equal(editor.editorBlocks[0].translation, chosen);
   assert.equal(editor.editorBlocks[2].translation, chosen);
   assert.equal(editor.editorHaveChanges(), false);
+  assert.equal(editor.diagnosticScanCompleted, false, 'Resolving without an existing scan must not start one.');
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+});
+
+test('resolution preserves unrelated diagnostic results and refreshes matching peers and filtered counts', async () => {
+  const { editor, config } = loadEditor();
+  const source = 'Fire damage {1}%';
+  const first = description('first', [source, 'Cold damage'], ['ไฟ {1}', 'เย็นหนึ่ง']);
+  const peer = description('peer', [source], ['ไฟ {1}%']);
+  const coldPeer = description('cold-peer', ['Cold damage'], ['เย็นสอง']);
+  const other = description('other', ['Lightning damage'], ['ฟ้าหนึ่ง']);
+  const otherPeer = description('other-peer', ['Lightning damage'], ['ฟ้าสอง']);
+  const error = description('error', ['Duration {2}'], ['ระยะเวลา']);
+  editor.descs = [first, peer, coldPeer, other, otherPeer, error];
+  editor.filterDesc = config.methods.filterDesc;
+  editor.filterSelect = 'diagnosticWarning';
+  openFile(editor, first);
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 5);
+  assert.equal(editor.diagnosticScanErrorFileCount, 2);
+  const unchanged = new Map([coldPeer, other, otherPeer, error].map(desc => [desc.filepath, editor.diagnosticScanResults[desc.filepath]]));
+  const analyzed = [];
+  const analyze = editor.analyzeDescDiagnostics;
+  editor.analyzeDescDiagnostics = function (desc, ...args) {
+    analyzed.push(desc.filepath);
+    return analyze.call(this, desc, ...args);
+  };
+  editor.scanAllDiagnostics = async () => { throw new Error('A resolution must not rerun the full scan.'); };
+
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(peer.translations.Thai[0]), true);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.deepEqual(analyzed.sort(), [first.filepath, peer.filepath].sort(), 'Only files containing the resolved source need analysis.');
+  assert.equal(editor.diagnosticScanWarningFileCount, 4);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+  assert.equal(editor.diagnosticScanResults[peer.filepath].hasDiagnosticWarning, false,
+    'The already-correct peer must lose its obsolete consistency warning too.');
+  assert.deepEqual(Array.from(editor.diagnosticScanResults[first.filepath].consistencyDiagnostics, item => item.blockIndex), [1]);
+  assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [first, coldPeer, other, otherPeer].map(desc => desc.filepath));
+  assert.equal(editor.editorConsistencyDiagnostics[0], null);
+  assert.equal(editor.editorConsistencyDiagnostics[1].code, 'inconsistent-translation');
+  for (const [filepath, result] of unchanged) assert.equal(editor.diagnosticScanResults[filepath], result);
+  editor.filterSelect = 'diagnosticError';
+  editor.filterDesc();
+  assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [error.filepath]);
+
+  editor.filterSelect = 'diagnosticWarning';
+  await editor.openConsistencyResolver(1);
+  assert.ok(editor.consistencyResolver, 'The next conflict must remain actionable without rescanning.');
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+  assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [other.filepath, otherPeer.filepath]);
+});
+
+test('resolution keeps the completed scan categories after the selector resets to defaults', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['Fire damage', 'Cold damage'], [' ผิดหนึ่ง', 'ผิดสาม']);
+  const peer = description('peer', ['Fire damage'], ['ผิดสอง']);
+  editor.descs = [first, peer];
+  editor.dictionary = [{ find: 'Fire', replace: 'ไฟ' }, { find: 'Cold', replace: 'เย็น' }];
+  editor.diagnosticScanChecks = Object.fromEntries(Object.keys(editor.diagnosticScanChecks)
+    .map(key => [key, key === 'consistency' || key === 'terminology']));
+  openFile(editor, first);
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanResults[first.filepath].warningCount, 3);
+  editor.openDiagnosticScanDialog();
+  editor.closeDiagnosticScanDialog();
+  assert.equal(editor.diagnosticScanChecks.terminology, false);
+  assert.equal(editor.diagnosticScanChecks.whitespace, true);
+
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+  const result = editor.diagnosticScanResults[first.filepath];
+  assert.equal(result.consistencyDiagnostics.length, 0);
+  assert.equal(result.terminologyDiagnostics.length, 2, 'Previously selected terminology checks must remain active.');
+  assert.equal(result.warningCount, 2, 'A default whitespace check must not be added to the completed scan.');
+  assert.equal(editor.diagnosticScanResults[peer.filepath].warningCount, 1);
+  assert.equal(editor.blockTerminologyDiagnostics(editor.editorBlocks[0]).length, 1);
 });
 
 test('source grouping normalizes only newline representation and preserves whole-entry boundaries', async () => {
@@ -204,6 +288,8 @@ test('persistent apply stages workspace and before/after revisions before mutati
 
 test('storage rejection preserves all saved data, drafts, and baselines and leaves the resolver open', async () => {
   const { editor, window, dialogs } = setup({ drafts: true, persistent: true });
+  await editor.scanAllDiagnostics();
+  const scanResults = editor.diagnosticScanResults;
   await editor.openConsistencyResolver(0);
   const before = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
   window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('QuotaExceededError'); };
@@ -214,6 +300,9 @@ test('storage rejection preserves all saved data, drafts, and baselines and leav
   assert.equal(editor.consistencyResolutionNotice, '');
   assert.equal(editor.consistencyResolverBusy, false);
   assert.equal(dialogs.closed, 0);
+  assert.equal(editor.diagnosticScanResults, scanResults);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
 });
 
 test('a language switch during atomic save preserves the new language editor and baselines', async () => {
@@ -235,6 +324,8 @@ test('a language switch during atomic save preserves the new language editor and
   openFile(editor, first, ['French draft zero', 'French draft one', 'French draft two']);
   editor.editorOriginalTranslations = [...first.translations.French];
   const frenchEditor = snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  await editor.scanAllDiagnostics();
+  const frenchResults = editor.diagnosticScanResults;
   release();
   assert.equal(await applying, true);
   assert.equal(savedVersion, 'poe1');
@@ -242,6 +333,8 @@ test('a language switch during atomic save preserves the new language editor and
   assert.deepEqual(snapshot({ blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), frenchEditor);
   assert.deepEqual(snapshot(first.translations.French), ['French first 0', 'French first 1', 'French first 2']);
   assert.match(editor.consistencyResolutionNotice, /Thai/);
+  assert.equal(editor.diagnosticScanResults, frenchResults, 'Finishing the Thai save must preserve a new French scan.');
+  assert.equal(editor.diagnosticScanCompleted, true);
 });
 
 test('reopening the same file during atomic save preserves the new editor draft', async () => {
@@ -278,10 +371,43 @@ test('a game version switch during atomic save preserves the new workspace and e
   editor.localDescs = { descs: snapshot(editor.descs), status: {}, lastModified: 999, size: 456 };
   openFile(editor, newVersionDesc, ['ร่างภาคสอง {1}%']);
   const poe2State = snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+  await editor.scanAllDiagnostics();
+  const poe2Results = editor.diagnosticScanResults;
   release();
   assert.equal(await applying, true);
   assert.equal(savedVersion, 'poe1');
   assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs, blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), poe2State);
+  assert.equal(editor.diagnosticScanResults, poe2Results, 'Finishing a prior game version save must preserve the current scan.');
+  assert.equal(editor.diagnosticScanCompleted, true);
+});
+
+test('resolution does not restore a scan invalidated while storage was committing', async () => {
+  const { editor, window } = setup({ persistent: true });
+  await editor.scanAllDiagnostics();
+  let release;
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => new Promise(resolve => { release = resolve; });
+  await editor.openConsistencyResolver(0);
+  const applying = editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text);
+  await Promise.resolve();
+  editor.scheduleDictionaryDiagnosticScan();
+  release();
+  assert.equal(await applying, true);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+});
+
+test('resolution cancels an unfinished scan before it can publish stale peer warnings', async () => {
+  const { editor, first } = setup();
+  editor.descs.push(...Array.from({ length: 24 }, (_, index) => description(`extra-${index}`, [`Other source ${index}`], [`อื่น ${index}`])));
+  await editor.openConsistencyResolver(0);
+  const scanning = editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanRunning, true);
+  assert.equal(editor.diagnosticScanProcessed, 25);
+  assert.equal(await editor.applyConsistencyVersion(first.translations.Thai[0]), true);
+  await scanning;
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
 });
 
 test('resolver rejects changed language, game version, saved peers, or current drafts', async () => {
