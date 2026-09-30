@@ -174,7 +174,7 @@ test('resolution preserves unrelated diagnostic results and refreshes matching p
   const error = description('error', ['Duration {2}'], ['ระยะเวลา']);
   editor.descs = [first, peer, coldPeer, other, otherPeer, error];
   editor.filterDesc = config.methods.filterDesc;
-  editor.filterSelect = 'diagnosticWarning';
+  editor.selectedFileFilters = ['diagnosticWarning'];
   openFile(editor, first);
   await editor.scanAllDiagnostics();
   assert.equal(editor.diagnosticScanWarningFileCount, 5);
@@ -202,11 +202,11 @@ test('resolution preserves unrelated diagnostic results and refreshes matching p
   assert.equal(editor.editorConsistencyDiagnostics[0], null);
   assert.equal(editor.editorConsistencyDiagnostics[1].code, 'inconsistent-translation');
   for (const [filepath, result] of unchanged) assert.equal(editor.diagnosticScanResults[filepath], result);
-  editor.filterSelect = 'diagnosticError';
+  editor.selectedFileFilters = ['diagnosticError'];
   editor.filterDesc();
   assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [error.filepath]);
 
-  editor.filterSelect = 'diagnosticWarning';
+  editor.selectedFileFilters = ['diagnosticWarning'];
   await editor.openConsistencyResolver(1);
   assert.ok(editor.consistencyResolver, 'The next conflict must remain actionable without rescanning.');
   assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
@@ -215,7 +215,7 @@ test('resolution preserves unrelated diagnostic results and refreshes matching p
   assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [other.filepath, otherPeer.filepath]);
 });
 
-test('resolution keeps the completed scan categories after the selector resets to defaults', async () => {
+test('resolution keeps completed scan categories after changing choices for the next scan', async () => {
   const { editor } = loadEditor();
   const first = description('first', ['Fire damage', 'Cold damage'], [' ผิดหนึ่ง', 'ผิดสาม']);
   const peer = description('peer', ['Fire damage'], ['ผิดสอง']);
@@ -226,6 +226,8 @@ test('resolution keeps the completed scan categories after the selector resets t
   openFile(editor, first);
   await editor.scanAllDiagnostics();
   assert.equal(editor.diagnosticScanResults[first.filepath].warningCount, 3);
+  editor.diagnosticScanChecks = Object.fromEntries(Object.keys(editor.diagnosticScanChecks)
+    .map(key => [key, key === 'whitespace']));
   editor.openDiagnosticScanDialog();
   editor.closeDiagnosticScanDialog();
   assert.equal(editor.diagnosticScanChecks.terminology, false);
@@ -402,6 +404,10 @@ test('resolution cancels an unfinished scan before it can publish stale peer war
   await editor.openConsistencyResolver(0);
   const scanning = editor.scanAllDiagnostics();
   assert.equal(editor.diagnosticScanRunning, true);
+  assert.equal(editor.diagnosticScanProcessed, 0, 'The scan yields before doing work.');
+  while (editor.diagnosticScanRunning && editor.diagnosticScanProcessed < 25) {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
   assert.equal(editor.diagnosticScanProcessed, 25);
   assert.equal(await editor.applyConsistencyVersion(first.translations.Thai[0]), true);
   await scanning;

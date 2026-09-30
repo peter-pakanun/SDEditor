@@ -1,0 +1,137 @@
+.settingPage.settingsBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  overflow: hidden;
+  background: #10182e80;
+  backdrop-filter: blur(5px);
+}
+
+.settingsDialog {
+  width: min(760px, 100%);
+  max-height: min(840px, calc(100dvh - 40px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-element);
+  color: var(--color-font);
+  border: 1px solid var(--color-element-alt);
+  border-radius: 18px;
+  box-shadow: 0 24px 80px #0005;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.settingsDialog button,
+.settingsDialog select {
+  min-height: 38px;
+  padding: 8px 13px;
+  border: 1px solid var(--color-element-alt);
+  border-radius: 8px;
+  background: var(--color-bg2);
+  font: inherit;
+  line-height: 1.4;
+}
+
+.settingsDialog button { cursor: pointer; }
+.settingsDialog button:hover:not(:disabled) { border-color: var(--color-element-highlight); }
+.settingsDialog button:disabled { opacity: .55; cursor: default; }
+.settingsDialog :focus-visible { outline: 2px solid var(--color-element-highlight); outline-offset: 3px; }
+.settingsDialog h2 { margin: 0; font-size: 26px; line-height: 1.3; letter-spacing: -.02em; }
+.settingsDialog h3 { margin: 0 0 8px; font-size: 17px; }
+.settingsDialog h4 { margin: 18px 0 8px; font-size: 15px; }
+.settingsDialog p { margin: 8px 0 14px; }
+
+.settingsHeader {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 23px 15px;
+}
+
+.settingsHeader p:last-child { margin-bottom: 0; opacity: .72; }
+.settingsDialog .settingsEyebrow { margin: 0 0 8px; color: var(--ui-accent, var(--color-element-highlight)); font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+.settingsClose { flex: none; }
+.settingsClose kbd { margin-left: 8px; padding: 1px 4px; border: 1px solid var(--color-element-alt); border-radius: 4px; font: inherit; font-size: 11px; opacity: .7; }
+
+.settingsTabs {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 3px 20px 0;
+  border-bottom: 1px solid var(--color-element-alt);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.settingsTabs button[role="tab"] {
+  flex: none;
+  margin-bottom: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  opacity: .7;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settingsTabs button[aria-selected="true"] { color: var(--ui-accent, var(--color-element-highlight)); border-bottom-color: var(--ui-accent, var(--color-element-highlight)); opacity: 1; }
+.settingsTabs button:hover { background: var(--color-bg2); opacity: 1; }
+.settingsTabs button[role="tab"]:focus { outline: 2px solid var(--ui-accent, var(--color-element-highlight)); outline-offset: -3px; }
+.settingsBody { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.settingsPanel { padding: 20px 23px 23px; }
+.settingsPanel.cloudSettings { max-width: none; margin: 0; border-bottom: 0; }
+.settingsDialog .settingsHelp { opacity: .72; line-height: 1.6; }
+.settingsField { display: flex; flex-direction: column; gap: 7px; margin: 16px 0; }
+.settingsField label { font-weight: 600; }
+.settingsField select { width: 100%; background: var(--color-bg); }
+.settingsField small { font-size: 12px; opacity: .7; }
+.settingsFieldGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.settingsFieldGrid .settingsField { margin-top: 2px; }
+.settingsToggle { display: flex; align-items: center; gap: 13px; padding: 14px 0; border-bottom: 1px solid var(--color-element-alt); cursor: pointer; }
+.settingsToggle input { width: 18px; height: 18px; flex: none; margin: 0; padding: 0; accent-color: var(--color-element-highlight); }
+.settingsToggle span { display: flex; flex-direction: column; gap: 3px; }
+.settingsToggle strong { font-weight: 600; }
+.settingsToggle small { opacity: .7; font-size: 12px; }
+.settingsPanel h3.settingsSubheading { margin-top: 23px; }
+.settingsDialog .settingsNotice { padding: 12px 14px; border-radius: 8px; background: var(--color-bg2); }
+.settingsAccount { margin: 16px 0; padding: 12px; border: 1px solid var(--color-element-alt); border-radius: 9px; overflow-wrap: anywhere; }
+.settingsAccount > span { display: block; opacity: .7; }
+.settingsAccount p:last-child { margin-bottom: 0; }
+.settingsActions, .settingsDialog .cloudActions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.settingsDialog .cloudAdminRow { align-items: flex-start; }
+.settingsDialog .cloudAdminRow > span { min-width: 0; overflow-wrap: anywhere; }
+.settingsDialog .cloudAdminRow select { max-width: 100%; }
+.settingsDialog button.settingsActionPrimary { color: white; background: var(--color-element-highlight); border-color: var(--color-element-highlight); font-weight: 600; }
+.settingsDialog button.settingsTextButton { min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; color: inherit; text-decoration: underline; }
+.settingsReset { margin-top: 23px; padding: 16px; border: 1px solid color-mix(in srgb, var(--color-diagnostic-error-border) 40%, var(--color-element-alt)); border-radius: 9px; }
+.settingsReset button { color: var(--color-diagnostic-error-border); }
+.settingsFooter { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 23px; border-top: 1px solid var(--color-element-alt); background: var(--color-bg); }
+.settingsFooter p { margin: 0; font-size: 12px; }
+.settingsFooter button { flex: none; }
+.settingsMessage { color: var(--color-diagnostic-error-border); }
+
+@media (max-width: 640px) {
+  .settingPage.settingsBackdrop { padding: 10px; }
+  .settingsDialog { max-height: calc(100dvh - 20px); border-radius: 12px; font-size: 13px; }
+  .settingsHeader { padding: 17px 15px 13px; gap: 10px; }
+  .settingsDialog h2 { font-size: 22px; }
+  .settingsHeader p:last-child { max-width: 32ch; }
+  .settingsTabs { padding: 3px 8px 0; }
+  .settingsTabs button[role="tab"] { padding: 9px 9px; }
+  .settingsPanel { padding: 18px 15px; }
+  .settingsFieldGrid { grid-template-columns: 1fr; gap: 0; }
+  .settingsFieldGrid .settingsField { margin-top: 0; }
+  .settingsFooter { flex-wrap: wrap; padding: 12px 15px; gap: 10px; }
+  .settingsFooter button { margin-left: auto; }
+  .settingsClose kbd { display: none; }
+}

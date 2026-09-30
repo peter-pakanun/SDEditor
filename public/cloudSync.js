@@ -23,7 +23,7 @@
       if (!Object.hasOwn(value, key)) continue;
       if (typeof DEFAULT_SETTINGS[key] === 'boolean') assert(typeof value[key] === 'boolean', key + ' must be boolean.');
     }
-    const enums = { theme: ['light', 'grey', 'dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
+    const enums = { theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
     for (const [key, allowed] of Object.entries(enums)) if (Object.hasOwn(value, key)) assert(allowed.includes(value[key]), key + ' is invalid.');
     if (value.gamePreviewFonts != null) assert(object(value.gamePreviewFonts) && Object.entries(value.gamePreviewFonts).every(([lang, font]) => LANGUAGES.includes(lang) && string(font)), 'preview fonts must map languages to strings.');
     if (value.editorClipboard != null) assert(string(value.editorClipboard), 'clipboard must be text.');

@@ -1,0 +1,813 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+function loadEditor() {
+  let config;
+  let searchFocusCount = 0;
+  const context = vm.createContext({
+    window: { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } },
+    URLSearchParams, console, setTimeout, clearTimeout,
+    document: { activeElement: null, body: { tagName: 'BODY' } },
+    Vue: {
+      defineComponent(value) { config = value; return value; },
+      createApp() { return { component() {}, directive() {}, mount() {} }; },
+      nextTick(callback) { callback?.(); return Promise.resolve(); },
+    },
+  });
+  for (const name of ['helper.js', 'regexEngine.js', 'index.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
+  }
+  const editor = Object.assign(config.data(), config.methods, {
+    lang: 'Thai', hideDNT: false, gameVersionSelected: true,
+    loadingProgress: 100, needsInitialSettings: false,
+    $nextTick(callback) { callback?.(); return Promise.resolve(); },
+    $refs: { searchInput: { focus() { searchFocusCount++; } } },
+  });
+  for (const [name, getter] of Object.entries(config.computed)) {
+    Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+  }
+  return { editor, config, context, searchFocusCount: () => searchFocusCount };
+}
+
+function description(name, flags = {}, english = `English ${name}`, thai = `ภาษาไทย ${name}`) {
+  return {
+    filepath: `test/${name}.txt`, filedir: 'test', filename: `${name}.txt`,
+    translations: { English: [english], Thai: [thai] },
+    isMissing: false, hasChanges: false, needsReview: false, isDNT: false,
+    ...flags,
+  };
+}
+
+const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
+const defaultStatuses = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
+
+function element(tagName, properties = {}, parentElement = null) {
+  return {
+    tagName, parentElement,
+    matches(selector) {
+      return selector.split(',').some(part => {
+        const token = part.trim().toLowerCase();
+        if (token.includes('contenteditable')) return !!this.isContentEditable || this.contentEditable === 'true';
+        const role = /^\[role="([^"]+)"\]$/.exec(token);
+        if (role) return this.role === role[1];
+        if (token.startsWith('.')) return String(this.className || '').toLowerCase().split(/\s+/).includes(token.slice(1));
+        if (token.startsWith('tr')) return this.tagName === 'TR' && !!this.dataset?.filepath;
+        return token === this.tagName.toLowerCase();
+      });
+    },
+    closest(selector) {
+      let candidate = this;
+      while (candidate) {
+        if (candidate.matches?.(selector)) return candidate;
+        candidate = candidate.parentElement;
+      }
+      return null;
+    },
+    ...properties,
+  };
+}
+
+function statusFixtures(editor) {
+  editor.descs = [
+    description('missing', { isMissing: true }),
+    description('saved', { hasChanges: true }),
+    description('review', { needsReview: true }),
+    description('overlap', { isMissing: true, hasChanges: true, needsReview: true }),
+    description('unchanged'),
+  ];
+}
+
+function paginatedFixtures(editor) {
+  // Input order deliberately differs from the displayed ascending sort.
+  editor.descs = Array.from({ length: 45 }, (_, index) => {
+    const number = String(45 - index).padStart(2, '0');
+    return description(`entry-${number}`, { hasChanges: true }, `Source ${number}`);
+  });
+  editor.filterDesc();
+}
+
+function attachFileList(harness) {
+  const { editor, context } = harness;
+  const rowElements = new Map();
+  const focusedRows = [];
+  const revealedRows = [];
+  const openedFiles = [];
+  const openedWithReturnFocus = [];
+  const document = context.document;
+  const region = element('DIV', {
+    getClientRects() { return [{}]; },
+    focus() { document.activeElement = this; },
+    querySelectorAll() { return editor.descsDisplay.map(row => rowElement(row.filepath)); },
+    contains(target) {
+      if (target === this) return true;
+      let ancestor = target;
+      while (ancestor) {
+        if (editor.descsDisplay.some(row => rowElement(row.filepath) === ancestor)) return true;
+        ancestor = ancestor.parentElement;
+      }
+      return false;
+    },
+  });
+  function rowElement(filepath) {
+    if (!rowElements.has(filepath)) {
+      rowElements.set(filepath, element('TR', {
+        dataset: { filepath },
+        getAttribute(name) { return name === 'data-filepath' ? filepath : null; },
+        focus() { document.activeElement = this; focusedRows.push(filepath); },
+        scrollIntoView() { revealedRows.push(filepath); },
+      }, region));
+    }
+    return rowElements.get(filepath);
+  }
+  region.querySelector = selector => region.querySelectorAll().find(row => selector.includes(row.dataset.filepath)) || null;
+  editor.$refs.fileTableRegion = region;
+  Object.assign(editor.$refs.searchInput, element('INPUT'));
+  document.body = element('BODY');
+  editor.editFile = (filepath, returnToFileList) => {
+    openedFiles.push(filepath);
+    openedWithReturnFocus.push({ filepath, returnToFileList });
+  };
+  return { region, rowElement, focusedRows, revealedRows, openedFiles, openedWithReturnFocus, document };
+}
+
+function keyboardEvent(key, target, overrides = {}) {
+  return {
+    key, target, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false,
+    isComposing: false, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() {},
+    ...overrides,
+  };
+}
+
+test('default status choices include work needing translation or diagnostics and leave Unchanged last', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
+  assert.deepEqual(Array.from(editor.fileFilterOptions, option => option.key), [...defaultStatuses, 'unchanged']);
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap']);
+  editor.descs.push(description('warning-only'), description('error-only'));
+  editor.diagnosticScanResults = {
+    'test/warning-only.txt': { hasDiagnosticWarning: true, warningCount: 1 },
+    'test/error-only.txt': { hasDiagnosticError: true, errorCount: 1 },
+  };
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap', 'warning-only', 'error-only']);
+});
+
+test('status choices combine with OR and overlapping files appear once', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.selectedFileFilters = ['missing', 'review'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'review', 'overlap']);
+  editor.selectedFileFilters = ['saved'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['saved', 'overlap']);
+});
+
+test('Unchanged includes only files without missing, saved, or review flags', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.selectedFileFilters = ['unchanged'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['unchanged']);
+});
+
+test('diagnostic status choices use scan results and combine with ordinary statuses', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.diagnosticScanResults = {
+    'test/saved.txt': { hasDiagnosticError: true, errorCount: 2 },
+    'test/unchanged.txt': { hasDiagnosticWarning: true, warningCount: 1 },
+  };
+  editor.selectedFileFilters = ['missing', 'diagnosticError', 'diagnosticWarning'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'overlap', 'unchanged']);
+  assert.equal(editor.filteredDescs.find(row => row.filename === 'saved.txt').diagnosticErrorCount, 2);
+  editor.selectedFileFilters = ['diagnosticWarning'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['unchanged']);
+});
+
+test('clearing all statuses gives a stable empty page; Select all restores every status', () => {
+  const { editor, config } = loadEditor();
+  statusFixtures(editor);
+  editor.currentPage = 9;
+  editor.selectedFileFilters = [];
+  config.watch.selectedFileFilters.handler.call(editor);
+  assert.equal(editor.filteredDescs.length, 0);
+  assert.equal(editor.descsDisplay.length, 0);
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.pageCount, 1);
+  assert.deepEqual(Array.from(editor.pageButtons), [1]);
+  assert.equal(editor.fileRangeLabel, '0 files');
+  assert.equal(editor.allFileFiltersSelected, false);
+  editor.selectAllFileFilters();
+  config.watch.selectedFileFilters.handler.call(editor);
+  assert.equal(editor.allFileFiltersSelected, true);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap', 'unchanged']);
+});
+
+test('search matches filename, English, and Thai while respecting selected statuses', () => {
+  const { editor } = loadEditor();
+  editor.descs = [
+    description('Fire-file', { isMissing: true }, 'Cold source', 'เย็น'),
+    description('source-match', { hasChanges: true }, 'Fire damage', 'ไฟ'),
+    description('translation-match', { hasChanges: true }, 'Cold source', 'FIRE translation'),
+    description('hidden-status', {}, 'Fire damage', 'ไฟ'),
+  ];
+  editor.searchText = 'fIrE';
+  editor.fileSearchChanged();
+  assert.deepEqual(names(editor.filteredDescs), ['Fire-file', 'source-match', 'translation-match']);
+  editor.selectedFileFilters = ['saved'];
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['source-match', 'translation-match']);
+  editor.searchText = 'ไฟ';
+  editor.fileSearchChanged();
+  assert.deepEqual(names(editor.filteredDescs), ['source-match']);
+  editor.searchText = '   ';
+  editor.fileSearchChanged();
+  assert.deepEqual(names(editor.filteredDescs), ['source-match', 'translation-match']);
+});
+
+test('status totals respect Hide DNT and remain independent of search and status choices', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.descs.push(description('hidden-dnt', { isMissing: true, hasChanges: true, needsReview: true, isDNT: true }));
+  editor.hideDNT = true;
+  editor.searchText = 'does not match';
+  editor.selectedFileFilters = ['unchanged'];
+  editor.filterDesc();
+  assert.equal(editor.filteredDescs.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 2, isMissing: 2, needsReview: 2 });
+  editor.hideDNT = false;
+  editor.filterDesc();
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isMissing: 3, needsReview: 3 });
+});
+
+test('45 files render correctly sorted pages, ranges, and a shorter final page', () => {
+  const { editor, context } = loadEditor();
+  paginatedFixtures(editor);
+  assert.equal(editor.pageCount, 3);
+  const originalOrder = names(editor.filteredDescs);
+  assert.deepEqual(names(editor.descsDisplay), Array.from({ length: 20 }, (_, index) => `entry-${String(index + 1).padStart(2, '0')}`));
+  assert.equal(editor.fileRangeLabel, '1–20 of 45 files');
+  assert.deepEqual(names(editor.filteredDescs), originalOrder, 'Rendering sorted pages must preserve the underlying filtered order.');
+  assert.equal(Object.hasOwn(context, 'descsToDisplay'), false, 'Rendering pages must not leak a global variable.');
+  editor.nextPage();
+  assert.deepEqual(names(editor.descsDisplay), Array.from({ length: 20 }, (_, index) => `entry-${String(index + 21).padStart(2, '0')}`));
+  assert.equal(editor.fileRangeLabel, '21–40 of 45 files');
+  editor.nextPage();
+  assert.deepEqual(names(editor.descsDisplay), ['entry-41', 'entry-42', 'entry-43', 'entry-44', 'entry-45']);
+  assert.equal(editor.fileRangeLabel, '41–45 of 45 files');
+  editor.nextPage();
+  assert.equal(editor.currentPage, 3);
+  editor.gotoPage(1);
+  editor.prevPage();
+  assert.equal(editor.currentPage, 1);
+  editor.sort('english');
+  assert.deepEqual(names(editor.descsDisplay), Array.from({ length: 20 }, (_, index) => `entry-${String(45 - index).padStart(2, '0')}`));
+  assert.equal(editor.currentSortIcon, '▼');
+});
+
+test('page jumps bound invalid, negative, decimal, and out-of-range values', () => {
+  const { editor } = loadEditor();
+  paginatedFixtures(editor);
+  for (const [input, expected] of [
+    ['invalid', 1], [undefined, 1], [NaN, 1], [Infinity, 1], [-Infinity, 1],
+    ['', 1], [0, 1], [-10, 1], [-1.5, 1], ['2.9', 2], [3.9, 3], [999, 3], ['2', 2],
+  ]) {
+    editor.gotoPage(input);
+    assert.equal(editor.currentPage, expected, `Page input ${String(input)} must stay in range.`);
+    assert.ok(editor.descsDisplay.length > 0);
+  }
+  editor.filteredDescs = [];
+  editor.gotoPage(999);
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.pageCount, 1);
+});
+
+test('search and status changes return to page one even when later pages remain valid', () => {
+  const { editor, config, searchFocusCount } = loadEditor();
+  paginatedFixtures(editor);
+  editor.gotoPage(3);
+  editor.searchText = 'Source';
+  editor.fileSearchChanged();
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.pageCount, 3);
+  editor.gotoPage(3);
+  editor.selectedFileFilters = ['saved'];
+  config.watch.selectedFileFilters.handler.call(editor);
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.pageCount, 3);
+  editor.gotoPage(2);
+  editor.searchText = 'nothing matches';
+  editor.fileSearchChanged();
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.fileRangeLabel, '0 files');
+  editor.clearFileSearch();
+  assert.equal(editor.searchText, '');
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.filteredDescs.length, 45);
+  assert.equal(searchFocusCount(), 1);
+});
+
+test('Reset search clears the query and restores the default status choices', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.searchText = 'unchanged';
+  editor.selectedFileFilters = ['unchanged'];
+  editor.currentPage = 8;
+  editor.resetFileSearch();
+  assert.equal(editor.searchText, '');
+  assert.equal(editor.currentPage, 1);
+  assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap']);
+});
+
+test('focusing the file list selects its first row and explicit row selection can move focus', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  table.region.focus();
+  editor.fileTableFocused();
+  assert.equal(editor.selectedFilepath, 'test/entry-01.txt');
+  editor.selectFileRow('test/entry-08.txt', true);
+  assert.equal(editor.selectedFilepath, 'test/entry-08.txt');
+  assert.equal(table.document.activeElement, table.rowElement('test/entry-08.txt'));
+  editor.fileTableFocused();
+  assert.equal(editor.selectedFilepath, 'test/entry-08.txt', 'Returning to the list preserves its visible selected row.');
+});
+
+test('Up and Down move selection within a page and clamp without paging or returning to search', () => {
+  const harness = loadEditor();
+  const { editor, searchFocusCount } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  table.region.focus();
+  editor.fileTableFocused();
+  const firstUp = keyboardEvent('ArrowUp', table.region);
+  editor.fileTableKeydown(firstUp);
+  assert.equal(firstUp.defaultPrevented, true);
+  assert.equal(editor.selectedFilepath, 'test/entry-01.txt');
+  assert.equal(searchFocusCount(), 0);
+  editor.fileTableKeydown(keyboardEvent('ArrowDown', table.document.activeElement));
+  assert.equal(editor.selectedFilepath, 'test/entry-02.txt');
+  for (let count = 0; count < 25; count++) {
+    editor.fileTableKeydown(keyboardEvent('ArrowDown', table.document.activeElement));
+  }
+  assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
+  assert.equal(editor.currentPage, 1, 'Down must not switch pages at the last row.');
+  for (let count = 0; count < 25; count++) {
+    editor.fileTableKeydown(keyboardEvent('ArrowUp', table.document.activeElement));
+  }
+  assert.equal(editor.selectedFilepath, 'test/entry-01.txt');
+  assert.equal(editor.currentPage, 1);
+  assert.equal(searchFocusCount(), 0, 'Up at the first row must remain in the file list.');
+});
+
+test('Home and End select the page edges and Page Up or Down moves ten rows without changing pages', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  for (const [key, expected] of [
+    ['Home', '01'], ['End', '20'], ['PageUp', '10'], ['PageDown', '20'], ['PageDown', '20'],
+    ['Home', '01'], ['PageUp', '01'], ['PageDown', '11'], ['PageDown', '20'],
+  ]) {
+    const event = keyboardEvent(key, table.document.activeElement);
+    editor.handleKeydown(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(editor.selectedFilepath, `test/entry-${expected}.txt`, key);
+    assert.equal(editor.currentPage, 1);
+    assert.equal(table.document.activeElement, table.rowElement(editor.selectedFilepath));
+  }
+  editor.gotoPage(3);
+  for (const [key, expected] of [['End', '45'], ['PageUp', '41'], ['PageDown', '45']]) {
+    editor.handleKeydown(keyboardEvent(key, table.document.activeElement));
+    assert.equal(editor.selectedFilepath, `test/entry-${expected}.txt`, key);
+    assert.equal(editor.currentPage, 3, 'Navigation in the short last page must not switch pages.');
+  }
+});
+
+test('Right selects the next page first row and Left selects the previous page last row', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-17.txt', true);
+  editor.fileTableKeydown(keyboardEvent('ArrowRight', table.document.activeElement));
+  assert.equal(editor.currentPage, 2);
+  assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
+  editor.fileTableKeydown(keyboardEvent('ArrowRight', table.document.activeElement));
+  assert.equal(editor.currentPage, 3);
+  assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+  editor.fileTableKeydown(keyboardEvent('ArrowRight', table.document.activeElement));
+  assert.equal(editor.currentPage, 3);
+  assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+  editor.fileTableKeydown(keyboardEvent('ArrowLeft', table.document.activeElement));
+  assert.equal(editor.currentPage, 2);
+  assert.equal(editor.selectedFilepath, 'test/entry-40.txt');
+  editor.fileTableKeydown(keyboardEvent('ArrowLeft', table.document.activeElement));
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
+  editor.fileTableKeydown(keyboardEvent('ArrowLeft', table.document.activeElement));
+  assert.equal(editor.currentPage, 1);
+  assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
+});
+
+test('Enter opens exactly the selected file from a row or the list region', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  const rowEnter = keyboardEvent('Enter', table.document.activeElement);
+  editor.fileTableKeydown(rowEnter);
+  assert.equal(rowEnter.defaultPrevented, true);
+  table.region.focus();
+  editor.fileTableKeydown(keyboardEvent('Enter', table.region));
+  assert.deepEqual(table.openedFiles, ['test/entry-09.txt', 'test/entry-09.txt']);
+});
+
+test('opening a clicked row selects and opens it with return focus to the file list', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.openFileRow('test/entry-09.txt');
+  assert.equal(editor.selectedFilepath, 'test/entry-09.txt');
+  assert.deepEqual(table.openedFiles, ['test/entry-09.txt']);
+  assert.deepEqual(table.openedWithReturnFocus, [{ filepath: 'test/entry-09.txt', returnToFileList: true }]);
+  editor.openFileRow('test/entry-30.txt');
+  editor.openFileRow('test/does-not-exist.txt');
+  assert.deepEqual(table.openedFiles, ['test/entry-09.txt'], 'Rows outside the visible page cannot be opened by a stale row click.');
+});
+
+test('a closed editor restores selected row focus after the view updates', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt');
+  const editorField = element('TEXTAREA');
+  table.document.activeElement = editorField;
+  const ticks = [];
+  editor.$nextTick = callback => { ticks.push(callback); return Promise.resolve(); };
+  editor._fileTableReturnFocus = true;
+  editor.editorVisible = false;
+  editor.restoreFileTableFocusAfterEditor();
+  assert.equal(table.document.activeElement, editorField, 'Closing must wait for the list view to be available.');
+  assert.equal(editor._fileTableReturnFocus, true);
+  ticks.shift()();
+  assert.equal(editor._fileTableReturnFocus, false);
+  while (ticks.length) ticks.shift()();
+  assert.equal(table.document.activeElement, table.rowElement('test/entry-09.txt'));
+});
+
+test('reopening the editor before its return tick preserves editor focus and restores it on the later close', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt');
+  const ticks = [];
+  editor.$nextTick = callback => { ticks.push(callback); return Promise.resolve(); };
+  editor._fileTableReturnFocus = true;
+  editor.editorVisible = false;
+  editor.restoreFileTableFocusAfterEditor();
+  // Save-and-next may reopen a different file before Vue applies the view change.
+  editor.editorVisible = true;
+  editor.selectFileRow('test/entry-10.txt');
+  const nextEditorField = element('TEXTAREA');
+  table.document.activeElement = nextEditorField;
+  while (ticks.length) ticks.shift()();
+  assert.equal(table.document.activeElement, nextEditorField);
+  assert.equal(editor._fileTableReturnFocus, true, 'A reopened editor still needs to return to the list when it closes later.');
+  assert.deepEqual(table.focusedRows, []);
+  editor.editorVisible = false;
+  editor.restoreFileTableFocusAfterEditor();
+  while (ticks.length) ticks.shift()();
+  assert.equal(editor._fileTableReturnFocus, false);
+  assert.equal(table.document.activeElement, table.rowElement('test/entry-10.txt'));
+});
+
+test('arrow navigation leaves typing fields, page inputs, select boxes, and filter checkboxes untouched', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  const row = table.document.activeElement;
+  const targets = [
+    element('INPUT', { type: 'text' }),
+    element('INPUT', { type: 'number' }),
+    element('INPUT', { type: 'checkbox' }),
+    element('TEXTAREA', { className: 'translation' }),
+    element('SELECT'),
+    element('DIV', { isContentEditable: true }),
+    element('SPAN', {}, element('DIV', { contentEditable: 'true' })),
+    ...['textbox', 'combobox', 'spinbutton', 'slider'].map(role => element('DIV', { role })),
+    element('INPUT', { type: 'text' }, row),
+  ];
+  for (const target of targets) {
+    for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter']) {
+      table.document.activeElement = target;
+      const event = keyboardEvent(key, target);
+      editor.handleFileListKeydown(event);
+      assert.equal(event.defaultPrevented, false, `${target.tagName} ${key} must keep its native behavior.`);
+      assert.equal(editor.selectedFilepath, 'test/entry-09.txt');
+      assert.equal(editor.currentPage, 1);
+    }
+  }
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('Up and Down from body or a normal navigation button restore the selected row or fall back to first', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  for (const target of [table.document.body, element('BUTTON', { className: 'tableSort' })]) {
+    for (const key of ['ArrowUp', 'ArrowDown']) {
+      editor.gotoPage(3);
+      editor.selectFileRow('test/entry-45.txt');
+      table.document.activeElement = target;
+      const event = keyboardEvent(key, target);
+      editor.handleKeydown(event);
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+      assert.equal(table.document.activeElement, table.rowElement('test/entry-45.txt'));
+    }
+    for (const key of ['ArrowLeft', 'ArrowRight', 'Enter']) {
+      table.document.activeElement = target;
+      const event = keyboardEvent(key, target);
+      editor.handleFileListKeydown(event);
+      assert.equal(event.defaultPrevented, false);
+      assert.equal(editor.currentPage, 3);
+      assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+    }
+    for (const [key, expected] of [['Home', '41'], ['End', '45'], ['PageUp', '41'], ['PageDown', '45']]) {
+      table.document.activeElement = target;
+      const event = keyboardEvent(key, target);
+      editor.handleKeydown(event);
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(editor.selectedFilepath, `test/entry-${expected}.txt`);
+      assert.equal(editor.currentPage, 3);
+      assert.equal(table.document.activeElement, table.rowElement(editor.selectedFilepath));
+    }
+    editor.selectedFilepath = 'test/no-visible-selection.txt';
+    editor.handleKeydown(keyboardEvent('ArrowDown', target));
+    assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+    assert.equal(table.document.activeElement, table.rowElement('test/entry-41.txt'));
+  }
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('contextual arrows preserve filter, tab, menu, and listbox keyboard controls', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt');
+  const containers = [element('FIELDSET', { className: 'fileFilters' }),
+    ...['tablist', 'menu', 'listbox'].map(role => element('DIV', { role }))];
+  for (const container of containers) {
+    const button = element('BUTTON', {}, container);
+    for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']) {
+      const event = keyboardEvent(key, button);
+      editor.handleFileListKeydown(event);
+      assert.equal(event.defaultPrevented, false);
+      assert.equal(editor.selectedFilepath, 'test/entry-09.txt');
+      assert.equal(editor.currentPage, 1);
+    }
+  }
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('arrows work on row buttons and cells while Enter on native row buttons is left alone', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  const filenameButton = element('BUTTON', { className: 'fileOpen' }, table.rowElement('test/entry-09.txt'));
+  const down = keyboardEvent('ArrowDown', filenameButton);
+  editor.handleFileListKeydown(down);
+  assert.equal(down.defaultPrevented, true);
+  assert.equal(editor.selectedFilepath, 'test/entry-10.txt');
+  const cell = element('TD', {}, table.rowElement('test/entry-10.txt'));
+  editor.handleFileListKeydown(keyboardEvent('ArrowRight', cell));
+  assert.equal(editor.currentPage, 2);
+  assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
+  const currentButton = element('BUTTON', {}, table.rowElement('test/entry-21.txt'));
+  const enter = keyboardEvent('Enter', currentButton);
+  editor.fileTableKeydown(enter);
+  assert.equal(enter.defaultPrevented, false);
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('page controls and page jumps select the appropriate edge and preserve selection at boundaries', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  attachFileList(harness);
+  editor.selectFileRow('test/entry-17.txt');
+  editor.nextPage();
+  assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
+  editor.gotoPage(3);
+  assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+  editor.selectFileRow('test/entry-44.txt');
+  editor.nextPage();
+  assert.equal(editor.selectedFilepath, 'test/entry-44.txt');
+  editor.prevPage();
+  assert.equal(editor.selectedFilepath, 'test/entry-40.txt');
+  editor.gotoPage(1);
+  assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
+  editor.selectFileRow('test/entry-07.txt');
+  editor.prevPage();
+  assert.equal(editor.selectedFilepath, 'test/entry-07.txt');
+});
+
+test('page buttons and page inputs retain focus while revealing the newly selected file', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  const pageButton = element('BUTTON');
+  table.document.activeElement = pageButton;
+  editor.nextPage();
+  assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
+  assert.equal(table.revealedRows.at(-1), 'test/entry-21.txt');
+  assert.equal(table.document.activeElement, pageButton);
+  const pageInput = element('INPUT', { type: 'number', value: '3' });
+  table.document.activeElement = pageInput;
+  editor.commitPageJump({ target: pageInput });
+  assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+  assert.equal(table.revealedRows.at(-1), 'test/entry-41.txt');
+  assert.equal(table.document.activeElement, pageInput);
+  assert.equal(pageInput.value, 3);
+  pageInput.value = '1';
+  editor.commitPageJump({ target: pageInput });
+  assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
+  assert.equal(table.revealedRows.at(-1), 'test/entry-20.txt');
+  assert.equal(table.document.activeElement, pageInput);
+});
+
+test('modifier and composing events never change list selection, pages, or open files', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  for (const overrides of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }, { isComposing: true }, { keyCode: 229 }, { defaultPrevented: true }]) {
+    for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter']) {
+      editor.fileTableKeydown(keyboardEvent(key, table.document.activeElement, overrides));
+      assert.equal(editor.selectedFilepath, 'test/entry-09.txt', `${key} with ${JSON.stringify(overrides)}`);
+      assert.equal(editor.currentPage, 1);
+    }
+  }
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('list and search navigation stay inactive while an editor or blocking dialog is open', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt', true);
+  const blockingStates = [
+    ['editorVisible', true], ['importDialogVisible', true], ['cloudResolverVisible', true],
+    ['cloudHistoryVisible', true], ['consistencyResolver', {}], ['duplicateLangImportWarning', {}],
+    ['showMultiInstanceGate', true], ['settingsImportDraft', {}], ['pendingSingleVersionMigration', {}],
+  ];
+  function assertBlocked() {
+    const listEvent = keyboardEvent('ArrowRight', table.rowElement('test/entry-09.txt'));
+    editor.fileTableKeydown(listEvent);
+    const searchEvent = keyboardEvent('ArrowDown', editor.$refs.searchInput);
+    editor.handleFileListKeydown(searchEvent);
+    assert.equal(listEvent.defaultPrevented, false);
+    assert.equal(searchEvent.defaultPrevented, false);
+    assert.equal(editor.selectedFilepath, 'test/entry-09.txt');
+    assert.equal(editor.currentPage, 1);
+  }
+  for (const [key, value] of blockingStates) {
+    const previous = editor[key];
+    editor[key] = value;
+    assertBlocked();
+    editor[key] = previous;
+  }
+  editor.$refs.diagnosticScanDialog = { open: true };
+  assertBlocked();
+  editor.$refs.diagnosticScanDialog.open = false;
+  editor.gameVersionSelected = true;
+  editor.showSetting = true;
+  assertBlocked();
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('contextual navigation ignores a hidden or absent file list', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.selectFileRow('test/entry-09.txt');
+  for (const region of [Object.assign(table.region, { getClientRects() { return []; } }), null]) {
+    editor.$refs.fileTableRegion = region;
+    for (const target of [table.document.body, editor.$refs.searchInput]) {
+      for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']) {
+        const event = keyboardEvent(key, target);
+        editor.handleFileListKeydown(event);
+        assert.equal(event.defaultPrevented, false);
+        assert.equal(editor.selectedFilepath, 'test/entry-09.txt');
+        assert.equal(editor.currentPage, 1);
+      }
+    }
+  }
+  assert.deepEqual(table.openedFiles, []);
+});
+
+test('search Down selects first and Up restores current while other navigation keys keep native behavior', () => {
+  const harness = loadEditor();
+  const { editor } = harness;
+  paginatedFixtures(editor);
+  const table = attachFileList(harness);
+  editor.gotoPage(3);
+  table.document.activeElement = editor.$refs.searchInput;
+  const down = keyboardEvent('ArrowDown', editor.$refs.searchInput);
+  editor.handleFileListKeydown(down);
+  assert.equal(down.defaultPrevented, true);
+  assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
+  assert.equal(table.document.activeElement, table.rowElement('test/entry-41.txt'));
+  editor.selectFileRow('test/entry-45.txt');
+  table.document.activeElement = editor.$refs.searchInput;
+  const up = keyboardEvent('ArrowUp', editor.$refs.searchInput);
+  editor.handleFileListKeydown(up);
+  assert.equal(up.defaultPrevented, true);
+  assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+  assert.equal(table.document.activeElement, table.rowElement('test/entry-45.txt'));
+  editor.selectFileRow('test/entry-45.txt', true);
+  for (const overrides of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }, { isComposing: true }, { keyCode: 229 }, { defaultPrevented: true }]) {
+    table.document.activeElement = editor.$refs.searchInput;
+    const event = keyboardEvent('ArrowDown', editor.$refs.searchInput, overrides);
+    editor.handleFileListKeydown(event);
+    assert.equal(event.defaultPrevented, !!overrides.defaultPrevented);
+    assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+    assert.equal(table.document.activeElement, editor.$refs.searchInput);
+  }
+  for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter']) {
+    const event = keyboardEvent(key, editor.$refs.searchInput);
+    editor.handleFileListKeydown(event);
+    assert.equal(event.defaultPrevented, false);
+    assert.equal(editor.currentPage, 3);
+    assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+  }
+  editor.filteredDescs = [];
+  editor.syncFileSelection();
+  const emptyDown = keyboardEvent('ArrowDown', editor.$refs.searchInput);
+  editor.handleFileListKeydown(emptyDown);
+  assert.equal(emptyDown.defaultPrevented, false);
+  assert.equal(editor.selectedFilepath, '');
+  assert.equal(table.document.activeElement, editor.$refs.searchInput);
+});
+
+test('selection stays visible after sorting, page changes, or a search, and clears when there are no results', () => {
+  const harness = loadEditor();
+  const { editor, config } = harness;
+  paginatedFixtures(editor);
+  attachFileList(harness);
+  editor.selectFileRow('test/entry-17.txt', true);
+  editor.sort('english');
+  config.watch.descsDisplay.call(editor);
+  assert.ok(editor.descsDisplay.some(row => row.filepath === editor.selectedFilepath));
+  editor.gotoPage(2);
+  config.watch.descsDisplay.call(editor);
+  assert.ok(editor.descsDisplay.some(row => row.filepath === editor.selectedFilepath));
+  editor.searchText = 'Source 05';
+  editor.fileSearchChanged();
+  config.watch.descsDisplay.call(editor);
+  assert.equal(editor.selectedFilepath, 'test/entry-05.txt');
+  editor.selectedFileFilters = [];
+  config.watch.selectedFileFilters.handler.call(editor);
+  config.watch.descsDisplay.call(editor);
+  assert.equal(editor.selectedFilepath, '');
+  editor.selectedFileFilters = ['saved'];
+  config.watch.selectedFileFilters.handler.call(editor);
+  config.watch.descsDisplay.call(editor);
+  assert.equal(editor.selectedFilepath, 'test/entry-05.txt');
+  editor.currentPage = 1;
+  editor.filteredDescs = [];
+  config.watch.descsDisplay.call(editor);
+  for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter']) {
+    editor.fileTableKeydown(keyboardEvent(key, editor.$refs.fileTableRegion));
+    assert.equal(editor.currentPage, 1);
+    assert.equal(editor.selectedFilepath, '');
+  }
+});

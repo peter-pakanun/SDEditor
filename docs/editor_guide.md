@@ -19,25 +19,41 @@ Open **Settings → Cloud backup → Backup using Google account** to connect pe
 
 Settings and Regex rules are personal; dictionaries are shared among assigned translators. The editor clipboard, source ZIPs, translated files and history remain local. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for sync status, session renewal, recovery and account switching.
 
+### Settings
+
+Settings is organized into four tabs: **General** for language, theme and density; **Editor & shortcuts** for preview behavior, highlighting and keyboard preferences; **Cloud backup** for account and shared Dictionary controls; and **Data** for importing/exporting settings and starting a workspace from scratch.
+
+In **General → Theme**, **Dark** keeps the original dark palette; **Modern Dark** uses the new dark palette.
+
+Click a tab or use **Left/Right Arrow**, **Home**, and **End** while a tab has focus to switch sections. **Save and close**, **Close**, and **Escape** save your preferences before returning to the workspace. First-time setup requires a translation language before you can continue.
+
 ### Importing StatDescriptions.zip
 
-Use the **📦 Import Zip** button in the top left corner to begin import process.
+Use **Import ZIP** in the main action header to begin the import process.
 For more details, see the [**Import Workflow**](import_workflow.md).
+
+### Finding Files and Navigating Pages
+
+The main action header stays visible while you scroll, with labeled controls for exporting, settings, importing, and diagnostic scans. Search the file list by name, English source, or translation using the search field in this sticky navigation bar.
+
+Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Needs review**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
+
+Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list, so you can reach the previous/next page controls after scrolling through the files. The loaded file count appears before **Missing**, **Saved**, and **Review**. The status counters describe files eligible under **Hide DNT entries**, independently of search and status choices; the result count describes the files matching your search and filters.
 
 ### File Status Indicators
 
-In the file list, you'll see colors and counters indicating the state of each file:
+In the file list, colors indicate each file's state. The bottom navigation bar shows the workspace counters:
 
 | Color   | Meaning                                                                                |
 |---------|----------------------------------------------------------------------------------------|
 | Red     | Missing lines or line count mismatch                                                   |
-| Green   | Done and checked                                                                       |
+| Green   | Saved changes                                                                          |
 | Yellow  | Review required                                                                        |
 
 | Counter | Meaning                                                                                |
 |---------|----------------------------------------------------------------------------------------|
 | Missing | Translation has blank lines or doesn't match English line count                        |
-| Done    | You've saved changes to this file at least once and are “tracked for export”           |
+| Saved   | You've saved changes to this file at least once and are “tracked for export”           |
 | Review  | The English source changed since your last save; consider re-checking your translation |
 
 #### What “Missing” Actually Means
@@ -51,14 +67,21 @@ So it is “missing translation content”, not “missing file”.
 
 ### Opening a File
 
-1. Click on any row to open that file in the editor
-2. Or use **F2** to open the first file from the current filtered list
+Click a row or its filename once to open the file in the editor. A blue indicator on the left marks the selected file.
+
+Focus the file list with **Tab** or press **Up/Down Arrow** from a non-input control in the main interface to return to the currently selected row. If no current selection is visible, the first row is selected. From search, **Down Arrow** selects the first visible file; **Up Arrow** returns to the current selection.
+
+In the list, **Up/Down Arrow** selects the previous/next row without leaving the current page or returning to search. **Home/End** selects the first/last row, and **Page Up/Page Down** moves ten rows, stopping at the page's first/last row; these four keys also work from other non-input controls in the main interface. **Right Arrow** opens the next page at its first row; **Left Arrow** opens the previous page at its last row. Page controls use the same first/last selection behavior and retain focus while revealing the selected file. **Enter** opens the selected row. Other text fields, page inputs, select boxes, editable text, and filter checkboxes keep their usual keyboard behavior. **F2** can also open the first file from the current filtered list.
 
 ### Scanning Diagnostics
 
-If a **⚡ count** button appears before **Scan diagnostics**, it opens shared Dictionary conflicts. Choose local content on the left or remote content on the right for **Alternates** and **TL note**, review the center result, and save it. Independent changes merge automatically. See [Resolve Dictionary Conflicts](cloud_backup.md#resolve-dictionary-conflicts).
+If a **Resolve conflicts** button appears in the main action header, it opens shared Dictionary conflicts. Choose local content on the left or remote content on the right for **Alternates** and **TL note**, review the center result, and save it. Independent changes merge automatically. See [Resolve Dictionary Conflicts](cloud_backup.md#resolve-dictionary-conflicts).
 
-Click **Scan diagnostics** to choose which checks to run. The selector has a checkbox for whitespace, dash spacing, tag syntax, variable tags, keyword popup tags, text decoration tags, inconsistent translations, and Dictionary terminology. Every check starts selected except **Dictionary terminology**. Start the scan to check every loaded file in the selected language, including files hidden by search or filters. Use **Diagnostic warnings only** or **Diagnostic errors only** to narrow the results. Hover over a flagged file for details.
+Click **Scan diagnostics** to choose which checks to run. The modal has a checkbox for whitespace, dash spacing, tag syntax, variable tags, keyword popup tags, text decoration tags, inconsistent translations, and Dictionary terminology. Every check starts selected except **Dictionary terminology**. **Start scan** checks every loaded file in the selected language, including files hidden by search or filters.
+
+Progress and results stay inside the scan modal. During a scan, the progress bar shows processed files and live warning/error counts. **Close** or **Escape** lets the scan continue in the background; open **Scan diagnostics** again to return to it. **Stop scan** cancels without keeping partial results.
+
+Completed results show warning/error totals and a paginated list of affected files, with entry and column details. Expand additional issues when needed, or click **Open file** to inspect a translation in the editor. Reopening the modal retains the completed results until a workspace change clears them. **Scan again** uses the currently selected checks. The file list's diagnostic warning/error status filters also help you focus on affected files.
 
 The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations count as differences. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
 
@@ -81,6 +104,8 @@ Keyword tags use their dictionary entry's main **Find** to identify the term and
 Terminology warnings come from the last manual scan; edit translations or dictionary alternatives and scan again to check the updated wording. This is a check for allowed wording, not a word-alignment or occurrence-count check: it does not prove that every word was translated correctly. The separate identical-English check still reports differences between complete translations, even when both use allowed dictionary wording.
 
 ## The Editor Interface
+
+The editor's **Save & close** button saves the current translation and returns to the file list. **Close** returns without saving, asking for confirmation when there are unsaved changes. For files opened from the list, both return focus to the selected file. Use the **Small**, **Medium**, or **Large** controls beside **Preview size** to resize the game preview. **Apply regex** fills a translation block using your Regex rules and Dictionary.
 
 The editor shows each string as a block:
 - **Top side (English)**: The original text you need to translate
@@ -148,7 +173,7 @@ On the right side of the editor are two helper panels: **Dictionary** and **Rege
 
 While editing a translation, press the configured shortcut (**Ctrl + Space** by default) or enter a literal ASCII **`[`** (left square bracket) to open a popup showing all available Dictionary replacements. This is called the **Autocomplete Popup**.
 
-SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/reference/default-keybindings) for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Autocomplete popup shortcut** can select either binding or **Disabled**; disabling the keybinding does not disable the literal `[` trigger. If the operating system intercepts **Ctrl + Space** before it reaches the browser, select **Ctrl + I**, or use literal `[` from an alphanumeric/direct-input mode.
+SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/reference/default-keybindings) for every language: **Ctrl + Space** is the primary/default binding and **Ctrl + I** is an optional alternative. Editor shortcuts do not run while any IME—including Japanese, Chinese, and Korean IMEs—is actively composing. **Settings → Editor & shortcuts → Open autocomplete** can select either binding or **Disabled**; disabling the keybinding does not disable the literal `[` trigger. If the operating system intercepts **Ctrl + Space** before it reaches the browser, select **Ctrl + I**, or use literal `[` from an alphanumeric/direct-input mode.
 
 > **IME punctuation:** Autocomplete reacts to the character committed into the translation, not the physical key. A Zhuyin IME that commits ASCII `[` opens autocomplete after composition ends. Japanese Hiragana normally commits `「` from the same physical key; SDEditor leaves that legitimate punctuation unchanged, so use the configured shortcut or switch temporarily to alphanumeric/direct input for `[`.
 
@@ -172,7 +197,7 @@ SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/r
 The **Dictionary** tab lets you define how specific terms should be translated.
 
 **Adding a Dictionary Entry:**
-1. Click the **+** button below the "Dictionary" heading
+1. Click **Add entry** beside the Dictionary tabs
 2. Enter a word or phrase in the "Find" field
 3. Enter the translation in the "Replace" field
 4. (Optional) Add a **TL note** explaining the translation; it is shared with the Dictionary when cloud sync is enabled.
@@ -215,7 +240,7 @@ When you're editing, the **Dictionary** panel automatically shows terms that are
 
 ### Backing up your Dictionary
 
-Use **Settings → 📤 Export settings** to download the current language's Dictionary, personal Regex rules, preferences and local editor clipboard. Select and export other languages separately when needed. **📥 Import settings** restores a standard settings export and keeps a recovery copy first.
+Use **Settings → Data → Export settings** to download the current language's Dictionary, personal Regex rules, preferences and local editor clipboard. Select and export other languages separately when needed. **Import settings** restores a standard settings export and keeps a recovery copy first.
 
 Google backup also synchronizes personal settings and the assigned language's shared Dictionary. It does not upload the clipboard or translation files. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for first-login restores, recovery archives and conflict resolution.
 
@@ -240,7 +265,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 | Shortcut           | Action                                       |
 |--------------------|----------------------------------------------|
 | Ctrl + Space (default), Ctrl + I (optional), or literal [ | Open Autocomplete Popup |
-| Ctrl + S           | Save and open next file                      |
+| Ctrl + S           | Save; open next file when enabled in settings |
 | Escape             | Close the file without saving                |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
 ```
@@ -265,7 +290,7 @@ If you see a keyword in the English text that isn't in your Dictionary yet:
 
 ## Saving Your Translation
 
-**Click the 💾 button** at the top of the editor to save your work, or use:
+**Click Save & close** at the top of the editor to save your work, or use:
 - **Ctrl + S**: Save the file
 - **F1/F2**: Save and open previous/next file
 
@@ -273,7 +298,7 @@ If you see a keyword in the English text that isn't in your Dictionary yet:
 - Your translation is stored locally in your browser
 - A revision/history entry is created (view in the **History** tab on the right)
 - Mismatch warnings appear if your translation doesn't match the English version ask you to review before saving
-- The "Done" counter updates if this is your first save for this file
+- The **Saved** counter updates if this is your first save for this file
 
 ## Handling Warnings
 
@@ -324,9 +349,9 @@ Click the **Export** button at the top of the editor to export your work. This c
 
 2. **Use Alternatives for context**: If you have more than one translation for a keyword, create Alternatives to distinguish between them, you can have multiple entries for each keyword by adding number next to the name, e.g. `Hit1`, `Hit2`, etc.
 
-3. **Filter by status**: Use the filter dropdown to show only "Missing", "Done", "Review", or "New" files to focus your work.
+3. **Filter by status**: Tick **Missing translation**, **Saved changes**, **Needs review**, or **Unchanged** to focus your work. Combine statuses to show files matching any of them.
 
-4. **Check the History**: Before exporting, check the "Review" filter to verify all your major edits were saved correctly. These are the files that will be discarded if you export them without reviewing.
+4. **Check the History**: Before exporting, check the **Needs review** filter to verify all your major edits were saved correctly. These are the files that will be discarded if you export them without reviewing.
 
 ## What Happens During Import/Export
 

@@ -967,8 +967,8 @@ tr {
 tr:nth-child(even) {
   background-color: var(--color-element-alt);
 }
-tbody>tr:hover,
-th:hover {
+table:not(#table) tbody>tr:hover,
+table:not(#table) th:hover {
   background-color: var(--color-element-highlight);
 }
 
@@ -980,7 +980,7 @@ tr.hasChanges:nth-child(even)>td {
   background-color: rgba(80, 255, 90, 0.12);
 }
 
-tbody>tr:hover.hasChanges>td {
+table:not(#table) tbody>tr:hover.hasChanges>td {
   background-color: rgba(80, 255, 90, 0.3);
 }
 
@@ -996,12 +996,11 @@ tr.isMissing:nth-child(even)>td.translationTr {
   background-color: rgba(255, 80, 90, 0.12);
 }
 
-tbody>tr:hover.isMissing>td.translationTr {
+table:not(#table) tbody>tr:hover.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.3);
 }
 
 tr.needsReview>td {
-  box-shadow: inset 3px 0 0 rgba(255, 180, 0, 0.75);
   background-color: rgba(255, 180, 0, 0.08);
 }
 
@@ -1009,7 +1008,7 @@ tr.needsReview:nth-child(even)>td {
   background-color: rgba(255, 180, 0, 0.12);
 }
 
-tbody>tr:hover.needsReview>td {
+table:not(#table) tbody>tr:hover.needsReview>td {
   background-color: rgba(255, 180, 0, 0.3);
 }
 
@@ -1021,7 +1020,7 @@ tr.needsReview:nth-child(even) {
   background-color: rgba(255, 180, 0, 0.12);
 }
 
-tbody>tr:hover.needsReview {
+table:not(#table) tbody>tr:hover.needsReview {
   background-color: rgba(255, 180, 0, 0.3);
 }
 
@@ -1033,34 +1032,14 @@ table#table tbody tr.needsReview:nth-child(even) td {
   background-color: rgba(255, 180, 0, 0.12);
 }
 
-table#table tbody tr:hover.needsReview td {
-  background-color: rgba(255, 180, 0, 0.3);
-}
-
 table#table tbody tr.diagnosticWarning td,
 table#table tbody tr.diagnosticWarning:nth-child(even) td {
   background-color: var(--color-diagnostic-warning);
 }
 
-table#table tbody tr.diagnosticWarning td:first-child {
-  box-shadow: inset 4px 0 0 var(--color-diagnostic-warning-border);
-}
-
-table#table tbody tr:hover.diagnosticWarning td {
-  background-color: color-mix(in srgb, var(--color-diagnostic-warning) 75%, var(--color-element-highlight));
-}
-
 table#table tbody tr.diagnosticError td,
 table#table tbody tr.diagnosticError:nth-child(even) td {
   background-color: var(--color-diagnostic-error);
-}
-
-table#table tbody tr.diagnosticError td:first-child {
-  box-shadow: inset 4px 0 0 var(--color-diagnostic-error-border);
-}
-
-table#table tbody tr:hover.diagnosticError td {
-  background-color: color-mix(in srgb, var(--color-diagnostic-error) 75%, var(--color-element-highlight));
 }
 
 .needsReviewBanner {

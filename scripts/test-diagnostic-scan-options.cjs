@@ -71,20 +71,21 @@ test('manual scan defaults select every category except dictionary terminology',
   for (const key of CHECKS) assert.equal(editor.diagnosticScanChecks[key], key !== 'terminology', key);
 });
 
-test('selector waits for Start scan and resets defaults each time it opens', async () => {
+test('selector waits for Start scan and retains choices and results when reopened', async () => {
   const { editor, calls, dialog } = loadEditor();
   conflictingEntries(editor);
   editor.diagnosticScanChecks = only('terminology');
   editor.openDiagnosticScanDialog();
   assert.equal(dialog.open, true);
-  assert.equal(editor.diagnosticScanChecks.terminology, false);
-  assert.equal(editor.diagnosticScanChecks.consistency, true);
+  assert.equal(editor.diagnosticScanChecks.terminology, true);
+  assert.equal(editor.diagnosticScanChecks.consistency, false);
   assert.equal(editor.diagnosticScanCompleted, false);
   assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
   editor.closeDiagnosticScanDialog();
   assert.equal(dialog.open, false);
   assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
   editor.openDiagnosticScanDialog();
+  assert.equal(editor.diagnosticScanChecks.terminology, true, 'Reopening must retain the chosen checks.');
   editor.diagnosticScanChecks = only();
   assert.equal(editor.hasDiagnosticScanSelection, false);
   await editor.startDiagnosticScan();
@@ -92,8 +93,15 @@ test('selector waits for Start scan and resets defaults each time it opens', asy
   assert.equal(editor.diagnosticScanCompleted, false);
   editor.diagnosticScanChecks = only('consistency');
   await editor.startDiagnosticScan();
-  assert.equal(dialog.open, false);
+  assert.equal(dialog.open, true, 'Progress and results stay in the modal.');
   assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanResultFiles.length, 2);
+  assert.equal(editor.diagnosticScanVisibleResults[0].result.diagnostics[0].code, 'inconsistent-translation');
+  editor.closeDiagnosticScanDialog();
+  editor.openDiagnosticScanDialog();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanChecks.consistency, true);
   assert.equal(editor.diagnosticScanWarningFileCount, 2);
 });
 
@@ -210,6 +218,10 @@ test('a save during a yielded scan cancels it without publishing partial results
   editor.diagnosticScanChecks = only('consistency', 'terminology');
   const scanning = editor.scanAllDiagnostics();
   assert.equal(editor.diagnosticScanRunning, true);
+  assert.equal(editor.diagnosticScanProcessed, 0, 'The modal paints before analysis begins.');
+  while (editor.diagnosticScanRunning && editor.diagnosticScanProcessed < 25) {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
   assert.equal(editor.diagnosticScanProcessed, 25);
   const interruptedCalls = { ...calls };
   editor.descs[0].translations.Thai[0] = 'ไฟ';
@@ -219,4 +231,60 @@ test('a save during a yielded scan cancels it without publishing partial results
   assert.equal(editor.diagnosticScanCompleted, false);
   assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
   assert.deepEqual(calls, interruptedCalls);
+});
+
+test('closing a running scan keeps it available and Stop prevents partial results', async () => {
+  const { editor, calls, dialog } = loadEditor();
+  conflictingEntries(editor);
+  editor.openDiagnosticScanDialog();
+  const scanning = editor.startDiagnosticScan();
+  assert.equal(editor.diagnosticScanRunning, true);
+  editor.closeDiagnosticScanDialog();
+  assert.equal(dialog.open, false);
+  assert.equal(editor.diagnosticScanRunning, true);
+  editor.openDiagnosticScanDialog();
+  assert.equal(dialog.open, true);
+  editor.stopDiagnosticScan();
+  await scanning;
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanStopped, true);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+  assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
+});
+
+test('scan failures remain in the modal and can be retried', async () => {
+  const { editor, dialog } = loadEditor();
+  conflictingEntries(editor);
+  editor.openDiagnosticScanDialog();
+  const analyze = editor.analyzeDescDiagnostics;
+  editor.analyzeDescDiagnostics = () => { throw new Error('Fixture failed'); };
+  await editor.startDiagnosticScan();
+  assert.equal(dialog.open, true);
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.match(editor.diagnosticScanError, /Fixture failed/);
+  editor.analyzeDescDiagnostics = analyze;
+  await editor.startDiagnosticScan();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanError, '');
+});
+
+test('large scan results bound file cards and preserve exact issue counts', async () => {
+  const { editor } = loadEditor();
+  editor.descs = Array.from({ length: 21 }, (_, index) => {
+    const desc = description(`entry-${index}`, 'Fire', ' ผิด');
+    desc.translations.English = Array(50).fill('Fire');
+    desc.translations.Thai = Array(50).fill(' ผิด');
+    return desc;
+  });
+  editor.diagnosticScanChecks = only('whitespace');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanResultPageCount, 2);
+  assert.equal(editor.diagnosticScanVisibleResults.length, 20);
+  assert.equal(editor.diagnosticScanVisibleResults[0].result.diagnostics.length, 40);
+  assert.equal(editor.diagnosticScanVisibleResults[0].result.diagnosticsTruncated, 10);
+  assert.equal(editor.diagnosticScanIssueCounts.warnings, 1050);
+  editor.diagnosticScanResultsPage = 2;
+  assert.equal(editor.diagnosticScanVisibleResults.length, 1);
 });

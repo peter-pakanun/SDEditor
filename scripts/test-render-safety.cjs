@@ -30,7 +30,7 @@ function loadEditor() {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
-    lang: 'Thai', hideDNT: false, filterSelect: 'all', searchText: '',
+    lang: 'Thai', hideDNT: false, selectedFileFilters: ['missing', 'saved', 'review', 'unchanged'], searchText: '',
     currentPage: 1, pageCount: 1, refreshGamePreview() {},
   });
   return { editor, context, window };

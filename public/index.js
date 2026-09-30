@@ -117,6 +117,15 @@ const config = Vue.defineComponent({
       lang: "",
       theme: 'light',
       showSetting: false,
+      settingsTab: 'general',
+      settingsTabs: [
+        { id: 'general', label: 'General' },
+        { id: 'editor', label: 'Editor & shortcuts' },
+        { id: 'cloud', label: 'Cloud backup' },
+        { id: 'data', label: 'Data' },
+      ],
+      settingsSaving: false,
+      settingsMessage: '',
       needsInitialSettings: true,
       loadingProgress: 0.001,
       descs: [],
@@ -140,7 +149,9 @@ const config = Vue.defineComponent({
       paginationPadding: 2,
       currentPage: 1,
       searchText: "",
-      filterSelect: "new",
+      selectedFileFilters: ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'],
+      fileFiltersVisible: false,
+      selectedFilepath: '',
       diagnosticScanResults: {},
       diagnosticScanAppliedChecks: null,
       diagnosticScanTypes: DIAGNOSTIC_SCAN_TYPES,
@@ -152,6 +163,11 @@ const config = Vue.defineComponent({
       diagnosticScanErrorFileCount: 0,
       diagnosticScanWarningFileCount: 0,
       diagnosticScanRunId: 0,
+      diagnosticScanError: '',
+      diagnosticScanStopped: false,
+      diagnosticScanPhase: '',
+      diagnosticScanResultsPage: 1,
+      diagnosticScanResultsPageSize: 20,
       consistencyResolver: null,
       consistencyResolverBusy: false,
       consistencyResolverError: '',
@@ -349,8 +365,30 @@ const config = Vue.defineComponent({
     }
   },
   watch: {
+    settingsDialogVisible(visible) {
+      if (visible) {
+        this._settingsReturnFocus = document.activeElement;
+        this._settingsBodyOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        this.settingsMessage = '';
+        if (this.needsInitialSettings) this.settingsTab = 'general';
+        this.$nextTick(() => {
+          if (!this.settingsDialogVisible) return;
+          if (this.needsInitialSettings && !this.lang) this.$refs.settingsLanguage?.focus();
+          else this.$refs.settingsDialog?.querySelector('[role="tab"][aria-selected="true"]')?.focus();
+        });
+      } else {
+        document.body.style.overflow = this._settingsBodyOverflow || '';
+        this.$nextTick(() => {
+          if (this._settingsReturnFocus?.isConnected) this._settingsReturnFocus.focus();
+          else this.$refs.settingsButton?.focus();
+          this._settingsReturnFocus = null;
+        });
+      }
+    },
     hideDNT() {
       this.saveSettings();
+      if (this.sourceLoaded) this.filterDesc();
     },
     highlightDict() {
       this.saveSettings();
@@ -393,8 +431,18 @@ const config = Vue.defineComponent({
       document.documentElement.setAttribute('data-theme', newTheme);
       this.saveSettings();
     },
-    filterSelect() {
-      this.filterDesc();
+    selectedFileFilters: {
+      deep: true,
+      handler() {
+        this.currentPage = 1;
+        this.filterDesc();
+      }
+    },
+    descsDisplay() {
+      this.syncFileSelection();
+    },
+    diagnosticScanResultPageCount(count) {
+      this.diagnosticScanResultsPage = Math.max(1, Math.min(this.diagnosticScanResultsPage, count));
     },
     editorClipboard() {
       this.saveSettings();
@@ -413,6 +461,10 @@ const config = Vue.defineComponent({
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
   },
   computed: {
+    settingsDialogVisible() {
+      return this.gameVersionSelected && (this.showSetting || this.needsInitialSettings)
+        && !this.showMultiInstanceGate && !this.pendingSingleVersionMigration && !this.duplicateLangImportWarning;
+    },
     gameVersionLabel() {
       return GAME_VERSIONS[this.gameVersion]?.label || '';
     },
@@ -458,6 +510,31 @@ const config = Vue.defineComponent({
     hasDiagnosticScanSelection() {
       return this.diagnosticScanTypes.some(type => this.diagnosticScanChecks[type.key]);
     },
+    diagnosticScanPercent() {
+      if (!this.diagnosticScanTotal) return this.diagnosticScanCompleted ? 100 : 0;
+      return Math.round(this.diagnosticScanProcessed / this.diagnosticScanTotal * 100);
+    },
+    diagnosticScanResultFiles() {
+      return Object.entries(this.diagnosticScanResults)
+        .filter(([, result]) => result.hasDiagnosticError || result.hasDiagnosticWarning)
+        .map(([filepath, result]) => ({ filepath, result }))
+        .sort((a, b) => Number(b.result.hasDiagnosticError) - Number(a.result.hasDiagnosticError)
+          || a.filepath.localeCompare(b.filepath));
+    },
+    diagnosticScanResultPageCount() {
+      return Math.max(1, Math.ceil(this.diagnosticScanResultFiles.length / this.diagnosticScanResultsPageSize));
+    },
+    diagnosticScanVisibleResults() {
+      const page = Math.min(this.diagnosticScanResultsPage, this.diagnosticScanResultPageCount);
+      const start = (page - 1) * this.diagnosticScanResultsPageSize;
+      return this.diagnosticScanResultFiles.slice(start, start + this.diagnosticScanResultsPageSize);
+    },
+    diagnosticScanIssueCounts() {
+      return Object.values(this.diagnosticScanResults).reduce((counts, result) => ({
+        errors: counts.errors + Number(result.errorCount || 0),
+        warnings: counts.warnings + Number(result.warningCount || 0),
+      }), { errors: 0, warnings: 0 });
+    },
     consistencyCurrentChoice() {
       return this.consistencyResolver ? this.buildConsistencyChoice(this.consistencyResolver.currentTranslation) : null;
     },
@@ -487,8 +564,27 @@ const config = Vue.defineComponent({
     editorDiagnosticErrorTitle() {
       return this.formatDiagnosticsForDisplay(this.collectEditorDiagnostics("error"), 10);
     },
+    fileFilterOptions() {
+      return [
+        { key: 'missing', label: 'Missing translation', tone: 'missing' },
+        { key: 'saved', label: 'Saved changes', tone: 'saved' },
+        { key: 'review', label: 'Needs review', tone: 'review' },
+        { key: 'diagnosticError', label: 'Diagnostic errors', tone: 'error' },
+        { key: 'diagnosticWarning', label: 'Diagnostic warnings', tone: 'warning' },
+        { key: 'unchanged', label: 'Unchanged', tone: '' },
+      ];
+    },
+    allFileFiltersSelected() {
+      return this.fileFilterOptions.every(option => this.selectedFileFilters.includes(option.key));
+    },
+    fileRangeLabel() {
+      const total = this.filteredDescs.length;
+      if (!total) return '0 files';
+      const start = (this.currentPage - 1) * this.pageSize + 1;
+      return `${start}–${Math.min(this.currentPage * this.pageSize, total)} of ${total} files`;
+    },
     pageCount() {
-      return Math.ceil(this.filteredDescs.length / this.pageSize);
+      return Math.max(1, Math.ceil(this.filteredDescs.length / this.pageSize));
     },
     pageButtons() {
       let start = this.currentPage - this.paginationPadding;
@@ -509,7 +605,7 @@ const config = Vue.defineComponent({
       return btns;
     },
     descsDisplay() {
-      descsToDisplay = this.filteredDescs.sort((a, b) => {
+      let descsToDisplay = this.filteredDescs.slice().sort((a, b) => {
         let modifier = 1;
         this.currentSortIcon = '▲';
         if (this.currentSortDir === 'desc') {
@@ -969,14 +1065,64 @@ const config = Vue.defineComponent({
       if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
       if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
     },
+    openSettings(tab = 'general') {
+      this.setSettingsTab(tab);
+      this.settingsMessage = '';
+      this.showSetting = true;
+    },
+    setSettingsTab(tab, focusTab = false) {
+      if (!this.settingsTabs.some(item => item.id === tab)) return;
+      this.settingsTab = tab;
+      if (focusTab) this.$nextTick(() => {
+        this.$refs.settingsDialog?.querySelector('[role="tab"][aria-selected="true"]')?.focus();
+      });
+    },
+    handleSettingsTabKeydown(event, index) {
+      let nextIndex;
+      if (event.key === 'ArrowRight') nextIndex = (index + 1) % this.settingsTabs.length;
+      else if (event.key === 'ArrowLeft') nextIndex = (index + this.settingsTabs.length - 1) % this.settingsTabs.length;
+      else if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = this.settingsTabs.length - 1;
+      else return;
+      event.preventDefault();
+      this.setSettingsTab(this.settingsTabs[nextIndex].id, true);
+    },
+    settingsTrapFocus(event) {
+      const dialog = this.$refs.settingsDialog;
+      if (!dialog) return;
+      const controls = [...dialog.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
+        .filter(element => element.getClientRects().length && element.tabIndex >= 0);
+      if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault(); first.focus();
+      }
+    },
     async settingsSaveClose() {
+      if (this.settingsSaving) return;
       if (!this.lang) {
-        alert('Please select a language.');
+        this.settingsMessage = 'Choose a translation language before continuing.';
+        this.setSettingsTab('general');
+        this.$nextTick(() => this.$refs.settingsLanguage?.focus());
         return;
       }
-      if (await this.saveSettings() === false) return;
-      this.needsInitialSettings = false;
-      this.showSetting = false;
+      this.settingsSaving = true;
+      this.settingsMessage = '';
+      try {
+        if (await this.saveSettings() === false) {
+          this.settingsMessage = this.cloudStorageError || 'Could not save preferences. Please try again.';
+          return;
+        }
+        this.needsInitialSettings = false;
+        this.showSetting = false;
+      } catch (error) {
+        this.settingsMessage = 'Could not save preferences: ' + error.message;
+      } finally {
+        this.settingsSaving = false;
+      }
     },
     toggleEditorEnglishDiff() {
       this.editorShowEnglishDiff = !this.editorShowEnglishDiff;
@@ -1628,10 +1774,22 @@ const config = Vue.defineComponent({
       let warningCount = 0;
       let errorCount = 0;
       const terminologyDiagnostics = [];
-      const collectTerminology = (result, blockIndex, columnIndex) => {
+      const diagnostics = [];
+      // Keep cards bounded while retaining the exact counts and manual editor caches.
+      const collectDiagnostic = (diagnostic, blockIndex, columnIndex) => {
+        const located = { ...diagnostic, blockIndex, columnIndex };
+        if (diagnostics.length < 40) diagnostics.push(located);
+        else if (diagnostic.level === 'error') {
+          const warningIndex = diagnostics.findIndex(item => item.level !== 'error');
+          if (warningIndex >= 0) diagnostics[warningIndex] = located;
+        }
+      };
+      const collectDiagnostics = (result, blockIndex, columnIndex) => {
         for (const diagnostic of result.diagnostics) {
-          if (diagnostic.code !== "dictionary-terminology") continue;
-          terminologyDiagnostics.push({ ...diagnostic, blockIndex, columnIndex });
+          collectDiagnostic(diagnostic, blockIndex, columnIndex);
+          if (diagnostic.code === "dictionary-terminology") {
+            terminologyDiagnostics.push({ ...diagnostic, blockIndex, columnIndex });
+          }
         }
       };
 
@@ -1658,22 +1816,27 @@ const config = Vue.defineComponent({
             );
             warningCount += Number(result.warningCount || 0);
             errorCount += Number(result.errorCount || 0);
-            collectTerminology(result, i, columnIndex);
+            collectDiagnostics(result, i, columnIndex);
           }
         } else {
           const result = this.analyzeTranslationDiagnostics(translation, english, lang, checks);
           warningCount += Number(result.warningCount || 0);
           errorCount += Number(result.errorCount || 0);
-          collectTerminology(result, i);
+          collectDiagnostics(result, i);
         }
       }
 
       const consistencyDiagnostics = checks.consistency
         ? this.analyzeDescConsistencyDiagnostics(desc, lang, consistencyIndex) : [];
       warningCount += consistencyDiagnostics.length;
+      for (const diagnostic of consistencyDiagnostics) collectDiagnostic(diagnostic, diagnostic.blockIndex);
+      diagnostics.sort((a, b) => Number(b.level === 'error') - Number(a.level === 'error')
+        || a.blockIndex - b.blockIndex || Number(a.columnIndex || 0) - Number(b.columnIndex || 0));
       return {
         warningCount,
         errorCount,
+        diagnostics,
+        diagnosticsTruncated: Math.max(0, warningCount + errorCount - diagnostics.length),
         consistencyDiagnostics,
         terminologyDiagnostics,
         lang,
@@ -1707,6 +1870,10 @@ const config = Vue.defineComponent({
       this.diagnosticScanTotal = 0;
       this.diagnosticScanErrorFileCount = 0;
       this.diagnosticScanWarningFileCount = 0;
+      this.diagnosticScanError = '';
+      this.diagnosticScanStopped = false;
+      this.diagnosticScanPhase = '';
+      this.diagnosticScanResultsPage = 1;
     },
     refreshConsistencyResolutionDiagnostics(resolver) {
       if (this.lang !== resolver.lang || this.gameVersion !== resolver.gameVersion) return;
@@ -1741,21 +1908,44 @@ const config = Vue.defineComponent({
       this.clearDiagnosticScanResults();
     },
     openDiagnosticScanDialog() {
-      if (this.diagnosticScanRunning) return;
-      this.diagnosticScanChecks = defaultDiagnosticScanChecks();
       this.hideTooltip();
-      this.$refs.diagnosticScanDialog?.showModal();
+      const dialog = this.$refs.diagnosticScanDialog;
+      if (!dialog || dialog.open) return;
+      this._diagnosticScanReturnFocus = document.activeElement;
+      dialog.showModal();
+      this.$nextTick(() => this.$refs.diagnosticScanHeading?.focus());
     },
-    closeDiagnosticScanDialog() {
+    closeDiagnosticScanDialog(restoreFocus = true) {
+      if (restoreFocus === false) this._diagnosticScanReturnFocus = null;
       this.$refs.diagnosticScanDialog?.close();
+    },
+    diagnosticScanDialogClosed() {
+      const target = this._diagnosticScanReturnFocus;
+      this._diagnosticScanReturnFocus = null;
+      if (target?.isConnected && typeof target.focus === 'function') target.focus({ preventScroll: true });
     },
     diagnosticScanDialogKeydown(event) {
       if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') event.preventDefault();
     },
     startDiagnosticScan() {
       if (!this.hasDiagnosticScanSelection || this.diagnosticScanRunning) return;
-      this.closeDiagnosticScanDialog();
       return this.scanAllDiagnostics();
+    },
+    stopDiagnosticScan() {
+      if (!this.diagnosticScanRunning) return;
+      this.diagnosticScanRunId++;
+      this.diagnosticScanRunning = false;
+      this.diagnosticScanStopped = true;
+      this.diagnosticScanPhase = '';
+    },
+    openDiagnosticResult(filepath) {
+      this.closeDiagnosticScanDialog(false);
+      this.editFile(filepath);
+    },
+    diagnosticScanIssueLocation(diagnostic) {
+      let location = `Entry ${Number(diagnostic.blockIndex || 0) + 1}`;
+      if (Number.isInteger(diagnostic.columnIndex)) location += ` · column ${diagnostic.columnIndex + 1}`;
+      return location;
     },
     async scanAllDiagnostics() {
       if (this.diagnosticScanRunning || !this.hasDiagnosticScanSelection) return;
@@ -1775,11 +1965,21 @@ const config = Vue.defineComponent({
       this.diagnosticScanTotal = descs.length;
       this.diagnosticScanErrorFileCount = 0;
       this.diagnosticScanWarningFileCount = 0;
+      this.diagnosticScanError = '';
+      this.diagnosticScanStopped = false;
+      this.diagnosticScanPhase = 'Preparing checks…';
+      this.diagnosticScanResultsPage = 1;
       this.filterDesc();
 
       try {
+        // Paint the modal before indexing or analysis; even a small scan has visible feedback.
+        await this.$nextTick?.();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
         const consistencyIndex = checks.consistency
           ? window.TranslationDiagnostics.createConsistencyIndex(descs, scanLang) : null;
+        this.diagnosticScanPhase = 'Checking files…';
+        await new Promise(resolve => setTimeout(resolve, 0));
         for (let i = 0; i < descs.length; i++) {
           if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
           const desc = descs[i];
@@ -1788,6 +1988,8 @@ const config = Vue.defineComponent({
           if (result.hasDiagnosticError) errorFileCount++;
           if (result.hasDiagnosticWarning) warningFileCount++;
           this.diagnosticScanProcessed = i + 1;
+          this.diagnosticScanErrorFileCount = errorFileCount;
+          this.diagnosticScanWarningFileCount = warningFileCount;
 
           if ((i + 1) % 25 === 0) {
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -1802,12 +2004,14 @@ const config = Vue.defineComponent({
         this.diagnosticScanWarningFileCount = warningFileCount;
         this.diagnosticScanCompleted = true;
         this.diagnosticScanRunning = false;
+        this.diagnosticScanPhase = '';
         this.filterDesc();
       } catch (error) {
         if (runId !== this.diagnosticScanRunId) return;
         console.error("Diagnostic scan failed:", error);
         this.diagnosticScanRunning = false;
-        alert("The diagnostic scan could not be completed.");
+        this.diagnosticScanPhase = '';
+        this.diagnosticScanError = `The scan could not be completed. ${error.message || error}`;
       }
     },
     refreshTranslationDiagnostics(target) {
@@ -3615,6 +3819,7 @@ const config = Vue.defineComponent({
     },
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
+      if (this.handleFileListKeydown(e)) return;
       if (this.consistencyResolver) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -3629,6 +3834,17 @@ const config = Vue.defineComponent({
       if (this.importDialogVisible && e.key === "Escape") {
         e.preventDefault();
         this.closeImportDialog();
+        return;
+      }
+
+      if (this.settingsDialogVisible) {
+        // Cloud and settings-import overlays keep their own keyboard handling.
+        const overlay = e.target?.closest?.('.cloudResolverBackdrop');
+        if (overlay || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft) return;
+        if (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && e.code === 'KeyS')) {
+          e.preventDefault();
+          this.settingsSaveClose();
+        }
         return;
       }
 
@@ -4406,6 +4622,151 @@ const config = Vue.defineComponent({
         desc.needsReview = !!st?.needsReview;
       }
     },
+    selectAllFileFilters() {
+      this.selectedFileFilters = this.fileFilterOptions.map(option => option.key);
+    },
+    syncFileSelection() {
+      const rows = this.descsDisplay;
+      if (rows.some(row => row.filepath === this.selectedFilepath)) return;
+      const active = document.activeElement;
+      const listHadFocus = active === this.$refs.fileTableRegion
+        || (active?.matches?.('tr[data-filepath]') && this.$refs.fileTableRegion?.contains(active));
+      this.selectedFilepath = rows[0]?.filepath || '';
+      if (listHadFocus && !this.editorVisible) this.focusSelectedFileRow();
+    },
+    fileListNavigationBlocked() {
+      const region = this.$refs.fileTableRegion;
+      return !region || (region.getClientRects && !region.getClientRects().length)
+        || this.editorVisible || this.settingsDialogVisible || this.$refs.diagnosticScanDialog?.open
+        || this.importDialogVisible || this.consistencyResolver || this.cloudResolverVisible
+        || this.cloudHistoryVisible || this.duplicateLangImportWarning || this.showMultiInstanceGate
+        || this.settingsImportDraft || this.pendingSingleVersionMigration;
+    },
+    selectFileRow(filepath, focus = false) {
+      if (!this.descsDisplay.some(row => row.filepath === filepath)) return;
+      this.selectedFilepath = filepath;
+      if (focus) this.focusSelectedFileRow();
+    },
+    openFileRow(filepath) {
+      if (!this.descsDisplay.some(row => row.filepath === filepath)) return;
+      this.selectFileRow(filepath);
+      this.editFile(filepath, true);
+    },
+    focusSelectedFileRow(moveFocus = true) {
+      this.$nextTick(() => {
+        if (this.fileListNavigationBlocked()) return;
+        const region = this.$refs.fileTableRegion;
+        const row = Array.from(region?.querySelectorAll('tr[data-filepath]') || [])
+          .find(element => element.dataset.filepath === this.selectedFilepath);
+        if (!row) {
+          if (moveFocus) region?.focus({ preventScroll: true });
+          return;
+        }
+        if (moveFocus) row.focus({ preventScroll: true });
+        row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+        // Keep keyboard selection clear of both sticky navigation surfaces.
+        const bounds = row.getBoundingClientRect?.();
+        if (!bounds) return;
+        const top = (document.querySelector('.workspaceHeader')?.getBoundingClientRect().bottom || 0) + 8;
+        const bottom = (document.querySelector('.workspaceFooter')?.getBoundingClientRect().top || window.innerHeight) - 8;
+        const delta = bounds.top < top || bounds.height > bottom - top
+          ? bounds.top - top : bounds.bottom > bottom ? bounds.bottom - bottom : 0;
+        if (delta) window.scrollBy({ top: delta, behavior: 'instant' });
+      });
+    },
+    fileTableFocused() {
+      this.syncFileSelection();
+      if (this.selectedFilepath) this.focusSelectedFileRow();
+    },
+    isFileNavigationInput(target) {
+      return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)
+        || target?.isContentEditable
+        || !!target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="spinbutton"], [role="slider"]');
+    },
+    fileNavigationIndex(key, index, count) {
+      if (key === 'Home') return 0;
+      if (key === 'End') return count - 1;
+      const step = { ArrowUp: -1, ArrowDown: 1, PageUp: -10, PageDown: 10 }[key] || 0;
+      return Math.max(0, Math.min(count - 1, index + step));
+    },
+    handleFileListKeydown(event) {
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)
+        || event.defaultPrevented || this.isImeComposingEvent(event)
+        || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+        || this.fileListNavigationBlocked()) return false;
+      const target = event.target;
+      const region = this.$refs.fileTableRegion;
+      const isRow = target?.matches?.('tr[data-filepath]') || target?.closest?.('tr[data-filepath]');
+      if (target === region || (isRow && region.contains(target))) {
+        this.fileTableKeydown(event);
+        return event.defaultPrevented;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') return false;
+      const isSearchArrow = target === this.$refs.searchInput && ['ArrowUp', 'ArrowDown'].includes(event.key);
+      // Search may hand focus to the list; other editable and selection controls
+      // keep their native arrow behavior, even while the workspace is visible.
+      if ((!isSearchArrow && this.isFileNavigationInput(target))
+        || target?.closest?.('.fileFilters, [role="tablist"], [role="menu"], [role="listbox"]')) return false;
+      const rows = this.descsDisplay;
+      if (!rows.length) return false;
+      let index = Math.max(0, rows.findIndex(row => row.filepath === this.selectedFilepath));
+      if (isSearchArrow && event.key === 'ArrowDown') index = 0;
+      else if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+        index = this.fileNavigationIndex(event.key, index, rows.length);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.selectFileRow(rows[index].filepath, true);
+      return true;
+    },
+    fileTableKeydown(event) {
+      const region = this.$refs.fileTableRegion;
+      const target = event.target;
+      const row = target?.matches?.('tr[data-filepath]') ? target : target?.closest?.('tr[data-filepath]');
+      const isRow = row && region?.contains(target);
+      if (event.defaultPrevented || (target !== region && !isRow) || this.isImeComposingEvent(event)
+        || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+        || this.fileListNavigationBlocked() || this.isFileNavigationInput(target)) return;
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter'].includes(event.key)) return;
+      if (event.key === 'Enter' && target !== region && target !== row) return;
+      const rows = this.descsDisplay;
+      if (!rows.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      let index = rows.findIndex(row => row.filepath === this.selectedFilepath);
+      if (index < 0) index = 0;
+      if (event.key === 'Enter') {
+        this.selectFileRow(rows[index].filepath);
+        this.editFile(rows[index].filepath);
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        this.gotoPage(this.currentPage + (event.key === 'ArrowLeft' ? -1 : 1));
+        this.focusSelectedFileRow();
+        return;
+      }
+      index = this.fileNavigationIndex(event.key, index, rows.length);
+      this.selectFileRow(rows[index].filepath, true);
+    },
+    closeFileFilters() {
+      this.fileFiltersVisible = false;
+      this.$refs.fileFiltersButton?.focus();
+    },
+    resetFileSearch() {
+      this.searchText = '';
+      this.selectedFileFilters = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
+      this.currentPage = 1;
+      this.filterDesc();
+    },
+    fileSearchChanged() {
+      this.currentPage = 1;
+      this.filterDesc();
+    },
+    clearFileSearch() {
+      this.searchText = '';
+      this.fileSearchChanged();
+      this.$refs.searchInput?.focus();
+    },
     filterDesc() {
       this.filteredDescs = [];
       this.statistic.hasChanges = 0;
@@ -4418,20 +4779,21 @@ const config = Vue.defineComponent({
         }
         if (desc.isMissing) {
           this.statistic.isMissing++;
-        } else {
-          if (this.showOnlyMissing) continue;
         }
         if (desc.needsReview) {
           this.statistic.needsReview++;
         }
 
         const diagnosticResult = this.diagnosticScanResults?.[desc.filepath] || null;
-        if (this.filterSelect == "new" && !desc.isMissing && !desc.hasChanges && !desc.needsReview) continue;
-        if (this.filterSelect == "blank" && !desc.isMissing) continue;
-        if (this.filterSelect == "done" && !desc.hasChanges) continue;
-        if (this.filterSelect == "review" && !desc.needsReview) continue;
-        if (this.filterSelect == "diagnosticError" && !diagnosticResult?.hasDiagnosticError) continue;
-        if (this.filterSelect == "diagnosticWarning" && !diagnosticResult?.hasDiagnosticWarning) continue;
+        const statuses = {
+          missing: !!desc.isMissing,
+          saved: !!desc.hasChanges,
+          review: !!desc.needsReview,
+          unchanged: !desc.isMissing && !desc.hasChanges && !desc.needsReview,
+          diagnosticError: !!diagnosticResult?.hasDiagnosticError,
+          diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
+        };
+        if (!this.selectedFileFilters.some(key => statuses[key])) continue;
 
         if (
           this.searchText.trim() == "" ||
@@ -4471,15 +4833,28 @@ const config = Vue.defineComponent({
       this.currentSort = s;
     },
     gotoPage(n) {
-      if (n < 1) n = 1;
-      if (n > this.pageCount) n = this.pageCount;
-      this.currentPage = n;
+      const page = Number(n);
+      const next = Math.max(1, Math.min(this.pageCount, Number.isFinite(page) ? Math.trunc(page) : 1));
+      if (next === this.currentPage) return;
+      const previous = this.currentPage;
+      const active = document.activeElement;
+      const region = this.$refs.fileTableRegion;
+      const listHadFocus = !!region && (active === region || (active?.closest?.('tr[data-filepath]') && region.contains(active))
+        || (active?.matches?.('tr[data-filepath]') && region.contains(active)));
+      this.currentPage = next;
+      const rows = this.descsDisplay;
+      this.selectedFilepath = (next > previous ? rows[0] : rows[rows.length - 1])?.filepath || '';
+      this.focusSelectedFileRow(listHadFocus);
+    },
+    commitPageJump(event) {
+      this.gotoPage(event.target.value);
+      event.target.value = this.currentPage;
     },
     prevPage() {
-      if (this.currentPage > 1) this.currentPage--;
+      this.gotoPage(this.currentPage - 1);
     },
     nextPage() {
-      if ((this.currentPage * this.pageSize) < this.filteredDescs.length) this.currentPage++;
+      this.gotoPage(this.currentPage + 1);
     },
     elipsisRenderer(data) {
       return data.length > 20 ?
@@ -4489,13 +4864,15 @@ const config = Vue.defineComponent({
     getDescByFilepath(filepath) {
       return this.descs.find(o => o.filepath == filepath);
     },
-    editFile(filepath) {
+    editFile(filepath, returnToFileList = false) {
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
         alert('Unexpected Error! cannot find the file you want to edit!');
         return;
       }
+      if (!this.editorVisible) this._fileTableReturnFocus = returnToFileList || !!document.activeElement?.closest?.('.fileTableScroll');
+      this.selectFileRow(filepath);
 
       this.closeHlPopup();
       this.editorBlocks = [];
@@ -4755,6 +5132,7 @@ const config = Vue.defineComponent({
       this.editorVisible = false;
       this.updateScannedDescDiagnostics(desc);
       this.filterDesc();
+      this.restoreFileTableFocusAfterEditor();
       return true;
     },
     async refreshHistory() {
@@ -5015,6 +5393,16 @@ const config = Vue.defineComponent({
       this.saveSettings();
       this.closeHlPopup();
       this.editorVisible = false;
+      this.restoreFileTableFocusAfterEditor();
+    },
+    restoreFileTableFocusAfterEditor() {
+      if (!this._fileTableReturnFocus) return;
+      this.$nextTick(() => {
+        if (this.editorVisible) return;
+        this._fileTableReturnFocus = false;
+        this.syncFileSelection();
+        this.focusSelectedFileRow();
+      });
     },
     async saveSettings() {
       if (this._cloudApplying) return true;

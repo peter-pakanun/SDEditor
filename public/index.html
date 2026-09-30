@@ -9,6 +9,9 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/spoqa/spoqa-han-sans@master/css/SpoqaHanSansNeo.css">
   <link rel="stylesheet" href="spinner.css">
   <link rel="stylesheet" href="index.css">
+  <link rel="stylesheet" href="interface.css">
+  <link rel="stylesheet" href="settings-ui.css">
+  <link rel="stylesheet" href="diagnostics-ui.css">
   <title>SDEditor</title>
 </head>
 <body>
@@ -68,99 +71,109 @@
       </div>
     </div>
 
-    <div class="settingPage centerContainer" v-if="gameVersionSelected && (showSetting || needsInitialSettings)">
-      <div class="box">
-        <section class="cloudSettings" aria-label="Cloud backup">
-          <h3>Cloud backup</h3>
-          <p class="cloudHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
-          <p class="cloudHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
-          <p v-if="testMode">Cloud backup is disabled in test mode.</p>
-          <template v-else>
-            <button v-if="!cloudSignedIn" @click="cloudLogin" :disabled="cloudBusy">Backup using Google account</button>
-            <p v-if="cloudLoginUrl"><a :href="cloudLoginUrl">Continue sign-in in this tab</a></p>
-            <template v-if="cloudUser">
-              <p><strong>{{ cloudUser.name || cloudUser.email }}</strong><br>{{ cloudUser.email }}</p>
-              <p v-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
-              <p v-else class="cloudWarning">Not configured — awaiting admin language assignment</p>
-            </template>
-            <p class="cloudStatus" :class="{ cloudWarning: cloudError }" role="status">{{ cloudStatus }}</p>
-            <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose a language below to keep your existing dictionary under that language before cloud backup.</p>
-            <div class="cloudActions">
-              <button v-if="cloudSignedIn" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
-              <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
-              <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
-              <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve dictionary conflicts ({{ cloudConflicts.length }})</button>
-              <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
-              <button v-if="cloudRecoveryCount" @click="cloudDownloadRecovery">Download local recovery copies</button>
+    <div class="settingPage settingsBackdrop" v-if="settingsDialogVisible" @keydown.tab="settingsTrapFocus">
+      <section class="settingsDialog" ref="settingsDialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" :aria-describedby="needsInitialSettings ? 'settingsDescription' : undefined" tabindex="-1">
+        <header class="settingsHeader">
+          <div>
+            <p class="settingsEyebrow">WORKSPACE PREFERENCES</p>
+            <h2 id="settingsTitle">{{ needsInitialSettings ? 'Set up your editor' : 'Settings' }}</h2>
+            <p v-if="needsInitialSettings" id="settingsDescription">Choose your translation language to get started.</p>
+          </div>
+          <button class="settingsClose" @click="settingsSaveClose" :disabled="settingsSaving || (needsInitialSettings && !lang)" title="Save settings and close (Esc)">Close <kbd>Esc</kbd></button>
+        </header>
+        <nav class="settingsTabs" role="tablist" aria-label="Settings sections">
+          <button v-for="(tab, index) in settingsTabs" :key="tab.id" :id="'settings-tab-' + tab.id" role="tab" :aria-selected="settingsTab === tab.id" :aria-controls="'settings-panel-' + tab.id" :tabindex="settingsTab === tab.id ? 0 : -1" @click="setSettingsTab(tab.id)" @keydown="handleSettingsTabKeydown($event, index)">{{ tab.label }}</button>
+        </nav>
+        <div class="settingsBody">
+          <section id="settings-panel-general" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-general" v-show="settingsTab === 'general'" tabindex="0">
+            <h3>Language &amp; appearance</h3>
+            <p class="settingsHelp">These preferences apply across your workspaces.</p>
+            <div class="settingsField">
+              <label for="settingsLanguage">Translation language</label>
+              <select id="settingsLanguage" ref="settingsLanguage" v-model="lang">
+                <option disabled value="">Choose a language</option>
+                <option v-for="language in langs" :key="language" :value="language">{{ language }}</option>
+              </select>
+              <small>Your dictionary and translations follow the selected language.</small>
             </div>
-            <div v-if="cloudAdminVisible" class="cloudAdmin">
-              <h4>Language assignments</h4>
-              <p>Users appear here after their first Google sign-in. Clearing an assignment stops cloud access and keeps their local work.</p>
-              <div v-for="user in cloudAdminUsers" :key="user.id" class="cloudAdminRow">
-                <span>{{ user.name || user.email }}<small>{{ user.email }}{{ user.isAdmin ? ' · Admin' : '' }}</small></span>
-                <select :value="user.language || ''" :aria-label="'Language for ' + user.email" @change="cloudAssign(user, $event)" :disabled="cloudBusy">
-                  <option value="">Not configured</option><option v-for="language in langs" :value="language">{{ language }}</option>
-                </select>
+            <div class="settingsFieldGrid">
+              <div class="settingsField">
+                <label for="settingsTheme">Theme</label>
+                <select id="settingsTheme" v-model="theme"><option value="light">Light</option><option value="grey">Grey</option><option value="dark">Dark</option><option value="modern-dark">Modern Dark</option></select>
+              </div>
+              <div class="settingsField">
+                <label for="uiDensity">Interface density</label>
+                <select id="uiDensity" v-model="uiDensity"><option value="compact">Compact</option><option value="spacious">Spacious</option></select>
               </div>
             </div>
-          </template>
-          <p v-if="!cloudHistoryAvailable" class="cloudHelp">{{ cloudHistoryUnavailableReason }}</p>
-        </section>
-        <h3>Language to translate</h3>
-        <select v-model="lang" aria-label="Language to translate">
-          <option v-for="lang in langs">{{ lang }}</option>
-        </select>
-        <h3>Theme</h3>
-        <div class="inputField">
-          <select v-model="theme">
-            <option value="light">Light</option>
-            <option value="grey">Grey</option>
-            <option value="dark">Dark</option>
-          </select>
+            <label class="settingsToggle" for="hideDNT"><input type="checkbox" id="hideDNT" v-model="hideDNT"><span><strong>Hide DNT entries</strong><small>Hide descriptions marked as do not translate.</small></span></label>
+          </section>
+          <section id="settings-panel-editor" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-editor" v-show="settingsTab === 'editor'" tabindex="0">
+            <h3>Editor behavior</h3>
+            <label class="settingsToggle" for="hideSourceInPreviewPanel"><input type="checkbox" id="hideSourceInPreviewPanel" v-model="hideSourceInPreviewPanel"><span><strong>Hide source in preview panel</strong><small>Show only the translation in the game preview.</small></span></label>
+            <label class="settingsToggle" for="highlightDict"><input type="checkbox" id="highlightDict" v-model="highlightDict"><span><strong>Highlight Dictionary words</strong><small>Mark words matched by your Dictionary.</small></span></label>
+            <label class="settingsToggle" for="autoOpenNextFile"><input type="checkbox" id="autoOpenNextFile" v-model="autoOpenNextFile"><span><strong>Open the next file after saving</strong><small>Continue translating without returning to the file list.</small></span></label>
+            <h3 class="settingsSubheading">Keyboard shortcuts</h3>
+            <div class="settingsField">
+              <label for="autocompleteShortcut">Open autocomplete</label>
+              <select id="autocompleteShortcut" v-model="autocompleteShortcut"><option value="ctrl-space">Ctrl + Space</option><option value="ctrl-i">Ctrl + I</option><option value="disabled">Disabled</option></select>
+              <small>Typing [ also opens the autocomplete list.</small>
+            </div>
+            <label class="settingsToggle" for="shiftEnterSave"><input type="checkbox" id="shiftEnterSave" v-model="shiftEnterSave"><span><strong>Save with Shift + Enter</strong><small>Enable an additional shortcut while editing.</small></span></label>
+            <label class="settingsToggle" for="filterShortcutCtrlD"><input type="checkbox" id="filterShortcutCtrlD" v-model="filterShortcutCtrlD"><span><strong>Focus search with Ctrl + D</strong><small>Use Ctrl + D instead of the default Ctrl + F.</small></span></label>
+          </section>
+          <section id="settings-panel-cloud" class="settingsPanel cloudSettings" role="tabpanel" aria-labelledby="settings-tab-cloud" v-show="settingsTab === 'cloud'" tabindex="0">
+            <h3>Cloud backup</h3>
+            <p class="settingsHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
+            <p class="settingsHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
+            <p v-if="testMode" class="settingsNotice">Cloud backup is disabled in test mode.</p>
+            <template v-else>
+              <button v-if="!cloudSignedIn" class="settingsActionPrimary" @click="cloudLogin" :disabled="cloudBusy">Back up with Google</button>
+              <p v-if="cloudLoginUrl"><a :href="cloudLoginUrl">Continue sign-in in this tab</a></p>
+              <div v-if="cloudUser" class="settingsAccount">
+                <strong>{{ cloudUser.name || cloudUser.email }}</strong><span>{{ cloudUser.email }}</span>
+                <p v-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
+                <p v-else class="cloudWarning">Not configured — awaiting admin language assignment</p>
+              </div>
+              <p class="cloudStatus settingsNotice" :class="{ cloudWarning: cloudError }" role="status">{{ cloudStatus }}</p>
+              <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose your translation language in <button class="settingsTextButton" @click="setSettingsTab('general', true)">General</button> to keep your existing dictionary under that language before cloud backup.</p>
+              <div class="cloudActions">
+                <button v-if="cloudSignedIn" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
+                <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
+                <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
+                <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
+                <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
+                <button v-if="cloudRecoveryCount" @click="cloudDownloadRecovery">Download recovery copies</button>
+              </div>
+              <div v-if="cloudAdminVisible" class="cloudAdmin">
+                <h4>Language assignments</h4>
+                <p>Users appear here after their first Google sign-in. Clearing an assignment stops cloud access and keeps their local work.</p>
+                <div v-for="user in cloudAdminUsers" :key="user.id" class="cloudAdminRow">
+                  <span>{{ user.name || user.email }}<small>{{ user.email }}{{ user.isAdmin ? ' · Admin' : '' }}</small></span>
+                  <select :value="user.language || ''" :aria-label="'Language for ' + user.email" @change="cloudAssign(user, $event)" :disabled="cloudBusy"><option value="">Not configured</option><option v-for="language in langs" :key="language" :value="language">{{ language }}</option></select>
+                </div>
+              </div>
+            </template>
+            <p v-if="!cloudHistoryAvailable" class="settingsHelp">{{ cloudHistoryUnavailableReason }}</p>
+          </section>
+          <section id="settings-panel-data" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-data" v-show="settingsTab === 'data'" tabindex="0">
+            <h3>Settings backup</h3>
+            <p class="settingsHelp">Download your settings, regex rules, and current language Dictionary as a JSON file, or restore a saved copy.</p>
+            <div class="settingsActions"><button @click="exportSettingsClicked">Export settings</button><button @click="importSettingsClicked">Import settings</button></div>
+            <form ref="importSettingsFileForm" hidden><input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile" accept="application/json"></form>
+            <div class="settingsReset">
+              <h3>Reset translated workspace</h3>
+              <p>Start from scratch for {{ gameVersionLabel }}. This deletes the selected version's translated workspace and history.</p>
+              <button @click.stop.prevent="startFromScratch">Start from scratch</button>
+            </div>
+          </section>
         </div>
-        <h3>Other settings</h3>
-        <div class="inputField">
-          <label for="uiDensity">UI density</label>
-          <select id="uiDensity" v-model="uiDensity">
-            <option value="compact">Compact</option>
-            <option value="spacious">Spacious</option>
-          </select>
-        </div>
-        <div class="inputField">
-          <label for="autocompleteShortcut">Autocomplete popup shortcut</label>
-          <select id="autocompleteShortcut" v-model="autocompleteShortcut">
-            <option value="ctrl-space">Ctrl + Space (default; VS Code primary)</option>
-            <option value="ctrl-i">Ctrl + I (VS Code alternative)</option>
-            <option value="disabled">Disabled (use literal [ to open)</option>
-          </select>
-        </div>
-        <input type="checkbox" id="hideDNT" name="hideDNT" v-model="hideDNT">
-        <label for="hideDNT"> Hide DNT</label>
-        <br>
-        <input type="checkbox" id="hideSourceInPreviewPanel" name="hideSourceInPreviewPanel" v-model="hideSourceInPreviewPanel">
-        <label for="hideSourceInPreviewPanel"> Hide source in preview panel</label>
-        <br>
-        <input type="checkbox" id="highlightDict" name="highlightDict" v-model="highlightDict">
-        <label for="highlightDict"> Highlight words from Dictionary</label>
-        <br>
-        <input type="checkbox" id="shiftEnterSave" name="shiftEnterSave" v-model="shiftEnterSave">
-        <label for="shiftEnterSave"> Shift + Enter to Save</label>
-        <br>
-        <input type="checkbox" id="autoOpenNextFile" name="autoOpenNextFile" v-model="autoOpenNextFile">
-        <label for="autoOpenNextFile"> Auto open next file on save</label>
-        <br>
-        <input type="checkbox" id="filterShortcutCtrlD" name="filterShortcutCtrlD" v-model="filterShortcutCtrlD">
-        <label for="filterShortcutCtrlD"> Use Ctrl + D for filter shortcut</label>
-        <br>
-        <button @click="settingsSaveClose">💾</button>
-        <button @click="exportSettingsClicked" v-tooltip="'Export settings'" aria-label="Export settings">📤</button>
-        <button @click="importSettingsClicked" v-tooltip="'Import settings'" aria-label="Import settings">📥</button>
-        <button @click.stop.prevent="startFromScratch" v-tooltip="'Delete selected-version translated workspace and history'">Start from scratch</button>
-        <form ref="importSettingsFileForm">
-          <input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile"
-            accept="application/json" style="visibility: hidden; width: 0; padding: 0;">
-        </form>
-      </div>
+        <footer class="settingsFooter">
+          <p v-if="settingsMessage" class="settingsMessage" role="alert">{{ settingsMessage }}</p>
+          <p v-else-if="needsInitialSettings && !lang" class="settingsHelp">Select a language in General to continue.</p>
+          <button class="settingsActionPrimary" style="margin-left: auto;" @click="settingsSaveClose" :disabled="settingsSaving || !lang">{{ settingsSaving ? 'Saving…' : (needsInitialSettings ? 'Save and continue' : 'Save and close') }}</button>
+        </footer>
+      </section>
     </div>
 
     <!-- Multi-instance detection gate -->
@@ -255,7 +268,7 @@
           <button @click="showImportUpdateZipDialog" v-tooltip="'Import ZIP'">📦 Import StatDescriptions.zip</button>
           <p>* It is recommended to import the last version of StatDescriptions.zip first.</p>
         </div>
-        <button v-if="loadingProgress === 0" @click="showSetting = true" aria-label="Open settings and cloud backup">⚙️ Settings and cloud backup</button>
+        <button v-if="loadingProgress === 0" ref="settingsButton" @click="openSettings()" aria-label="Open settings and cloud backup">Settings and cloud backup</button>
         <div class="loadingText" v-if="loadingProgress == 0.001">
           <h1>Initializing...</h1>
           <h3>Please wait while we initialize the workspace. This can take a moment.</h3> 
@@ -273,41 +286,45 @@
     </div>
 
 
-    <div v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings">
-      <div class="topbar">
-        <div class="pagination">
-          <!-- <span class="versionBadge">{{ gameVersionLabel }}</span> -->
-          <button @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Ctrl + Click to do a full export'" aria-label="Export ZIP">💾</button>
-          <button @click="showSetting = true">⚙️</button>
-          <button @click="importZipClicked" v-tooltip="'Import ZIP'" aria-label="Import ZIP">📦</button>
-          <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver" :aria-label="'Resolve ' + cloudConflicts.length + ' dictionary conflicts'" v-tooltip="'Resolve shared dictionary conflicts'">⚡ {{ cloudConflicts.length }}</button>
-          <button class="diagnosticScanButton" :disabled="diagnosticScanRunning" @click="openDiagnosticScanDialog" v-tooltip="'Choose diagnostic types to scan in every loaded file for the selected language'">
-            {{ diagnosticScanRunning ? ('Scanning ' + diagnosticScanProcessed + '/' + diagnosticScanTotal) : 'Scan diagnostics' }}
-          </button>
-          <span v-if="diagnosticScanCompleted" class="diagnosticScanSummary">Error files: {{ diagnosticScanErrorFileCount }} | Warning files: {{ diagnosticScanWarningFileCount }}</span>
-          <input type="number" v-model.number="currentPage" min="1" v-bind:max="pageCount">
-          <button @click="prevPage">⯇</button>
-          <button v-for="n in pageButtons" @click="gotoPage(n)" v-bind:class="{ active: currentPage == n }">{{ n }}</button>
-          <button @click="nextPage">⯈</button>
+    <div class="workspace" v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" :inert="showSetting">
+      <header class="workspaceHeader">
+        <div class="workspaceBrand">
+          <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
+          <div><strong>SDEditor</strong><span>{{ gameVersionLabel }} <span aria-hidden="true">·</span> {{ lang }}</span></div>
         </div>
-        <div>
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Missing: ' + statistic.isMissing" v-tooltip="'File missing translation'">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Done: ' + statistic.hasChanges" v-tooltip="'Files with saved translations'">
-          <input style="width: 9em;" type="text" readonly v-bind:value="'Review: ' + statistic.needsReview" v-tooltip="'Source changed since last translation save'">
-          <span></span>
-          <input id="searchInp" ref="searchInput" type="text" placeholder="Search..." v-model="searchText" @input="filterDesc">
+        <section class="workspaceSearch" aria-label="Search and filters">
+          <div class="searchToolbar">
+            <div class="searchField">
+              <label class="srOnly" for="searchInp">Search files and translations</label>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+              <input id="searchInp" ref="searchInput" type="search" placeholder="Search filenames, English, or translations…" v-model="searchText" @input="fileSearchChanged" @keydown.esc.stop.prevent="clearFileSearch">
+              <button v-if="searchText" class="clearSearch" @click="clearFileSearch">Clear</button>
+              <kbd v-else>{{ filterShortcutCtrlD ? 'Ctrl D' : 'Ctrl F' }}</kbd>
+              <button ref="fileFiltersButton" class="filterToggle" :class="{ active: fileFiltersVisible }" @click="fileFiltersVisible = !fileFiltersVisible" :aria-expanded="fileFiltersVisible" aria-controls="fileFilterPanel" aria-label="Filters" title="Filters">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h2m6 0h8M4 17h8m6 0h2"></path><circle cx="9" cy="7" r="3"></circle><circle cx="15" cy="17" r="3"></circle></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+        <nav class="workspaceActions" aria-label="Workspace actions">
+          <button @click="importZipClicked" aria-label="Import ZIP">Import ZIP</button>
+          <button class="primaryAction" @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Export saved translations. Ctrl + click exports all files.'" aria-label="Export ZIP">Export ZIP</button>
+          <button ref="diagnosticScanButton" class="diagnosticScanButton" @click="openDiagnosticScanDialog">Scan diagnostics</button>
+          <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
+          <button ref="settingsButton" @click="openSettings()">Settings</button>
+        </nav>
+        <fieldset id="fileFilterPanel" class="fileFilters" aria-label="File status filters" v-show="fileFiltersVisible" @keydown.esc.stop.prevent="closeFileFilters">
+          <div class="fileFilterChoices">
+            <label v-for="option in fileFilterOptions" :key="option.key" class="filterChip" :class="[{ selected: selectedFileFilters.includes(option.key) }, option.tone]">
+              <input type="checkbox" v-model="selectedFileFilters" :value="option.key">
+              <span>{{ option.label }}</span>
+            </label>
+            <div class="filterSelectionActions"><button @click="selectAllFileFilters" :disabled="allFileFiltersSelected">Select all</button><button @click="selectedFileFilters = []" :disabled="selectedFileFilters.length === 0">Clear filters</button></div>
+          </div>
+        </fieldset>
+      </header>
 
-          <select v-model="filterSelect">
-            <option value="new">New statfiles</option>
-            <option value="blank">Blank only</option>
-            <option value="done">Done only</option>
-            <option value="review">Need review only</option>
-            <option value="diagnosticError">Diagnostic errors only</option>
-            <option value="diagnosticWarning">Diagnostic warnings only</option>
-            <option value="all">Show All</option>
-          </select>
-        </div>
-      </div>
+      <main class="workspaceContent">
 
       <div v-if="importDialogVisible" class="importDialogOverlay" @click.self="closeImportDialog">
         <div class="box importDialogBox">
@@ -326,38 +343,61 @@
         </div>
       </div>
 
-      <table id="table" class="display compact cell-border">
+      <p id="fileTableKeyboardHelp" class="srOnly">Arrow Up and Down return to the current selection or move between files while the list is focused. Arrow Down from search selects the first file. Home and End select the first and last files on the current page. Page Up and Page Down move ten files. Arrow Left and Right change page; the next page selects its first file and the previous page selects its last file. Click a row or press Enter to open it.</p>
+      <div ref="fileTableRegion" class="fileTableScroll" role="region" aria-label="Stat files" aria-describedby="fileTableKeyboardHelp" :tabindex="selectedFilepath ? -1 : 0" @focus.self="fileTableFocused" @keydown="fileTableKeydown">
+      <table id="table" class="display compact cell-border" role="grid" aria-label="Stat files" aria-multiselectable="false">
+        <caption class="srOnly">Stat descriptions in {{ lang }}. Open a filename to edit its translations.</caption>
         <thead>
           <tr>
-            <th style="width: 10%;" @click="sort('filedir')">Directory
-              {{ this.currentSort == "filedir" ? this.currentSortIcon : "" }}</th>
-            <th style="width: 15%;" @click="sort('filename')">
-              Filename{{ this.currentSort == "filename" ? this.currentSortIcon : "" }}</th>
-            <th style="width: auto;" @click="sort('english')">English{{ this.currentSort == "english" ? this.currentSortIcon : "" }}</th>
-            <th style="width: auto;" @click="sort('translation')">Translation{{ this.currentSort == "translation" ? this.currentSortIcon : "" }}
-            </th>
+            <th scope="col" style="width: 10%;" :aria-sort="currentSort === 'filedir' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('filedir')">Directory <span aria-hidden="true">{{ currentSort === 'filedir' ? currentSortIcon : '' }}</span></button></th>
+            <th scope="col" style="width: 15%;" :aria-sort="currentSort === 'filename' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('filename')">Filename <span aria-hidden="true">{{ currentSort === 'filename' ? currentSortIcon : '' }}</span></button></th>
+            <th scope="col" :aria-sort="currentSort === 'english' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('english')">English <span aria-hidden="true">{{ currentSort === 'english' ? currentSortIcon : '' }}</span></button></th>
+            <th scope="col" :aria-sort="currentSort === 'translation' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('translation')">{{ lang }} translation <span aria-hidden="true">{{ currentSort === 'translation' ? currentSortIcon : '' }}</span></button></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" v-bind:class="{ isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @click="editFile(desc.filepath)">
+          <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" v-bind:class="{ selectedFileRow: selectedFilepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath)" @click="openFileRow(desc.filepath)">
             <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
-            <td v-tooltip="desc.filename">{{ (desc.needsReview ? '⚠ ' : '') + desc.filename }}</td>
-            <td><span v-html="desc.english"></span></td>
-            <td class="translationTr"><span v-html="desc.translation"></span></td>
+            <td><button class="fileOpenButton" tabindex="-1" @click.stop="openFileRow(desc.filepath)" :aria-label="'Edit ' + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.needsReview" class="fileReviewLabel">Needs review</span></td>
+            <td data-label="English"><span v-html="desc.english"></span></td>
+            <td class="translationTr" :data-label="lang + ' translation'"><span v-html="desc.translation"></span></td>
           </tr>
         </tbody>
       </table>
+      </div>
+      <div v-if="filteredDescs.length === 0" class="workspaceEmpty" role="status">
+        <h2>{{ selectedFileFilters.length ? 'No files match your search' : 'Choose a status to show files' }}</h2>
+        <p>{{ selectedFileFilters.length ? 'Try another search or open Filters to select more statuses.' : 'Open Filters and tick one or more statuses to see matching stat files.' }}</p>
+        <button @click="resetFileSearch">Reset search and filters</button>
+      </div>
+      </main>
+
+      <footer class="workspaceFooter">
+        <div class="workspaceStatus" aria-label="Workspace status counts">
+          <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
+          <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
+          <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
+          <span class="statusPill review" title="Files whose English source changed since the last translation save"><span class="statusDot" aria-hidden="true"></span>Review <strong>{{ statistic.needsReview }}</strong></span>
+        </div>
+        <nav class="workspacePagination" aria-label="File pagination">
+          <span class="fileRange" role="status">{{ fileRangeLabel }}</span>
+          <button @click="prevPage" :disabled="currentPage <= 1" aria-label="Previous page">← <span>Previous</span></button>
+          <div class="pageNumbers"><button v-for="n in pageButtons" :key="n" @click="gotoPage(n)" :class="{ active: currentPage === n }" :aria-label="'Page ' + n" :aria-current="currentPage === n ? 'page' : null">{{ n }}</button></div>
+          <label class="pageJump">Page <input type="number" :value="currentPage" @change="commitPageJump" @blur="commitPageJump" @keydown.enter.prevent="commitPageJump" min="1" :max="pageCount" aria-label="Go to page"> <span>/ {{ pageCount }}</span></label>
+          <button @click="nextPage" :disabled="currentPage >= pageCount" aria-label="Next page"><span>Next</span> →</button>
+        </nav>
+      </footer>
     </div>
 
     <div class="editor" v-if="editorVisible" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div class="gamePreviewStrip">
           <div class="gamePreviewToolbar twoSided">
-            <!-- <span class="gamePreviewLabel">👾 In-game preview</span> -->
+            <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" v-tooltip="'Small frame'" aria-label="Small frame" @click="setGamePreviewFrame('s')">▢</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" v-tooltip="'Medium frame'" aria-label="Medium frame" @click="setGamePreviewFrame('m')">▣</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" v-tooltip="'Large frame'" aria-label="Large frame" @click="setGamePreviewFrame('l')">▦</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" :aria-pressed="gamePreviewFrame === 's'" title="Use a small preview frame" @click="setGamePreviewFrame('s')">Small</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" :aria-pressed="gamePreviewFrame === 'm'" title="Use a medium preview frame" @click="setGamePreviewFrame('m')">Medium</button>
+              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" :aria-pressed="gamePreviewFrame === 'l'" title="Use a large preview frame" @click="setGamePreviewFrame('l')">Large</button>
             </div>
           </div>
           <div class="gamePreviewMainRow">
@@ -412,12 +452,12 @@
             </div>
           </div>
         </div>
-        <div class="twoSided">
+        <div class="twoSided editorActions">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
           <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" v-tooltip="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
           <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" v-tooltip="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
-          <button @click="editorSave" :disabled="editorTranslationReadOnly" v-tooltip="'Save (Ctrl+S)'" aria-label="Save">💾</button>
-          <button @click="editorExit" v-tooltip="'Exit (ESC)'" aria-label="Exit">❌</button>
+          <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly" title="Save this translation and close the file">Save &amp; close</button>
+          <button @click="editorExit" title="Close the file (Esc); unsaved changes require confirmation">Close</button>
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
@@ -471,7 +511,7 @@
             </div>
             <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" v-tooltip="'Table content'">@</div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" v-tooltip="'Multiline content'">↵</div>
-            <button @click="useRegex(editorBlock)" tabindex="-1">📑</button>
+            <button class="applyRegexButton" @click="useRegex(editorBlock)" tabindex="-1" title="Fill this translation using your Regex rules and Dictionary">Apply regex</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
@@ -511,11 +551,11 @@
             <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
             <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
           </div>
-          <button v-if="sideTab !== 'history'" @click="sideAddClicked()">➕</button>
+          <button v-if="sideTab !== 'history'" @click="sideAddClicked()" :title="sideTab === 'regex' ? 'Add a Regex rule' : 'Add a Dictionary entry'">{{ sideTab === 'regex' ? 'Add rule' : 'Add entry' }}</button>
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <input class="sideFilter" type="text" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Filter dictionary..." @keydown.esc="dictionaryFilter = ''">
+          <input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''">
           <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided dictEntryBlock">
               <div>
@@ -526,38 +566,38 @@
                 <div class="dictAltHeader">
                   <span>Alternates</span>
                   <button class="dictHistoryBtn" @click="cloudOpenHistory(word._id)" :disabled="!cloudEntryHistoryAvailable" :aria-label="'View shared history for ' + (word.find || 'this dictionary entry')" :title="cloudEntryHistoryHint"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
-                  <button @click="addDictionaryAltRow(word)">➕</button>
+                  <button @click="addDictionaryAltRow(word)" title="Add an alternate translation" :aria-label="'Add an alternate for ' + (word.find || 'this Dictionary entry')">➕</button>
                 </div>
                 <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
                   <input type="text" v-model="alt.find" placeholder="Find" lang="en" :class="{ dictExactMatchFind: isDictionaryAltFindMatched(word, alt) }">
                   <input type="text" v-model="alt.replace" placeholder="Replace" :lang="translationEditorBcp47" @keydown.enter="onDictionaryReplaceEnter">
-                  <button @click="removeDictionaryAltRow(word, alt)">🗑️</button>
+                  <button @click="removeDictionaryAltRow(word, alt)" title="Remove this alternate" :aria-label="'Remove alternate ' + (alt.find || alt.replace || 'translation')">🗑️</button>
                 </div>
                 <details class="dictTlnote">
                   <summary>TL note</summary>
                   <textarea rows="3" v-model="word.tlnote" placeholder="Translator note (shared)" :lang="translationEditorBcp47"></textarea>
                 </details>
               </div>
-              <button class="dictDeleteBtn" @click="removeVocab(word)">🗑️</button>
+              <button class="dictDeleteBtn" @click="removeVocab(word)" title="Delete this Dictionary entry" :aria-label="'Delete Dictionary entry ' + (word.find || 'without a Find value')">🗑️</button>
             </div>
           </div>
         </div>
 
         <div v-if="sideTab === 'regex'">
-          <input class="sideFilter" type="text" v-model="regexFilter" ref="regexFilterInput" placeholder="Filter regex..." @keydown.esc="regexFilter = ''">
+          <input class="sideFilter" type="search" v-model="regexFilter" ref="regexFilterInput" placeholder="Search regex rules…" aria-label="Search Regex rules" @keydown.esc="regexFilter = ''">
           <div class="editBlock" v-for="regex in filteredRegexes">
             <div class="twoSided">
               <div>
                 <div class="inputField">
                   <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off" placeholder="Find (regex)">
-                  <button @click="moveRegexUp(regex)">🡩</button>
+                  <button @click="moveRegexUp(regex)" title="Run this rule earlier" aria-label="Move Regex rule up">🡩</button>
                 </div>
                 <div class="inputField">
                   <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off" placeholder="Replace">
-                  <button @click="moveRegexDown(regex)">🡫</button>
+                  <button @click="moveRegexDown(regex)" title="Run this rule later" aria-label="Move Regex rule down">🡫</button>
                 </div>
               </div>
-              <button @click="removeRegex(regex)">🗑️</button>
+              <button @click="removeRegex(regex)" title="Delete this Regex rule" :aria-label="'Delete Regex rule ' + (regex.find || 'without a pattern')">🗑️</button>
             </div>
           </div>
         </div>
@@ -578,7 +618,7 @@
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
                   <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
-                  <button v-if="historyMode !== 'source'" class="historyRestore" v-tooltip="'Restore'" aria-label="Restore" @click="restoreHistoryRevision(rev)">↩</button>
+                  <button v-if="historyMode !== 'source'" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)">↩</button>
                 </div>
                 <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
               </div>
@@ -611,22 +651,89 @@
       </div>
     </div>
 
-    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @keydown.stop="diagnosticScanDialogKeydown">
-      <form @submit.prevent="startDiagnosticScan">
-        <h2 id="diagnosticScanDialogTitle">Scan diagnostics</h2>
-        <p id="diagnosticScanDialogDescription">Choose checks for every loaded file in {{ lang }}, including files hidden by filters.</p>
-        <fieldset class="diagnosticScanOptions">
-          <legend>Diagnostic types</legend>
-          <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
-            <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
-            <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
-          </label>
-        </fieldset>
-        <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
-        <div class="diagnosticScanActions">
-          <button type="button" @click="closeDiagnosticScanDialog">Cancel</button>
-          <button type="submit" :disabled="!hasDiagnosticScanSelection || diagnosticScanRunning">Start scan</button>
+    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @close="diagnosticScanDialogClosed" @keydown.stop="diagnosticScanDialogKeydown">
+      <form class="diagnosticScanForm" @submit.prevent="startDiagnosticScan">
+        <header class="diagnosticScanHeading">
+          <div>
+            <h2 id="diagnosticScanDialogTitle" ref="diagnosticScanHeading" tabindex="-1">Scan diagnostics</h2>
+            <p id="diagnosticScanDialogDescription">Check every loaded {{ lang }} file, including files hidden by filters.</p>
+          </div>
+          <button type="button" class="diagnosticScanClose" @click="closeDiagnosticScanDialog" aria-label="Close diagnostic scan (Esc)">Close</button>
+        </header>
+        <div class="diagnosticScanBody">
+          <section v-if="diagnosticScanRunning || diagnosticScanCompleted || diagnosticScanStopped || diagnosticScanError" class="diagnosticScanStatus" :class="{ diagnosticScanFailed: diagnosticScanError }" aria-label="Scan status">
+            <p class="diagnosticScanStatusText" role="status" aria-live="polite" aria-atomic="true">
+              <template v-if="diagnosticScanRunning">{{ diagnosticScanPhase }} {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }} · {{ diagnosticScanPercent }}%</template>
+              <template v-else-if="diagnosticScanCompleted">Scan complete · {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }} checked</template>
+              <template v-else-if="diagnosticScanStopped">Scan stopped after {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }}. Start again to get complete results.</template>
+              <template v-else>{{ diagnosticScanError }}</template>
+            </p>
+            <progress v-if="diagnosticScanRunning" :value="diagnosticScanProcessed" :max="Math.max(1, diagnosticScanTotal)" aria-label="Files scanned"></progress>
+            <div v-if="diagnosticScanRunning || diagnosticScanCompleted" class="diagnosticScanCounts">
+              <span class="diagnosticScanCount diagnosticScanCountError"><strong>{{ diagnosticScanErrorFileCount }}</strong> {{ diagnosticScanErrorFileCount === 1 ? 'file' : 'files' }} with errors<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.errors }} {{ diagnosticScanIssueCounts.errors === 1 ? 'issue' : 'issues' }}</span></span>
+              <span class="diagnosticScanCount diagnosticScanCountWarning"><strong>{{ diagnosticScanWarningFileCount }}</strong> {{ diagnosticScanWarningFileCount === 1 ? 'file' : 'files' }} with warnings<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.warnings }} {{ diagnosticScanIssueCounts.warnings === 1 ? 'issue' : 'issues' }}</span></span>
+              <span v-if="diagnosticScanCompleted" class="diagnosticScanCount"><strong>{{ diagnosticScanTotal - diagnosticScanResultFiles.length }}</strong> {{ diagnosticScanTotal - diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }} without findings</span>
+            </div>
+            <p v-if="diagnosticScanRunning" class="diagnosticScanBackgroundHint">You can close this window while the scan runs and reopen it from Scan diagnostics.</p>
+          </section>
+          <section v-if="diagnosticScanCompleted" class="diagnosticScanResults" aria-label="Scan results">
+            <div class="diagnosticScanResultsHeading">
+              <h3>{{ diagnosticScanResultFiles.length ? 'Files to review' : 'No issues found' }}</h3>
+              <span v-if="diagnosticScanResultFiles.length">{{ diagnosticScanResultFiles.length }} {{ diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }}</span>
+            </div>
+            <nav v-if="diagnosticScanResultPageCount > 1" class="diagnosticScanResultPagination" aria-label="Scan result pages">
+              <button type="button" :disabled="diagnosticScanResultsPage <= 1" @click="diagnosticScanResultsPage--">Previous</button>
+              <span>Page {{ Math.min(diagnosticScanResultsPage, diagnosticScanResultPageCount) }} of {{ diagnosticScanResultPageCount }}</span>
+              <button type="button" :disabled="diagnosticScanResultsPage >= diagnosticScanResultPageCount" @click="diagnosticScanResultsPage++">Next</button>
+            </nav>
+            <p v-if="!diagnosticScanResultFiles.length" class="diagnosticScanEmpty">The selected checks found no errors or warnings.</p>
+            <article v-for="entry in diagnosticScanVisibleResults" :key="entry.filepath" class="diagnosticScanResultCard">
+              <div class="diagnosticScanResultHeading">
+                <div>
+                  <h4><bdi>{{ entry.filepath }}</bdi></h4>
+                  <div class="diagnosticScanResultCounts">
+                    <span v-if="entry.result.errorCount" class="diagnosticScanResultError">{{ entry.result.errorCount }} {{ entry.result.errorCount === 1 ? 'error' : 'errors' }}</span>
+                    <span v-if="entry.result.warningCount" class="diagnosticScanResultWarning">{{ entry.result.warningCount }} {{ entry.result.warningCount === 1 ? 'warning' : 'warnings' }}</span>
+                  </div>
+                </div>
+                <button type="button" @click="openDiagnosticResult(entry.filepath)" :aria-label="'Open ' + entry.filepath">Open file</button>
+              </div>
+              <ul class="diagnosticScanIssues">
+                <li v-for="(issue, index) in entry.result.diagnostics.slice(0, 3)" :key="index">
+                  <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
+                  <span>{{ issue.message || issue.code }}</span>
+                </li>
+              </ul>
+              <details v-if="entry.result.diagnostics.length > 3" class="diagnosticScanMoreIssues">
+                <summary>{{ entry.result.diagnostics.length - 3 }} more {{ entry.result.diagnostics.length - 3 === 1 ? 'issue' : 'issues' }}</summary>
+                <ul class="diagnosticScanIssues">
+                  <li v-for="(issue, index) in entry.result.diagnostics.slice(3)" :key="index">
+                    <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
+                    <span>{{ issue.message || issue.code }}</span>
+                  </li>
+                </ul>
+              </details>
+              <p v-if="entry.result.diagnosticsTruncated" class="diagnosticScanTruncated">{{ entry.result.diagnosticsTruncated }} more {{ entry.result.diagnosticsTruncated === 1 ? 'finding' : 'findings' }}. Open the file to review all entries.</p>
+            </article>
+          </section>
+          <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
+            <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>
+            <fieldset class="diagnosticScanOptions" :disabled="diagnosticScanRunning">
+              <legend class="visuallyHidden">Diagnostic types</legend>
+              <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
+                <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
+                <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
+              </label>
+            </fieldset>
+            <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
+          </details>
         </div>
+        <footer class="diagnosticScanActions">
+          <span class="diagnosticScanEscapeHint">Esc to close</span>
+          <button type="button" @click="closeDiagnosticScanDialog">Close</button>
+          <button v-if="diagnosticScanRunning" type="button" class="diagnosticScanStop" @click="stopDiagnosticScan">Stop scan</button>
+          <button v-else type="submit" class="diagnosticScanStart" :disabled="!hasDiagnosticScanSelection">{{ diagnosticScanCompleted ? 'Scan again' : 'Start scan' }}</button>
+        </footer>
       </form>
     </dialog>
 
