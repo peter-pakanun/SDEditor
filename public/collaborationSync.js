@@ -3,7 +3,7 @@
   const api = factory(typeof module === 'object' && module.exports ? require('./collaborationProtocol.js') : root.CollaborationProtocol);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.CollaborationSync = api;
-})(typeof window === 'object' ? window : this, function (P) {
+})(globalThis, function (P) {
   'use strict';
   const { copy, fileState, contentEqual, mergeFile, scopeKey } = P;
   const ROOT = '/v1/collaboration';
@@ -17,6 +17,7 @@
       this.getContext = options.context || (() => undefined);
       this.onChange = options.onChange || (() => {});
       this.onRemote = options.onRemote || (() => {});
+      this.onCommitted = options.onCommitted || (() => {});
       this.onStatus = options.onStatus || (() => {});
       this.onEditingConflict = options.onEditingConflict || (() => {});
       this.projectWorkspace = options.projectWorkspace || P.projectWorkspace;
@@ -29,6 +30,8 @@
       this.claims = new Map(); this.running = null; this.socket = null;
       this.timer = null; this.heartbeat = null; this.backoff = 1000;
       this.destroyed = false;
+      this.deferredSync = !!options.deferredSync;
+      this.networkQueue = Promise.resolve();
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
@@ -37,7 +40,8 @@
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
         connected: this.connected, disconnected: this.disconnected, pending: room?.outbox?.length || 0,
         conflicts: copy(room?.conflicts || []), files: Object.values(copy(room?.local || {})),
-        peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
+        peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0,
+        localOnly: !!this.localOnly, generation: this.generation, revision: this.storageSnapshot?.revision };
     }
     notify() { this.onChange(this.snapshot()); }
     status(message, error = false) { this.onStatus({ message, error }); }
@@ -45,14 +49,18 @@
     async update(fn, options = {}, epoch = this.epoch) {
       const key = this.key;
       if (!this.current(epoch)) throw staleError();
-      const state = await this.store.updateCollaborationState(state => {
+      const result = await this.store.updateCollaborationState((state, snapshot) => {
         if (!this.current(epoch) || this.key !== key) throw staleError();
         state ||= { version: 1, rooms: {} };
-        fn(state, state.rooms[key]);
+        if (state.rooms[key]?.recoveryOnly && !options.reconnect) throw Object.assign(staleError(), { code: 'SOURCE_GENERATION_CHANGED' });
+        fn(state, state.rooms[key], snapshot);
         return state;
-      }, { version: this.room()?.identity.game, ...options });
+      }, { version: this.room()?.identity.game, generation: this.generation, ...options, returnSnapshot: true });
       if (!this.current(epoch)) throw staleError();
+      const state = result?.state || result;
+      if (result?.state) this.storageSnapshot = { workspace: result.workspace, generation: result.generation, revision: result.revision };
       this.state = state; this.notify();
+      if (result?.state) this.onCommitted(copy(this.storageSnapshot));
       return this.room();
     }
     async api(path, options, epoch = this.epoch) {
@@ -61,10 +69,11 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, language, source, files, workspace }) {
+    async connect({ accountId, game, language, source, files, workspace, localOnly = false, generation }) {
       this.disconnect(); this.destroyed = false;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
+      this.localOnly = !!localOnly; this.generation = generation;
       const manifest = P.manifest(source);
       const sourceHash = await P.sourceHash(manifest);
       if (epoch !== this.epoch) throw staleError();
@@ -79,10 +88,19 @@
       for (const original of manifest.files) if (!incoming[original.filepath]) {
         incoming[original.filepath] = fileState({ filepath: original.filepath, translations: [] }, original.english.length);
       }
-      await this.update((state, room) => {
+      await this.update((state, room, snapshot) => {
+        if (room && (room.recoveryOnly || (room.generation !== undefined && generation !== undefined && room.generation !== generation))) {
+          state.rooms[this.key + ':recovery:' + String(room.generation ?? 'legacy')] = { ...room, recoveryOnly: true };
+          delete state.rooms[this.key]; room = null;
+        }
+        if (snapshot?.workspace) {
+          for (const desc of snapshot.workspace.descs || []) if (incoming[desc.filepath]) incoming[desc.filepath] = this.workspaceFile(desc, snapshot.workspace, identity.language, incoming[desc.filepath]);
+        }
         if (!room) state.rooms[this.key] = { identity, manifest, roomId: null, sequence: 0,
-          shared: {}, local: incoming, outbox: [], conflicts: [], recovery: [], initialized: false };
+          shared: localOnly ? copy(incoming) : {}, local: incoming, outbox: [], conflicts: [], recovery: [], initialized: !!localOnly, localOnly: !!localOnly, generation };
         else {
+          if (room.localOnly && !localOnly) room.initialized = false;
+          room.localOnly = !!localOnly; room.generation = generation;
           const differences = Object.values(incoming).filter(file => room.local[file.filepath] && !contentEqual(file, room.local[file.filepath]));
           if (differences.length) {
             room.recovery.push({ at: Date.now(), reason: 'Local workspace changed while disconnected', files: copy(Object.values(incoming)) });
@@ -96,15 +114,19 @@
             if (room.initialized) this.rebuild(room);
           }
         }
-      }, { version: game, projectWorkspace: stored => {
+      }, { version: game, reconnect: true, projectWorkspace: stored => {
         const current = copy(stored || workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash;
         current.collaborationAccountId = identity.accountId;
         return current;
       } }, epoch);
+      if (this.localOnly) return this.snapshot();
+      if (this.deferredSync) {
+        this.retry().catch(error => this.handleError(error));
+        return this.snapshot();
+      }
       try {
-        await this.initializeRoom(epoch);
         await this.retry();
       } catch (error) {
         if (error.stale) throw error;
@@ -112,6 +134,19 @@
         if (!transient(error)) throw error;
       }
       return this.snapshot();
+    }
+    workspaceFile(desc, workspace, language, fallback) {
+      return fileState({ ...fallback, translations: desc.translations?.[language] || [],
+        needsReview: workspace.status?.[desc.filepath]?.needsReview ?? desc.needsReview,
+        trackedForExport: desc.hasChanges }, this.sourceFiles.get(desc.filepath)?.english.length);
+    }
+    committedRevisions(revisions, files, identity) {
+      const committed = byPath(files);
+      return revisions.map(revision => {
+        const file = committed[revision.filepath];
+        return { ...copy(revision), sourceHash: identity.sourceHash, collaborationAccountId: identity.accountId,
+          ...(file && !/^Before\b/.test(revision.note || '') ? { translations: copy(file.translations), isMissing: file.translations.some(text => !text.trim()) } : {}) };
+      });
     }
     async initializeRoom(epoch) {
       const room = this.room();
@@ -176,11 +211,12 @@
     rebuild(room) {
       room.local = copy(room.shared);
       for (const operation of room.outbox) for (const entry of operation.files) {
+        if (operation.localConflictPaths?.includes(entry.yours.filepath)) continue;
         const shared = room.local[entry.yours.filepath];
         room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
       }
       for (const conflict of room.conflicts) {
-        const shared = room.shared[conflict.filepath];
+        const shared = conflict.local ? room.local[conflict.filepath] : room.shared[conflict.filepath];
         if (!shared) continue;
         const merged = mergeFile(conflict.base, conflict.yours, shared);
         conflict.shared = copy(shared); conflict.indexes = merged.indexes; conflict.metadata = merged.metadata;
@@ -215,11 +251,11 @@
       }, { projectWorkspace: this.projection(files, epoch) }, epoch);
       this.onRemote(copy(Object.values(this.room().local)));
     }
-    async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore }) {
+    async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, generation, requestId }) {
       const epoch = this.epoch; const room = this.room();
       if (!room) throw new Error('Collaboration workspace is not connected.');
       if (!Array.isArray(files) || !files.length) throw new Error('A save must contain at least one file.');
-      const mutationId = this.uuid();
+      const mutationId = requestId || this.uuid();
       const normalized = files.map(file => {
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
@@ -227,27 +263,69 @@
       });
       if (new Set(normalized.map(file => file.filepath)).size !== normalized.length) throw new Error('A save contains duplicate files.');
       if (restore && (normalized.length !== 1 || !restore.eventId || !['before', 'after'].includes(restore.version))) throw new Error('Invalid shared history restore.');
-      await this.update((state, current) => {
-        current.outbox.push({ id: mutationId, origin, ...(restore ? { restore: { ...copy(restore), translations: copy(normalized[0].translations) } } : {}), status: 'pending', files: normalized.map(yours => ({
-          base: copy(Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath] || null), yours })) });
-        for (const yours of normalized) current.local[yours.filepath] = copy(yours);
-      }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
-        collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, copy(workspace)) }, epoch);
-      await this.retry();
+      // Keep the array identity: the storage transaction opens the history store
+      // before invoking the updater, then writes the accepted records afterwards.
+      const committedRevisions = copy(revisions);
+      await this.update((state, current, snapshot) => {
+        const operation = { id: mutationId, origin, ...(restore ? { restore: { ...copy(restore), translations: copy(normalized[0].translations) } } : {}), status: 'pending', files: [], localConflictPaths: [] };
+        for (const yours of normalized) {
+          let latest = current.local[yours.filepath];
+          const desc = snapshot?.workspace?.descs?.find(desc => desc.filepath === yours.filepath);
+          if (desc) latest = this.workspaceFile(desc, snapshot.workspace, room.identity.language, latest);
+          const base = copy(Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : latest || null);
+          const merged = mergeFile(base, yours, latest);
+          if (origin === 'save' && !P.equal(merged.file.translations, yours.translations)) operation.historyOrigin = 'merge';
+          if (['confirm', 'confirm_unchanged', 'restore'].includes(origin) && base && !P.equal(base.translations, latest.translations)) {
+            merged.conflict = true;
+            merged.indexes = latest.translations.map((text, index) => text !== base.translations[index] ? index : -1).filter(index => index >= 0);
+          }
+          operation.files.push({ base: copy(latest), yours: copy(merged.file) });
+          if (merged.conflict) {
+            operation.status = 'conflict'; operation.localConflictPaths.push(yours.filepath);
+            current.conflicts.push({ id: mutationId + ':' + yours.filepath, mutationId, filepath: yours.filepath, kind: 'edit', local: true,
+              base, yours: copy(yours), shared: copy(latest), indexes: merged.indexes, metadata: merged.metadata });
+          }
+        }
+        if (operation.status === 'conflict') {
+          // Imports/resolvers are one save. Hold every member of the batch until
+          // its comparisons are resolved, including otherwise independent files.
+          operation.atomicConflict = true;
+          operation.localConflictPaths = normalized.map(file => file.filepath);
+          operation.pendingRevisions = copy(revisions);
+          current.recovery.push({ at: Date.now(), reason: 'Unresolved local translation save', files: copy(normalized), bases: copy(bases) });
+          committedRevisions.splice(0);
+        } else {
+          for (const entry of operation.files) {
+            current.local[entry.yours.filepath] = copy(entry.yours);
+            if (this.localOnly) current.shared[entry.yours.filepath] = copy(entry.yours);
+          }
+          committedRevisions.splice(0, committedRevisions.length, ...this.committedRevisions(revisions, operation.files.map(entry => entry.yours), current.identity));
+        }
+        if (!this.localOnly || operation.status === 'conflict') current.outbox.push(operation);
+      }, { ...(generation === undefined ? {} : { generation }), requestId, revisions: committedRevisions,
+        projectWorkspace: this.projection(normalized, epoch, copy(workspace)) }, epoch);
+      const committed = copy(this.storageSnapshot || {});
+      if (!this.localOnly) {
+        if (this.deferredSync) { this.dirty = true; this.retry().catch(error => this.handleError(error)); }
+        else await this.retry();
+      }
       if (!this.current(epoch)) throw staleError();
       if (this.lastError && !transient(this.lastError)) throw this.lastError;
       const remaining = this.room()?.outbox.find(op => op.id === mutationId);
       if (remaining?.status === 'pending') this.schedule();
-      return { status: !remaining ? 'synced' : remaining.status === 'conflict' || remaining.blockedByConflict ? 'conflict' : 'pending', mutationId };
+      return { status: !remaining ? 'synced' : remaining.status === 'conflict' || remaining.blockedByConflict ? 'conflict' : 'pending', mutationId,
+        ...(this.deferredSync || this.localOnly ? committed : copy(this.storageSnapshot || committed)), files: copy(Object.values(this.room().local)) };
     }
     sync() { return this.retry(); }
     retry() {
+      if (this.localOnly) return Promise.resolve(this.snapshot());
       if (this.running) { this.dirty = true; return this.running; }
       const epoch = this.epoch;
       if (!this.current(epoch)) return Promise.resolve(this.snapshot());
       const run = async () => {
         this.lastError = null;
         try {
+          await this.reload(epoch);
           if (!this.room().roomId) await this.initializeRoom(epoch);
           do {
             this.dirty = false;
@@ -264,10 +342,24 @@
         }
         return this.snapshot();
       };
-      const promise = this.locks ? this.locks.request('sdeditor-collaboration:' + this.key, run) : run();
+      const promise = this.networkOperation(run);
       this.running = promise.finally(() => { if (this.running === tracked) this.running = null; });
       const tracked = this.running;
       return tracked;
+    }
+    networkOperation(run) {
+      const key = this.key;
+      const operation = this.networkQueue.catch(() => {}).then(() => this.locks ? this.locks.request('sdeditor-collaboration:' + key, run) : run());
+      this.networkQueue = operation.catch(() => {});
+      return operation;
+    }
+    async reload(epoch) {
+      if (this.store.getCollaborationState) {
+        const state = await this.store.getCollaborationState();
+        if (!this.current(epoch)) throw staleError();
+        if (state?.rooms?.[this.key]?.recoveryOnly) throw Object.assign(staleError(), { code: 'SOURCE_GENERATION_CHANGED' });
+        if (state) this.state = state;
+      }
     }
     handleError(error) {
       this.lastError = error;
@@ -413,25 +505,44 @@
       return this.api('/uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST' }, epoch);
     }
     async resolve(conflictId, resolution, options = {}) {
+      const result = await this.networkOperation(() => this.resolveNow(conflictId, resolution, options));
+      if (!this.localOnly && !result.renewed) {
+        if (this.deferredSync) this.retry().catch(error => this.handleError(error));
+        else await this.retry();
+      }
+      const remaining = this.room()?.outbox.find(item => item.id === result.mutationId);
+      return { ...result, ...copy(this.storageSnapshot || {}), files: copy(Object.values(this.room()?.local || {})),
+        status: !remaining ? 'synced' : remaining.status === 'conflict' ? 'conflict' : 'pending' };
+    }
+    async resolveNow(conflictId, resolution, options = {}) {
       const epoch = this.epoch;
+      await this.reload(epoch);
+      if (options.requestId && this.room()?.resolvedRequests?.includes(options.requestId)) return { status: 'synced', mutationId: conflictId.slice(0, conflictId.lastIndexOf(':')) };
       const observed = copy(this.room()?.conflicts.find(item => item.id === conflictId));
       if (!observed) throw new Error('This comparison has already changed.');
       if (options.sharedRevision != null && options.sharedRevision !== observed.shared.revision) return { status: 'conflict', mutationId: observed.mutationId };
-      try { await this.catchUp(epoch); } catch (error) { if (!transient(error)) throw error; }
+      if (!this.localOnly) try { await this.catchUp(epoch); } catch (error) { if (!transient(error)) throw error; }
       const chosen = fileState(Array.isArray(resolution) ? { ...observed.yours, translations: resolution } : { ...observed.yours, ...resolution });
       const source = this.room().manifest.files.find(file => file.filepath === chosen.filepath);
       if (chosen.translations.length !== source.english.length) throw new Error('Resolve every translation entry before saving.');
+      const affected = copy(this.room().outbox.find(op => op.id === observed.mutationId)?.files.map(entry => entry.yours) || [chosen]);
+      const resolutionRevisions = [{ filepath: chosen.filepath, lang: this.room().identity.language, savedAt: Date.now(),
+        note: 'Resolve shared translation conflict', translations: copy(chosen.translations), isMissing: chosen.translations.some(text => !text.trim()) }];
       let renewed = false;
-      await this.update((state, room) => {
+      await this.update((state, room, snapshot) => {
         const conflict = room.conflicts.find(item => item.id === conflictId);
         if (!conflict) throw new Error('This comparison has already changed.');
         const op = room.outbox.find(item => item.id === conflict.mutationId);
         const entry = op.files.find(item => item.yours.filepath === conflict.filepath);
-        const shared = room.shared[conflict.filepath];
+        let shared = conflict.local ? room.local[conflict.filepath] : room.shared[conflict.filepath];
+        const desc = snapshot?.workspace?.descs?.find(desc => desc.filepath === conflict.filepath);
+        if (conflict.local && desc) shared = this.workspaceFile(desc, snapshot.workspace, room.identity.language, shared);
         const merged = mergeFile(observed.shared, chosen, shared);
         if (!merged.conflict && op.kind === 'join' && op.files.length === 1 && contentEqual(merged.file, shared)) {
           room.outbox = room.outbox.filter(item => item.id !== op.id);
           room.conflicts = room.conflicts.filter(item => item.mutationId !== op.id);
+          if (options.requestId) (room.resolvedRequests ||= []).push(options.requestId);
+          resolutionRevisions.splice(0);
           this.rebuild(room);
           return;
         }
@@ -445,18 +556,44 @@
         if (merged.conflict) {
           renewed = true;
           Object.assign(conflict, { base: observed.shared, yours: chosen, shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
-        } else room.conflicts = room.conflicts.filter(item => item.id !== conflictId);
+        } else {
+          room.conflicts = room.conflicts.filter(item => item.id !== conflictId);
+          if (!op.atomicConflict) op.localConflictPaths = (op.localConflictPaths || []).filter(path => path !== conflict.filepath);
+        }
+        // Recheck the complete batch once its last comparison is answered. A
+        // peer may have edited a formerly independent file while it was open.
+        if (op.atomicConflict && !room.conflicts.some(item => item.mutationId === op.id)) {
+          for (const candidate of op.files) {
+            let latest = room.local[candidate.yours.filepath];
+            const latestDesc = snapshot?.workspace?.descs?.find(desc => desc.filepath === candidate.yours.filepath);
+            if (latestDesc) latest = this.workspaceFile(latestDesc, snapshot.workspace, room.identity.language, latest);
+            const rebased = mergeFile(candidate.base, candidate.yours, latest);
+            if (rebased.conflict) room.conflicts.push({ id: op.id + ':' + candidate.yours.filepath, mutationId: op.id,
+              filepath: candidate.yours.filepath, kind: 'edit', local: true, base: copy(candidate.base), yours: copy(candidate.yours), shared: copy(latest),
+              indexes: rebased.indexes, metadata: rebased.metadata });
+            candidate.base = copy(latest); candidate.yours = copy(rebased.file);
+          }
+        }
         op.status = room.conflicts.some(item => item.mutationId === op.id) ? 'conflict' : 'pending';
+        if (op.status === 'conflict') {
+          renewed = true; resolutionRevisions.splice(0);
+        } else {
+          op.localConflictPaths = [];
+          if (this.localOnly) {
+            for (const candidate of op.files) room.shared[candidate.yours.filepath] = copy(candidate.yours);
+            room.outbox = room.outbox.filter(item => item.id !== op.id);
+          }
+          const records = op.pendingRevisions?.length ? op.pendingRevisions : resolutionRevisions;
+          resolutionRevisions.splice(0, resolutionRevisions.length, ...this.committedRevisions(records, op.files.map(candidate => candidate.yours), room.identity));
+          delete op.pendingRevisions; delete op.atomicConflict;
+        }
+        if (options.requestId) (room.resolvedRequests ||= []).push(options.requestId);
         this.rebuild(room);
-      }, { projectWorkspace: this.projection([chosen], epoch), revisions: [{ filepath: chosen.filepath,
-        lang: this.room().identity.language, sourceHash: this.room().identity.sourceHash,
-        collaborationAccountId: this.room().identity.accountId, savedAt: Date.now(),
-        note: 'Resolve shared translation conflict', translations: copy(chosen.translations),
-        isMissing: chosen.translations.some(text => !text.trim()) }] }, epoch);
-      this.onRemote([copy(this.room().local[chosen.filepath])]);
-      if (!renewed) await this.retry();
+      }, { ...(options.generation === undefined ? {} : { generation: options.generation }), requestId: options.requestId,
+        projectWorkspace: this.projection(affected, epoch), revisions: resolutionRevisions }, epoch);
+      this.onRemote(affected.map(file => copy(this.room().local[file.filepath])));
       const remaining = this.room().outbox.find(item => item.id === observed.mutationId);
-      return { status: !remaining ? 'synced' : remaining.status === 'conflict' ? 'conflict' : 'pending', mutationId: observed.mutationId };
+      return { status: !remaining ? 'synced' : remaining.status === 'conflict' ? 'conflict' : 'pending', mutationId: observed.mutationId, renewed };
     }
     async history(filepath, options = {}) {
       if (!this.room()?.roomId) return { events: [], hasMore: false };
@@ -546,5 +683,35 @@
     }
     destroy() { this.disconnect(); this.destroyed = true; }
   }
-  return { Client };
+  // A coordinator owns one durable client per translation scope, but presence
+  // belongs to an individual tab. Reuse the socket protocol without opening
+  // another storage/sync client or sharing editing claims between tabs.
+  class PresenceClient extends Client {
+    constructor(options) {
+      super({ ...options, store: null });
+      this.onChanged = options.onChanged || (() => {});
+    }
+    room() { return this.presenceRoom || null; }
+    async connect({ roomId, identity, context }) {
+      this.disconnect(); this.destroyed = false;
+      if (!roomId) return this.snapshot();
+      this.presenceRoom = { roomId, identity: copy(identity), local: {}, outbox: [], conflicts: [] };
+      this.key = scopeKey(identity); this.context = context || this.getContext();
+      try { await this.openSocket(this.epoch); }
+      catch (error) { if (!error.stale) this.handleError(error); }
+      return this.snapshot();
+    }
+    async retry() {
+      if (!this.key || this.destroyed) return this.snapshot();
+      try {
+        await this.onChanged();
+        await this.openSocket(this.epoch);
+        this.backoff = 1000;
+        this.status('');
+      } catch (error) { if (!error.stale) this.handleError(error); }
+      return this.snapshot();
+    }
+    disconnect() { this.presenceRoom = null; super.disconnect(); }
+  }
+  return { Client, PresenceClient };
 });

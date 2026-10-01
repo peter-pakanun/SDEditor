@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const P = require('../public/collaborationProtocol.js');
-const { Client } = require('../public/collaborationSync.js');
+const { Client, PresenceClient } = require('../public/collaborationSync.js');
 const copy = structuredClone;
 const source = [
   { filepath: 'a.txt', name: '', stats: ['a'], variables: ['#', '#'], remarks: ['', ''], translations: { English: ['One {0}', 'Two {0}'], Thai: ['one', 'two'] } },
@@ -20,6 +20,29 @@ function storeFixture() {
       return copy(this.state);
     },
   };
+}
+function coordinatedStoreFixture() {
+  return { state: null, workspace: { descs: copy(source), status: {} }, generation: 0, revision: 0, revisions: [], receipts: new Set(),
+    async getCollaborationState() { return copy(this.state); },
+    async updateCollaborationState(fn, options = {}) {
+      if (options.generation !== undefined && options.generation !== this.generation) throw Object.assign(new Error('Source changed'), { code: 'SOURCE_GENERATION_CHANGED' });
+      const snapshot = { workspace: copy(this.workspace), source: copy(source), generation: this.generation, revision: this.revision };
+      if (!options.requestId || !this.receipts.has(options.requestId)) {
+        const state = fn(copy(this.state), snapshot);
+        const workspace = options.projectWorkspace ? options.projectWorkspace(snapshot.workspace, state, snapshot) : snapshot.workspace;
+        this.state = copy(state); this.workspace = copy(workspace); this.revision++;
+        this.revisions.push(...copy(options.revisions || []));
+        if (options.requestId) this.receipts.add(options.requestId);
+      }
+      return options.returnSnapshot ? { state: copy(this.state), workspace: copy(this.workspace), generation: this.generation, revision: this.revision } : copy(this.state);
+    },
+  };
+}
+async function localFixture(store = coordinatedStoreFixture(), language = 'Thai') {
+  const client = new Client({ store, request: async () => { throw new Error('Local-only client must not call the server'); }, WebSocket: null });
+  await client.connect({ localOnly: true, accountId: 'guest', game: 'poe1', language, generation: store.generation,
+    source, files: initial, workspace: store.workspace });
+  return { client, store };
 }
 function serverFixture() {
   const server = { files: copy(initial), sequence: 1, events: [], receipts: new Map(), requests: [], offline: false, exists: true,
@@ -238,7 +261,7 @@ test('disconnect invalidates in-flight replies and offline editing claims remain
   assert.equal((await client.claim('a.txt')).granted, true);
   let release; const previous = server.request.bind(server);
   client.request = async (path, options) => { await new Promise(resolve => { release = resolve; }); return previous(path, options); };
-  const syncing = client.sync(); await Promise.resolve(); client.disconnect(); release(); await syncing;
+  const syncing = client.sync(); await new Promise(setImmediate); client.disconnect(); release(); await syncing;
   assert.equal(client.snapshot().roomId, null); assert.equal(client.snapshot().files.length, 0);
   client.destroy();
 });
@@ -271,7 +294,7 @@ test('a save queued during catch-up waits for conflict detection before reportin
     if (!delayed && args[0].includes('/changes?')) { delayed = true; await new Promise(resolve => { release = resolve; }); }
     return original(...args);
   };
-  const running = client.sync(); await Promise.resolve();
+  const running = client.sync(); await new Promise(setImmediate);
   const saving = client.save({ bases: { 'a.txt': base }, files: [{ ...base, translations: ['local changed', 'two'] }] });
   await Promise.resolve(); release();
   await running; assert.equal((await saving).status, 'conflict');
@@ -418,4 +441,157 @@ test('initial socket connection is quiet but a real disconnect persists until th
   assert.equal(client.snapshot().connected, true);
   client.disconnect();
   assert.equal(client.snapshot().disconnected, false, 'Leaving a workspace is not an unexpected disconnect.');
+});
+
+test('signed-out tabs merge authored entries and files against the transaction workspace', async t => {
+  const { client, store } = await localFixture(); t.after(() => client.destroy());
+  const firstBase = client.fileBase('a.txt'), otherBase = client.fileBase('b.txt');
+  await client.save({ requestId: 'tab-one:1', bases: { 'a.txt': firstBase }, files: [{ ...firstBase, translations: ['first tab', 'two'] }] });
+  const second = await client.save({ requestId: 'tab-two:1', bases: { 'a.txt': firstBase }, files: [{ ...firstBase, translations: ['one', 'second tab'] }] });
+  await client.save({ bases: { 'b.txt': otherBase }, files: [{ ...otherBase, translations: ['another file'] }] });
+  assert.deepEqual(second.workspace.descs[0].translations.Thai, ['first tab', 'second tab']);
+  assert.deepEqual(store.workspace.descs.map(desc => desc.translations.Thai), [['first tab', 'second tab'], ['another file']]);
+  assert.equal(client.snapshot().pending, 0);
+});
+
+test('overlapping local tab edits retain the saved text and both comparison candidates', async t => {
+  const { client, store } = await localFixture(); t.after(() => client.destroy());
+  const base = client.fileBase('a.txt');
+  await client.save({ bases: { 'a.txt': base }, files: [{ ...base, translations: ['saved first', 'two'] }] });
+  const result = await client.save({ requestId: 'second-save', bases: { 'a.txt': base }, files: [{ ...base, translations: ['second candidate', 'two'] }] });
+  assert.equal(result.status, 'conflict');
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'saved first');
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.yours.translations[0], 'second candidate'); assert.equal(conflict.shared.translations[0], 'saved first');
+  await client.resolve(conflict.id, ['combined result', 'two'], { requestId: 'resolve-once' });
+  await client.resolve(conflict.id, ['combined result', 'two'], { requestId: 'resolve-once' });
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'combined result');
+  assert.equal(store.revisions.length, 1, 'lost resolution acknowledgement does not duplicate history');
+  assert.equal(client.snapshot().conflicts.length, 0);
+});
+
+test('different language scopes preserve each other within one shared workspace', async t => {
+  const { client: thai, store } = await localFixture(); t.after(() => thai.destroy());
+  const { client: french } = await localFixture(store, 'French'); t.after(() => french.destroy());
+  const thaiBase = thai.fileBase('a.txt'), frenchBase = french.fileBase('a.txt');
+  await thai.save({ bases: { 'a.txt': thaiBase }, files: [{ ...thaiBase, translations: ['ไทย', 'สอง'] }] });
+  const result = await french.save({ bases: { 'a.txt': frenchBase }, files: [{ ...frenchBase, translations: ['Un', 'Deux'] }] });
+  assert.deepEqual(result.workspace.descs[0].translations.Thai, ['ไทย', 'สอง']);
+  assert.deepEqual(result.workspace.descs[0].translations.French, ['Un', 'Deux']);
+});
+
+test('a restarted coordinator replays save receipts without duplicating revisions', async t => {
+  const { client, store } = await localFixture();
+  const base = client.fileBase('a.txt');
+  const request = { requestId: 'tab:request', generation: 0, bases: { 'a.txt': base }, files: [{ ...base, translations: ['durable', 'two'] }], revisions: [{ filepath: 'a.txt' }] };
+  await client.save(request); client.destroy();
+  const { client: reopened } = await localFixture(store); t.after(() => reopened.destroy());
+  const result = await reopened.save(request);
+  assert.equal(store.revisions.length, 1); assert.equal(result.status, 'synced');
+  assert.equal(result.workspace.descs[0].translations.Thai[0], 'durable');
+});
+
+test('source replacement fences old clients and same-source reopen starts a new generation', async t => {
+  const { client, store } = await localFixture(); t.after(() => client.destroy());
+  const base = client.fileBase('a.txt');
+  store.generation++;
+  for (const room of Object.values(store.state.rooms)) room.recoveryOnly = true;
+  await assert.rejects(client.save({ files: [{ ...base, translations: ['obsolete', 'two'] }] }), { code: 'SOURCE_GENERATION_CHANGED' });
+  const { client: next } = await localFixture(store); t.after(() => next.destroy());
+  assert.equal(next.room().generation, 1);
+  assert.equal(Object.values(store.state.rooms).filter(room => room.recoveryOnly).length, 1);
+  assert.equal(next.fileBase('a.txt').translations[0], 'one');
+});
+
+test('deferred worker saves acknowledge durable storage while the network is stalled', async t => {
+  const store = coordinatedStoreFixture(), server = serverFixture();
+  const { client } = await fixture({ store, server }); t.after(() => client.destroy());
+  client.deferredSync = true;
+  let release;
+  client.request = async () => { await new Promise(resolve => { release = resolve; }); throw new Error('Offline'); };
+  const base = client.fileBase('a.txt');
+  const result = await client.save({ requestId: 'fast-save', bases: { 'a.txt': base }, files: [{ ...base, translations: ['already durable', 'two'] }] });
+  assert.equal(result.status, 'pending'); assert.equal(result.workspace.descs[0].translations.Thai[0], 'already durable');
+  await new Promise(setImmediate); release(); await client.running;
+});
+
+test('presence clients retain independent tab selections and editing claims', async t => {
+  const sockets = [];
+  class Socket {
+    constructor() { this.readyState = 0; this.sent = []; sockets.push(this); }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    open() { this.readyState = 1; this.onopen(); }
+    close() { this.readyState = 3; }
+  }
+  let changed = 0;
+  const options = { request: async () => ({ ticket: 'ticket' }), apiBase: 'https://example.test', WebSocket: Socket, onChanged: async () => { changed++; } };
+  const first = new PresenceClient(options), second = new PresenceClient(options);
+  t.after(() => { first.destroy(); second.destroy(); });
+  const identity = { accountId: 'a', game: 'poe1', sourceHash: 'hash', language: 'Thai' };
+  await first.connect({ roomId: 'room', identity }); await second.connect({ roomId: 'room', identity });
+  first.select('a.txt'); second.select('b.txt'); first.setAway(true);
+  sockets.forEach(socket => socket.open()); await new Promise(setImmediate);
+  assert.equal(sockets[0].sent.find(message => message.type === 'select').filepath, 'a.txt');
+  assert.equal(sockets[1].sent.find(message => message.type === 'select').filepath, 'b.txt');
+  assert.equal(second.snapshot().away, false); assert.equal(changed, 2);
+  const claim = first.claim('a.txt');
+  const sent = sockets[0].sent.find(message => message.type === 'claim');
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'claim-result', requestId: sent.requestId, granted: true }) });
+  assert.equal((await claim).granted, true); assert.equal(second.editing, null);
+});
+
+test('a conflicting bulk save applies no sibling files or accepted history until all comparisons resolve', async t => {
+  const { client, store } = await localFixture(); t.after(() => client.destroy());
+  const first = client.fileBase('a.txt'), second = client.fileBase('b.txt');
+  await client.save({ files: [{ ...first, translations: ['peer first', 'two'] }], bases: { 'a.txt': first } });
+  const batch = { requestId: 'bulk', origin: 'consistency', bases: { 'a.txt': first, 'b.txt': second },
+    files: [{ ...first, translations: ['bulk first', 'two'] }, { ...second, translations: ['bulk second'] }],
+    revisions: [{ filepath: 'a.txt', note: 'Before consistency resolution', translations: first.translations },
+      { filepath: 'a.txt', note: 'Consistency resolution', translations: ['bulk first', 'two'] },
+      { filepath: 'b.txt', note: 'Consistency resolution', translations: ['bulk second'] }] };
+  const pending = await client.save(batch);
+  assert.equal(pending.status, 'conflict'); assert.equal(store.workspace.descs[1].translations.Thai[0], 'three');
+  assert.equal(store.revisions.length, 0); assert.equal(client.room().recovery.at(-1).files[1].translations[0], 'bulk second');
+  // A file that initially merged cleanly changes while the first comparison is open.
+  await client.save({ files: [{ ...second, translations: ['peer second'] }], bases: { 'b.txt': second } });
+  const firstConflict = client.snapshot().conflicts.find(conflict => conflict.filepath === 'a.txt');
+  const partial = await client.resolve(firstConflict.id, ['agreed first', 'two']);
+  assert.equal(partial.status, 'conflict'); assert.equal(store.workspace.descs[0].translations.Thai[0], 'peer first');
+  assert.equal(store.revisions.length, 0);
+  const secondConflict = client.snapshot().conflicts.find(conflict => conflict.filepath === 'b.txt');
+  await client.resolve(secondConflict.id, ['agreed second']);
+  assert.deepEqual(store.workspace.descs.map(desc => desc.translations.Thai), [['agreed first', 'two'], ['agreed second']]);
+  assert.deepEqual(store.revisions.map(revision => revision.translations), [first.translations, ['agreed first', 'two'], ['agreed second']]);
+});
+
+test('local history records the accepted merged text including independent peer entries', async t => {
+  const { client, store } = await localFixture(); t.after(() => client.destroy());
+  const base = client.fileBase('a.txt');
+  await client.save({ files: [{ ...base, translations: ['peer', 'two'] }], bases: { 'a.txt': base } });
+  await client.save({ files: [{ ...base, translations: ['one', 'own'] }], bases: { 'a.txt': base },
+    revisions: [{ filepath: 'a.txt', translations: ['one', 'own'], note: 'Save translation' }] });
+  assert.deepEqual(store.revisions[0].translations, ['peer', 'own']);
+});
+
+test('choosing the shared join copy records resolution identity for lost-ack replay', async t => {
+  const store = coordinatedStoreFixture(); store.workspace.descs[0].translations.Thai[0] = 'preexisting local';
+  const { client } = await fixture({ store }); t.after(() => client.destroy());
+  const conflict = client.snapshot().conflicts[0];
+  await client.resolve(conflict.id, conflict.shared.translations, { requestId: 'adopt-shared' });
+  const result = await client.resolve(conflict.id, conflict.shared.translations, { requestId: 'adopt-shared' });
+  assert.equal(result.status, 'synced'); assert.equal(store.revisions.length, 0);
+});
+
+test('a surviving sync client reloads and uploads another closed client durable queue', async t => {
+  const store = coordinatedStoreFixture(), server = serverFixture();
+  const first = await fixture({ store, server }), survivor = await fixture({ store, server });
+  t.after(() => { first.client.destroy(); survivor.client.destroy(); });
+  server.offline = true;
+  const base = first.client.fileBase('a.txt');
+  await first.client.save({ requestId: 'closed-tab-save', files: [{ ...base, translations: ['upload after close', 'two'] }], bases: { 'a.txt': base } });
+  assert.equal(survivor.client.snapshot().pending, 0, 'surviving client initially holds a stale queue snapshot');
+  first.client.destroy(); server.offline = false;
+  await survivor.client.retry();
+  assert.equal(server.files[0].translations[0], 'upload after close');
+  assert.equal(server.receipts.size, 1); assert.equal(survivor.client.snapshot().pending, 0);
 });

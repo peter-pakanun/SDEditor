@@ -48,7 +48,7 @@ function browserControls(account, language, secret) {
   const ready = async () => {
     for (let attempt = 0; attempt < 200; attempt++) {
       const vm = window.__commentsFixtureApp;
-      if (vm?._cloud?.state && vm.offlineStoreReady) return vm;
+      if (vm?._cloud?.snapshot() && vm.offlineStoreReady && !vm._cloudInitializing) return vm;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw new Error('Editor initialization did not finish.');
@@ -63,7 +63,9 @@ function browserControls(account, language, secret) {
     const vm = await ready();
     status.textContent = 'Preparing disposable account and both game workspaces…';
     const result = await fixtureRequest('bootstrap');
-    await vm._cloud.acceptLogin(result.session);
+    vm.lang = language; vm.theme = account === 'a' ? 'grey' : 'dark';
+    await vm.saveSettings();
+    await vm._cloud.finishLogin('comments-' + account, secret);
     await vm.cloudApply(vm._cloud.snapshot());
     // Initialize preferences in the signed-in profile, after any first-login
     // restore. The normal language switch keeps its dictionary scope in sync.
@@ -72,10 +74,11 @@ function browserControls(account, language, secret) {
     await vm.cloudApply(vm._cloud.snapshot());
     await vm._cloud.sync();
     for (const game of ['poe1', 'poe2']) {
-      await OfflineStore.setSource(result.source, game);
-      await OfflineStore.setWorkspace({ descs: JSON.parse(JSON.stringify(result.source)), status: {}, lastModified: 0, size: 0, sourceHash: result.sourceHash }, game);
+      const snapshot = await OfflineStore.getWorkspaceSnapshot(game);
+      await OfflineStore.replaceWorkspace({ game, source: result.source,
+        workspace: { descs: JSON.parse(JSON.stringify(result.source)), status: {}, lastModified: 0, size: 0, sourceHash: result.sourceHash },
+        generation: snapshot.generation, revision: snapshot.revision, requestId: crypto.randomUUID() });
     }
-    await OfflineStore.setMigratedFromSingleVersion(true);
     vm.showSetting = false; vm.needsInitialSettings = false;
     await vm.activateGameVersion('poe1', { checkMigration: false });
     await vm.$nextTick();
@@ -86,17 +89,15 @@ function browserControls(account, language, secret) {
     await fixtureRequest('remote-comment');
     status.textContent = 'New German comment added to PoE1 / fixture/stat_01.txt. It will appear automatically within 20 seconds.';
   });
-  let offline = false, originalFetcher;
+  let offline = false;
   const offlineButton = button('Simulate offline', async () => {
-    const vm = await ready(); offline = !offline;
+    const vm = await ready();
+    const result = await fixtureRequest('network', { offline: !offline });
+    offline = result.offline;
     if (offline) {
-      originalFetcher = vm._cloud.fetcher;
-      vm._cloud.fetcher = async () => { throw new TypeError('Fixture: network offline'); };
-      vm._collaboration?.closeSocket();
       offlineButton.textContent = 'Restore connection';
       status.textContent = 'Fixture API traffic disabled. Try posting a comment or wait for automatic sync.';
     } else {
-      vm._cloud.fetcher = originalFetcher;
       offlineButton.textContent = 'Simulate offline';
       await vm.collabRetry();
       status.textContent = 'Fixture API traffic restored.';
@@ -154,18 +155,40 @@ function browserControls(account, language, secret) {
   createComment('a', 'poe1', 'fixture/stat_01.txt', 0, 'My own Thai comment should not increase my unread count.');
   createComment('c', 'poe2', 'fixture/stat_01.txt', 0, 'PoE2-only discussion. It must never appear in PoE1 comments.');
   const remoteSession = store.createSession('comments-b');
-  const apiServer = createServer(api);
+  const secrets = ports.map(() => randomUUID());
+  const offlineOrigins = new Set();
+  const apiHost = express();
+  apiHost.use((req, res, next) => {
+    const origin = req.get('Origin');
+    if (origins.includes(origin)) res.set({ 'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Headers': 'Authorization,Content-Type',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Credentials': 'true' });
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    if (offlineOrigins.has(origin)) return res.status(503).json({ error: { code: 'FIXTURE_OFFLINE', message: 'Fixture network disabled' } });
+    next();
+  });
+  apiHost.post('/auth/exchange', express.json(), (req, res, next) => {
+    const index = origins.indexOf(req.get('Origin'));
+    if (index < 0 || req.body.verifier !== secrets[index] || req.body.code !== 'comments-' + teams[index].account) return next();
+    res.json(store.createSession('comments-' + teams[index].account));
+  });
+  apiHost.use(api);
+  const apiServer = createServer(apiHost);
   api.locals.collaborationRealtime.attach(apiServer);
   const frontendServers = [];
   for (let index = 0; index < ports.length; index++) {
-    const { account, language } = teams[index], secret = randomUUID(), frontend = express();
+    const { account, language } = teams[index], secret = secrets[index], frontend = express();
     frontend.use((req, res, next) => { res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); next(); });
     frontend.use('/fixture', express.json({ limit: '1kb' }));
     frontend.use('/fixture', (req, res, next) => {
       if (req.method !== 'POST' || req.get('X-Fixture-Key') !== secret || req.get('Origin') !== origins[index]) return res.status(403).json({ error: 'Fixture request refused' });
       next();
     });
-    frontend.post('/fixture/bootstrap', (req, res) => res.json({ session: store.createSession('comments-' + account), source: sources[index], sourceHash: hashes[index] }));
+    frontend.post('/fixture/bootstrap', (req, res) => res.json({ source: sources[index], sourceHash: hashes[index] }));
+    frontend.post('/fixture/network', (req, res) => {
+      if (req.body.offline) offlineOrigins.add(origins[index]); else offlineOrigins.delete(origins[index]);
+      res.json({ offline: offlineOrigins.has(origins[index]) });
+    });
     frontend.post('/fixture/remote-comment', async (req, res) => {
       try {
         const response = await fetch(apiOrigin + '/v1/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + remoteSession.token },

@@ -22,6 +22,8 @@
       cloudResolverVisible: false, cloudConflictIndex: 0, cloudDefinitionsChoice: '', cloudNoteChoice: '',
       cloudAdminVisible: false, cloudAdminUsers: [], cloudNeedsDictionaryLanguage: false, cloudRecoveryCount: 0,
       cloudLoginUrl: '',
+      cloudAuthorizationGeneration: 0,
+      cloudLanguageBusy: false,
       settingsImportDraft: null, settingsImportConfirm: '',
     }; },
     computed: {
@@ -64,7 +66,27 @@
         return this.toPlainForStorage({ ...window.CloudSync.preferences(this), dictionary: this.dictionary, editorClipboard: this.editorClipboard });
       },
       async cloudApply(snapshot) {
+        // Worker events and command replies may arrive together. Apply them in
+        // order so watcher suppression and authored baselines stay consistent.
+        const run = () => this.applyCloudSnapshot(snapshot);
+        const pending = (this._cloudApplyQueue || Promise.resolve()).then(run);
+        this._cloudApplyQueue = pending.catch(() => {});
+        return pending;
+      },
+      async applyCloudSnapshot(snapshot) {
         if (!snapshot) return;
+        const oldProfile = this._cloudProfile;
+        const switchedProfile = oldProfile != null && oldProfile !== snapshot.profileId;
+        if (switchedProfile) {
+          if (this._cloudAuthoredBase && !same(this.cloudPayload(), this._cloudAuthoredBase)) this.rememberInstanceSettings?.(this.cloudPayload(), oldProfile);
+          if (this.editorVisible && this.editorHaveChanges()) {
+            this.rememberInstanceDraft?.('Signed-in profile changed');
+            this.instanceSourceChanged = true;
+            this.collaborationNotice = 'The signed-in profile changed in another tab. Your draft is preserved under the previous profile; reload the workspace before continuing.';
+          }
+        }
+        this._cloudProfile = snapshot.profileId;
+        this.cloudAuthorizationGeneration = this._cloud?.context()?.generation ?? this._cloud?.context()?.epoch ?? 0;
         this.cloudUser = snapshot.user;
         this.cloudSignedIn = snapshot.signedIn;
         const prior = this.cloudConflict;
@@ -79,10 +101,25 @@
           this.cloudDefinitionsChoice = ''; this.cloudNoteChoice = '';
         }
         const payload = { ...window.CloudSync.completeSettings(snapshot.settings), dictionary: snapshot.dictionary, editorClipboard: snapshot.editorClipboard };
-        if (same(this.cloudPayload(), payload)) return;
+        const previous = this._cloudAuthoredBase;
+        const current = this.cloudPayload();
+        const next = clone(payload), nextBase = clone(payload);
+        if (previous && !switchedProfile) {
+          for (const key of Object.keys(next)) {
+            if (!same(current[key], previous[key])) {
+              next[key] = clone(current[key]);
+              nextBase[key] = clone(previous[key]);
+            }
+          }
+        }
+        // An active tab's language belongs to that tab. Cloud defaults apply at
+        // startup; selecting a different language explicitly uses selectLanguage.
+        if (this._instances && !this._cloudInitializing && !this._cloudImporting && this.lang) next.lang = this.lang;
+        this._cloudAuthoredBase = nextBase;
+        if (same(current, next)) return;
         this._cloudApplying = true;
         try {
-          this.importSettings(payload);
+          this.importSettings(next);
           if (!this._cloudInitializing && this.needsInitialSettings && this.lang) this.showSetting = true;
           this.needsInitialSettings = !this.lang;
           await this.$nextTick();
@@ -100,11 +137,15 @@
           }
         }
         this._cloudApplying = true;
-        this._cloud = new window.CloudSync.Client({ store: window.OfflineStore, merge: window.DictionarySync,
-          fetch: window.fetch.bind(window), apiBase: apiBase(), locks: navigator.locks,
+        const callbacks = {
           onChange: snapshot => { this.cloudApply(snapshot).catch(error => { this.cloudStorageError = error.message; }); },
           onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; this.cloudWarning = !!status.warning; },
+        };
+        this._cloud = this._instances?.cloud || new window.CloudSync.Client({ store: window.OfflineStore, merge: window.DictionarySync,
+          fetch: window.fetch.bind(window), apiBase: apiBase(), locks: navigator.locks,
+          ...callbacks,
         });
+        this._cloud.configureCallbacks?.(callbacks);
         try {
           await this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] });
           await this.cloudApply(this._cloud.snapshot());
@@ -116,8 +157,8 @@
         listen(document, 'visibilitychange', () => { if (!document.hidden) this._cloud.refreshSession(true); });
         const activity = () => { if (!document.hidden) this._cloud.refreshSession(); };
         listen(document, 'keydown', activity); listen(document, 'pointerdown', activity);
-        this._cloudPoll = setInterval(() => { if (!document.hidden && !this.showMultiInstanceGate) this._cloud.sync(); }, 30000);
-        if (typeof BroadcastChannel !== 'undefined') {
+        if (!this._instances) this._cloudPoll = setInterval(() => { if (!document.hidden && !this.showMultiInstanceGate) this._cloud.sync(); }, 30000);
+        if (!this._instances && typeof BroadcastChannel !== 'undefined') {
           this._cloudChannel = new BroadcastChannel('sdeditor-cloud-account');
           this._cloudChannel.onmessage = async () => {
             this._cloud.epoch++;
@@ -138,7 +179,11 @@
       async cloudPersist(payload) {
         if (this._cloudApplying) return true;
         try {
-          await this._cloud.saveLocal(payload);
+          await this._cloud.saveLocal(payload, { language: payload.lang, base: clone(this._cloudAuthoredBase || payload) });
+          // Mark only this submitted draft as accepted. Later typing remains a
+          // change relative to this base, even if a notification arrived first.
+          this._cloudAuthoredBase = clone(payload);
+          await this.cloudApply(this._cloud.snapshot());
           this.cloudStorageError = '';
           return true;
         } catch (error) {
@@ -146,24 +191,31 @@
           return false;
         }
       },
-      async cloudSelectLanguage(language, previous) {
+      cloudSelectLanguage(language, previous) {
         if (!this._cloud || this._cloudApplying) return;
         this._cloudApplying = true;
-        try {
-          await this._cloud.selectLanguage(language, this.cloudPayload(), previous);
-          await this.cloudApply(this._cloud.snapshot());
-        } catch (error) { this.cloudStorageError = 'Could not switch language: ' + error.message; }
-        finally { await this.$nextTick(); this._cloudApplying = false; }
+        this.cloudLanguageBusy = true;
+        return this._cloudLanguageTask = (async () => {
+          try {
+            await this._cloud.selectLanguage(language, this.cloudPayload(), previous, { base: clone(this._cloudAuthoredBase || this.cloudPayload()) });
+            this._cloudAuthoredBase = null;
+            await this.cloudApply(this._cloud.snapshot());
+            return true;
+          } catch (error) { this.lang = previous; this.cloudStorageError = 'Could not switch language: ' + error.message; return false; }
+          finally { await this.$nextTick(); this._cloudApplying = false; this.cloudLanguageBusy = false; }
+        })();
       },
       async cloudImport(payload) {
         this._cloudApplying = true;
+        this._cloudImporting = true;
         try {
           await this._cloud.importLocal(payload);
+          this._cloudAuthoredBase = null;
           await this.cloudApply(this._cloud.snapshot());
           this.cloudStorageError = '';
           return true;
         } catch (error) { this.cloudStorageError = 'Could not import settings: ' + error.message; return false; }
-        finally { await this.$nextTick(); this._cloudApplying = false; }
+        finally { await this.$nextTick(); this._cloudApplying = false; this._cloudImporting = false; }
       },
       async cloudLogin() {
         if (this.testMode || !this._cloud) return;
@@ -202,9 +254,12 @@
       async cloudFinishLogin(code, state) {
         const saved = JSON.parse(sessionStorage.getItem('sdeditor-login') || 'null');
         if (!saved || saved.state !== state || Date.now() - saved.at > 10 * 60 * 1000) throw new Error('Login expired. Please sign in again.');
-        const result = await this._cloud.request('/auth/exchange', { method: 'POST', body: { code, verifier: saved.verifier } });
+        if (this._cloud.finishLogin) await this._cloud.finishLogin(code, saved.verifier);
+        else {
+          const result = await this._cloud.request('/auth/exchange', { method: 'POST', body: { code, verifier: saved.verifier } });
+          await this._cloud.acceptLogin(result);
+        }
         sessionStorage.removeItem('sdeditor-login');
-        await this._cloud.acceptLogin(result);
         await this.cloudApply(this._cloud.snapshot());
         this._cloudChannel?.postMessage('account-changed');
       },
@@ -255,10 +310,10 @@
         catch (error) { event.target.value = user.language || ''; this.cloudStatus = error.message; this.cloudError = true; }
         finally { this.cloudBusy = false; }
       },
-      cloudDownloadRecovery() {
-        saveAs(new Blob([JSON.stringify(this._cloud.recoveryExport(), null, 2)], { type: 'application/json' }), 'sdeditor_local_recovery.json');
+      async cloudDownloadRecovery() {
+        saveAs(new Blob([JSON.stringify(await this._cloud.recoveryExport(), null, 2)], { type: 'application/json' }), 'sdeditor_local_recovery.json');
       },
     },
   };
-  window.CloudUI = { mixin };
+  window.CloudUI = { mixin, apiBase };
 })();

@@ -99,7 +99,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.InstanceUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -300,11 +300,8 @@ const config = Vue.defineComponent({
       gamePreviewSourceSegments: [],
       gamePreviewSegments: [],
       
-      // Multi-instance detection
+      // Coordination errors pause the tab before it can write.
       showMultiInstanceGate: false,
-      instanceTabId: Math.random().toString(36).substr(2, 9),
-      multiInstanceCheckTimer: null,
-      multiInstanceBypass: false,
     }
   },
   async mounted() {
@@ -321,9 +318,8 @@ const config = Vue.defineComponent({
       return;
     }
 
-    // Check for multiple instances early
-    this.checkMultipleInstances();
-    this.startMultiInstanceCheck();
+    // Nothing may open storage or start sync before joining the coordinator.
+    if (!await this.connectInstances()) return;
 
     const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
     if (!canUseOfflineStore) {
@@ -366,15 +362,8 @@ const config = Vue.defineComponent({
     await this.saveSettings();
     this.updateDocumentTitle();
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('keydown', this.handleKeydown);
-    // Clean up multi-instance detection
-    if (this.multiInstanceCheckTimer) {
-      clearInterval(this.multiInstanceCheckTimer);
-    }
-    if (this._broadcastChannel) {
-      this._broadcastChannel.close();
-    }
   },
   watch: {
     settingsDialogVisible(visible) {
@@ -814,6 +803,7 @@ const config = Vue.defineComponent({
       await this.activateGameVersion(version, { checkMigration: true });
     },
     async activateGameVersion(version, { checkMigration = true } = {}) {
+      if (!this.testMode && !this.instanceReady) return;
       const v = this.normalizeGameVersion(version);
       this.gameVersion = v;
       this.gameVersionSelected = true;
@@ -894,10 +884,15 @@ const config = Vue.defineComponent({
       this.resetVersionedState();
       this.loadingProgress = 0.001;
       try {
-        const [workspace, source] = await Promise.all([
-          window.OfflineStore.getWorkspace(game), window.OfflineStore.getSource(game),
-        ]);
+        const snapshot = window.OfflineStore.getWorkspaceSnapshot
+          ? await window.OfflineStore.getWorkspaceSnapshot(game)
+          : await Promise.all([window.OfflineStore.getWorkspace(game), window.OfflineStore.getSource(game)])
+            .then(([workspace, source]) => ({ workspace, source, generation: 0, revision: 0 }));
+        const { workspace, source } = snapshot;
         if (!current()) return;
+        this.sourceGeneration = Number(snapshot.generation) || 0;
+        this.workspaceRevision = Number(snapshot.revision) || 0;
+        this.instanceSourceChanged = false;
         let sourceHash = '';
         if (Array.isArray(source) && source.length && window.CollaborationProtocol) {
           try { sourceHash = await window.CollaborationProtocol.sourceHash(source); }
@@ -921,7 +916,7 @@ const config = Vue.defineComponent({
           this.cloudStorageError = 'Could not load this workspace. ' + error.message;
         }
       } finally {
-        if (current()) { this.versionStorageLoading = false; this.scheduleCollaboration?.(); }
+        if (current()) { this.versionStorageLoading = false; this.applyDeferredInstanceWorkspace?.(); this.scheduleCollaboration?.(); }
       }
     },
     getGamePreviewFontFamily(lang) {
@@ -1133,6 +1128,10 @@ const config = Vue.defineComponent({
       this.settingsSaving = true;
       this.settingsMessage = '';
       try {
+        if (this._cloudLanguageTask && await this._cloudLanguageTask === false) {
+          this.settingsMessage = this.cloudStorageError || 'Could not save the selected language.';
+          return;
+        }
         if (await this.saveSettings() === false) {
           this.settingsMessage = this.cloudStorageError || 'Could not save preferences. Please try again.';
           return;
@@ -1728,7 +1727,7 @@ const config = Vue.defineComponent({
       const sameVersion = this.gameVersion === resolver.gameVersion;
       const sameEditor = sameVersion && this.lang === resolver.lang && this.editorBlocks === originalBlocks
         && this.editorCurrentEditingDesc?.filepath === resolver.filepath && this.editorVisible;
-      if (updates.size && sameVersion) this.localDescs = nextWorkspace;
+      if (updates.size && sameVersion && !this._instances) this.localDescs = nextWorkspace;
       for (const { desc, lines } of updates.values()) {
         desc.translations[resolver.lang] = lines;
         desc.hasChanges = true;
@@ -4100,6 +4099,7 @@ const config = Vue.defineComponent({
     },
 
     async startFromScratch() {
+      if (!this.testMode && !this.instanceReady) return;
       const ok = this.confirmProceedByTypingYes(
         `This will DELETE your ${this.formatGameVersion(this.gameVersion)} translated workspace data and ${this.formatGameVersion(this.gameVersion)} revision history stored in this browser.\n\n` +
         "You will lose your working translated files and history for the selected version.\n\n" +
@@ -4108,18 +4108,13 @@ const config = Vue.defineComponent({
       );
       if (!ok) return;
       try {
-        await window.OfflineStore?.clearWorkspace?.();
-      } catch (_) {
+        await window.OfflineStore.replaceWorkspace({ game: this.gameVersion,
+          generation: this.sourceGeneration, revision: this.workspaceRevision,
+          requestId: crypto.randomUUID(), reset: true });
+        location.reload();
+      } catch (error) {
+        this.cloudStorageError = 'Could not reset this workspace. Existing data was kept. ' + error.message;
       }
-      try {
-        await window.OfflineStore?.clearSource?.();
-      } catch (_) {
-      }
-      try {
-        await window.OfflineStore?.clearRevisions?.();
-      } catch (_) {
-      }
-      location.reload();
     },
 
     confirmProceedByTypingYes(message, { confirmMessage } = {}) {
@@ -4434,11 +4429,18 @@ const config = Vue.defineComponent({
         }
       }
 
+      let acceptedSource;
       try {
-        await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(nextSource), nextWorkspace, sourceRevisions, game);
+        if (this._instances) {
+          acceptedSource = await window.OfflineStore.replaceWorkspace({ game,
+            source: this.toPlainForStorage(nextSource), workspace: nextWorkspace, revisions: sourceRevisions,
+            generation: importContext.generation, revision: importContext.workspaceRevision,
+            requestId: crypto.randomUUID() });
+        } else await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(nextSource), nextWorkspace, sourceRevisions, game);
       } catch (error) {
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         this._importingSource = false;
+        this.applyDeferredInstanceWorkspace?.();
         this.scheduleCollaboration?.();
         alert('Could not save the imported source. Existing work is unchanged. ' + error.message);
         return;
@@ -4446,14 +4448,20 @@ const config = Vue.defineComponent({
       this._importingSource = false;
       if (this.gameVersion !== game || this.lang !== language
         || (importContext && (this.sourceIdentity !== importContext.source || (this.cloudUser?.id || '') !== importContext.account))
-        || this.localDescs !== importWorkspace || this.descs !== importSource) return;
-      this.localDescs = nextWorkspace;
-      this.sourceIdentity = sourceHash;
-      this.descs = nextSource;
+        || this.localDescs !== importWorkspace || this.descs !== importSource) { this.applyDeferredInstanceWorkspace?.(); return; }
+      this.localDescs = acceptedSource?.workspace || nextWorkspace;
+      this.sourceIdentity = acceptedSource?.workspace?.sourceHash || sourceHash;
+      this.descs = acceptedSource?.source || nextSource;
+      if (acceptedSource) {
+        this.sourceGeneration = acceptedSource.generation;
+        this.workspaceRevision = acceptedSource.revision;
+      }
       this.sourceLoaded = true;
+      this.applyWorkspaceOverlay();
       this.clearDiagnosticScanResults();
       this.loadingProgress = 100;
       this.filterDesc();
+      this.applyDeferredInstanceWorkspace?.();
       this.scheduleCollaboration?.();
       const repairSummary = this.getImportRepairSummary(parsed);
       if (repairSummary) alert('Source import completed.\n\n' + repairSummary);
@@ -4906,8 +4914,14 @@ const config = Vue.defineComponent({
       } finally { this.navigationBusy = false; }
     },
     editFile(filepath, returnToFileList = false, options = {}) {
+      if (this._instances && !this._collaboration) {
+        return this.initializeCollaboration().then(() => this._collaboration
+          ? this.openClaimedEditorFile(filepath, returnToFileList, options)
+          : false).catch(error => { this.collaborationFailure(error); return false; });
+      }
       if (!this._collaboration) {
-        this._editorCollabBase = undefined;
+        const desc = this.getDescByFilepath(filepath);
+        this._editorCollabBase = desc ? this.collaborationFile(desc) : undefined;
         return this.openEditorFile(filepath, returnToFileList);
       }
       return this.openClaimedEditorFile(filepath, returnToFileList, options);
@@ -5094,6 +5108,11 @@ const config = Vue.defineComponent({
     },
     async editorSave({ close = true } = {}) {
       if (this.editorSaving) return false;
+      if (this._instances && (!this.instanceReady || this.instanceSourceChanged)) {
+        this.rememberInstanceDraft('Save blocked until workspace reconnects');
+        this.collaborationNotice = 'Reconnect and reload the shared workspace before saving. Your draft is still open.';
+        return false;
+      }
       if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
@@ -5174,7 +5193,8 @@ const config = Vue.defineComponent({
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
-        const accepted = this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc);
+        const cached = this._collaboration?.fileBase(desc.filepath);
+        const accepted = { ...cached, ...(result.acceptedFiles?.find(file => file.filepath === desc.filepath) || cached || this.collaborationFile(desc)) };
         const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
           draftBefore: draftAtSave, submittedTranslations: newTranslations,
         });
@@ -5513,13 +5533,6 @@ const config = Vue.defineComponent({
         this.gamePreviewFonts = settings.gamePreviewFonts;
       } else this.gamePreviewFonts = null;
     },
-    async saveLocalDescs() {
-      if (this.testMode) return;
-      if (!offlineStoreReady || !window.OfflineStore?.setWorkspace) throw new Error('Local storage is unavailable.');
-      const plain = this.toPlainForStorage(this.localDescs);
-      if (!plain) throw new Error('Cannot serialize workspace');
-      await window.OfflineStore.setWorkspace(plain, this.gameVersion);
-    },
     useRegex(editorBlock) {
       this.sideTab = 'regex';
       let regexEngineResult = regexEngineLookup(editorBlock.english, this.editorRegexes);
@@ -5640,105 +5653,10 @@ const config = Vue.defineComponent({
       saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
     },
     
-    // Multi-instance detection methods
-    checkMultipleInstances() {
-      // Use localStorage with heartbeat pattern to detect multiple instances
-      const storageKey = 'sdeditor_instance_heartbeat';
-      const currentTime = Date.now();
-      const heartbeatInterval = 1000; // 1 second
-      const timeoutThreshold = 5000; // 5 seconds - if no update, consider instance dead
-      
-      try {
-        // Check if we can use BroadcastChannel (better option)
-        if (typeof BroadcastChannel !== 'undefined') {
-          try {
-            const channel = new BroadcastChannel('sdeditor-instances');
-            channel.onmessage = (event) => {
-              if (event.data.type === 'instance_check' && event.data.id !== this.instanceTabId) {
-                // Another instance detected
-                if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
-                  this.showMultiInstanceGate = true;
-                }
-              }
-            };
-            // Announce this instance
-            channel.postMessage({ type: 'instance_check', id: this.instanceTabId });
-            this._broadcastChannel = channel;
-            return;
-          } catch (e) {
-            // BroadcastChannel not available, fall back to localStorage
-          }
-        }
-        
-        // Fallback: localStorage heartbeat
-        let instances = {};
-        try {
-          const stored = localStorage.getItem(storageKey);
-          if (stored) {
-            instances = JSON.parse(stored);
-          }
-        } catch (_) {
-          // localStorage parsing failed
-        }
-        
-        // Clean up dead instances
-        for (const id in instances) {
-          if (currentTime - instances[id] > timeoutThreshold) {
-            delete instances[id];
-          }
-        }
-        
-        // Register this instance
-        instances[this.instanceTabId] = currentTime;
-        
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(instances));
-        } catch (_) {
-          // localStorage write failed
-        }
-        
-        // Check if multiple instances exist (more than just this one)
-        if (Object.keys(instances).length > 1) {
-          if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
-            this.showMultiInstanceGate = true;
-          }
-        }
-      } catch (e) {
-        // If all detection fails, silently continue
-      }
-    },
-    
-    startMultiInstanceCheck() {
-      // Start periodic checks for multiple instances
-      if (this.multiInstanceCheckTimer) {
-        clearInterval(this.multiInstanceCheckTimer);
-      }
-      
-      this.multiInstanceCheckTimer = setInterval(() => {
-        if (!this.multiInstanceBypass) {
-          this.checkMultipleInstances();
-        }
-      }, 2000); // Check every 2 seconds
-    },
-    
-    bypassMultiInstanceGate() {
-      // User chose to continue anyway
-      this.multiInstanceBypass = true;
-      this.showMultiInstanceGate = false;
-    },
-    
-    closeAllButThis() {
-      // Provide user guidance - we can't close other tabs directly for security reasons
-      const message = 'Since browsers prevent programmatic closing of other tabs for security reasons, ' +
-        'you will need to manually close other instances of SDEditor in your browser tabs/windows. ' +
-        'After closing them, this message will disappear automatically.\n\n' +
-        'To proceed with this instance, click "Continue Anyway" below.';
-      alert(message);
-    },
-    
     closeThisInstance() {
       // Close this instance
       window.close();
+      this.instanceFailureReason = 'If this tab did not close, use your browser tab close button. Your other SDEditor tab can continue working.';
     },
   },
 });

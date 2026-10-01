@@ -93,6 +93,18 @@ test('account change clears history and discards an outstanding list response', 
   assert.equal(app.cloudHistoryLoading, false);
 });
 
+test('one tab changing language discards only its own late history result', async () => {
+  const pending = deferred();
+  const client = { getDictionaryHistory: () => pending.promise };
+  const changedTab = editor(client), readingTab = editor(client);
+  changedTab.cloudHistoryVisible = true; readingTab.cloudHistoryVisible = true;
+  const changedLoading = changedTab.cloudLoadHistory(), otherLoading = readingTab.cloudLoadHistory();
+  changedTab.lang = 'French'; changedTab.contextChanged();
+  pending.resolve(page([event()])); await Promise.all([changedLoading, otherLoading]);
+  assert.equal(changedTab.cloudHistoryVisible, false); assert.equal(changedTab.cloudHistoryItems.length, 0);
+  assert.equal(readingTab.cloudHistoryVisible, true); assert.equal(readingTab.cloudHistoryItems[0].entryId, 'fire-main');
+});
+
 test('a late detail response cannot replace a newly selected event', async () => {
   const old = deferred();
   const app = editor({ getDictionaryHistoryEvent: id => id === 3 ? old.promise : Promise.resolve(event({ id })) });

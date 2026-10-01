@@ -245,7 +245,7 @@ test('local edits made while restore is in flight remain available after the res
   assert.equal(h.client.snapshot().dictionary[0].tlnote, 'note typed during restore');
 });
 
-test('switching language discards a late history response', async t => {
+test('one tab switching language leaves the shared assigned-language history request valid', async t => {
   const h = await harness(t);
   h.api.event(1, 'fire', null, word());
   const entered = deferred();
@@ -257,7 +257,11 @@ test('switching language discards a late history response', async t => {
   await entered.promise;
   await h.client.selectLanguage('French', payload([word()], { lang: 'French' }), 'Thai');
   release.resolve();
-  await assert.rejects(reading, error => error.stale === true);
+  const result = await reading;
+  assert.equal(result.items[0].entryId, 'fire');
+  assert.equal(h.api.calls.find(call => call.path.endsWith('/history')).path, '/v1/dictionaries/Thai/history');
+  // A tab that navigated away discards this result in CloudHistoryUI using its
+  // own language/request context. Other tabs may still be reading Thai history.
   assert.equal(h.client.snapshot().settings.lang, 'French');
   assert.deepEqual(h.client.snapshot().dictionary, []);
 });

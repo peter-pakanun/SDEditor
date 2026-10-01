@@ -3,7 +3,7 @@
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.CloudSync = api;
-})(typeof window === 'object' ? window : this, function () {
+})(globalThis, function () {
   'use strict';
   const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideSourceInPreviewPanel', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'filterShortcutCtrlD', 'autocompleteShortcut', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
   const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideSourceInPreviewPanel: false, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
@@ -97,6 +97,7 @@
       this.state = null; this.epoch = 0; this.timer = null; this.running = null;
       this.backoff = 1000; this.lastActivityRefresh = 0; this.destroyed = false;
       this.localQueue = Promise.resolve();
+      this.cloudQueue = Promise.resolve();
     }
     async initialize(legacy) {
       this.state = await this.store.updateHybridState(state => {
@@ -110,65 +111,83 @@
       this.notify();
       return this.snapshot();
     }
-    snapshot() {
+    snapshot(language) {
       const profile = this.state?.profiles[this.state.activeProfile];
       if (!profile) return null;
-      const dictionary = profile.dictionaries[profile.settings.lang] || newDictionary();
+      const selectedLanguage = language === undefined ? profile.settings.lang : language;
+      const dictionary = profile.dictionaries[selectedLanguage] || newDictionary();
       // Never expose a bearer token to reactive Vue state or exports.
-      return { settings: copy(profile.settings), editorClipboard: profile.clipboard, dictionary: copy(dictionary.entries), conflicts: copy(dictionary.conflicts), revision: dictionary.revision, user: copy(this.state.auth?.user || null), signedIn: !!this.state.auth?.token, profileId: this.state.activeProfile, needsDictionaryLanguage: !!profile.unassignedDictionary?.length, recoveryCount: profile.recovery.length };
+      return { settings: { ...copy(profile.settings), lang: selectedLanguage }, editorClipboard: profile.clipboard, dictionary: copy(dictionary.entries), conflicts: copy(dictionary.conflicts), revision: dictionary.revision, user: copy(this.state.auth?.user || null), signedIn: !!this.state.auth?.token, profileId: this.state.activeProfile, needsDictionaryLanguage: !!profile.unassignedDictionary?.length, recoveryCount: profile.recovery.length };
     }
     notify() { this.onChange(this.snapshot()); }
     status(message, error = false, warning = false) { this.onStatus({ message, error, warning }); }
     context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language }; }
     current(ctx, state = this.state) { return !this.destroyed && ctx.epoch === this.epoch && state.activeProfile === ctx.profile && state.auth?.token === ctx.token; }
-    async update(fn, ctx, notify = true) {
+    async update(fn, ctx, notify = true, storeOptions = {}) {
       this.state = await this.store.updateHybridState(state => {
-        if (!ctx || this.current(ctx, state)) fn(state, state.profiles[state.activeProfile]);
+        if (ctx && !this.current(ctx, state)) throw Object.assign(new Error('Account changed. The operation was not applied.'), { stale: true });
+        fn(state, state.profiles[state.activeProfile]);
         return state;
-      });
+      }, storeOptions);
       if (notify) this.notify();
     }
     saveLocal(payload, contextLanguage = payload.lang) {
       const requested = this.context();
       const snapshot = copy(payload);
+      const options = typeof contextLanguage === 'object' ? copy(contextLanguage) : { language: contextLanguage };
       const operation = this.localQueue.catch(() => {}).then(() => {
-        if (!this.current(requested)) return;
-        return this.saveLocalNow(snapshot, contextLanguage);
+        if (!this.current(requested)) throw Object.assign(new Error('Account changed. Your settings draft was not saved.'), { stale: true });
+        return this.saveLocalNow(snapshot, options);
       });
       this.localQueue = operation;
       return operation;
     }
-    async saveLocalNow(payload, contextLanguage) {
+    async saveLocalNow(payload, options) {
       const ctx = this.context();
       const observed = copy(this.state.profiles[ctx.profile]);
+      const contextLanguage = options.language === undefined ? payload.lang : options.language;
+      const authored = options.base;
+      const observedSettings = authored ? preferences(authored.settings || authored) : observed.settings;
+      const observedDictionary = authored ? authored.dictionary || [] : observed.dictionaries[contextLanguage]?.entries || [];
       await this.update((state, profile) => {
         // A language switch may already be queued. Never put the old dictionary
         // into a new language, even when Vue watchers finish out of order.
-        if (profile.settings.lang !== contextLanguage) return;
-        profile.settings = mergeSettings(observed.settings, preferences(payload), profile.settings);
-        if (String(payload.editorClipboard || '') !== observed.clipboard) profile.clipboard = String(payload.editorClipboard || '');
+        if (!authored && profile.settings.lang !== contextLanguage) return;
+        const submitted = preferences(payload);
+        // A tab's active language is navigation state. Save other preferences
+        // against its authored snapshot without changing the new-tab default.
+        if (authored) submitted.lang = observedSettings.lang;
+        profile.settings = mergeSettings(observedSettings, submitted, profile.settings);
+        if (String(payload.editorClipboard || '') !== (authored ? authored.editorClipboard || '' : observed.clipboard)) profile.clipboard = String(payload.editorClipboard || '');
         if (contextLanguage) {
           const dictionary = profile.dictionaries[contextLanguage] ||= newDictionary();
-          const prior = observed.dictionaries[contextLanguage]?.entries || [];
+          const prior = observedDictionary;
           if (!equal(dictionary.entries, prior)) {
             const combined = this.merge.merge({ entries: prior, tombstones: [], revision: 0 }, payload.dictionary || [], { entries: dictionary.entries, tombstones: [], revision: 0 });
-            if (combined.conflicts.length) throw new Error('This dictionary changed in another tab. Export your current settings to preserve this draft, then reload before retrying.');
-            dictionary.entries = combined.entries;
+            if (combined.conflicts.length && !authored) throw new Error('This dictionary changed in another tab. Export your current settings to preserve this draft, then reload before retrying.');
+            const conflictIds = new Set(combined.conflicts.map(conflict => conflict.id));
+            for (const previous of dictionary.conflicts.filter(conflict => conflict.localOnlyConflict && conflictIds.has(conflict.id))) {
+              const recovery = copy(profile.dictionaries);
+              recovery[contextLanguage].entries = recovery[contextLanguage].entries.filter(entry => entry._id !== previous.id);
+              if (previous.local) recovery[contextLanguage].entries.push(copy(previous.local));
+              profile.recovery.push({ at: Date.now(), reason: 'Earlier conflicting tab dictionary draft', settings: copy(profile.settings), dictionaries: recovery, editorClipboard: profile.clipboard });
+            }
+            dictionary.entries = combined.entries.filter(entry => !conflictIds.has(entry._id)).concat(dictionary.entries.filter(entry => conflictIds.has(entry._id)));
+            dictionary.conflicts = dictionary.conflicts.filter(conflict => !conflictIds.has(conflict.id)).concat(combined.conflicts.map(conflict => ({ ...conflict, localOnlyConflict: true })));
           } else dictionary.entries = copy(payload.dictionary || []);
         }
-      }, ctx, false);
+      }, ctx, false, { requestId: options.requestId });
       const latest = this.state.profiles[ctx.profile];
       if (!equal(latest.settings, preferences(payload)) || !equal(latest.dictionaries[contextLanguage]?.entries || [], payload.dictionary || [])) this.notify();
       this.schedule();
+      return this.snapshot(contextLanguage);
     }
-    async selectLanguage(language, payload, oldLanguage) {
-      this.epoch++;
+    async selectLanguage(language, payload, oldLanguage, options = {}) {
       const ctx = this.context();
+      await this.saveLocal({ ...payload, lang: oldLanguage }, { language: oldLanguage, base: options.base || this.snapshot(oldLanguage), requestId: options.requestId ? options.requestId + ':dictionary' : undefined });
+      if (!this.current(ctx)) throw Object.assign(new Error('Account changed'), { stale: true });
       await this.update((state, profile) => {
-        if (oldLanguage && profile.settings.lang === oldLanguage) {
-          (profile.dictionaries[oldLanguage] ||= newDictionary()).entries = copy(payload.dictionary || []);
-        }
-        profile.settings = { ...preferences(payload), lang: language };
+        profile.settings.lang = language;
         if (profile.unassignedDictionary?.length && language) {
           const existing = profile.dictionaries[language];
           if (existing) {
@@ -181,10 +200,11 @@
           profile.unassignedDictionary = null;
         }
         if (language) profile.dictionaries[language] ||= newDictionary();
-      }, ctx);
+      }, ctx, true, { requestId: options.requestId });
       this.schedule(0);
+      return this.snapshot(language);
     }
-    async importLocal(payload) {
+    async importLocal(payload, options = {}) {
       validateImport(payload);
       payload = { ...copy(payload), editorRegexes: (payload.editorRegexes || []).map(row => ({ find: row.find, replace: row.replace })), dictionary: this.merge.normalizeEntries(payload.dictionary || []) };
       const ctx = this.context();
@@ -194,7 +214,7 @@
         profile.clipboard = String(payload.editorClipboard || '');
         if (payload.lang) (profile.dictionaries[payload.lang] ||= newDictionary()).entries = copy(payload.dictionary || []);
         else profile.unassignedDictionary = copy(payload.dictionary || []);
-      }, ctx);
+      }, ctx, true, { requestId: options.requestId });
       this.schedule();
     }
     recoveryExport() {
@@ -270,6 +290,11 @@
       const prefix = error.status === 403 ? 'Cloud access unavailable' : 'Saved locally · cloud unavailable';
       this.status(prefix + ': ' + error.message, true);
     }
+    cloudOperation(run) {
+      const operation = this.cloudQueue.catch(() => {}).then(() => this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run());
+      this.cloudQueue = operation.catch(() => {});
+      return operation;
+    }
     async sync() {
       clearTimeout(this.timer);
       if (this.running) { this.resyncRequested = true; return this.running; }
@@ -297,7 +322,7 @@
           : snapshot.settings.lang !== language ? 'Selected dictionary language is local only' : '';
         this.status(warning, false, !!warning);
       };
-      this.running = (this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run()).catch(error => {
+      this.running = this.cloudOperation(run).catch(error => {
         this.reportError(error);
         if (!error.stale && error.status !== 401 && error.status !== 403) {
           this.backoff = Math.min(this.backoff * 2, 60000); this.schedule(this.backoff);
@@ -359,7 +384,8 @@
         const priorAutoMerged = (d.autoMergedIds || []).filter(id => !accepted || !d.pendingWrite?.request.upserts.some(e => e._id === id));
         d.autoMergedIds = autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
         d.entries = result.entries;
-        d.conflicts = result.conflicts;
+        const localConflicts = d.conflicts.filter(conflict => conflict.localOnlyConflict);
+        d.conflicts = result.conflicts.filter(conflict => !localConflicts.some(local => local.id === conflict.id)).concat(localConflicts);
         d.base = preserveConflictBases(remote, result.conflicts);
         d.revision = remote.revision;
         if (mutationId && d.pendingWrite?.request.mutationId === mutationId) d.pendingWrite = null;
@@ -403,9 +429,31 @@
         throw error;
       }
     }
-    async resolveConflict(id, choices, revision) {
+    resolveConflict(id, choices, revision, options = {}) {
       const ctx = this.context();
-      const language = this.state.profiles[ctx.profile].settings.lang;
+      const language = options.language === undefined ? this.state.profiles[ctx.profile].settings.lang : options.language;
+      return this.cloudOperation(() => this.resolveConflictNow(id, choices, revision, ctx, language));
+    }
+    async resolveConflictNow(id, choices, revision, ctx, language) {
+      this.state = await this.store.getHybridState();
+      if (!this.current(ctx)) throw Object.assign(new Error('Account changed'), { stale: true });
+      const localConflict = this.state.profiles[ctx.profile].dictionaries[language]?.conflicts.find(conflict => conflict.id === id && conflict.localOnlyConflict);
+      if (localConflict) {
+        await this.update((state, profile) => {
+          const dictionary = profile.dictionaries[language];
+          const conflict = dictionary.conflicts.find(item => item.id === id);
+          if (!equal(conflict, localConflict) || dictionary.revision !== revision) throw new Error('The dictionary changed. Review the current conflict again.');
+          const chosen = this.merge.resolve(conflict, choices);
+          const current = dictionary.entries.find(entry => entry._id === id);
+          const rebased = this.merge.merge(
+            { entries: conflict.remote ? [conflict.remote] : [], tombstones: [], revision: 0 }, chosen ? [chosen] : [],
+            { entries: current ? [current] : [], tombstones: current ? [] : [id], revision: dictionary.revision });
+          dictionary.entries = dictionary.entries.filter(entry => entry._id !== id).concat(rebased.conflicts.length ? current ? [current] : [] : rebased.entries);
+          dictionary.conflicts = dictionary.conflicts.filter(item => item.id !== id).concat(rebased.conflicts.map(item => ({ ...item, localOnlyConflict: true })));
+        }, ctx);
+        this.schedule(0);
+        return this.snapshot(language);
+      }
       if (language !== this.state.auth?.user.language) throw new Error('This language is local only.');
       await this.update((state, profile) => {
         const d = profile.dictionaries[language];
@@ -501,7 +549,7 @@
         await this.sendHistoryRestore(ctx, ctx.language, pending);
         this.notify();
       };
-      const operation = this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run();
+      const operation = this.cloudOperation(run);
       this.running = operation.catch(() => {}).finally(() => { this.running = null; this.schedule(1000); });
       try { await operation; }
       catch (error) {

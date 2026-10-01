@@ -1,6 +1,6 @@
 (() => {
   const DB_NAME = 'sdeditor';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
 
   const STORE_KV = 'kv';
   const STORE_REVISIONS_LEGACY = 'revisions';
@@ -15,8 +15,22 @@
   const KV_SOURCE_PREFIX = 'source_';
   const KV_MIGRATED = 'migratedFromLocalStorage';
   const KV_MIGRATED_SINGLE_VERSION = 'migratedFromSingleVersion';
+  const KV_OWNER = 'coordinator_owner_v1';
+  const OWNER_DURATION = 30000;
 
   let currentGameVersion = 'poe1';
+  let ownership = null;
+  let statusHandler = null;
+
+  function storageError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function reportStatus(status) {
+    try { statusHandler?.(status); } catch (_) {}
+  }
 
   function isAvailable() {
     return typeof indexedDB !== 'undefined' && indexedDB;
@@ -63,50 +77,128 @@
         }
       };
       req.onsuccess = () => {
-        console.log('openDb success');
-        resolve(req.result);
+        const db = req.result;
+        if (blocked) { db.close(); _dbPromise = null; return; }
+        db.onversionchange = () => {
+          db.close();
+          _dbPromise = null;
+          reportStatus({ code: 'DB_VERSION_CHANGED', message: 'SDEditor storage was updated. Reconnect this tab before saving.' });
+        };
+        resolve(db);
       };
       req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+      let blocked = false;
+      req.onblocked = () => {
+        blocked = true;
+        const error = storageError('DB_UPGRADE_BLOCKED', 'Close older SDEditor tabs to finish updating local storage, then check again.');
+        reportStatus({ code: error.code, message: error.message });
+        reject(error);
+      };
     });
+    _dbPromise.catch(() => { _dbPromise = null; });
     return _dbPromise;
   }
 
-  async function withStore(storeName, mode, fn) {
+  // All writers take the kv lock, including history-only writes. Checking the
+  // lease within that same transaction fences a suspended former coordinator.
+  async function transaction(storeNames, mode, fn, unfenced = false) {
     const db = await openDb();
-    const tx = db.transaction([storeName], mode);
+    const names = [...new Set(mode === 'readwrite' ? [STORE_KV, ...storeNames] : storeNames)];
+    const tx = db.transaction(names, mode);
     const done = txDone(tx);
-    const store = tx.objectStore(storeName);
-    let out;
-    try { out = await fn(store, tx); } catch (error) {
+    const expectedOwner = ownership;
+    let result;
+    try {
+      if (mode === 'readwrite' && !unfenced) {
+        const row = await requestToPromise(tx.objectStore(STORE_KV).get(KV_OWNER));
+        const lease = row?.value;
+        if (!expectedOwner && lease) {
+          throw storageError('OWNERSHIP_REQUIRED', 'Local storage is managed by the SDEditor coordinator. Reconnect before saving.');
+        }
+        if (expectedOwner && (!lease || lease.ownerId !== expectedOwner.ownerId || lease.generation !== expectedOwner.generation || lease.expiresAt <= Date.now())) {
+          throw storageError('OWNERSHIP_LOST', 'This SDEditor coordinator no longer owns local storage. Reconnect before saving.');
+        }
+      }
+      result = await fn(tx);
+    } catch (error) {
       try { tx.abort(); } catch (_) {}
       await done.catch(() => {});
       throw error;
     }
     await done;
-    return out;
+    return result;
+  }
+
+  async function readValues(tx, keys) {
+    const kv = tx.objectStore(STORE_KV);
+    const rows = await Promise.all(keys.map(key => requestToPromise(kv.get(key))));
+    return rows.map(row => row?.value);
+  }
+
+  function configureOwnership(lease) {
+    if (!lease || !lease.ownerId || !Number.isSafeInteger(lease.generation)) throw new TypeError('A valid ownership lease is required');
+    ownership = { ...lease };
+    return { ...ownership };
+  }
+
+  async function acquireOwnership(ownerId, now) {
+    if (!ownerId) throw new TypeError('An owner ID is required');
+    return transaction([STORE_KV], 'readwrite', async tx => {
+      const kv = tx.objectStore(STORE_KV);
+      const [previous] = await readValues(tx, [KV_OWNER]);
+      const observedNow = now === undefined ? Date.now() : now;
+      if (previous?.ownerId && previous.expiresAt > observedNow && previous.ownerId !== ownerId) return null;
+      const sameLiveOwner = previous?.ownerId === ownerId && previous.expiresAt > observedNow;
+      const lease = { ownerId, generation: sameLiveOwner ? previous.generation : (previous?.generation || 0) + 1, expiresAt: observedNow + OWNER_DURATION };
+      kv.put({ key: KV_OWNER, value: lease });
+      return lease;
+    }, true);
+  }
+
+  async function renewOwnership(lease = ownership, now) {
+    if (!lease) throw storageError('OWNERSHIP_LOST', 'No storage ownership lease is configured.');
+    const renewed = await transaction([STORE_KV], 'readwrite', async tx => {
+      const [current] = await readValues(tx, [KV_OWNER]);
+      const observedNow = now === undefined ? Date.now() : now;
+      if (!current || current.ownerId !== lease.ownerId || current.generation !== lease.generation || current.expiresAt <= observedNow) {
+        throw storageError('OWNERSHIP_LOST', 'Storage ownership expired. Reconnect before saving.');
+      }
+      const next = { ...current, expiresAt: observedNow + OWNER_DURATION };
+      tx.objectStore(STORE_KV).put({ key: KV_OWNER, value: next });
+      return next;
+    }, true);
+    if (ownership?.ownerId === renewed.ownerId && ownership.generation === renewed.generation) ownership = renewed;
+    return renewed;
+  }
+
+  async function releaseOwnership(lease = ownership) {
+    if (!lease) return false;
+    return transaction([STORE_KV], 'readwrite', async tx => {
+      const [current] = await readValues(tx, [KV_OWNER]);
+      if (current?.ownerId !== lease.ownerId || current.generation !== lease.generation) return false;
+      // Retain the generation so a subsequent owner never reuses a fence.
+      tx.objectStore(STORE_KV).put({ key: KV_OWNER, value: { ...current, ownerId: null, expiresAt: 0 } });
+      return true;
+    }, true);
+  }
+
+  async function withStore(storeName, mode, fn) {
+    return transaction([storeName], mode, tx => fn(tx.objectStore(storeName), tx));
   }
 
   // Read/modify/write one durable hybrid snapshot in a single transaction. The
   // callback must be synchronous so the transaction never becomes inactive.
-  async function updateHybridState(update) {
-    const db = await openDb();
-    const tx = db.transaction([STORE_KV], 'readwrite');
-    const done = txDone(tx);
-    const store = tx.objectStore(STORE_KV);
-    let result;
-    const req = store.get('hybrid_v1');
-    req.onsuccess = () => {
-      try {
-        result = update(req.result?.value);
-        if (result && typeof result.then === 'function') throw new Error('Hybrid storage update must be synchronous');
-        store.put({ key: 'hybrid_v1', value: result });
-      } catch (error) {
-        tx._hybridError = error;
-        tx.abort();
-      }
-    };
-    try { await done; } catch (error) { throw tx._hybridError || error; }
-    return result;
+  async function updateHybridState(update, options = {}) {
+    return transaction([STORE_KV], 'readwrite', async tx => {
+      const receiptKey = options.requestId ? 'hybrid_receipt_' + options.requestId : null;
+      const [previous, receipt] = await readValues(tx, ['hybrid_v1', ...(receiptKey ? [receiptKey] : [])]);
+      if (receipt) return previous;
+      const result = update(previous);
+      if (result && typeof result.then === 'function') throw new Error('Hybrid storage update must be synchronous');
+      tx.objectStore(STORE_KV).put({ key: 'hybrid_v1', value: result });
+      if (receiptKey) tx.objectStore(STORE_KV).put({ key: receiptKey, value: { committed: true, at: Date.now() } });
+      return result;
+    });
   }
 
   async function kvGet(key) {
@@ -117,13 +209,15 @@
   }
 
   async function kvSet(key, value) {
-    return withStore(STORE_KV, 'readwrite', async (store) => {
+    return withStore(STORE_KV, 'readwrite', async (store, tx) => {
+      await advanceWorkspaceRevisionForKey(tx, key);
       store.put({ key, value });
     });
   }
 
   async function kvDel(key) {
-    return withStore(STORE_KV, 'readwrite', async (store) => {
+    return withStore(STORE_KV, 'readwrite', async (store, tx) => {
+      await advanceWorkspaceRevisionForKey(tx, key);
       store.delete(key);
     });
   }
@@ -146,6 +240,47 @@
     return KV_SOURCE_PREFIX + normalizeGameVersion(version);
   }
 
+  function workspaceMetaKey(version) {
+    return 'workspace_meta_' + normalizeGameVersion(version);
+  }
+
+  function snapshotFrom(workspace, source, meta) {
+    return { workspace, source, generation: meta?.generation || 0, revision: meta?.revision || 0 };
+  }
+
+  function sameStoredValue(left, right) {
+    if (Object.is(left, right)) return true;
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    if (Array.isArray(left) && left.length !== right.length) return false;
+    const tag = Object.prototype.toString.call(left);
+    if (tag !== Object.prototype.toString.call(right)) return false;
+    if (tag === '[object Date]') return Date.prototype.getTime.call(left) === Date.prototype.getTime.call(right);
+    if (tag !== '[object Object]' && tag !== '[object Array]') return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && sameStoredValue(left[key], right[key]));
+  }
+
+  function checkGeneration(snapshot, expected) {
+    if (expected !== undefined && snapshot.generation !== expected) {
+      throw storageError('SOURCE_GENERATION_CHANGED', 'The source workspace changed in another tab. Keep this draft for recovery and reopen the file before saving.');
+    }
+  }
+
+  async function advanceWorkspaceRevisionForKey(tx, key) {
+    const match = /^(?:workspace|source)_(poe1|poe2)$/.exec(key);
+    if (!match) return;
+    const [meta] = await readValues(tx, [workspaceMetaKey(match[1])]);
+    tx.objectStore(STORE_KV).put({ key: workspaceMetaKey(match[1]), value: { generation: meta?.generation || 0, revision: (meta?.revision || 0) + 1 } });
+  }
+
+  async function getWorkspaceSnapshot(version) {
+    return transaction([STORE_KV], 'readonly', async tx => {
+      const values = await readValues(tx, [workspaceKey(version), sourceKey(version), workspaceMetaKey(version)]);
+      return snapshotFrom(...values);
+    });
+  }
+
   function setGameVersion(version) {
     currentGameVersion = normalizeGameVersion(version);
     return currentGameVersion;
@@ -157,19 +292,12 @@
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
     const revisionsStore = revisionStoreName(gameVersion);
-    const db = await openDb();
-    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
-    const done = txDone(tx);
-    try {
+    return transaction([STORE_KV, revisionsStore], 'readwrite', async tx => {
+      await advanceWorkspaceRevisionForKey(tx, workspaceKey(gameVersion));
       tx.objectStore(STORE_KV).put({ key: workspaceKey(gameVersion), value: workspace });
       const store = tx.objectStore(revisionsStore);
       for (const revision of revisions) store.add(revision);
-    } catch (error) {
-      try { tx.abort(); } catch (_) {}
-      await done.catch(() => {});
-      throw error;
-    }
-    await done;
+    });
   }
 
   // The source identity must advance in the same durable commit as the imported
@@ -178,57 +306,107 @@
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
     const revisionsStore = revisionStoreName(gameVersion);
-    const db = await openDb();
-    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
-    const done = txDone(tx);
-    try {
+    return transaction([STORE_KV, revisionsStore], 'readwrite', async tx => {
+      await advanceWorkspaceRevisionForKey(tx, workspaceKey(gameVersion));
       const kv = tx.objectStore(STORE_KV);
       kv.put({ key: sourceKey(gameVersion), value: source });
       kv.put({ key: workspaceKey(gameVersion), value: workspace });
       for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
-    } catch (error) {
-      try { tx.abort(); } catch (_) {}
-      await done.catch(() => {});
-      throw error;
-    }
-    await done;
+    });
+  }
+
+  // Source replacement/reset is an explicit generation change. Queued edits
+  // stay available for recovery but cannot upload into a replacement workspace.
+  async function replaceWorkspace({ game, version, source, workspace, revisions = [], generation, revision, expectedRevision = revision, expectedAuth, requestId, reset = false }) {
+    if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
+    const gameVersion = normalizeGameVersion(game || version);
+    const revisionsStore = revisionStoreName(gameVersion);
+    const receiptKey = requestId ? 'workspace_receipt_' + gameVersion + '_' + requestId : null;
+    return transaction([STORE_KV, revisionsStore], 'readwrite', async tx => {
+      const kv = tx.objectStore(STORE_KV);
+      const [previousWorkspace, previousSource, meta, collaboration, hybrid, receipt] = await readValues(tx, [
+        workspaceKey(gameVersion), sourceKey(gameVersion), workspaceMetaKey(gameVersion), 'collaboration_v1', 'hybrid_v1', ...(receiptKey ? [receiptKey] : []),
+      ]);
+      const current = snapshotFrom(previousWorkspace, previousSource, meta);
+      // Authentication may change while this command waits for the kv lock.
+      // Fence against the durable state in the same transaction as replacement.
+      // The optional token is supplied only inside the coordinator, never saved
+      // in a receipt or included in a tab-facing workspace snapshot.
+      if (expectedAuth && (!hybrid || hybrid.activeProfile !== expectedAuth.profile
+        || (hybrid.auth?.user?.language || '') !== (expectedAuth.language || '')
+        || (hybrid.auth?.user?.assignmentVersion ?? null) !== (expectedAuth.assignmentVersion ?? null)
+        || (Object.hasOwn(expectedAuth, 'token') && (hybrid.auth?.token ?? null) !== (expectedAuth.token ?? null)))) {
+        throw Object.assign(storageError('CONTEXT_CHANGED', 'The account or language assignment changed before the source could be saved. Review this workspace before importing again.'), { stale: true });
+      }
+      if (receipt) return { ...current, duplicate: true };
+      checkGeneration(current, generation);
+      if (expectedRevision !== undefined && current.revision !== expectedRevision) {
+        throw storageError('WORKSPACE_REVISION_CHANGED', 'Saved translations changed in another tab. Reload the workspace and retry the source import.');
+      }
+      const next = { workspace: reset ? undefined : workspace, source: reset ? undefined : source,
+        generation: current.generation + 1, revision: current.revision + 1 };
+      if (reset) {
+        kv.delete(workspaceKey(gameVersion));
+        kv.delete(sourceKey(gameVersion));
+        tx.objectStore(revisionsStore).clear();
+      } else {
+        kv.put({ key: workspaceKey(gameVersion), value: workspace });
+        kv.put({ key: sourceKey(gameVersion), value: source });
+      }
+      kv.put({ key: workspaceMetaKey(gameVersion), value: { generation: next.generation, revision: next.revision } });
+      for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
+      if (collaboration?.rooms) {
+        for (const room of Object.values(collaboration.rooms)) {
+          if (room.identity?.gameVersion !== gameVersion && room.identity?.game !== gameVersion) continue;
+          room.recovery ||= [];
+          room.recovery.push({ at: Date.now(), reason: reset ? 'Workspace reset' : 'Source workspace replaced',
+            sourceGeneration: current.generation, files: Object.values(room.local || {}), outbox: room.outbox || [], conflicts: room.conflicts || [] });
+          room.outbox = [];
+          room.conflicts = [];
+          room.recoveryOnly = true;
+        }
+        kv.put({ key: 'collaboration_v1', value: collaboration });
+      }
+      if (receiptKey) kv.put({ key: receiptKey, value: { generation: next.generation, revision: next.revision } });
+      return next;
+    });
   }
 
   // Read/modify/write collaboration cache, retry queue, replay cursor and local
   // working/history data in one transaction. Both callbacks must be synchronous.
   async function updateCollaborationState(update, options = {}) {
-    const gameVersion = normalizeGameVersion(options.version);
+    const gameVersion = normalizeGameVersion(options.game || options.version);
     const revisions = options.revisions || [];
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const revisionsStore = revisionStoreName(gameVersion);
-    const db = await openDb();
-    const tx = db.transaction(revisions.length ? [STORE_KV, revisionsStore] : [STORE_KV], 'readwrite');
-    const done = txDone(tx);
-    const kv = tx.objectStore(STORE_KV);
-    let result;
-    let failure;
-    const read = kv.get('collaboration_v1');
-    read.onsuccess = () => {
-      try {
-        result = update(read.result?.value);
-        if (result && typeof result.then === 'function') throw new Error('Collaboration storage update must be synchronous');
-        kv.put({ key: 'collaboration_v1', value: result });
-        for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
-        if (Object.hasOwn(options, 'workspace')) kv.put({ key: workspaceKey(gameVersion), value: options.workspace });
-        if (options.projectWorkspace) {
-          const workspaceRead = kv.get(workspaceKey(gameVersion));
-          workspaceRead.onsuccess = () => {
-            try {
-              const projected = options.projectWorkspace(workspaceRead.result?.value, result);
-              if (projected && typeof projected.then === 'function') throw new Error('Workspace projection must be synchronous');
-              if (projected !== undefined) kv.put({ key: workspaceKey(gameVersion), value: projected });
-            } catch (error) { failure = error; tx.abort(); }
-          };
-        }
-      } catch (error) { failure = error; tx.abort(); }
-    };
-    try { await done; } catch (error) { throw failure || error; }
-    return result;
+    const receiptKey = options.requestId ? 'collaboration_receipt_' + gameVersion + '_' + options.requestId : null;
+    return transaction(revisions.length ? [STORE_KV, revisionsStore] : [STORE_KV], 'readwrite', async tx => {
+      const kv = tx.objectStore(STORE_KV);
+      const [previous, workspace, source, meta, receipt] = await readValues(tx, [
+        'collaboration_v1', workspaceKey(gameVersion), sourceKey(gameVersion), workspaceMetaKey(gameVersion), ...(receiptKey ? [receiptKey] : []),
+      ]);
+      const snapshot = snapshotFrom(workspace, source, meta);
+      if (receipt) return options.returnSnapshot ? { state: previous, ...snapshot, duplicate: true } : previous;
+      checkGeneration(snapshot, options.generation);
+      const result = update(previous, snapshot);
+      if (result && typeof result.then === 'function') throw new Error('Collaboration storage update must be synchronous');
+      kv.put({ key: 'collaboration_v1', value: result });
+      for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
+      let projected = Object.hasOwn(options, 'workspace') ? options.workspace : workspace;
+      if (options.projectWorkspace) {
+        const value = options.projectWorkspace(projected, result, snapshot);
+        if (value && typeof value.then === 'function') throw new Error('Workspace projection must be synchronous');
+        if (value !== undefined) projected = value;
+      }
+      const workspaceChanged = (Object.hasOwn(options, 'workspace') || options.projectWorkspace) && !sameStoredValue(workspace, projected);
+      if (workspaceChanged) {
+        kv.put({ key: workspaceKey(gameVersion), value: projected });
+      }
+      const next = { ...snapshot, workspace: projected, revision: snapshot.revision + (workspaceChanged ? 1 : 0) };
+      if (workspaceChanged) kv.put({ key: workspaceMetaKey(gameVersion), value: { generation: next.generation, revision: next.revision } });
+      if (receiptKey) kv.put({ key: receiptKey, value: { generation: next.generation, revision: next.revision } });
+      return options.returnSnapshot ? { state: result, ...next } : result;
+    });
   }
 
   async function revisionAdd(rev, version) {
@@ -289,9 +467,7 @@
     });
   }
 
-  async function revisionCopyAll(fromStoreName, toStoreName) {
-    const db = await openDb();
-    const tx = db.transaction([fromStoreName, toStoreName], 'readwrite');
+  async function revisionCopyAll(tx, fromStoreName, toStoreName) {
     const fromStore = tx.objectStore(fromStoreName);
     const toStore = tx.objectStore(toStoreName);
 
@@ -310,53 +486,56 @@
         cursor.continue();
       };
     });
-
-    await txDone(tx);
   }
 
-  async function migrateFromLocalStorageIfNeeded() {
-    const migrated = await kvGet(KV_MIGRATED);
-    if (migrated) return;
-    console.log("Migrate from localStorage storage...");
-
-    let settings;
-    try {
-      const raw = localStorage.getItem('settings');
-      if (raw) settings = JSON.parse(raw);
-    } catch (_) {
+  async function migrateFromLocalStorageIfNeeded(supplied) {
+    let legacy = supplied;
+    if (legacy === undefined) {
+      legacy = {};
+      if (typeof localStorage !== 'undefined') {
+        try { legacy.settings = JSON.parse(localStorage.getItem('settings')); } catch (_) {}
+        try { legacy.workspace = JSON.parse(localStorage.getItem('localDescs')); } catch (_) {}
+      }
     }
-    console.log('localStorage settings', settings);
-
-    let workspace;
-    try {
-      const raw = localStorage.getItem('localDescs');
-      if (raw) workspace = JSON.parse(raw);
-    } catch (_) {
-    }
-    console.log('localStorage localDescs', workspace);
-
-    if (settings) await kvSet(KV_SETTINGS, settings);
-    if (workspace) await kvSet(KV_WORKSPACE_LEGACY, workspace);
-
-    // try {
-    //   if (settings) {
-    //     localStorage.setItem('__backup_settings', JSON.stringify(settings));
-    //     localStorage.removeItem('settings');
-    //     console.log('localStorage settings renamed');
-    //   }
-    //   if (workspace) {
-    //     localStorage.setItem('__backup_localDescs', JSON.stringify(workspace));
-    //     localStorage.removeItem('localDescs');
-    //     console.log('localStorage localDescs renamed');
-    //   }
-    // } catch (_) {
-    // }
-
-    await kvSet(KV_MIGRATED, true);
+    return transaction([STORE_KV], 'readwrite', async tx => {
+      const [migrated, settings, workspace] = await readValues(tx, [KV_MIGRATED, KV_SETTINGS, KV_WORKSPACE_LEGACY]);
+      if (migrated) return;
+      const kv = tx.objectStore(STORE_KV);
+      if (settings === undefined && legacy?.settings) kv.put({ key: KV_SETTINGS, value: legacy.settings });
+      if (workspace === undefined && legacy?.workspace) kv.put({ key: KV_WORKSPACE_LEGACY, value: legacy.workspace });
+      kv.put({ key: KV_MIGRATED, value: true });
+    });
   }
 
-  window.OfflineStore = {
+  async function copyLegacyToVersion(version) {
+    const v = normalizeGameVersion(version);
+    const revisionStore = revisionStoreName(v);
+    return transaction([STORE_KV, STORE_REVISIONS_LEGACY, revisionStore], 'readwrite', async tx => {
+      const [migrated, legacyWorkspace, legacySource, workspace, source, meta] = await readValues(tx, [
+        KV_MIGRATED_SINGLE_VERSION, KV_WORKSPACE_LEGACY, KV_SOURCE_LEGACY, workspaceKey(v), sourceKey(v), workspaceMetaKey(v),
+      ]);
+      // A second startup, or a user who already imported into this version,
+      // must never overwrite a destination that now has data.
+      if (migrated || workspace !== undefined || source !== undefined) return snapshotFrom(workspace, source, meta);
+      const kv = tx.objectStore(STORE_KV);
+      if (legacyWorkspace !== undefined) kv.put({ key: workspaceKey(v), value: legacyWorkspace });
+      if (legacySource !== undefined) kv.put({ key: sourceKey(v), value: legacySource });
+      await revisionCopyAll(tx, STORE_REVISIONS_LEGACY, revisionStore);
+      const nextMeta = { generation: (meta?.generation || 0) + 1, revision: (meta?.revision || 0) + 1 };
+      kv.put({ key: workspaceMetaKey(v), value: nextMeta });
+      kv.put({ key: KV_MIGRATED_SINGLE_VERSION, value: true });
+      return snapshotFrom(legacyWorkspace, legacySource, nextMeta);
+    });
+  }
+
+  const api = {
     isAvailable,
+    open: openDb,
+    setStorageStatusHandler: handler => { statusHandler = handler; },
+    configureOwnership,
+    acquireOwnership,
+    renewOwnership,
+    releaseOwnership,
     normalizeGameVersion,
     setGameVersion,
     migrateFromLocalStorageIfNeeded,
@@ -365,6 +544,8 @@
     getHybridState: () => kvGet('hybrid_v1'),
     updateHybridState,
     getWorkspace: (version) => kvGet(workspaceKey(version)),
+    getWorkspaceSnapshot,
+    replaceWorkspace,
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
@@ -384,15 +565,10 @@
     getLegacyRevisionCount: () => storeCount(STORE_REVISIONS_LEGACY),
     hasMigratedFromSingleVersion: () => kvGet(KV_MIGRATED_SINGLE_VERSION),
     setMigratedFromSingleVersion: (value) => kvSet(KV_MIGRATED_SINGLE_VERSION, !!value),
-    copyLegacyToVersion: async (version) => {
-      const v = normalizeGameVersion(version);
-      const legacyWorkspace = await kvGet(KV_WORKSPACE_LEGACY);
-      const legacySource = await kvGet(KV_SOURCE_LEGACY);
-      if (typeof legacyWorkspace !== 'undefined') await kvSet(workspaceKey(v), legacyWorkspace);
-      if (typeof legacySource !== 'undefined') await kvSet(sourceKey(v), legacySource);
-      await revisionCopyAll(STORE_REVISIONS_LEGACY, revisionStoreName(v));
-      await kvSet(KV_MIGRATED_SINGLE_VERSION, true);
-      return { workspace: legacyWorkspace, source: legacySource };
-    },
+    copyLegacyToVersion,
   };
+  globalThis.OfflineStore = api;
+  // Retain compatibility with isolated browser fixtures where window is a
+  // separate object; real windows and workers use the globalThis export.
+  if (typeof window === 'object') window.OfflineStore = api;
 })();
