@@ -25,7 +25,7 @@ function loadEditor() {
       nextTick() { return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
+  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [api, name, counter] of [
@@ -124,10 +124,10 @@ test('each basic scan category can be selected independently', () => {
   assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
 });
 
-test('opening and editing a file never run either manual-only analyzer', () => {
+test('opening and editing a file never run either manual-only analyzer', async () => {
   const { editor, calls } = loadEditor();
   const { first } = conflictingEntries(editor);
-  editor.editFile(first.filepath);
+  await editor.editFile(first.filepath);
   assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
   assert.equal(editor.blockTerminologyDiagnostics(editor.editorBlocks[0]).length, 0);
   editor.editorBlocks[0].translation = 'เปลี่ยนข้อความ';
@@ -144,7 +144,7 @@ test('default manual scan finds consistency and reuses warnings only for unchang
   assert.equal(calls.terminology, 0);
   assert.equal(calls.consistencyIndex, 1);
   const scannedCalls = { ...calls };
-  editor.editFile(first.filepath);
+  await editor.editFile(first.filepath);
   assert.equal(editor.editorConsistencyDiagnostics[0].code, 'inconsistent-translation');
   assert.equal(editor.blockTerminologyDiagnostics(editor.editorBlocks[0]).length, 0);
   editor.editorBlocks[0].translation += 'ฉบับร่าง';
@@ -170,7 +170,7 @@ test('terminology is opt-in and cached table warnings disappear after a draft ch
   assert.equal(calls.consistencyIndex, 0, 'A terminology-only scan must not build the consistency index.');
   assert.equal(calls.consistency, 0);
   const scannedCalls = { ...calls };
-  editor.editFile(table.filepath);
+  await editor.editFile(table.filepath);
   const block = editor.editorBlocks[0];
   assert.equal(editor.blockTerminologyDiagnostics(block).length, 1);
   block.tableColumns[0].translation = 'ไฟ';
@@ -201,12 +201,12 @@ test('saving or changing the dictionary invalidates results without scheduling a
   assert.equal(timers.length, timerCount, 'Dictionary edits must not schedule an automatic scan.');
 });
 
-test('deselecting scan checks does not disable automatic editor errors', () => {
+test('deselecting scan checks does not disable automatic editor errors', async () => {
   const { editor, calls } = loadEditor();
   editor.diagnosticScanChecks = only();
   const desc = description('variable', 'Damage {1}%', 'ความเสียหาย {1}');
   editor.descs = [desc];
-  editor.editFile(desc.filepath);
+  await editor.editFile(desc.filepath);
   editor.refreshEditorDiagnostics();
   assert.equal(editor.collectEditorDiagnostics('error')[0].code, 'variable-tag-identity-mismatch');
   assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });

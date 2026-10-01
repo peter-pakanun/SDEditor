@@ -424,3 +424,24 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .collaborationHistoryList button { grid-template-columns: 1fr 1fr; }
   .collaborationHistoryList button > span:last-child { grid-column: 1 / -1; }
 }
+.editorOpening {
+  margin: 20px;
+  padding: 20px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--color-element);
+  min-height: 180px;
+}
+.editorOpening h3 { overflow-wrap: anywhere; }
+.editorOpening [role="status"] { color: var(--ui-muted); }
+.dictionaryPagination {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  background: var(--color-element);
+}
+.dictionaryPagination > span { flex: 1; font-size: 12px; color: var(--ui-muted); }

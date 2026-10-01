@@ -181,17 +181,20 @@
         // editorBlocks and its captured base remain untouched until explicit save/reopen.
         this.filterDesc();
       },
-      async claimCollaborationFile(filepath, automatic = false) {
+      async claimCollaborationFile(filepath, automatic = false, isCurrent = () => true) {
         const client = this._collaboration;
         if (!client) return true;
         if (automatic && client.isEditing(filepath)) return false;
         const result = await client.claim(filepath, { force: false });
         if (client !== this._collaboration) return false;
+        if (!isCurrent()) { client.leaveEdit(); return false; }
         if (result.granted) return true;
         if (automatic) return false;
         const names = (result.peers || []).map(peer => peer.name).join(', ') || 'Another translator';
         if (!confirm(`${names} is editing this file. Edit anyway?`)) return false;
-        return !!(await client.claim(filepath, { force: true })).granted;
+        const forced = await client.claim(filepath, { force: true });
+        if (!isCurrent()) { client.leaveEdit(); return false; }
+        return !!forced.granted;
       },
       async persistTranslationBatch(updates, origin, options = {}) {
         const ctx = options.context || this.captureCollaborationContext();

@@ -444,7 +444,13 @@
       </aside>
     </div>
 
-    <div class="editor" v-if="editorVisible" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
+    <section v-if="editorVisible && (editorLoading || editorLoadError)" class="editorOpening" aria-label="Translation editor" :aria-busy="editorLoading" @keydown.esc="editorEsc">
+      <div class="twoSided"><h1>🧾 Translation</h1><button @click="editorExit" title="Close the file (Esc)">Close</button></div>
+      <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+      <p v-if="editorLoading" role="status">Preparing editor…</p>
+      <p v-else role="alert">{{ editorLoadError }}</p>
+    </section>
+    <div class="editor" v-if="editorVisible && !editorLoading && !editorLoadError" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div class="gamePreviewStrip">
           <div class="gamePreviewToolbar twoSided">
@@ -611,7 +617,7 @@
         </div>
       </div>
 
-      <div class="side fixed" :class="{ commentsActive: sideTab === 'comments' }">
+      <div class="side fixed" ref="editorSide" :class="{ commentsActive: sideTab === 'comments' }">
         <div class="twoSided sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
@@ -623,7 +629,12 @@
 
         <div v-if="sideTab === 'dictionary'">
           <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
-          <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
+          <div class="dictionaryPagination" aria-label="Dictionary pages">
+            <span>{{ dictionaryRangeLabel }} · Matches in this file first</span>
+            <button @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
+            <button @click="setDictionaryPage(dictionaryPage + 1)" :disabled="dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
+          </div>
+          <div class="editBlock" v-for="word in visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided dictEntryBlock">
               <div>
                 <div class="dictRow" :data-dict-id="word._id">
@@ -1079,6 +1090,7 @@
   <script src="helper.js"></script>
   <script src="statDescParser.js"></script>
   <script src="regexEngine.js"></script>
+  <script src="editorDictionaryIndex.js"></script>
   <script src="translationDiagnostics.js"></script>
   <script src="terminologyDiagnostics.js"></script>
   <script src="offlineStore.js"></script>

@@ -71,6 +71,8 @@ So it is “missing translation content”, not “missing file”.
 
 Click a row or its filename once to open the file in the editor. A blue indicator on the left marks the selected file.
 
+The opening view appears immediately while the editor prepares highlights and checks. Editing and saving become available when preparation finishes; **Close** or **Escape** cancels the open while it is loading.
+
 Focus the file list with **Tab** or press **Up/Down Arrow** from a non-input control in the main interface to return to the currently selected row. If no current selection is visible, the first row is selected. From search, **Down Arrow** selects the first visible file; **Up Arrow** returns to the current selection.
 
 In the list, **Up/Down Arrow** selects the previous/next row without leaving the current page or returning to search. **Home/End** selects the first/last row, and **Page Up/Page Down** moves ten rows, stopping at the page's first/last row; these four keys also work from other non-input controls in the main interface. **Right Arrow** opens the next page at its first row; **Left Arrow** opens the previous page at its last row. Page controls use the same first/last selection behavior and retain focus while revealing the selected file. **Enter** opens the selected row. Other text fields, page inputs, select boxes, editable text, and filter checkboxes keep their usual keyboard behavior. **F2** can also open the first file from the current filtered list.
@@ -225,6 +227,8 @@ Selecting an autocomplete option shows its Dictionary entry's **TL note** in a s
 ### Dictionary (Word Replacements)
 
 The **Dictionary** tab lets you define how specific terms should be translated.
+
+Entries matched in the current file appear first, including matches in table columns. The panel shows 40 entries per page; use **Previous** and **Next** to browse more. Search covers the entire Dictionary, and jumping to an entry from autocomplete opens its page automatically. Large dictionaries use a reusable lookup index, so opening another file does not rebuild every definition.
 
 **Adding a Dictionary Entry:**
 1. Click **Add entry** beside the search box underneath the Dictionary tabs

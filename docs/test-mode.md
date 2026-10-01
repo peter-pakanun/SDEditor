@@ -35,6 +35,12 @@ Disable auto-open for automation runs with:
 - `node server.js --no-open`
 - or `NO_OPEN_BROWSER=1 node server.js`
 
+## Large Dictionary Opening Fixture
+
+Run `node scripts/editor-opening-browser-fixture.cjs` and open the loopback URL it prints. This uses test mode without storage or cloud synchronization. Click **Load 20,000 dictionary entries**, then open a dummy file by mouse or Enter. The fixture reports the opening view and ready times plus the number of rendered dictionary rows. Matching entries are deliberately placed at the end of the dictionary; confirm they appear first, search can find the last unrelated entry, and paging keeps the list at 40 rows.
+
+Use **Delay preparation for cancellation check**, open a file, then **Close** or **Escape** before preparation finishes. The file must stay closed with no partial draft. The fixture is separate from the normal server and is intended for local comparisons, not production timing guarantees.
+
 ## Shared Comments Fixture
 
 Run `node scripts/comments-browser-fixture.cjs` after installing dependencies in the sibling `SDEditor-API` checkout. Open either editor URL printed by the script and click its **Bootstrap Thai** or **Bootstrap German** button. These are separate loopback origins with normal IndexedDB storage and an in-memory API, using disposable accounts rather than Google sign-in. Do not add `testMode=1` to their URLs.

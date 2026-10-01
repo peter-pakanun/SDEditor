@@ -193,6 +193,8 @@ const config = Vue.defineComponent({
 
       sideTab: 'dictionary',
       dictionaryFilter: '',
+      dictionaryPage: 1,
+      dictionaryPageSize: 40,
       regexFilter: '',
       dictionaryFlashId: '',
 
@@ -210,6 +212,8 @@ const config = Vue.defineComponent({
       historyMode: 'translation',
 
       editorVisible: false,
+      editorLoading: false,
+      editorLoadError: '',
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
       editorFocusedColumnIndex: 0,
@@ -468,11 +472,13 @@ const config = Vue.defineComponent({
     dictionary: {
       deep: true,
       handler() {
+        this.invalidateEditorDictionaryIndex();
         this.saveSettings();
         this.scheduleEditorHLterRefresh();
         this.scheduleDictionaryDiagnosticScan();
       }
     },
+    dictionaryFilter() { this.dictionaryPage = 1; },
     hideSourceInPreviewPanel() { this.saveSettings(); },
     uiDensity() { this.saveSettings(); },
     editorRegexes: { deep: true, handler() { this.saveSettings(); } },
@@ -514,7 +520,7 @@ const config = Vue.defineComponent({
       return code || undefined;
     },
     editorTranslationReadOnly() {
-      return this.editorCompareActive && this.editorCompareMode === 'translation';
+      return this.editorLoading || !!this.editorLoadError || (this.editorCompareActive && this.editorCompareMode === 'translation');
     },
     terminologyDictionary() {
       return window.TerminologyDiagnostics.compileDictionary(this.dictionary);
@@ -636,7 +642,9 @@ const config = Vue.defineComponent({
       if (!this.editorVisible) return new Set();
       let set = new Set();
       for (const editorBlock of this.editorBlocks || []) {
-        for (const hl of editorBlock?.HLs || []) {
+        const highlights = editorBlock?.isTable
+          ? (editorBlock.tableColumns || []).flatMap(column => column.HLs || []) : editorBlock?.HLs || [];
+        for (const hl of highlights) {
           if (Array.isArray(hl?.dictIds)) {
             for (const id of hl.dictIds) {
               if (id) set.add(id);
@@ -651,7 +659,9 @@ const config = Vue.defineComponent({
       if (!this.editorVisible) return new Map();
       let map = new Map();
       for (const editorBlock of this.editorBlocks || []) {
-        for (const hl of editorBlock?.HLs || []) {
+        const highlights = editorBlock?.isTable
+          ? (editorBlock.tableColumns || []).flatMap(column => column.HLs || []) : editorBlock?.HLs || [];
+        for (const hl of highlights) {
           let dictId = hl?.dictId;
           let def = (hl?.dictDefFind || "").trim();
           if (!dictId || !def) continue;
@@ -693,14 +703,19 @@ const config = Vue.defineComponent({
       let foundSet = this.foundDictionarySet;
       if (!foundSet || foundSet.size <= 0) return list;
 
-      let indexMap = new Map();
-      for (let i = 0; i < dictionary.length; i++) indexMap.set(dictionary[i], i);
-      return list.sort((a, b) => {
-        let aFound = foundSet.has(a?._id) ? 1 : 0;
-        let bFound = foundSet.has(b?._id) ? 1 : 0;
-        if (aFound !== bFound) return bFound - aFound;
-        return (indexMap.get(a) ?? 0) - (indexMap.get(b) ?? 0);
-      });
+      const found = [], rest = [];
+      for (const entry of list) (foundSet.has(entry?._id) ? found : rest).push(entry);
+      return found.concat(rest);
+    },
+    dictionaryPageCount() {
+      return Math.max(1, Math.ceil(this.filteredDictionary.length / this.dictionaryPageSize));
+    },
+    visibleDictionary() {
+      const page = Math.min(this.dictionaryPage, this.dictionaryPageCount);
+      return this.filteredDictionary.slice((page - 1) * this.dictionaryPageSize, page * this.dictionaryPageSize);
+    },
+    dictionaryRangeLabel() {
+      return formatPageRange(this.filteredDictionary.length, Math.min(this.dictionaryPage, this.dictionaryPageCount), this.dictionaryPageSize);
     },
     filteredRegexes() {
       let f = (this.regexFilter || "").trim().toLowerCase();
@@ -2731,7 +2746,48 @@ const config = Vue.defineComponent({
         this.dictionaryFilter = "";
       }
     },
+    invalidateEditorDictionaryIndex() {
+      this._editorDictionaryRevision = (this._editorDictionaryRevision || 0) + 1;
+      this._editorDictionaryIndex = null;
+    },
+    getEditorDictionaryIndex() {
+      if (!window.EditorDictionaryIndex) return null;
+      if (!this._editorDictionaryIndex || this._editorDictionarySource !== this.dictionary) {
+        const dictionary = Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
+        const index = window.EditorDictionaryIndex.create(dictionary, entry => this.getDictionaryDefinitionPairs(entry));
+        this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
+        this._editorDictionarySource = this.dictionary;
+      }
+      return this._editorDictionaryIndex;
+    },
+    async prepareEditorDictionaryIndex(isCurrent) {
+      if (!window.EditorDictionaryIndex) return true;
+      while (isCurrent()) {
+        if (this._editorDictionaryIndex && this._editorDictionarySource === this.dictionary) return true;
+        const source = this.dictionary;
+        const revision = this._editorDictionaryRevision || 0;
+        const dictionary = Vue.toRaw ? Vue.toRaw(source) : source;
+        const stale = () => !isCurrent() || source !== this.dictionary || revision !== (this._editorDictionaryRevision || 0);
+        const index = await window.EditorDictionaryIndex.createAsync(dictionary, entry => this.getDictionaryDefinitionPairs(entry), {
+          yieldTask: () => this.yieldEditorWork(), isCancelled: stale,
+        });
+        if (stale() || !index) continue;
+        this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
+        this._editorDictionarySource = source;
+        return true;
+      }
+      return false;
+    },
+    setDictionaryPage(page) {
+      this.dictionaryPage = Math.max(1, Math.min(page, this.dictionaryPageCount));
+      this.$nextTick(() => { const side = this.$refs.editorSide; if (side) side.scrollTop = 0; });
+    },
+    revealDictionaryEntry(dictId) {
+      const index = this.filteredDictionary.findIndex(word => String(word?._id) === String(dictId));
+      if (index >= 0) this.dictionaryPage = Math.floor(index / this.dictionaryPageSize) + 1;
+    },
     buildEnglishHLter(english) {
+      const dictionaryIndex = this.getEditorDictionaryIndex();
       let escapedEnglish = escapeHtml(english);
       let englishHLter = escapedEnglish;
       let modifiedEnglish = escapedEnglish;
@@ -2749,7 +2805,9 @@ const config = Vue.defineComponent({
       };
       let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
         if (!text) return;
-        for (const dictEntry of this.dictionary || []) {
+        const entries = dictionaryIndex && restrictMainFindLower
+          ? dictionaryIndex.keywordEntries(restrictMainFindLower) : this.dictionary || [];
+        for (const dictEntry of entries) {
           if (!dictEntry?._id) continue;
           if (restrictMainFindLower && String(dictEntry?.find || "").trim().toLowerCase() !== restrictMainFindLower) continue;
           for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
@@ -2797,7 +2855,8 @@ const config = Vue.defineComponent({
         let dictIdSet = new Set();
         addMatchingDictIds(dictIdSet, rawTagName, tagLower);
         addMatchingDictIds(dictIdSet, staticDynamicContent, tagLower);
-        let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent, this.dictionary);
+        let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent,
+          dictionaryIndex && tagLower ? dictionaryIndex.keywordEntries(tagLower) : this.dictionary);
         addHL({
           index: m.index,
           find: m[0],
@@ -2824,20 +2883,21 @@ const config = Vue.defineComponent({
 
       // highlight word from dictionary
       if (this.highlightDict) {
-        let defs = [];
-        for (const dictEntry of (this.dictionary || [])) {
+        let defs = dictionaryIndex ? dictionaryIndex.definitionsFor(modifiedEnglish) : [];
+        if (!dictionaryIndex) for (const dictEntry of (this.dictionary || [])) {
           if (!dictEntry?._id) continue;
           for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
             if (!pair?.find) continue;
             defs.push({ pair, dictEntry });
           }
         }
-        defs.sort((a, b) => (b.pair.find || '').length - (a.pair.find || '').length);
+        if (!dictionaryIndex) defs.sort((a, b) => (b.pair.find || '').length - (a.pair.find || '').length);
 
         for (const d of defs) {
           if (!d.pair.find || d.pair.find.length <= 0) continue;
           let escapedFind = escapeRegExp(d.pair.find);
-          let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
+          let regex = d.regex || new RegExp(`\\b${escapedFind}\\b`, "g");
+          regex.lastIndex = 0;
           while (m = regex.exec(modifiedEnglish)) {
             // skip if it overlaps a tag highlight
             if (overlapsExistingHL(m.index, m.index + m[0].length)) continue;
@@ -3000,7 +3060,8 @@ const config = Vue.defineComponent({
       return this.renderTextRanges(source, ranges);
     },
     refreshEditorHLter() {
-      if (!this.editorVisible) return;
+      if (!this.editorVisible || this.editorLoading || this.editorLoadError) return;
+      const focusedDictionaryId = document.activeElement?.closest?.('[data-dict-id]')?.getAttribute?.('data-dict-id');
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
         let editorBlock = this.editorBlocks[i];
         if (editorBlock.isTable) {
@@ -3036,12 +3097,13 @@ const config = Vue.defineComponent({
           this.syncHlScroll('translation', i);
         });
       }
+      if (focusedDictionaryId) this.revealDictionaryEntry(focusedDictionaryId);
       if (this.hlPopup.visible) {
         this.$nextTick(() => this.syncHlPopupEnglishHighlight());
       }
     },
     scheduleEditorHLterRefresh() {
-      if (!this.editorVisible) return;
+      if (!this.editorVisible || this.editorLoading || this.editorLoadError) return;
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
       this._hlterRefreshTimer = setTimeout(() => {
         this.refreshEditorHLter();
@@ -3049,6 +3111,7 @@ const config = Vue.defineComponent({
     },
     /** Rebuild english HLs immediately so foundDictionarySet / filteredDictionary match the current dictionary (avoids focus loss when a debounced refresh later re-sorts the sidebar list). */
     syncEditorHlterWithDictionaryNow() {
+      this.invalidateEditorDictionaryIndex();
       if (!this.editorVisible) return;
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
       this._hlterRefreshTimer = null;
@@ -3585,21 +3648,24 @@ const config = Vue.defineComponent({
         return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       };
       this.$nextTick(() => {
-        let altId = String(options?.altId || "");
-        if (altId) {
-          let altRow = document?.querySelector?.(`.side .dictAltRow[data-dict-id="${esc(dictId)}"][data-dict-alt-id="${esc(altId)}"]`);
-          let altInput = altRow?.querySelector?.('input:nth-of-type(2)');
-          this.scrollDictionaryEntryIntoView(altRow, { allowPageScroll: true });
-          altInput?.focus?.({ preventScroll: true });
-          altInput?.select?.();
-          return;
-        }
+        this.revealDictionaryEntry(dictId);
+        this.$nextTick(() => {
+          let altId = String(options?.altId || "");
+          if (altId) {
+            let altRow = document?.querySelector?.(`.side .dictAltRow[data-dict-id="${esc(dictId)}"][data-dict-alt-id="${esc(altId)}"]`);
+            let altInput = altRow?.querySelector?.('input:nth-of-type(2)');
+            this.scrollDictionaryEntryIntoView(altRow, { allowPageScroll: true });
+            altInput?.focus?.({ preventScroll: true });
+            altInput?.select?.();
+            return;
+          }
 
-        let row = document?.querySelector?.(`.side .dictRow[data-dict-id="${esc(dictId)}"]`);
-        let input = row?.querySelector?.('input:nth-of-type(2)');
-        this.scrollDictionaryEntryIntoView(row, { allowPageScroll: true });
-        input?.focus?.({ preventScroll: true });
-        input?.select?.();
+          let row = document?.querySelector?.(`.side .dictRow[data-dict-id="${esc(dictId)}"]`);
+          let input = row?.querySelector?.('input:nth-of-type(2)');
+          this.scrollDictionaryEntryIntoView(row, { allowPageScroll: true });
+          input?.focus?.({ preventScroll: true });
+          input?.select?.();
+        });
       });
     },
     createDictionaryEntryFromHlPopupSelection() {
@@ -3658,6 +3724,14 @@ const config = Vue.defineComponent({
 
       let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
       if (!item) return;
+      if (this.sideTab === 'dictionary' && item.dictEntryId) {
+        const page = this.dictionaryPage;
+        this.revealDictionaryEntry(item.dictEntryId);
+        if (page !== this.dictionaryPage) {
+          this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+          return;
+        }
+      }
       this.scrollHlPopupSelectionIntoView();
 
       let ids = Array.isArray(item.hlIds) ? item.hlIds : [];
@@ -3898,6 +3972,11 @@ const config = Vue.defineComponent({
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
+      if (this.editorVisible && (this.editorLoading || this.editorLoadError)) {
+        if (e.key === 'Escape') { e.preventDefault(); this.editorExit(); }
+        else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
+        return;
+      }
       if (this.collaborationConflictVisible || this.collaborationHistoryVisible) {
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
         return;
@@ -4031,9 +4110,10 @@ const config = Vue.defineComponent({
       return false;
     },
     async saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
-      if (this.navigationBusy || this.editorSaving || this.collaborationConflictVisible || this.collaborationHistoryVisible) return false;
+      if (this.editorLoading || this.editorLoadError || this.navigationBusy || this.editorSaving || this.collaborationConflictVisible || this.collaborationHistoryVisible) return false;
       this.navigationBusy = true;
       const ctx = this.captureCollaborationContext?.();
+      const cancelRevision = this._editorOpenCancelRevision || 0;
       const direction = reverse ? -1 : 1;
       const sortRows = () => this.filteredDescs.slice().sort((a, b) => {
         const modifier = this.currentSortDir === 'desc' ? -1 : 1;
@@ -4055,6 +4135,7 @@ const config = Vue.defineComponent({
           const position = sortRows().findIndex(d => d.filepath === filepath);
           if (position < 0) continue;
           const opened = await this.editFile(filepath, true, { automatic: true });
+          if (cancelRevision !== (this._editorOpenCancelRevision || 0)) return false;
           if (opened === false) continue;
           this.currentPage = Math.floor(position / this.pageSize) + 1;
           this.selectedFilepath = filepath;
@@ -4891,7 +4972,7 @@ const config = Vue.defineComponent({
       return this.descs.find(o => o.filepath == filepath);
     },
     async commentsOpenFile(filepath) {
-      if (this.navigationBusy || this.editorSaving || !this.getDescByFilepath(filepath)) return;
+      if (this.editorLoading || this.navigationBusy || this.editorSaving || !this.getDescByFilepath(filepath)) return;
       const context = this.captureCollaborationContext();
       this.navigationBusy = true;
       try {
@@ -4914,23 +4995,70 @@ const config = Vue.defineComponent({
     },
     async openClaimedEditorFile(filepath, returnToFileList, options = {}) {
       if (this._openingFile) return false;
-      this._openingFile = true;
+      const request = this.beginEditorOpen(filepath, returnToFileList);
+      if (!request) return false;
+      this._openingFile = request.run;
+      // Serialize claims so a cancelled response cannot release a newer file.
+      const previousClaim = this._editorClaimPending;
+      let releaseClaim;
+      this._editorClaimPending = new Promise(resolve => { releaseClaim = resolve; });
       const ctx = this.captureCollaborationContext();
+      const client = this._collaboration;
       try {
-        if (!await this.claimCollaborationFile(filepath, !!options.automatic)) return false;
-        if (!this.collaborationContextCurrent(ctx)) return false;
+        await this.yieldEditorPaint();
+        if (previousClaim) await previousClaim;
+        if (!request.isCurrent()) return false;
+        if (!await this.claimCollaborationFile(filepath, !!options.automatic, request.isCurrent)) {
+          if (request.isCurrent()) this.cancelEditorOpen();
+          return false;
+        }
+        if (!request.isCurrent() || !this.collaborationContextCurrent(ctx)) {
+          client?.leaveEdit();
+          if (this._editorOpenRun === request.run) this.cancelEditorOpen();
+          return false;
+        }
         this._editorCollabBase = this._collaboration?.fileBase(filepath);
-        this.openEditorFile(filepath, returnToFileList);
-        return true;
-      } catch (error) { this.collaborationFailure(error); return false; }
-      finally { this._openingFile = false; }
+        return await this.openEditorFile(filepath, returnToFileList, request);
+      } catch (error) {
+        if (request.isCurrent()) {
+          this.editorLoading = false;
+          this.editorLoadError = 'Could not open this file. Close it and try again. ' + error.message;
+          this.collaborationFailure(error);
+        }
+        return false;
+      }
+      finally {
+        releaseClaim();
+        if (this._openingFile === request.run) this._openingFile = false;
+        if (this._editorOpenRun === request.run && !request.isCurrent() && this.editorLoading) this.cancelEditorOpen();
+      }
     },
-    openEditorFile(filepath, returnToFileList = false) {
+    yieldEditorWork() {
+      return new Promise(resolve => setTimeout(resolve, 0));
+    },
+    async yieldEditorPaint() {
+      await this.$nextTick();
+      // A nextTick alone flushes Vue but does not allow the browser to paint.
+      await new Promise(resolve => {
+        if (typeof requestAnimationFrame === 'function' && !document.hidden) {
+          requestAnimationFrame(() => setTimeout(resolve, 0));
+        } else setTimeout(resolve, 0);
+      });
+    },
+    cancelEditorOpen() {
+      this._editorOpenRun = (this._editorOpenRun || 0) + 1;
+      this._openingFile = false;
+      this.editorLoading = false;
+      this.editorLoadError = '';
+      this.editorVisible = false;
+      this.restoreFileTableFocusAfterEditor();
+    },
+    beginEditorOpen(filepath, returnToFileList = false) {
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
         alert('Unexpected Error! cannot find the file you want to edit!');
-        return;
+        return null;
       }
       if (!this.editorVisible) this._fileTableReturnFocus = returnToFileList || !!document.activeElement?.closest?.('.fileTableScroll');
       this.selectFileRow(filepath);
@@ -4942,109 +5070,161 @@ const config = Vue.defineComponent({
       this.editorCompareActive = false;
       this.editorCompareTitle = '';
       this.editorCurrentEditingDesc = desc;
-      for (let i = 0; i < desc.translations.English.length; i++) {
-        let englishRaw = desc.translations.English[i] || "";
-        let translationRaw = desc.translations[this.lang]?.[i] || "";
-        let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
-        let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
-        let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
-        let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
-        let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
-        let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
-        let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(english);
-        let englishHLter = baseEnglishHLter;
-        let translationDiagnosticResult = this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
-        let translationHLter = this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
-        let multilineLineMismatch = false;
-        let tableColumns = [];
-        if (isTable) {
-          tableColumns = this.buildEditorTableColumns(english, translation);
-          isMultiline = tableColumns.some(col => col.isMultiline);
-          multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
-          let tableDiagnostics = [];
-          let tableWarningCount = 0;
-          let tableErrorCount = 0;
-          for (let col = 0; col < tableColumns.length; col++) {
-            const column = tableColumns[col];
-            tableWarningCount += Number(column?.diagnosticWarningCount || 0);
-            tableErrorCount += Number(column?.diagnosticErrorCount || 0);
-            for (const diagnostic of (column?.translationDiagnostics || [])) {
-              tableDiagnostics.push({ ...diagnostic, columnIndex: col });
-            }
-          }
-          translationDiagnosticResult = {
-            diagnostics: tableDiagnostics,
-            warningCount: tableWarningCount,
-            errorCount: tableErrorCount
-          };
-          englishHLter = "";
-          translationHLter = "";
-          HLs = [];
-        } else if (isMultiline) {
-          let diff = this.computeMultilineLineMismatch(english, translation);
-          englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
-          translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics), diff.trMismatch);
-          multilineLineMismatch = diff.mismatch;
-        }
-        this.editorOriginalTranslations.push(translation);
-        let engStats = this.computeTextStats(english);
-        let trStats = this.computeTextStats(translation);
-        this.editorBlocks.push({
-          isTable,
-          isMultiline,
-          tableColumns,
-          english,
-          englishHLter,
-          HLs,
-          englishDiffHtml: escapeHtml(String(english ?? '')),
-          translation,
-          translationHLter,
-          translationDiagnostics: translationDiagnosticResult.diagnostics,
-          diagnosticWarningCount: translationDiagnosticResult.warningCount,
-          diagnosticErrorCount: translationDiagnosticResult.errorCount,
-          translationDiffHtml: escapeHtml(String(translation ?? '')),
-          translationCompareColumns: [],
-          multilineLineMismatch,
-          metaLinesEn: engStats.lines,
-          metaLinesTr: trStats.lines,
-          metaColsEn: engStats.cols,
-          metaColsTr: trStats.cols,
-          metaVarsEn: engStats.vars,
-          metaVarsTr: trStats.vars,
-          metaKwEn: engStats.kw,
-          metaKwTr: trStats.kw,
-          metaDecorEn: engStats.decor,
-          metaDecorTr: trStats.decor,
-          translationReplace: "",
-          words: []
-        })
-      }
+      this.gamePreviewSourceSegments = [];
+      this.gamePreviewSegments = [];
+      this.editorLoadError = '';
+      this.editorLoading = true;
       this.editorVisible = true;
-      this.editorFocusedIndex = 0;
-      this.editorFocusedColumnIndex = 0;
-      this.$nextTick(() => {
-        let firstBlock = this.editorBlocks?.[0];
-        this.getEditorRef("translation", 0, firstBlock?.isTable ? 0 : null)?.focus?.();
-        this.autosizeEditorMultilineFields();
-        for (let i = 0; i < (this.editorBlocks || []).length; i++) {
-          if (!this.editorBlocks[i]?.isMultiline) continue;
-          if (this.editorBlocks[i]?.isTable) {
-            for (let col = 0; col < (this.editorBlocks[i].tableColumns || []).length; col++) {
-              if (!this.editorBlocks[i].tableColumns[col]?.isMultiline) continue;
-              this.syncHlScroll('english', i, col);
-              this.syncHlScroll('translation', i, col);
-            }
-            continue;
-          }
-          this.syncHlScroll('english', i);
-          this.syncHlScroll('translation', i);
-        }
-        this.refreshGamePreview();
+      this.dictionaryPage = 1;
+      const run = this._editorOpenRun = (this._editorOpenRun || 0) + 1;
+      const lang = this.lang, version = this.gameVersion, sourceIdentity = this.sourceIdentity;
+      const isCurrent = () => this._editorOpenRun === run && this.editorVisible
+        && this.editorCurrentEditingDesc === desc && this.lang === lang && this.gameVersion === version
+        && this.sourceIdentity === sourceIdentity;
+      return { desc, run, isCurrent };
+    },
+    async openEditorFile(filepath, returnToFileList = false, pendingRequest = null) {
+      const request = pendingRequest || this.beginEditorOpen(filepath, returnToFileList);
+      if (!request) return false;
+      const { desc, isCurrent } = request;
+      // Keep the draft aligned with the collaboration base captured at open,
+      // even if background sync changes the saved description between chunks.
+      const source = request.source || (request.source = {
+        english: [...desc.translations.English],
+        translations: [...(desc.translations[this.lang] || [])],
+        needsReview: desc.needsReview,
       });
-      if (this.sideTab === 'history') this.refreshHistory();
-      if (desc.needsReview) {
-        this.editorShowEnglishDiff = true;
-        this.prepareEditorEnglishDiff();
+      try {
+        await this.yieldEditorPaint();
+        if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
+        const blocks = [], originals = [];
+        const dictionaryRevision = this._editorDictionaryRevision || 0;
+        let sliceStart = Date.now();
+        for (let i = 0; i < source.english.length; i++) {
+          if (!isCurrent()) return false;
+          if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
+          let englishRaw = source.english[i] || "";
+          let translationRaw = source.translations[i] || "";
+          let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
+          let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
+          let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
+          let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
+          let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
+          let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
+          let { englishHLter: baseEnglishHLter, HLs } = isTable ? { englishHLter: '', HLs: [] } : this.buildEnglishHLter(english);
+          let englishHLter = baseEnglishHLter;
+          let translationDiagnosticResult = isTable ? {} : this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
+          let translationHLter = isTable ? '' : this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
+          let multilineLineMismatch = false;
+          let tableColumns = [];
+          if (isTable) {
+            tableColumns = this.buildEditorTableColumns(english, translation);
+            isMultiline = tableColumns.some(col => col.isMultiline);
+            multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
+            let tableDiagnostics = [];
+            let tableWarningCount = 0;
+            let tableErrorCount = 0;
+            for (let col = 0; col < tableColumns.length; col++) {
+              const column = tableColumns[col];
+              tableWarningCount += Number(column?.diagnosticWarningCount || 0);
+              tableErrorCount += Number(column?.diagnosticErrorCount || 0);
+              for (const diagnostic of (column?.translationDiagnostics || [])) {
+                tableDiagnostics.push({ ...diagnostic, columnIndex: col });
+              }
+            }
+            translationDiagnosticResult = {
+              diagnostics: tableDiagnostics,
+              warningCount: tableWarningCount,
+              errorCount: tableErrorCount
+            };
+            englishHLter = "";
+            translationHLter = "";
+            HLs = [];
+          } else if (isMultiline) {
+            let diff = this.computeMultilineLineMismatch(english, translation);
+            englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+            translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics), diff.trMismatch);
+            multilineLineMismatch = diff.mismatch;
+          }
+          originals.push(translation);
+          let engStats = this.computeTextStats(english);
+          let trStats = this.computeTextStats(translation);
+          blocks.push({
+            isTable,
+            isMultiline,
+            tableColumns,
+            english,
+            englishHLter,
+            HLs,
+            englishDiffHtml: escapeHtml(String(english ?? '')),
+            translation,
+            translationHLter,
+            translationDiagnostics: translationDiagnosticResult.diagnostics,
+            diagnosticWarningCount: translationDiagnosticResult.warningCount,
+            diagnosticErrorCount: translationDiagnosticResult.errorCount,
+            translationDiffHtml: escapeHtml(String(translation ?? '')),
+            translationCompareColumns: [],
+            multilineLineMismatch,
+            metaLinesEn: engStats.lines,
+            metaLinesTr: trStats.lines,
+            metaColsEn: engStats.cols,
+            metaColsTr: trStats.cols,
+            metaVarsEn: engStats.vars,
+            metaVarsTr: trStats.vars,
+            metaKwEn: engStats.kw,
+            metaKwTr: trStats.kw,
+            metaDecorEn: engStats.decor,
+            metaDecorTr: trStats.decor,
+            translationReplace: "",
+            words: []
+          });
+          if (Date.now() - sliceStart >= 8) {
+            await this.yieldEditorWork();
+            sliceStart = Date.now();
+          }
+        }
+        if (!isCurrent()) return false;
+        // A cloud dictionary update during preparation must not publish mixed matches.
+        if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
+        this.editorOriginalTranslations = originals;
+        this.editorBlocks = blocks;
+        this.editorLoading = false;
+        this.editorFocusedIndex = 0;
+        this.editorFocusedColumnIndex = 0;
+        this.$nextTick(() => {
+          if (!isCurrent()) return;
+          let firstBlock = this.editorBlocks?.[0];
+          this.getEditorRef("translation", 0, firstBlock?.isTable ? 0 : null)?.focus?.();
+          this.autosizeEditorMultilineFields();
+          for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+            if (!this.editorBlocks[i]?.isMultiline) continue;
+            if (this.editorBlocks[i]?.isTable) {
+              for (let col = 0; col < (this.editorBlocks[i].tableColumns || []).length; col++) {
+                if (!this.editorBlocks[i].tableColumns[col]?.isMultiline) continue;
+                this.syncHlScroll('english', i, col);
+                this.syncHlScroll('translation', i, col);
+              }
+              continue;
+            }
+            this.syncHlScroll('english', i);
+            this.syncHlScroll('translation', i);
+          }
+          this.refreshGamePreview();
+        });
+        if (this.sideTab === 'history') this.refreshHistory();
+        if (source.needsReview) {
+          this.editorShowEnglishDiff = true;
+          this.prepareEditorEnglishDiff();
+        }
+        return true;
+      } catch (error) {
+        if (isCurrent()) {
+          this.editorLoading = false;
+          this.editorLoadError = 'Could not prepare this file. Close it and try again. ' + error.message;
+        }
+        return false;
+      } finally {
+        if (this._editorOpenRun === request.run && !isCurrent() && this.editorLoading) this.cancelEditorOpen();
       }
     },
     copySpanToTranslation(e, editorBlock, editorIndex, columnIndex = 0) {
@@ -5093,7 +5273,7 @@ const config = Vue.defineComponent({
       }
     },
     async editorSave({ close = true } = {}) {
-      if (this.editorSaving) return false;
+      if (this.editorLoading || this.editorLoadError || this.editorSaving) return false;
       if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
@@ -5387,11 +5567,18 @@ const config = Vue.defineComponent({
       this.editorExit();
     },
     editorHaveChanges() {
+      if (this.editorLoading || this.editorLoadError) return false;
       let original = (this.editorOriginalTranslations || []).map(v => v ?? "");
       let current = (this.editorBlocks || []).map(b => b?.translation ?? "");
       return !arrayEquals(original, current);
     },
     editorExit() {
+      if (this.editorLoading || this.editorLoadError) {
+        this._editorOpenCancelRevision = (this._editorOpenCancelRevision || 0) + 1;
+        this.cancelEditorOpen();
+        this._collaboration?.leaveEdit();
+        return;
+      }
       if (this.editorHaveChanges() && !confirm('Are you sure you want to exit without saving?')) return;
       if (this.editorSaving || this.navigationBusy) return;
       this.saveSettings();
@@ -5608,7 +5795,9 @@ const config = Vue.defineComponent({
       }
     },
     addVocab() {
-      this.dictionary.unshift({ _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" });
+      const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" };
+      this.dictionary.unshift(entry);
+      this.focusDictionaryEntryReplaceInput(entry._id);
       this.saveSettings();
     },
     removeVocab(word) {
