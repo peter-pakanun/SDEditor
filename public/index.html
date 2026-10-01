@@ -314,14 +314,6 @@
           <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
           <button ref="settingsButton" @click="openSettings()">Settings</button>
         </nav>
-        <div class="collaborationStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
-          <span class="collaborationConnection" :class="{ connected: collaborationState.connected }" aria-hidden="true"></span>
-          <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
-          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Source version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Version {{ collaborationShortVersion }}</span>
-          <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
-          <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
-          <span v-if="collaborationState.error" class="collaborationError" role="alert">{{ collaborationState.error }}</span>
-        </div>
         <fieldset id="fileFilterPanel" class="fileFilters" aria-label="File status filters" v-show="fileFiltersVisible" @keydown.esc.stop.prevent="closeFileFilters">
           <div class="fileFilterChoices">
             <label v-for="option in fileFilterOptions" :key="option.key" class="filterChip" :class="[{ selected: selectedFileFilters.includes(option.key) }, option.tone]">
@@ -334,7 +326,6 @@
       </header>
 
       <main class="workspaceContent">
-      <p v-if="collaborationNotice" class="collaborationNotice" role="status">{{ collaborationNotice }}</p>
 
       <div v-if="importDialogVisible" class="importDialogOverlay" @click.self="closeImportDialog">
         <div class="box importDialogBox">
@@ -370,9 +361,9 @@
             <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
             <td><button class="fileOpenButton" tabindex="-1" @click.stop="openFileRow(desc.filepath)" :aria-label="'Edit ' + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.needsReview" class="fileReviewLabel">Needs review</span></td>
             <td data-label="English"><span v-html="desc.english"></span></td>
-            <td class="translationTr collaborationCell" :class="{ collaborationSelected: collaborationPeersFor(desc.filepath).length, collaborationEditing: collaborationEditing(desc.filepath) }" :style="collaborationCellStyle(desc.filepath)" :data-label="lang + ' translation'">
-              <div v-if="collaborationPeersFor(desc.filepath).length" class="collaborationPeerLabels" aria-label="Other translators on this file">
-                <span v-for="peer in collaborationPeersFor(desc.filepath)" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerLabel(peer, desc.filepath) }}</span>
+            <td class="translationTr collaborationCell" :class="{ collaborationSelected: collaborationPeersFor(desc.filepath).length, collaborationEditing: collaborationEditing(desc.filepath) }" :style="collaborationCellStyle(desc.filepath)" :data-label="lang + ' translation'" v-tooltip="collaborationSelectionLabel(desc.filepath)" :aria-description="collaborationSelectionLabel(desc.filepath) || undefined">
+              <div v-if="collaborationEditing(desc.filepath)" class="collaborationPeerLabels" aria-label="Other translators editing this file">
+                <span v-for="peer in collaborationEditingPeersFor(desc.filepath)" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerLabel(peer, desc.filepath) }}</span>
               </div>
               <span v-html="desc.translation"></span>
             </td>
@@ -388,13 +379,24 @@
       </main>
 
       <footer class="workspaceFooter">
+        <div class="workspaceFooterSummary">
         <div class="workspaceStatus" aria-label="Workspace status counts">
+          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Source version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Version {{ collaborationShortVersion }}</span>
           <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
           <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill error" title="Files with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ diagnosticScanErrorFileCount }}</strong></span>
           <span class="statusPill review" title="Files whose English source changed since the last translation save"><span class="statusDot" aria-hidden="true"></span>Review <strong>{{ statistic.needsReview }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill warning" title="Files with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ diagnosticScanWarningFileCount }}</strong></span>
           <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
+          <div class="collaborationStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
+            <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
+            <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+            <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
+            <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
+          </div>
+        </div>
+        <p v-if="collaborationState.error" class="collaborationFooterMessage collaborationError" role="alert">{{ collaborationState.error }}</p>
+        <p v-if="collaborationNotice && collaborationNotice !== collaborationState.error" class="collaborationFooterMessage" role="status">{{ collaborationNotice }}</p>
         </div>
         <div class="workspaceFooterRight">
         <ul v-if="collaborationParticipants.length" class="collaborationAvatars" aria-label="Collaborators in this workspace">
@@ -483,19 +485,19 @@
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
-          <div class="collaborationEditorStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
+          <div class="collaborationEditorStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <div class="collaborationStatus">
-              <span class="collaborationConnection" :class="{ connected: collaborationState.connected }" aria-hidden="true"></span>
-              <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+              <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
+              <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+              <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
               <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
               <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
             </div>
-            <p v-if="collaborationState.error" class="collaborationError" role="alert">{{ collaborationState.error }}</p>
-            <div v-if="collaborationEditorPeers.length" class="collaborationPeerLabels" aria-label="Other translators editing this file">
+          </div>
+            <div v-if="collaborationEditorPeers.length" class="collaborationPeerLabels collaborationEditorPeers" aria-label="Other translators editing this file">
               <span v-for="peer in collaborationEditorPeers" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerName(peer) }} · Editing this file</span>
             </div>
-          </div>
-          <p v-if="collaborationNotice" class="collaborationNotice" role="status">{{ collaborationNotice }}</p>
+          <p v-if="collaborationEditorNotice" class="collaborationNotice" role="status">{{ collaborationEditorNotice }}</p>
           <div v-if="consistencyResolutionNotice" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</div>
           <div v-if="editorCompareActive" class="compareBanner">
             <span>{{ editorCompareTitle }}</span>

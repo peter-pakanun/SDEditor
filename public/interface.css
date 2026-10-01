@@ -211,7 +211,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   border-top: 1px solid var(--ui-border);
   box-shadow: 0 -3px 16px rgba(0, 0, 0, .04);
 }
-.workspaceStatus { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ui-muted); }
+.workspaceFooterSummary { flex: 1 1 520px; min-width: 0; }
+.workspaceStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; color: var(--ui-muted); }
 .workspaceLoaded { font-size: 12px; white-space: nowrap; }
 .workspaceLoaded strong { color: var(--color-font); font-variant-numeric: tabular-nums; }
 .statusPill { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
@@ -280,6 +281,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .workspace #table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: var(--ui-muted); }
   .workspace #table td.translationTr > span:empty::after { content: 'No translation yet'; font-style: italic; color: var(--ui-muted); }
   .workspaceFooter { padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)); flex-direction: column; align-items: stretch; gap: 8px; }
+  .workspaceFooterSummary { flex: none; }
   .workspaceStatus { justify-content: center; }
   .workspacePagination { justify-content: center; gap: 6px; }
   .fileRange { flex: 1; margin-right: 0; font-size: 11px; }
@@ -352,11 +354,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 
 /* Translation collaboration: presence stays distinct from file status colors. */
 .collaborationStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; font-size: 12px; line-height: 1.5; }
-.workspaceHeader > .collaborationStatus { grid-column: 1 / -1; padding-top: 4px; border-top: 1px solid var(--ui-border); }
 .collaborationStatus button { padding: 4px 9px; min-height: 28px; font-size: 12px; }
 .collaborationConnection { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-muted); flex: none; }
 .collaborationConnection.connected { background: var(--ui-saved); }
-.collaborationVersion { color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+.collaborationConnection.warning { background: var(--ui-review); }
+.collaborationConnection.error { background: var(--ui-missing); }
+.collaborationVersion { color: var(--ui-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.collaborationFooterMessage { margin: 5px 0 0; color: var(--ui-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .workspaceFooterRight { display: flex; align-items: center; justify-content: flex-end; gap: 16px; min-width: 0; max-width: 100%; margin-left: auto; }
 .workspaceFooterRight .workspacePagination { flex: none; }
 .collaborationAvatars { display: flex; align-items: center; gap: 5px; list-style: none; padding: 3px; margin: 0; min-width: 0; max-width: 248px; overflow-x: auto; scrollbar-width: thin; }
@@ -373,7 +377,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 [data-theme="dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing,
 [data-theme="modern-dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .28), rgba(0, 0, 0, .28)); }
 .collaborationEditorStatus { margin: 9px 0; padding: 9px 12px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element); }
-.collaborationEditorStatus .collaborationPeerLabels { margin: 8px 0 0; }
+.collaborationEditorPeers { margin: 9px 0; }
 .collaborationNotice { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }
 .collaborationError { color: var(--ui-missing); white-space: pre-wrap; overflow-wrap: anywhere; }
 .collaborationLocalHistoryLabel { color: var(--ui-muted); font-size: 12px; margin: 5px 0 8px; }

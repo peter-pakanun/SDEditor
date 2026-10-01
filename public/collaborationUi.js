@@ -53,6 +53,20 @@
         if (state.identity) return 'Waiting to join collaboration';
         return 'Local workspace';
       },
+      collaborationNeedsAttention() {
+        return !!(this.collaborationState.error || this.collaborationPendingCount || this.collaborationConflicts.length
+          || (this.collaborationAvailable && !this.collaborationState.connected));
+      },
+      collaborationConnectionTone() {
+        return this.collaborationState.error ? 'error' : this.collaborationNeedsAttention ? 'warning'
+          : this.collaborationState.connected ? 'connected' : '';
+      },
+      collaborationEditorNotice() {
+        const notice = this.collaborationNotice || '';
+        if (['Translation conflict resolved.', 'Marked as reviewed (unchanged).'].includes(notice)
+          || /^Imported \d+ translated files\.$/.test(notice)) return '';
+        return notice === this.collaborationState.error ? '' : notice;
+      },
       collaborationContext() {
         const state = this.collaborationState, identity = state.identity || {};
         return [identity.accountId || this.cloudUser?.id || '', state.roomId, identity.game || this.gameVersion, identity.sourceHash || state.sourceHash, identity.language || this.lang].join('|');
@@ -98,7 +112,9 @@
         const first = word => typeof Intl.Segmenter === 'function' ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(word)][0]?.segment || '' : Array.from(word)[0] || '';
         return [first(words[0] || 'T'), words.length > 1 ? first(words[words.length - 1]) : ''].join('').toLocaleUpperCase();
       },
-      collaborationPeerLabel(peer, filepath) { return `${this.collaborationPeerName(peer)} · ${peer.editing === filepath ? 'Editing' : 'Selected'}`; },
+      collaborationPeerLabel(peer, filepath) { return this.collaborationPeerName(peer) + (peer.editing === filepath ? ' · Editing' : ''); },
+      collaborationEditingPeersFor(filepath) { return this.collaborationPeersFor(filepath).filter(peer => peer.editing === filepath); },
+      collaborationSelectionLabel(filepath) { return this.collaborationPeersFor(filepath).filter(peer => peer.editing !== filepath).map(peer => this.collaborationPeerName(peer)).join(', '); },
       collaborationEditing(filepath) { return this.collaborationPeersFor(filepath).some(peer => peer.editing === filepath); },
       collaborationCellStyle(filepath) { const peer = this.collaborationPeersFor(filepath)[0]; return peer ? { '--collaboration-color': peerColor(peer) } : {}; },
       collaborationResetViews() {

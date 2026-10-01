@@ -43,8 +43,10 @@ test('file presence excludes this browser and clears stale presence when disconn
   ];
   assert.deepEqual(app.collaborationPeersFor('stat.txt').map(peer => peer.name), ['Bob', 'Carol']);
   assert.equal(app.collaborationEditing('stat.txt'), true);
-  assert.equal(app.collaborationPeerLabel(app.collaborationState.peers[1], 'stat.txt'), 'Bob · Selected');
+  assert.equal(app.collaborationPeerLabel(app.collaborationState.peers[1], 'stat.txt'), 'Bob');
   assert.equal(app.collaborationPeerLabel(app.collaborationState.peers[2], 'stat.txt'), 'Carol · Editing');
+  assert.equal(app.collaborationSelectionLabel('stat.txt'), 'Bob');
+  assert.deepEqual(app.collaborationEditingPeersFor('stat.txt').map(peer => peer.name), ['Carol']);
   app.collaborationState.connected = false;
   assert.equal(app.collaborationPeersFor('stat.txt').length, 0);
   assert.equal(app.collaborationEditing('stat.txt'), false);
@@ -73,6 +75,29 @@ test('participant avatars include self, deduplicate accounts, and mark away only
   assert.deepEqual(peers, before, 'Avatar aggregation never mutates live session presence.');
   app.collaborationState.connected = false;
   assert.equal(app.collaborationParticipants.length, 0, 'Disconnected room participants must disappear rather than remain stale.');
+});
+
+test('healthy collaboration is quiet in the editor while failures, pending work and conflicts remain visible', () => {
+  const { app } = editor();
+  assert.equal(app.collaborationNeedsAttention, false);
+  assert.equal(app.collaborationConnectionTone, 'connected');
+  for (const success of ['Translation conflict resolved.', 'Marked as reviewed (unchanged).', 'Imported 2 translated files.']) {
+    app.collaborationNotice = success; assert.equal(app.collaborationEditorNotice, '');
+  }
+  app.collaborationNotice = 'No available files in this direction.';
+  assert.equal(app.collaborationEditorNotice, app.collaborationNotice);
+  app.collaborationState.pendingCount = 1;
+  assert.equal(app.collaborationNeedsAttention, true); assert.equal(app.collaborationConnectionTone, 'warning');
+  app.collaborationState.pendingCount = 0; app.collaborationState.conflicts = [conflict()];
+  assert.equal(app.collaborationNeedsAttention, true);
+  app.collaborationState.conflicts = []; app.collaborationState.error = 'Access expired';
+  app.collaborationNotice = 'Access expired';
+  assert.equal(app.collaborationNeedsAttention, true); assert.equal(app.collaborationConnectionTone, 'error');
+  assert.equal(app.collaborationEditorNotice, '', 'Do not repeat the same error below the warning banner.');
+  app.collaborationState.error = ''; app.collaborationState.connected = false;
+  assert.equal(app.collaborationNeedsAttention, true);
+  app.collaborationState.roomId = '';
+  assert.equal(app.collaborationNeedsAttention, false, 'Local editing has no healthy sync banner.');
 });
 
 test('avatars keep namesakes separate and initials preserve Unicode graphemes', () => {
