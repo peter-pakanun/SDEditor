@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="interface.css">
   <link rel="stylesheet" href="settings-ui.css">
   <link rel="stylesheet" href="diagnostics-ui.css">
+  <link rel="stylesheet" href="comments.css">
   <title>SDEditor</title>
 </head>
 <body>
@@ -287,7 +288,7 @@
     </div>
 
 
-    <div class="workspace" v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" :inert="showSetting">
+    <div class="workspace" :class="{ commentsOpen: commentsAllVisible }" v-if="gameVersionSelected && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" :inert="showSetting">
       <header class="workspaceHeader">
         <div class="workspaceBrand">
           <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
@@ -404,6 +405,10 @@
             <span class="collaborationAvatar" :class="{ away: participant.away }" :style="{ '--collaboration-color': collaborationPeerColor(participant) }" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(participant)" v-tooltip="collaborationParticipantLabel(participant)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(participant) }}</span></span>
           </li>
         </ul>
+        <button type="button" ref="commentsAllToggle" class="commentsIconButton" :class="{ active: commentsAllVisible }" @click="commentsToggleAll" :aria-expanded="commentsAllVisible" aria-controls="allCommentsSidebar" :aria-label="'Show all comments' + (commentsUnreadTotal ? ', ' + commentsUnreadTotal + ' unread' : '')" title="Show all comments">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg>
+          <span v-if="commentsUnreadTotal" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsUnreadTotal) }}</span>
+        </button>
         <nav class="workspacePagination" aria-label="File pagination">
           <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ fileRangeLabel }}</span>
           <button type="button" class="paginationArrow" @click="prevPage" :disabled="currentPage <= 1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
@@ -411,6 +416,29 @@
         </nav>
         </div>
       </footer>
+      <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc.prevent="commentsCloseAll">
+        <header class="commentsPanelHeader">
+          <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · All languages and source versions</p></div>
+          <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments">×</button>
+        </header>
+        <p v-if="!commentsEligible" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
+        <template v-else>
+          <div class="commentsToolbar"><span>{{ commentsUnreadTotal }} unread</span><button type="button" @click="commentsRefreshAll" :disabled="commentsAllLoading">Refresh</button></div>
+          <p v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</p>
+          <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
+          <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllLoading">
+            <article v-for="comment in commentsAllItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
+              <button type="button" class="commentFileLink" @click="commentsOpenFile(comment.filepath)" :disabled="!getDescByFilepath(comment.filepath) || navigationBusy" :title="getDescByFilepath(comment.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ comment.filepath }}</button>
+              <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
+              <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different hash · {{ comment.sourceHash.slice(0, 8) }}</span></div>
+              <p class="commentBody">{{ comment.body }}</p>
+            </article>
+            <p v-if="!commentsAllItems.length && !commentsAllLoading && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
+            <p v-if="commentsAllLoading" class="commentsEmpty" role="status">Loading comments…</p>
+            <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllLoading">Load older comments</button>
+          </div>
+        </template>
+      </aside>
     </div>
 
     <div class="editor" v-if="editorVisible" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
@@ -581,18 +609,18 @@
         </div>
       </div>
 
-      <div class="side fixed">
+      <div class="side fixed" :class="{ commentsActive: sideTab === 'comments' }">
         <div class="twoSided sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
             <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
             <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
+            <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
           </div>
-          <button v-if="sideTab !== 'history'" @click="sideAddClicked()" :title="sideTab === 'regex' ? 'Add a Regex rule' : 'Add a Dictionary entry'">{{ sideTab === 'regex' ? 'Add rule' : 'Add entry' }}</button>
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''">
+          <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
           <div class="editBlock" v-for="word in filteredDictionary" :key="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided dictEntryBlock">
               <div>
@@ -621,7 +649,7 @@
         </div>
 
         <div v-if="sideTab === 'regex'">
-          <input class="sideFilter" type="search" v-model="regexFilter" ref="regexFilterInput" placeholder="Search regex rules…" aria-label="Search Regex rules" @keydown.esc="regexFilter = ''">
+          <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="regexFilter" ref="regexFilterInput" placeholder="Search regex rules…" aria-label="Search Regex rules" @keydown.esc="regexFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Regex rule">Add rule</button></div>
           <div class="editBlock" v-for="regex in filteredRegexes">
             <div class="twoSided">
               <div>
@@ -638,6 +666,33 @@
             </div>
           </div>
         </div>
+
+        <section v-if="sideTab === 'comments'" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
+          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>Shared across all languages and source versions</p></div></header>
+          <p v-if="!commentsEligible" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
+          <template v-else>
+            <div class="commentsToolbar"><span>{{ commentsFileUnread }} unread</span><button type="button" @click="commentsRefreshFile" :disabled="commentsFileLoading">Refresh</button></div>
+            <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
+            <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
+            <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileLoading">
+              <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
+                <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different hash · {{ comment.sourceHash.slice(0, 8) }}</span></div>
+                <p class="commentBody">{{ comment.body }}</p>
+              </article>
+              <p v-if="!commentsFileItems.length && !commentsFileLoading && !commentsFileError" class="commentsEmpty">No comments yet. Share a thought about this file.</p>
+              <p v-if="commentsFileLoading" class="commentsEmpty" role="status">Loading comments…</p>
+              <button v-if="commentsFileHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreFile" :disabled="commentsFileLoading">Load older comments</button>
+            </div>
+            <form class="commentsComposer" @submit.prevent="commentsSubmit">
+              <label for="fileCommentDraft">Add a comment <span>· {{ cloudUser.language }}</span></label>
+              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" placeholder="Share your thoughts with all translators…" :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
+              <p v-if="!sourceIdentity" class="commentsEmpty">Load a source version to post a comment.</p>
+              <p v-if="commentsPostError" class="commentsError" role="alert">{{ commentsPostError }}</p>
+              <div class="commentsComposerActions"><span>Ctrl+Enter to post</span><button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button></div>
+            </form>
+          </template>
+        </section>
 
         <div v-if="sideTab === 'history'" class="historyPanel">
           <div v-if="!editorCurrentEditingDesc" class="historyEmpty">Open a file to see history</div>
@@ -1035,6 +1090,7 @@
   <script src="collaborationSync.js"></script>
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>
+  <script src="commentsUi.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

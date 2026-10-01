@@ -111,7 +111,7 @@ Terminology warnings come from the last manual scan; edit translations or dictio
 
 When signed in with your assigned language selected, matching game and source versions collaborate automatically. A colored outline marks another translator's selected file; hover over its translation cell to see their name. While they edit, the cell darkens and their Editing badge stays visible. Opening an occupied file asks whether you want to edit alongside them, and the editor shows everyone currently editing it. Names and text remain readable in both themes.
 
-Participant circles appear just before pagination. Their borders match the file-selection colors, and grey initials indicate Away after two minutes without activity or when the tab is hidden. Hover or focus a circle to see its name and status. Returning to the tab or using the keyboard or pointer marks it active again; an away translator's open file is still skipped by automatic navigation.
+Participant circles appear before the **Show all comments** button and pagination. Their borders match the file-selection colors, and grey initials indicate Away after two minutes without activity or when the tab is hidden. Hover or focus a circle to see its name and status. Returning to the tab or using the keyboard or pointer marks it active again; an away translator's open file is still skipped by automatic navigation.
 
 Only saved changes are shared. In the bottom status bar, the source version appears before the loaded-file count, while the sync LED and status follow Saved. The editor shows collaboration warnings and errors only; healthy sync stays quiet. **Retry sync** reconnects. **Resolve translation conflicts** compares Base, Yours, and Shared for each conflicting translation entry and lets you choose or edit the result. Changes to separate entries merge automatically; multiline and table content within one entry stays together. Closing a conflict dialog preserves unresolved work.
 
@@ -125,6 +125,16 @@ The editor shows each string as a block:
 - **Top side (English)**: The original text you need to translate
 - **Bottom side (Translation)**: Where you type your translation
 - **Special items highlighted**: Variables and keyword tags are highlighted in both columns
+
+### File Comments
+
+Open a file and select **Comments**, beside **History** in the right pane, to discuss that file. Comments are shared with every assigned translator across all team languages and source hashes. Only the selected game (**PoE1** or **PoE2**) and the file path identify a discussion. Importing a new source version therefore keeps its file discussions available; PoE1 and PoE2 discussions remain separate.
+
+Each comment shows its author's name, team language, and time. A **Different hash** badge shows the source hash prefix when the comment was posted from a version other than the source currently loaded; hover over it for the full hash. Your administrator-assigned language identifies your team even if you select another language in the editor. Sign in with an assigned account to read comments; load a source file to post to its discussion.
+
+The red numbered badge on **Comments** counts unread comments for the open file. **Show all comments**, between the participant avatars and pagination, has the unread total for the selected game. Click it to toggle the right sidebar containing comments from every file, including files absent from your current source. Use a comment's file control to open an available file; **Load older comments** retrieves earlier posts.
+
+Unread counts exclude your own comments and are saved for your account. A comment is marked read when its card is visible in an open comments panel while the browser tab is visible. Opening a panel does not mark older, unloaded or off-screen comments read. Scrolling through either panel updates the same unread state. Comments refresh while the editor is visible; **Refresh** checks immediately. If a request fails, the panel shows an error and retains the text you were composing for retry.
 
 ## Text Elements to Watch
 
@@ -213,7 +223,7 @@ Selecting an autocomplete option shows its Dictionary entry's **TL note** in a s
 The **Dictionary** tab lets you define how specific terms should be translated.
 
 **Adding a Dictionary Entry:**
-1. Click **Add entry** beside the Dictionary tabs
+1. Click **Add entry** beside the search box underneath the Dictionary tabs
 2. Enter a word or phrase in the "Find" field
 3. Enter the translation in the "Replace" field
 4. (Optional) Add a **TL note** explaining the translation; it is shared with the Dictionary when cloud sync is enabled.
@@ -263,6 +273,8 @@ Google backup synchronizes personal settings and the assigned language's shared 
 ### Regex (Pattern-Based Replacements)
 
 The **Regex** tab lets you define pattern-matching rules. These are useful for translating complex phrases with variations.
+
+Use **Add rule** beside the search box underneath the tabs to create a rule.
 
 See [Regex Guide](regex_guide.md) for detailed information on how to use Regex replacements.
 

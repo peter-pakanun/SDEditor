@@ -44,6 +44,51 @@ function description(name, flags = {}, english = `English ${name}`, thai = `р╕ар
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
 const defaultStatuses = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
 
+test('opening file comments preserves a dirty translation when saving fails', async () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('one')];
+  editor.editorVisible = true;
+  editor.commentsAllVisible = true;
+  editor.captureCollaborationContext = () => ({});
+  editor.editorHaveChanges = () => true;
+  editor.editorSave = async () => false;
+  editor.editFile = () => assert.fail('A failed save must not replace the current editor');
+  await editor.commentsOpenFile('test/one.txt');
+  assert.equal(editor.commentsAllVisible, true);
+  assert.equal(editor.navigationBusy, false);
+});
+
+test('opening file comments stops if the workspace changes while saving', async () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('one')];
+  editor.editorVisible = true;
+  editor.captureCollaborationContext = () => ({});
+  editor.editorHaveChanges = () => true;
+  editor.editorSave = async () => true;
+  editor.collaborationContextCurrent = () => false;
+  editor.editFile = () => assert.fail('An old workspace request must not open a file');
+  await editor.commentsOpenFile('test/one.txt');
+  assert.equal(editor.navigationBusy, false);
+});
+
+test('opening comments from the workspace uses file claiming and focuses the comments panel', async () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('one')];
+  editor.commentsAllVisible = true;
+  editor.captureCollaborationContext = () => ({});
+  editor.collaborationContextCurrent = () => true;
+  let focused = false;
+  editor.$refs.commentsFileList = { focus() { focused = true; } };
+  editor.editFile = async (filepath, returnToList) => {
+    assert.equal(filepath, 'test/one.txt'); assert.equal(returnToList, true); return true;
+  };
+  await editor.commentsOpenFile('test/one.txt');
+  assert.equal(editor.commentsAllVisible, false);
+  assert.equal(editor.sideTab, 'comments');
+  assert.equal(focused, true);
+  assert.equal(editor.navigationBusy, false);
+});
+
 function element(tagName, properties = {}, parentElement = null) {
   return {
     tagName, parentElement,

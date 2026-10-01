@@ -99,7 +99,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -4870,6 +4870,21 @@ const config = Vue.defineComponent({
     },
     getDescByFilepath(filepath) {
       return this.descs.find(o => o.filepath == filepath);
+    },
+    async commentsOpenFile(filepath) {
+      if (this.navigationBusy || this.editorSaving || !this.getDescByFilepath(filepath)) return;
+      const context = this.captureCollaborationContext();
+      this.navigationBusy = true;
+      try {
+        if (this.editorVisible && this.editorHaveChanges() && !await this.editorSave({ close: false })) return;
+        if (!this.collaborationContextCurrent(context)) return;
+        const opened = await this.editFile(filepath, true);
+        if (opened === false || !this.collaborationContextCurrent(context)) return;
+        this.commentsAllVisible = false;
+        this.sideTab = 'comments';
+        await this.$nextTick();
+        this.$refs.commentsFileList?.focus();
+      } finally { this.navigationBusy = false; }
     },
     editFile(filepath, returnToFileList = false, options = {}) {
       if (!this._collaboration) {
