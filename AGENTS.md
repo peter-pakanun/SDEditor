@@ -7,6 +7,12 @@ Minimal, verified facts for working in this repo.
 - **PoE StatDescriptions.zip translation editor** — vanilla JS SPA, Vue 3 loaded via CDN, Express dev server.
 - Single monolithic Vue 3 Options API component in `public/index.js` (~3000 lines). No build step, no bundler, no router.
 
+## Platform Support
+
+- **Desktop-first:** supported use is a desktop or laptop browser with a keyboard and mouse or trackpad.
+- Mobile phone and tablet support is discontinued. Mobile layouts, touch-only workflows, and desktop/mobile parity are outside the scope of future work unless explicitly requested.
+- Prioritize desktop layouts, keyboard navigation, and pointer interactions. Continue accommodating resized desktop windows; this does not require mobile support.
+
 ## Commands
 
 | Command | Purpose |
@@ -36,6 +42,7 @@ Env vars: `PORT` (3333), `HOST` (127.0.0.1), `NO_OPEN_BROWSER`, `LOG_REQUESTS`, 
 - No test framework. Manual testing via `?testMode=1` URL param (e.g. `http://127.0.0.1:3333/?testMode=1&lang=Thai`).
 - Test mode loads `dummyFiles.js` and bypasses IndexedDB entirely.
 - Combine `--no-open` with test mode for automated runs.
+- Validate UI changes in desktop viewports with keyboard and mouse/trackpad workflows. Mobile device checks are not required.
 
 ## Toolchain quirks
 

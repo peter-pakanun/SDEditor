@@ -1,6 +1,12 @@
 # SDEditor
 
-Browser-based editor for `StatDescriptions.zip` (stat description translation files).
+Desktop-first browser-based editor for `StatDescriptions.zip` (stat description translation files).
+
+## Platform Support
+
+SDEditor supports desktop and laptop browsers with a keyboard and mouse or trackpad. As of October 1, 2026, mobile phone and tablet support is discontinued.
+
+Future UI design, bug fixes, and validation target desktop workflows, including resized desktop windows. Mobile layouts, touch-only workflows, and desktop/mobile feature parity are outside the supported scope.
 
 ## Features
 
@@ -16,7 +22,7 @@ Browser-based editor for `StatDescriptions.zip` (stat description translation fi
 
 ## Quick Start (Local)
 
-Prerequisites: Node.js (for the local web server) and a modern browser.
+Prerequisites: Node.js (for the local web server) and a modern desktop browser.
 
 ```bash
 npm install

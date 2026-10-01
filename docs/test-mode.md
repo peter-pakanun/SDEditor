@@ -4,6 +4,10 @@ SDEditor normally starts with an empty table and requires you to use the 📦 **
 
 For debugging and automation (including AI-driven testing), the app supports a `testMode` that skips the import requirement and loads built-in dummy data instead.
 
+## Validation Scope
+
+UI validation targets desktop and laptop browsers, including resized desktop windows, keyboard navigation, and mouse/trackpad interactions. Mobile phone and tablet layouts and touch-only workflows are unsupported and do not require validation. See [Platform Support](../README.md#platform-support).
+
 ## Usage
 
 - Enable test mode:

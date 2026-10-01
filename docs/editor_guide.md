@@ -3,6 +3,8 @@
 
 This guide explains how to use the SDEditor to translate game text efficiently.
 
+SDEditor is desktop-first. Use a desktop or laptop browser with a keyboard and mouse or trackpad; mobile phones and tablets are unsupported. This guide covers desktop workflows. See [Platform Support](../README.md#platform-support) for the project scope.
+
 ## Overview
 
 The editor helps you translate game stat descriptions while maintaining formatting, variables, and special tags. It shows you the original English text and lets you work with a Dictionary and Regex system to speed up your translation work.

@@ -1,5 +1,6 @@
 # SDEditor
-*browser-based editor for `StatDescriptions.zip` (stat translation).*
+*desktop-first browser-based editor for `StatDescriptions.zip` (stat translation).*
+Use a desktop or laptop browser with a keyboard and mouse or trackpad. Mobile phones and tablets are unsupported.
 You can access the live version [here](<https://sdeditor.pages.dev/>), or if you prefer not to use online version you can clone the [repo](<https://github.com/peter-pakanun/SDEditor>) and run it locally.
 
 ## How to use
