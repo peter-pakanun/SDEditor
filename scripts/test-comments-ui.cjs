@@ -49,6 +49,79 @@ function fixture(handler = async () => ({ total: 0, files: [], items: [], nextCu
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
 
+test('all comments group nonadjacent rows by exact filepath across languages and hashes', async () => {
+  const { app } = fixture();
+  assert.equal(app.commentsAllGroups.length, 0);
+  const items = [
+    comment(9, { filepath: 'Metadata/other.txt', language: 'Thai' }),
+    comment(8),
+    comment(7, { filepath: 'Metadata/other.txt', language: 'Japanese', sourceHash: HASH_B, unread: false }),
+    comment(6, { filepath: 'Metadata/third.txt' }),
+    comment(5, { language: 'French', sourceHash: HASH_B }),
+    comment(4, { filepath: 'Metadata/Test.txt' }),
+  ];
+  app.commentsAllFeed.items = items;
+  const groups = app.commentsAllGroups;
+  assert.deepEqual(copy(groups.map(group => ({ filepath: group.filepath, ids: group.items.map(item => item.id) }))), [
+    { filepath: 'Metadata/other.txt', ids: [9, 7] },
+    { filepath: 'Metadata/test.txt', ids: [8, 5] },
+    { filepath: 'Metadata/third.txt', ids: [6] },
+    { filepath: 'Metadata/Test.txt', ids: [4] },
+  ]);
+  assert.equal(app.commentsAllItems, items);
+  for (const group of groups) {
+    for (const item of group.items) assert.equal(item, items.find(original => original.id === item.id));
+  }
+  assert.equal(groups[0].items[1].unread, false);
+  assert.equal(groups[0].items[0].unread, true);
+});
+
+test('file groups span loaded pages and reorder by their newest comment after refresh', async () => {
+  const other = { filepath: 'Metadata/other.txt' };
+  const pages = [
+    { items: [comment(12), comment(11, other), comment(10)], nextCursor: 10 },
+    { items: [comment(9, other), comment(8), comment(7, { filepath: 'Metadata/third.txt' })], nextCursor: 7 },
+    { items: [comment(13, other), comment(12)], nextCursor: 12 },
+  ];
+  const { app, calls } = fixture(async () => pages.shift());
+  app.editorVisible = false; app.commentsAllVisible = true;
+  await app.commentsRefreshAll();
+  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[12, 10], [11]]);
+  await app.commentsLoadMoreAll();
+  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[12, 10, 8], [11, 9], [7]]);
+  assert.match(calls[1].url, /before=10/);
+  await app.commentsRefreshAll();
+  assert.deepEqual(copy(app.commentsAllGroups.map(group => ({ filepath: group.filepath, ids: group.items.map(item => item.id) }))), [
+    { filepath: 'Metadata/other.txt', ids: [13, 11, 9] },
+    { filepath: 'Metadata/test.txt', ids: [12, 10, 8] },
+    { filepath: 'Metadata/third.txt', ids: [7] },
+  ]);
+  assert.deepEqual(Array.from(app.commentsAllItems, item => item.id), [13, 12, 11, 10, 9, 8, 7]);
+  assert.equal(app.commentsAllFeed.cursor, 7);
+  assert.equal(app.commentsAllHasMore, true);
+});
+
+test('grouped rows retain shared references and acknowledge only the visible comment', async () => {
+  const { app, calls, observers } = fixture(async () => ({ total: 1, files: [{ filepath: 'Metadata/test.txt', count: 1 }] }));
+  app.editorVisible = false; app.commentsAllVisible = true;
+  app.commentsAllFeed.items = [comment(9), comment(8, { sourceHash: HASH_B, language: 'Thai' })];
+  const group = app.commentsAllGroups[0];
+  const visible = node(9), offscreen = node(8);
+  visible.dataset.commentsSurface = 'all'; offscreen.dataset.commentsSurface = 'all';
+  app.$refs.commentsAllList = { querySelectorAll: () => [visible, offscreen] };
+  await app.commentsObserveVisible();
+  observers.at(-1).emit([
+    { target: visible, isIntersecting: true, intersectionRatio: 1 },
+    { target: offscreen, isIntersecting: false, intersectionRatio: 0 },
+  ]);
+  await app.commentsMarkVisibleRead();
+  assert.deepEqual(calls[0].options.body.ids, [9]);
+  assert.equal(group.items[0], app.commentsAllItems[0]);
+  assert.equal(group.items[0].unread, false);
+  assert.equal(group.items[1].unread, true);
+  assert.equal(app.commentsUnreadTotal, 1);
+});
+
 test('all assigned teams can read across selected language and source hash', async () => {
   const { app } = fixture();
   app.sourceIdentity = '';

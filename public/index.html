@@ -424,12 +424,14 @@
           <p v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</p>
           <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
           <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllBusy">
-            <article v-for="comment in commentsAllItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
-              <button type="button" class="commentFileLink" @click="commentsOpenFile(comment.filepath)" :disabled="!getDescByFilepath(comment.filepath) || navigationBusy" :title="getDescByFilepath(comment.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ comment.filepath }}</button>
-              <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
-              <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
-              <p class="commentBody">{{ comment.body }}</p>
-            </article>
+            <section v-for="group in commentsAllGroups" :key="group.filepath" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
+              <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!getDescByFilepath(group.filepath) || navigationBusy" :title="getDescByFilepath(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ group.filepath }}</button>
+              <article v-for="comment in group.items" :key="comment.id" class="commentGroupEntry" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span></div>
+                <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
+                <p class="commentBody">{{ comment.body }}</p>
+              </article>
+            </section>
             <p v-if="commentsAllFeed.loaded && !commentsAllItems.length && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
             <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllFeed.loadingMore">Load older comments</button>
           </div>
@@ -670,8 +672,8 @@
             <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
             <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
               <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
-                <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span></div>
+                <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
               <p v-if="commentsFileFeed.loaded && !commentsFileItems.length && !commentsFileError" class="commentsEmpty">No comments yet. Share a thought about this file.</p>

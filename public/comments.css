@@ -19,16 +19,21 @@
 .commentsList { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px; scrollbar-width: thin; }
 .commentCard { margin: 0 0 10px; padding: 13px; background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 8px; overflow-wrap: anywhere; }
 .commentCard.unread { border-left: 3px solid var(--ui-accent); padding-left: 11px; }
+.commentFileGroup { padding: 0; }
+.commentGroupEntry { padding: 13px 13px 13px 10px; border-left: 3px solid transparent; }
+.commentGroupEntry + .commentGroupEntry { border-top: 1px solid var(--ui-border); }
+.commentGroupEntry.unread { border-left-color: var(--ui-accent); }
 .commentByline, .commentMeta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; }
 .commentByline { font-size: 13px; }
 .commentByline strong { font-weight: 650; }
 .commentLanguage { border: 1px solid var(--ui-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--ui-muted); }
-.commentNew { color: var(--ui-accent); font-size: 11px; }
+.commentUnreadLabel { display: inline-block; flex: none; padding: 1px 6px; border-radius: 4px; background: #c52f3f; color: #fff; font-size: 10px; font-weight: 650; line-height: 1.5; }
 .commentMeta { color: var(--ui-muted); font-size: 11px; margin-top: 6px; }
 .commentHashBadge { border: 1px solid var(--ui-review); color: var(--ui-review); border-radius: 4px; padding: 1px 5px; }
 .commentBody { white-space: pre-wrap; margin: 10px 0 0; font-size: 13px; line-height: 1.65; }
 .commentFileLink { display: block; text-align: left; width: 100%; margin-bottom: 10px; padding: 0; border: 0; background: transparent; color: var(--ui-accent); font: 600 12px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .commentFileLink:disabled { opacity: .8; color: var(--ui-muted); cursor: default; }
+.commentFileGroup > .commentFileLink { box-sizing: border-box; margin: 0; padding: 13px; border-bottom: 1px solid var(--ui-border); border-radius: 8px 8px 0 0; }
 .commentsEmpty { color: var(--ui-muted); padding: 12px 14px; font-size: 13px; line-height: 1.6; margin: 0; }
 .commentsError { color: var(--ui-missing); padding: 6px 14px; font-size: 13px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
 .commentsLoadMore { display: block; width: 100%; padding: 8px; font-size: 12px; }

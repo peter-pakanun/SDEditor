@@ -44,6 +44,16 @@
       commentsFileError() { return this.commentsFileFeed.error; },
       commentsFileHasMore() { return this.commentsFileFeed.cursor != null; },
       commentsAllItems() { return this.commentsAllFeed.items; },
+      commentsAllGroups() {
+        const groups = new Map();
+        // The flat feed is newest first. Its first occurrence orders each file,
+        // and retaining the item references keeps read state per comment.
+        for (const item of this.commentsAllItems) {
+          if (!groups.has(item.filepath)) groups.set(item.filepath, { filepath: item.filepath, items: [] });
+          groups.get(item.filepath).items.push(item);
+        }
+        return [...groups.values()];
+      },
       commentsAllLoading() { return this.commentsAllFeed.loading; },
       commentsAllBusy() { return (!this.commentsAllFeed.loaded && this.commentsAllLoading) || this.commentsAllFeed.loadingMore; },
       commentsAllError() { return this.commentsAllFeed.error; },
