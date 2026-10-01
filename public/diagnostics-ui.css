@@ -66,6 +66,7 @@
 .diagnosticScanFailed { border-left: 3px solid var(--color-diagnostic-error-border); }
 .diagnosticScanFailed .diagnosticScanStatusText { margin-bottom: 0; }
 
+.diagnosticScanResults { margin-top: 20px; }
 .diagnosticScanResultsHeading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .diagnosticScanResultsHeading h3 { margin: 0; font-size: 1.2em; }
 .diagnosticScanResultsHeading > span { font-size: .92em; opacity: .7; }
@@ -84,7 +85,7 @@
 .diagnosticScanMoreIssues { margin-top: 8px; }
 .diagnosticScanMoreIssues > summary { cursor: pointer; color: var(--color-element-highlight); }
 .diagnosticScanDialog .diagnosticScanTruncated { margin: 10px 0 0; opacity: .75; font-size: .9em; }
-.diagnosticScanResultPagination { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0 12px; background: var(--color-element); }
+.diagnosticScanResultPagination { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 0 12px; background: var(--color-element); }
 
 .diagnosticScanChecksDisclosure { border: 1px solid var(--color-element-alt); border-radius: 10px; overflow: hidden; }
 .diagnosticScanChecksDisclosure > summary { padding: 12px 16px; background: var(--color-bg); cursor: pointer; font-weight: 600; }
@@ -110,6 +111,5 @@
   .diagnosticScanResultHeading { gap: 10px; }
   .diagnosticScanResultCard { padding: 12px; }
   .diagnosticScanEscapeHint { display: none; }
-  .diagnosticScanResultPagination { flex-wrap: wrap; justify-content: center; }
   .diagnosticScanActions { flex-wrap: wrap; }
 }

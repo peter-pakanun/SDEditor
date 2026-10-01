@@ -1857,6 +1857,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .hlPopup {
   position: fixed;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   background-color: var(--color-bg2);
@@ -1933,6 +1934,23 @@ button, label, th, td, input[type="checkbox"] {
   padding: calc(0.6em * var(--density));
   opacity: 0.8;
 }
+
+.hlPopupTlnote {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.5em * var(--density));
+  box-sizing: border-box;
+  padding: calc(0.75em * var(--density));
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--color-element);
+  box-shadow: 2px 2px 6px var(--color-shadow);
+  overflow: hidden;
+}
+
+.hlPopupTlnote > strong { flex: 0 0 auto; color: var(--ui-muted); }
+.hlPopupTlnoteText { min-height: 0; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; line-height: 1.5; }
 
 [data-density="spacious"] {
   --density: 1.3;

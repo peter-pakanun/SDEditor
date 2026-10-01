@@ -376,15 +376,15 @@
         <div class="workspaceStatus" aria-label="Workspace status counts">
           <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
           <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
-          <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
+          <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill error" title="Files with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ diagnosticScanErrorFileCount }}</strong></span>
           <span class="statusPill review" title="Files whose English source changed since the last translation save"><span class="statusDot" aria-hidden="true"></span>Review <strong>{{ statistic.needsReview }}</strong></span>
+          <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill warning" title="Files with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ diagnosticScanWarningFileCount }}</strong></span>
+          <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
         </div>
         <nav class="workspacePagination" aria-label="File pagination">
-          <span class="fileRange" role="status">{{ fileRangeLabel }}</span>
-          <button @click="prevPage" :disabled="currentPage <= 1" aria-label="Previous page">← <span>Previous</span></button>
-          <div class="pageNumbers"><button v-for="n in pageButtons" :key="n" @click="gotoPage(n)" :class="{ active: currentPage === n }" :aria-label="'Page ' + n" :aria-current="currentPage === n ? 'page' : null">{{ n }}</button></div>
-          <label class="pageJump">Page <input type="number" :value="currentPage" @change="commitPageJump" @blur="commitPageJump" @keydown.enter.prevent="commitPageJump" min="1" :max="pageCount" aria-label="Go to page"> <span>/ {{ pageCount }}</span></label>
-          <button @click="nextPage" :disabled="currentPage >= pageCount" aria-label="Next page"><span>Next</span> →</button>
+          <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ fileRangeLabel }}</span>
+          <button type="button" class="paginationArrow" @click="prevPage" :disabled="currentPage <= 1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
+          <button type="button" class="paginationArrow" @click="nextPage" :disabled="currentPage >= pageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
         </nav>
       </footer>
     </div>
@@ -648,6 +648,10 @@
             <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
           </div>
         </div>
+        <aside v-if="hlPopupTlnote" class="hlPopupTlnote" :style="{ left: hlPopup.noteX + 'px', top: hlPopup.noteY + 'px', width: hlPopup.noteWidth + 'px', maxHeight: hlPopup.noteMaxHeight + 'px' }" role="note" aria-label="TL note" @mousedown.stop>
+          <strong>TL note</strong>
+          <div class="hlPopupTlnoteText" :lang="translationEditorBcp47">{{ hlPopupTlnote }}</div>
+        </aside>
       </div>
     </div>
 
@@ -676,15 +680,26 @@
             </div>
             <p v-if="diagnosticScanRunning" class="diagnosticScanBackgroundHint">You can close this window while the scan runs and reopen it from Scan diagnostics.</p>
           </section>
+          <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
+            <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>
+            <fieldset class="diagnosticScanOptions" :disabled="diagnosticScanRunning">
+              <legend class="visuallyHidden">Diagnostic types</legend>
+              <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
+                <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
+                <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
+              </label>
+            </fieldset>
+            <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
+          </details>
           <section v-if="diagnosticScanCompleted" class="diagnosticScanResults" aria-label="Scan results">
             <div class="diagnosticScanResultsHeading">
               <h3>{{ diagnosticScanResultFiles.length ? 'Files to review' : 'No issues found' }}</h3>
               <span v-if="diagnosticScanResultFiles.length">{{ diagnosticScanResultFiles.length }} {{ diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }}</span>
             </div>
             <nav v-if="diagnosticScanResultPageCount > 1" class="diagnosticScanResultPagination" aria-label="Scan result pages">
-              <button type="button" :disabled="diagnosticScanResultsPage <= 1" @click="diagnosticScanResultsPage--">Previous</button>
-              <span>Page {{ Math.min(diagnosticScanResultsPage, diagnosticScanResultPageCount) }} of {{ diagnosticScanResultPageCount }}</span>
-              <button type="button" :disabled="diagnosticScanResultsPage >= diagnosticScanResultPageCount" @click="diagnosticScanResultsPage++">Next</button>
+              <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ diagnosticScanResultRangeLabel }}</span>
+              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage <= 1" @click="diagnosticScanResultsPage--" aria-label="Previous scan results" title="Previous scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
+              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage >= diagnosticScanResultPageCount" @click="diagnosticScanResultsPage++" aria-label="Next scan results" title="Next scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
             </nav>
             <p v-if="!diagnosticScanResultFiles.length" class="diagnosticScanEmpty">The selected checks found no errors or warnings.</p>
             <article v-for="entry in diagnosticScanVisibleResults" :key="entry.filepath" class="diagnosticScanResultCard">
@@ -716,17 +731,6 @@
               <p v-if="entry.result.diagnosticsTruncated" class="diagnosticScanTruncated">{{ entry.result.diagnosticsTruncated }} more {{ entry.result.diagnosticsTruncated === 1 ? 'finding' : 'findings' }}. Open the file to review all entries.</p>
             </article>
           </section>
-          <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
-            <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>
-            <fieldset class="diagnosticScanOptions" :disabled="diagnosticScanRunning">
-              <legend class="visuallyHidden">Diagnostic types</legend>
-              <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
-                <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
-                <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
-              </label>
-            </fieldset>
-            <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
-          </details>
         </div>
         <footer class="diagnosticScanActions">
           <span class="diagnosticScanEscapeHint">Esc to close</span>

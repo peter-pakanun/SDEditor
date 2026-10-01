@@ -89,6 +89,15 @@ function escapeTooltipAttr(value) {
   return escapeHtml(String(value ?? "")).replace(/\r\n|\r|\n/g, "&#10;");
 }
 
+function formatPageRange(total, page, pageSize) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const current = Math.max(1, Math.min(page, pageCount));
+  const start = total ? (current - 1) * pageSize + 1 : 0;
+  const end = Math.min(current * pageSize, total);
+  const [first, last, count] = [start, end, total].map(value => value.toLocaleString('en-US'));
+  return `${first}–${last} of ${count}`;
+}
+
 const config = Vue.defineComponent({
   mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}],
   data() {
@@ -146,7 +155,6 @@ const config = Vue.defineComponent({
       currentSortDir: 'asc',
       currentSortIcon: '▲',
       pageSize: 20,
-      paginationPadding: 2,
       currentPage: 1,
       searchText: "",
       selectedFileFilters: ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'],
@@ -224,6 +232,10 @@ const config = Vue.defineComponent({
         columnIndex: 0,
         width: 0,
         maxHeight: 0,
+        noteX: 0,
+        noteY: 0,
+        noteWidth: 280,
+        noteMaxHeight: 240,
         selectedTranslationText: ""
       },
       tooltip: {
@@ -394,11 +406,17 @@ const config = Vue.defineComponent({
       this.saveSettings();
       this.scheduleEditorHLterRefresh();
     },
-    "hlPopup.visible"() {
-      this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+    hlPopupSelectedItem() {
+      this.$nextTick(() => {
+        if (this.hlPopup.visible) this.positionHlPopup(this.hlPopup.editorIndex, this.hlPopup.columnIndex);
+        this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+      });
     },
-    "hlPopup.selectedIndex"() {
-      this.$nextTick(() => this.syncHlPopupEnglishHighlight());
+    hlPopupTlnote() {
+      if (this.hlPopup.visible) this.$nextTick(() => {
+        this.positionHlPopup(this.hlPopup.editorIndex, this.hlPopup.columnIndex);
+        this.$nextTick(() => this.scrollHlPopupSelectionIntoView());
+      });
     },
     "hlPopup.editorIndex"() {
       this.$nextTick(() => this.syncHlPopupEnglishHighlight());
@@ -524,6 +542,9 @@ const config = Vue.defineComponent({
     diagnosticScanResultPageCount() {
       return Math.max(1, Math.ceil(this.diagnosticScanResultFiles.length / this.diagnosticScanResultsPageSize));
     },
+    diagnosticScanResultRangeLabel() {
+      return formatPageRange(this.diagnosticScanResultFiles.length, this.diagnosticScanResultsPage, this.diagnosticScanResultsPageSize);
+    },
     diagnosticScanVisibleResults() {
       const page = Math.min(this.diagnosticScanResultsPage, this.diagnosticScanResultPageCount);
       const start = (page - 1) * this.diagnosticScanResultsPageSize;
@@ -578,31 +599,10 @@ const config = Vue.defineComponent({
       return this.fileFilterOptions.every(option => this.selectedFileFilters.includes(option.key));
     },
     fileRangeLabel() {
-      const total = this.filteredDescs.length;
-      if (!total) return '0 files';
-      const start = (this.currentPage - 1) * this.pageSize + 1;
-      return `${start}–${Math.min(this.currentPage * this.pageSize, total)} of ${total} files`;
+      return formatPageRange(this.filteredDescs.length, this.currentPage, this.pageSize);
     },
     pageCount() {
       return Math.max(1, Math.ceil(this.filteredDescs.length / this.pageSize));
-    },
-    pageButtons() {
-      let start = this.currentPage - this.paginationPadding;
-      let end = this.currentPage + this.paginationPadding;
-      while (start < 1) {
-        start++;
-        end++;
-      }
-      while (end > this.pageCount) {
-        start--;
-        end--;
-      }
-      if (start < 1) start = 1;
-      let btns = [];
-      for (let i = start; i <= end; i++) {
-        btns.push(i);
-      }
-      return btns;
     },
     descsDisplay() {
       let descsToDisplay = this.filteredDescs.slice().sort((a, b) => {
@@ -622,6 +622,15 @@ const config = Vue.defineComponent({
         if (index >= start && index < end) return true;
       });
       return descsToDisplay;
+    },
+    hlPopupSelectedItem() {
+      return this.hlPopup.visible ? this.hlPopup.filtered[this.hlPopup.selectedIndex] || null : null;
+    },
+    hlPopupTlnote() {
+      const dictId = this.hlPopupSelectedItem?.dictEntryId;
+      if (!dictId) return '';
+      const entry = this.dictionary.find(word => String(word?._id) === String(dictId));
+      return String(entry?.tlnote ?? '').trim();
     },
     foundDictionarySet() {
       if (!this.editorVisible) return new Set();
@@ -3245,31 +3254,44 @@ const config = Vue.defineComponent({
       let gap = 6;
       let margin = 8;
       let viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      let viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
       let popupEl = this.$refs?.hlPopupPanel;
-      let popupRect = popupEl?.getBoundingClientRect?.();
-      let popupHeight = Math.ceil(popupRect?.height || Math.min(360, Math.max(180, viewportHeight * 0.48)));
-      let width = Math.min(Math.max(rect.width, 260), 640);
-      let left = Math.min(rect.left, window.innerWidth - width - 8);
-      if (left < 8) left = 8;
+      let list = popupEl?.querySelector?.('.hlPopupList');
+      let filterHeight = this.$refs?.hlPopupFilter?.getBoundingClientRect?.().height || 42;
+      let popupHeight = Math.ceil(list ? Math.min(list.scrollHeight, viewportHeight * 0.4) + filterHeight + 24 : Math.min(360, Math.max(180, viewportHeight * 0.48)));
+      let width = Math.min(Math.max(rect.width, 260), 640, Math.max(0, viewportWidth - margin * 2));
+      let left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
+      let rightSpace = viewportWidth - left - width - gap - margin;
+      let leftSpace = left - gap - margin;
+      let hasNote = !!this.hlPopupTlnote;
+      let stackNote = hasNote && Math.max(rightSpace, leftSpace) < 220;
+      let noteMaxHeight = Math.min(stackNote ? 144 : 240, Math.max(0, viewportHeight - margin * 2) * 0.3);
+      let noteSpace = stackNote ? noteMaxHeight + gap : 0;
+      let groupHeight = popupHeight + noteSpace;
 
       let belowSpace = Math.max(0, viewportHeight - avoidBottom - gap - margin);
       let aboveSpace = Math.max(0, avoidTop - gap - margin);
-      let placeAbove = belowSpace < popupHeight && aboveSpace > belowSpace;
+      let placeAbove = belowSpace < groupHeight && aboveSpace > belowSpace;
       let available = placeAbove ? aboveSpace : belowSpace;
-      let maxHeight = Math.max(96, Math.min(popupHeight, available || popupHeight));
+      let maxHeight = Math.min(Math.max(96, Math.min(popupHeight, (available || groupHeight) - noteSpace)), Math.max(0, viewportHeight - margin * 2 - noteSpace));
+      let totalHeight = maxHeight + noteSpace;
       let top = placeAbove
-        ? avoidTop - gap - maxHeight
+        ? avoidTop - gap - totalHeight
         : avoidBottom + gap;
 
       if (top < margin) top = margin;
-      if (viewportHeight && top + maxHeight > viewportHeight - margin) {
-        top = Math.max(margin, viewportHeight - margin - maxHeight);
+      if (viewportHeight && top + totalHeight > viewportHeight - margin) {
+        top = Math.max(margin, viewportHeight - margin - totalHeight);
       }
 
       this.hlPopup.x = Math.round(left);
       this.hlPopup.y = Math.round(top);
       this.hlPopup.width = Math.round(width);
       this.hlPopup.maxHeight = Math.round(maxHeight);
+      this.hlPopup.noteWidth = Math.round(stackNote ? width : Math.min(320, Math.max(0, rightSpace >= 220 ? rightSpace : leftSpace)));
+      this.hlPopup.noteX = Math.round(stackNote ? left : rightSpace >= 220 ? left + width + gap : left - gap - this.hlPopup.noteWidth);
+      this.hlPopup.noteY = Math.round(stackNote ? top + maxHeight + gap : Math.max(margin, Math.min(top + filterHeight + 12, viewportHeight - margin - noteMaxHeight)));
+      this.hlPopup.noteMaxHeight = Math.floor(noteMaxHeight);
     },
     getTranslationSelectionText(editorIndex, columnIndex = 0) {
       let editorBlock = this.editorBlocks?.[editorIndex];
@@ -3497,6 +3519,45 @@ const config = Vue.defineComponent({
 
       this.insertHlPopupSelection();
     },
+    getHlPopupDictionaryRow(item) {
+      const dictId = String(item?.dictEntryId || '');
+      if (!dictId || !document?.querySelector) return null;
+      const esc = value => window.CSS?.escape ? window.CSS.escape(String(value)) : String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const altId = String(item?.dictAltId || '');
+      if (altId) {
+        const altRow = document.querySelector(`.side .dictAltRow[data-dict-id="${esc(dictId)}"][data-dict-alt-id="${esc(altId)}"]`);
+        if (altRow) return altRow;
+      }
+      return document.querySelector(`.side .dictRow[data-dict-id="${esc(dictId)}"]`);
+    },
+    scrollDictionaryEntryIntoView(row, options = {}) {
+      const side = row?.closest?.('.side');
+      if (!side?.getBoundingClientRect || !row?.getBoundingClientRect) return;
+      const overflow = window.getComputedStyle?.(side)?.overflowY;
+      if (!['auto', 'scroll'].includes(overflow) || side.scrollHeight <= side.clientHeight) {
+        if (options.allowPageScroll) row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      const sideRect = side.getBoundingClientRect();
+      const headerRect = side.querySelector('.sideHeader')?.getBoundingClientRect();
+      const top = Math.max(sideRect.top, headerRect?.bottom || sideRect.top) + 6;
+      const bottom = Math.min(sideRect.bottom, window.innerHeight || sideRect.bottom) - 6;
+      const block = row.closest('.editBlock');
+      const blockRect = block?.getBoundingClientRect();
+      const targetRect = blockRect && blockRect.height <= bottom - top ? blockRect : row.getBoundingClientRect();
+      if (targetRect.top < top) side.scrollTop += targetRect.top - top;
+      else if (targetRect.bottom > bottom) side.scrollTop += targetRect.bottom - bottom;
+    },
+    scrollHlPopupSelectionIntoView() {
+      const panel = this.$refs?.hlPopupPanel;
+      const list = panel?.querySelector?.('.hlPopupList');
+      const item = panel?.querySelector?.('.hlPopupItem.active');
+      if (!list?.getBoundingClientRect || !item?.getBoundingClientRect) return;
+      const listRect = list.getBoundingClientRect();
+      const itemRect = item.getBoundingClientRect();
+      if (itemRect.top < listRect.top) list.scrollTop += itemRect.top - listRect.top;
+      else if (itemRect.bottom > listRect.bottom) list.scrollTop += itemRect.bottom - listRect.bottom;
+    },
     focusDictionaryEntryReplaceInput(dictId, options = {}) {
       if (!dictId) return;
       let esc = (s) => {
@@ -3508,16 +3569,16 @@ const config = Vue.defineComponent({
         if (altId) {
           let altRow = document?.querySelector?.(`.side .dictAltRow[data-dict-id="${esc(dictId)}"][data-dict-alt-id="${esc(altId)}"]`);
           let altInput = altRow?.querySelector?.('input:nth-of-type(2)');
-          altRow?.scrollIntoView?.({ block: "nearest" });
-          altInput?.focus?.();
+          this.scrollDictionaryEntryIntoView(altRow, { allowPageScroll: true });
+          altInput?.focus?.({ preventScroll: true });
           altInput?.select?.();
           return;
         }
 
         let row = document?.querySelector?.(`.side .dictRow[data-dict-id="${esc(dictId)}"]`);
         let input = row?.querySelector?.('input:nth-of-type(2)');
-        row?.scrollIntoView?.({ block: "nearest" });
-        input?.focus?.();
+        this.scrollDictionaryEntryIntoView(row, { allowPageScroll: true });
+        input?.focus?.({ preventScroll: true });
         input?.select?.();
       });
     },
@@ -3574,29 +3635,27 @@ const config = Vue.defineComponent({
       let editorIndex = this.hlPopup.editorIndex;
       let activeBlock = this.editorBlocks?.[editorIndex];
       let root = this.getEditorRef("englishHLter", editorIndex, activeBlock?.isTable ? (this.hlPopup.columnIndex || 0) : null);
-      if (!root?.querySelectorAll) return;
 
       let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
       if (!item) return;
+      this.scrollHlPopupSelectionIntoView();
 
       let ids = Array.isArray(item.hlIds) ? item.hlIds : [];
       let idSet = new Set(ids.map(v => String(v)));
       let value = String(item.value ?? "");
-      let dictEntryId = String(item.dictEntryId || "");
-      let dictAltId = String(item.dictAltId || "");
 
       let esc = (s) => {
         if (window?.CSS?.escape) return window.CSS.escape(String(s));
         return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       };
 
-      if (idSet.size > 0) {
+      if (root?.querySelectorAll && idSet.size > 0) {
         for (const id of idSet) {
           let el = root.querySelector(`span[data-hl-id="${esc(id)}"]`);
           if (!el?.classList) continue;
           el.classList.add('hlPopupActive');
         }
-      } else if (value) {
+      } else if (root?.querySelectorAll && value) {
         for (const el of root.querySelectorAll(`span[data-hl-id][dataValue="${esc(value)}"]`)) {
           el.classList.add('hlPopupActive');
         }
@@ -3604,13 +3663,11 @@ const config = Vue.defineComponent({
 
       if (!document?.querySelector) return;
 
-      let dictEl = null;
-      if (dictAltId) {
-        dictEl = document.querySelector(`.side .dictAltRow[data-dict-alt-id="${esc(dictAltId)}"]`);
-      } else if (dictEntryId) {
-        dictEl = document.querySelector(`.side .dictRow[data-dict-id="${esc(dictEntryId)}"]`);
+      const dictEl = this.getHlPopupDictionaryRow(item);
+      if (dictEl?.classList) {
+        dictEl.classList.add('hlPopupDictActive');
+        this.scrollDictionaryEntryIntoView(dictEl);
       }
-      if (dictEl?.classList) dictEl.classList.add('hlPopupDictActive');
     },
     insertTranslationText(editorIndex, text, options = {}) {
       let editorBlock = this.editorBlocks?.[editorIndex];
@@ -3685,6 +3742,7 @@ const config = Vue.defineComponent({
       });
     },
     insertHlPopupItem(item) {
+      this.scrollDictionaryEntryIntoView(this.getHlPopupDictionaryRow(item));
       let editorIndex = this.hlPopup.editorIndex;
       let deleteOpeningBracket = this.hlPopup.openedByBracket;
       let deleteOpeningChar = this.hlPopup.openedByChar || "";
@@ -4845,10 +4903,6 @@ const config = Vue.defineComponent({
       const rows = this.descsDisplay;
       this.selectedFilepath = (next > previous ? rows[0] : rows[rows.length - 1])?.filepath || '';
       this.focusSelectedFileRow(listHadFocus);
-    },
-    commitPageJump(event) {
-      this.gotoPage(event.target.value);
-      event.target.value = this.currentPage;
     },
     prevPage() {
       this.gotoPage(this.currentPage - 1);

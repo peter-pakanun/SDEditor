@@ -40,7 +40,7 @@ The main action header stays visible while you scroll, with labeled controls for
 
 Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Needs review**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
 
-Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list, so you can reach the previous/next page controls after scrolling through the files. The loaded file count appears before **Missing**, **Saved**, and **Review**. The status counters describe files eligible under **Hide DNT entries**, independently of search and status choices; the result count describes the files matching your search and filters.
+Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Scan errors**, **Review**, **Scan warnings**, **Saved**. Scan counts show files with errors or warnings while a scan runs and after it completes; they disappear when results are cleared or a scan is stopped. **Missing**, **Review**, and **Saved** counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** and scan counts cover every loaded file, and the result count describes the files matching your search and filters.
 
 ### File Status Indicators
 
@@ -81,7 +81,7 @@ If a **Resolve conflicts** button appears in the main action header, it opens sh
 
 Click **Scan diagnostics** to choose which checks to run. The modal has a checkbox for whitespace, dash spacing, tag syntax, variable tags, keyword popup tags, text decoration tags, inconsistent translations, and Dictionary terminology. Every check starts selected except **Dictionary terminology**. **Start scan** checks every loaded file in the selected language, including files hidden by search or filters.
 
-Progress and results stay inside the scan modal. During a scan, the progress bar shows processed files and live warning/error counts. **Close** or **Escape** lets the scan continue in the background; open **Scan diagnostics** again to return to it. **Stop scan** cancels without keeping partial results.
+The scan modal shows progress followed by **Diagnostic checks**, then **Files to review** when results are ready. During a scan, the progress bar shows processed files and live warning/error counts, which also appear in the bottom status bar. **Close** or **Escape** lets the scan continue in the background; open **Scan diagnostics** again to return to it. **Stop scan** cancels without keeping partial results. Longer result lists use a visible range and previous/next arrows.
 
 Completed results show warning/error totals and a paginated list of affected files, with entry and column details. Expand additional issues when needed, or click **Open file** to inspect a translation in the editor. Reopening the modal retains the completed results until a workspace change clears them. **Scan again** uses the currently selected checks. The file list's diagnostic warning/error status filters also help you focus on affected files.
 
@@ -186,6 +186,8 @@ SDEditor follows [VS Code's shortcut model](https://code.visualstudio.com/docs/r
 - Type to filter the list as you navigate
 - Press **Escape** to close without inserting
 - Press **Ctrl + Enter** to jump to the Dictionary entry, or create a new one if it doesn't exist.
+
+Selecting an autocomplete option shows its Dictionary entry's **TL note** in a separate box beside the popup, when a note exists. Alternate options share their parent entry's note. On narrow screens, the note appears below the popup. The selected option stays visible in the popup, and its matching Dictionary entry scrolls into view in the sidebar without moving keyboard focus.
 
 > 💡 When you done creating a new Dictionary entry, press **Enter** to quickly insert it back into your translation at the cursor position.
 

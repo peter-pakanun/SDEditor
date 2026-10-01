@@ -220,13 +220,27 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .statusPill.missing .statusDot { color: var(--ui-missing); }
 .statusPill.saved .statusDot { color: var(--ui-saved); }
 .statusPill.review .statusDot { color: var(--ui-review); }
-.workspacePagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.fileRange { font-size: 12px; color: var(--ui-muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
-.pageNumbers { display: flex; gap: 4px; }
-.workspacePagination .pageNumbers button { min-width: 34px; padding: 8px; }
-.workspacePagination .active { background: var(--ui-accent-soft); border-color: var(--ui-accent); color: var(--ui-accent); }
-.pageJump { display: inline-flex; align-items: center; gap: 6px; color: var(--ui-muted); font-size: 12px; white-space: nowrap; }
-.pageJump input { background: var(--color-element); width: 54px; padding: 6px 4px 6px 8px; line-height: 1.6; }
+.statusPill.error .statusDot { color: var(--color-diagnostic-error-border); }
+.statusPill.warning .statusDot { color: var(--color-diagnostic-warning-border); }
+.workspacePagination { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px; }
+.fileRange { font-size: 13px; color: var(--ui-muted); margin-right: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.workspacePagination .paginationArrow, .diagnosticScanResultPagination .paginationArrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 6px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ui-muted);
+  line-height: 1;
+}
+.workspacePagination .paginationArrow:hover:enabled, .diagnosticScanResultPagination .paginationArrow:hover:enabled { background: var(--color-bg2); }
+.paginationArrow svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .sideHeader { flex-wrap: wrap; }
 .editor .gamePreviewStrip { display: flex; flex-direction: column; }
 .editor .gamePreviewToolbar { position: static; flex: none; gap: 8px; margin-bottom: 6px; }
@@ -240,7 +254,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 }
 @media (max-width: 1100px) {
   .workspaceFooter { gap: 8px; }
-  .workspacePagination .pageNumbers { display: none; }
 }
 @media (max-width: 700px) {
   .workspace { padding-bottom: calc(126px + env(safe-area-inset-bottom, 0px)); }
@@ -270,10 +283,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .workspaceStatus { justify-content: center; }
   .workspacePagination { justify-content: center; gap: 6px; }
   .fileRange { flex: 1; margin-right: 0; font-size: 11px; }
-  .workspacePagination button { min-height: 36px; padding: 7px 9px; }
-  .workspacePagination button > span { display: none; }
-  .pageJump { gap: 4px; }
-  .pageJump input { width: 44px; }
   .editor > .edit { margin-right: 0; }
   .editor > .side, .editor > .clipboard { position: static; width: 100%; height: auto; overflow: visible; }
   .editor > .side { margin-top: 20px; border-top: 1px solid var(--ui-border); }

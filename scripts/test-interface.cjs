@@ -204,8 +204,7 @@ test('clearing all statuses gives a stable empty page; Select all restores every
   assert.equal(editor.descsDisplay.length, 0);
   assert.equal(editor.currentPage, 1);
   assert.equal(editor.pageCount, 1);
-  assert.deepEqual(Array.from(editor.pageButtons), [1]);
-  assert.equal(editor.fileRangeLabel, '0 files');
+  assert.equal(editor.fileRangeLabel, '0–0 of 0');
   assert.equal(editor.allFileFiltersSelected, false);
   editor.selectAllFileFilters();
   config.watch.selectedFileFilters.handler.call(editor);
@@ -256,15 +255,15 @@ test('45 files render correctly sorted pages, ranges, and a shorter final page',
   assert.equal(editor.pageCount, 3);
   const originalOrder = names(editor.filteredDescs);
   assert.deepEqual(names(editor.descsDisplay), Array.from({ length: 20 }, (_, index) => `entry-${String(index + 1).padStart(2, '0')}`));
-  assert.equal(editor.fileRangeLabel, '1–20 of 45 files');
+  assert.equal(editor.fileRangeLabel, '1–20 of 45');
   assert.deepEqual(names(editor.filteredDescs), originalOrder, 'Rendering sorted pages must preserve the underlying filtered order.');
   assert.equal(Object.hasOwn(context, 'descsToDisplay'), false, 'Rendering pages must not leak a global variable.');
   editor.nextPage();
   assert.deepEqual(names(editor.descsDisplay), Array.from({ length: 20 }, (_, index) => `entry-${String(index + 21).padStart(2, '0')}`));
-  assert.equal(editor.fileRangeLabel, '21–40 of 45 files');
+  assert.equal(editor.fileRangeLabel, '21–40 of 45');
   editor.nextPage();
   assert.deepEqual(names(editor.descsDisplay), ['entry-41', 'entry-42', 'entry-43', 'entry-44', 'entry-45']);
-  assert.equal(editor.fileRangeLabel, '41–45 of 45 files');
+  assert.equal(editor.fileRangeLabel, '41–45 of 45');
   editor.nextPage();
   assert.equal(editor.currentPage, 3);
   editor.gotoPage(1);
@@ -275,7 +274,7 @@ test('45 files render correctly sorted pages, ranges, and a shorter final page',
   assert.equal(editor.currentSortIcon, '▼');
 });
 
-test('page jumps bound invalid, negative, decimal, and out-of-range values', () => {
+test('programmatic page changes bound invalid, negative, decimal, and out-of-range values', () => {
   const { editor } = loadEditor();
   paginatedFixtures(editor);
   for (const [input, expected] of [
@@ -309,7 +308,7 @@ test('search and status changes return to page one even when later pages remain 
   editor.searchText = 'nothing matches';
   editor.fileSearchChanged();
   assert.equal(editor.currentPage, 1);
-  assert.equal(editor.fileRangeLabel, '0 files');
+  assert.equal(editor.fileRangeLabel, '0–0 of 0');
   editor.clearFileSearch();
   assert.equal(editor.searchText, '');
   assert.equal(editor.currentPage, 1);
@@ -614,7 +613,7 @@ test('arrows work on row buttons and cells while Enter on native row buttons is 
   assert.deepEqual(table.openedFiles, []);
 });
 
-test('page controls and page jumps select the appropriate edge and preserve selection at boundaries', () => {
+test('page changes select the appropriate edge and preserve selection at boundaries', () => {
   const harness = loadEditor();
   const { editor } = harness;
   paginatedFixtures(editor);
@@ -636,7 +635,7 @@ test('page controls and page jumps select the appropriate edge and preserve sele
   assert.equal(editor.selectedFilepath, 'test/entry-07.txt');
 });
 
-test('page buttons and page inputs retain focus while revealing the newly selected file', () => {
+test('previous and next page controls retain focus while revealing the newly selected file', () => {
   const harness = loadEditor();
   const { editor } = harness;
   paginatedFixtures(editor);
@@ -647,18 +646,15 @@ test('page buttons and page inputs retain focus while revealing the newly select
   assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
   assert.equal(table.revealedRows.at(-1), 'test/entry-21.txt');
   assert.equal(table.document.activeElement, pageButton);
-  const pageInput = element('INPUT', { type: 'number', value: '3' });
-  table.document.activeElement = pageInput;
-  editor.commitPageJump({ target: pageInput });
+  editor.nextPage();
   assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
   assert.equal(table.revealedRows.at(-1), 'test/entry-41.txt');
-  assert.equal(table.document.activeElement, pageInput);
-  assert.equal(pageInput.value, 3);
-  pageInput.value = '1';
-  editor.commitPageJump({ target: pageInput });
+  assert.equal(table.document.activeElement, pageButton);
+  editor.prevPage();
+  editor.prevPage();
   assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
   assert.equal(table.revealedRows.at(-1), 'test/entry-20.txt');
-  assert.equal(table.document.activeElement, pageInput);
+  assert.equal(table.document.activeElement, pageButton);
 });
 
 test('modifier and composing events never change list selection, pages, or open files', () => {
@@ -810,4 +806,160 @@ test('selection stays visible after sorting, page changes, or a search, and clea
     assert.equal(editor.currentPage, 1);
     assert.equal(editor.selectedFilepath, '');
   }
+});
+
+test('autocomplete TL notes follow the selected dictionary ID, including alternate translations', () => {
+  const { editor } = loadEditor();
+  editor.dictionary = [
+    { _id: 'first', find: 'Evasion', tlnote: 'First definition note' },
+    { _id: 'second', find: 'Evasion', tlnote: '  หลบหลีก\nKeep the second definition.  ', alts: [{ _id: 'alt-second', find: 'Evasion Rating' }] },
+  ];
+  const mainItem = { dictEntryId: 'first', label: 'Evasion', value: 'การหลบหลีก' };
+  const alternateItem = { dictEntryId: 'second', dictAltId: 'alt-second', label: 'Evasion Rating', value: 'อัตราการหลบหลีก' };
+  editor.hlPopup.filtered = [mainItem, alternateItem];
+  editor.hlPopup.visible = true;
+  editor.hlPopup.selectedIndex = 0;
+  assert.equal(editor.hlPopupSelectedItem, mainItem);
+  assert.equal(editor.hlPopupTlnote, 'First definition note');
+  editor.hlPopup.selectedIndex = 1;
+  assert.equal(editor.hlPopupSelectedItem, alternateItem);
+  assert.equal(editor.hlPopupTlnote, 'หลบหลีก\nKeep the second definition.', 'Alternates inherit their own parent entry note, even when another entry has the same Find.');
+  editor.dictionary[1].tlnote = 'Updated while the popup is open';
+  assert.equal(editor.hlPopupTlnote, 'Updated while the popup is open', 'Notes must reflect current dictionary edits rather than the popup opening snapshot.');
+});
+
+test('autocomplete hides TL notes for missing entries, create-new items, blank notes, and a closed popup', () => {
+  const { editor } = loadEditor();
+  editor.dictionary = [{ _id: 'blank', find: 'Armour', tlnote: ' \n\t ' }];
+  editor.hlPopup.visible = true;
+  for (const item of [
+    { dictEntryId: 'blank' },
+    { dictEntryId: 'deleted-entry' },
+    { mustCreate: true, kwTagName: 'Armour', label: 'Armour → create a new dictionary entry...' },
+    { value: '{0}%' },
+  ]) {
+    editor.hlPopup.filtered = [item];
+    editor.hlPopup.selectedIndex = 0;
+    assert.equal(editor.hlPopupTlnote, '');
+  }
+  editor.dictionary.push({ _id: 'has-note', tlnote: 'A visible note' });
+  editor.hlPopup.filtered = [{ dictEntryId: 'has-note' }];
+  assert.equal(editor.hlPopupTlnote, 'A visible note');
+  editor.hlPopup.visible = false;
+  assert.equal(editor.hlPopupSelectedItem, null);
+  assert.equal(editor.hlPopupTlnote, '');
+  editor.hlPopup.visible = true;
+  editor.hlPopup.filtered = [];
+  assert.equal(editor.hlPopupTlnote, '');
+});
+
+function attachDictionaryGeometry(harness, options = {}) {
+  const { context } = harness;
+  const nativeScrolls = [];
+  const scrollAssignments = [];
+  const sideTop = options.sideTop ?? 100;
+  const sideHeight = options.sideHeight ?? 500;
+  const headerHeight = options.headerHeight ?? 60;
+  const cardContentTop = options.cardContentTop ?? 650;
+  const cardHeight = options.cardHeight ?? 160;
+  const rowOffset = options.rowOffset ?? 12;
+  const rowHeight = options.rowHeight ?? 42;
+  let scrollTop = options.scrollTop ?? 200;
+  const rectangle = (top, height) => ({ top, bottom: top + height, height, left: 800, right: 1200, width: 400 });
+  const side = element('DIV', {
+    className: 'side fixed',
+    clientHeight: sideHeight,
+    clientTop: 0,
+    scrollHeight: options.scrollHeight ?? 2400,
+    getBoundingClientRect() { return rectangle(sideTop, sideHeight); },
+    getClientRects() { return [this.getBoundingClientRect()]; },
+    scrollTo(configuration) { this.scrollTop = typeof configuration === 'number' ? configuration : configuration.top; },
+    scrollBy(configuration) { this.scrollTop += typeof configuration === 'number' ? configuration : configuration.top; },
+  });
+  Object.defineProperty(side, 'scrollTop', {
+    get() { return scrollTop; },
+    set(value) { scrollAssignments.push(value); scrollTop = value; },
+  });
+  const header = element('DIV', {
+    className: 'sideHeader', offsetHeight: headerHeight,
+    getBoundingClientRect() { return rectangle(sideTop, headerHeight); },
+  }, side);
+  side.querySelector = selector => selector === '.sideHeader' ? header : null;
+  const card = element('DIV', {
+    className: 'editBlock',
+    getBoundingClientRect() { return rectangle(sideTop + cardContentTop - scrollTop, cardHeight); },
+    getClientRects() { return [this.getBoundingClientRect()]; },
+  }, side);
+  const row = element('DIV', {
+    className: 'dictRow', dataset: { dictId: 'selected-entry' },
+    getBoundingClientRect() { return rectangle(card.getBoundingClientRect().top + rowOffset, rowHeight); },
+    getClientRects() { return [this.getBoundingClientRect()]; },
+    scrollIntoView(configuration) { nativeScrolls.push(configuration); },
+  }, card);
+  const focusedInput = element('INPUT', { type: 'text' });
+  context.document.activeElement = focusedInput;
+  context.window.innerHeight = 1000;
+  context.document.documentElement = { clientHeight: 1000 };
+  const getComputedStyle = target => ({
+    overflowY: target === side ? (options.overflowY ?? 'auto') : 'visible',
+    position: target === side ? (options.position ?? 'fixed') : target === header ? 'sticky' : 'static',
+  });
+  context.window.getComputedStyle = getComputedStyle;
+  context.getComputedStyle = getComputedStyle;
+  return { side, header, card, row, nativeScrolls, scrollAssignments, focusedInput };
+}
+
+test('autocomplete scrolling reveals a cutoff dictionary card inside its sidebar without moving focus or the page', () => {
+  const harness = loadEditor();
+  const geometry = attachDictionaryGeometry(harness);
+  assert.ok(geometry.card.getBoundingClientRect().bottom > geometry.side.getBoundingClientRect().bottom);
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row);
+  const cardRect = geometry.card.getBoundingClientRect();
+  assert.ok(cardRect.top >= geometry.header.getBoundingClientRect().bottom, 'The full card should clear the sticky Dictionary tabs.');
+  assert.ok(cardRect.bottom <= geometry.side.getBoundingClientRect().bottom, 'The card should be fully visible when it fits in the sidebar.');
+  assert.ok(geometry.side.scrollTop > 200);
+  assert.deepEqual(geometry.nativeScrolls, [], 'Automatic selection must scroll the sidebar rather than its page ancestors.');
+  assert.equal(harness.context.document.activeElement, geometry.focusedInput);
+});
+
+test('dictionary scrolling reveals an entry hidden by the sticky sidebar header', () => {
+  const harness = loadEditor();
+  const geometry = attachDictionaryGeometry(harness, { cardContentTop: 235, cardHeight: 120 });
+  assert.ok(geometry.card.getBoundingClientRect().top < geometry.header.getBoundingClientRect().bottom);
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row);
+  assert.ok(geometry.side.scrollTop < 200, 'Scroll upward when sticky tabs obscure the selected entry.');
+  assert.ok(geometry.card.getBoundingClientRect().top >= geometry.header.getBoundingClientRect().bottom);
+  assert.ok(geometry.card.getBoundingClientRect().bottom <= geometry.side.getBoundingClientRect().bottom);
+});
+
+test('an oversized dictionary entry reveals its selected alternate rather than trying to show the entire card', () => {
+  const harness = loadEditor();
+  const geometry = attachDictionaryGeometry(harness, { cardContentTop: 200, cardHeight: 900, rowOffset: 700 });
+  geometry.row.className = 'dictAltRow';
+  geometry.row.dataset.dictAltId = 'selected-alt';
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row);
+  const rowRect = geometry.row.getBoundingClientRect();
+  assert.ok(rowRect.top >= geometry.header.getBoundingClientRect().bottom);
+  assert.ok(rowRect.bottom <= geometry.side.getBoundingClientRect().bottom, 'The selected alternate must be visible even when its parent has many alternatives.');
+  assert.ok(geometry.card.getBoundingClientRect().top < geometry.header.getBoundingClientRect().bottom, 'A large parent card may remain clipped when the selected row is visible.');
+});
+
+test('an already visible dictionary entry leaves sidebar scroll and focus unchanged', () => {
+  const harness = loadEditor();
+  const geometry = attachDictionaryGeometry(harness, { cardContentTop: 450, cardHeight: 120 });
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row);
+  assert.equal(geometry.side.scrollTop, 200);
+  assert.deepEqual(geometry.scrollAssignments, [], 'Selecting an already visible entry should not jitter the sidebar.');
+  assert.equal(harness.context.document.activeElement, geometry.focusedInput);
+});
+
+test('mobile autocomplete preview leaves the page still while an explicit dictionary jump may reveal the row', () => {
+  const harness = loadEditor();
+  const geometry = attachDictionaryGeometry(harness, { overflowY: 'visible', position: 'static' });
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row);
+  assert.equal(geometry.side.scrollTop, 200);
+  assert.deepEqual(geometry.nativeScrolls, [], 'The mobile sidebar is part of the page, so preview must preserve the editor and popup position.');
+  assert.equal(harness.context.document.activeElement, geometry.focusedInput);
+  harness.editor.scrollDictionaryEntryIntoView(geometry.row, { allowPageScroll: true });
+  assert.equal(geometry.nativeScrolls.length, 1, 'An explicit Ctrl+Enter edit may navigate to the mobile dictionary input.');
 });
