@@ -118,7 +118,7 @@
       return { settings: copy(profile.settings), editorClipboard: profile.clipboard, dictionary: copy(dictionary.entries), conflicts: copy(dictionary.conflicts), revision: dictionary.revision, user: copy(this.state.auth?.user || null), signedIn: !!this.state.auth?.token, profileId: this.state.activeProfile, needsDictionaryLanguage: !!profile.unassignedDictionary?.length, recoveryCount: profile.recovery.length };
     }
     notify() { this.onChange(this.snapshot()); }
-    status(message, error = false) { this.onStatus({ message, error }); }
+    status(message, error = false, warning = false) { this.onStatus({ message, error, warning }); }
     context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language }; }
     current(ctx, state = this.state) { return !this.destroyed && ctx.epoch === this.epoch && state.activeProfile === ctx.profile && state.auth?.token === ctx.token; }
     async update(fn, ctx, notify = true) {
@@ -159,7 +159,6 @@
       }, ctx, false);
       const latest = this.state.profiles[ctx.profile];
       if (!equal(latest.settings, preferences(payload)) || !equal(latest.dictionaries[contextLanguage]?.entries || [], payload.dictionary || [])) this.notify();
-      this.status(this.state.auth?.token ? 'Saved locally · waiting to sync' : 'Saved in this browser');
       this.schedule();
     }
     async selectLanguage(language, payload, oldLanguage) {
@@ -283,8 +282,7 @@
         if (!this.current(ctx)) { this.notify(); return; }
         const me = await this.request('/v1/me', {}, ctx);
         await this.update(state => { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }, ctx, false);
-        if (!me.user.language) { this.notify(); this.status('Not configured — awaiting admin language assignment'); return; }
-        this.status('Syncing…');
+        if (!me.user.language) { this.notify(); this.status('Not configured — awaiting admin language assignment', false, true); return; }
         await this.syncSettings(ctx);
         if (!this.current(ctx)) return;
         const language = me.user.language;
@@ -293,7 +291,11 @@
         this.backoff = 1000;
         this.notify();
         const snapshot = this.snapshot();
-        this.status(snapshot.conflicts.length ? 'Saved locally · dictionary conflicts need your choice' : (snapshot.settings.lang !== language ? 'Settings backed up · selected language is local only' : 'Backed up · ' + new Date().toLocaleTimeString()));
+        // Leave existing failures visible throughout retries; only a completed
+        // sync can clear them. Routine saves and polling have no visible status.
+        const warning = snapshot.conflicts.length ? 'Saved locally · dictionary conflicts need your choice'
+          : snapshot.settings.lang !== language ? 'Selected dictionary language is local only' : '';
+        this.status(warning, false, !!warning);
       };
       this.running = (this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run()).catch(error => {
         this.reportError(error);
@@ -409,8 +411,8 @@
         const d = profile.dictionaries[language];
         const conflict = d.conflicts.find(c => c.id === id);
         if (!conflict || d.revision !== revision) throw new Error('The dictionary changed. Review the current conflict again.');
-        if (d.pendingResolution) throw new Error('A previous resolution is still waiting to sync. Retry sync first.');
-        if (d.pendingHistoryRestore) throw new Error('A history restore is still waiting to sync. Retry sync first.');
+        if (d.pendingResolution) throw new Error('A previous resolution is still waiting to sync. Automatic sync will retry; wait for confirmation before resolving another conflict.');
+        if (d.pendingHistoryRestore) throw new Error('A history restore is still waiting to sync. Automatic sync will retry; wait for confirmation before resolving another conflict.');
         const entry = this.merge.resolve(conflict, choices);
         d.pendingResolution = { id, entry, originalLocal: copy(d.entries.find(e => e._id === id) || null), revision, mutationId: this.uuid(), origin: 'conflict_resolution' };
       }, ctx, false);
@@ -481,7 +483,7 @@
         this.assertHistoryContext(ctx);
         const path = '/v1/dictionaries/' + encodeURIComponent(ctx.language);
         const existing = this.state.profiles[ctx.profile].dictionaries[ctx.language];
-        if (existing?.pendingHistoryRestore || existing?.pendingWrite || existing?.pendingResolution) throw new Error('Another dictionary change is waiting to sync. Use Sync now, then review the history version again.');
+        if (existing?.pendingHistoryRestore || existing?.pendingWrite || existing?.pendingResolution) throw new Error('Another dictionary change is waiting to sync. Automatic sync will retry; review the history version again after it completes.');
         const event = await this.request(path + '/history/' + encodeURIComponent(eventId), {}, ctx);
         const remote = await this.request(path, {}, ctx);
         this.assertHistoryContext(ctx);
@@ -497,7 +499,6 @@
         }, ctx, false);
         const pending = this.state.profiles[ctx.profile].dictionaries[ctx.language].pendingHistoryRestore;
         await this.sendHistoryRestore(ctx, ctx.language, pending);
-        this.status('History version restored · other local edits will continue syncing');
         this.notify();
       };
       const operation = this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run();
@@ -505,7 +506,7 @@
       try { await operation; }
       catch (error) {
         if (error.stale || error.status || !this.state.profiles[ctx.profile]?.dictionaries[ctx.language]?.pendingHistoryRestore) throw error;
-        throw new Error('Restore is saved locally but confirmation is pending. Use Sync now to retry safely. ' + error.message);
+        throw new Error('Restore is saved locally but confirmation is pending. Automatic sync will retry safely. ' + error.message);
       }
     }
     async sendHistoryRestore(ctx, language, pending) {

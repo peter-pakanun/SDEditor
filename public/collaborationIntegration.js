@@ -131,7 +131,7 @@
               else if (/^Imported \d+ translated files · Pending sync$/.test(this.collaborationNotice)) this.collaborationNotice = this.collaborationNotice.replace(' · Pending sync', '.');
             }
           },
-          onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot(), status: status?.message || status, error: status?.error ? status.message : '' }); },
+          onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot(), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onRemote: files => { if (this._collaboration === client) this.applyCollaborationFiles(files, ctx.language); },
           onEditingConflict: ({ filepath }) => { if (this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath) return this.claimCollaborationFile(filepath, false); },
         });

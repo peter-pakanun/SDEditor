@@ -57,6 +57,15 @@ Env vars: `PORT` (3333), `HOST` (127.0.0.1), `NO_OPEN_BROWSER`, `LOG_REQUESTS`, 
 - Git commit style: conventional prefixes (`feat:`, `fix:`, `style:`, `refactor:`, `docs:`).
 - Two CSS themes via `[data-theme]` on `<html>`: `grey` and `dark`. UI density via `--density` custom property.
 
+## Syncing UX
+
+- Healthy background synchronization is silent. Do not show loading/syncing messages, success notices or timestamps, or routine Refresh/Retry controls for automatic sync.
+- Keep existing content, scroll position, focus, and settled empty states stable during background requests. Polling must not clear a list, replace it with a loader, or briefly hide its empty state.
+- Show only actionable sync warnings, errors, and conflicts. Keep a failure visible until the relevant operation succeeds; starting a retry or completing an unrelated request must not clear it.
+- Retry automatically when appropriate. Comments refresh every 20 seconds while the tab is visible and when it becomes visible or connectivity returns. Comment panels and the workspace/editor status bars have no manual Refresh/Retry sync buttons. Settings may offer **Sync now** for an actual warning/error.
+- Explicit user actions such as Save, Post comment, import/export, diagnostics, and requested history loading may show progress and prevent duplicate submissions. Unread counts, presence, source versions, and access guidance remain useful content.
+- Comment badges use the exact label **Different version** when source hashes differ. Show the full hash on hover, with no hash prefix in the visible badge.
+
 ## Docs
 
 - `/docs/editor_guide.md` — full editor UI walkthrough

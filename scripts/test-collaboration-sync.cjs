@@ -363,3 +363,59 @@ test('away presence is retained offline, sent once per transition, and restored 
   assert.deepEqual(sockets[1].sent.filter(message => message.type === 'activity'), [{ type: 'activity', away: true }, { type: 'activity', away: false }]);
   client.destroy();
 });
+
+test('collaboration keeps failed sync visible while another durable save retries', async t => {
+  const { client, server, store } = await fixture();
+  t.after(() => client.destroy());
+  const statuses = []; client.onStatus = status => statuses.push(status);
+  server.offline = true;
+  await client.sync();
+  assert.equal(statuses.at(-1).error, true);
+  const count = statuses.length;
+  server.offline = false;
+  let entered, release;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const request = client.request;
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { entered(); await gate; }
+    return request(path, options);
+  };
+  const save = client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['quiet pending save', 'two'] }] });
+  await waiting;
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'quiet pending save');
+  assert.equal(statuses.length, count, 'Durable queue updates and retry starts do not hide the failure.');
+  release();
+  await save;
+  assert.deepEqual(statuses.at(-1), { message: '', error: false });
+  assert.equal(client.snapshot().pending, 0);
+});
+
+test('initial socket connection is quiet but a real disconnect persists until the socket reopens', async t => {
+  const { client } = await fixture();
+  t.after(() => client.destroy());
+  const sockets = [];
+  class Socket {
+    constructor() { this.readyState = 0; sockets.push(this); }
+    send() {}
+    open() { this.readyState = 1; this.onopen(); }
+    close() { this.readyState = 3; }
+    drop() { this.readyState = 3; this.onclose(); }
+  }
+  const request = client.request;
+  client.request = (path, options) => path.endsWith('/ticket') ? Promise.resolve({ ticket: 'ticket' }) : request(path, options);
+  client.apiBase = 'http://127.0.0.1:3333'; client.WebSocket = Socket;
+  await client.sync();
+  assert.equal(client.snapshot().connected, false);
+  assert.equal(client.snapshot().disconnected, false);
+  sockets[0].open(); await client.running;
+  sockets[0].drop();
+  assert.equal(client.snapshot().disconnected, true);
+  await client.sync();
+  assert.equal(client.snapshot().disconnected, true, 'HTTP recovery cannot claim presence has reconnected.');
+  sockets[1].open(); await client.running;
+  assert.equal(client.snapshot().disconnected, false);
+  assert.equal(client.snapshot().connected, true);
+  client.disconnect();
+  assert.equal(client.snapshot().disconnected, false, 'Leaving a workspace is not an unexpected disconnect.');
+});

@@ -84,7 +84,7 @@ function browserControls(account, language, secret) {
   });
   button('Add German comment', async () => {
     await fixtureRequest('remote-comment');
-    status.textContent = 'New German comment added to PoE1 / fixture/stat_01.txt. Wait for the normal refresh or use Refresh.';
+    status.textContent = 'New German comment added to PoE1 / fixture/stat_01.txt. It will appear automatically within 20 seconds.';
   });
   let offline = false, originalFetcher;
   const offlineButton = button('Simulate offline', async () => {
@@ -94,7 +94,7 @@ function browserControls(account, language, secret) {
       vm._cloud.fetcher = async () => { throw new TypeError('Fixture: network offline'); };
       vm._collaboration?.closeSocket();
       offlineButton.textContent = 'Restore connection';
-      status.textContent = 'Fixture API traffic disabled. Try posting or refreshing a comment.';
+      status.textContent = 'Fixture API traffic disabled. Try posting a comment or wait for automatic sync.';
     } else {
       vm._cloud.fetcher = originalFetcher;
       offlineButton.textContent = 'Simulate offline';

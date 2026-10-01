@@ -238,6 +238,46 @@ test('offline edits persist and merge independent remote changes on reconnect', 
   assert.deepEqual(h.client.snapshot().conflicts, []);
 });
 
+test('automatic cloud retries retain failures during local saves and in-flight polls until full recovery', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api);
+  await h.client.sync();
+  assert.deepEqual(h.statuses.at(-1), { message: '', error: false, warning: false });
+  h.api.online = false;
+  await h.client.sync();
+  const failure = clone(h.statuses.at(-1));
+  assert.equal(failure.error, true);
+  const beforeSave = h.statuses.length;
+  await h.client.saveLocal(payload([word('fire', { replace: 'saved while offline' })]));
+  assert.equal(h.statuses.length, beforeSave, 'A local save cannot dismiss the cloud outage.');
+  h.api.online = true;
+  const gate = h.api.pause('GET', '/v1/dictionaries/Thai');
+  const retry = h.client.sync();
+  await gate.entered.promise;
+  assert.deepEqual(h.statuses.at(-1), failure, 'A successful session/settings request is not a completed dictionary sync.');
+  gate.release.resolve();
+  await retry;
+  assert.deepEqual(h.statuses.at(-1), { message: '', error: false, warning: false });
+  assert.equal(h.statuses.some(status => /Syncing|Backed up|waiting to sync/.test(status.message)), false);
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'saved while offline');
+});
+
+test('unassigned accounts, local-only languages, and dictionary conflicts remain explicit warnings', async t => {
+  const h = await harness(t);
+  await h.client.acceptLogin({ token: 'token-unassigned', user: user('unassigned', null), expiresAt: 1 });
+  assert.equal(h.statuses.at(-1).warning, true);
+  assert.match(h.statuses.at(-1).message, /assignment/);
+  const other = await harness(t, { state: authenticatedState({ localSettings: settings({ lang: 'French' }) }) });
+  seedAPI(other.api);
+  await other.client.sync();
+  assert.deepEqual(other.statuses.at(-1), { message: 'Selected dictionary language is local only', error: false, warning: true });
+  const conflict = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'mine' })] }) });
+  seedAPI(conflict.api, { remote: dictionary([word('fire', { replace: 'theirs' })], 2) });
+  await conflict.client.sync();
+  assert.equal(conflict.statuses.at(-1).warning, true);
+  assert.match(conflict.statuses.at(-1).message, /conflicts need your choice/);
+});
+
 test('content conflicts survive another poll and a client reload without uploading the conflicted entry', async t => {
   const h = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'local' })] }) });
   seedAPI(h.api, { remote: dictionary([word('fire', { replace: 'remote' })], 2) });

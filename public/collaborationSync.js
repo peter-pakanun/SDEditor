@@ -23,7 +23,7 @@
       this.WebSocket = options.WebSocket === undefined ? globalThis.WebSocket : options.WebSocket;
       this.uuid = options.uuid || (() => globalThis.crypto.randomUUID());
       this.locks = options.locks || globalThis.navigator?.locks;
-      this.state = null; this.key = null; this.epoch = 0; this.connected = false;
+      this.state = null; this.key = null; this.epoch = 0; this.connected = false; this.disconnected = false;
       this.peers = []; this.sessionId = null; this.selected = null; this.editing = null;
       this.away = false;
       this.claims = new Map(); this.running = null; this.socket = null;
@@ -35,7 +35,7 @@
     snapshot() {
       const room = this.room();
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
-        connected: this.connected, pending: room?.outbox?.length || 0,
+        connected: this.connected, disconnected: this.disconnected, pending: room?.outbox?.length || 0,
         conflicts: copy(room?.conflicts || []), files: Object.values(copy(room?.local || {})),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
@@ -233,7 +233,6 @@
         for (const yours of normalized) current.local[yours.filepath] = copy(yours);
       }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
         collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, copy(workspace)) }, epoch);
-      this.status('Saved locally · Pending sync');
       await this.retry();
       if (!this.current(epoch)) throw staleError();
       if (this.lastError && !transient(this.lastError)) throw this.lastError;
@@ -257,7 +256,9 @@
             await this.openSocket(epoch);
           } while (this.dirty && this.current(epoch));
           this.backoff = 1000;
-          this.status(this.room().conflicts.length ? 'Comparison needed' : this.room().outbox.length ? 'Pending sync' : 'Shared changes saved');
+          // A completed pass clears an earlier failure. Enqueueing a save or
+          // starting another request must never hide an outstanding problem.
+          this.status('');
         } catch (error) {
           if (!error.stale) this.handleError(error);
         }
@@ -472,7 +473,7 @@
       const socket = new this.WebSocket(url.href); this.socket = socket;
       socket.onopen = () => {
         if (!this.current(epoch) || this.socket !== socket) { socket.close(); return; }
-        this.connected = true; this.notify(); this.send({ type: 'select', filepath: this.selected });
+        this.connected = true; this.disconnected = false; this.notify(); this.send({ type: 'select', filepath: this.selected });
         this.send({ type: 'activity', away: this.away });
         this.heartbeat = setInterval(() => this.send({ type: 'heartbeat' }), 15000);
         this.heartbeat.unref?.();
@@ -500,8 +501,9 @@
       socket.onerror = () => { /* onclose drives retry and clears obsolete claims. */ };
       socket.onclose = () => {
         if (this.socket !== socket) return;
+        this.disconnected = true;
         this.closeSocket();
-        if (this.current(epoch)) { this.status('Disconnected · Pending sync'); this.schedule(); }
+        if (this.current(epoch)) this.schedule();
       };
     }
     send(message) {
@@ -539,6 +541,7 @@
     }
     disconnect() {
       this.epoch++; clearTimeout(this.timer); this.timer = null;
+      this.disconnected = false;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }
     destroy() { this.disconnect(); this.destroyed = true; }

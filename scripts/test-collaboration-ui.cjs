@@ -77,17 +77,18 @@ test('participant avatars include self, deduplicate accounts, and mark away only
   assert.equal(app.collaborationParticipants.length, 0, 'Disconnected room participants must disappear rather than remain stale.');
 });
 
-test('healthy collaboration is quiet in the editor while failures, pending work and conflicts remain visible', () => {
+test('healthy collaboration and brief pending work stay quiet while failures and conflicts remain visible', () => {
   const { app } = editor();
   assert.equal(app.collaborationNeedsAttention, false);
   assert.equal(app.collaborationConnectionTone, 'connected');
-  for (const success of ['Translation conflict resolved.', 'Marked as reviewed (unchanged).', 'Imported 2 translated files.']) {
-    app.collaborationNotice = success; assert.equal(app.collaborationEditorNotice, '');
+  for (const success of ['Translation conflict resolved.', 'Marked as reviewed (unchanged).', 'Imported 2 translated files.', 'Saved locally · Pending sync', 'Resolution saved locally · Pending sync', 'Imported 2 translated files · Pending sync']) {
+    app.collaborationNotice = success; assert.equal(app.collaborationEditorNotice, ''); assert.equal(app.collaborationUserNotice, '');
   }
   app.collaborationNotice = 'No available files in this direction.';
   assert.equal(app.collaborationEditorNotice, app.collaborationNotice);
   app.collaborationState.pendingCount = 1;
-  assert.equal(app.collaborationNeedsAttention, true); assert.equal(app.collaborationConnectionTone, 'warning');
+  assert.equal(app.collaborationNeedsAttention, false); assert.equal(app.collaborationConnectionTone, 'connected');
+  assert.equal(app.collaborationCanRetry, false); assert.equal(app.collaborationStatusLabel, '');
   app.collaborationState.pendingCount = 0; app.collaborationState.conflicts = [conflict()];
   assert.equal(app.collaborationNeedsAttention, true);
   app.collaborationState.conflicts = []; app.collaborationState.error = 'Access expired';
@@ -95,8 +96,13 @@ test('healthy collaboration is quiet in the editor while failures, pending work 
   assert.equal(app.collaborationNeedsAttention, true); assert.equal(app.collaborationConnectionTone, 'error');
   assert.equal(app.collaborationEditorNotice, '', 'Do not repeat the same error below the warning banner.');
   app.collaborationState.error = ''; app.collaborationState.connected = false;
+  assert.equal(app.collaborationNeedsAttention, false, 'An initial socket connection is silent.');
+  assert.equal(app.collaborationCanRetry, false);
+  app.collaborationState.disconnected = true;
   assert.equal(app.collaborationNeedsAttention, true);
-  app.collaborationState.roomId = '';
+  assert.equal(app.collaborationCanRetry, true);
+  assert.match(app.collaborationStatusLabel, /reconnecting automatically/);
+  app.collaborationState.roomId = ''; app.collaborationState.disconnected = false;
   assert.equal(app.collaborationNeedsAttention, false, 'Local editing has no healthy sync banner.');
 });
 
@@ -149,10 +155,24 @@ test('presence updates do not erase a sync failure, while success or a different
   assert.equal(app.collaborationState.error, 'Permission refresh required');
   assert.equal(app.collaborationStatusLabel, 'Collaboration needs attention');
   app.collabReceiveState({ ...presence, error: '', status: 'Shared changes saved' });
-  assert.equal(app.collaborationStatusLabel, 'Translations synced');
+  assert.equal(app.collaborationStatusLabel, '');
   app.collabReceiveState({ ...presence, error: 'Old room failure' });
   app.collabReceiveState({ ...presence, roomId: 'new-room' });
   assert.equal(app.collaborationState.error, '');
+});
+
+test('initial join preserves a failure until confirmed recovery and clears its duplicate notice', () => {
+  const { app } = editor();
+  app.collabReceiveState({ ...app.collaborationState, roomId: null, connected: false, error: 'Network unavailable' });
+  app.collaborationNotice = 'Network unavailable';
+  const joined = { ...app.collaborationState, roomId: 'room-1' };
+  delete joined.error; delete joined.status;
+  app.collabReceiveState(joined);
+  assert.equal(app.collaborationState.error, 'Network unavailable');
+  assert.equal(app.collaborationUserNotice, '', 'The unresolved issue stays in its existing banner.');
+  app.collabReceiveState({ ...joined, error: '', status: '' });
+  assert.equal(app.collaborationNeedsAttention, false);
+  assert.equal(app.collaborationNotice, '', 'Confirmed recovery must not leave an obsolete warning.');
 });
 
 test('an initial offline join can be retried before the server assigns a room ID', () => {
@@ -160,7 +180,8 @@ test('an initial offline join can be retried before the server assigns a room ID
   app.collabReceiveState({ ...app.collaborationState, roomId: null, connected: false, error: 'Offline' });
   assert.equal(app.collaborationCanRetry, true);
   app.collabReceiveState({ ...app.collaborationState, error: '' });
-  assert.equal(app.collaborationStatusLabel, 'Waiting to join collaboration');
+  assert.equal(app.collaborationStatusLabel, '');
+  assert.equal(app.collaborationCanRetry, false);
 });
 
 test('late retry failure and deferred dialog opening cannot cross account or room changes', async () => {

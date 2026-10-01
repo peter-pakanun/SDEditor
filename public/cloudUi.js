@@ -17,7 +17,7 @@
   const b64url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const mixin = {
     data() { return {
-      cloudUser: null, cloudSignedIn: false, cloudStatus: 'Saved in this browser', cloudError: false,
+      cloudUser: null, cloudSignedIn: false, cloudStatus: '', cloudError: false, cloudWarning: false,
       cloudBusy: false, cloudStorageError: '', cloudConflicts: [], cloudRevision: 0,
       cloudResolverVisible: false, cloudConflictIndex: 0, cloudDefinitionsChoice: '', cloudNoteChoice: '',
       cloudAdminVisible: false, cloudAdminUsers: [], cloudNeedsDictionaryLanguage: false, cloudRecoveryCount: 0,
@@ -25,6 +25,13 @@
       settingsImportDraft: null, settingsImportConfirm: '',
     }; },
     computed: {
+      cloudSyncIssue() {
+        if (this.cloudError || this.cloudWarning) return this.cloudStatus;
+        if (this.cloudSignedIn && !this.cloudUser?.language) return 'Not configured — awaiting admin language assignment';
+        if (this.cloudConflicts.length) return 'Saved locally · dictionary conflicts need your choice';
+        if (this.cloudSignedIn && this.cloudUser?.language && this.lang !== this.cloudUser.language) return 'Selected dictionary language is local only';
+        return '';
+      },
       cloudConflict() { return this.cloudConflicts[this.cloudConflictIndex] || null; },
       cloudResult() {
         if (!this.cloudConflict) return null;
@@ -50,7 +57,6 @@
           this.settingsImportDraft = null;
           this.settingsImportConfirm = '';
           this.$refs.importSettingsFileForm.reset();
-          this.cloudStatus = 'Settings imported and saved locally';
         } catch (error) { this.cloudStorageError = error.message; }
       },
       cancelSettingsImport() { this.settingsImportDraft = null; this.settingsImportConfirm = ''; this.$refs.importSettingsFileForm.reset(); },
@@ -97,7 +103,7 @@
         this._cloud = new window.CloudSync.Client({ store: window.OfflineStore, merge: window.DictionarySync,
           fetch: window.fetch.bind(window), apiBase: apiBase(), locks: navigator.locks,
           onChange: snapshot => { this.cloudApply(snapshot).catch(error => { this.cloudStorageError = error.message; }); },
-          onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; },
+          onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; this.cloudWarning = !!status.warning; },
         });
         try {
           await this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] });
@@ -172,7 +178,7 @@
           sessionStorage.setItem('sdeditor-login', JSON.stringify({ verifier, state: result.state, at: Date.now(), returnUrl: location.href }));
           this.cloudLoginUrl = result.authorizationUrl;
           this.cloudStatus = 'Complete Google sign-in in the opened window, or continue in this tab.';
-          this.cloudError = false;
+          this.cloudError = false; this.cloudWarning = false;
           if (!popup) { location.assign(result.authorizationUrl); return; }
           const handler = async event => {
             if (event.origin !== new URL(apiBase()).origin || event.source !== popup || event.data?.type !== 'sdeditor:auth') return;

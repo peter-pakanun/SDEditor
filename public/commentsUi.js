@@ -1,11 +1,11 @@
 /* Shared file discussions are scoped by game/path, independently of translation rooms. */
 (() => {
-  const emptyFeed = () => ({ items: [], loadedIds: [], cursor: null, loading: false, loaded: false, error: '' });
+  const emptyFeed = () => ({ items: [], loadedIds: [], cursor: null, loading: false, loadingMore: false, moreRequested: false, loaded: false, error: '' });
   const ordered = items => [...new Map(items.map(item => [item.id, item])).values()].sort((a, b) => b.id - a.id);
   const mixin = {
     data() { return {
       commentsAllVisible: false, commentsFileFeed: emptyFeed(), commentsAllFeed: emptyFeed(),
-      commentsUnreadTotal: 0, commentsUnreadFiles: {}, commentsUnreadError: '',
+      commentsUnreadTotal: 0, commentsUnreadFiles: {}, commentsUnreadFetchError: '', commentsUnreadReadError: '',
       commentsDrafts: {}, commentsPosts: {}, commentsPostErrors: {},
     }; },
     computed: {
@@ -22,7 +22,7 @@
         if (!this.cloudSignedIn) return 'Sign in to read and share comments with all translation teams.';
         if (!this.cloudUser?.language) return 'An admin must assign your team language before comments are available.';
         if (!['poe1', 'poe2'].includes(this.gameVersion)) return 'Choose a game to view its comments.';
-        return this.commentsEligible ? '' : 'Connecting to shared comments…';
+        return '';
       },
       commentsFilepath() { return this.editorCurrentEditingDesc?.filepath || ''; },
       commentsDraftKey() {
@@ -40,13 +40,16 @@
       commentsPostError() { return this.commentsPostErrors[this.commentsDraftKey] || ''; },
       commentsFileItems() { return this.commentsFileFeed.items; },
       commentsFileLoading() { return this.commentsFileFeed.loading; },
+      commentsFileBusy() { return (!this.commentsFileFeed.loaded && this.commentsFileLoading) || this.commentsFileFeed.loadingMore; },
       commentsFileError() { return this.commentsFileFeed.error; },
       commentsFileHasMore() { return this.commentsFileFeed.cursor != null; },
       commentsAllItems() { return this.commentsAllFeed.items; },
       commentsAllLoading() { return this.commentsAllFeed.loading; },
+      commentsAllBusy() { return (!this.commentsAllFeed.loaded && this.commentsAllLoading) || this.commentsAllFeed.loadingMore; },
       commentsAllError() { return this.commentsAllFeed.error; },
       commentsAllHasMore() { return this.commentsAllFeed.cursor != null; },
       commentsFileUnread() { return this.commentsUnreadFiles[this.commentsFilepath] || 0; },
+      commentsUnreadError() { return [this.commentsUnreadFetchError, this.commentsUnreadReadError].filter(Boolean).join(' '); },
       commentsUiBlocked() {
         return !!(this.showMultiInstanceGate || this.showSetting || this.settingsDialogVisible || this.importDialogVisible
           || this.consistencyResolver || this.cloudResolverVisible || this.cloudHistoryVisible || this.duplicateLangImportWarning
@@ -100,7 +103,7 @@
         this._commentsUnreadTask = null; this._commentsReadTask = null; this._commentsPollRun = null;
         this._commentsReadDone = new Set(); this._commentsVisible = new Map();
         clearTimeout(this._commentsReadTimer); this._commentsReadTimer = null; this._commentsObserver?.disconnect();
-        this.commentsUnreadTotal = 0; this.commentsUnreadFiles = {}; this.commentsUnreadError = '';
+        this.commentsUnreadTotal = 0; this.commentsUnreadFiles = {}; this.commentsUnreadFetchError = ''; this.commentsUnreadReadError = '';
         this.commentsAllVisible = false; this.commentsAllFeed = emptyFeed();
         this.commentsResetFile();
         this.commentsPoll();
@@ -156,10 +159,10 @@
         try {
           const result = await ctx.client.request('/v1/comments/unread?game=' + encodeURIComponent(ctx.game), {}, ctx.auth);
           if (!this.commentsCurrent(ctx) || revision !== (this._commentsReadRevision || 0)) return;
-          this.commentsApplyUnread(result); this.commentsUnreadError = '';
+          this.commentsApplyUnread(result); this.commentsUnreadFetchError = '';
         } catch (error) {
           if (this.commentsCurrent(ctx) && revision === (this._commentsReadRevision || 0) && !error.stale) {
-            this.commentsUnreadError = 'Could not refresh unread comments. ' + error.message;
+            this.commentsUnreadFetchError = 'Could not refresh unread comments. ' + error.message;
           }
         } finally { if (this._commentsUnreadTask === task) this._commentsUnreadTask = null; }
       },
@@ -170,14 +173,19 @@
       async commentsLoadFeed(surface, append = false) {
         if (!this.commentsSurfaceVisible(surface)) return;
         const feed = surface === 'file' ? this.commentsFileFeed : this.commentsAllFeed;
-        if (feed.loading || (append && feed.cursor == null)) return;
+        if (append && feed.cursor == null) return;
+        if (feed.loading) {
+          // A background refresh must not swallow a click on Load older comments.
+          if (append) { feed.moreRequested = true; feed.loadingMore = true; }
+          return;
+        }
         const ctx = this.commentsCapture(), filepath = surface === 'file' ? this.commentsFilepath : '';
         const current = () => this.commentsCurrent(ctx) && feed === (surface === 'file' ? this.commentsFileFeed : this.commentsAllFeed)
           && (surface !== 'file' || filepath === this.commentsFilepath);
         const params = new URLSearchParams({ game: ctx.game, limit: '50' });
         if (filepath) params.set('filepath', filepath);
         if (append) params.set('before', feed.cursor);
-        feed.loading = true; feed.error = '';
+        feed.loading = true; feed.loadingMore = append;
         try {
           const result = await ctx.client.request('/v1/comments?' + params, {}, ctx.auth);
           if (!current()) return;
@@ -198,11 +206,19 @@
             feed.items = ordered(incoming); feed.cursor = result.nextCursor;
             feed.loadedIds = incoming.map(item => item.id);
           }
-          feed.loaded = true;
+          feed.loaded = true; feed.error = '';
           await this.commentsObserveVisible();
         } catch (error) {
           if (current() && !error.stale) feed.error = 'Could not load comments. ' + error.message;
-        } finally { if (current()) feed.loading = false; }
+        } finally {
+          if (current()) {
+            feed.loading = false; feed.loadingMore = false;
+            if (feed.moreRequested) {
+              feed.moreRequested = false;
+              await this.commentsLoadFeed(surface, true);
+            }
+          }
+        }
       },
       async commentsSubmit() {
         if (!this.commentsCanPost || this.commentsPosting) return false;
@@ -289,9 +305,9 @@
           for (const feed of [this.commentsFileFeed, this.commentsAllFeed]) {
             for (const item of feed.items) if (ids.has(item.id)) item.unread = false;
           }
-          this.commentsApplyUnread(result); this.commentsUnreadError = ''; succeeded = true;
+          this.commentsApplyUnread(result); this.commentsUnreadFetchError = ''; this.commentsUnreadReadError = ''; succeeded = true;
         } catch (error) {
-          if (this.commentsCurrent(ctx) && !error.stale) this.commentsUnreadError = 'Could not update unread comments. ' + error.message;
+          if (this.commentsCurrent(ctx) && !error.stale) this.commentsUnreadReadError = 'Could not update unread comments. ' + error.message;
         } finally {
           if (this._commentsReadTask === task) {
             this._commentsReadTask = null;

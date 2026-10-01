@@ -135,12 +135,11 @@
               <div v-if="cloudUser" class="settingsAccount">
                 <strong>{{ cloudUser.name || cloudUser.email }}</strong><span>{{ cloudUser.email }}</span>
                 <p v-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
-                <p v-else class="cloudWarning">Not configured — awaiting admin language assignment</p>
               </div>
-              <p class="cloudStatus settingsNotice" :class="{ cloudWarning: cloudError }" role="status">{{ cloudStatus }}</p>
+              <p v-if="cloudSyncIssue" class="cloudStatus settingsNotice cloudWarning" role="alert">{{ cloudSyncIssue }}</p>
               <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose your translation language in <button class="settingsTextButton" @click="setSettingsTab('general', true)">General</button> to keep your existing dictionary under that language before cloud backup.</p>
               <div class="cloudActions">
-                <button v-if="cloudSignedIn" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
+                <button v-if="cloudSignedIn && cloudSyncIssue" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
                 <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
                 <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
                 <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
@@ -389,15 +388,14 @@
           <span class="statusPill review" title="Files whose English source changed since the last translation save"><span class="statusDot" aria-hidden="true"></span>Review <strong>{{ statistic.needsReview }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill warning" title="Files with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ diagnosticScanWarningFileCount }}</strong></span>
           <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
-          <div class="collaborationStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
+          <div class="collaborationStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
-            <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
-            <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
+            <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+            <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
             <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
           </div>
         </div>
-        <p v-if="collaborationState.error" class="collaborationFooterMessage collaborationError" role="alert">{{ collaborationState.error }}</p>
-        <p v-if="collaborationNotice && collaborationNotice !== collaborationState.error" class="collaborationFooterMessage" role="status">{{ collaborationNotice }}</p>
+        <p v-if="collaborationUserNotice" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</p>
         </div>
         <div class="workspaceFooterRight">
         <ul v-if="collaborationParticipants.length" class="collaborationAvatars" aria-label="Collaborators in this workspace">
@@ -421,21 +419,19 @@
           <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · All languages and source versions</p></div>
           <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments">×</button>
         </header>
-        <p v-if="!commentsEligible" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
+        <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
         <template v-else>
-          <div class="commentsToolbar"><span>{{ commentsUnreadTotal }} unread</span><button type="button" @click="commentsRefreshAll" :disabled="commentsAllLoading">Refresh</button></div>
           <p v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</p>
           <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
-          <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllLoading">
+          <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllBusy">
             <article v-for="comment in commentsAllItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
               <button type="button" class="commentFileLink" @click="commentsOpenFile(comment.filepath)" :disabled="!getDescByFilepath(comment.filepath) || navigationBusy" :title="getDescByFilepath(comment.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ comment.filepath }}</button>
               <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
-              <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different hash · {{ comment.sourceHash.slice(0, 8) }}</span></div>
+              <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
               <p class="commentBody">{{ comment.body }}</p>
             </article>
-            <p v-if="!commentsAllItems.length && !commentsAllLoading && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
-            <p v-if="commentsAllLoading" class="commentsEmpty" role="status">Loading comments…</p>
-            <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllLoading">Load older comments</button>
+            <p v-if="commentsAllFeed.loaded && !commentsAllItems.length && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
+            <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllFeed.loadingMore">Load older comments</button>
           </div>
         </template>
       </aside>
@@ -518,7 +514,6 @@
               <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
               <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
               <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
-              <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
               <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
             </div>
           </div>
@@ -669,20 +664,18 @@
 
         <section v-if="sideTab === 'comments'" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>Shared across all languages and source versions</p></div></header>
-          <p v-if="!commentsEligible" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
+          <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
           <template v-else>
-            <div class="commentsToolbar"><span>{{ commentsFileUnread }} unread</span><button type="button" @click="commentsRefreshFile" :disabled="commentsFileLoading">Refresh</button></div>
             <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
             <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
-            <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileLoading">
+            <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
               <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
                 <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span><span v-if="comment.unread" class="commentNew">Unread</span></div>
-                <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different hash · {{ comment.sourceHash.slice(0, 8) }}</span></div>
+                <div class="commentMeta"><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
-              <p v-if="!commentsFileItems.length && !commentsFileLoading && !commentsFileError" class="commentsEmpty">No comments yet. Share a thought about this file.</p>
-              <p v-if="commentsFileLoading" class="commentsEmpty" role="status">Loading comments…</p>
-              <button v-if="commentsFileHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreFile" :disabled="commentsFileLoading">Load older comments</button>
+              <p v-if="commentsFileFeed.loaded && !commentsFileItems.length && !commentsFileError" class="commentsEmpty">No comments yet. Share a thought about this file.</p>
+              <button v-if="commentsFileHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreFile" :disabled="commentsFileFeed.loadingMore">Load older comments</button>
             </div>
             <form class="commentsComposer" @submit.prevent="commentsSubmit">
               <label for="fileCommentDraft">Add a comment <span>· {{ cloudUser.language }}</span></label>

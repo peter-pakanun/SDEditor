@@ -1,6 +1,6 @@
 /* Translation collaboration views. Mutations and session lifecycle live in the integration mixin. */
 (() => {
-  const emptyState = () => ({ status: 'local', error: '', roomId: '', sourceHash: '', peers: [], conflicts: [], pendingCount: 0, connected: false });
+  const emptyState = () => ({ status: 'local', error: '', roomId: '', sourceHash: '', peers: [], conflicts: [], pendingCount: 0, connected: false, disconnected: false });
   const colors = ['#17743b', '#3458b3', '#96408c', '#996015', '#087782', '#ac3f42'];
   const text = value => String(value ?? '');
   const decode = value => text(value).replaceAll('\\n', '\n');
@@ -45,28 +45,24 @@
       collaborationStatusLabel() {
         const state = this.collaborationState;
         if (this.collaborationConflicts.length) return `${this.collaborationConflicts.length} translation conflict${this.collaborationConflicts.length === 1 ? '' : 's'} to review`;
-        if (this.collaborationPendingCount) return `Saved locally · ${this.collaborationPendingCount} pending sync`;
         if (state.error) return 'Collaboration needs attention';
-        if (state.connected) return 'Translations synced';
-        if (['joining', 'connecting', 'syncing', 'saving'].includes(state.status)) return 'Connecting to collaboration…';
-        if (this.collaborationAvailable) return 'Offline · changes save in this browser';
-        if (state.identity) return 'Waiting to join collaboration';
-        return 'Local workspace';
+        if (state.disconnected) return 'Collaboration disconnected · reconnecting automatically';
+        return '';
       },
       collaborationNeedsAttention() {
-        return !!(this.collaborationState.error || this.collaborationPendingCount || this.collaborationConflicts.length
-          || (this.collaborationAvailable && !this.collaborationState.connected));
+        return !!(this.collaborationState.error || this.collaborationState.disconnected || this.collaborationConflicts.length);
       },
       collaborationConnectionTone() {
         return this.collaborationState.error ? 'error' : this.collaborationNeedsAttention ? 'warning'
           : this.collaborationState.connected ? 'connected' : '';
       },
-      collaborationEditorNotice() {
+      collaborationUserNotice() {
         const notice = this.collaborationNotice || '';
-        if (['Translation conflict resolved.', 'Marked as reviewed (unchanged).'].includes(notice)
-          || /^Imported \d+ translated files\.$/.test(notice)) return '';
+        if (['Translation conflict resolved.', 'Marked as reviewed (unchanged).', 'Saved locally · Pending sync', 'Resolution saved locally · Pending sync'].includes(notice)
+          || /^Imported \d+ translated files(?:\.| · Pending sync)$/.test(notice)) return '';
         return notice === this.collaborationState.error ? '' : notice;
       },
+      collaborationEditorNotice() { return this.collaborationUserNotice; },
       collaborationContext() {
         const state = this.collaborationState, identity = state.identity || {};
         return [identity.accountId || this.cloudUser?.id || '', state.roomId, identity.game || this.gameVersion, identity.sourceHash || state.sourceHash, identity.language || this.lang].join('|');
@@ -86,7 +82,7 @@
         return [...participants.values()].sort((a, b) => Number(b.isSelf) - Number(a.isSelf)
           || this.collaborationPeerName(a).localeCompare(this.collaborationPeerName(b)) || a.key.localeCompare(b.key));
       },
-      collaborationCanRetry() { return (this.collaborationAvailable || !!this.collaborationState.identity) && (!this.collaborationState.connected || !!this.collaborationState.error || this.collaborationPendingCount > 0); },
+      collaborationCanRetry() { return (this.collaborationAvailable || !!this.collaborationState.identity) && !!(this.collaborationState.disconnected || this.collaborationState.error); },
     },
     watch: {
       collaborationContext() { this.collaborationResetViews(); },
@@ -96,8 +92,11 @@
       collabReceiveState(state) {
         const previous = this.collaborationState;
         const next = { ...emptyState(), ...state, pendingCount: state?.pendingCount ?? state?.pending ?? 0 };
-        const sameScope = previous.roomId === next.roomId && ['accountId', 'game', 'sourceHash', 'language'].every(key => previous.identity?.[key] === next.identity?.[key]);
+        const sameScope = (previous.roomId === next.roomId || !previous.roomId || !next.roomId)
+          && ['accountId', 'game', 'sourceHash', 'language'].every(key => previous.identity?.[key] === next.identity?.[key]);
         if (sameScope) for (const key of ['status', 'error']) if (!Object.prototype.hasOwnProperty.call(state, key)) next[key] = previous[key];
+        if (sameScope && previous.error && Object.prototype.hasOwnProperty.call(state, 'error') && !next.error
+          && this.collaborationNotice === previous.error) this.collaborationNotice = '';
         this.collaborationState = next;
       },
       collaborationPeersFor(filepath) {

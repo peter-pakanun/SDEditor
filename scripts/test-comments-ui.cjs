@@ -65,6 +65,69 @@ test('all assigned teams can read across selected language and source hash', asy
   assert.equal(app.commentsEligible, false);
 });
 
+test('background refresh preserves content, empty-state and accessible busy state until confirmed changes', async () => {
+  const pending = deferred();
+  const { app } = fixture(() => pending.promise);
+  app.commentsFileFeed.loaded = true;
+  app.commentsFileFeed.items = [comment(5)];
+  const items = app.commentsFileItems;
+  const refresh = app.commentsRefreshFile();
+  assert.equal(app.commentsFileFeed.loaded, true);
+  assert.equal(app.commentsFileItems, items);
+  assert.equal(app.commentsFileBusy, false);
+  assert.equal(app.commentsFileFeed.loadingMore, false);
+  pending.resolve({ items: [comment(5)], nextCursor: null });
+  await refresh;
+  app.commentsFileFeed.items = [];
+  const emptyRefresh = app.commentsRefreshFile();
+  assert.equal(app.commentsFileFeed.loaded && !app.commentsFileItems.length, true);
+  assert.equal(app.commentsFileBusy, false);
+  await emptyRefresh;
+});
+
+test('comment fetch errors stay visible through retries and clear only after success', async () => {
+  const failed = deferred(), recovered = deferred();
+  let attempts = 0;
+  const { app } = fixture(() => ++attempts === 1 ? failed.promise : recovered.promise);
+  app.commentsFileFeed.loaded = true;
+  app.commentsFileFeed.items = [comment(5)];
+  app.commentsFileFeed.error = 'Previous network failure';
+  const retry = app.commentsRefreshFile();
+  assert.equal(app.commentsFileError, 'Previous network failure');
+  failed.reject(new Error('Still offline')); await retry;
+  assert.match(app.commentsFileError, /Still offline/);
+  const recovery = app.commentsRefreshFile();
+  assert.match(app.commentsFileError, /Still offline/);
+  recovered.resolve({ items: [comment(5)], nextCursor: null }); await recovery;
+  assert.equal(app.commentsFileError, '');
+});
+
+test('Load older comments requested during silent refresh runs after the refresh', async () => {
+  const pending = deferred();
+  const { app, calls } = fixture(url => url.includes('before=')
+    ? { items: [comment(4)], nextCursor: null } : pending.promise);
+  Object.assign(app.commentsFileFeed, { loaded: true, items: [comment(5)], loadedIds: [5], cursor: 5 });
+  const refresh = app.commentsRefreshFile();
+  assert.equal(app.commentsFileBusy, false);
+  await app.commentsLoadMoreFile();
+  assert.equal(app.commentsFileBusy, true);
+  assert.equal(calls.length, 1);
+  pending.resolve({ items: [comment(6), comment(5)], nextCursor: 5 }); await refresh;
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].url, /before=5/);
+  assert.deepEqual(Array.from(app.commentsFileItems, item => item.id), [6, 5, 4]);
+  assert.equal(app.commentsFileBusy, false);
+});
+
+test('successful unread-count polling does not hide a failed read acknowledgement', async () => {
+  const { app } = fixture(async () => ({ total: 1, files: [{ filepath: 'Metadata/test.txt', count: 1 }] }));
+  app.commentsUnreadReadError = 'Read acknowledgement failed';
+  app.commentsUnreadFetchError = 'Unread counts unavailable';
+  await app.commentsRefreshUnread();
+  assert.equal(app.commentsUnreadFetchError, '');
+  assert.equal(app.commentsUnreadError, 'Read acknowledgement failed');
+});
+
 test('a late file fetch cannot overwrite a switched file, including return to the same file', async () => {
   const pending = deferred();
   const { app } = fixture(() => pending.promise);
