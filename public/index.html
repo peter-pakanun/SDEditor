@@ -29,7 +29,7 @@
     <div class="multiInstanceGate versionGate" v-if="!testMode && !gameVersionSelected">
       <div class="multiInstanceGateContent versionGateContent">
         <h2>Select Game Version</h2>
-        <p>SDEditor is a translation editor for Path of Exile StatDescriptions files, with optional Google backup for settings and shared language dictionaries.</p>
+        <p>SDEditor is a translation editor for Path of Exile StatDescriptions files, with Google sign-in for personal settings backup, shared language dictionaries, and collaboration on matching source versions.</p>
         <p>Choose the Path of Exile version you are translating. Source files, workspace data, and history are stored separately for each version.</p>
         <div class="versionGateButtons">
           <button class="versionChoiceBtn" @click="selectGameVersion('poe1')">
@@ -125,6 +125,7 @@
           <section id="settings-panel-cloud" class="settingsPanel cloudSettings" role="tabpanel" aria-labelledby="settings-tab-cloud" v-show="settingsTab === 'cloud'" tabindex="0">
             <h3>Cloud backup</h3>
             <p class="settingsHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
+            <p class="settingsHelp">When signed in with an assigned language, saved translations automatically collaborate with translators using the same game and source version. Your name and selected or open file are visible to them. Typing stays in your draft until Save.</p>
             <p class="settingsHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
             <p v-if="testMode" class="settingsNotice">Cloud backup is disabled in test mode.</p>
             <template v-else>
@@ -313,6 +314,14 @@
           <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
           <button ref="settingsButton" @click="openSettings()">Settings</button>
         </nav>
+        <div class="collaborationStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
+          <span class="collaborationConnection" :class="{ connected: collaborationState.connected }" aria-hidden="true"></span>
+          <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Source version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Version {{ collaborationShortVersion }}</span>
+          <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
+          <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
+          <span v-if="collaborationState.error" class="collaborationError" role="alert">{{ collaborationState.error }}</span>
+        </div>
         <fieldset id="fileFilterPanel" class="fileFilters" aria-label="File status filters" v-show="fileFiltersVisible" @keydown.esc.stop.prevent="closeFileFilters">
           <div class="fileFilterChoices">
             <label v-for="option in fileFilterOptions" :key="option.key" class="filterChip" :class="[{ selected: selectedFileFilters.includes(option.key) }, option.tone]">
@@ -325,6 +334,7 @@
       </header>
 
       <main class="workspaceContent">
+      <p v-if="collaborationNotice" class="collaborationNotice" role="status">{{ collaborationNotice }}</p>
 
       <div v-if="importDialogVisible" class="importDialogOverlay" @click.self="closeImportDialog">
         <div class="box importDialogBox">
@@ -360,7 +370,12 @@
             <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
             <td><button class="fileOpenButton" tabindex="-1" @click.stop="openFileRow(desc.filepath)" :aria-label="'Edit ' + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.needsReview" class="fileReviewLabel">Needs review</span></td>
             <td data-label="English"><span v-html="desc.english"></span></td>
-            <td class="translationTr" :data-label="lang + ' translation'"><span v-html="desc.translation"></span></td>
+            <td class="translationTr collaborationCell" :class="{ collaborationSelected: collaborationPeersFor(desc.filepath).length, collaborationEditing: collaborationEditing(desc.filepath) }" :style="collaborationCellStyle(desc.filepath)" :data-label="lang + ' translation'">
+              <div v-if="collaborationPeersFor(desc.filepath).length" class="collaborationPeerLabels" aria-label="Other translators on this file">
+                <span v-for="peer in collaborationPeersFor(desc.filepath)" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerLabel(peer, desc.filepath) }}</span>
+              </div>
+              <span v-html="desc.translation"></span>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -381,11 +396,18 @@
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill warning" title="Files with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ diagnosticScanWarningFileCount }}</strong></span>
           <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
         </div>
+        <div class="workspaceFooterRight">
+        <ul v-if="collaborationParticipants.length" class="collaborationAvatars" aria-label="Collaborators in this workspace">
+          <li v-for="participant in collaborationParticipants" :key="participant.key">
+            <span class="collaborationAvatar" :class="{ away: participant.away }" :style="{ '--collaboration-color': collaborationPeerColor(participant) }" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(participant)" v-tooltip="collaborationParticipantLabel(participant)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(participant) }}</span></span>
+          </li>
+        </ul>
         <nav class="workspacePagination" aria-label="File pagination">
           <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ fileRangeLabel }}</span>
           <button type="button" class="paginationArrow" @click="prevPage" :disabled="currentPage <= 1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
           <button type="button" class="paginationArrow" @click="nextPage" :disabled="currentPage >= pageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
         </nav>
+        </div>
       </footer>
     </div>
 
@@ -456,11 +478,24 @@
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
           <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" v-tooltip="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
           <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" v-tooltip="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
-          <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly" title="Save this translation and close the file">Save &amp; close</button>
+          <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy" title="Save this translation and close the file">{{ editorSaving ? 'Saving…' : 'Save & close' }}</button>
           <button @click="editorExit" title="Close the file (Esc); unsaved changes require confirmation">Close</button>
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+          <div class="collaborationEditorStatus" v-if="cloudSignedIn || collaborationAvailable || collaborationState.error" aria-label="Translation collaboration">
+            <div class="collaborationStatus">
+              <span class="collaborationConnection" :class="{ connected: collaborationState.connected }" aria-hidden="true"></span>
+              <span role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+              <button v-if="collaborationCanRetry" @click="collaborationRetry">Retry sync</button>
+              <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
+            </div>
+            <p v-if="collaborationState.error" class="collaborationError" role="alert">{{ collaborationState.error }}</p>
+            <div v-if="collaborationEditorPeers.length" class="collaborationPeerLabels" aria-label="Other translators editing this file">
+              <span v-for="peer in collaborationEditorPeers" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerName(peer) }} · Editing this file</span>
+            </div>
+          </div>
+          <p v-if="collaborationNotice" class="collaborationNotice" role="status">{{ collaborationNotice }}</p>
           <div v-if="consistencyResolutionNotice" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</div>
           <div v-if="editorCompareActive" class="compareBanner">
             <span>{{ editorCompareTitle }}</span>
@@ -607,6 +642,8 @@
           <div v-else>
             <div class="historyMeta">
               <div class="historyTitle">{{ editorCurrentEditingDesc.filename }}</div>
+              <p class="collaborationLocalHistoryLabel">Local history · saved in this browser</p>
+              <button class="collaborationHistoryButton" @click="collaborationOpenHistory(editorCurrentEditingDesc.filepath)" :disabled="!collaborationAvailable" :title="collaborationAvailable ? 'View shared translation changes for this source version' : 'Sign in with your assigned language and load a matching source version'">Shared translation history</button>
               <div class="historySubtitle">
                 <button class="historyModeBtn" :class="{ active: historyMode === 'translation' }" @click="setHistoryMode('translation')">Translation</button>
                 <button class="historyModeBtn" :class="{ active: historyMode === 'source' }" @click="setHistoryMode('source')">Source</button>
@@ -898,6 +935,80 @@
         </section>
       </section>
     </div>
+    <dialog ref="collaborationConflictDialog" class="collaborationDialog" aria-labelledby="collaborationConflictTitle" aria-describedby="collaborationConflictDescription" @cancel.prevent="collaborationCloseConflicts" @keydown.stop>
+      <template v-if="collaborationConflictVisible">
+        <header class="collaborationDialogHeader">
+          <div><h2 id="collaborationConflictTitle">Resolve translation conflicts</h2><p id="collaborationConflictDescription">Review each conflicting entry and choose Yours, Shared, or edit the result. Other entries are combined automatically.</p></div>
+          <button ref="collaborationConflictClose" @click="collaborationCloseConflicts">Close</button>
+        </header>
+        <template v-if="collaborationConflict">
+          <label class="collaborationFilePicker">File to review
+            <select :value="collaborationConflictId" @change="collaborationSelectConflict($event.target.value)" :disabled="collaborationConflictBusy"><option v-for="conflict in collaborationConflicts" :key="conflict.id" :value="conflict.id">{{ conflict.filepath }}</option></select>
+          </label>
+          <p v-if="collaborationConflict.kind === 'join'" class="collaborationNotice">This browser has different saved translations and no shared base yet. Your local work has been preserved.</p>
+          <p v-if="collaborationConflictNotice" class="collaborationNotice" role="status">{{ collaborationConflictNotice }}</p>
+          <div class="collaborationConflictEntries">
+            <section v-for="entryIndex in collaborationConflictIndexes" :key="entryIndex" class="collaborationConflictEntry" :aria-labelledby="'collaborationEntry-' + entryIndex">
+              <h3 :id="'collaborationEntry-' + entryIndex">Entry {{ entryIndex + 1 }}</h3>
+              <p class="collaborationSourceText"><strong>English</strong><span>{{ collaborationConflictEnglish(entryIndex) }}</span></p>
+              <div class="collaborationVersions">
+                <section><h4>Base</h4><pre>{{ collaborationConflictText(entryIndex, 'base') }}</pre></section>
+                <section><h4>Yours</h4><pre>{{ collaborationConflictText(entryIndex, 'yours') }}</pre><button @click="collaborationChooseConflict(entryIndex, 'yours')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictChoices[entryIndex] === 'yours'">Use yours</button></section>
+                <section><h4>Shared</h4><pre>{{ collaborationConflictText(entryIndex, 'shared') }}</pre><button @click="collaborationChooseConflict(entryIndex, 'shared')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictChoices[entryIndex] === 'shared'">Use shared</button></section>
+              </div>
+              <label class="collaborationResult" :for="'collaborationResult-' + entryIndex">Result <span>{{ collaborationConflictChoices[entryIndex] ? 'Ready to save' : 'Choose a version or edit the result' }}</span></label>
+              <textarea :id="'collaborationResult-' + entryIndex" v-model="collaborationConflictDraft[entryIndex]" @input="collaborationEditConflict(entryIndex)" :disabled="collaborationConflictBusy" :lang="translationEditorBcp47" rows="3"></textarea>
+              <button v-if="collaborationConflictEdited[entryIndex] && !collaborationConflictChoices[entryIndex]" @click="collaborationEditConflict(entryIndex)" :disabled="collaborationConflictBusy">Keep this result</button>
+            </section>
+          </div>
+          <section v-for="field in collaborationConflictMetadata" :key="field" class="collaborationConflictEntry">
+            <h3>{{ collaborationMetadataLabel(field) }}</h3>
+            <p>This file's saved status differs. Choose the status to share.</p>
+            <div class="collaborationMetadataChoices">
+              <button @click="collaborationChooseMetadata(field, 'yours')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictMetadataChoices[field] === 'yours'">Yours: {{ collaborationConflict.yours[field] ? 'Yes' : 'No' }}</button>
+              <button @click="collaborationChooseMetadata(field, 'shared')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictMetadataChoices[field] === 'shared'">Shared: {{ collaborationConflict.shared[field] ? 'Yes' : 'No' }}</button>
+            </div>
+          </section>
+          <p v-if="collaborationConflictIndexes.length === 0 && collaborationConflictMetadata.length === 0" class="collaborationNotice">Translation text has already merged. Save the result to finish reconciling this file.</p>
+          <p v-if="collaborationConflictError" class="collaborationError" role="alert">{{ collaborationConflictError }}</p>
+          <footer class="collaborationDialogFooter"><span>Result drafts stay in this tab when you close or switch files. Save result to keep them after a reload or account/workspace change. Original saved conflict versions remain in browser storage.</span><button class="btnPrimary" @click="collaborationSubmitConflict" :disabled="!collaborationConflictReady || collaborationConflictBusy">{{ collaborationConflictBusy ? 'Saving…' : 'Save result' }}</button></footer>
+        </template>
+        <p v-else role="status">No translation conflicts remain.</p>
+      </template>
+    </dialog>
+
+    <dialog ref="collaborationHistoryDialog" class="collaborationDialog collaborationHistoryDialog" aria-labelledby="collaborationHistoryTitle" @cancel.prevent="collaborationCloseHistory" @keydown.stop>
+      <template v-if="collaborationHistoryVisible">
+        <header class="collaborationDialogHeader">
+          <div><h2 id="collaborationHistoryTitle">Shared translation history</h2><p>{{ collaborationHistoryFilepath }}</p></div>
+          <button ref="collaborationHistoryClose" @click="collaborationCloseHistory">Close</button>
+        </header>
+        <p class="collaborationNotice">Changes for this game, source version, and language. Earlier local history stays in this browser and is not uploaded.</p>
+        <div class="collaborationHistoryToolbar"><button @click="collaborationRefreshHistory()" :disabled="collaborationHistoryLoading || collaborationHistoryRestoring">Refresh history</button><span v-if="collaborationHistoryLoading" role="status">Loading history…</span></div>
+        <p v-if="collaborationHistoryError" class="collaborationError" role="alert">{{ collaborationHistoryError }}</p>
+        <p v-if="collaborationHistoryNotice" class="collaborationNotice" role="status">{{ collaborationHistoryNotice }}</p>
+        <ol class="collaborationHistoryList" aria-label="Shared translation changes">
+          <li v-for="event in collaborationHistoryItems" :key="event.id"><button @click="collaborationSelectHistoryEvent(event)" :disabled="collaborationHistoryRestoring" :class="{ active: collaborationHistoryEvent && collaborationHistoryEvent.id === event.id }"><strong>{{ collaborationHistoryActor(event) }}</strong><span>{{ collaborationHistoryDate(event) }}</span><span>{{ collaborationHistoryOrigin(event) }} · Revision {{ event.revision }}</span></button></li>
+        </ol>
+        <p v-if="!collaborationHistoryLoading && !collaborationHistoryItems.length">No shared changes have been recorded for this file.</p>
+        <button v-if="collaborationHistoryCursor" @click="collaborationRefreshHistory(true)" :disabled="collaborationHistoryLoading || collaborationHistoryRestoring">Load older changes</button>
+        <p v-if="collaborationHistoryDetailLoading" role="status">Loading before and after versions…</p>
+        <section v-if="collaborationHistoryEvent" ref="collaborationHistoryDetail" class="collaborationHistoryDetail">
+          <h3>{{ collaborationHistoryOrigin(collaborationHistoryEvent) }} by {{ collaborationHistoryActor(collaborationHistoryEvent) }}</h3>
+          <p>{{ collaborationHistoryDate(collaborationHistoryEvent) }}</p>
+          <div class="collaborationVersions collaborationHistoryVersions">
+            <section><h4>Before</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent.before) }}</pre><button @click="collaborationPrepareRestore('before')" :disabled="!collaborationHistoryCanRestore('before')">Restore before</button></section>
+            <section><h4>After</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent.after) }}</pre><button @click="collaborationPrepareRestore('after')" :disabled="!collaborationHistoryCanRestore('after')">Restore after</button></section>
+          </div>
+          <section v-if="collaborationHistoryRestoreVersion" ref="collaborationRestorePreview" class="collaborationRestorePreview">
+            <h3>Review shared restore</h3>
+            <p>This saves the selected version for everyone in this collaboration workspace and records a new history event. Later conflicting edits require review.</p>
+            <div class="collaborationVersions collaborationHistoryVersions"><section><h4>Currently shared · Revision {{ collaborationHistoryEvent.currentRevision }}</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent.current) }}</pre></section><section><h4>Result after restore</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent[collaborationHistoryRestoreVersion]) }}</pre></section></div>
+            <div class="collaborationDialogFooter"><button @click="collaborationHistoryRestoreVersion = ''" :disabled="collaborationHistoryRestoring">Cancel restore</button><button class="btnPrimary" @click="collaborationConfirmRestore" :disabled="collaborationHistoryRestoring">{{ collaborationHistoryRestoring ? 'Restoring…' : 'Confirm shared restore' }}</button></div>
+          </section>
+        </section>
+      </template>
+    </dialog>
     <app-tooltip :state="tooltip"></app-tooltip>
 
     </div>
@@ -918,6 +1029,10 @@
   <script src="cloudSync.js"></script>
   <script src="cloudUi.js"></script>
   <script src="cloudHistoryUi.js"></script>
+  <script src="collaborationProtocol.js"></script>
+  <script src="collaborationSync.js"></script>
+  <script src="collaborationUi.js"></script>
+  <script src="collaborationIntegration.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

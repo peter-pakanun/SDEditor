@@ -5,7 +5,7 @@ function allProgress(proms, progress_cb) {
     p.then(() => {
       d++;
       progress_cb((d * 100) / proms.length);
-    });
+    }, () => {});
   }
   return Promise.all(proms);
 }

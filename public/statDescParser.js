@@ -25,20 +25,22 @@
  * @param {string} lang 
  * @returns {Promise<StatDesc|false>}
  */
-async function parseFile(filepath, zipObject, lang) {
+async function parseFile(filepath, zipObject, lang, { strict = false } = {}) {
   let text = await decodeZipTxtFile(zipObject, lang);
 
   // find description mark
-  let count = (text.match(/^description/gim) ?? []).length;
+  let count = (text.match(strict ? /^[ \t]*description\b/gim : /^description/gim) ?? []).length;
   if (count == 0) return false;
   if (count > 1) {
+    if (strict) throw new Error('Multiple descriptions in ' + filepath);
     alert(
       'ERROR: Multiple description declaration\n' +
       filepath + '\n\n' + text
     );
     return false;
   }
-  let desc = parseDesc(filepath, text, lang);
+  let desc = parseDesc(filepath, text, lang, { strict });
+  if (strict && !desc) throw new Error('Malformed source: ' + filepath);
   return desc;
 }
 
@@ -48,8 +50,12 @@ async function parseFile(filepath, zipObject, lang) {
  * @param {string} lang 
  * @returns {StatDesc|false}
  */
-function parseDesc(filepath, text, lang) {
+function parseDesc(filepath, text, lang, { strict = false } = {}) {
   text = text.replace(/\t/g, ' ').replace(/\r/g, '');
+  const malformed = (message, lineIndex) => {
+    throw new Error(`Malformed source: ${filepath}${lineIndex == null ? '' : ':' + (lineIndex + 1)}: ${message}`);
+  };
+  const isCount = token => /^\d+$/.test(token || '') && Number.isSafeInteger(Number(token));
   
   let filepaths = filepath.split('/');
   let filename = filepaths.pop();
@@ -90,6 +96,7 @@ function parseDesc(filepath, text, lang) {
     // >>> expecting description name
     if (desc.name === null) {
       if (lineArray[0] != 'description') {
+        if (strict) malformed('Expected a description declaration.', lineIndex);
         alert(
           'ERROR: Malform description file\n' +
           'expecting description field\n' +
@@ -98,6 +105,7 @@ function parseDesc(filepath, text, lang) {
         return false;
       }
       if (lineArray.length > 2) {
+        if (strict) malformed('A description may have only one name.', lineIndex);
         alert(
           'ERROR: Multiple description declaration\n' +
           filepath + '\n\n' + text
@@ -111,6 +119,9 @@ function parseDesc(filepath, text, lang) {
     // >>> expecting stat names
     if (desc.stats.length == 0) {
       let count = parseInt(lineArray[0]);
+      if (strict && (!isCount(lineArray[0]) || count < 1 || lineArray.length - 1 !== count)) {
+        malformed('The declared stat count must match the number of stat identifiers.', lineIndex);
+      }
       if (!count) {
         alert(
           'ERROR: Malform description file\n' +
@@ -127,6 +138,9 @@ function parseDesc(filepath, text, lang) {
     // >>> expecting translation count
     if (!desc.tempTranslations[curLang]) {
       let count = parseInt(lineArray[0]);
+      if (strict && (!isCount(lineArray[0]) || lineArray.length !== 1 || (translationBlockInfos[curLang]?.lang === 'English' && count < 1))) {
+        malformed('Expected a whole translation count; English must contain at least one entry.', lineIndex);
+      }
       if (lineArray.length > 2) {
         alert(
           'ERROR: Multiple description declaration\n' +
@@ -134,7 +148,7 @@ function parseDesc(filepath, text, lang) {
         );
         return false;
       }
-      if (!count) {
+      if (!count && !(strict && count === 0 && curLang !== 'English')) {
         alert(
           'ERROR: Malform description file\n' +
           'expecting translations count\n' +
@@ -144,16 +158,21 @@ function parseDesc(filepath, text, lang) {
       }
       desc.tempTranslations[curLang] = {
         count, // temporary variable, use to validate the next "expect"
-        content: []
+        content: [], variables: [], remarks: []
       };
       continue;
     }
 
     // >>> expecting lang declaration
-    let matchs = /lang "([^"]+)"/.exec(line);
+    let matchs = (strict ? /^lang\s+"([^"]+)"$/ : /lang "([^"]+)"/).exec(line);
+    if (strict && /^lang\b/.test(line) && !matchs) malformed('Invalid language declaration.', lineIndex);
     if (matchs) {
       let nextLang = matchs[1];
+      if (strict && (Object.hasOwn(Object.prototype, nextLang) || nextLang === 'prototype' || nextLang.startsWith('__duplicate_lang_'))) {
+        malformed('Invalid language identifier.', lineIndex);
+      }
       if (!desc.tempTranslations[curLang] || desc.tempTranslations[curLang].count != desc.tempTranslations[curLang].content.length) {
+        if (strict) malformed('The declared translation count does not match the preceding block.', lineIndex);
         alert(
           'ERROR: Malform description file\n' +
           'missing some/all translation text\n' +
@@ -201,6 +220,7 @@ function parseDesc(filepath, text, lang) {
     // >>> found nothing that we need, this mean that the current line is translation string
     let matchs2 = line.match(/^([^"]*)"([^"]*)" ?(.*)$/);
     if (!matchs2) {
+      if (strict) malformed('Invalid quoted translation entry.', lineIndex);
       alert(
         'ERROR: Malform description file\n' +
         'Malform translation text\n' +
@@ -211,12 +231,26 @@ function parseDesc(filepath, text, lang) {
     let variable = matchs2[1].trim();
     let content = matchs2[2];
     let remark = matchs2[3];
+    if (strict && desc.tempTranslations[curLang].content.length >= desc.tempTranslations[curLang].count) {
+      malformed('There are more translation entries than the declared count.', lineIndex);
+    }
     if (curLang == "English") {
       desc.variables.push(variable);
       desc.remarks.push(remark);
     }
     
     desc.tempTranslations[curLang].content.push(content);
+    desc.tempTranslations[curLang].variables.push(variable);
+    desc.tempTranslations[curLang].remarks.push(remark);
+  }
+
+  if (strict) {
+    if (desc.name === null || !desc.stats.length || !desc.tempTranslations.English?.content.length) {
+      malformed('The description must include stats and a nonempty English block.');
+    }
+    if (Object.values(desc.tempTranslations).some(block => block.count !== block.content.length)) {
+      malformed('The final translation block is incomplete.');
+    }
   }
 
   for (let group of desc.duplicateLangGroups) {
@@ -227,7 +261,9 @@ function parseDesc(filepath, text, lang) {
         lang: info.lang,
         line: info.line,
         occurrence: info.occurrence,
-        content: (desc.tempTranslations[key]?.content || []).slice()
+        content: (desc.tempTranslations[key]?.content || []).slice(),
+        variables: (desc.tempTranslations[key]?.variables || []).slice(),
+        remarks: (desc.tempTranslations[key]?.remarks || []).slice()
       };
     });
     delete group.optionKeys;
@@ -249,7 +285,8 @@ function parseDesc(filepath, text, lang) {
   const trLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
   desc.isMissing = computeIsMissing(engLen, trLines);
 
-  if (desc.translations.English[0].indexOf('[DNT') == 0 || desc.translations.English[0].indexOf('DNT ') == 0) desc.isDNT = true;
+  const firstEnglish = desc.translations.English?.[0] || '';
+  if (firstEnglish.indexOf('[DNT') == 0 || firstEnglish.indexOf('DNT ') == 0) desc.isDNT = true;
 
   return desc;
 }

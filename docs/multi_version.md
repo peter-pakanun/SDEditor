@@ -39,7 +39,9 @@ Version-specific data is stored separately in IndexedDB:
 ```
 The old single-version `kv.source`, `kv.workspace`, and `revisions` data are left intact as a backup.
 
-These source/workspace/history stores stay in the browser; Google backup does not upload them or split them into separate Google-account workspaces. Hybrid storage separately preserves settings, per-language dictionaries, synchronization state and recovery copies in IndexedDB.
+These stores retain the browser's current source, working translations and local history. Signed-in translators automatically join a shared workspace when the game, source SHA-256 hash and assigned language match. Shared source manifests and saved translations are stored by the API, with new server-authored history. Existing local history is never uploaded. IndexedDB also stores collaboration caches, recovery copies and pending saves scoped by account and workspace.
+
+Import Next Version activates a separate shared workspace after the new source and working copy are durably saved. Previous workspaces retain their shared history and pending operations under their original identity; loading a new version never publishes those operations into it. Return to the original source, game, account and language to retry its pending saves. Deploy the migrated API before updating the frontend; production authentication, tunnel connectivity and backup restoration require separate deployment checks.
 
 ## Migration From Older SDEditor Builds
 

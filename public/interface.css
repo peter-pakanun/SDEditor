@@ -349,3 +349,74 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
     outline-offset: -2px;
   }
 }
+
+/* Translation collaboration: presence stays distinct from file status colors. */
+.collaborationStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; font-size: 12px; line-height: 1.5; }
+.workspaceHeader > .collaborationStatus { grid-column: 1 / -1; padding-top: 4px; border-top: 1px solid var(--ui-border); }
+.collaborationStatus button { padding: 4px 9px; min-height: 28px; font-size: 12px; }
+.collaborationConnection { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-muted); flex: none; }
+.collaborationConnection.connected { background: var(--ui-saved); }
+.collaborationVersion { color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+.workspaceFooterRight { display: flex; align-items: center; justify-content: flex-end; gap: 16px; min-width: 0; max-width: 100%; margin-left: auto; }
+.workspaceFooterRight .workspacePagination { flex: none; }
+.collaborationAvatars { display: flex; align-items: center; gap: 5px; list-style: none; padding: 3px; margin: 0; min-width: 0; max-width: 248px; overflow-x: auto; scrollbar-width: thin; }
+.collaborationAvatars > li { flex: none; }
+.collaborationAvatar { display: grid; place-items: center; box-sizing: border-box; width: 34px; height: 34px; padding: 2px; border: 2px solid var(--collaboration-color, #17743b); border-radius: 50%; background: var(--color-element); cursor: default; }
+.collaborationAvatarFace { display: grid; place-items: center; width: 100%; height: 100%; overflow: hidden; border-radius: 50%; background: var(--collaboration-color, #17743b); color: #fff; font: 600 11px/1 system-ui, sans-serif; user-select: none; }
+.collaborationAvatar.away .collaborationAvatarFace { filter: grayscale(1); opacity: .55; }
+.collaborationAvatar:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+.collaborationPeerLabels { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
+.collaborationPeer { display: inline-block; max-width: 100%; padding: 2px 7px; border-radius: 3px; background: var(--collaboration-color, #17743b); color: #fff; font: 600 12px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
+.workspace #table td.collaborationCell { position: relative; }
+.workspace #table tbody tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
+.workspace #table tbody tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .11), rgba(0, 0, 0, .11)); }
+[data-theme="dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing,
+[data-theme="modern-dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .28), rgba(0, 0, 0, .28)); }
+.collaborationEditorStatus { margin: 9px 0; padding: 9px 12px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element); }
+.collaborationEditorStatus .collaborationPeerLabels { margin: 8px 0 0; }
+.collaborationNotice { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }
+.collaborationError { color: var(--ui-missing); white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaborationLocalHistoryLabel { color: var(--ui-muted); font-size: 12px; margin: 5px 0 8px; }
+.collaborationHistoryButton { margin: 0 0 8px; }
+.collaborationDialog { box-sizing: border-box; width: min(1160px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); margin: auto; padding: 20px; overflow: auto; color: var(--color-font); background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 12px; box-shadow: 0 16px 60px rgba(0, 0, 0, .28); }
+.collaborationDialog::backdrop { background: rgba(0, 0, 0, .52); }
+.collaborationDialogHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.collaborationDialogHeader > div { min-width: 0; }
+.collaborationDialogHeader h2 { margin: 0 0 6px; font-size: 21px; }
+.collaborationDialogHeader p { margin: 0; color: var(--ui-muted); font-size: 13px; overflow-wrap: anywhere; }
+.collaborationDialogHeader > button { flex: none; }
+.collaborationDialog button { min-height: 32px; }
+.collaborationDialog button[aria-pressed="true"], .collaborationHistoryList button.active { border-color: var(--ui-accent); background: var(--ui-accent-soft); }
+.collaborationFilePicker { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 10px; font-weight: 600; }
+.collaborationFilePicker select { width: 100%; min-width: 0; }
+.collaborationConflictEntry { border-top: 1px solid var(--ui-border); margin-top: 16px; padding-top: 12px; }
+.collaborationConflictEntry h3 { margin: 0 0 8px; }
+.collaborationMetadataChoices { display: flex; flex-wrap: wrap; gap: 8px; }
+.collaborationSourceText { display: grid; gap: 4px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaborationSourceText > strong { color: var(--ui-muted); font-size: 12px; }
+.collaborationVersions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
+.collaborationVersions > section { min-width: 0; display: flex; flex-direction: column; padding: 12px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-bg2); }
+.collaborationVersions h4 { margin: 0 0 9px; }
+.collaborationVersions pre { flex: 1; margin: 0 0 10px; font: inherit; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.collaborationVersions button { align-self: flex-start; }
+.collaborationResult { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 10px 0 5px; font-weight: 600; }
+.collaborationResult > span { font-size: 12px; color: var(--ui-muted); font-weight: 400; }
+.collaborationConflictEntry textarea { box-sizing: border-box; width: 100%; min-height: 85px; resize: vertical; font: inherit; font-size: 14px; line-height: 1.6; }
+.collaborationDialogFooter { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--ui-border); }
+.collaborationDialogFooter > span { flex: 1; color: var(--ui-muted); font-size: 12px; }
+.collaborationHistoryToolbar { display: flex; align-items: center; gap: 12px; }
+.collaborationHistoryList { list-style: none; padding: 0; margin: 12px 0; max-height: 280px; overflow: auto; border: 1px solid var(--ui-border); border-radius: 6px; }
+.collaborationHistoryList:empty { display: none; }
+.collaborationHistoryList li + li { border-top: 1px solid var(--ui-border); }
+.collaborationHistoryList button { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(170px, 1fr) minmax(170px, 1.3fr); gap: 12px; width: 100%; text-align: left; padding: 10px 12px; border-radius: 0; border: 1px solid transparent; font-size: 12px; overflow-wrap: anywhere; }
+.collaborationHistoryVersions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.collaborationHistoryDetail { padding-top: 10px; margin-top: 14px; border-top: 1px solid var(--ui-border); }
+.collaborationRestorePreview { margin-top: 16px; padding: 14px; border: 2px solid var(--ui-accent); border-radius: 6px; }
+.collaborationRestorePreview > h3 { margin-top: 0; }
+.collaborationDialog :is(button, select, textarea):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+@media (max-width: 900px) {
+  .collaborationDialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 14px; }
+  .collaborationVersions { grid-template-columns: 1fr; }
+  .collaborationHistoryList button { grid-template-columns: 1fr 1fr; }
+  .collaborationHistoryList button > span:last-child { grid-column: 1 / -1; }
+}

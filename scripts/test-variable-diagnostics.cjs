@@ -11,6 +11,13 @@ function loadEditor() {
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
   const context = vm.createContext({
     window, URLSearchParams, console, setTimeout, clearTimeout,
+    document: { activeElement: null, body: {}, querySelector: () => null,
+      createElement(tag) {
+        assert.equal(tag, 'textarea');
+        return { set innerHTML(value) { this.value = String(value).replace(/&(lt|gt|quot|#039|amp);/g,
+          (_, entity) => ({ lt: '<', gt: '>', quot: '"', '#039': "'", amp: '&' })[entity]); } };
+      },
+    },
     alert(message) { alerts.push(message); },
     confirm(message) { confirmations.push(message); return false; },
     Vue: {
@@ -19,10 +26,11 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
+  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
-  const editor = Object.assign(config.data(), config.methods, {
+  const integration = window.CollaborationIntegration.mixin;
+  const editor = Object.assign(integration.data(), config.data(), integration.methods, config.methods, {
     lang: 'Thai', dictionary: [],
     // List rendering is unrelated to the diagnostic scan and save guard.
     filterDesc() {},
@@ -145,9 +153,9 @@ test('editorSave blocks a suffix mismatch and clears completed scan results afte
   editor.editorBlocks = [{ english: desc.translations.English[0], translation: 'ความเสียหายใหม่ {1}' }];
   let persisted = 0;
   // Persistence is outside this test; exercise the real save validation and model updates.
-  editor.saveLocalDescs = () => { persisted++; };
-  editor.commitRevision = () => {};
-  assert.equal(editor.editorSave(), false);
+  const persist = editor.persistTranslationBatch;
+  editor.persistTranslationBatch = async (...args) => { persisted++; return persist.call(editor, ...args); };
+  assert.equal(await editor.editorSave(), false);
   assert.equal(desc.translations.Thai[0], 'ความเสียหายเดิม {1}');
   assert.equal(persisted, 0);
   assert.equal(editor.editorVisible, true);
@@ -156,7 +164,7 @@ test('editorSave blocks a suffix mismatch and clears completed scan results afte
   assert.deepEqual(confirmations, [], 'An error must not offer a save-anyway confirmation.');
 
   editor.editorBlocks[0].translation += '%';
-  assert.equal(editor.editorSave(), true);
+  assert.equal(await editor.editorSave(), true);
   assert.equal(desc.translations.Thai[0], 'ความเสียหายใหม่ {1}%');
   assert.equal(editor.localDescs.descs[0].translations.Thai[0], 'ความเสียหายใหม่ {1}%');
   assert.equal(persisted, 1);

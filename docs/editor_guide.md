@@ -19,7 +19,7 @@ When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Sou
 
 Open **Settings → Cloud backup → Backup using Google account** to connect personal settings backup and your language's shared Dictionary. A new account shows **Not configured** until the administrator assigns a language through **Manage users**. Local editing remains available while waiting. Other selected languages keep local dictionaries.
 
-Settings and Regex rules are personal; dictionaries are shared among assigned translators. The editor clipboard, source ZIPs, translated files and history remain local. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for sync status, session renewal, recovery and account switching.
+Settings and Regex rules are personal; dictionaries are shared among assigned translators. Saved translations and new shared history synchronize with translators using the same game, source version, and assigned language. The editor clipboard, original ZIPs, unsaved typing, and legacy local history stay in this browser. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
 
 ### Settings
 
@@ -106,6 +106,18 @@ Keyword tags use their dictionary entry's main **Find** to identify the term and
 Terminology warnings come from the last manual scan; edit translations or dictionary alternatives and scan again to check the updated wording. This is a check for allowed wording, not a word-alignment or occurrence-count check: it does not prove that every word was translated correctly. The separate identical-English check still reports differences between complete translations, even when both use allowed dictionary wording.
 
 ## The Editor Interface
+
+### Working with Other Translators
+
+When signed in with your assigned language selected, matching game and source versions collaborate automatically. A name and colored outline mark another translator's selected file; its translation cell darkens while they edit. Opening an occupied file asks whether you want to edit alongside them, and the editor shows everyone currently editing it. Names and text remain readable in both themes.
+
+Participant circles appear just before pagination. Their borders match the file-selection colors, and grey initials indicate Away after two minutes without activity or when the tab is hidden. Hover or focus a circle to see its name and status. Returning to the tab or using the keyboard or pointer marks it active again; an away translator's open file is still skipped by automatic navigation.
+
+Only saved changes are shared. The collaboration status distinguishes synchronized work, locally saved changes awaiting sync, and conflicts. **Retry sync** reconnects. **Resolve translation conflicts** compares Base, Yours, and Shared for each conflicting translation entry and lets you choose or edit the result. Changes to separate entries merge automatically; multiline and table content within one entry stays together. Closing a conflict dialog preserves unresolved work.
+
+Previous/next editor shortcuts (**F1/F2** and **Ctrl+, / Ctrl+.**) and automatic next-file navigation skip files other translators are editing across the filtered and sorted list. They do not wrap. If there is no eligible file, the view stays in place with a status message. Direct row opens remain available after the occupied-file warning.
+
+The **History** side panel distinguishes browser-local records from **Shared translation history**. Shared history shows who changed a file, when, how, and its before/after translations. A confirmed restore is a new shared change; existing history is retained. Older local history is not uploaded. See [Translation Collaboration](cloud_backup.md#translation-collaboration) for version matching, offline saves, and conflict recovery.
 
 The editor's **Save & close** button saves the current translation and returns to the file list. **Close** returns without saving, asking for confirmation when there are unsaved changes. For files opened from the list, both return focus to the selected file. Use the **Small**, **Medium**, or **Large** controls beside **Preview size** to resize the game preview. **Apply regex** fills a translation block using your Regex rules and Dictionary.
 
@@ -246,7 +258,7 @@ When you're editing, the **Dictionary** panel automatically shows terms that are
 
 Use **Settings → Data → Export settings** to download the current language's Dictionary, personal Regex rules, preferences and local editor clipboard. Select and export other languages separately when needed. **Import settings** restores a standard settings export and keeps a recovery copy first.
 
-Google backup also synchronizes personal settings and the assigned language's shared Dictionary. It does not upload the clipboard or translation files. See [Cloud Backup and Shared Dictionaries](cloud_backup.md) for first-login restores, recovery archives and conflict resolution.
+Google backup synchronizes personal settings and the assigned language's shared Dictionary; collaboration also synchronizes saved translations and new shared history for matching source versions. The clipboard, unsaved typing, and legacy local history are not uploaded. See [Cloud Backup and Collaboration](cloud_backup.md) for first-login restores, recovery archives, and conflict resolution.
 
 ### Regex (Pattern-Based Replacements)
 

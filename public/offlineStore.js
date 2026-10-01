@@ -172,6 +172,65 @@
     await done;
   }
 
+  // The source identity must advance in the same durable commit as the imported
+  // workspace. Collaboration queues retain their own old source/account scope.
+  async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version) {
+    if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
+    const gameVersion = normalizeGameVersion(version);
+    const revisionsStore = revisionStoreName(gameVersion);
+    const db = await openDb();
+    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const done = txDone(tx);
+    try {
+      const kv = tx.objectStore(STORE_KV);
+      kv.put({ key: sourceKey(gameVersion), value: source });
+      kv.put({ key: workspaceKey(gameVersion), value: workspace });
+      for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
+    } catch (error) {
+      try { tx.abort(); } catch (_) {}
+      await done.catch(() => {});
+      throw error;
+    }
+    await done;
+  }
+
+  // Read/modify/write collaboration cache, retry queue, replay cursor and local
+  // working/history data in one transaction. Both callbacks must be synchronous.
+  async function updateCollaborationState(update, options = {}) {
+    const gameVersion = normalizeGameVersion(options.version);
+    const revisions = options.revisions || [];
+    if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
+    const revisionsStore = revisionStoreName(gameVersion);
+    const db = await openDb();
+    const tx = db.transaction(revisions.length ? [STORE_KV, revisionsStore] : [STORE_KV], 'readwrite');
+    const done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV);
+    let result;
+    let failure;
+    const read = kv.get('collaboration_v1');
+    read.onsuccess = () => {
+      try {
+        result = update(read.result?.value);
+        if (result && typeof result.then === 'function') throw new Error('Collaboration storage update must be synchronous');
+        kv.put({ key: 'collaboration_v1', value: result });
+        for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
+        if (Object.hasOwn(options, 'workspace')) kv.put({ key: workspaceKey(gameVersion), value: options.workspace });
+        if (options.projectWorkspace) {
+          const workspaceRead = kv.get(workspaceKey(gameVersion));
+          workspaceRead.onsuccess = () => {
+            try {
+              const projected = options.projectWorkspace(workspaceRead.result?.value, result);
+              if (projected && typeof projected.then === 'function') throw new Error('Workspace projection must be synchronous');
+              if (projected !== undefined) kv.put({ key: workspaceKey(gameVersion), value: projected });
+            } catch (error) { failure = error; tx.abort(); }
+          };
+        }
+      } catch (error) { failure = error; tx.abort(); }
+    };
+    try { await done; } catch (error) { throw failure || error; }
+    return result;
+  }
+
   async function revisionAdd(rev, version) {
     return withStore(revisionStoreName(version), 'readwrite', async (store) => {
       return requestToPromise(store.add(rev));
@@ -308,6 +367,9 @@
     getWorkspace: (version) => kvGet(workspaceKey(version)),
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
     saveWorkspaceWithRevisions,
+    saveSourceWorkspaceWithRevisions,
+    getCollaborationState: () => kvGet('collaboration_v1'),
+    updateCollaborationState,
     getSource: (version) => kvGet(sourceKey(version)),
     setSource: (source, version) => kvSet(sourceKey(version), source),
     clearWorkspace: (version) => kvDel(workspaceKey(version)),

@@ -11,6 +11,10 @@ There are two different “import” actions and two different “export” mode
 - **Export (:floppy_disk: click)**: exports your “tracked / done” files. you will use this mode most of the time.
 - **Export (:floppy_disk: Ctrl+Click)**: exports a “full set” of files that are not flagged for review.
 
+When signed in with an assigned language, a source import also determines the collaboration workspace. Matching **game + source content hash + language** joins the same shared translations. The hash uses source fields, so changing ZIP metadata or translated text does not create another source version. A genuinely changed source joins a different workspace. The first translator seeds a new workspace; later imports reconcile with existing shared work and preserve differing local translations for review.
+
+**Import Next Version** saves the new source and local carry-forward work before joining its collaboration workspace. Pending changes from an older source remain attached to that old source. **Import Translated** changes saved translations inside the current source workspace and follows the same durable-save, merge, conflict, and shared-history rules as editor Save. It never changes the source version hash. Signed-out or unassigned-language work remains local.
+
 ## Files You Will See
 
 - `StatDescriptions.zip` (source)

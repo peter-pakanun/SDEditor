@@ -1,6 +1,6 @@
-# Cloud Backup and Shared Dictionaries
+# Cloud Backup, Shared Dictionaries, and Translation Collaboration
 
-SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings backup and a shared dictionary for your assigned language. The static editor calls the separate API at `https://sdeditor-api.poemaid.com`; these instructions describe the implementation, not confirmation that the public API has been deployed.
+SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings backup, a shared dictionary, and translation collaboration for your assigned language. The static editor calls the separate API at `https://sdeditor-api.poemaid.com`; these instructions describe the implementation, not confirmation that the public API has been deployed.
 
 ## What Is Saved Where
 
@@ -9,9 +9,12 @@ SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings
 | Editor preferences and Regex rules | Saved for the current local/account profile | Personal to your Google account |
 | Dictionary, including Alternates and TL notes | Separate dictionary for each language and profile | Shared among translators assigned to that language |
 | Editor clipboard | Local to the profile | Not uploaded |
-| Source ZIP, translations and revision history | Separate PoE1/PoE2 workspaces | Not uploaded |
+| Original source ZIP, unsaved typing, and legacy translation history | Local only | Not uploaded |
+| Source manifest and saved translations | Cached locally with pending changes and recovery state | Shared by game, source version, and assigned language |
+| New shared translation history | Available alongside local history | Author, timestamp, origin, and before/after versions |
+| Selected/open file presence | Current browser session | Visible to participants in the same collaboration workspace; expires on disconnect |
 
-PoE1 and PoE2 use the same dictionary for a given language. Regex rules are personal; changing a Regex does not change another translator's rules. Translation workspaces remain local to this browser and game version; switching Google accounts does not create separate translation files. Continue exporting translated ZIPs for moving or backing up that work.
+PoE1 and PoE2 use the same dictionary for a given language. Regex rules are personal; changing a Regex does not change another translator's rules. Translation collaboration separates each game, source version, and assigned language. Account changes detach the current collaboration session; pending work retains the account and version that created it. Continue exporting translated ZIPs as portable copies of your work.
 
 ## Sign In and Get Assigned
 
@@ -21,7 +24,7 @@ PoE1 and PoE2 use the same dictionary for a given language. Regex rules are pers
 
 The administrator opens **Settings → Cloud backup → Manage users**. Accounts appear after their first Google sign-in. Choose one language per account, including the administrator's own account when it needs backup. Clearing an assignment stops cloud access and preserves the user's local drafts. Reassignment does not delete or transfer the old language's shared dictionary.
 
-You may still select another language in the editor. Its dictionary stays local and is labelled **Current dictionary is local only**; your account cannot read or publish another language's shared dictionary. Changing the language dropdown does not change the administrator's assignment.
+You may still select another language in the editor. Its dictionary and translations stay local; your account cannot read or publish another language's collaboration data. Changing the language dropdown does not change the administrator's assignment.
 
 The editor renews its session when you visit, return to the tab, or use the tool. A session expires after 30 days without renewal. If it expires, sign in again or choose **Return to local profile**; saved account drafts remain in this browser. Signing out also returns to the signed-out profile. A newly used account adopts the signed-out profile's starting data, never another account's private settings.
 
@@ -58,7 +61,25 @@ Select a change to compare complete **Before** and **After** versions, including
 
 Before a restore is sent, the editor saves a local recovery copy. Any earlier cloud write awaiting confirmation must finish syncing first. If another translator changes the shared dictionary after the preview was loaded, the restore is rejected and you must select the history event again to review a fresh preview. Network-interrupted restores remain pending for **Sync now** to retry safely. Account changes, sign-out, language changes and expired sessions close the history view rather than displaying a previous account's results.
 
-History starts when the API's history migration is installed. Existing live entries receive an **Existing entry** baseline without an invented author. The version before that baseline is unavailable. Entries deleted before history recording began have no saved content to restore; the view reports this limitation. This shared dictionary history is separate from the editor's existing local translation-file **History** tab.
+History starts when the API's history migration is installed. Existing live entries receive an **Existing entry** baseline without an invented author. The version before that baseline is unavailable. Entries deleted before history recording began have no saved content to restore; the view reports this limitation. Shared dictionary history is separate from local and shared translation-file history.
+
+## Translation Collaboration
+
+With a signed-in account and your assigned language selected, loading a source workspace automatically joins collaborators using the same **game + source version + language**. A content hash identifies the source version from its file paths, description names, English entries, stats, variables, and remarks. ZIP timestamps, compression, file ordering, and translated text do not change that source identity. Different source content stays in a different workspace.
+
+The first eligible translator to create a shared workspace seeds it from their saved translations. Later browsers download shared work and reconcile differing local work without silently overwriting it. The status bar shows connection state, pending saves, and translation conflicts. **Retry sync** reconnects or retries queued work. Signing out or switching to an unassigned language returns to local editing.
+
+A colored outline and name appear on the translation cell when another translator selects the file. The cell darkens while their editor is open, and names also appear inside the editor. Opening an occupied file directly asks whether you want to edit alongside them. This is an advisory warning: both people can edit after confirmation. Unsaved typing stays private; saved changes are synchronized.
+
+Circular initials avatars just before pagination show everyone connected to this workspace, including you. Their borders match their file-selection colors. The initials turn grey after two minutes of inactivity or while that person's tab is hidden; hovering or focusing the avatar shows their name and Active/Away status. Multiple sessions for the same account share one avatar and count as active while any session is active. Away status does not release an open file's editing claim.
+
+**F1/F2**, **Ctrl+, / Ctrl+.**, and automatic next-file navigation skip files that other people are editing across the current filtered and sorted list, including later pages. They stop at the end instead of wrapping. If no eligible file remains, the current view stays open and a status message explains why. A save must finish in browser storage before navigation continues.
+
+Offline saves stay durable in browser storage and are marked pending. On reconnection, changes to different translation entries combine automatically. If two people change the same entry differently, **Resolve translation conflicts** shows **Base**, **Yours**, **Shared**, and an editable **Result**. Choose a version or edit the result for each conflicting entry, then **Save result**. A complete translation entry is the merge unit: visual lines and table columns within that entry are kept together. An empty result is a real choice that clears the translation. If shared content changes during review, the dialog refreshes, retains custom result text, and requires a fresh choice or **Keep this result** confirmation. Closing the dialog or switching files retains result drafts in the current tab's memory. Use **Save result** before reloading, signing out, changing accounts, or changing workspaces to keep those proposed edits. Original saved conflict versions remain durable in browser storage.
+
+The editor's **History** tab labels existing records **Local history · saved in this browser**. **Shared translation history** opens changes for the current game, source version, language, and file, with author, time, origin, and before/after versions. Select a change, choose **Restore before** or **Restore after**, review the current and proposed versions, then **Confirm shared restore**. Restores create a new history event and retain earlier events. Concurrent changes use the same merge/conflict protection as ordinary saves. History before the first shared version is unavailable in the shared view; legacy local records stay local.
+
+Shared accepted work participates in normal ZIP export for everyone in the room. Pending local saves remain visibly pending and may appear in that browser's export. **Import Next Version** leaves the old source workspace and joins or creates the new one after the import is saved. Old pending changes keep their original source identity and cannot be sent to the new version.
 
 ## Existing Data and Manual Exports
 
@@ -79,11 +100,20 @@ node scripts/test-dictionary-sync.cjs
 node scripts/test-cloud-sync.cjs
 node scripts/test-history-sync.cjs
 node scripts/test-history-ui.cjs
+node scripts/test-collaboration-ui.cjs
+node scripts/test-collaboration-sync.cjs
+node scripts/test-collaboration-storage.cjs
+node scripts/test-collaboration-api.cjs
+node scripts/test-collaboration-editor.cjs
+node scripts/test-collaboration-lifecycle.cjs
+node scripts/test-collaboration-source.cjs
 node scripts/test-render-safety.cjs
 node --check public/dictionarySync.js
 node --check public/cloudSync.js
 node --check public/cloudUi.js
 node --check public/cloudHistoryUi.js
+node --check public/collaborationUi.js
+node --check public/collaborationIntegration.js
 node server.js --no-open
 ```
 
@@ -94,3 +124,5 @@ Use a separate browser profile for checks with real IndexedDB: edit offline, rel
 `?testMode=1&lang=Thai` loads dummy files and bypasses **both IndexedDB and cloud login/sync**. It is useful for editor/diagnostic checks, but cannot validate persistent storage or live synchronization. See [Test Mode](test-mode.md). Local checks do not establish live Google sign-in, Pages-to-API CORS, PM2 or tunnel readiness.
 
 For a disposable browser integration fixture, install the sibling API dependencies, then run `node scripts/cloud-browser-fixture.cjs`. It starts a separate editor origin on port 34191 and an in-memory API with fake `example.test` accounts on port 34192. The terminal prints the editor URL, fixture controls, and a settings file to import. The fixture administrator starts unassigned; assign Thai through Settings to exercise the normal authorization flow. Import the sample settings into the local profile before signing in as the translator to exercise first-merge conflicts. These are fixture identities, not Google accounts, and no authentication bypass is included in the deployed application. Use different `FIXTURE_FRONTEND_PORT` and `FIXTURE_API_PORT` values for a fresh browser origin on subsequent runs.
+
+For translation collaboration, run `node scripts/collaboration-browser-fixture.cjs`. The terminal prints two editor URLs on ports 34201 and 34202, each with isolated browser storage, connected to the real API and WebSocket implementation on port 34203. Click the visible **Bootstrap translator A/B** buttons to load two disposable Thai accounts and 25 source files. Use the actual editor to test occupied-file confirmation, cross-page navigation, different-entry merging, same-entry conflicts, history, and restore. **Simulate offline** disables that fixture browser's API traffic and presence connection while allowing normal IndexedDB saves; **Restore connection** retries the queue. **Switch theme** checks grey and dark. Fixture-only routes and controls are injected by this script and are never served by the production server. Its API database is discarded when the process stops; use `FIXTURE_A_PORT`, `FIXTURE_B_PORT`, and `FIXTURE_API_PORT` to choose fresh origins if needed.

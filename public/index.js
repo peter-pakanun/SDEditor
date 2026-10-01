@@ -99,7 +99,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -790,6 +790,11 @@ const config = Vue.defineComponent({
       return this.detectGameVersionFromFilepaths(getZipTxtFilepaths(zip));
     },
     resetVersionedState() {
+      this._collaboration?.disconnect();
+      this._collaboration = null;
+      this._collabKey = '';
+      this._editorCollabBase = undefined;
+      this.sourceIdentity = '';
       this.clearDiagnosticScanResults();
       this.descs = [];
       this.filteredDescs = [];
@@ -882,35 +887,42 @@ const config = Vue.defineComponent({
       await this.loadVersionedStorage();
     },
     async loadVersionedStorage() {
+      const game = this.gameVersion;
+      const generation = this._versionLoadGeneration = (this._versionLoadGeneration || 0) + 1;
+      const current = () => generation === this._versionLoadGeneration && game === this.gameVersion;
       this.versionStorageLoading = true;
       this.resetVersionedState();
       this.loadingProgress = 0.001;
-
-      let localDescs;
       try {
-        localDescs = await window.OfflineStore.getWorkspace(this.gameVersion);
-      } catch (_) {
+        const [workspace, source] = await Promise.all([
+          window.OfflineStore.getWorkspace(game), window.OfflineStore.getSource(game),
+        ]);
+        if (!current()) return;
+        let sourceHash = '';
+        if (Array.isArray(source) && source.length && window.CollaborationProtocol) {
+          try { sourceHash = await window.CollaborationProtocol.sourceHash(source); }
+          catch (error) { if (current()) this.collaborationNotice = 'Source identity could not be verified. Reimport the source ZIP. ' + error.message; }
+        }
+        if (!current()) return;
+        if (workspace?.sourceHash && sourceHash && workspace.sourceHash !== sourceHash) {
+          throw new Error('Stored translations and source have different version hashes. Reimport the matching source ZIP; existing browser data has been preserved.');
+        }
+        if (workspace) this.localDescs = workspace;
+        this.ensureLocalDescsReady();
+        this.sourceIdentity = sourceHash;
+        if (sourceHash) this.localDescs.sourceHash = sourceHash;
+        if (Array.isArray(source) && source.length) {
+          this.descs = source; this.sourceLoaded = true;
+          this.applyWorkspaceOverlay(); this.filterDesc(); this.loadingProgress = 100;
+        } else this.loadingProgress = 0;
+      } catch (error) {
+        if (current()) {
+          this.loadingProgress = 0;
+          this.cloudStorageError = 'Could not load this workspace. ' + error.message;
+        }
+      } finally {
+        if (current()) { this.versionStorageLoading = false; this.scheduleCollaboration?.(); }
       }
-      if (localDescs) this.localDescs = localDescs;
-      this.ensureLocalDescsReady();
-
-      let source;
-      try {
-        source = await window.OfflineStore.getSource(this.gameVersion);
-      } catch (_) {
-      }
-      if (Array.isArray(source) && source.length > 0) {
-        this.descs = source;
-        this.sourceLoaded = true;
-        this.applyWorkspaceOverlay();
-        this.filterDesc();
-        this.loadingProgress = 100;
-      } else {
-        this.versionStorageLoading = false;
-        this.loadingProgress = 0;
-        return;
-      }
-      this.versionStorageLoading = false;
     },
     getGamePreviewFontFamily(lang) {
       let map = this.gamePreviewFonts;
@@ -1139,31 +1151,19 @@ const config = Vue.defineComponent({
     },
     async confirmTranslationUnchanged() {
       const desc = this.editorCurrentEditingDesc;
-      if (!desc || !desc.needsReview) return;
-      const msg =
-        "Confirm that the translation does NOT need changes for this source revision?\n\n" +
-        "This will clear the Needs Review flag for this file.\n" +
-        "Only do this if you're sure the English changes don't affect the translation.";
-      if (!confirm(msg)) return;
-
-      desc.needsReview = false;
-      this.editorShowEnglishDiff = false;
-      this.ensureLocalDescsReady();
-      const st = this.localDescs.status[desc.filepath] || {};
-      st.needsReview = false;
-      st.reviewedAt = Date.now();
-      st.reviewedReason = 'confirmed-unchanged';
-      this.localDescs.status[desc.filepath] = st;
-
-      const localDesc = (this.localDescs.descs || []).find(o => o && o.filepath == desc.filepath);
-      if (localDesc) {
-        localDesc.hasChanges = true;
-        desc.hasChanges = true;
-      }
-
-      await this.saveLocalDescs();
-      this.filterDesc();
-      alert('Marked as reviewed (unchanged).');
+      if (!desc || !desc.needsReview || this.editorSaving) return;
+      if (!confirm('Confirm that the translation does NOT need changes for this source revision? This clears Needs Review and marks the file for export.')) return;
+      this.editorSaving = true;
+      try {
+        const result = await this.persistTranslationBatch([{ desc, lines: desc.translations[this.lang] || [], needsReview: false }], 'confirm', {
+          bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+        });
+        if (result.stale || result.status === 'conflict') return;
+        this.editorShowEnglishDiff = false;
+        this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
+        this.collaborationNotice = 'Marked as reviewed (unchanged).';
+      } catch (error) { this.collaborationNotice = 'Could not save the review: ' + error.message; }
+      finally { this.editorSaving = false; }
     },
     async prepareEditorEnglishDiff() {
       if (!this.editorVisible) return;
@@ -1650,6 +1650,9 @@ const config = Vue.defineComponent({
       const resolver = this.consistencyResolver;
       if (!resolver || this.consistencyResolverBusy || this.editorCompareActive) return false;
       const originalBlocks = this.editorBlocks;
+      const draftBeforeResolution = originalBlocks.map(block => block?.translation ?? '');
+      const originalsBeforeResolution = [...this.editorOriginalTranslations];
+      const baseBeforeResolution = this._editorCollabBase ? this.toPlainForStorage(this._editorCollabBase) : null;
       this.consistencyResolverError = '';
       if (this.lang !== resolver.lang || this.gameVersion !== resolver.gameVersion
         || !this.editorVisible || this.editorCurrentEditingDesc?.filepath !== resolver.filepath
@@ -1696,9 +1699,19 @@ const config = Vue.defineComponent({
           { ...metadata, savedAt, note: 'Resolve inconsistent translations', translations: lines, isMissing },
         );
       }
+      const submittedCurrentFile = [...(updates.get(resolver.filepath)?.lines || this.editorCurrentEditingDesc.translations[resolver.lang] || [])];
       this.consistencyResolverBusy = true;
       try {
-        if (updates.size && !this.testMode) {
+        if (updates.size && this.persistTranslationBatch) {
+          const result = await this.persistTranslationBatch([...updates.values()], 'consistency', { workspace: nextWorkspace, revisions });
+          if (result.status === 'conflict' || result.stale) {
+            this.consistencyResolverError = 'Saved locally. Resolve shared changes before applying this result.';
+            this.consistencyResolverBusy = false;
+            return false;
+          }
+          const effective = new Map((this._collaboration?.snapshot()?.files || []).map(file => [file.filepath, file]));
+          for (const [path, update] of updates) if (effective.has(path)) update.lines = [...effective.get(path).translations];
+        } else if (updates.size && !this.testMode) {
           if (!window.OfflineStore?.saveWorkspaceWithRevisions) throw new Error('Local storage is unavailable.');
           const snapshot = this.toPlainForStorage({ workspace: nextWorkspace, revisions });
           if (!snapshot) throw new Error('The workspace could not be serialized.');
@@ -1721,25 +1734,32 @@ const config = Vue.defineComponent({
         desc.hasChanges = true;
         desc.isMissing = computeIsMissing(desc.translations.English.length, desc.translations[this.lang] || []);
       }
-      // Only matching draft blocks and their save baselines advance; other drafts stay dirty.
-      for (const entry of resolver.entries) {
-        if (!sameEditor) break;
-        if (entry.filepath !== this.editorCurrentEditingDesc?.filepath) continue;
-        const block = this.editorBlocks[entry.blockIndex];
-        if (!block) continue;
-        block.translation = text;
-        block.isTable = this.isTableText(block.english) || this.isTableText(text);
-        block.isMultiline = this.isMultilineText(block.english) || this.isMultilineText(text);
-        if (block.isTable) this.rebuildEditorTableColumnsFromStrings(block);
-        else block.tableColumns = [];
-        block.translationReplace = '';
-        block.words = [];
-        this.editorOriginalTranslations[entry.blockIndex] = block.translation;
-        this.refreshEditorBlockMeta(block, entry.blockIndex);
-      }
-      if (sameEditor) {
-        this.refreshEditorHLter();
-        this.refreshGamePreview();
+      // Matching entries commit; unrelated drafts retain their own merge bases.
+      // Clean entries may adopt independent remote changes accepted in the batch.
+      if (sameEditor && this.rebaseEditorAfterCommit) {
+        const accepted = this._collaboration?.fileBase(resolver.filepath)
+          || { filepath: resolver.filepath, translations: [...this.editorCurrentEditingDesc.translations[resolver.lang]],
+            needsReview: !!this.editorCurrentEditingDesc.needsReview, trackedForExport: !!this.editorCurrentEditingDesc.hasChanges };
+        this.rebaseEditorAfterCommit(accepted, {
+          draftBefore: draftBeforeResolution, submittedTranslations: submittedCurrentFile,
+          savedIndexes: resolver.entries.filter(entry => entry.filepath === resolver.filepath).map(entry => entry.blockIndex),
+          baseBefore: baseBeforeResolution, originalsBefore: originalsBeforeResolution,
+        });
+      } else if (sameEditor) {
+        for (const entry of resolver.entries) {
+          if (entry.filepath !== this.editorCurrentEditingDesc?.filepath) continue;
+          const block = this.editorBlocks[entry.blockIndex];
+          if (!block) continue;
+          block.translation = text;
+          block.isTable = this.isTableText(block.english) || this.isTableText(text);
+          block.isMultiline = this.isMultilineText(block.english) || this.isMultilineText(text);
+          if (block.isTable) this.rebuildEditorTableColumnsFromStrings(block);
+          else block.tableColumns = [];
+          block.translationReplace = ''; block.words = [];
+          this.editorOriginalTranslations[entry.blockIndex] = block.translation;
+          this.refreshEditorBlockMeta(block, entry.blockIndex);
+        }
+        this.refreshEditorHLter(); this.refreshGamePreview();
       }
       this.refreshConsistencyResolutionDiagnostics(resolver);
       this.filterDesc();
@@ -3877,6 +3897,12 @@ const config = Vue.defineComponent({
     },
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
+      if (e.defaultPrevented) return;
+      if (this.collaborationConflictVisible || this.collaborationHistoryVisible) {
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
+        return;
+      }
+      if ((this.navigationBusy || this.editorSaving) && ['F1', 'F2', 'Comma', 'Period', 'KeyS'].includes(e.code)) { e.preventDefault(); return; }
       if (this.handleFileListKeydown(e)) return;
       if (this.consistencyResolver) {
         if (e.key === 'Escape') {
@@ -4004,42 +4030,40 @@ const config = Vue.defineComponent({
       }
       return false;
     },
-    saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
-      if (this.editorVisible) {
-        if (noSaveIfNotChanged && !this.editorHaveChanges()) {
-          this.editorExit();
-        } else {
-          if (!this.editorSave()) return;
+    async saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
+      if (this.navigationBusy || this.editorSaving || this.collaborationConflictVisible || this.collaborationHistoryVisible) return false;
+      this.navigationBusy = true;
+      const ctx = this.captureCollaborationContext?.();
+      const direction = reverse ? -1 : 1;
+      const sortRows = () => this.filteredDescs.slice().sort((a, b) => {
+        const modifier = this.currentSortDir === 'desc' ? -1 : 1;
+        return a[this.currentSort] < b[this.currentSort] ? -modifier : a[this.currentSort] > b[this.currentSort] ? modifier : 0;
+      });
+      const ordered = sortRows();
+      const hadEditor = this.editorVisible;
+      const currentPath = this.editorCurrentEditingDesc?.filepath;
+      const anchor = hadEditor ? ordered.findIndex(d => d.filepath === currentPath)
+        : (this.currentPage - 1) * this.pageSize + (reverse ? this.descsDisplay.length - 1 : 0);
+      const candidates = [];
+      for (let i = hadEditor ? anchor + direction : anchor; i >= 0 && i < ordered.length; i += direction) candidates.push(ordered[i].filepath);
+      try {
+        if (hadEditor && this.editorHaveChanges() && !await this.editorSave({ close: false })) return false;
+        if (ctx && !this.collaborationContextCurrent(ctx)) return false;
+        for (const filepath of candidates) {
+          if (this._collaboration?.isEditing(filepath)) continue;
+          // Saving can remove the current row from the filter; keep its original anchor.
+          const position = sortRows().findIndex(d => d.filepath === filepath);
+          if (position < 0) continue;
+          const opened = await this.editFile(filepath, true, { automatic: true });
+          if (opened === false) continue;
+          this.currentPage = Math.floor(position / this.pageSize) + 1;
+          this.selectedFilepath = filepath;
+          this.collaborationNotice = '';
+          return true;
         }
-        this.editorVisible = true;
-      } else {
-        if (!this.openFirstFile()) return;
-      }
-      let idx = this.descsDisplay.findIndex(d => d.filepath === (this.editorVisible ? this.editorCurrentEditingDesc?.filepath : null));
-
-      let targetIdx = idx >= 0 ? idx + (reverse ? -1 : 1) : 0;
-      
-      // page boundary
-      if (targetIdx < 0) {
-        if (this.currentPage > 0) {
-          this.prevPage();
-          targetIdx = this.descsDisplay.length - 1;
-        } else {
-          alert("No more files.");
-          return;
-        }
-      } else if (targetIdx >= this.descsDisplay.length) {
-        if (this.currentPage < this.pageCount) {
-          this.nextPage();
-          targetIdx = 0;
-        } else {
-          alert("No more files.");
-          return;
-        }
-      }
-
-      this.editFile(this.descsDisplay[targetIdx].filepath);
-      return;
+        this.collaborationNotice = 'No available files in this direction.';
+        return false;
+      } finally { this.navigationBusy = false; }
     },
     showImportUpdateZipDialog() {
       this.$refs.importUpdateZipFile?.click?.();
@@ -4126,7 +4150,8 @@ const config = Vue.defineComponent({
             lang: option?.lang || group?.lang || '(unknown language)',
             line: Number.isFinite(option?.line) ? option.line : 0,
             occurrence: Number.isFinite(option?.occurrence) ? option.occurrence : 1,
-            content: Array.isArray(option?.content) ? option.content.slice() : []
+            content: Array.isArray(option?.content) ? option.content.slice() : [],
+            variables: option.variables?.slice(), remarks: option.remarks?.slice()
           }));
           if (options.length < 2) continue;
           groups.push({
@@ -4179,6 +4204,9 @@ const config = Vue.defineComponent({
         if (!desc.translations || typeof desc.translations !== 'object') desc.translations = {};
         desc.translations[group.lang] = selected.content.slice();
         if (group.lang === 'English') {
+          if (selected.variables) desc.variables = selected.variables.slice();
+          if (selected.remarks) desc.remarks = selected.remarks.slice();
+          desc.duplicateLangEntries = (desc.duplicateLangEntries || []).filter(entry => entry.lang !== 'English');
           const firstLine = String(desc.translations.English?.[0] || '');
           desc.isDNT = firstLine.indexOf('[DNT') === 0 || firstLine.indexOf('DNT ') === 0;
         }
@@ -4219,6 +4247,7 @@ const config = Vue.defineComponent({
 
       const isPostMigrationImport = typeof options.isPostMigrationImport === 'boolean' ? options.isPostMigrationImport : !!this.needsPostMigrationImport;
 
+      let parseContext = this.captureCollaborationContext?.();
       let parsed = resolvedParsed;
       if (!parsed) {
         let zip;
@@ -4237,6 +4266,7 @@ const config = Vue.defineComponent({
           alert('No .txt files found in this ZIP.');
           return;
         }
+        if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
         const detectedGameVersion = this.detectGameVersionFromZip(zip);
         if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
           const detectedLabel = this.formatGameVersion(detectedGameVersion);
@@ -4250,6 +4280,7 @@ const config = Vue.defineComponent({
             return;
           }
           await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
+          parseContext = this.captureCollaborationContext?.();
           if (this.pendingSingleVersionMigration) {
             this.loadingProgress = 0;
             alert('Please finish or skip the migration before importing this ZIP.');
@@ -4272,33 +4303,60 @@ const config = Vue.defineComponent({
           }
         }
 
-        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
+        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
-        parsed = await allProgress(parseFuncs, (p) => {
-          const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
-          this.loadingProgress = percent;
-        });
+        try {
+          parsed = await allProgress(parseFuncs, (p) => {
+            const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+            this.loadingProgress = percent;
+          });
+        } catch (error) {
+          this.loadingProgress = this.sourceLoaded ? 100 : 0;
+          alert('Import aborted. ' + error.message);
+          return;
+        }
+        if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
         if (this.startDuplicateLangResolution(parsed, file, { mode: 'update', importMode: 'Import Next Version', isPostMigrationImport })) return;
       }
       const nextSource = parsed.filter(Boolean);
+      if (!nextSource.length) { this.loadingProgress = this.sourceLoaded ? 100 : 0; alert('No valid source descriptions found.'); return; }
+      const game = this.gameVersion, language = this.lang;
+      const importContext = this.captureCollaborationContext?.();
+      const importWorkspace = this.localDescs;
+      const importSource = this.descs;
+      let sourceHash;
+      try { sourceHash = await window.CollaborationProtocol.sourceHash(nextSource); }
+      catch (error) { this.loadingProgress = this.sourceLoaded ? 100 : 0; alert('Import aborted. ' + error.message); return; }
+      if ((importContext && !this.collaborationContextCurrent(importContext)) || this.localDescs !== importWorkspace || this.descs !== importSource) {
+        this.loadingProgress = this.sourceLoaded ? 100 : 0;
+        this.collaborationNotice = 'The workspace changed while importing. Import the source again in the intended workspace.';
+        return;
+      }
+      const nextWorkspace = this.toPlainForStorage(this.localDescs);
+      nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
+      nextWorkspace.sourceHash = sourceHash;
+      const sourceRevisions = [];
+      this._importingSource = true;
+      this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
 
-      this.localDescs.lastModified = file.lastModified;
-      this.localDescs.size = file.size;
-      this.ensureLocalDescsReady();
+
+      nextWorkspace.lastModified = file.lastModified;
+      nextWorkspace.size = file.size;
+
 
       const prevSource = Array.isArray(this.descs) ? this.descs : [];
       const prevSourceMap = new Map(prevSource.map(d => [d.filepath, d]));
       const nextSourceMap = new Map(nextSource.map(d => [d.filepath, d]));
-      const oldWorkspaceMap = new Map((this.localDescs.descs || []).map(d => [d.filepath, d]));
+      const oldWorkspaceMap = new Map((nextWorkspace.descs || []).map(d => [d.filepath, d]));
       const now = Date.now();
 
       for (const prev of prevSource) {
         if (!prev || !prev.filepath) continue;
         if (nextSourceMap.has(prev.filepath)) continue;
-        const st = this.localDescs.status[prev.filepath] || {};
+        const st = nextWorkspace.status[prev.filepath] || {};
         st.deletedAt = now;
         st.deleted = true;
-        this.localDescs.status[prev.filepath] = st;
+        nextWorkspace.status[prev.filepath] = st;
       }
 
       for (const nextDesc of nextSource) {
@@ -4308,10 +4366,10 @@ const config = Vue.defineComponent({
         const nextEng = Array.isArray(nextDesc?.translations?.English) ? nextDesc.translations.English : [];
 
         const oldLocal = oldWorkspaceMap.get(filepath);
-        const oldWorkspaceLines = Array.isArray(oldLocal?.translations?.[this.lang]) ? oldLocal.translations[this.lang] : [];
+        const oldWorkspaceLines = Array.isArray(oldLocal?.translations?.[language]) ? oldLocal.translations[language] : [];
         const hadOldWorkspaceTranslation = oldWorkspaceLines.some(v => String(v ?? '').trim() !== '');
-        const oldLinesRaw = Array.isArray(oldLocal?.translations?.[this.lang]) ? oldLocal.translations[this.lang] : (Array.isArray(prevDesc?.translations?.[this.lang]) ? prevDesc.translations[this.lang] : []);
-        const importedLinesRaw = Array.isArray(nextDesc?.translations?.[this.lang]) ? nextDesc.translations[this.lang] : [];
+        const oldLinesRaw = Array.isArray(oldLocal?.translations?.[language]) ? oldLocal.translations[language] : (Array.isArray(prevDesc?.translations?.[language]) ? prevDesc.translations[language] : []);
+        const importedLinesRaw = Array.isArray(nextDesc?.translations?.[language]) ? nextDesc.translations[language] : [];
 
         const engLen = nextEng.length;
         let needsReview = false;
@@ -4333,80 +4391,59 @@ const config = Vue.defineComponent({
 
         if (!nextDesc.translations) nextDesc.translations = { English: nextEng };
         nextDesc.translations.English = nextEng;
-        nextDesc.translations[this.lang] = merged;
+        nextDesc.translations[language] = merged;
 
         nextDesc.isMissing = computeIsMissing(engLen, merged);
         nextDesc.needsReview = isPostMigrationImport ? false : needsReview;
         const hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
         nextDesc.hasChanges = hasChanges;
 
-        const st = this.localDescs.status[filepath] || {};
+        const st = nextWorkspace.status[filepath] || {};
         st.deleted = false;
         st.deletedAt = 0;
         st.lastImportedAt = now;
         st.needsReview = isPostMigrationImport ? false : needsReview;
         if (prevDesc && !arrayEquals(prevEng, nextEng)) st.lastSourceAt = now;
         if (!prevDesc) st.lastSourceAt = now;
-        this.localDescs.status[filepath] = st;
+        nextWorkspace.status[filepath] = st;
 
         let localDesc = oldLocal;
         if (!localDesc) {
-          localDesc = makeLocalDesc(nextDesc, this.lang, merged, { hasChanges, isMissing: nextDesc.isMissing });
-          this.localDescs.descs.push(localDesc);
+          localDesc = makeLocalDesc(nextDesc, language, merged, { hasChanges, isMissing: nextDesc.isMissing });
+          nextWorkspace.descs.push(localDesc);
           oldWorkspaceMap.set(nextDesc.filepath, localDesc);
         } else {
-          updateLocalDesc(localDesc, nextDesc, this.lang, merged, { hasChanges, isMissing: nextDesc.isMissing });
+          updateLocalDesc(localDesc, nextDesc, language, merged, { hasChanges, isMissing: nextDesc.isMissing });
         }
 
-        if (prevDesc && !arrayEquals(prevEng, nextEng)) {
-          const rev = {
-            filepath: nextDesc.filepath,
-            filename: nextDesc.filename,
-            filedir: nextDesc.filedir,
-            lang: 'English',
-            savedAt: now,
-            note: 'Source update',
-            isMissing: false,
-            translations: nextEng,
-          };
-          try {
-            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English', this.gameVersion);
-            if (!latest || !arrayEquals(latest.translations, nextEng)) await window.OfflineStore.addRevision(rev, this.gameVersion);
-          } catch (_) {
-          }
-        } else if (!prevDesc) {
-          const rev = {
-            filepath: nextDesc.filepath,
-            filename: nextDesc.filename,
-            filedir: nextDesc.filedir,
-            lang: 'English',
-            savedAt: now,
-            note: 'Source import',
-            isMissing: false,
-            translations: nextEng,
-          };
-          try {
-            const latest = await window.OfflineStore.getLatestRevision(nextDesc.filepath, 'English', this.gameVersion);
-            if (!latest) await window.OfflineStore.addRevision(rev, this.gameVersion);
-          } catch (_) {
-          }
+        if (!prevDesc || !arrayEquals(prevEng, nextEng)) {
+          sourceRevisions.push({ filepath, filename: nextDesc.filename, filedir: nextDesc.filedir,
+            lang: 'English', savedAt: now, note: prevDesc ? 'Source update' : 'Source import',
+            isMissing: false, translations: nextEng, sourceHash });
         }
       }
 
+      try {
+        await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(nextSource), nextWorkspace, sourceRevisions, game);
+      } catch (error) {
+        this.loadingProgress = this.sourceLoaded ? 100 : 0;
+        this._importingSource = false;
+        this.scheduleCollaboration?.();
+        alert('Could not save the imported source. Existing work is unchanged. ' + error.message);
+        return;
+      }
+      this._importingSource = false;
+      if (this.gameVersion !== game || this.lang !== language
+        || (importContext && (this.sourceIdentity !== importContext.source || (this.cloudUser?.id || '') !== importContext.account))
+        || this.localDescs !== importWorkspace || this.descs !== importSource) return;
+      this.localDescs = nextWorkspace;
+      this.sourceIdentity = sourceHash;
       this.descs = nextSource;
       this.sourceLoaded = true;
       this.clearDiagnosticScanResults();
-
-      await this.saveLocalDescs();
-      if (window.OfflineStore && typeof window.OfflineStore.setSource === 'function') {
-        try {
-          await window.OfflineStore.setSource(nextSource, this.gameVersion);
-        } catch (_) {
-        }
-      }
-
       this.loadingProgress = 100;
       this.filterDesc();
+      this.scheduleCollaboration?.();
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
@@ -4420,6 +4457,7 @@ const config = Vue.defineComponent({
         alert('Please import the latest StatDescriptions.zip first.');
         return;
       }
+      const importContext = this.captureCollaborationContext?.();
       let parsed = resolvedParsed;
       if (!parsed) {
         if (String(file?.name || '').toLowerCase() !== 'statdescriptions_translated.zip') {
@@ -4458,12 +4496,19 @@ const config = Vue.defineComponent({
           }
         }
 
-        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang));
+        const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
-        parsed = await allProgress(parseFuncs, (p) => {
-          const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
-          this.loadingProgress = percent;
-        });
+        try {
+          parsed = await allProgress(parseFuncs, (p) => {
+            const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
+            this.loadingProgress = percent;
+          });
+        } catch (error) {
+          this.loadingProgress = this.sourceLoaded ? 100 : 0;
+          alert('Import aborted. ' + error.message);
+          return;
+        }
+        if (importContext && !this.collaborationContextCurrent(importContext)) return;
         if (this.startDuplicateLangResolution(parsed, file, { mode: 'translated', importMode: 'Import Translated' })) return;
       }
 
@@ -4481,6 +4526,10 @@ const config = Vue.defineComponent({
         }
         const prevEng = Array.isArray(prev?.translations?.English) ? prev.translations.English : [];
         const impEng = Array.isArray(imported?.translations?.English) ? imported.translations.English : [];
+        if ((prev.name || '') !== (imported.name || '')) {
+          mismatchFiles.push(`${imported.filepath}: description name differs`);
+          continue;
+        }
         if (!arrayEquals(prevEng, impEng)) {
           mismatchFiles.push(`${imported.filepath}: English source text differs`);
           continue;
@@ -4527,122 +4576,25 @@ const config = Vue.defineComponent({
         return;
       }
 
-      const oldWorkspaceMap = new Map((this.localDescs.descs || []).filter(Boolean).map(d => [d.filepath, d]));
-      const now = Date.now();
-      let changedCount = 0;
-      let reviewClearedCount = 0;
-      let trackedCount = 0;
-      const changedPaths = new Set();
-
+      const updates = [];
       for (const imported of importedDescs) {
         const desc = sourceMap.get(imported.filepath);
-        if (!desc) continue;
-
-        const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
-        const importedRaw = Array.isArray(imported?.translations?.[this.lang]) ? imported.translations[this.lang] : [];
-        const importedLines = Array.from({ length: engLen }).map((_, i) => importedRaw[i] ?? "");
-
-        let localDesc = oldWorkspaceMap.get(imported.filepath);
-        const existing = Array.isArray(localDesc?.translations?.[this.lang])
-          ? localDesc.translations[this.lang]
-          : (Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : []);
-        const existingLines = Array.from({ length: engLen }).map((_, i) => existing[i] ?? "");
-
-        const changed = !arrayEquals(existingLines, importedLines);
-        const hasAnyTranslation = importedLines.some(v => String(v ?? '').trim() !== '');
-        if (hasAnyTranslation) {
-          const st = this.localDescs.status[imported.filepath] || {};
-          if (st.needsReview || desc.needsReview) {
-            desc.needsReview = false;
-            st.needsReview = false;
-            this.localDescs.status[imported.filepath] = st;
-            reviewClearedCount++;
-          }
-        }
-
-        if (!changed) {
-          if (hasAnyTranslation) {
-            desc.translations[this.lang] = importedLines;
-            desc.isMissing = computeIsMissing(engLen, importedLines);
-            desc.hasChanges = true;
-            desc.needsReview = false;
-
-            if (!localDesc) {
-              localDesc = makeLocalDesc(desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
-              this.localDescs.descs.push(localDesc);
-              oldWorkspaceMap.set(desc.filepath, localDesc);
-            } else {
-              updateLocalDesc(localDesc, desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
-            }
-            trackedCount++;
-          }
-          continue;
-        }
-
-        changedCount++;
-        changedPaths.add(imported.filepath);
-
-        desc.translations[this.lang] = importedLines;
-        desc.isMissing = computeIsMissing(engLen, importedLines);
-        desc.hasChanges = true;
-        desc.needsReview = false;
-
-        const st = this.localDescs.status[imported.filepath] || {};
-        st.needsReview = false;
-        this.localDescs.status[imported.filepath] = st;
-
-        if (!localDesc) {
-          localDesc = makeLocalDesc(desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
-          this.localDescs.descs.push(localDesc);
-          oldWorkspaceMap.set(desc.filepath, localDesc);
-        } else {
-          updateLocalDesc(localDesc, desc, this.lang, importedLines, { hasChanges: true, isMissing: desc.isMissing });
+        const lines = [...imported.translations[this.lang]];
+        if (!arrayEquals(desc.translations[this.lang] || [], lines) || lines.some(value => String(value).trim())) {
+          updates.push({ desc, lines, needsReview: false });
         }
       }
-
-      if (!this.testMode && changedCount > 0 && window.OfflineStore && typeof window.OfflineStore.addRevision === 'function') {
-        for (const imported of importedDescs) {
-          const desc = sourceMap.get(imported?.filepath);
-          if (!desc?.filepath) continue;
-          if (!changedPaths.has(desc.filepath)) continue;
-
-          const lines = Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : [];
-          const rev = {
-            filepath: desc.filepath,
-            filename: desc.filename,
-            filedir: desc.filedir,
-            lang: this.lang,
-            savedAt: now,
-            note: 'Import translated',
-            isMissing: !!desc.isMissing,
-            translations: lines,
-          };
-
-          try {
-            const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang, this.gameVersion);
-            if (!latest || !arrayEquals(latest.translations, lines)) await window.OfflineStore.addRevision(rev, this.gameVersion);
-          } catch (_) {
-          }
-
-          const st = this.localDescs.status[desc.filepath] || {};
-          st.lastTranslatedAt = now;
-          st.lastEditedAt = now;
-          this.localDescs.status[desc.filepath] = st;
-        }
-      }
-
-      await this.saveLocalDescs();
-      this.loadingProgress = 100;
-      this.clearDiagnosticScanResults();
-      this.filterDesc();
-
-      if (changedCount === 0 && reviewClearedCount === 0 && trackedCount === 0) {
-        alert('No translation changes detected.');
-      } else if (changedCount === 0) {
-        const lines = [];
-        if (reviewClearedCount > 0) lines.push(`Cleared needs-review on ${reviewClearedCount} file(s).`);
-        if (trackedCount > 0) lines.push(`Marked ${trackedCount} file(s) for export.`);
-        alert(lines.join('\n'));
+      if (!updates.length) { this.loadingProgress = 100; alert('No translation changes detected.'); return; }
+      try {
+        const result = await this.persistTranslationBatch(updates, 'import');
+        if (result.stale) return;
+        this.loadingProgress = 100;
+        this.clearDiagnosticScanResults();
+        this.filterDesc();
+        if (result.status !== 'conflict') this.collaborationNotice = 'Imported ' + updates.length + ' translated files' + (result.status === 'pending' ? ' · Pending sync' : '.');
+      } catch (error) {
+        this.loadingProgress = 100;
+        alert('Could not save imported translations. Existing work is unchanged. ' + error.message);
       }
     },
     // Applies local workspace translations and status flags on top of the source descs.
@@ -4698,7 +4650,8 @@ const config = Vue.defineComponent({
         || this.editorVisible || this.settingsDialogVisible || this.$refs.diagnosticScanDialog?.open
         || this.importDialogVisible || this.consistencyResolver || this.cloudResolverVisible
         || this.cloudHistoryVisible || this.duplicateLangImportWarning || this.showMultiInstanceGate
-        || this.settingsImportDraft || this.pendingSingleVersionMigration;
+        || this.settingsImportDraft || this.pendingSingleVersionMigration
+        || this.collaborationConflictVisible || this.collaborationHistoryVisible;
     },
     selectFileRow(filepath, focus = false) {
       if (!this.descsDisplay.some(row => row.filepath === filepath)) return;
@@ -4918,7 +4871,27 @@ const config = Vue.defineComponent({
     getDescByFilepath(filepath) {
       return this.descs.find(o => o.filepath == filepath);
     },
-    editFile(filepath, returnToFileList = false) {
+    editFile(filepath, returnToFileList = false, options = {}) {
+      if (!this._collaboration) {
+        this._editorCollabBase = undefined;
+        return this.openEditorFile(filepath, returnToFileList);
+      }
+      return this.openClaimedEditorFile(filepath, returnToFileList, options);
+    },
+    async openClaimedEditorFile(filepath, returnToFileList, options = {}) {
+      if (this._openingFile) return false;
+      this._openingFile = true;
+      const ctx = this.captureCollaborationContext();
+      try {
+        if (!await this.claimCollaborationFile(filepath, !!options.automatic)) return false;
+        if (!this.collaborationContextCurrent(ctx)) return false;
+        this._editorCollabBase = this._collaboration?.fileBase(filepath);
+        this.openEditorFile(filepath, returnToFileList);
+        return true;
+      } catch (error) { this.collaborationFailure(error); return false; }
+      finally { this._openingFile = false; }
+    },
+    openEditorFile(filepath, returnToFileList = false) {
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
@@ -5085,7 +5058,8 @@ const config = Vue.defineComponent({
         }
       }
     },
-    editorSave() {
+    async editorSave({ close = true } = {}) {
+      if (this.editorSaving) return false;
       if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
@@ -5156,38 +5130,35 @@ const config = Vue.defineComponent({
       let engTextDecorationTagCount = desc.translations.English.reduce((p, c) => p += countTextDecorationTag(c), 0);
       if (newTextDecorationTagCount != engTextDecorationTagCount && !confirm("Number of text decoration tags (<tag>{{}} tag) mismatched!\nDo you want to save anyway?")) return false;
 
-      desc.isMissing = isMissing;
-      if (!arrayEquals(desc.translations[this.lang], newTranslations)) desc.hasChanges = true;
-      desc.translations[this.lang] = newTranslations;
-
-      if (desc.needsReview && desc.hasChanges) {
-        desc.needsReview = false;
-        this.ensureLocalDescsReady();
-        const st = this.localDescs.status[desc.filepath] || {};
-        st.needsReview = false;
-        this.localDescs.status[desc.filepath] = st;
-      }
-
-      // save to localDescs too
-      this.ensureLocalDescsReady();
-      let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
-      if (!localDesc) {
-        localDesc = makeLocalDesc(desc, this.lang, newTranslations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
-        this.localDescs.descs.push(localDesc);
-      } else {
-        updateLocalDesc(localDesc, desc, this.lang, newTranslations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
-      }
-      this.saveLocalDescs();
-      this.commitRevision(desc, newTranslations, { note: 'Save' });
-
-      this.saveSettings();
-      this.closeHlPopup();
-      this.editorOriginalTranslations = (this.editorBlocks || []).map(b => b?.translation ?? "");
-      this.editorVisible = false;
-      this.updateScannedDescDiagnostics(desc);
-      this.filterDesc();
-      this.restoreFileTableFocusAfterEditor();
-      return true;
+      const context = this.captureCollaborationContext();
+      const draftAtSave = (this.editorBlocks || []).map(block => block?.translation ?? '');
+      const blocksAtSave = this.editorBlocks;
+      this.editorSaving = true;
+      try {
+        const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
+          context, bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+        });
+        if (result.stale || result.status === 'conflict') return false;
+        if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
+        const accepted = this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc);
+        const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
+          draftBefore: draftAtSave, submittedTranslations: newTranslations,
+        });
+        // Typing during a slow save remains a draft; never close it.
+        if (typedDuringSave) return false;
+        this.saveSettings();
+        this.closeHlPopup();
+        if (close) {
+          this.editorVisible = false;
+          this._collaboration?.leaveEdit();
+          this.restoreFileTableFocusAfterEditor();
+        }
+        return true;
+      } catch (error) {
+        this.cloudStorageError = 'Could not save this translation. Your draft is still open. ' + error.message;
+        this.collaborationNotice = this.cloudStorageError;
+        return false;
+      } finally { this.editorSaving = false; }
     },
     async refreshHistory() {
       if (!this.editorCurrentEditingDesc) {
@@ -5351,81 +5322,25 @@ const config = Vue.defineComponent({
     },
     async restoreHistoryRevision(rev) {
       const desc = this.editorCurrentEditingDesc;
-      if (!desc || !rev) return;
-      if (this.historyMode === 'source' || String(rev?.lang) === 'English') {
-        alert('Restoring source English text is disabled.');
-        return;
+      if (!desc || !rev || this.editorSaving) return;
+      if (this.historyMode === 'source' || String(rev.lang) === 'English') { alert('Restoring source English text is disabled.'); return; }
+      if (desc.filepath !== rev.filepath || this.lang !== rev.lang || (rev.sourceHash && this.sourceIdentity && rev.sourceHash !== this.sourceIdentity)) {
+        alert('Cannot restore: revision does not match the current source, file and language.'); return;
       }
-      if (desc.filepath !== rev.filepath || this.lang !== rev.lang) {
-        alert('Cannot restore: revision does not match the currently opened file/language.');
-        return;
-      }
-      if (!confirm('Restore this revision?')) return;
-
-      if (this.editorCompareActive) this.exitEditorCompareMode();
-
       const lines = Array.isArray(rev.translations) ? rev.translations : [];
-      desc.isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, lines);
-      if (!arrayEquals(desc.translations[this.lang], lines)) desc.hasChanges = true;
-      desc.translations[this.lang] = lines;
-
-      if (desc.needsReview && desc.hasChanges) {
-        desc.needsReview = false;
-        this.ensureLocalDescsReady();
-        const st = this.localDescs.status[desc.filepath] || {};
-        st.needsReview = false;
-        this.localDescs.status[desc.filepath] = st;
-      }
-
-      this.ensureLocalDescsReady();
-      let localDesc = this.localDescs.descs.find(o => o.filepath == desc.filepath);
-      if (!localDesc) {
-        localDesc = makeLocalDesc(desc, this.lang, lines, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
-        this.localDescs.descs.push(localDesc);
-      } else {
-        updateLocalDesc(localDesc, desc, this.lang, lines, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
-      }
-
-      await this.saveLocalDescs();
-      await this.commitRevision(desc, lines, { note: 'Restore' });
-      this.updateScannedDescDiagnostics(desc);
-      this.filterDesc();
-      if (this.editorVisible) this.editFile(desc.filepath);
-      await this.refreshHistory();
-    },
-    async commitRevision(desc, translations, { note } = {}) {
-      if (!desc || !Array.isArray(translations)) return;
-      if (this.testMode) return;
-      if (!(window.OfflineStore && typeof window.OfflineStore.addRevision === 'function')) return;
-
-      const rev = {
-        filepath: desc.filepath,
-        filename: desc.filename,
-        filedir: desc.filedir,
-        lang: this.lang,
-        savedAt: Date.now(),
-        note: note || '',
-        isMissing: !!desc.isMissing,
-        translations: translations,
-      };
-
+      if (lines.length !== desc.translations.English.length) { alert('Cannot restore: the source entry layout differs.'); return; }
+      if (!confirm('Restore this revision? A new saved revision will be created.')) return;
+      this.editorSaving = true;
       try {
-        const latest = await window.OfflineStore.getLatestRevision(desc.filepath, this.lang, this.gameVersion);
-        if (latest && arrayEquals(latest.translations, translations)) return;
-      } catch (_) {
-      }
-
-      try {
-        await window.OfflineStore.addRevision(rev, this.gameVersion);
-      } catch (_) {
-      }
-
-      this.ensureLocalDescsReady();
-      const st = this.localDescs.status[desc.filepath] || {};
-      st.lastTranslatedAt = rev.savedAt;
-      st.lastEditedAt = rev.savedAt;
-      this.localDescs.status[desc.filepath] = st;
-      await this.saveLocalDescs();
+        const result = await this.persistTranslationBatch([{ desc, lines, needsReview: false }], 'restore', {
+          bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+        });
+        if (result.stale || result.status === 'conflict') return;
+        if (this.editorVisible) this.openEditorFile(desc.filepath);
+        this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
+        await this.refreshHistory();
+      } catch (error) { this.collaborationNotice = 'Could not restore the translation: ' + error.message; }
+      finally { this.editorSaving = false; }
     },
     editorEsc(e) {
       if (this.isImeComposingEvent(e)) return;
@@ -5444,9 +5359,11 @@ const config = Vue.defineComponent({
     },
     editorExit() {
       if (this.editorHaveChanges() && !confirm('Are you sure you want to exit without saving?')) return;
+      if (this.editorSaving || this.navigationBusy) return;
       this.saveSettings();
       this.closeHlPopup();
       this.editorVisible = false;
+      this._collaboration?.leaveEdit();
       this.restoreFileTableFocusAfterEditor();
     },
     restoreFileTableFocusAfterEditor() {
@@ -5563,15 +5480,11 @@ const config = Vue.defineComponent({
       } else this.gamePreviewFonts = null;
     },
     async saveLocalDescs() {
-      if (!offlineStoreReady) return;
-      if (window.OfflineStore && typeof window.OfflineStore.setWorkspace === 'function') {
-        try {
-          const plain = this.toPlainForStorage(this.localDescs);
-          if (!plain) throw new Error('Cannot serialize workspace');
-          await window.OfflineStore.setWorkspace(plain, this.gameVersion);
-        } catch (_) {
-        }
-      }
+      if (this.testMode) return;
+      if (!offlineStoreReady || !window.OfflineStore?.setWorkspace) throw new Error('Local storage is unavailable.');
+      const plain = this.toPlainForStorage(this.localDescs);
+      if (!plain) throw new Error('Cannot serialize workspace');
+      await window.OfflineStore.setWorkspace(plain, this.gameVersion);
     },
     useRegex(editorBlock) {
       this.sideTab = 'regex';
