@@ -522,6 +522,9 @@ const config = Vue.defineComponent({
     editorTranslationReadOnly() {
       return this.editorLoading || !!this.editorLoadError || (this.editorCompareActive && this.editorCompareMode === 'translation');
     },
+    editorReady() {
+      return !this.editorLoading && !this.editorLoadError;
+    },
     terminologyDictionary() {
       return window.TerminologyDiagnostics.compileDictionary(this.dictionary);
     },
@@ -711,6 +714,7 @@ const config = Vue.defineComponent({
       return Math.max(1, Math.ceil(this.filteredDictionary.length / this.dictionaryPageSize));
     },
     visibleDictionary() {
+      if (!this.editorReady) return [];
       const page = Math.min(this.dictionaryPage, this.dictionaryPageCount);
       return this.filteredDictionary.slice((page - 1) * this.dictionaryPageSize, page * this.dictionaryPageSize);
     },
@@ -1161,10 +1165,12 @@ const config = Vue.defineComponent({
       }
     },
     toggleEditorEnglishDiff() {
+      if (!this.editorReady) return;
       this.editorShowEnglishDiff = !this.editorShowEnglishDiff;
       if (this.editorShowEnglishDiff) this.prepareEditorEnglishDiff();
     },
     async confirmTranslationUnchanged() {
+      if (!this.editorReady) return;
       const desc = this.editorCurrentEditingDesc;
       if (!desc || !desc.needsReview || this.editorSaving) return;
       if (!confirm('Confirm that the translation does NOT need changes for this source revision? This clears Needs Review and marks the file for export.')) return;
@@ -1425,7 +1431,7 @@ const config = Vue.defineComponent({
         : 0;
       return Math.max(1, tableCount, compareCount);
     },
-    makeEditorTableColumn(english, translation, englishExists = true, translationExists = true) {
+    makeEditorTableColumn(english, translation, englishExists = true, translationExists = true, hydrate = true) {
       let column = {
         english: String(english ?? ""),
         translation: String(translation ?? ""),
@@ -1442,10 +1448,10 @@ const config = Vue.defineComponent({
         englishExists,
         translationExists
       };
-      this.refreshEditorTableColumnHLter(column);
+      if (hydrate) this.refreshEditorTableColumnHLter(column);
       return column;
     },
-    buildEditorTableColumns(english, translation) {
+    buildEditorTableColumns(english, translation, hydrate = true) {
       let englishColumns = this.splitTableColumns(english);
       let translationColumns = this.splitTableColumns(translation);
       let count = Math.max(englishColumns.length, translationColumns.length);
@@ -1455,7 +1461,8 @@ const config = Vue.defineComponent({
           englishColumns[i] ?? "",
           translationColumns[i] ?? "",
           i < englishColumns.length,
-          i < translationColumns.length
+          i < translationColumns.length,
+          hydrate
         ));
       }
       return columns;
@@ -1590,7 +1597,7 @@ const config = Vue.defineComponent({
       return entries;
     },
     async openConsistencyResolver(blockIndex) {
-      if (this.editorCompareActive || !this.editorVisible || this.consistencyResolverBusy) return;
+      if (this.editorLoading || this.editorLoadError || this.editorCompareActive || !this.editorVisible || this.consistencyResolverBusy) return;
       const desc = this.editorCurrentEditingDesc;
       const sourceEnglish = window.TranslationDiagnostics.normalizeConsistencyText(desc?.translations?.English?.[blockIndex]);
       if (!sourceEnglish) return;
@@ -2537,6 +2544,7 @@ const config = Vue.defineComponent({
       }
     },
     translationInput(editorBlock, editorIndex, e) {
+      if (this.editorTranslationReadOnly) return;
       if (this.isImeComposingEvent(e)) return;
       if (editorBlock?.isTable) {
         this.syncEditorBlockFromTableColumns(editorBlock);
@@ -2643,11 +2651,12 @@ const config = Vue.defineComponent({
           }
           continue;
         }
-        this.autosizeTextarea(this.$refs["english_" + i], { minHeight: 72, maxHeight: 220 });
-        this.autosizeTextarea(this.$refs["translation_" + i], { minHeight: 84, maxHeight: 260 });
+        this.autosizeTextarea(this.getEditorRef("english", i), { minHeight: 72, maxHeight: 220 });
+        this.autosizeTextarea(this.getEditorRef("translation", i), { minHeight: 84, maxHeight: 260 });
       }
     },
     normalizeMultilineEditorBlock(editorBlock, editorIndex, e) {
+      if (this.editorTranslationReadOnly) return;
       if (this.isImeComposingEvent(e)) return;
       if (!editorBlock?.isMultiline) return;
       if (editorBlock.isTable) {
@@ -2671,6 +2680,7 @@ const config = Vue.defineComponent({
       this.queueCommittedAutocompleteTrigger(e, editorIndex);
     },
     tableColumnInput(editorBlock, editorIndex, columnIndex, e) {
+      if (this.editorTranslationReadOnly) return;
       if (this.isImeComposingEvent(e)) return;
       let column = editorBlock?.tableColumns?.[columnIndex];
       if (!column) return;
@@ -3400,6 +3410,7 @@ const config = Vue.defineComponent({
       this.hlPopup.selectedIndex = 0;
     },
     openHlPopup(editorIndex, options = {}) {
+      if (this.editorTranslationReadOnly) return;
       if (!this.editorVisible) return;
       if (editorIndex == null) editorIndex = this.editorFocusedIndex || 0;
       let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (this.editorFocusedColumnIndex || 0);
@@ -3764,6 +3775,7 @@ const config = Vue.defineComponent({
       }
     },
     insertTranslationText(editorIndex, text, options = {}) {
+      if (this.editorTranslationReadOnly) return;
       let editorBlock = this.editorBlocks?.[editorIndex];
       let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (editorBlock?.isTable ? (this.hlPopup.columnIndex || this.editorFocusedColumnIndex || 0) : null);
       let el = this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null);
@@ -3859,6 +3871,7 @@ const config = Vue.defineComponent({
       return !!e?.isComposing || e?.keyCode === 229;
     },
     queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex = 0, options = {}) {
+      if (this.editorTranslationReadOnly) return;
       if (!e || this.isImeComposingEvent(e)) return;
       if (e.type === "input") {
         if (e.isTrusted === false) return;
@@ -3885,6 +3898,7 @@ const config = Vue.defineComponent({
       this.queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex, { compositionTarget: e?.target });
     },
     translationKeydown(e, editorIndex, columnIndex = 0) {
+      if (this.editorTranslationReadOnly) return;
       if (this.isImeComposingEvent(e)) return;
       if ((e.key === "[" || e.key === "<") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!this.editorVisible) return;
@@ -5018,6 +5032,9 @@ const config = Vue.defineComponent({
           return false;
         }
         this._editorCollabBase = this._collaboration?.fileBase(filepath);
+        // A claim can bring in newer saved translations. Pair the visible text
+        // and the hydration snapshot with the base captured above.
+        this.seedEditorOpenSource(request);
         return await this.openEditorFile(filepath, returnToFileList, request);
       } catch (error) {
         if (request.isCurrent()) {
@@ -5038,6 +5055,7 @@ const config = Vue.defineComponent({
     },
     async yieldEditorPaint() {
       await this.$nextTick();
+      this.autosizeEditorMultilineFields();
       // A nextTick alone flushes Vue but does not allow the browser to paint.
       await new Promise(resolve => {
         if (typeof requestAnimationFrame === 'function' && !document.hidden) {
@@ -5051,7 +5069,115 @@ const config = Vue.defineComponent({
       this.editorLoading = false;
       this.editorLoadError = '';
       this.editorVisible = false;
+      this.editorBlocks = [];
+      this.editorOriginalTranslations = [];
       this.restoreFileTableFocusAfterEditor();
+    },
+    applyPreparedEditorBlocks(blocks) {
+      // Keep the existing fields mounted, including their focus, selection and
+      // scroll positions. Only their highlight/diagnostic data needs replacing.
+      for (let i = 0; i < blocks.length; i++) {
+        const next = blocks[i], current = this.editorBlocks[i];
+        if (!current) { this.editorBlocks.push(next); continue; }
+        if (current.isTable && next.isTable) {
+          const columns = current.tableColumns;
+          for (let col = 0; col < next.tableColumns.length; col++) {
+            if (columns[col]) Object.assign(columns[col], next.tableColumns[col]);
+            else columns.push(next.tableColumns[col]);
+          }
+          columns.length = next.tableColumns.length;
+          Object.assign(current, next, { tableColumns: columns });
+        } else Object.assign(current, next);
+      }
+      this.editorBlocks.length = blocks.length;
+    },
+    seedEditorOpenSource(request) {
+      const desc = request.desc;
+      request.source = {
+        english: [...desc.translations.English],
+        translations: [...(desc.translations[this.lang] || [])],
+        needsReview: desc.needsReview,
+      };
+      const blocks = request.source.english.map((english, index) =>
+        this.makeEditorBlock(english || '', request.source.translations[index] || ''));
+      this.applyPreparedEditorBlocks(blocks);
+      this.editorOriginalTranslations = blocks.map(block => block.translation);
+      this.editorShowEnglishDiff = !!request.source.needsReview;
+      this.refreshGamePreview();
+    },
+    makeEditorBlock(englishRaw, translationRaw, hydrate = false) {
+      let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
+      let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
+      let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
+      let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
+      let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
+      let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
+      let { englishHLter: baseEnglishHLter, HLs } = !hydrate || isTable ? { englishHLter: '', HLs: [] } : this.buildEnglishHLter(english);
+      let englishHLter = baseEnglishHLter;
+      let translationDiagnosticResult = !hydrate || isTable ? { diagnostics: [], warningCount: 0, errorCount: 0 } : this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
+      let translationHLter = !hydrate || isTable ? '' : this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
+      let multilineLineMismatch = false;
+      let tableColumns = [];
+      if (isTable) {
+        tableColumns = this.buildEditorTableColumns(english, translation, hydrate);
+        isMultiline = tableColumns.some(col => col.isMultiline);
+        multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
+        let tableDiagnostics = [];
+        let tableWarningCount = 0;
+        let tableErrorCount = 0;
+        for (let col = 0; col < tableColumns.length; col++) {
+          const column = tableColumns[col];
+          tableWarningCount += Number(column?.diagnosticWarningCount || 0);
+          tableErrorCount += Number(column?.diagnosticErrorCount || 0);
+          for (const diagnostic of (column?.translationDiagnostics || [])) {
+            tableDiagnostics.push({ ...diagnostic, columnIndex: col });
+          }
+        }
+        translationDiagnosticResult = {
+          diagnostics: tableDiagnostics,
+          warningCount: tableWarningCount,
+          errorCount: tableErrorCount
+        };
+        englishHLter = "";
+        translationHLter = "";
+        HLs = [];
+      } else if (hydrate && isMultiline) {
+        let diff = this.computeMultilineLineMismatch(english, translation);
+        englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
+        translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics), diff.trMismatch);
+        multilineLineMismatch = diff.mismatch;
+      }
+      let engStats = this.computeTextStats(english);
+      let trStats = this.computeTextStats(translation);
+      return {
+        isTable,
+        isMultiline,
+        tableColumns,
+        english,
+        englishHLter,
+        HLs,
+        englishDiffHtml: escapeHtml(String(english ?? '')),
+        translation,
+        translationHLter,
+        translationDiagnostics: translationDiagnosticResult.diagnostics,
+        diagnosticWarningCount: translationDiagnosticResult.warningCount,
+        diagnosticErrorCount: translationDiagnosticResult.errorCount,
+        translationDiffHtml: escapeHtml(String(translation ?? '')),
+        translationCompareColumns: [],
+        multilineLineMismatch,
+        metaLinesEn: engStats.lines,
+        metaLinesTr: trStats.lines,
+        metaColsEn: engStats.cols,
+        metaColsTr: trStats.cols,
+        metaVarsEn: engStats.vars,
+        metaVarsTr: trStats.vars,
+        metaKwEn: engStats.kw,
+        metaKwTr: trStats.kw,
+        metaDecorEn: engStats.decor,
+        metaDecorTr: trStats.decor,
+        translationReplace: "",
+        words: []
+      };
     },
     beginEditorOpen(filepath, returnToFileList = false) {
       this.consistencyResolutionNotice = '';
@@ -5075,13 +5201,21 @@ const config = Vue.defineComponent({
       this.editorLoadError = '';
       this.editorLoading = true;
       this.editorVisible = true;
+      this.editorFocusedIndex = 0;
+      this.editorFocusedColumnIndex = 0;
       this.dictionaryPage = 1;
       const run = this._editorOpenRun = (this._editorOpenRun || 0) + 1;
       const lang = this.lang, version = this.gameVersion, sourceIdentity = this.sourceIdentity;
       const isCurrent = () => this._editorOpenRun === run && this.editorVisible
         && this.editorCurrentEditingDesc === desc && this.lang === lang && this.gameVersion === version
         && this.sourceIdentity === sourceIdentity;
-      return { desc, run, isCurrent };
+      const request = { desc, run, isCurrent };
+      this.seedEditorOpenSource(request);
+      this.$nextTick(() => {
+        if (!isCurrent()) return;
+        this.getEditorRef('translation', 0, this.editorBlocks[0]?.isTable ? 0 : null)?.focus?.({ preventScroll: true });
+      });
+      return request;
     },
     async openEditorFile(filepath, returnToFileList = false, pendingRequest = null) {
       const request = pendingRequest || this.beginEditorOpen(filepath, returnToFileList);
@@ -5089,95 +5223,17 @@ const config = Vue.defineComponent({
       const { desc, isCurrent } = request;
       // Keep the draft aligned with the collaboration base captured at open,
       // even if background sync changes the saved description between chunks.
-      const source = request.source || (request.source = {
-        english: [...desc.translations.English],
-        translations: [...(desc.translations[this.lang] || [])],
-        needsReview: desc.needsReview,
-      });
+      const source = request.source;
       try {
         await this.yieldEditorPaint();
         if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
-        const blocks = [], originals = [];
+        const blocks = [];
         const dictionaryRevision = this._editorDictionaryRevision || 0;
         let sliceStart = Date.now();
         for (let i = 0; i < source.english.length; i++) {
           if (!isCurrent()) return false;
           if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
-          let englishRaw = source.english[i] || "";
-          let translationRaw = source.translations[i] || "";
-          let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
-          let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
-          let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
-          let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
-          let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
-          let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
-          let { englishHLter: baseEnglishHLter, HLs } = isTable ? { englishHLter: '', HLs: [] } : this.buildEnglishHLter(english);
-          let englishHLter = baseEnglishHLter;
-          let translationDiagnosticResult = isTable ? {} : this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
-          let translationHLter = isTable ? '' : this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
-          let multilineLineMismatch = false;
-          let tableColumns = [];
-          if (isTable) {
-            tableColumns = this.buildEditorTableColumns(english, translation);
-            isMultiline = tableColumns.some(col => col.isMultiline);
-            multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
-            let tableDiagnostics = [];
-            let tableWarningCount = 0;
-            let tableErrorCount = 0;
-            for (let col = 0; col < tableColumns.length; col++) {
-              const column = tableColumns[col];
-              tableWarningCount += Number(column?.diagnosticWarningCount || 0);
-              tableErrorCount += Number(column?.diagnosticErrorCount || 0);
-              for (const diagnostic of (column?.translationDiagnostics || [])) {
-                tableDiagnostics.push({ ...diagnostic, columnIndex: col });
-              }
-            }
-            translationDiagnosticResult = {
-              diagnostics: tableDiagnostics,
-              warningCount: tableWarningCount,
-              errorCount: tableErrorCount
-            };
-            englishHLter = "";
-            translationHLter = "";
-            HLs = [];
-          } else if (isMultiline) {
-            let diff = this.computeMultilineLineMismatch(english, translation);
-            englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
-            translationHLter = this.wrapHlterByLines(this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics), diff.trMismatch);
-            multilineLineMismatch = diff.mismatch;
-          }
-          originals.push(translation);
-          let engStats = this.computeTextStats(english);
-          let trStats = this.computeTextStats(translation);
-          blocks.push({
-            isTable,
-            isMultiline,
-            tableColumns,
-            english,
-            englishHLter,
-            HLs,
-            englishDiffHtml: escapeHtml(String(english ?? '')),
-            translation,
-            translationHLter,
-            translationDiagnostics: translationDiagnosticResult.diagnostics,
-            diagnosticWarningCount: translationDiagnosticResult.warningCount,
-            diagnosticErrorCount: translationDiagnosticResult.errorCount,
-            translationDiffHtml: escapeHtml(String(translation ?? '')),
-            translationCompareColumns: [],
-            multilineLineMismatch,
-            metaLinesEn: engStats.lines,
-            metaLinesTr: trStats.lines,
-            metaColsEn: engStats.cols,
-            metaColsTr: trStats.cols,
-            metaVarsEn: engStats.vars,
-            metaVarsTr: trStats.vars,
-            metaKwEn: engStats.kw,
-            metaKwTr: trStats.kw,
-            metaDecorEn: engStats.decor,
-            metaDecorTr: trStats.decor,
-            translationReplace: "",
-            words: []
-          });
+          blocks.push(this.makeEditorBlock(source.english[i] || "", source.translations[i] || "", true));
           if (Date.now() - sliceStart >= 8) {
             await this.yieldEditorWork();
             sliceStart = Date.now();
@@ -5186,16 +5242,10 @@ const config = Vue.defineComponent({
         if (!isCurrent()) return false;
         // A cloud dictionary update during preparation must not publish mixed matches.
         if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
-        this.editorOriginalTranslations = originals;
-        this.editorBlocks = blocks;
+        this.applyPreparedEditorBlocks(blocks);
         this.editorLoading = false;
-        this.editorFocusedIndex = 0;
-        this.editorFocusedColumnIndex = 0;
         this.$nextTick(() => {
           if (!isCurrent()) return;
-          let firstBlock = this.editorBlocks?.[0];
-          this.getEditorRef("translation", 0, firstBlock?.isTable ? 0 : null)?.focus?.();
-          this.autosizeEditorMultilineFields();
           for (let i = 0; i < (this.editorBlocks || []).length; i++) {
             if (!this.editorBlocks[i]?.isMultiline) continue;
             if (this.editorBlocks[i]?.isTable) {
@@ -5708,6 +5758,7 @@ const config = Vue.defineComponent({
       await window.OfflineStore.setWorkspace(plain, this.gameVersion);
     },
     useRegex(editorBlock) {
+      if (this.editorTranslationReadOnly) return;
       this.sideTab = 'regex';
       let regexEngineResult = regexEngineLookup(editorBlock.english, this.editorRegexes);
       editorBlock.words = [];
@@ -5728,6 +5779,7 @@ const config = Vue.defineComponent({
       }
     },
     doTranslationReplace(editorBlock, force) {
+      if (this.editorTranslationReadOnly) return;
       if (!editorBlock.translationReplace) return;
       let editorIndex = this.editorBlocks?.indexOf?.(editorBlock);
       if (typeof editorIndex !== "number" || editorIndex < 0) editorIndex = undefined;

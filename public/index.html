@@ -444,13 +444,7 @@
       </aside>
     </div>
 
-    <section v-if="editorVisible && (editorLoading || editorLoadError)" class="editorOpening" aria-label="Translation editor" :aria-busy="editorLoading" @keydown.esc="editorEsc">
-      <div class="twoSided"><h1>🧾 Translation</h1><button @click="editorExit" title="Close the file (Esc)">Close</button></div>
-      <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
-      <p v-if="editorLoading" role="status">Preparing editor…</p>
-      <p v-else role="alert">{{ editorLoadError }}</p>
-    </section>
-    <div class="editor" v-if="editorVisible && !editorLoading && !editorLoadError" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
+    <div class="editor" v-if="editorVisible" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div class="gamePreviewStrip">
           <div class="gamePreviewToolbar twoSided">
@@ -522,6 +516,7 @@
         </div>
         <div>
           <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+          <p v-if="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</p>
           <div class="collaborationEditorStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <div class="collaborationStatus">
               <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
@@ -541,12 +536,12 @@
           </div>
           <div v-if="editorCurrentEditingDesc.needsReview" class="needsReviewBanner">
             <span>⚠ Source changed since your last translation save.</span>
-            <button @click="sideTab = 'history'; setHistoryMode('source')">Show source history</button>
-            <button @click="toggleEditorEnglishDiff">Toggle inline diff</button>
-            <button @click="confirmTranslationUnchanged">Confirm unchanged</button>
+            <button @click="sideTab = 'history'; setHistoryMode('source')" :disabled="!editorReady">Show source history</button>
+            <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
+            <button @click="confirmTranslationUnchanged" :disabled="!editorReady">Confirm unchanged</button>
           </div>
         </div>
-        <div class="editBlock" v-for="(editorBlock, index) in editorBlocks">
+        <div class="editBlock" v-for="(editorBlock, index) in editorBlocks" :key="index">
           <div class="inputField">
             <div v-if="editorBlock.isTable" class="tableEditorStack" :style="{ '--table-columns': editorTableColumnCount(editorBlock) }">
               <div class="tableEditorRow">
@@ -555,7 +550,7 @@
                   <div v-else class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
                     <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
-                    <div class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
+                    <div v-if="editorReady" class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
                   </div>
                 </div>
               </div>
@@ -569,7 +564,7 @@
                   <div class="textHL" :class="{ multiline: column.isMultiline }">
                     <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @compositionend="translationCompositionEnd($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex, $event)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip">
                     <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @compositionend="translationCompositionEnd($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex, $event)" @scroll="syncHlScroll('translation', index, colIndex)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip"></textarea>
-                    <div class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
+                    <div v-if="editorReady" class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
                   </div>
                 </div>
               </div>
@@ -579,22 +574,22 @@
               <template v-else>
                 <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
                 <textarea v-else placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
-                <div class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
+                <div v-if="editorReady" class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
             </div>
             <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" v-tooltip="'Table content'">@</div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" v-tooltip="'Multiline content'">↵</div>
-            <button class="applyRegexButton" @click="useRegex(editorBlock)" tabindex="-1" title="Fill this translation using your Regex rules and Dictionary">Apply regex</button>
+            <button class="applyRegexButton" @click="useRegex(editorBlock)" :disabled="editorTranslationReadOnly" tabindex="-1" title="Fill this translation using your Regex rules and Dictionary">Apply regex</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
             <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @compositionend="translationCompositionEnd($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index, $event)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip">
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+            <div v-if="editorReady" class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div v-else class="textHL multiline">
             <textarea class="multilineField" rows="4" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @compositionend="translationCompositionEnd($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="normalizeMultilineEditorBlock(editorBlock, index, $event)" @scroll="syncHlScroll('translation', index)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip"></textarea>
-            <div class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
+            <div v-if="editorReady" class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div class="fieldMeta">
             <span class="metaPill" :class="{ mismatch: editorBlock.metaLinesTr !== editorBlock.metaLinesEn }" v-tooltip="'Lines (translation / english)'"><span class="metaIcon">↵</span><span class="metaNum">{{ editorBlock.metaLinesTr }}/{{ editorBlock.metaLinesEn }}</span></span>
@@ -607,7 +602,7 @@
           </div>
           <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning consistencyPrompt" role="note">
             <div><strong>Inconsistent translations</strong><span>{{ editorConsistencyDiagnostics[index].variantCount }} versions across {{ editorConsistencyDiagnostics[index].entryCount }} entries with identical English</span></div>
-            <button @click="openConsistencyResolver(index)" :disabled="editorCompareActive">Compare &amp; resolve</button>
+            <button @click="openConsistencyResolver(index)" :disabled="!editorReady || editorCompareActive">Compare &amp; resolve</button>
           </div>
           <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
           <div class="inputField" v-for="word in editorBlock.words">
@@ -617,7 +612,7 @@
         </div>
       </div>
 
-      <div class="side fixed" ref="editorSide" :class="{ commentsActive: sideTab === 'comments' }">
+      <div class="side fixed" ref="editorSide" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments' }">
         <div class="twoSided sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
@@ -630,9 +625,9 @@
         <div v-if="sideTab === 'dictionary'">
           <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
           <div class="dictionaryPagination" aria-label="Dictionary pages">
-            <span>{{ dictionaryRangeLabel }} · Matches in this file first</span>
-            <button @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
-            <button @click="setDictionaryPage(dictionaryPage + 1)" :disabled="dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
+            <span><template v-if="editorReady">{{ dictionaryRangeLabel }} · Matches in this file first</template><template v-else>&nbsp;</template></span>
+            <button @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="!editorReady || dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
+            <button @click="setDictionaryPage(dictionaryPage + 1)" :disabled="!editorReady || dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
           </div>
           <div class="editBlock" v-for="word in visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided dictEntryBlock">
@@ -661,7 +656,7 @@
           </div>
         </div>
 
-        <div v-if="sideTab === 'regex'">
+        <div v-if="sideTab === 'regex' && editorReady">
           <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="regexFilter" ref="regexFilterInput" placeholder="Search regex rules…" aria-label="Search Regex rules" @keydown.esc="regexFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Regex rule">Add rule</button></div>
           <div class="editBlock" v-for="regex in filteredRegexes">
             <div class="twoSided">
@@ -680,7 +675,7 @@
           </div>
         </div>
 
-        <section v-if="sideTab === 'comments'" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
+        <section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>Shared across all languages and source versions</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
           <template v-else>
@@ -705,7 +700,7 @@
           </template>
         </section>
 
-        <div v-if="sideTab === 'history'" class="historyPanel">
+        <div v-if="sideTab === 'history' && editorReady" class="historyPanel">
           <div v-if="!editorCurrentEditingDesc" class="historyEmpty">Open a file to see history</div>
           <div v-else>
             <div class="historyMeta">

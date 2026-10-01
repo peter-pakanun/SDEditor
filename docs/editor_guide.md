@@ -71,7 +71,7 @@ So it is “missing translation content”, not “missing file”.
 
 Click a row or its filename once to open the file in the editor. A blue indicator on the left marks the selected file.
 
-The opening view appears immediately while the editor prepares highlights and checks. Editing and saving become available when preparation finishes; **Close** or **Escape** cancels the open while it is loading.
+Source and translation fields appear immediately in the normal editor layout, including tables, multiline text and the preview. The fields stay read-only while highlights and checks are prepared, then become editable in place. **Close** or **Escape** cancels the open while it is loading.
 
 Focus the file list with **Tab** or press **Up/Down Arrow** from a non-input control in the main interface to return to the currently selected row. If no current selection is visible, the first row is selected. From search, **Down Arrow** selects the first visible file; **Up Arrow** returns to the current selection.
 

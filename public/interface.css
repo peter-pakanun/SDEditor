@@ -424,16 +424,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .collaborationHistoryList button { grid-template-columns: 1fr 1fr; }
   .collaborationHistoryList button > span:last-child { grid-column: 1 / -1; }
 }
-.editorOpening {
-  margin: 20px;
-  padding: 20px;
-  border: 1px solid var(--ui-border);
-  border-radius: 8px;
-  background: var(--color-element);
-  min-height: 180px;
+/* Keep translation fields visually stable while their highlights are prepared. */
+.editor[aria-busy="true"] .textHL > [placeholder="Translation"] {
+  background: var(--color-element-alt);
 }
-.editorOpening h3 { overflow-wrap: anywhere; }
-.editorOpening [role="status"] { color: var(--ui-muted); }
 .dictionaryPagination {
   position: sticky;
   top: 0;

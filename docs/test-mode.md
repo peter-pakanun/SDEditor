@@ -37,9 +37,9 @@ Disable auto-open for automation runs with:
 
 ## Large Dictionary Opening Fixture
 
-Run `node scripts/editor-opening-browser-fixture.cjs` and open the loopback URL it prints. This uses test mode without storage or cloud synchronization. Click **Load 20,000 dictionary entries**, then open a dummy file by mouse or Enter. The fixture reports the opening view and ready times plus the number of rendered dictionary rows. Matching entries are deliberately placed at the end of the dictionary; confirm they appear first, search can find the last unrelated entry, and paging keeps the list at 40 rows.
+Run `node scripts/editor-opening-browser-fixture.cjs` and open the loopback URL it prints. This uses test mode without storage or cloud synchronization. Click **Load 20,000 dictionary entries**, then open a dummy file by mouse or Enter. The fixture reports text-visible and ready times, retained input nodes, the largest field position/size change, and rendered dictionary rows. Matching entries are deliberately placed at the end of the dictionary; confirm they appear first, search can find the last unrelated entry, and paging keeps the list at 40 rows.
 
-Use **Delay preparation for cancellation check**, open a file, then **Close** or **Escape** before preparation finishes. The file must stay closed with no partial draft. The fixture is separate from the normal server and is intended for local comparisons, not production timing guarantees.
+Use **Hold preparation for layout check**, then open a file. Source/translation text and preview should already be visible, fields read-only, Save and Apply regex disabled, and highlight layers absent. **Finish preparation** adds highlights and enables editing without replacing or moving the fields. Also test **Close** and **Escape** during the hold: the file must stay closed with no partial draft. The fixture is separate from the normal server and is intended for local comparisons, not production timing guarantees.
 
 ## Shared Comments Fixture
 

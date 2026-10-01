@@ -28,7 +28,7 @@ function dictionary(size = 120) {
 function loadEditor(options = {}) {
   let config;
   let clock = 0;
-  const calls = { asyncIndexes: 0, syncIndexes: 0, definitions: 0, focused: 0, selected: 0, settings: 0 };
+  const calls = { asyncIndexes: 0, syncIndexes: 0, definitions: 0, highlights: 0, diagnostics: 0, focused: 0, selected: 0, settings: 0 };
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
   const document = {
     hidden: false,
@@ -72,15 +72,17 @@ function loadEditor(options = {}) {
     $nextTick(callback) { return Promise.resolve().then(callback); },
     $refs: { editorSide: { scrollTop: 500 } },
   });
-  const getPairs = editor.getDictionaryDefinitionPairs;
-  editor.getDictionaryDefinitionPairs = function (...args) { calls.definitions++; return getPairs.apply(this, args); };
+  for (const [method, counter] of [['getDictionaryDefinitionPairs', 'definitions'], ['buildEnglishHLter', 'highlights'], ['analyzeTranslationDiagnostics', 'diagnostics']]) {
+    const original = editor[method];
+    editor[method] = function (...args) { calls[counter]++; return original.apply(this, args); };
+  }
   for (const [name, getter] of Object.entries(config.computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
   return { editor, config, calls, document, window };
 }
 
-test('opening publishes a disabled shell before dictionary work and blocks Save', async () => {
+test('opening publishes real read-only text before dictionary work and blocks Save', async () => {
   const { editor, calls } = loadEditor();
   const desc = description('first', 'Term 119');
   editor.descs = [desc];
@@ -91,17 +93,149 @@ test('opening publishes a disabled shell before dictionary work and blocks Save'
   assert.equal(editor.editorLoading, true);
   assert.equal(editor.editorTranslationReadOnly, true);
   assert.equal(editor.editorCurrentEditingDesc, desc);
-  assert.equal(editor.editorBlocks.length, 0);
-  assert.equal(calls.asyncIndexes, 0, 'Dictionary work must wait until the shell can paint.');
+  assert.equal(editor.editorBlocks.length, 1);
+  assert.equal(editor.editorBlocks[0].english, 'Term 119');
+  assert.equal(editor.editorBlocks[0].translation, 'Term 119');
+  assert.equal(editor.editorBlocks[0].englishHLter, '');
+  assert.equal(editor.editorBlocks[0].translationHLter, '');
+  assert.equal(editor.editorBlocks[0].HLs.length, 0);
+  assert.equal(editor.editorOriginalTranslations[0], 'Term 119');
+  assert.equal(editor.editorReady, false);
+  assert.equal(calls.asyncIndexes, 0, 'Dictionary work must wait until source and translation can paint.');
   assert.equal(calls.definitions, 0);
+  assert.equal(calls.highlights, 0);
+  assert.equal(calls.diagnostics, 0);
   assert.equal(await editor.editorSave(), false);
   assert.equal(calls.settings, 0);
   paint.resolve();
   assert.equal(await opening, true, editor.editorLoadError);
   assert.equal(editor.editorLoading, false);
+  assert.equal(editor.editorReady, true);
   assert.equal(editor.editorTranslationReadOnly, false);
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'word-119');
   assert.equal(calls.syncIndexes, 0, 'Opening must use the cooperative index builder.');
+});
+
+test('plain, multiline and table text retain their structure and identity while hydrating', async () => {
+  const { editor, calls } = loadEditor();
+  editor.descs = [description('shapes',
+    ['Term 1', 'Term 2\\nTerm 3', 'Term 4@Term 5\\nTerm 6@Term 7'],
+    ['คำ 1', 'คำ 2\\nคำ 3', 'คำ 4@คำ 5\\nคำ 6'])];
+  const paint = deferred();
+  editor.yieldEditorPaint = () => paint.promise;
+  const opening = editor.editFile(editor.descs[0].filepath);
+  const blocks = [...editor.editorBlocks];
+  const tableColumns = [...blocks[2].tableColumns];
+  const shape = block => ({
+    english: block.english, translation: block.translation,
+    isTable: block.isTable, isMultiline: block.isMultiline,
+    metaLinesEn: block.metaLinesEn, metaLinesTr: block.metaLinesTr,
+    metaColsEn: block.metaColsEn, metaColsTr: block.metaColsTr,
+    tableColumns: Array.from(block.tableColumns, column => ({
+      english: column.english, translation: column.translation,
+      isMultiline: column.isMultiline,
+      englishExists: column.englishExists, translationExists: column.translationExists,
+    })),
+  });
+  const initialShapes = blocks.map(shape);
+  assert.deepEqual(blocks.map(block => [block.isTable, block.isMultiline]), [[false, false], [false, true], [true, true]]);
+  assert.equal(blocks[1].english, 'Term 2\nTerm 3');
+  assert.equal(blocks[1].translation, 'คำ 2\nคำ 3');
+  assert.equal(tableColumns.length, 3);
+  assert.equal(tableColumns[1].english, 'Term 5\nTerm 6');
+  assert.equal(tableColumns[1].translation, 'คำ 5\nคำ 6');
+  assert.equal(tableColumns[2].translation, '');
+  assert.equal(tableColumns[2].translationExists, false);
+  assert.equal(calls.highlights, 0, 'Even table cells must defer highlighting.');
+  assert.equal(calls.diagnostics, 0, 'Even table cells must defer diagnostic analysis.');
+  paint.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.deepEqual(Array.from(editor.editorBlocks, shape), initialShapes);
+  for (let i = 0; i < blocks.length; i++) assert.equal(editor.editorBlocks[i], blocks[i]);
+  for (let i = 0; i < tableColumns.length; i++) assert.equal(editor.editorBlocks[2].tableColumns[i], tableColumns[i]);
+  assert.equal(blocks[0].HLs[0].dictId, 'word-1');
+  assert.equal(tableColumns[1].HLs.length, 2);
+  assert.ok(calls.highlights > 0);
+  assert.ok(calls.diagnostics > 0);
+});
+
+test('pending text rejects insertion, regex, diagnostics and autocomplete interactions', async () => {
+  const { editor, calls, document } = loadEditor();
+  editor.descs = [description('readonly', ['Term 1', 'Term 2\\nTerm 3', 'Term 4@Term 5'], ['หนึ่ง', 'สอง\\nสาม', 'สี่@ห้า'])];
+  const paint = deferred();
+  editor.yieldEditorPaint = () => paint.promise;
+  const opening = editor.editFile(editor.descs[0].filepath);
+  const before = editor.editorBlocks.map(block => block.translation);
+  const input = { value: '[', selectionStart: 1, selectionEnd: 1 };
+  editor.getEditorRef = () => input;
+  document.activeElement = input;
+  let nativeEdits = 0, popupBuilds = 0;
+  document.execCommand = () => { nativeEdits++; return true; };
+  editor.buildHlPopupItems = () => { popupBuilds++; return []; };
+  editor.insertTranslationText(0, 'changed');
+  editor.useRegex(editor.editorBlocks[0]);
+  assert.equal(editor.sideTab, 'dictionary');
+  editor.editorBlocks[0].translationReplace = 'changed';
+  editor.doTranslationReplace(editor.editorBlocks[0]);
+  editor.translationInput(editor.editorBlocks[0], 0);
+  editor.normalizeMultilineEditorBlock(editor.editorBlocks[1], 1);
+  editor.tableColumnInput(editor.editorBlocks[2], 2, 0);
+  editor.openHlPopup(0);
+  editor.translationKeydown({ key: '[', target: input }, 0);
+  editor.queueCommittedAutocompleteTrigger({ type: 'input', inputType: 'insertText', data: '[', target: input }, 0);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(editor.editorBlocks.map(block => block.translation), before);
+  assert.equal(nativeEdits, 0);
+  assert.equal(popupBuilds, 0);
+  assert.equal(editor.hlPopup.visible, false);
+  assert.equal(calls.highlights, 0);
+  assert.equal(calls.diagnostics, 0);
+  assert.equal(calls.asyncIndexes, 0);
+  editor.getEditorRef = () => null;
+  paint.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.equal(editor.editorTranslationReadOnly, false);
+  assert.deepEqual(editor.editorBlocks.map(block => block.translation), before);
+});
+
+test('cached manual warnings remain visible during hydration without rescanning or opening the resolver', async () => {
+  const { editor, calls } = loadEditor();
+  const desc = description('cached-warnings', 'Term 119', 'คำที่หนึ่ง');
+  editor.descs = [desc, description('different-translation', 'Term 119', 'คำที่สอง')];
+  const consistency = { blockIndex: 0, level: 'warning', code: 'inconsistent-translation', message: 'Cached inconsistent translation' };
+  const terminology = { blockIndex: 0, level: 'warning', code: 'dictionary-terminology', message: 'Cached Dictionary terminology warning' };
+  const result = {
+    lang: 'Thai', englishLines: [...desc.translations.English], translationLines: [...desc.translations.Thai],
+    consistencyDiagnostics: [consistency], terminologyDiagnostics: [terminology],
+    warningCount: 2, errorCount: 0, hasDiagnosticWarning: true, hasDiagnosticError: false,
+  };
+  editor.diagnosticScanCompleted = true;
+  editor.diagnosticScanResults = { [desc.filepath]: result };
+  let manualScans = 0;
+  editor.scanAllDiagnostics = async () => { manualScans++; };
+  editor.analyzeDescDiagnostics = () => { manualScans++; return result; };
+  const paint = deferred();
+  editor.yieldEditorPaint = () => paint.promise;
+  const opening = editor.editFile(desc.filepath);
+  const block = editor.editorBlocks[0];
+  assert.equal(editor.editorTranslationReadOnly, true);
+  assert.equal(editor.getEditorDiagnosticScanResult(block, 0), result);
+  assert.equal(editor.editorConsistencyDiagnostics[0], consistency);
+  assert.equal(editor.blockTerminologyDiagnostics(block, 0)[0], terminology);
+  assert.equal(editor.blockDiagnosticWarningCount(block, 0), 2);
+  assert.match(editor.blockDiagnosticTitle(block, 'warning', 0), /Cached inconsistent translation/);
+  assert.match(editor.blockDiagnosticTitle(block, 'warning', 0), /Cached Dictionary terminology warning/);
+  await editor.openConsistencyResolver(0);
+  assert.equal(editor.consistencyResolver, null, 'Compare & resolve must wait until the editor is ready.');
+  assert.equal(calls.diagnostics, 0);
+  assert.equal(manualScans, 0);
+  paint.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.equal(editor.getEditorDiagnosticScanResult(block, 0), result);
+  assert.equal(editor.blockDiagnosticWarningCount(block, 0), 2);
+  assert.equal(manualScans, 0, 'Hydrating normal diagnostics must preserve the manual scan snapshot.');
+  await editor.openConsistencyResolver(0);
+  assert.equal(editor.consistencyResolver.versions.length, 2, 'The same action is available once hydration finishes.');
 });
 
 test('closing during index construction prevents publication and allows reopening', async () => {
@@ -139,7 +273,7 @@ test('rapid file selections only publish the latest requested file', async () =>
   assert.equal(editor.editorBlocks[0].english, 'Term 119');
 });
 
-test('preparation errors leave a closeable error shell and a later open can recover', async () => {
+test('preparation errors retain read-only text and a later open can recover', async () => {
   const { editor, window } = loadEditor();
   editor.descs = [description('failure', 'Term 119')];
   const createAsync = window.EditorDictionaryIndex.createAsync;
@@ -149,6 +283,9 @@ test('preparation errors leave a closeable error shell and a later open can reco
   assert.equal(editor.editorLoading, false);
   assert.match(editor.editorLoadError, /Fixture indexing failure/);
   assert.equal(editor.editorTranslationReadOnly, true);
+  assert.equal(editor.editorReady, false);
+  assert.equal(editor.editorBlocks[0].english, 'Term 119');
+  assert.equal(editor.editorBlocks[0].translation, 'Term 119');
   assert.equal(await editor.editorSave(), false);
   editor.editorExit();
   assert.equal(editor.editorVisible, false);
@@ -157,7 +294,7 @@ test('preparation errors leave a closeable error shell and a later open can reco
   assert.equal(editor.editorLoadError, '');
 });
 
-test('collaboration claims wait behind the shell and closing cancels their pending open', async () => {
+test('collaboration claims wait until text can paint and closing cancels their pending open', async () => {
   const { editor, calls } = loadEditor();
   editor.descs = [description('claimed', 'Term 119')];
   const paint = deferred(), claiming = deferred(), claimResult = deferred();
@@ -170,7 +307,8 @@ test('collaboration claims wait behind the shell and closing cancels their pendi
   const opening = editor.editFile(editor.descs[0].filepath);
   assert.equal(editor.editorVisible, true);
   assert.equal(editor.editorLoading, true);
-  assert.equal(claims, 0, 'The shell must be published before requesting a claim.');
+  assert.equal(editor.editorBlocks[0].english, 'Term 119');
+  assert.equal(claims, 0, 'Text must be published before requesting a claim.');
   paint.resolve();
   await claiming.promise;
   assert.equal(claims, 1);
@@ -213,7 +351,7 @@ test('a closed pending claim serializes the next claim without releasing the new
   assert.equal(editor.editorLoading, true);
   assert.equal(editor.editorCurrentEditingDesc, editor.descs[1]);
   await editor.$nextTick();
-  assert.equal(events.filter(event => event.startsWith('claim:')).length, 1, 'The newer shell may show while its claim waits.');
+  assert.equal(events.filter(event => event.startsWith('claim:')).length, 1, 'The newer text may show while its claim waits.');
   oldResult.resolve({ granted: true });
   assert.equal(await old, false);
   await nextStarted.promise;
@@ -253,6 +391,53 @@ test('translation snapshots keep all deferred blocks aligned with the captured c
   assert.deepEqual(Array.from(editor.editorOriginalTranslations), ['ก่อน 1', 'ก่อน 119']);
   assert.deepEqual(Array.from(editor._editorCollabBase.translations), ['ก่อน 1', 'ก่อน 119']);
   assert.equal(editor.editorBlocks[1].english, 'Term 119');
+});
+
+test('a successful claim refreshes the visible text and freezes the matching collaboration base before hydration', async () => {
+  const { editor, calls } = loadEditor();
+  const desc = description('claim-refresh', 'Term 1', 'local translation');
+  editor.descs = [desc];
+  const firstPaint = deferred(), claimStarted = deferred(), claimResult = deferred();
+  const refreshedPaint = deferred(), resume = deferred();
+  let paints = 0;
+  editor.yieldEditorPaint = async () => {
+    if (++paints === 1) await firstPaint.promise;
+    else { refreshedPaint.resolve(); await resume.promise; }
+  };
+  editor._collaboration = {
+    isEditing() { return false; },
+    async claim() { claimStarted.resolve(); return claimResult.promise; },
+    leaveEdit() {},
+    fileBase() { return { translations: [...desc.translations.Thai] }; },
+  };
+  const opening = editor.editFile(desc.filepath);
+  assert.equal(editor.editorBlocks[0].translation, 'local translation');
+  assert.equal(calls.highlights, 0);
+  firstPaint.resolve();
+  await claimStarted.promise;
+  desc.translations.English = ['Term 119', 'Term 118@Term 117'];
+  desc.translations.Thai = ['remote translation', 'remote left@remote right'];
+  claimResult.resolve({ granted: true });
+  await refreshedPaint.promise;
+  assert.equal(editor.editorReady, false);
+  assert.deepEqual(Array.from(editor.editorBlocks, block => block.translation), ['remote translation', 'remote left@remote right']);
+  assert.deepEqual(Array.from(editor.editorOriginalTranslations), ['remote translation', 'remote left@remote right']);
+  assert.deepEqual(Array.from(editor._editorCollabBase.translations), ['remote translation', 'remote left@remote right']);
+  assert.equal(editor.editorBlocks[1].tableColumns[1].translation, 'remote right');
+  assert.equal(calls.highlights, 0);
+  assert.equal(calls.diagnostics, 0);
+  const claimedBlocks = [...editor.editorBlocks];
+  const claimedColumn = editor.editorBlocks[1].tableColumns[1];
+  desc.translations.English[0] = 'Term 116';
+  desc.translations.Thai[0] = 'later remote translation';
+  resume.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.equal(editor.editorBlocks[0], claimedBlocks[0]);
+  assert.equal(editor.editorBlocks[1], claimedBlocks[1]);
+  assert.equal(editor.editorBlocks[1].tableColumns[1], claimedColumn);
+  assert.equal(editor.editorBlocks[0].english, 'Term 119');
+  assert.equal(editor.editorBlocks[0].translation, 'remote translation');
+  assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'word-119');
 });
 
 test('changing language or source during preparation dismisses the still-owned loading view', async () => {
@@ -314,7 +499,13 @@ test('large dictionaries match all blocks and table cells while reusing the prep
   blocks.push('Term 19998@Term 19999');
   editor.descs = [description('large', blocks)];
   const started = performance.now();
-  assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
+  const opening = editor.editFile(editor.descs[0].filepath);
+  assert.equal(editor.editorBlocks.length, 46, 'All initial text is available before a 20,000-entry index starts.');
+  assert.equal(editor.editorBlocks[45].tableColumns[1].translation, 'Term 19999');
+  assert.equal(calls.definitions, 0);
+  assert.equal(calls.highlights, 0);
+  assert.equal(calls.diagnostics, 0);
+  assert.equal(await opening, true, editor.editorLoadError);
   assert.equal(editor.editorBlocks.length, 46);
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'word-19950');
   const table = editor.editorBlocks[45];

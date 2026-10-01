@@ -10,10 +10,11 @@ function controls(editor) {
   panel.style.cssText = 'position:fixed;bottom:10px;left:10px;z-index:9999;background:#fff8df;color:#222;padding:10px;border:1px solid #a80;font:13px system-ui;max-width:620px';
   panel.setAttribute('aria-label', 'Editor performance fixture');
   const seed = document.createElement('button'); seed.textContent = 'Load 20,000 dictionary entries';
-  const slow = document.createElement('button'); slow.textContent = 'Delay preparation for cancellation check';
+  const slow = document.createElement('button'); slow.textContent = 'Hold preparation for layout check';
+  const finish = document.createElement('button'); finish.textContent = 'Finish preparation'; finish.disabled = true;
   const status = document.createElement('p'); status.textContent = 'Test data only. Load the dictionary, then open a file.';
   status.setAttribute('role', 'status');
-  panel.append(seed, slow, status); document.body.append(panel);
+  panel.append(seed, slow, finish, status); document.body.append(panel);
   seed.onclick = async () => {
     editor.editorExit();
     editor.dictionary = Array.from({ length: 19996 }, (_, i) => ({
@@ -24,14 +25,30 @@ function controls(editor) {
       { _id: 'fixture-rune', find: 'Rune', replace: 'รูน', alts: [{ _id: 'fixture-rune-alt', find: 'Runes', replace: 'รูน' }], tlnote: '' },
       { _id: 'fixture-chest', find: 'BlackScytheArtifact', replace: 'วัตถุโบราณ', alts: [{ _id: 'fixture-chest-alt', find: 'Black Scythe Artifacts', replace: 'วัตถุโบราณ' }], tlnote: '' },
     ]);
+    const tableFile = editor.descs.find(desc => desc.filepath === 'test/dummy2.txt');
+    tableFile.translations.Thai = [
+      'คอลัมน์ A: [UnarmedDamage|ความเสียหายมือเปล่า] เพิ่มขึ้น 1% ต่อ [Strength|ความแข็งแกร่ง] {0} หน่วย@คอลัมน์ B: ข้อความเพิ่มเติม {1}',
+      '[UnarmedDamage|ความเสียหายมือเปล่า] ลดลง 1% ต่อ [Strength|ความแข็งแกร่ง] {0} หน่วย',
+      'ตัวอย่างซ้าย A\\nตัวอย่างซ้าย B@ตัวอย่างขวา a\\nตัวอย่างขวา b',
+      '<enchanted>{{หีบที่ขุดค้นมีโอกาส {0}% ที่จะมี [BlackScytheArtifact|วัตถุโบราณ] เพิ่มเติม}}',
+    ];
     await editor.$nextTick();
     status.textContent = '20,000 entries ready. Relevant entries are at the end of the dictionary.';
   };
-  let delay = false;
-  slow.onclick = () => { delay = !delay; status.textContent = delay ? 'Preparation delayed 2 seconds. Open a file, then Close or Escape.' : 'Normal preparation restored.'; };
+  let delay = false, releasePreparation;
+  slow.onclick = () => { delay = true; status.textContent = 'Preparation will pause after the text appears. Inspect the fields, then Finish preparation, Close or Escape.'; };
+  finish.onclick = () => { delay = false; releasePreparation?.(); finish.disabled = true; };
   const prepare = editor.prepareEditorDictionaryIndex;
   editor.prepareEditorDictionaryIndex = async function (current) {
-    if (delay) await new Promise(resolve => setTimeout(resolve, 2000));
+    if (delay) {
+      finish.disabled = false;
+      await new Promise(resolve => {
+        releasePreparation = resolve;
+        const timer = setInterval(() => { if (!current()) { clearInterval(timer); resolve(); } }, 100);
+        releasePreparation = () => { clearInterval(timer); resolve(); };
+      });
+      finish.disabled = true;
+    }
     return prepare.call(this, current);
   };
   const open = editor.openEditorFile;
@@ -40,14 +57,25 @@ function controls(editor) {
     let paint = null;
     const pending = open.apply(this, args);
     await this.$nextTick();
-    const shell = !!document.querySelector('.editorOpening');
-    requestAnimationFrame(() => { paint = performance.now() - start; });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    paint = performance.now() - start;
+    const fields = Array.from(document.querySelectorAll('.editor .textHL input, .editor .textHL textarea'));
+    const bounds = fields.map(field => field.getBoundingClientRect());
+    const readonly = fields.every(field => field.readOnly);
+    const initialOverlays = document.querySelectorAll('.editor .HLter').length;
+    status.textContent = `${fields.length} text fields visible; read-only: ${readonly}; highlight layers: ${initialOverlays}.`;
     const opened = await pending;
     await this.$nextTick();
     requestAnimationFrame(() => {
       const rows = document.querySelectorAll('.side .dictRow').length;
+      const currentFields = Array.from(document.querySelectorAll('.editor .textHL input, .editor .textHL textarea'));
+      const kept = fields.filter((field, index) => field === currentFields[index]).length;
+      const shift = Math.max(0, ...fields.map((field, index) => {
+        const now = field.getBoundingClientRect(), before = bounds[index];
+        return Math.max(Math.abs(now.x - before.x), Math.abs(now.y - before.y), Math.abs(now.width - before.width), Math.abs(now.height - before.height));
+      }));
       status.textContent = opened
-        ? `Opening view: ${shell ? 'visible' : 'missing'} in ${Math.round(paint || 0)} ms; ready in ${Math.round(performance.now() - start)} ms; ${rows} dictionary rows rendered of ${this.dictionary.length}.`
+        ? `Text visible in ${Math.round(paint)} ms; kept ${kept}/${fields.length} fields; largest field shift ${Math.round(shift)} px; ready in ${Math.round(performance.now() - start)} ms; ${rows} dictionary rows of ${this.dictionary.length}.`
         : `Open cancelled; editor visible: ${this.editorVisible}; draft blocks: ${this.editorBlocks.length}.`;
     });
     return opened;
