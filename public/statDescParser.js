@@ -16,6 +16,7 @@
  * @property {Object.<string,string[]>} translations 
  * @property {{filepath:string, lang:string, line:number}[]} [duplicateLangEntries]
  * @property {{filepath:string, lang:string, options:{id:string, lang:string, line:number, occurrence:number, content:string[]}[]}[]} [duplicateLangGroups]
+ * @property {{filepath:string, lang:string, line:number, endLine:number, kind:string}[]} [importRepairs]
  * @property {boolean} isDNT 
  * @property {boolean} [isMissing] 
  */
@@ -218,7 +219,19 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
     }
 
     // >>> found nothing that we need, this mean that the current line is translation string
+    const entryStartLine = lineIndex;
     let matchs2 = line.match(/^([^"]*)"([^"]*)" ?(.*)$/);
+    if (!matchs2) {
+      // Repair only a closing quote stranded on the immediately following line.
+      // Keep whitespace inside the quotes and use the editor's escaped newline
+      // representation before source hashing, comparison, rendering, and export.
+      const opening = lines[lineIndex].trimStart().match(/^([^"]*)"([^"]*)$/);
+      const closing = lines[lineIndex + 1]?.trimEnd().match(/^( *)"(?: ([^"]*))?$/);
+      if (opening && closing) {
+        matchs2 = [line, opening[1], opening[2] + '\\n' + closing[1], closing[2] || ''];
+        lineIndex++;
+      }
+    }
     if (!matchs2) {
       if (strict) malformed('Invalid quoted translation entry.', lineIndex);
       alert(
@@ -232,7 +245,11 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
     let content = matchs2[2];
     let remark = matchs2[3];
     if (strict && desc.tempTranslations[curLang].content.length >= desc.tempTranslations[curLang].count) {
-      malformed('There are more translation entries than the declared count.', lineIndex);
+      malformed('There are more translation entries than the declared count.', entryStartLine);
+    }
+    if (lineIndex !== entryStartLine) {
+      (desc.importRepairs ||= []).push({ filepath, lang: translationBlockInfos[curLang].lang,
+        line: entryStartLine + 1, endLine: lineIndex + 1, kind: 'quoted-line-break' });
     }
     if (curLang == "English") {
       desc.variables.push(variable);

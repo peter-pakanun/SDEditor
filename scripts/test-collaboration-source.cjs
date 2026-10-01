@@ -96,6 +96,109 @@ test('parseFile detects indented descriptions and rejects multiple declarations 
   assert.equal(await f.parseFile('source/include.txt', entry('include "other.txt"')), false, 'Auxiliary files remain outside the source manifest');
 });
 
+const repairPath = 'stat_descriptions/ignite_faster_burn_%_applies_to_ignite_proliferation_delay_ms.txt';
+const repairText = '[DNT] Modifiers which make [Ignite] deal damage faster also lower the delay before it spreads';
+const brokenSource = `description\n1 ignite_faster_burn_%_applies_to_ignite_proliferation_delay_ms\n1\n# "${repairText}\n"`;
+const escapedSource = brokenSource.replace(`${repairText}\n"`, `${repairText}\\n"`);
+
+test('stranded closing quotes repair consistently in strict and legacy parsing for LF and CRLF', () => {
+  const f = fixture();
+  for (const strict of [true, false]) {
+    for (const newline of ['\n', '\r\n']) {
+      const parsed = f.parse(brokenSource.replace(/\n/g, newline), strict, repairPath);
+      assert.deepEqual(Array.from(parsed.translations.English), [repairText + '\\n']);
+      assert.deepEqual(Array.from(parsed.variables), ['#']);
+      assert.deepEqual(Array.from(parsed.remarks), ['']);
+      assert.equal(parsed.isDNT, true);
+      assert.deepEqual(JSON.parse(JSON.stringify(parsed.importRepairs)), [
+        { filepath: repairPath, lang: 'English', line: 4, endLine: 5, kind: 'quoted-line-break' }
+      ]);
+    }
+  }
+  assert.equal(f.alerts.length, 0, 'Recoverable input does not open parser error alerts');
+  assert.equal(Object.hasOwn(f.parse(escapedSource), 'importRepairs'), false, 'Valid entries need no repair metadata');
+});
+
+test('quote repair preserves content whitespace, variables, and closing-line remarks', () => {
+  const f = fixture();
+  const text = 'description\n2 first_stat second_stat\n1\n\t# 1 "First \t\n \t" negate 2';
+  for (const strict of [true, false]) {
+    const parsed = f.parse(text, strict);
+    assert.deepEqual(Array.from(parsed.variables), ['# 1']);
+    assert.deepEqual(Array.from(parsed.translations.English), ['First  \\n  ']);
+    assert.deepEqual(Array.from(parsed.remarks), ['negate 2']);
+  }
+});
+
+test('repairs retain language identity, duplicate candidates, and physical source lines', () => {
+  const f = fixture();
+  const text = 'description\n1 damage\n1\n# "English\n"\nlang "Thai"\n1\n# "หนึ่ง\n"\nlang "Thai"\n1\n9 "อื่น\n" translated_only';
+  for (const strict of [true, false]) {
+    const parsed = f.parse(text, strict);
+    assert.deepEqual(Array.from(parsed.translations.Thai), ['หนึ่ง\\n']);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.importRepairs)), [
+      { filepath: 'source/test.txt', lang: 'English', line: 4, endLine: 5, kind: 'quoted-line-break' },
+      { filepath: 'source/test.txt', lang: 'Thai', line: 8, endLine: 9, kind: 'quoted-line-break' },
+      { filepath: 'source/test.txt', lang: 'Thai', line: 12, endLine: 13, kind: 'quoted-line-break' }
+    ]);
+    const [group] = parsed.duplicateLangGroups;
+    assert.equal(group.lang, 'Thai');
+    assert.equal(group.options.length, 2);
+    assert.deepEqual(Array.from(group.options, option => option.line), [6, 10]);
+    assert.deepEqual(Array.from(group.options[0].content), ['หนึ่ง\\n']);
+    assert.deepEqual(Array.from(group.options[1].content), ['อื่น\\n']);
+    assert.deepEqual(Array.from(group.options[1].variables), ['9']);
+    assert.deepEqual(Array.from(group.options[1].remarks), ['translated_only']);
+    assert.notEqual(group.options[0].id, group.options[1].id, 'Duplicate options remain independently selectable');
+    assert.deepEqual(Array.from(parsed.variables), ['#'], 'A translated repair cannot replace English source metadata');
+    assert.deepEqual(Array.from(parsed.remarks), ['']);
+  }
+});
+
+test('ambiguous missing quotes remain rejected without consuming later entries or declarations', () => {
+  for (const suffix of ['', '\n# "Next"', '\n""', '\n"Next"', '\n" Next"', '\n" "', '\nlang "Thai"\n1\n# "ถัดไป"', '\n1\n# "Next"',
+    '\ndescription next', '\ncontinued text"', '\n\n"']) {
+    const f = fixture();
+    const text = 'description\n1 damage\n1\n# "Unfinished' + suffix;
+    assert.throws(() => f.parse(text), /Malformed source: source\/test.txt:4: Invalid quoted translation entry/);
+    assert.equal(f.parse(text, false), false, 'Legacy parsing also refuses an ambiguous repair');
+    assert.equal(f.alerts.length, 1);
+  }
+  const f = fixture();
+  assert.throws(() => f.parse('description\n1 damage\n2\n# "Recovered\n"\n# "Unfinished'),
+    /Malformed source: source\/test.txt:6: Invalid quoted translation entry/, 'Errors after a repair keep physical line numbers');
+});
+
+test('parseFile repairs UTF-16LE source entries in both import modes', async () => {
+  const f = fixture();
+  for (const strict of [true, false]) {
+    const entry = { async: async () => Buffer.from('\ufeff' + brokenSource.replace(/\n/g, '\r\n'), 'utf16le') };
+    const parsed = await f.parseFile(repairPath, entry, strict);
+    assert.deepEqual(Array.from(parsed.translations.English), [repairText + '\\n']);
+    assert.equal(parsed.importRepairs[0].filepath, repairPath);
+    assert.equal(parsed.importRepairs[0].line, 4);
+    assert.equal(parsed.importRepairs[0].endLine, 5);
+  }
+  assert.equal(f.alerts.length, 0);
+});
+
+test('original, escaped repair, and exported source share a hash while actual source changes do not', async () => {
+  const f = fixture();
+  const original = f.parse(brokenSource, true, repairPath);
+  const repaired = f.parse(escapedSource, true, repairPath);
+  const reparsed = await f.parseFile(repairPath, { async: async () => f.encode(original) });
+  const originalHash = await P.sourceHash([original]);
+  assert.equal(await P.sourceHash([repaired]), originalHash);
+  assert.equal(await P.sourceHash([reparsed]), originalHash);
+  assert.deepEqual(Array.from(reparsed.translations.English), [repairText + '\\n']);
+  assert.equal(Object.hasOwn(reparsed, 'importRepairs'), false, 'Export emits a valid single-line entry');
+  assert.equal(JSON.stringify(P.manifest([original])).includes('importRepairs'), false, 'Repair reporting is not source identity');
+  for (const changed of [escapedSource.replace('faster', 'slower'), escapedSource.replace('\\n"', '"')]) {
+    assert.notEqual(await P.sourceHash([f.parse(changed, true, repairPath)]), originalHash,
+      'Changing English text or deleting its line break must change source identity');
+  }
+});
+
 function crc32(bytes) {
   let crc = 0xffffffff;
   for (const byte of bytes) {

@@ -4237,6 +4237,17 @@ const config = Vue.defineComponent({
       }
     },
 
+    getImportRepairSummary(parsed) {
+      const repairs = (parsed || []).flatMap(desc => desc?.importRepairs || []);
+      if (!repairs.length) return '';
+      const entries = repairs.length === 1 ? '1 quoted entry' : `${repairs.length} quoted entries`;
+      const details = repairs.slice(0, 12).map(repair =>
+        `${repair.filepath}:${repair.line}-${repair.endLine} (${repair.lang})`).join('\n');
+      const more = repairs.length > 12 ? `\n... and ${repairs.length - 12} more` : '';
+      return `Automatically repaired ${entries} with a closing quote on the following line.\n` +
+        'The line breaks were preserved as \\n.\n\n' + details + more;
+    },
+
     async importUpdateZipFile(file, resolvedParsed = null, options = {}) {
       if (!file) return;
       if (!offlineStoreReady) return;
@@ -4444,6 +4455,8 @@ const config = Vue.defineComponent({
       this.loadingProgress = 100;
       this.filterDesc();
       this.scheduleCollaboration?.();
+      const repairSummary = this.getImportRepairSummary(parsed);
+      if (repairSummary) alert('Source import completed.\n\n' + repairSummary);
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
@@ -4584,7 +4597,12 @@ const config = Vue.defineComponent({
           updates.push({ desc, lines, needsReview: false });
         }
       }
-      if (!updates.length) { this.loadingProgress = 100; alert('No translation changes detected.'); return; }
+      const repairSummary = this.getImportRepairSummary(parsed);
+      if (!updates.length) {
+        this.loadingProgress = 100;
+        alert('No translation changes detected.' + (repairSummary ? '\n\n' + repairSummary : ''));
+        return;
+      }
       try {
         const result = await this.persistTranslationBatch(updates, 'import');
         if (result.stale) return;
@@ -4592,6 +4610,7 @@ const config = Vue.defineComponent({
         this.clearDiagnosticScanResults();
         this.filterDesc();
         if (result.status !== 'conflict') this.collaborationNotice = 'Imported ' + updates.length + ' translated files' + (result.status === 'pending' ? ' · Pending sync' : '.');
+        if (repairSummary) alert(repairSummary);
       } catch (error) {
         this.loadingProgress = 100;
         alert('Could not save imported translations. Existing work is unchanged. ' + error.message);

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const protocol = require('../public/collaborationProtocol.js');
 
 function deferred() {
   let resolve, reject;
@@ -11,27 +12,52 @@ function deferred() {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const plain = value => JSON.parse(JSON.stringify(value));
+const repairedPath = 'stat_descriptions/ignite_faster_burn_%_applies_to_ignite_proliferation_delay_ms.txt';
+function importText({ broken = true, translated = '' } = {}) {
+  return 'description\n1 ignite_delay\n1\n# "Ignite spreads faster' + (broken ? '\n' : '\\n') + '"\nlang "Thai"\n1\n# "' + translated + '"\n';
+}
+function zipFixture(text, { translated = false, extra = {} } = {}) {
+  const entries = { [repairedPath]: text, ...extra };
+  const files = Object.fromEntries(Object.entries(entries).map(([name, content]) => [name, {
+    name, dir: false,
+    async: async format => {
+      assert.equal(format, 'uint8array');
+      return new Uint8Array(Buffer.from('\uFEFF' + content, 'utf16le'));
+    },
+  }]));
+  return { name: translated ? 'StatDescriptions_Translated.zip' : 'StatDescriptions.zip', size: 100, lastModified: 123, files };
+}
+class FixtureFileReader {
+  readAsText(blob, encoding) {
+    blob.arrayBuffer().then(bytes => {
+      this.result = new TextDecoder(encoding).decode(bytes);
+      this.onload?.();
+    }, error => this.onerror?.(error));
+  }
+}
 function description(name = 'old', english = ['Original {0}', 'Second']) {
   return { filepath: `source/${name}.txt`, filedir: 'source', filename: name + '.txt', name: '',
     stats: ['stat'], variables: ['#', '#'], remarks: ['', ''], translations: { English: english, Thai: ['เดิม {0}', 'สอง'] },
     hasChanges: true, needsReview: false };
 }
-function harness() {
+function harness({ realImport = false } = {}) {
   let config;
   const writes = [], alerts = [], confirmations = [];
   let approved = true;
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} },
-    CollaborationProtocol: { sourceHash: async source => 'hash-' + source[0].filename },
+    CollaborationProtocol: realImport ? { ...protocol } : { sourceHash: async source => 'hash-' + source[0].filename },
     OfflineStore: {
       getWorkspace: async () => undefined, getSource: async () => undefined,
       saveSourceWorkspaceWithRevisions: async (...args) => { writes.push(plain(args)); },
+      saveWorkspaceWithRevisions: async (...args) => { writes.push(plain(args)); },
     } };
-  const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout,
+  const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout, Blob, FileReader: FixtureFileReader,
+    JSZip: class { async loadAsync(file) { return { files: file.files }; } },
     alert: value => alerts.push(value), confirm: value => { confirmations.push(value); return approved; },
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['helper.js', 'statDescParser.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   vm.runInContext('offlineStoreReady = true', context);
@@ -43,6 +69,7 @@ function harness() {
   });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   editor.descs = [description()]; editor.localDescs = { descs: plain(editor.descs), status: {}, sourceHash: 'old-hash' };
+  if (realImport) { editor.testMode = false; editor.confirmProceedByTypingYes = () => true; }
   return { editor, window, document: context.document, writes, alerts, confirmations, approve(value) { approved = value; } };
 }
 
@@ -145,6 +172,101 @@ test('source import cannot activate into a different account after its durable c
   const workspace = e.localDescs, source = e.descs;
   commit.resolve(); await importing;
   assert.equal(e.localDescs, workspace); assert.equal(e.descs, source); assert.equal(e.sourceIdentity, 'second-account-hash');
+});
+
+test('source ZIP repairs before hashing and commits the same identity as a corrected ZIP', async () => {
+  const { editor: e, window, alerts } = harness({ realImport: true });
+  const commit = deferred(), saveStarted = deferred(); let stored;
+  const workspace = e.localDescs, source = e.descs;
+  window.CollaborationProtocol.sourceHash = async parsed => {
+    assert.deepEqual(plain(parsed[0].translations.English), ['Ignite spreads faster\\n']);
+    assert.deepEqual(plain(parsed[0].importRepairs), [{ filepath: repairedPath, lang: 'English', line: 4, endLine: 5, kind: 'quoted-line-break' }]);
+    return protocol.sourceHash(parsed);
+  };
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async (...args) => {
+    stored = plain(args); saveStarted.resolve(); await commit.promise;
+  };
+  const importing = e.importUpdateZipFile(zipFixture(importText()));
+  await saveStarted.promise;
+  assert.equal(e.localDescs, workspace); assert.equal(e.descs, source); assert.equal(e.sourceIdentity, 'old-hash');
+  assert.deepEqual(alerts, [], 'Repair success is not announced before durable storage completes.');
+  assert.deepEqual(stored[0][0].translations.English, ['Ignite spreads faster\\n']);
+  assert.equal(stored[1].sourceHash, await protocol.sourceHash(stored[0]));
+  assert.equal(stored[2][0].sourceHash, stored[1].sourceHash);
+  commit.resolve(); await importing;
+  assert.equal(e.sourceIdentity, stored[1].sourceHash);
+  assert.equal(e.localDescs.sourceHash, e.sourceIdentity);
+  assert.equal(alerts.length, 1); assert.match(alerts[0], /Source import completed/);
+  assert.match(alerts[0], /Automatically repaired 1 quoted entry/);
+  assert.ok(alerts[0].includes(repairedPath + ':4-5 (English)'));
+
+  const corrected = harness({ realImport: true });
+  await corrected.editor.importUpdateZipFile(zipFixture(importText({ broken: false })));
+  assert.equal(corrected.editor.sourceIdentity, e.sourceIdentity, 'Equivalent corrected source joins the same collaboration workspace.');
+  assert.deepEqual(corrected.alerts, []);
+});
+
+test('failed repair import storage preserves the old source and does not announce a successful repair', async () => {
+  const { editor: e, window, alerts } = harness({ realImport: true });
+  const workspace = e.localDescs, source = e.descs, before = plain({ workspace, source });
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async () => { throw new Error('Storage unavailable'); };
+  await e.importUpdateZipFile(zipFixture(importText()));
+  assert.equal(e.localDescs, workspace); assert.equal(e.descs, source); assert.equal(e.sourceIdentity, 'old-hash');
+  assert.deepEqual(plain({ workspace, source }), before);
+  assert.equal(alerts.length, 1); assert.match(alerts[0], /Could not save the imported source.*Existing work is unchanged/);
+  assert.doesNotMatch(alerts[0], /Automatically repaired|completed/);
+});
+
+test('another malformed file still aborts the whole source ZIP without saving its repaired entries', async () => {
+  const { editor: e, writes, alerts } = harness({ realImport: true });
+  const workspace = e.localDescs, source = e.descs;
+  const invalid = 'description\n1 different_stat\n1\n# "Unclosed text\nlang "Thai"\n1\n# "translation"\n';
+  await e.importUpdateZipFile(zipFixture(importText(), { extra: { 'stat_descriptions/invalid.txt': invalid } }));
+  assert.equal(e.localDescs, workspace); assert.equal(e.descs, source); assert.equal(e.sourceIdentity, 'old-hash');
+  assert.equal(writes.length, 0); assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /Import aborted.*invalid\.txt:4: Invalid quoted translation entry/);
+  assert.doesNotMatch(alerts[0], /Automatically repaired/);
+});
+
+test('Import Translated repairs canonical English before matching and retains the source identity', async () => {
+  const { editor: e, window, alerts } = harness({ realImport: true });
+  await e.importUpdateZipFile(zipFixture(importText({ broken: false })));
+  const hash = e.sourceIdentity, workspace = e.localDescs;
+  const commit = deferred(), saveStarted = deferred(); let stored;
+  window.OfflineStore.saveWorkspaceWithRevisions = async (...args) => {
+    stored = plain(args); saveStarted.resolve(); await commit.promise;
+  };
+  const importing = e.importTranslatedZipFile(zipFixture(importText({ translated: 'ไฟลุกลามเร็วขึ้น' }), { translated: true }));
+  await saveStarted.promise;
+  assert.equal(e.localDescs, workspace); assert.deepEqual(alerts, []);
+  assert.equal(stored[0].sourceHash, hash); assert.equal(stored[1][0].sourceHash, hash);
+  commit.resolve(); await importing;
+  assert.equal(e.sourceIdentity, hash); assert.equal(e.localDescs.sourceHash, hash);
+  assert.deepEqual(plain(e.descs[0].translations.English), ['Ignite spreads faster\\n']);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['ไฟลุกลามเร็วขึ้น']);
+  assert.match(e.collaborationNotice, /Imported 1 translated files/);
+  assert.equal(alerts.length, 1); assert.match(alerts[0], /Automatically repaired 1 quoted entry/);
+});
+
+test('failed translated repair persistence leaves translations unchanged and reports no successful repair', async () => {
+  const { editor: e, window, alerts } = harness({ realImport: true });
+  await e.importUpdateZipFile(zipFixture(importText({ broken: false })));
+  const workspace = e.localDescs, before = plain(e.descs), hash = e.sourceIdentity;
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('Storage unavailable'); };
+  await e.importTranslatedZipFile(zipFixture(importText({ translated: 'ไฟลุกลามเร็วขึ้น' }), { translated: true }));
+  assert.equal(e.localDescs, workspace); assert.deepEqual(plain(e.descs), before); assert.equal(e.sourceIdentity, hash);
+  assert.equal(alerts.length, 1); assert.match(alerts[0], /Could not save imported translations.*Existing work is unchanged/);
+  assert.doesNotMatch(alerts[0], /Automatically repaired/);
+});
+
+test('translated repair with no translation changes explains the repair without rewriting storage', async () => {
+  const { editor: e, writes, alerts } = harness({ realImport: true });
+  await e.importUpdateZipFile(zipFixture(importText({ broken: false })));
+  const hash = e.sourceIdentity, writeCount = writes.length;
+  await e.importTranslatedZipFile(zipFixture(importText(), { translated: true }));
+  assert.equal(writes.length, writeCount); assert.equal(e.sourceIdentity, hash);
+  assert.equal(alerts.length, 1); assert.match(alerts[0], /No translation changes detected/);
+  assert.match(alerts[0], /Automatically repaired 1 quoted entry/);
 });
 
 test('shared-history fetch cannot publish into a switched account, source, or client', async t => {

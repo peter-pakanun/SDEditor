@@ -13,6 +13,8 @@ There are two different “import” actions and two different “export” mode
 
 When signed in with an assigned language, a source import also determines the collaboration workspace. Matching **game + source content hash + language** joins the same shared translations. The hash uses source fields, so changing ZIP metadata or translated text does not create another source version. A genuinely changed source joins a different workspace. The first translator seeds a new workspace; later imports reconcile with existing shared work and preserve differing local translations for review.
 
+Imports automatically repair a quoted translation whose closing quote is stranded on the immediately following line. The repair preserves that line break as literal `\n`, including spaces inside the quote, and reports the affected file and lines. The original archive and an equivalent manually repaired archive produce the same source hash. For English entries, deleting the line break or changing the text changes the hash. Ambiguous malformed entries still abort the import rather than guessing at their contents.
+
 **Import Next Version** saves the new source and local carry-forward work before joining its collaboration workspace. Pending changes from an older source remain attached to that old source. **Import Translated** changes saved translations inside the current source workspace and follows the same durable-save, merge, conflict, and shared-history rules as editor Save. It never changes the source version hash. Signed-out or unassigned-language work remains local.
 
 ## Files You Will See
