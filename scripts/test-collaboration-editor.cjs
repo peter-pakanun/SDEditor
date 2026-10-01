@@ -118,61 +118,6 @@ test('account or source change during save never closes or replaces the new edit
   const saving = e.editorSave(); e.sourceIdentity = 'other-source'; const workspace = { descs: [], status: {} }; e.localDescs = workspace;
   finish(); assert.equal(await saving, false); assert.equal(e.localDescs, workspace); assert.equal(e.editorVisible, true);
 });
-
-test('a delayed save acknowledgement preserves a newer peer workspace and its revision', async () => {
-  const { editor: e, desc } = saveFixture();
-  e.sourceGeneration = 3; e.workspaceRevision = 10;
-  e.localDescs = { descs: JSON.parse(JSON.stringify([desc])), status: {} };
-  let finish;
-  const oldFile = { filepath: desc.filepath, translations: ['submitted', 'สอง'], trackedForExport: true, needsReview: false };
-  e._collaboration = { save: () => new Promise(resolve => { finish = resolve; }), snapshot: () => ({ files: [oldFile], generation: 3, revision: 11 }) };
-  const saving = e.persistTranslationBatch([{ desc, lines: oldFile.translations }], 'save');
-  const newer = { descs: [{ ...JSON.parse(JSON.stringify(desc)), translations: { ...desc.translations, Thai: ['peer committed later', 'สอง'], French: ['Un', 'Deux'] } }], status: {} };
-  e.localDescs = newer; e.workspaceRevision = 12;
-  e.applyCollaborationFiles([{ ...oldFile, translations: ['peer committed later', 'สอง'] }]);
-  const acceptedWorkspace = e.localDescs;
-  finish({ status: 'pending', revision: 11, generation: 3, workspace: { descs: [{ ...JSON.parse(JSON.stringify(desc)), translations: { Thai: ['submitted', 'สอง'] } }], status: {} }, files: [oldFile] });
-  const result = await saving;
-  assert.equal(result.superseded, true); assert.equal(result.stale, undefined);
-  assert.equal(e.localDescs, acceptedWorkspace); assert.equal(e.workspaceRevision, 12);
-  assert.equal(desc.translations.Thai[0], 'peer committed later');
-  assert.deepEqual(e.localDescs.descs[0].translations.French, ['Un', 'Deux']);
-  assert.equal(result.acceptedFiles[0].translations[0], 'peer committed later');
-  assert.equal(e.editorBlocks[0].translation, 'ใหม่', 'The typing draft remains unchanged.');
-});
-
-test('a save acknowledgement from another source generation never installs its workspace', async () => {
-  const { editor: e, desc } = saveFixture();
-  e.sourceGeneration = 4; e.workspaceRevision = 2;
-  const current = e.localDescs;
-  e._collaboration = { save: async () => ({ status: 'pending', generation: 3, revision: 99, workspace: { descs: [], status: {} } }) };
-  const result = await e.persistTranslationBatch([{ desc, lines: ['submitted', 'สอง'] }], 'save');
-  assert.equal(result.stale, true); assert.equal(e.localDescs, current); assert.equal(e.workspaceRevision, 2);
-  assert.equal(desc.translations.Thai[0], 'เดิม'); assert.equal(e.editorBlocks[0].translation, 'ใหม่');
-});
-
-test('an authoritative save result wins over an older cached room snapshot', async () => {
-  const { editor: e, desc } = saveFixture(); e.sourceGeneration = 1; e.workspaceRevision = 1;
-  const accepted = { filepath: desc.filepath, translations: ['accepted merge', 'two'], trackedForExport: true, needsReview: false };
-  e._collaboration = { save: async () => ({ status: 'synced', generation: 1, revision: 3, files: [accepted] }),
-    snapshot: () => ({ generation: 1, revision: 2, files: [{ ...accepted, translations: ['cached old', 'two'] }] }) };
-  await e.persistTranslationBatch([{ desc, lines: ['submitted', 'two'] }], 'save');
-  assert.equal(desc.translations.Thai[0], 'accepted merge'); assert.equal(e.workspaceRevision, 3);
-});
-
-test('a delayed resolution acknowledgement rebases from the latest received workspace', async () => {
-  const { editor: e, desc } = saveFixture(); e.sourceGeneration = 1; e.workspaceRevision = 6;
-  const yours = { filepath: desc.filepath, translations: ['draft', 'สอง'], trackedForExport: true, needsReview: false, revision: 3 };
-  const conflict = { id: 'comparison', filepath: desc.filepath, yours };
-  desc.translations.Thai = ['newer peer result', 'สอง'];
-  e.editorBlocks[0].translation = 'draft';
-  e._collaboration = { snapshot: () => ({ generation: 1, revision: 5, conflicts: [conflict] }),
-    fileBase: () => ({ ...yours, translations: ['older resolution', 'สอง'] }),
-    resolve: async () => ({ status: 'synced', generation: 1, revision: 5 }) };
-  await e.collabResolve('comparison', ['older resolution', 'สอง']);
-  assert.equal(e.editorBlocks[0].translation, 'newer peer result');
-  assert.equal(e.editorOriginalTranslations[0], 'newer peer result');
-});
 test('collaboration modal and IME own their keys instead of triggering save-and-next', () => {
   const { editor: e } = harness(); let navigation = 0;
   e.saveAndSkipFile = () => navigation++;
@@ -207,31 +152,6 @@ test('failed source import preserves the current source, translations and versio
   await e.importUpdateZipFile({ size: 123, lastModified: 1 }, [description(2)]);
   assert.equal(e.descs[0], old); assert.equal(e.localDescs, workspace); assert.equal(e.sourceIdentity, 'source-one');
   assert.match(alerts.at(-1), /Existing work is unchanged/);
-});
-
-test('worker source import installs the authoritative receipt before draining its own broadcast', async () => {
-  const { editor: e, window, context } = harness();
-  vm.runInContext('offlineStoreReady = true', context);
-  context.crypto = require('node:crypto').webcrypto;
-  e._instances = {}; e.scheduleCollaboration = () => {};
-  e.sourceGeneration = 2; e.workspaceRevision = 8;
-  const old = description(1); e.descs = [old]; e.localDescs = { descs: [JSON.parse(JSON.stringify(old))], status: {} };
-  const next = description(1, ['', '']); next.translations.English[0] = 'Changed source';
-  let drained = false;
-  window.OfflineStore.replaceWorkspace = async command => {
-    assert.equal(command.generation, 2); assert.equal(command.revision, 8);
-    const workspace = JSON.parse(JSON.stringify(command.workspace));
-    workspace.descs[0].translations.Thai[0] = 'Authoritative newer peer edit';
-    return { generation: 3, revision: 10, source: command.source, workspace };
-  };
-  e.applyDeferredInstanceWorkspace = () => {
-    drained = true;
-    assert.equal(e.sourceGeneration, 3); assert.equal(e.workspaceRevision, 10);
-    assert.equal(e.descs[0].translations.English[0], 'Changed source');
-    assert.equal(e.descs[0].translations.Thai[0], 'Authoritative newer peer edit');
-  };
-  await e.importUpdateZipFile({ size: 123, lastModified: 1 }, [next]);
-  assert.equal(drained, true);
 });
 test('translated import stages every file in one durable save and failure changes none', async () => {
   const { editor: e, window, context, writes } = harness();

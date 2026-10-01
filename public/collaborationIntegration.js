@@ -8,7 +8,6 @@
       'cloudUser.id'() { this.scheduleCollaboration(); },
       'cloudUser.language'() { this.scheduleCollaboration(); },
       'cloudUser.assignmentVersion'() { this.scheduleCollaboration(); },
-      cloudAuthorizationGeneration() { this.scheduleCollaboration(); },
       lang() { this.scheduleCollaboration(); },
       gameVersion() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
@@ -80,7 +79,7 @@
           this.refreshEditorBlockMeta(block, index);
         });
         this.editorOriginalTranslations = originals;
-        this._editorCollabBase = base;
+        this._editorCollabBase = this._collaboration ? base : undefined;
         this.refreshEditorHLter(); this.refreshGamePreview();
         return { typedDuringSave };
       },
@@ -89,22 +88,16 @@
           needsReview: !!desc.needsReview, trackedForExport: !!desc.hasChanges };
       },
       captureCollaborationContext() {
-        return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity,
-          generation: this.sourceGeneration, workspaceRevision: this.workspaceRevision,
-          authGeneration: this.cloudAuthorizationGeneration,
-          account: this.cloudUser?.id || '', client: this._collaboration };
+        return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '', client: this._collaboration };
       },
       collaborationContextCurrent(ctx) {
         return ctx.game === this.gameVersion && ctx.language === this.lang && ctx.source === this.sourceIdentity
-          && ctx.account === (this.cloudUser?.id || '') && ctx.client === this._collaboration
-          && ctx.generation === this.sourceGeneration && ctx.authGeneration === this.cloudAuthorizationGeneration;
+          && ctx.account === (this.cloudUser?.id || '') && ctx.client === this._collaboration;
       },
       scheduleCollaboration() {
         // Invalidate an old room immediately, before the debounce or any network await.
-        const eligible = this.sourceLoaded && !this.instanceSourceChanged
-          && (this._instances || (this.cloudSignedIn && this.cloudUser?.language === this.lang));
-        const key = eligible ? [this.cloudUser?.id || 'guest', this.gameVersion, this.lang, this.sourceIdentity,
-          this.sourceGeneration, this.cloudAuthorizationGeneration].join('|') : '';
+        const eligible = this.cloudSignedIn && this.cloudUser?.language === this.lang && this.sourceLoaded;
+        const key = eligible ? [this.cloudUser.id, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this.collabReceiveState?.({ status: 'Local workspace', peers: [], conflicts: [], pending: 0, connected: false });
@@ -119,19 +112,16 @@
       },
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
-          || this.instanceSourceChanged || !this.lang || !window.CollaborationSync) return;
-        if (!this._instances && (!this.cloudSignedIn || this.cloudUser?.language !== this.lang)) return;
-        const key = [this.cloudUser?.id || 'guest', this.gameVersion, this.lang, this.sourceIdentity,
-          this.sourceGeneration, this.cloudAuthorizationGeneration].join('|');
-        if (this._collabKey === key && this._collaboration) return this._collaborationReady;
+          || !this.cloudSignedIn || this.cloudUser?.language !== this.lang || !window.CollaborationSync) return;
+        const key = [this.cloudUser.id, this.gameVersion, this.lang, this.sourceIdentity].join('|');
+        if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
-        const ctx = { accountId: this.cloudUser?.id || 'guest', game: this.gameVersion, language: this.lang,
-          generation: this.sourceGeneration, localOnly: !this.cloudSignedIn || this.cloudUser?.language !== this.lang };
+        const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, language: this.lang };
         const cloud = this._cloud;
         const openFile = this.editorVisible ? this.collaborationFile(this.editorCurrentEditingDesc) : null;
         const originalBase = copy(this._editorCollabBase);
         let client;
-        const options = { store: window.OfflineStore, apiBase: cloud.apiBase,
+        client = new window.CollaborationSync.Client({ store: window.OfflineStore, apiBase: cloud.apiBase,
           context: () => cloud.context(), request: (path, options, captured) => cloud.request(path, options, captured),
           onChange: state => {
             if (this._collaboration !== client) return;
@@ -144,13 +134,11 @@
           onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot(), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onRemote: files => { if (this._collaboration === client) this.applyCollaborationFiles(files, ctx.language); },
           onEditingConflict: ({ filepath }) => { if (this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath) return this.claimCollaborationFile(filepath, false); },
-        };
-        client = this._instances ? this._instances.createCollaboration(options) : new window.CollaborationSync.Client(options);
+        });
         this._collaboration = client; this._collabKey = key;
         this.updateCollaborationActivity();
-        this._collaborationReady = client.connect({ ...ctx, source: this.toPlainForStorage(this.descs),
+        await client.connect({ ...ctx, source: this.toPlainForStorage(this.descs),
           files: this.descs.map(desc => this.collaborationFile(desc)), workspace: this.toPlainForStorage(this.localDescs) });
-        await this._collaborationReady;
         if (this._collaboration !== client) return;
         client.select(this.selectedFilepath);
         if (this.editorVisible) {
@@ -206,19 +194,11 @@
         return !!(await client.claim(filepath, { force: true })).granted;
       },
       async persistTranslationBatch(updates, origin, options = {}) {
-        if (this._instances && (!this.instanceReady || this.instanceSourceChanged)) {
-          this.rememberInstanceDraft('Workspace changed before saving');
-          throw new Error('Reload the shared workspace before saving. Your draft has been preserved.');
-        }
-        if (this._instances) await this.initializeCollaboration();
         const ctx = options.context || this.captureCollaborationContext();
         const workspace = options.workspace || this.toPlainForStorage(this.localDescs);
         workspace.descs ||= []; workspace.status ||= {};
         const now = Date.now();
         const revisions = options.revisions || [];
-        // Capture what the tab actually saw, before staging any changes. The
-        // worker has newer state and must never invent this authored baseline.
-        const bases = options.bases || Object.fromEntries(updates.map(update => [update.desc.filepath, this.collaborationFile(update.desc, ctx.language)]));
         const files = updates.map(update => {
           const desc = update.desc;
           const lines = [...update.lines];
@@ -240,32 +220,14 @@
         this._collabDiagnosticBatch = batch;
         try {
           if (!this.testMode) {
-            if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases, restore: options.restore,
-              generation: ctx.generation, requestId: this._instances ? crypto.randomUUID() : undefined });
-            else if (this._instances) throw new Error('The shared workspace is still connecting. Keep your draft open and retry.');
+            if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases: options.bases, restore: options.restore });
             else await window.OfflineStore.saveWorkspaceWithRevisions(workspace, revisions, ctx.game);
           }
-          if (!this.collaborationContextCurrent(ctx)
-            || (result.generation != null && result.generation !== this.sourceGeneration)) return { ...result, stale: true };
-          const currentRevision = Number(this.workspaceRevision) || 0;
-          const superseded = result.revision != null && result.revision < currentRevision;
-          if (!superseded) {
-            this.localDescs = result.workspace || workspace;
-            if (result.revision != null) this.workspaceRevision = Math.max(currentRevision, result.revision);
-            // Prefer a newer received room snapshot, but never use an older
-            // cached room to replace an authoritative durable acknowledgement.
-            const state = ctx.client?.snapshot();
-            const currentState = state && (state.generation == null || state.generation === this.sourceGeneration)
-              && (state.revision == null || result.revision == null || state.revision >= result.revision);
-            const effective = currentState && state.files?.length ? state.files : result.files?.length ? result.files : files;
-            this.applyCollaborationFiles(effective, ctx.language);
-          }
-          // An event can arrive before the acknowledgement of an earlier save.
-          // Its workspace includes other files/languages and must remain whole.
-          result = { ...result, superseded, acceptedFiles: updates.map(update => {
-            const current = this.getDescByFilepath(update.desc.filepath);
-            return current ? this.collaborationFile(current, ctx.language) : null;
-          }).filter(Boolean) };
+          if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
+          this.localDescs = workspace;
+          // The engine may have combined independent remote changes during this save.
+          const effective = ctx.client?.snapshot()?.files;
+          this.applyCollaborationFiles(effective?.length ? effective : files, ctx.language);
           if (result.status === 'conflict') {
             if (batch?.touched) this.clearDiagnosticScanResults();
             this.collaborationNotice = 'Saved locally. Resolve the shared changes before continuing.';
@@ -281,7 +243,6 @@
       },
       async collabResolve(id, translations, options) {
         const client = this._collaboration;
-        const context = this.captureCollaborationContext();
         const conflict = client.snapshot().conflicts.find(item => item.id === id);
         const lines = Array.isArray(translations) ? translations : translations?.translations;
         const desc = conflict && this.getDescByFilepath(conflict.filepath);
@@ -302,17 +263,11 @@
         if (warnings.length && !confirm('Translation warnings: ' + warnings.map(item => item.message).join('\n') + '\nSave the result anyway?')) return { status: 'conflict' };
         const blocksAtResolution = this.editorBlocks;
         const result = await client.resolve(id, translations, options);
-        if (!this.collaborationContextCurrent(context)
-          || (result.generation != null && result.generation !== this.sourceGeneration)) return { ...result, stale: true };
+        if (client !== this._collaboration) return result;
         if (result.status !== 'conflict') this.collaborationNotice = result.status === 'pending' ? 'Resolution saved locally · Pending sync' : 'Translation conflict resolved.';
         if (result.status !== 'conflict' && conflict && this.editorVisible && this.editorBlocks === blocksAtResolution
           && this.editorCurrentEditingDesc.filepath === conflict.filepath) {
-          let saved = client.fileBase(conflict.filepath);
-          const snapshot = client.snapshot();
-          if (snapshot.revision != null && snapshot.revision < (Number(this.workspaceRevision) || 0)) {
-            const current = this.getDescByFilepath(conflict.filepath);
-            if (current) saved = { ...saved, ...this.collaborationFile(current) };
-          }
+          const saved = client.fileBase(conflict.filepath);
           this.rebaseEditorAfterCommit(saved, {
             draftBefore: conflict.yours.translations.map(value => this.getEditorDisplayText(value)),
             submittedTranslations: conflict.yours.translations,

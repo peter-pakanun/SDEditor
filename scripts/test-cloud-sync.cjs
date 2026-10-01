@@ -544,7 +544,7 @@ test('local language switching isolates dictionaries and stale save callbacks ca
   assert.equal(h.store.state.profiles.alice.dictionaries.French.entries[0].replace, 'Feu');
 });
 
-test('switching one tab language leaves assigned-language sync active without changing its selection', async t => {
+test('switching the local language cancels a delayed cloud response from the previous UI context', async t => {
   const h = await harness(t, { state: authenticatedState() });
   seedAPI(h.api);
   const gate = h.api.pause('GET', '/v1/dictionaries/Thai');
@@ -555,7 +555,7 @@ test('switching one tab language leaves assigned-language sync active without ch
   await syncing;
   assert.equal(h.client.snapshot().settings.lang, 'French');
   assert.deepEqual(h.client.snapshot().dictionary, []);
-  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'late Thai response');
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'ไฟ');
   assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 0);
 });
 
@@ -807,89 +807,4 @@ test('offline logout clears local authentication while retaining isolated accoun
   assert.equal(h.client.snapshot().dictionary.some(entry => entry._id === privateEntry._id), false);
   assert.match(h.statuses.at(-1).message, /Signed out in this browser/);
   assert.match(h.statuses.at(-1).message, /revocation could not be confirmed/);
-});
-
-test('one shared cloud client merges explicit tab bases without replacing newer preferences or dictionary fields', async t => {
-  const h = await harness(t);
-  const first = payload(h.client.snapshot('Thai').dictionary), second = clone(first);
-  await h.client.saveLocal(payload([word('fire', { replace: 'first tab' })], { theme: 'dark' }), { base: first, language: 'Thai' });
-  const result = await h.client.saveLocal(payload([word('fire', { tlnote: 'second tab note' })]), { base: second, language: 'Thai' });
-  assert.equal(result.dictionary[0].replace, 'first tab'); assert.equal(result.dictionary[0].tlnote, 'second tab note');
-  assert.equal(result.settings.theme, 'dark'); assert.deepEqual(result.conflicts, []);
-});
-
-test('signed-out overlapping dictionary drafts remain available through existing conflict choices', async t => {
-  const h = await harness(t); const base = h.client.snapshot('Thai');
-  await h.client.saveLocal(payload([word('fire', { replace: 'saved first' })]), { base, language: 'Thai' });
-  const result = await h.client.saveLocal(payload([word('fire', { replace: 'second draft' })]), { base, language: 'Thai' });
-  assert.equal(result.dictionary[0].replace, 'saved first');
-  assert.equal(result.conflicts[0].local.replace, 'second draft'); assert.equal(result.conflicts[0].remote.replace, 'saved first');
-  assert.equal(result.conflicts[0].localOnlyConflict, true);
-  await h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, result.revision, { language: 'Thai' });
-  assert.equal(h.client.snapshot('Thai').dictionary[0].replace, 'second draft');
-  assert.deepEqual(h.client.snapshot('Thai').conflicts, []); assert.equal(h.api.calls.length, 0);
-});
-
-test('switching a stale tab language cannot overwrite a dictionary change from another tab', async t => {
-  const h = await harness(t); const base = h.client.snapshot('Thai');
-  await h.client.saveLocal(payload([word('fire', { replace: 'another tab' })]), { base, language: 'Thai' });
-  await h.client.selectLanguage('French', payload(base.dictionary, { lang: 'French' }), 'Thai', { base });
-  assert.equal(h.client.snapshot('French').settings.lang, 'French'); assert.deepEqual(h.client.snapshot('French').dictionary, []);
-  assert.equal(h.client.snapshot('Thai').dictionary[0].replace, 'another tab');
-  await h.client.saveLocal(payload([word('fire', { tlnote: 'still editing Thai' })]), { base, language: 'Thai' });
-  assert.equal(h.client.snapshot('Thai').dictionary[0].replace, 'another tab');
-  assert.equal(h.client.snapshot('Thai').dictionary[0].tlnote, 'still editing Thai');
-  assert.equal(h.client.snapshot().settings.lang, 'French', 'saving another tab does not switch the default language');
-});
-
-test('cloud polling retains local tab conflict candidates until the translator chooses', async t => {
-  const h = await harness(t, { state: authenticatedState() }); seedAPI(h.api);
-  const base = h.client.snapshot('Thai');
-  await h.client.saveLocal(payload([word('fire', { replace: 'saved first' })]), { base, language: 'Thai' });
-  await h.client.saveLocal(payload([word('fire', { replace: 'second candidate' })]), { base, language: 'Thai' });
-  await h.client.sync(); await h.client.sync();
-  assert.equal(h.client.snapshot('Thai').conflicts[0].local.replace, 'second candidate');
-  assert.equal(h.client.snapshot('Thai').dictionary[0].replace, 'saved first');
-  await h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, h.client.snapshot('Thai').revision, { language: 'Thai' });
-  await h.client.sync();
-  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'second candidate');
-});
-
-test('dictionary conflict resolution waits for an in-flight cloud pass before publishing', async t => {
-  const h = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'local' })] }) });
-  seedAPI(h.api, { remote: dictionary([word('fire', { replace: 'remote' })], 2) }); await h.client.sync();
-  const gate = h.api.pause('GET', '/v1/dictionaries/Thai');
-  const syncing = h.client.sync(); await gate.entered.promise;
-  const resolving = h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2, { language: 'Thai' });
-  await new Promise(setImmediate);
-  assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 0, 'resolution never overlaps the existing cloud operation');
-  gate.release.resolve(); await syncing; await resolving;
-  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'local');
-});
-
-test('a stale dictionary deletion keeps the saved peer entry until comparison is resolved', async t => {
-  const h = await harness(t); const base = h.client.snapshot('Thai');
-  await h.client.saveLocal(payload([word('fire', { replace: 'peer changed it' })]), { base, language: 'Thai' });
-  const result = await h.client.saveLocal(payload([]), { base, language: 'Thai' });
-  assert.equal(result.conflicts[0].local, null); assert.equal(result.dictionary[0].replace, 'peer changed it');
-  await h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, result.revision, { language: 'Thai' });
-  assert.deepEqual(h.client.snapshot('Thai').dictionary, []);
-});
-
-test('a third conflicting dictionary tab retains the preceding candidate in recovery export', async t => {
-  const h = await harness(t); const base = h.client.snapshot('Thai');
-  for (const text of ['first', 'second', 'third']) await h.client.saveLocal(payload([word('fire', { replace: text })]), { base, language: 'Thai' });
-  assert.equal(h.client.snapshot('Thai').dictionary[0].replace, 'first');
-  assert.equal(h.client.snapshot('Thai').conflicts[0].local.replace, 'third');
-  assert.equal(h.client.recoveryExport().copies.at(-1).dictionaries.Thai[0].replace, 'second');
-});
-
-test('account invalidation while a settings write waits for storage rejects instead of acknowledging an unsaved draft', async t => {
-  const h = await harness(t); const gate = deferred(), before = clone(h.store.state);
-  h.store.tail = gate.promise;
-  const saving = h.client.saveLocal(payload([word('fire', { replace: 'old account draft' })]), { base: h.client.snapshot('Thai'), language: 'Thai' });
-  await new Promise(setImmediate);
-  h.client.epoch++; gate.resolve();
-  await assert.rejects(saving, error => error.stale === true);
-  assert.deepEqual(h.store.state, before);
 });

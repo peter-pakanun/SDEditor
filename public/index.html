@@ -19,12 +19,6 @@
   <div id="app">
     <div class="appRoot" :data-density="uiDensity">
     <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
-    <div v-if="instanceSourceChanged || instanceDraftRecovery" class="cloudStorageError" role="status">
-      <span v-if="instanceSourceChanged">The shared source or workspace changed. Your draft is preserved; reload before saving.</span>
-      <span v-else>A draft recovery copy is available in this tab.</span>
-      <button v-if="instanceSourceChanged" @click="reloadSharedWorkspace">Reload shared workspace</button>
-      <button v-if="instanceDraftRecovery" @click="downloadInstanceDraft">Download draft</button>
-    </div>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
@@ -33,7 +27,7 @@
       <input type="file" ref="importTranslatedZipFile" accept="application/zip,.zip" @change="importTranslatedZipChanged">
     </form>
 
-    <div class="multiInstanceGate versionGate" v-if="!testMode && !gameVersionSelected && !showMultiInstanceGate">
+    <div class="multiInstanceGate versionGate" v-if="!testMode && !gameVersionSelected">
       <div class="multiInstanceGateContent versionGateContent">
         <h2>Select Game Version</h2>
         <p>SDEditor is a translation editor for Path of Exile StatDescriptions files, with Google sign-in for personal settings backup, shared language dictionaries, and collaboration on matching source versions.</p>
@@ -97,7 +91,7 @@
             <p class="settingsHelp">These preferences apply across your workspaces.</p>
             <div class="settingsField">
               <label for="settingsLanguage">Translation language</label>
-              <select id="settingsLanguage" ref="settingsLanguage" v-model="lang" :disabled="cloudLanguageBusy">
+              <select id="settingsLanguage" ref="settingsLanguage" v-model="lang">
                 <option disabled value="">Choose a language</option>
                 <option v-for="language in langs" :key="language" :value="language">{{ language }}</option>
               </select>
@@ -183,24 +177,29 @@
       </section>
     </div>
 
-    <!-- Unsupported coordinator / single-tab fallback gate -->
-    <div class="multiInstanceGate instanceCoordinationGate" v-if="showMultiInstanceGate">
-      <div class="multiInstanceGateContent" role="dialog" aria-modal="true" aria-labelledby="instanceGateTitle">
-        <h2 id="instanceGateTitle">{{ instanceWorkerFailed ? 'Shared coordinator unavailable' : 'Multiple tabs aren’t supported in this browser' }}</h2>
+    <!-- Multi-instance detection gate -->
+    <div class="multiInstanceGate" v-if="showMultiInstanceGate">
+      <div class="multiInstanceGateContent">
+        <h2>⚠️ Multiple Instances Detected</h2>
         <p>
-          SDEditor could not connect this tab to a shared coordinator. Safe simultaneous editing needs SharedWorker support and available browser storage. Without it, saves in different tabs could overwrite translations or interfere with online sync.
+          You have <strong>more than one instance of SDEditor open</strong> in your browser. This can cause data loss or conflicts if you save translations simultaneously across multiple tabs or windows.
         </p>
         <div class="multiInstanceGateWarning">
-          {{ instanceFailureReason }}
+          <strong>Warning:</strong> Each instance maintains its own in-memory state and may have outdated translations from IndexedDB. Concurrent edits can cause data loss.
         </div>
-        <p>Keep your other working tab open, or close other SDEditor tabs and check again. Update your desktop browser to enable multiple tabs. Tabs running an older SDEditor version must close before the storage upgrade can finish.</p>
+        <h3 style="margin-top: calc(1.5em * var(--density)); margin-bottom: calc(0.75em * var(--density));">What should I do?</h3>
+        <ul style="margin: calc(0.75em * var(--density)) 0; padding-left: calc(1.5em * var(--density)); color: var(--color-font); line-height: 1.6;">
+          <li>Use only <strong>one instance at a time</strong> and close other tabs/windows before editing</li>
+          <li><strong>Save frequently</strong> and reload before switching instances</li>
+          <li>Consider exporting translations between instances to avoid conflicts</li>
+        </ul>
         <div class="multiInstanceGateButtons">
-          <button class="btnSecondary" @click="retryInstanceConnection" :disabled="instanceConnecting">Check again</button>
-          <button class="btnPrimary" @click="closeThisInstance">Close this tab</button>
-          <button v-if="instanceDraftRecovery || (editorVisible && editorHaveChanges())" @click="downloadInstanceDraft">Download draft</button>
+          <button class="btnSecondary" @click="bypassMultiInstanceGate">Continue Anyway</button>
+          <!-- <button class="btnPrimary" @click="closeAllButThis">Close Other Instances</button> -->
+          <button class="btnPrimary" @click="closeThisInstance">Close This Instance</button>
         </div>
         <p style="font-size: calc(11px * var(--density)); opacity: 0.7; margin-top: calc(1.5em * var(--density)); margin-bottom: 0;">
-          If your browser does not allow this button to close the tab, use its tab close button.
+          You can close this message, but please be careful about data loss.
         </p>
       </div>
     </div>
@@ -1084,9 +1083,6 @@
   <script src="cloudHistoryUi.js"></script>
   <script src="collaborationProtocol.js"></script>
   <script src="collaborationSync.js"></script>
-  <script src="instanceCoordinator.js"></script>
-  <script src="instanceClient.js"></script>
-  <script src="instanceUi.js"></script>
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>
   <script src="commentsUi.js"></script>

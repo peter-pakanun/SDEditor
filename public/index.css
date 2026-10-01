@@ -2169,10 +2169,6 @@ button, label, th, td, input[type="checkbox"] {
   z-index: 10001;
 }
 
-.instanceCoordinationGate {
-  z-index: 10010;
-}
-
 .versionGateContent {
   max-width: 680px;
 }

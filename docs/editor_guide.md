@@ -21,22 +21,6 @@ Open **Settings → Cloud backup → Backup using Google account** to connect pe
 
 Settings and Regex rules are personal; dictionaries are shared among assigned translators. Saved translations and new shared history synchronize with translators using the same game, source version, and assigned language. The editor clipboard, original ZIPs, unsaved typing, and legacy local history stay in this browser. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
 
-### Working in Multiple Tabs or Windows
-
-You can open several SDEditor tabs or windows in a supported desktop browser. Tabs in the same browser profile and site address share saved translations, source files, history, settings, and dictionaries. PoE1 and PoE2 each have their own workspace. Each tab keeps its own selected game, language, file, and unsaved translation draft; a language saved in Settings supplies a default for new tabs.
-
-Saving different files or different entries merges the changes. If two tabs change the same entry, SDEditor keeps both candidates and opens a comparison before closing the editor or moving on. Choose the intended result there. The existing **Edit anyway?** warning still appears when another tab or translator is editing the same file. Dictionary comparisons retain separate **Alternates** and **TL note** choices.
-
-An import of a new source version or a workspace reset pauses saves in other tabs using that workspace. Keep or download their recovery drafts, then choose **Reload shared workspace** before continuing. Changing the shared Google account also preserves dirty drafts under their original account; review them before using the new account.
-
-Saved translations and pending uploads retired by a source replacement or reset remain available in **Settings → Cloud backup → Download recovery copies** for their original profile. They are kept for recovery and do not automatically refill the replacement workspace.
-
-Saved changes are committed to browser storage before Save finishes. Pending online uploads continue while another eligible tab remains open and resume when the editor next starts. Unsaved typing belongs to its tab, so save before closing it. Separate browser profiles, site addresses, and devices exchange changes through online synchronization.
-
-If your browser cannot safely coordinate multiple tabs, SDEditor allows one owning tab. Extra tabs show **Multiple tabs aren’t supported in this browser**, explaining the risk of simultaneous saves overwriting translations. Close the other tab and choose **Check again**, or update your browser for SharedWorker support. After an unexpected closure, ownership can take up to 30 seconds to expire. **Close this tab** also explains when the browser requires you to close it manually. There is no override for simultaneous writers.
-
-If the shared worker stops, saving pauses while SDEditor reconnects; your open draft stays in place. A worker startup failure is reported separately from missing browser support. During the storage upgrade, close tabs running an older SDEditor version and choose **Check again**. The upgrade keeps existing browser data.
-
 ### Settings
 
 Settings is organized into four tabs: **General** for language, theme and density; **Editor & shortcuts** for preview behavior, highlighting and keyboard preferences; **Cloud backup** for account and shared Dictionary controls; and **Data** for importing/exporting settings and starting a workspace from scratch.

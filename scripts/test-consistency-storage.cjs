@@ -22,24 +22,6 @@ function loadStore({ throwOnRevision = false, unavailable = false } = {}) {
         objectStore(name) {
           assert.ok(names.includes(name), 'only stores in this transaction are accessible');
           return {
-            get(key) {
-              const request = {};
-              queueMicrotask(() => {
-                if (finished) return;
-                // Reads in a transaction see its staged writes before the
-                // previously committed value, just like IndexedDB.
-                const staged = pending.filter(item => item.name === name
-                  && (name === 'kv' ? item.value.key : item.value.id) === key).at(-1);
-                let value;
-                if (staged) value = staged.value;
-                else if (name === 'kv') {
-                  if (data.kv.has(key)) value = { key, value: data.kv.get(key) };
-                } else value = data[name].find(row => row.id === key);
-                request.result = structuredClone(value);
-                request.onsuccess?.();
-              });
-              return request;
-            },
             put(row) { pending.push({ name, value: structuredClone(row) }); },
             add(row) {
               if (throwOnRevision) throw new Error('Cannot clone revision');

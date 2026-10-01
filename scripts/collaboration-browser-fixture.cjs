@@ -26,12 +26,13 @@ function browserControls(account, secret) {
   const ready = async () => {
     for (let index = 0; index < 200; index++) {
       const vm = getApp();
-      if (vm?._cloud?.snapshot() && vm.offlineStoreReady && !vm._cloudInitializing) return vm;
+      if (vm?._cloud?.state && vm.offlineStoreReady) return vm;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw new Error('Editor initialization did not finish. Inspect visible storage or script errors.');
   };
   let offline = false;
+  let originalFetcher;
   const seed = Array.from({ length: 25 }, (_, index) => {
     const number = String(index + 1).padStart(2, '0');
     return { filepath: 'fixture/stat_' + number + '.txt', filedir: 'fixture', filename: 'stat_' + number + '.txt', name: '',
@@ -42,20 +43,17 @@ function browserControls(account, secret) {
   button('Bootstrap translator ' + account.toUpperCase(), async () => {
     const vm = await ready();
     status.textContent = 'Preparing disposable account and source…';
-    await vm._cloud.finishLogin('fixture-' + account, secret);
-    await vm.cloudApply(vm._cloud.snapshot());
-    const previousLanguage = vm.lang;
-    vm._cloudApplying = true;
+    const response = await fetch('/fixture/session', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Fixture-Key': secret }, body: '{}' });
+    if (!response.ok) throw new Error('Fixture session refused');
     vm.lang = 'Thai'; vm.theme = account === 'a' ? 'grey' : 'dark';
-    await vm.$nextTick();
-    vm._cloudApplying = false;
-    await vm.cloudSelectLanguage('Thai', previousLanguage);
     await vm.saveSettings();
+    await vm._cloud.acceptLogin(await response.json());
+    await vm.cloudApply(vm._cloud.snapshot());
     const source = JSON.parse(JSON.stringify(seed));
     const workspace = { descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: 0, sourceHash: await CollaborationProtocol.sourceHash(source) };
-    const snapshot = await OfflineStore.getWorkspaceSnapshot('poe1');
-    await OfflineStore.replaceWorkspace({ game: 'poe1', source, workspace, generation: snapshot.generation,
-      revision: snapshot.revision, requestId: crypto.randomUUID() });
+    await OfflineStore.setSource(source, 'poe1');
+    await OfflineStore.setWorkspace(workspace, 'poe1');
+    await OfflineStore.setMigratedFromSingleVersion(true);
     vm.showSetting = false; vm.needsInitialSettings = false;
     await vm.activateGameVersion('poe1', { checkMigration: false });
     await vm.$nextTick();
@@ -65,12 +63,14 @@ function browserControls(account, secret) {
   const offlineButton = button('Simulate offline', async () => {
     const vm = await ready();
     offline = !offline;
-    const response = await fetch('/fixture/network', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Fixture-Key': secret }, body: JSON.stringify({ offline }) });
-    if (!response.ok) throw new Error('Fixture network control refused');
     if (offline) {
+      originalFetcher = vm._cloud.fetcher;
+      vm._cloud.fetcher = async () => { throw new TypeError('Fixture: network offline'); };
+      vm._collaboration?.closeSocket();
       offlineButton.textContent = 'Restore connection';
       status.textContent = 'Fixture network disabled. Editor Save still writes to IndexedDB.';
     } else {
+      vm._cloud.fetcher = originalFetcher;
       offlineButton.textContent = 'Simulate offline';
       await vm.collabRetry();
       status.textContent = 'Fixture network restored. Pending saves are retrying.';
@@ -79,20 +79,6 @@ function browserControls(account, secret) {
   button('Switch theme', async () => {
     const vm = await ready(); vm.theme = vm.theme === 'grey' ? 'dark' : 'grey';
     status.textContent = 'Theme: ' + vm.theme;
-  });
-  button('Inspect shared storage', async () => {
-    const vm = await ready();
-    const snapshot = await OfflineStore.getWorkspaceSnapshot(vm.gameVersion || 'poe1');
-    const collab = vm._collaboration?.snapshot();
-    status.textContent = JSON.stringify({ mode: vm.instanceMode, generation: snapshot.generation, revision: snapshot.revision,
-      pending: collab?.pending, conflicts: collab?.conflicts?.length, session: collab?.sessionId,
-      peers: collab?.peers?.length, error: vm.cloudStorageError, notice: vm.collaborationNotice,
-      files: snapshot.workspace?.descs?.slice(0, 3).map(file => ({ path: file.filepath, translations: file.translations })) });
-  });
-  button('Load shared workspace', async () => {
-    const vm = await ready(); vm.showSetting = false;
-    await vm.activateGameVersion('poe1', { checkMigration: false });
-    await vm.initializeCollaboration(); status.textContent = 'Shared workspace loaded.';
   });
   document.body.append(panel);
 }
@@ -118,27 +104,11 @@ function browserControls(account, secret) {
     store.assignLanguage('fixture-admin', 'fixture-' + account, 'Thai');
   }
   const api = createApp({ config, database, store, oauthProvider: null });
-  const secrets = ports.map(() => randomUUID());
-  const offlineOrigins = new Set();
-  const apiHost = express();
-  apiHost.use((req, res, next) => {
-    const origin = req.get('Origin');
-    if (origins.includes(origin)) res.set({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization,Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,OPTIONS', 'Access-Control-Allow-Credentials': 'true' });
-    if (req.method === 'OPTIONS') return res.status(204).end();
-    if (offlineOrigins.has(origin)) return res.status(503).json({ error: { code: 'FIXTURE_OFFLINE', message: 'Fixture network disabled' } });
-    next();
-  });
-  apiHost.post('/auth/exchange', express.json(), (req, res, next) => {
-    const index = origins.indexOf(req.get('Origin'));
-    if (index < 0 || req.body.verifier !== secrets[index] || req.body.code !== 'fixture-' + ['a', 'b'][index]) return next();
-    res.json(store.createSession('fixture-' + ['a', 'b'][index]));
-  });
-  apiHost.use(api);
-  const apiServer = createServer(apiHost);
+  const apiServer = createServer(api);
   api.locals.collaborationRealtime.attach(apiServer);
   const frontendServers = [];
   for (let index = 0; index < ports.length; index++) {
-    const account = ['a', 'b'][index], secret = secrets[index], frontend = express();
+    const account = ['a', 'b'][index], secret = randomUUID(), frontend = express();
     frontend.use((req, res, next) => {
       res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       next();
@@ -147,16 +117,10 @@ function browserControls(account, secret) {
       if (req.get('X-Fixture-Key') !== secret || req.get('Origin') !== origins[index]) return res.status(403).json({ error: 'Fixture request refused' });
       res.json(store.createSession('fixture-' + account));
     });
-    frontend.post('/fixture/network', express.json(), (req, res) => {
-      if (req.get('X-Fixture-Key') !== secret || req.get('Origin') !== origins[index]) return res.status(403).end();
-      if (req.body.offline) offlineOrigins.add(origins[index]); else offlineOrigins.delete(origins[index]);
-      res.json({ offline: offlineOrigins.has(origins[index]) });
-    });
     frontend.get('/', (req, res) => {
       const html = readFileSync(resolve(__dirname, '../public/index.html'), 'utf8');
       const script = '<script>(' + browserControls.toString() + ')(' + JSON.stringify(account) + ',' + JSON.stringify(secret) + ');</script>';
-      const patched = req.query.fallback === '1' ? html.replace('<head>', '<head><script>Object.defineProperty(window,"SharedWorker",{value:undefined});</script>') : html;
-      res.type('html').send(patched.replace('</body>', script + '</body>'));
+      res.type('html').send(html.replace('</body>', script + '</body>'));
     });
     frontend.get('/index.js', (req, res) => {
       const source = readFileSync(resolve(__dirname, '../public/index.js'), 'utf8');

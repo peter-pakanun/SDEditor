@@ -35,14 +35,6 @@ Disable auto-open for automation runs with:
 - `node server.js --no-open`
 - or `NO_OPEN_BROWSER=1 node server.js`
 
-## Multiple Tabs and Durable Storage
-
-Ordinary test mode bypasses persistence and cannot validate multiple tabs. Run `node scripts/collaboration-browser-fixture.cjs` with the sibling API checkout's dependencies installed. Use the printed disposable loopback URLs, bootstrap one translator once, then open a second tab at that **same origin** and choose **Load shared workspace**. Bootstrap replaces that origin's source; do not bootstrap every tab. **Inspect shared storage** shows committed revisions, pending uploads, presence sessions, and sample files. The other printed origin provides a second account through the real local API and WebSocket implementation.
-
-Check different-file and different-entry saves, overlapping comparisons, drafts and focus during peer updates, source replacement recovery, distinct presence, and an offline save whose originating tab closes before connectivity returns. **Simulate offline** affects worker API requests for that fixture origin. Add `fallback=1` to the URL to exercise browsers without SharedWorker: one owning tab works and additional tabs must be blocked. Fixture API state is disposable and does not verify production Google login or deployment.
-
-Run the direct Node suites without a new test framework: `node scripts/test-multi-instance-storage.cjs`, `node scripts/test-instance-coordinator.cjs`, `node scripts/test-instance-ui.cjs`, plus `test-cloud-sync.cjs`, `test-collaboration-sync.cjs`, `test-collaboration-storage.cjs`, `test-collaboration-editor.cjs`, and `test-collaboration-lifecycle.cjs` under `scripts/`. These cover atomic commits, mutation retries, ownership expiry, blocked upgrades, account changes, pending uploads, and draft preservation. Run the diagnostic, consistency, comments, and interface suites for related UI changes. `npm test` remains an unused stub.
-
 ## Shared Comments Fixture
 
 Run `node scripts/comments-browser-fixture.cjs` after installing dependencies in the sibling `SDEditor-API` checkout. Open either editor URL printed by the script and click its **Bootstrap Thai** or **Bootstrap German** button. These are separate loopback origins with normal IndexedDB storage and an in-memory API, using disposable accounts rather than Google sign-in. Do not add `testMode=1` to their URLs.

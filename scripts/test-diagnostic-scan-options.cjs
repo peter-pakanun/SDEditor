@@ -25,7 +25,7 @@ function loadEditor() {
       nextTick() { return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [api, name, counter] of [
@@ -36,7 +36,7 @@ function loadEditor() {
     const original = api[name];
     api[name] = function (...args) { calls[counter]++; return original.apply(this, args); };
   }
-  const editor = Object.assign(config.data(), window.CollaborationIntegration.mixin.methods, config.methods, {
+  const editor = Object.assign(config.data(), config.methods, {
     lang: 'Thai', gameVersion: 'poe1',
     dictionary: [{ find: 'Fire', replace: 'ไฟ' }],
     // Exercise opening, scanning, and validation without DOM layout or persistence.
