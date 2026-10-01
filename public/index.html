@@ -414,7 +414,7 @@
         </nav>
         </div>
       </footer>
-      <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc.prevent="commentsCloseAll">
+      <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc="!$event.isComposing && $event.keyCode !== 229 && ($event.preventDefault(), commentsCloseAll())">
         <header class="commentsPanelHeader">
           <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · All languages and source versions</p></div>
           <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments">×</button>
@@ -431,6 +431,11 @@
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentHashBadge" :title="'Source hash: ' + comment.sourceHash">Different version</span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
+              <form class="commentsQuickReply" :aria-label="'Reply to ' + group.filepath" :aria-busy="commentsReplyPosting(group.filepath)" @submit.prevent="commentsSubmitReply(group.filepath)">
+                <input type="text" :value="commentsReplyDraft(group.filepath)" @input="commentsSetReplyDraft(group.filepath, $event.target.value)" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()" placeholder="Reply..." maxlength="10000" :aria-label="'Reply to ' + group.filepath" :disabled="!commentsCanReply(group.filepath)" :title="!sourceIdentity ? 'Load a source version to reply.' : ''">
+                <button type="submit" class="commentsSendReply btnPrimary" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath) || !commentsReplyDraft(group.filepath).trim()" :aria-label="(commentsReplyPosting(group.filepath) ? 'Sending reply to ' : 'Send reply to ') + group.filepath" :title="commentsReplyPosting(group.filepath) ? 'Sending reply…' : 'Send reply'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 3 18 9-18 9 4-9-4-9Z"></path><path d="M7 12h14"></path></svg></button>
+              </form>
+              <p v-if="commentsReplyError(group.filepath)" class="commentsError commentReplyError" role="alert">{{ commentsReplyError(group.filepath) }}</p>
             </section>
             <p v-if="commentsAllFeed.loaded && !commentsAllItems.length && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
             <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllFeed.loadingMore">Load older comments</button>

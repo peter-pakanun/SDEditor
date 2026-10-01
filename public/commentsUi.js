@@ -32,10 +32,7 @@
         get() { return this.commentsDrafts[this.commentsDraftKey] || ''; },
         set(value) { this.commentsDrafts[this.commentsDraftKey] = String(value); this.commentsPostErrors[this.commentsDraftKey] = ''; },
       },
-      commentsCanPost() {
-        return this.commentsEligible && !!this.commentsFilepath && /^[a-f0-9]{64}$/.test(this.sourceIdentity || '')
-          && !this.versionStorageLoading && !this._importingSource;
-      },
+      commentsCanPost() { return this.commentsCanPostTo(this.commentsFilepath); },
       commentsPosting() { return !!this.commentsPosts[this.commentsDraftKey]?.pending; },
       commentsPostError() { return this.commentsPostErrors[this.commentsDraftKey] || ''; },
       commentsFileItems() { return this.commentsFileFeed.items; },
@@ -46,13 +43,13 @@
       commentsAllItems() { return this.commentsAllFeed.items; },
       commentsAllGroups() {
         const groups = new Map();
-        // The flat feed is newest first. Its first occurrence orders each file,
-        // and retaining the item references keeps read state per comment.
+        // The flat feed is newest first, so its first occurrence orders files by
+        // latest activity. Reverse only each group's new array for conversation order.
         for (const item of this.commentsAllItems) {
           if (!groups.has(item.filepath)) groups.set(item.filepath, { filepath: item.filepath, items: [] });
           groups.get(item.filepath).items.push(item);
         }
-        return [...groups.values()];
+        return [...groups.values()].map(group => ({ ...group, items: group.items.reverse() }));
       },
       commentsAllLoading() { return this.commentsAllFeed.loading; },
       commentsAllBusy() { return (!this.commentsAllFeed.loaded && this.commentsAllLoading) || this.commentsAllFeed.loadingMore; },
@@ -161,6 +158,25 @@
         this.commentsUnreadTotal = Number(result?.total) || 0;
         this.commentsUnreadFiles = Object.fromEntries((result?.files || []).map(item => [item.filepath, Number(item.count) || 0]));
       },
+      commentsCaptureReplyFocus() {
+        const input = document.activeElement, root = this.$refs.commentsAllList;
+        if (!this.commentsSurfaceVisible('all') || !input?.matches?.('.commentsQuickReply input') || !root?.contains(input)) return null;
+        return { input, root, context: this.commentsCapture(), sourceHash: this.sourceIdentity,
+          top: input.getBoundingClientRect().top, start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection };
+      },
+      async commentsRestoreReplyFocus(saved) {
+        if (!saved) return;
+        await this.$nextTick();
+        const { input, root } = saved;
+        if (!this.commentsCurrent(saved.context) || saved.sourceHash !== this.sourceIdentity || !this.commentsSurfaceVisible('all')
+          || !input.isConnected || root !== this.$refs.commentsAllList || !root.contains(input)
+          || (document.activeElement !== input && document.activeElement !== document.body)) return;
+        // Moving a keyed card can blur its input. Keep a reply in progress at the
+        // same viewport position, without taking focus from another control.
+        input.focus({ preventScroll: true });
+        if (saved.start != null && saved.end != null) input.setSelectionRange(saved.start, saved.end, saved.direction || 'none');
+        root.scrollTop += input.getBoundingClientRect().top - saved.top;
+      },
       async commentsRefreshUnread() {
         if (!this.commentsEligible || this._commentsUnreadTask || this._commentsReadTask) return;
         const ctx = this.commentsCapture(), task = {};
@@ -200,6 +216,7 @@
           const result = await ctx.client.request('/v1/comments?' + params, {}, ctx.auth);
           if (!current()) return;
           const incoming = (result.items || []).map(item => ({ ...item, unread: item.unread && !this._commentsReadDone?.has(item.id) }));
+          const replyFocus = surface === 'all' ? this.commentsCaptureReplyFocus() : null;
           // Only a server-loaded row establishes continuity. A newly posted row
           // can overlap the head even when many unseen pages arrived in between.
           const overlaps = incoming.some(item => feed.loadedIds.includes(item.id));
@@ -217,6 +234,7 @@
             feed.loadedIds = incoming.map(item => item.id);
           }
           feed.loaded = true; feed.error = '';
+          await this.commentsRestoreReplyFocus(replyFocus);
           await this.commentsObserveVisible();
         } catch (error) {
           if (current() && !error.stale) feed.error = 'Could not load comments. ' + error.message;
@@ -230,26 +248,42 @@
           }
         }
       },
-      async commentsSubmit() {
-        if (!this.commentsCanPost || this.commentsPosting) return false;
-        const key = this.commentsDraftKey, draft = this.commentsFileDraft, body = draft.trim();
+      commentsCanPostTo(filepath) {
+        return this.commentsEligible && typeof filepath === 'string' && !!filepath && /^[a-f0-9]{64}$/.test(this.sourceIdentity || '')
+          && !this.versionStorageLoading && !this._importingSource && !this._commentsDestroyed;
+      },
+      commentsReplyKey(filepath) {
+        return JSON.stringify(['reply', this.cloudUser?.id, this.cloudUser?.language, this.gameVersion, filepath, this.sourceIdentity]);
+      },
+      commentsReplyDraft(filepath) { return this.commentsDrafts[this.commentsReplyKey(filepath)] || ''; },
+      commentsSetReplyDraft(filepath, value) { this.commentsDrafts[this.commentsReplyKey(filepath)] = String(value); },
+      commentsReplyPosting(filepath) { return !!this.commentsPosts[this.commentsReplyKey(filepath)]?.pending; },
+      commentsReplyError(filepath) { return this.commentsPostErrors[this.commentsReplyKey(filepath)] || ''; },
+      commentsCanReply(filepath) { return this.commentsCanPostTo(filepath); },
+      commentsSubmitReply(filepath) { return this.commentsSendDraft(this.commentsReplyKey(filepath), filepath); },
+      commentsSubmit() { return this.commentsSendDraft(this.commentsDraftKey, this.commentsFilepath); },
+      async commentsSendDraft(key, filepath) {
+        if (!this.commentsCanPostTo(filepath) || this.commentsPosts[key]?.pending) return false;
+        const draft = this.commentsDrafts[key] || '', body = draft.trim();
         if (!body || body.length > 10000) {
           this.commentsPostErrors[key] = body ? 'Keep your comment within 10,000 characters.' : 'Write a comment first.';
           return false;
         }
-        const ctx = this.commentsCapture(), filepath = this.commentsFilepath, sourceHash = this.sourceIdentity;
+        const ctx = this.commentsCapture(), sourceHash = this.sourceIdentity;
         const previous = this.commentsPosts[key];
         const task = { body, mutationId: previous?.body === body ? previous.mutationId : crypto.randomUUID(), pending: true };
-        this.commentsPosts[key] = task; this.commentsPostErrors[key] = '';
+        this.commentsPosts[key] = task;
         try {
           const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, mutationId: task.mutationId } }, ctx.auth);
           if (this.commentsDrafts[key] === draft) this.commentsDrafts[key] = '';
           delete this.commentsPosts[key]; delete this.commentsPostErrors[key];
           if (!this.commentsCurrent(ctx)) return true;
+          const replyFocus = this.commentsCaptureReplyFocus();
           if (result?.item) {
             if (this.commentsFilepath === filepath) this.commentsFileFeed.items = ordered([...this.commentsFileFeed.items, result.item]);
             if (this.commentsAllFeed.items.length || this.commentsAllVisible) this.commentsAllFeed.items = ordered([...this.commentsAllFeed.items, result.item]);
           }
+          await this.commentsRestoreReplyFocus(replyFocus);
           await this.commentsObserveVisible();
           return true;
         } catch (error) {

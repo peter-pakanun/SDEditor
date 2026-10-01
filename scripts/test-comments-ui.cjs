@@ -16,7 +16,7 @@ const node = id => ({ dataset: { commentId: String(id), commentsSurface: 'file' 
 function fixture(handler = async () => ({ total: 0, files: [], items: [], nextCursor: null })) {
   const timers = new Map(), observers = [], calls = [];
   let timerId = 0, uuid = 0;
-  const document = { hidden: false, activeElement: null, addEventListener() {}, removeEventListener() {} };
+  const document = { hidden: false, activeElement: null, body: {}, addEventListener() {}, removeEventListener() {} };
   const window = { addEventListener() {}, removeEventListener() {} };
   class Observer {
     constructor(callback) { this.callback = callback; this.nodes = []; observers.push(this); }
@@ -46,10 +46,22 @@ function fixture(handler = async () => ({ total: 0, files: [], items: [], nextCu
   return { app, document, calls, observers, timers, destroy: () => mixin.beforeUnmount.call(app) };
 }
 
+function activeReplyInput({ app, document }) {
+  const focusCalls = [], selections = [];
+  const input = { isConnected: true, top: 400, selectionStart: 2, selectionEnd: 5, selectionDirection: 'backward',
+    matches: selector => selector === '.commentsQuickReply input', getBoundingClientRect() { return { top: this.top }; },
+    focus(options) { focusCalls.push(options); document.activeElement = this; },
+    setSelectionRange(...selection) { selections.push(selection); },
+  };
+  const root = { scrollTop: 500, contains: element => element === input && input.isConnected, querySelectorAll: () => [] };
+  app.editorVisible = false; app.commentsAllVisible = true; app.$refs.commentsAllList = root; document.activeElement = input;
+  return { input, root, focusCalls, selections };
+}
+
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
 
-test('all comments group nonadjacent rows by exact filepath across languages and hashes', async () => {
+test('all comments group by latest activity with oldest-first conversation rows across languages and hashes', async () => {
   const { app } = fixture();
   assert.equal(app.commentsAllGroups.length, 0);
   const items = [
@@ -63,17 +75,18 @@ test('all comments group nonadjacent rows by exact filepath across languages and
   app.commentsAllFeed.items = items;
   const groups = app.commentsAllGroups;
   assert.deepEqual(copy(groups.map(group => ({ filepath: group.filepath, ids: group.items.map(item => item.id) }))), [
-    { filepath: 'Metadata/other.txt', ids: [9, 7] },
-    { filepath: 'Metadata/test.txt', ids: [8, 5] },
+    { filepath: 'Metadata/other.txt', ids: [7, 9] },
+    { filepath: 'Metadata/test.txt', ids: [5, 8] },
     { filepath: 'Metadata/third.txt', ids: [6] },
     { filepath: 'Metadata/Test.txt', ids: [4] },
   ]);
   assert.equal(app.commentsAllItems, items);
+  assert.deepEqual(items.map(item => item.id), [9, 8, 7, 6, 5, 4]);
   for (const group of groups) {
     for (const item of group.items) assert.equal(item, items.find(original => original.id === item.id));
   }
-  assert.equal(groups[0].items[1].unread, false);
-  assert.equal(groups[0].items[0].unread, true);
+  assert.equal(groups[0].items[0].unread, false);
+  assert.equal(groups[0].items[1].unread, true);
 });
 
 test('file groups span loaded pages and reorder by their newest comment after refresh', async () => {
@@ -86,14 +99,14 @@ test('file groups span loaded pages and reorder by their newest comment after re
   const { app, calls } = fixture(async () => pages.shift());
   app.editorVisible = false; app.commentsAllVisible = true;
   await app.commentsRefreshAll();
-  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[12, 10], [11]]);
+  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[10, 12], [11]]);
   await app.commentsLoadMoreAll();
-  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[12, 10, 8], [11, 9], [7]]);
+  assert.deepEqual(copy(app.commentsAllGroups.map(group => group.items.map(item => item.id))), [[8, 10, 12], [9, 11], [7]]);
   assert.match(calls[1].url, /before=10/);
   await app.commentsRefreshAll();
   assert.deepEqual(copy(app.commentsAllGroups.map(group => ({ filepath: group.filepath, ids: group.items.map(item => item.id) }))), [
-    { filepath: 'Metadata/other.txt', ids: [13, 11, 9] },
-    { filepath: 'Metadata/test.txt', ids: [12, 10, 8] },
+    { filepath: 'Metadata/other.txt', ids: [9, 11, 13] },
+    { filepath: 'Metadata/test.txt', ids: [8, 10, 12] },
     { filepath: 'Metadata/third.txt', ids: [7] },
   ]);
   assert.deepEqual(Array.from(app.commentsAllItems, item => item.id), [13, 12, 11, 10, 9, 8, 7]);
@@ -116,10 +129,232 @@ test('grouped rows retain shared references and acknowledge only the visible com
   ]);
   await app.commentsMarkVisibleRead();
   assert.deepEqual(calls[0].options.body.ids, [9]);
-  assert.equal(group.items[0], app.commentsAllItems[0]);
-  assert.equal(group.items[0].unread, false);
-  assert.equal(group.items[1].unread, true);
+  assert.equal(group.items[1], app.commentsAllItems[0]);
+  assert.equal(group.items[1].unread, false);
+  assert.equal(group.items[0].unread, true);
   assert.equal(app.commentsUnreadTotal, 1);
+});
+
+test('quick replies target the card path and current source version, including absent source files', async () => {
+  const filepath = 'Metadata/removed-from-current-source.txt';
+  const accepted = comment(20, { filepath, actorId: 'account-a', actorName: 'Signed-in translator', language: 'Thai', unread: false });
+  const { app, calls } = fixture(async () => ({ item: accepted }));
+  app.editorVisible = false; app.commentsAllVisible = true; app.descs = [];
+  app.commentsAllFeed.items = [comment(10), comment(9, { filepath, sourceHash: HASH_B, language: 'French' })];
+  app.commentsFileFeed.items = [comment(10)];
+  const editorDesc = app.editorCurrentEditingDesc;
+  app.commentsSetReplyDraft(filepath, '  Reply to the older version  ');
+  assert.equal(app.commentsCanReply(filepath), true);
+  assert.equal(await app.commentsSubmitReply(filepath), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/v1/comments');
+  assert.deepEqual(calls[0].options.body, {
+    game: 'poe1', filepath, sourceHash: HASH_A, body: 'Reply to the older version', mutationId: 'mutation-1',
+  });
+  assert.equal(calls[0].auth.account, 'account-a');
+  assert.equal(app.commentsAllItems[0], accepted);
+  assert.equal(app.commentsAllItems[0].language, 'Thai');
+  assert.equal(app.editorCurrentEditingDesc, editorDesc);
+  assert.deepEqual(Array.from(app.commentsFileItems, item => item.id), [10]);
+  assert.equal(app.commentsAllGroups[0].filepath, filepath);
+  assert.deepEqual(Array.from(app.commentsAllGroups[0].items, item => item.id), [9, 20]);
+  assert.equal(app.commentsReplyDraft(filepath), '');
+});
+
+test('quick reply drafts are independent from full comments and scoped to file, account, team, game, and hash', async () => {
+  const { app } = fixture();
+  const filepath = app.commentsFilepath;
+  app.commentsFileDraft = 'Long file composer draft';
+  app.commentsSetReplyDraft(filepath, 'Quick reply');
+  app.commentsSetReplyDraft('Metadata/other.txt', 'Other card reply');
+  assert.equal(app.commentsFileDraft, 'Long file composer draft');
+  assert.equal(app.commentsReplyDraft(filepath), 'Quick reply');
+  assert.equal(app.commentsReplyDraft('Metadata/other.txt'), 'Other card reply');
+  app.cloudUser.id = 'account-b'; assert.equal(app.commentsReplyDraft(filepath), ''); app.cloudUser.id = 'account-a';
+  app.cloudUser.language = 'German'; assert.equal(app.commentsReplyDraft(filepath), ''); app.cloudUser.language = 'Thai';
+  app.gameVersion = 'poe2'; assert.equal(app.commentsReplyDraft(filepath), ''); app.gameVersion = 'poe1';
+  app.sourceIdentity = HASH_B; assert.equal(app.commentsReplyDraft(filepath), ''); app.sourceIdentity = HASH_A;
+  app.lang = 'French'; assert.equal(app.commentsReplyDraft(filepath), 'Quick reply');
+  assert.equal(app.commentsFileDraft, 'Long file composer draft');
+});
+
+test('quick replies refuse unassigned sessions, missing hashes, and changing source contexts', async () => {
+  for (const block of [
+    app => { app.cloudSignedIn = false; },
+    app => { app.cloudUser.language = null; },
+    app => { app.sourceIdentity = ''; },
+    app => { app.sourceIdentity = 'invalid-hash'; },
+    app => { app.versionStorageLoading = true; },
+    app => { app._importingSource = true; },
+    app => { app.gameVersion = ''; },
+    app => { app._commentsDestroyed = true; },
+  ]) {
+    const { app, calls } = fixture();
+    const filepath = 'Metadata/other.txt';
+    block(app);
+    app.commentsSetReplyDraft(filepath, 'Keep until available');
+    assert.equal(app.commentsCanReply(filepath), false);
+    assert.equal(await app.commentsSubmitReply(filepath), false);
+    assert.equal(app.commentsReplyDraft(filepath), 'Keep until available');
+    assert.equal(calls.length, 0);
+  }
+  const { app, calls } = fixture();
+  assert.equal(app.commentsCanReply(''), false);
+  assert.equal(await app.commentsSubmitReply(''), false);
+  assert.equal(calls.length, 0);
+});
+
+test('failed quick replies keep the draft and error while an idempotent retry is pending', async () => {
+  const retry = deferred(); let attempts = 0;
+  const filepath = 'Metadata/other.txt';
+  const { app, calls } = fixture(async () => {
+    if (++attempts === 1) throw new Error('Connection lost after send');
+    return retry.promise;
+  });
+  app.commentsSetReplyDraft(filepath, 'Keep this reply');
+  assert.equal(await app.commentsSubmitReply(filepath), false);
+  assert.equal(app.commentsReplyDraft(filepath), 'Keep this reply');
+  assert.equal(app.commentsReplyPosting(filepath), false);
+  assert.match(app.commentsReplyError(filepath), /Connection lost/);
+  assert.equal(app.commentsReplyError(app.commentsFilepath), '');
+  const send = app.commentsSubmitReply(filepath);
+  assert.equal(app.commentsReplyPosting(filepath), true);
+  assert.match(app.commentsReplyError(filepath), /Connection lost/);
+  assert.equal(await app.commentsSubmitReply(filepath), false);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.body.mutationId, calls[1].options.body.mutationId);
+  retry.resolve({ item: comment(20, { filepath, unread: false }) });
+  assert.equal(await send, true);
+  assert.equal(app.commentsReplyError(filepath), '');
+  assert.equal(app.commentsReplyDraft(filepath), '');
+  assert.equal(app.commentsReplyPosting(filepath), false);
+});
+
+test('parallel card replies preserve independently edited inputs during in-flight posts', async () => {
+  const filepathA = 'Metadata/first.txt', filepathB = 'Metadata/second.txt';
+  const pendingA = deferred(), pendingB = deferred();
+  const { app, calls } = fixture((_url, options) => options.body.filepath === filepathA ? pendingA.promise : pendingB.promise);
+  app.commentsSetReplyDraft(filepathA, 'First card'); app.commentsSetReplyDraft(filepathB, 'Second card');
+  const sendA = app.commentsSubmitReply(filepathA), sendB = app.commentsSubmitReply(filepathB);
+  assert.equal(app.commentsReplyPosting(filepathA), true);
+  assert.equal(app.commentsReplyPosting(filepathB), true);
+  assert.equal(await app.commentsSubmitReply(filepathA), false);
+  app.commentsSetReplyDraft(filepathA, 'Next thought typed before reply finishes');
+  pendingB.resolve({ item: comment(20, { filepath: filepathB, unread: false }) });
+  await sendB;
+  assert.equal(app.commentsReplyDraft(filepathB), '');
+  assert.equal(app.commentsReplyPosting(filepathA), true);
+  pendingA.resolve({ item: comment(21, { filepath: filepathA, unread: false }) });
+  await sendA;
+  assert.equal(app.commentsReplyDraft(filepathA), 'Next thought typed before reply finishes');
+  assert.equal(app.commentsReplyPosting(filepathA), false);
+  assert.equal(calls.length, 2);
+  assert.notEqual(calls[0].options.body.mutationId, calls[1].options.body.mutationId);
+});
+
+test('late quick reply responses cannot mix account or game feeds or clear another source draft', async () => {
+  for (const change of ['account', 'game', 'source']) {
+    const pending = deferred(), filepath = 'Metadata/other.txt';
+    const { app } = fixture(() => pending.promise);
+    app.editorVisible = false; app.commentsAllVisible = true;
+    app.commentsSetReplyDraft(filepath, 'Submitted in original context');
+    const send = app.commentsSubmitReply(filepath);
+    if (change === 'account') app.cloudUser.id = 'account-b';
+    if (change === 'game') app.gameVersion = 'poe2';
+    if (change === 'source') app.sourceIdentity = HASH_B;
+    app.commentsSetReplyDraft(filepath, 'Keep new context draft');
+    pending.resolve({ item: comment(20, { filepath, unread: false }) });
+    assert.equal(await send, true);
+    assert.equal(app.commentsReplyDraft(filepath), 'Keep new context draft');
+    assert.equal(app.commentsReplyPosting(filepath), false);
+    if (change === 'source') {
+      assert.equal(app.commentsAllItems.length, 1);
+      assert.equal(app.commentsDifferentHash(app.commentsAllItems[0]), true);
+    } else assert.equal(app.commentsAllItems.length, 0);
+  }
+});
+
+test('changing a failed reply body creates a new mutation while leaving other drafts untouched', async () => {
+  const { app, calls } = fixture(async () => { throw new Error('Offline'); });
+  const filepath = app.commentsFilepath;
+  app.commentsFileDraft = 'Full composer stays';
+  app.commentsSetReplyDraft(filepath, 'First reply'); await app.commentsSubmitReply(filepath);
+  app.commentsSetReplyDraft(filepath, 'Changed reply'); await app.commentsSubmitReply(filepath);
+  assert.notEqual(calls[0].options.body.mutationId, calls[1].options.body.mutationId);
+  assert.equal(app.commentsReplyDraft(filepath), 'Changed reply');
+  assert.equal(app.commentsFileDraft, 'Full composer stays');
+});
+
+test('posting a quick reply retains input focus, selection, and viewport position when its card moves', async () => {
+  const filepath = 'Metadata/other.txt';
+  const state = fixture(async () => ({ item: comment(20, { filepath, unread: false }) }));
+  const { app, document } = state;
+  const { input, root, focusCalls, selections } = activeReplyInput(state);
+  app.commentsAllFeed.items = [comment(10), comment(9, { filepath })];
+  app.commentsSetReplyDraft(filepath, 'New reply');
+  let moved = false;
+  app.$nextTick = async () => {
+    if (!moved && app.commentsAllItems[0]?.id === 20) {
+      moved = true; input.top = 100; document.activeElement = document.body;
+    }
+  };
+  await app.commentsSubmitReply(filepath);
+  assert.equal(document.activeElement, input);
+  assert.deepEqual(copy(focusCalls), [{ preventScroll: true }]);
+  assert.deepEqual(selections, [[2, 5, 'backward']]);
+  assert.equal(root.scrollTop, 200);
+});
+
+test('background and older-page feed changes preserve an active quick reply at its viewport offset', async () => {
+  for (const append of [false, true]) {
+    const state = fixture(async () => ({ items: append ? [comment(8)] : [comment(11), comment(10)], nextCursor: append ? null : 10 }));
+    const { app, document } = state;
+    const { input, root, focusCalls } = activeReplyInput(state);
+    Object.assign(app.commentsAllFeed, { items: [comment(10)], loaded: true, loadedIds: [10], cursor: 10 });
+    let moved = false;
+    app.$nextTick = async () => {
+      if (!moved) { moved = true; input.top = 460; document.activeElement = document.body; }
+    };
+    await (append ? app.commentsLoadMoreAll() : app.commentsRefreshAll());
+    assert.equal(document.activeElement, input);
+    assert.equal(root.scrollTop, 560);
+    assert.equal(focusCalls.length, 1);
+  }
+});
+
+test('reply focus preservation respects a newly focused control, detached card, or changed context', async () => {
+  for (const interruption of ['focus', 'detached', 'account', 'source']) {
+    const state = fixture();
+    const { app, document } = state;
+    const { input, root, focusCalls } = activeReplyInput(state);
+    const saved = app.commentsCaptureReplyFocus();
+    const anotherControl = { name: 'Newly focused button' };
+    app.$nextTick = async () => {
+      document.activeElement = interruption === 'focus' ? anotherControl : document.body;
+      if (interruption === 'detached') input.isConnected = false;
+      if (interruption === 'account') app.cloudUser.id = 'account-b';
+      if (interruption === 'source') app.sourceIdentity = HASH_B;
+      input.top = 100;
+    };
+    await app.commentsRestoreReplyFocus(saved);
+    assert.equal(focusCalls.length, 0);
+    assert.equal(root.scrollTop, 500);
+    assert.equal(document.activeElement, interruption === 'focus' ? anotherControl : document.body);
+  }
+});
+
+test('a pending reply response does not reclaim an input the user already left', async () => {
+  const pending = deferred(), state = fixture(() => pending.promise);
+  const { app, document } = state;
+  const { focusCalls } = activeReplyInput(state);
+  app.commentsSetReplyDraft(app.commentsFilepath, 'Send this');
+  const send = app.commentsSubmitReply(app.commentsFilepath);
+  const anotherControl = { name: 'Open file' };
+  document.activeElement = anotherControl;
+  pending.resolve({ item: comment(20, { unread: false }) });
+  await send;
+  assert.equal(document.activeElement, anotherControl);
+  assert.equal(focusCalls.length, 0);
 });
 
 test('all assigned teams can read across selected language and source hash', async () => {
