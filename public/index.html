@@ -381,7 +381,7 @@
       <footer class="workspaceFooter">
         <div class="workspaceFooterSummary">
         <div class="workspaceStatus" aria-label="Workspace status counts">
-          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Source version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Version {{ collaborationShortVersion }}</span>
+          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Export version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Export Version {{ collaborationShortVersion }}</span>
           <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
           <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill error" title="Files with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ diagnosticScanErrorFileCount }}</strong></span>
@@ -760,7 +760,7 @@
         <header class="diagnosticScanHeading">
           <div>
             <h2 id="diagnosticScanDialogTitle" ref="diagnosticScanHeading" tabindex="-1">Scan diagnostics</h2>
-            <p id="diagnosticScanDialogDescription">Check every loaded {{ lang }} file, including files hidden by filters.</p>
+            <p id="diagnosticScanDialogDescription">Check every loaded {{ lang }} file, including files hidden by search or status filters. DNT files are skipped when Hide DNT is enabled.</p>
           </div>
           <button type="button" class="diagnosticScanClose" @click="closeDiagnosticScanDialog" aria-label="Close diagnostic scan (Esc)">Close</button>
         </header>

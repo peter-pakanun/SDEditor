@@ -157,6 +157,80 @@ test('default manual scan finds consistency and reuses warnings only for unchang
   assert.deepEqual(calls, scannedCalls, 'Rendering or editing cached results must not perform another analysis.');
 });
 
+test('Hide DNT excludes files from every selected check and from consistency peers', async () => {
+  const { editor, calls } = loadEditor();
+  const visible = description('visible', 'Fire damage {1}%', 'ไฟ {1}%');
+  const hidden = description('hidden', 'Fire damage {1}%', ' ผิด {1}');
+  hidden.isDNT = true;
+  const error = description('error', 'Duration {2}', 'ระยะเวลา');
+  editor.descs = [visible, hidden, error];
+  editor.diagnosticScanChecks = only('whitespace', 'variables', 'consistency', 'terminology');
+  editor.hideDNT = true;
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanTotal, 2);
+  assert.equal(editor.diagnosticScanProcessed, 2);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), [visible.filepath, error.filepath]);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+  assert.equal(editor.diagnosticScanResults[visible.filepath].consistencyDiagnostics.length, 0,
+    'A hidden DNT translation must not create a conflict on a scanned file.');
+  assert.deepEqual(calls, { terminology: 2, consistencyIndex: 1, consistency: 2 });
+
+  editor.hideDNT = false;
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanTotal, 3);
+  assert.equal(editor.diagnosticScanProcessed, 3);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), [visible.filepath, hidden.filepath, error.filepath]);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanErrorFileCount, 2);
+  assert.equal(editor.diagnosticScanResults[visible.filepath].consistencyDiagnostics[0].code, 'inconsistent-translation');
+  assert.ok(editor.diagnosticScanResults[hidden.filepath].diagnostics.some(item => item.code === 'leading-whitespace'));
+  assert.ok(editor.diagnosticScanResults[hidden.filepath].terminologyDiagnostics.length);
+  assert.deepEqual(calls, { terminology: 5, consistencyIndex: 2, consistency: 5 });
+});
+
+test('a scan with only hidden DNT files completes with no eligible files or issues', async () => {
+  const { editor, calls } = loadEditor();
+  editor.descs = [description('hidden', 'Fire {1}%', ' ผิด {1}')];
+  editor.descs[0].isDNT = true;
+  editor.hideDNT = true;
+  editor.diagnosticScanChecks = only('whitespace', 'variables', 'consistency', 'terminology');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanTotal, 0);
+  assert.equal(editor.diagnosticScanProcessed, 0);
+  assert.equal(editor.diagnosticScanPercent, 100);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.equal(editor.diagnosticScanErrorFileCount, 0);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+  assert.equal(calls.terminology, 0);
+  assert.equal(calls.consistency, 0);
+});
+
+test('toggling Hide DNT in either direction invalidates a completed scan without rescanning', async () => {
+  const { editor, config, calls, timers } = loadEditor();
+  const { second } = conflictingEntries(editor);
+  second.isDNT = true;
+  editor.diagnosticScanChecks = only('consistency');
+  editor.hideDNT = false;
+  for (const hideDNT of [true, false]) {
+    await editor.scanAllDiagnostics();
+    assert.equal(editor.diagnosticScanCompleted, true);
+    const beforeToggle = { ...calls };
+    const timerCount = timers.length;
+    editor.hideDNT = hideDNT;
+    config.watch.hideDNT.call(editor);
+    assert.equal(editor.diagnosticScanCompleted, false);
+    assert.equal(editor.diagnosticScanRunning, false);
+    assert.equal(editor.diagnosticScanTotal, 0);
+    assert.equal(editor.diagnosticScanWarningFileCount, 0);
+    assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+    assert.deepEqual(calls, beforeToggle);
+    assert.equal(timers.length, timerCount, 'Changing Hide DNT must not schedule an automatic scan.');
+  }
+});
+
 test('terminology is opt-in and cached table warnings disappear after a draft change', async () => {
   const { editor, calls } = loadEditor();
   const table = description('table', 'Fire@Fire damage', 'ผิด@ไฟ');
@@ -231,6 +305,32 @@ test('a save during a yielded scan cancels it without publishing partial results
   assert.equal(editor.diagnosticScanCompleted, false);
   assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
   assert.deepEqual(calls, interruptedCalls);
+});
+
+test('toggling Hide DNT during a yielded scan cancels its partial results without restarting', async () => {
+  const { editor, config, calls, timers } = loadEditor();
+  editor.descs = Array.from({ length: 26 }, (_, index) => description(`entry-${index}`, 'Fire damage', `ผิด ${index}`));
+  editor.descs[25].isDNT = true;
+  editor.hideDNT = false;
+  editor.diagnosticScanChecks = only('consistency', 'terminology');
+  const scanning = editor.scanAllDiagnostics();
+  while (editor.diagnosticScanRunning && editor.diagnosticScanProcessed < 25) {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  assert.equal(editor.diagnosticScanProcessed, 25);
+  const interruptedCalls = { ...calls };
+  const timerCount = timers.length;
+  editor.hideDNT = true;
+  config.watch.hideDNT.call(editor);
+  assert.equal(timers.length, timerCount, 'Changing Hide DNT must not schedule a replacement scan.');
+  await scanning;
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanCompleted, false);
+  assert.equal(editor.diagnosticScanProcessed, 0);
+  assert.equal(editor.diagnosticScanTotal, 0);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+  assert.deepEqual(calls, interruptedCalls, 'The cancelled scan must not analyze its remaining file.');
 });
 
 test('closing a running scan keeps it available and Stop prevents partial results', async () => {

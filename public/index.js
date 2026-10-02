@@ -404,6 +404,7 @@ const config = Vue.defineComponent({
     },
     hideDNT() {
       this.saveSettings();
+      this.clearDiagnosticScanResults();
       if (this.sourceLoaded) this.filterDesc();
     },
     highlightDict() {
@@ -536,6 +537,10 @@ const config = Vue.defineComponent({
     },
     hasDiagnosticScanSelection() {
       return this.diagnosticScanTypes.some(type => this.diagnosticScanChecks[type.key]);
+    },
+    diagnosticScanDescs() {
+      return (Array.isArray(this.descs) ? this.descs : [])
+        .filter(desc => !(this.hideDNT && desc.isDNT));
     },
     diagnosticScanPercent() {
       if (!this.diagnosticScanTotal) return this.diagnosticScanCompleted ? 100 : 0;
@@ -1937,7 +1942,7 @@ const config = Vue.defineComponent({
       const checks = this.diagnosticScanAppliedChecks;
       const filepaths = new Set(resolver.entries.map(entry => entry.filepath));
       const consistencyIndex = checks.consistency
-        ? window.TranslationDiagnostics.createConsistencyIndex(this.descs, resolver.lang) : null;
+        ? window.TranslationDiagnostics.createConsistencyIndex(this.diagnosticScanDescs, resolver.lang) : null;
       const results = { ...this.diagnosticScanResults };
       // Include unchanged peers: their shared conflict is resolved too. Keep
       // unrelated findings and use the completed scan's checks, not dialog edits.
@@ -2000,7 +2005,7 @@ const config = Vue.defineComponent({
     },
     async scanAllDiagnostics() {
       if (this.diagnosticScanRunning || !this.hasDiagnosticScanSelection) return;
-      const descs = Array.isArray(this.descs) ? [...this.descs] : [];
+      const descs = this.diagnosticScanDescs;
       const scanLang = this.lang;
       const checks = { ...this.diagnosticScanChecks };
       const runId = ++this.diagnosticScanRunId;

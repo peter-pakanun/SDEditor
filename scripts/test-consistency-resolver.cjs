@@ -215,6 +215,45 @@ test('resolution preserves unrelated diagnostic results and refreshes matching p
   assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [other.filepath, otherPeer.filepath]);
 });
 
+test('resolution refresh keeps hidden DNT conflicts excluded and preserves unrelated scan results', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', ['Fire damage', 'Cold damage'], ['ไฟหนึ่ง', 'เย็นหนึ่ง']);
+  const peer = description('peer', ['Fire damage'], ['ไฟสอง']);
+  const hidden = description('hidden', ['Cold damage'], ['เย็นซ่อน']);
+  hidden.isDNT = true;
+  const other = description('other', ['Lightning damage'], ['ฟ้าหนึ่ง']);
+  const otherPeer = description('other-peer', ['Lightning damage'], ['ฟ้าสอง']);
+  const error = description('error', ['Duration {2}'], ['ระยะเวลา']);
+  editor.descs = [first, peer, hidden, other, otherPeer, error];
+  editor.hideDNT = true;
+  openFile(editor, first);
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 4);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+  const unchanged = new Map([other, otherPeer, error].map(desc => [desc.filepath, editor.diagnosticScanResults[desc.filepath]]));
+  const analyzed = [];
+  const analyze = editor.analyzeDescDiagnostics;
+  editor.analyzeDescDiagnostics = function (desc, ...args) {
+    analyzed.push(desc.filepath);
+    return analyze.call(this, desc, ...args);
+  };
+  editor.scanAllDiagnostics = async () => { throw new Error('A resolution must not rerun the full scan.'); };
+
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanTotal, 5);
+  assert.equal(editor.diagnosticScanProcessed, 5);
+  assert.deepEqual(analyzed.sort(), [first.filepath, peer.filepath].sort());
+  assert.equal(editor.diagnosticScanResults[hidden.filepath], undefined);
+  assert.equal(editor.diagnosticScanResults[first.filepath].consistencyDiagnostics.length, 0,
+    'Refreshing the resolved file must not introduce a conflict against its hidden DNT peer.');
+  assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+  for (const [filepath, result] of unchanged) assert.equal(editor.diagnosticScanResults[filepath], result);
+});
+
 test('resolution keeps completed scan categories after changing choices for the next scan', async () => {
   const { editor } = loadEditor();
   const first = description('first', ['Fire damage', 'Cold damage'], [' ผิดหนึ่ง', 'ผิดสาม']);
