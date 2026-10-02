@@ -18,8 +18,8 @@ function loadEditor() {
           (_, entity) => ({ lt: '<', gt: '>', quot: '"', '#039': "'", amp: '&' })[entity]); } };
       },
     },
-    alert(message) { alerts.push(message); },
-    confirm(message) { confirmations.push(message); return false; },
+    alert() { assert.fail('Native alerts must not be used'); },
+    confirm() { assert.fail('Native confirmations must not be used'); },
     Vue: {
       defineComponent(value) { config = value; return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; },
@@ -32,6 +32,8 @@ function loadEditor() {
   const integration = window.CollaborationIntegration.mixin;
   const editor = Object.assign(integration.data(), config.data(), integration.methods, config.methods, {
     lang: 'Thai', dictionary: [],
+    appAlert: async message => { alerts.push(message); },
+    appConfirm: async message => { confirmations.push(message); return false; },
     // List rendering is unrelated to the diagnostic scan and save guard.
     filterDesc() {},
   });

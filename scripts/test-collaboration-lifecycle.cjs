@@ -53,7 +53,7 @@ function harness({ realImport = false } = {}) {
     } };
   const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout, Blob, FileReader: FixtureFileReader,
     JSZip: class { async loadAsync(file) { return { files: file.files }; } },
-    alert: value => alerts.push(value), confirm: value => { confirmations.push(value); return approved; },
+    alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
@@ -65,6 +65,8 @@ function harness({ realImport = false } = {}) {
   const editor = Object.assign(mixin.data(), config.data(), mixin.methods, config.methods, {
     lang: 'Thai', gameVersion: 'poe1', sourceIdentity: 'old-hash', sourceLoaded: true,
     cloudUser: { id: 'account-one' }, dictionary: [], $refs: {}, $nextTick: fn => { fn?.(); return Promise.resolve(); },
+    appAlert: async value => { alerts.push(value); },
+    appConfirm: async value => { confirmations.push(value); return approved; },
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {}, scheduleCollaboration() {},
   });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
@@ -302,6 +304,81 @@ test('declining conflict warning confirmation preserves the pending comparison',
   e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Empty translation' }] });
   assert.equal((await e.collabResolve('conflict', ['', ''])).status, 'conflict');
   assert.equal(confirmations.length, 1); assert.equal(saves, 0);
+});
+
+test('editing override cannot force a stale client after its dialog is accepted', async () => {
+  const { editor: e } = harness(); const answer = deferred(); let forced = 0;
+  const filepath = e.descs[0].filepath;
+  e._collaboration = { claim: async (file, options) => {
+    assert.equal(file, filepath);
+    if (options.force) { forced++; return { granted: true }; }
+    return { granted: false, peers: [{ name: 'Another translator' }] };
+  } };
+  e.appConfirm = () => answer.promise;
+  const claiming = e.claimCollaborationFile(filepath);
+  await tick(); e._collaboration = { claim: () => assert.fail('A new client must not receive the stale override') };
+  answer.resolve(true);
+  assert.equal(await claiming, false); assert.equal(forced, 0);
+});
+
+test('editing override cannot force a request that became stale during its dialog', async () => {
+  const { editor: e } = harness(); const answer = deferred(); let forced = 0, current = true;
+  e._collaboration = { leaveEdit() {}, claim: async (file, options) => {
+    if (options.force) { forced++; return { granted: true }; }
+    return { granted: false, peers: [] };
+  } };
+  e.appConfirm = () => answer.promise;
+  const claiming = e.claimCollaborationFile(e.descs[0].filepath, false, () => current);
+  await tick(); current = false; answer.resolve(true);
+  assert.equal(await claiming, false); assert.equal(forced, 0);
+});
+
+test('conflict warnings cannot authorize resolution after the workspace changes', async () => {
+  const { editor: e } = harness(); const answer = deferred(); let saves = 0;
+  const filepath = e.descs[0].filepath;
+  e._collaboration = { snapshot: () => ({ conflicts: [{ id: 'conflict', filepath }] }), resolve: async () => { saves++; } };
+  e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Empty translation' }] });
+  e.appConfirm = () => answer.promise;
+  const resolution = e.collabResolve('conflict', ['', '']);
+  await tick(); e.gameVersion = 'poe2'; e.sourceIdentity = 'new-source'; answer.resolve(true);
+  const result = await resolution;
+  assert.equal(saves, 0); assert.ok(result.stale || result.status === 'conflict');
+});
+
+test('small source archive waits for typed confirmation before parsing or writing', async () => {
+  const { editor: e, writes } = harness({ realImport: true }); const answer = deferred();
+  let prompts = 0, reads = 0;
+  const file = zipFixture(importText({ broken: false }));
+  const entry = file.files[repairedPath], read = entry.async;
+  entry.async = (...args) => { reads++; return read(...args); };
+  e.confirmProceedByTypingYes = () => { prompts++; return answer.promise; };
+  const importing = e.importUpdateZipFile(file);
+  await tick(); assert.equal(prompts, 1); assert.equal(writes.length, 0); assert.equal(reads, 0);
+  answer.resolve(false); await importing;
+  assert.equal(writes.length, 0); assert.equal(reads, 0); assert.equal(e.sourceIdentity, 'old-hash');
+});
+
+test('a full source archive in translated-import mode waits for YES before reading entries', async () => {
+  const { editor: e, writes } = harness({ realImport: true }); const answer = deferred();
+  let reads = 0, prompts = 0;
+  const file = zipFixture(importText({ broken: false, translated: 'ใหม่' }), { translated: true });
+  const entry = file.files[repairedPath], read = entry.async;
+  entry.async = (...args) => { reads++; return read(...args); };
+  e.countZipTxtFiles = () => 5000;
+  e.confirmProceedByTypingYes = () => { prompts++; return answer.promise; };
+  const importing = e.importTranslatedZipFile(file);
+  await tick(); assert.equal(prompts, 1); assert.equal(reads, 0); assert.equal(writes.length, 0);
+  answer.resolve(false); await importing;
+  assert.equal(reads, 0); assert.equal(writes.length, 0);
+});
+
+test('translated archive with an unexpected filename waits for confirmation and can be cancelled', async () => {
+  const { editor: e, writes } = harness({ realImport: true }); const answer = deferred();
+  const file = zipFixture(importText({ broken: false, translated: 'ใหม่' }), { translated: true });
+  file.name = 'Unexpected.zip'; e.appConfirm = () => answer.promise;
+  const importing = e.importTranslatedZipFile(file);
+  await tick(); assert.equal(writes.length, 0);
+  answer.resolve(false); await importing; assert.equal(writes.length, 0);
 });
 
 test('conflict resolution cannot remove a table column even when its text has no variables', async () => {

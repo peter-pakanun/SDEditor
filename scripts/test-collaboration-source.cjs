@@ -13,7 +13,9 @@ function fixture() {
       blob.arrayBuffer().then(bytes => { this.result = new TextDecoder(encoding).decode(bytes); this.onload?.(); }, error => this.onerror?.(error));
     }
   }
-  const context = vm.createContext({ Blob, FileReader, alert: value => alerts.push(value), console });
+  const context = vm.createContext({ Blob, FileReader,
+    window: { AppDialogs: { alert: async value => { alerts.push(value); } } },
+    alert: () => assert.fail('Native parser alerts must not be used'), console });
   for (const filename of ['helper.js', 'statDescParser.js', 'dummyFiles.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', filename), 'utf8'), context, { filename });
   }

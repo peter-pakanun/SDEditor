@@ -331,7 +331,7 @@ const config = Vue.defineComponent({
 
     const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
     if (!canUseOfflineStore) {
-      alert('This app requires IndexedDB for offline storage, but your browser does not support it.');
+      this.appAlert('This app requires IndexedDB for offline storage, but your browser does not support it.');
       return;
     }
 
@@ -759,6 +759,15 @@ const config = Vue.defineComponent({
     }
   },
   methods: {
+    appAlert(message, options) {
+      return window.AppDialogs.alert(message, options);
+    },
+    appConfirm(message, options) {
+      return window.AppDialogs.confirm(message, options);
+    },
+    appPrompt(message, options) {
+      return window.AppDialogs.prompt(message, options);
+    },
     toPlainForStorage(v) {
       try {
         if (typeof structuredClone === 'function') return structuredClone(v);
@@ -902,7 +911,7 @@ const config = Vue.defineComponent({
       } catch (error) {
         this.loadingProgress = 0;
         this.migrationInProgress = false;
-        alert('Migration failed. Your old data was left untouched.');
+        this.appAlert('Migration failed. Your old data was left untouched.');
         return;
       }
 
@@ -1178,11 +1187,22 @@ const config = Vue.defineComponent({
       if (!this.editorReady) return;
       const desc = this.editorCurrentEditingDesc;
       if (!desc || !desc.needsReview || this.editorSaving) return;
-      if (!confirm('Confirm that the translation does NOT need changes for this source revision? This clears Needs Review and marks the file for export.')) return;
+      const context = this.captureCollaborationContext();
+      const blocks = this.editorBlocks;
+      const lines = [...(desc.translations[this.lang] || [])];
+      const english = JSON.stringify(desc.translations.English);
+      const base = this._editorCollabBase;
       this.editorSaving = true;
       try {
-        const result = await this.persistTranslationBatch([{ desc, lines: desc.translations[this.lang] || [], needsReview: false }], 'confirm', {
-          bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+        if (!await this.appConfirm('Confirm that the translation does NOT need changes for this source revision? This clears Needs Review and marks the file for export.', {
+          title: 'Mark translation as reviewed?', confirmLabel: 'Mark reviewed',
+        })) return;
+        if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocks
+          || !this.collaborationContextCurrent(context) || this._editorCollabBase !== base
+          || JSON.stringify(desc.translations.English) !== english
+          || !arrayEquals(lines, desc.translations[this.lang] || [])) return;
+        const result = await this.persistTranslationBatch([{ desc, lines, needsReview: false }], 'confirm', {
+          context, bases: base ? { [desc.filepath]: base } : undefined,
         });
         if (result.stale || result.status === 'conflict') return;
         this.editorShowEnglishDiff = false;
@@ -1537,10 +1557,14 @@ const config = Vue.defineComponent({
         replace: String(word?.replace ?? "")
       });
     },
-    removeDictionaryAltRow(word, alt) {
+    async removeDictionaryAltRow(word, alt) {
       if (!word || !Array.isArray(word.alts)) return;
       let id = alt?._id;
-      if (!confirm(`Are you sure you want to remove alternate definition of ${String(alt?.find ?? "")}?`)) return;
+      const dictionary = this.dictionary;
+      if (!await this.appConfirm(`Are you sure you want to remove alternate definition of ${String(alt?.find ?? "")}?`, {
+        title: 'Remove alternate definition?', confirmLabel: 'Remove alternate',
+      })) return;
+      if (this.dictionary !== dictionary) return;
       if (id) {
         word.alts = word.alts.filter(a => String(a?._id) !== String(id));
       } else {
@@ -3991,6 +4015,7 @@ const config = Vue.defineComponent({
     handleKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
+      if (window.AppDialogs?.isOpen) return;
       if (this.editorVisible && (this.editorLoading || this.editorLoadError)) {
         if (e.key === 'Escape') { e.preventDefault(); this.editorExit(); }
         else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
@@ -4200,32 +4225,46 @@ const config = Vue.defineComponent({
     },
 
     async startFromScratch() {
-      const ok = this.confirmProceedByTypingYes(
-        `This will DELETE your ${this.formatGameVersion(this.gameVersion)} translated workspace data and ${this.formatGameVersion(this.gameVersion)} revision history stored in this browser.\n\n` +
-        "You will lose your working translated files and history for the selected version.\n\n" +
-        "Type YES to proceed:",
-        { confirmMessage: "Last warning: This cannot be undone. Proceed?" }
-      );
-      if (!ok) return;
+      if (this._resetConfirming) return;
+      this._resetConfirming = true;
+      const game = this.gameVersion;
+      const context = this.captureCollaborationContext?.();
+      const workspace = this.localDescs;
       try {
-        await window.OfflineStore?.clearWorkspace?.();
-      } catch (_) {
-      }
-      try {
-        await window.OfflineStore?.clearSource?.();
-      } catch (_) {
-      }
-      try {
-        await window.OfflineStore?.clearRevisions?.();
-      } catch (_) {
-      }
-      location.reload();
+        const ok = await this.confirmProceedByTypingYes(
+          `This will DELETE your ${this.formatGameVersion(this.gameVersion)} translated workspace data and ${this.formatGameVersion(this.gameVersion)} revision history stored in this browser.\n\n` +
+          "You will lose your working translated files and history for the selected version.\n\n" +
+          "Type YES to proceed:",
+          { confirmMessage: "Last warning: This cannot be undone. Proceed?" }
+        );
+        if (!ok) return;
+        if (this.gameVersion !== game || this.localDescs !== workspace
+          || (context && !this.collaborationContextCurrent(context))) return;
+        try {
+          await window.OfflineStore?.clearWorkspace?.(game);
+        } catch (_) {
+        }
+        try {
+          await window.OfflineStore?.clearSource?.(game);
+        } catch (_) {
+        }
+        try {
+          await window.OfflineStore?.clearRevisions?.(game);
+        } catch (_) {
+        }
+        location.reload();
+      } finally { this._resetConfirming = false; }
     },
 
-    confirmProceedByTypingYes(message, { confirmMessage } = {}) {
-      const typed = (prompt(message) || "").trim();
+    async confirmProceedByTypingYes(message, { confirmMessage } = {}) {
+      const typed = (await this.appPrompt(message, {
+        title: 'Confirm potentially destructive action', requiredText: 'YES',
+        confirmLabel: 'Continue', danger: true,
+      }) || "").trim();
       if (typed !== "YES") return false;
-      if (!confirm(confirmMessage || "Last warning: Proceed?")) return false;
+      if (!await this.appConfirm(confirmMessage || "Last warning: Proceed?", {
+        title: 'Last warning', confirmLabel: 'Proceed', danger: true,
+      })) return false;
       return true;
     },
     countZipTxtFiles(zip) {
@@ -4352,7 +4391,7 @@ const config = Vue.defineComponent({
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
-        alert('Please select a language in Settings first.');
+        this.appAlert('Please select a language in Settings first.');
         return;
       }
 
@@ -4367,14 +4406,14 @@ const config = Vue.defineComponent({
           zip = await new JSZip().loadAsync(file);
         } catch (error) {
           this.loadingProgress = 0;
-          alert('Cannot open this file');
+          this.appAlert('Cannot open this file');
           return;
         }
 
         const txtFileCount = this.countZipTxtFiles(zip);
         if (txtFileCount === 0) {
           this.loadingProgress = 100;
-          alert('No .txt files found in this ZIP.');
+          this.appAlert('No .txt files found in this ZIP.');
           return;
         }
         if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
@@ -4382,7 +4421,7 @@ const config = Vue.defineComponent({
         if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
           const detectedLabel = this.formatGameVersion(detectedGameVersion);
           const currentLabel = this.formatGameVersion(this.gameVersion);
-          const ok = confirm(
+          const ok = await this.appConfirm(
             `This StatDescriptions.zip looks like ${detectedLabel}, but you are currently working in ${currentLabel}.\n\n` +
             `Switch to ${detectedLabel} and import it there?`
           );
@@ -4390,17 +4429,18 @@ const config = Vue.defineComponent({
             this.loadingProgress = 100;
             return;
           }
+          if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
           await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
           parseContext = this.captureCollaborationContext?.();
           if (this.pendingSingleVersionMigration) {
             this.loadingProgress = 0;
-            alert('Please finish or skip the migration before importing this ZIP.');
+            this.appAlert('Please finish or skip the migration before importing this ZIP.');
             return;
           }
           this.loadingProgress = 0.001;
         }
         if (txtFileCount < ZIP_TXT_FILE_COUNT_THRESHOLD) {
-          const ok = this.confirmProceedByTypingYes(
+          const ok = await this.confirmProceedByTypingYes(
             "This ZIP looks smaller than a full StatDescriptions export.\n\n" +
             `Found only ${txtFileCount} .txt files (expected ~${ZIP_TXT_FILE_COUNT_THRESHOLD}+).\n\n` +
             "This might be a partial export or the translated ZIP.\n" +
@@ -4414,6 +4454,7 @@ const config = Vue.defineComponent({
           }
         }
 
+        if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
         const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
         try {
@@ -4423,21 +4464,21 @@ const config = Vue.defineComponent({
           });
         } catch (error) {
           this.loadingProgress = this.sourceLoaded ? 100 : 0;
-          alert('Import aborted. ' + error.message);
+          this.appAlert('Import aborted. ' + error.message);
           return;
         }
         if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
         if (this.startDuplicateLangResolution(parsed, file, { mode: 'update', importMode: 'Import Next Version', isPostMigrationImport })) return;
       }
       const nextSource = parsed.filter(Boolean);
-      if (!nextSource.length) { this.loadingProgress = this.sourceLoaded ? 100 : 0; alert('No valid source descriptions found.'); return; }
+      if (!nextSource.length) { this.loadingProgress = this.sourceLoaded ? 100 : 0; this.appAlert('No valid source descriptions found.'); return; }
       const game = this.gameVersion, language = this.lang;
       const importContext = this.captureCollaborationContext?.();
       const importWorkspace = this.localDescs;
       const importSource = this.descs;
       let sourceHash;
       try { sourceHash = await window.CollaborationProtocol.sourceHash(nextSource); }
-      catch (error) { this.loadingProgress = this.sourceLoaded ? 100 : 0; alert('Import aborted. ' + error.message); return; }
+      catch (error) { this.loadingProgress = this.sourceLoaded ? 100 : 0; this.appAlert('Import aborted. ' + error.message); return; }
       if ((importContext && !this.collaborationContextCurrent(importContext)) || this.localDescs !== importWorkspace || this.descs !== importSource) {
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         this.collaborationNotice = 'The workspace changed while importing. Import the source again in the intended workspace.';
@@ -4540,7 +4581,7 @@ const config = Vue.defineComponent({
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         this._importingSource = false;
         this.scheduleCollaboration?.();
-        alert('Could not save the imported source. Existing work is unchanged. ' + error.message);
+        this.appAlert('Could not save the imported source. Existing work is unchanged. ' + error.message);
         return;
       }
       this._importingSource = false;
@@ -4556,26 +4597,29 @@ const config = Vue.defineComponent({
       this.filterDesc();
       this.scheduleCollaboration?.();
       const repairSummary = this.getImportRepairSummary(parsed);
-      if (repairSummary) alert('Source import completed.\n\n' + repairSummary);
+      if (repairSummary) this.appAlert('Source import completed.\n\n' + repairSummary);
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
-        alert('Please select a language in Settings first.');
+        this.appAlert('Please select a language in Settings first.');
         return;
       }
       if (!this.sourceLoaded || !Array.isArray(this.descs) || this.descs.length === 0) {
-        alert('Please import the latest StatDescriptions.zip first.');
+        this.appAlert('Please import the latest StatDescriptions.zip first.');
         return;
       }
       const importContext = this.captureCollaborationContext?.();
       let parsed = resolvedParsed;
       if (!parsed) {
         if (String(file?.name || '').toLowerCase() !== 'statdescriptions_translated.zip') {
-          if (!confirm('This does not look like StatDescriptions_Translated.zip. Import anyway?')) return;
+          if (!await this.appConfirm('This does not look like StatDescriptions_Translated.zip. Import anyway?', {
+            title: 'Import an unexpected ZIP?', confirmLabel: 'Import anyway',
+          })) return;
         }
+        if (importContext && !this.collaborationContextCurrent(importContext)) return;
 
         this.loadingProgress = 0.001;
 
@@ -4584,18 +4628,18 @@ const config = Vue.defineComponent({
           zip = await new JSZip().loadAsync(file);
         } catch (error) {
           this.loadingProgress = 100;
-          alert('Cannot open this file');
+          this.appAlert('Cannot open this file');
           return;
         }
 
         const txtFileCount = this.countZipTxtFiles(zip);
         if (txtFileCount === 0) {
           this.loadingProgress = 100;
-          alert('No .txt files found in this ZIP.');
+          this.appAlert('No .txt files found in this ZIP.');
           return;
         }
         if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD) {
-          const ok = this.confirmProceedByTypingYes(
+          const ok = await this.confirmProceedByTypingYes(
             "This ZIP looks like a full StatDescriptions export.\n\n" +
             `Found ${txtFileCount} .txt files (expected less than ${ZIP_TXT_FILE_COUNT_THRESHOLD} for a translated transfer ZIP).\n\n` +
             "This import mode is meant for moving translated data between PCs.\n" +
@@ -4609,6 +4653,7 @@ const config = Vue.defineComponent({
           }
         }
 
+        if (importContext && !this.collaborationContextCurrent(importContext)) return;
         const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
         try {
@@ -4618,7 +4663,7 @@ const config = Vue.defineComponent({
           });
         } catch (error) {
           this.loadingProgress = this.sourceLoaded ? 100 : 0;
-          alert('Import aborted. ' + error.message);
+          this.appAlert('Import aborted. ' + error.message);
           return;
         }
         if (importContext && !this.collaborationContextCurrent(importContext)) return;
@@ -4680,7 +4725,7 @@ const config = Vue.defineComponent({
         this.loadingProgress = 100;
         const head = mismatchFiles.slice(0, 12).join('\n');
         const more = mismatchFiles.length > 12 ? `\n… and ${mismatchFiles.length - 12} more` : '';
-        alert(
+        this.appAlert(
           'Import aborted: source fields mismatch detected.\n\n' +
           head +
           more +
@@ -4700,7 +4745,7 @@ const config = Vue.defineComponent({
       const repairSummary = this.getImportRepairSummary(parsed);
       if (!updates.length) {
         this.loadingProgress = 100;
-        alert('No translation changes detected.' + (repairSummary ? '\n\n' + repairSummary : ''));
+        this.appAlert('No translation changes detected.' + (repairSummary ? '\n\n' + repairSummary : ''));
         return;
       }
       try {
@@ -4710,10 +4755,10 @@ const config = Vue.defineComponent({
         this.clearDiagnosticScanResults();
         this.filterDesc();
         if (result.status !== 'conflict') this.collaborationNotice = 'Imported ' + updates.length + ' translated files' + (result.status === 'pending' ? ' · Pending sync' : '.');
-        if (repairSummary) alert(repairSummary);
+        if (repairSummary) this.appAlert(repairSummary);
       } catch (error) {
         this.loadingProgress = 100;
-        alert('Could not save imported translations. Existing work is unchanged. ' + error.message);
+        this.appAlert('Could not save imported translations. Existing work is unchanged. ' + error.message);
       }
     },
     // Applies local workspace translations and status flags on top of the source descs.
@@ -4766,6 +4811,7 @@ const config = Vue.defineComponent({
     fileListNavigationBlocked() {
       const region = this.$refs.fileTableRegion;
       return !region || (region.getClientRects && !region.getClientRects().length)
+        || window.AppDialogs?.isOpen
         || this.editorVisible || this.settingsDialogVisible || this.$refs.diagnosticScanDialog?.open
         || this.importDialogVisible || this.consistencyResolver || this.cloudResolverVisible
         || this.cloudHistoryVisible || this.duplicateLangImportWarning || this.showMultiInstanceGate
@@ -5188,7 +5234,7 @@ const config = Vue.defineComponent({
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
-        alert('Unexpected Error! cannot find the file you want to edit!');
+        this.appAlert('Unexpected Error! cannot find the file you want to edit!');
         return null;
       }
       if (!this.editorVisible) this._fileTableReturnFocus = returnToFileList || !!document.activeElement?.closest?.('.fileTableScroll');
@@ -5332,80 +5378,89 @@ const config = Vue.defineComponent({
       if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
-      let desc = this.editorCurrentEditingDesc;
-      let newTranslations = [];
-      for (const editorBlock of this.editorBlocks) {
-        if (editorBlock?.isTable) this.syncEditorBlockFromTableColumns(editorBlock);
-        let ui = editorBlock?.translation ?? "";
-        let normalizedUi = editorBlock?.isMultiline ? this.decodeEscapedNewlines(ui) : ui;
-        newTranslations.push(this.encodeNewlines(normalizedUi));
-      }
-
-      this.refreshEditorDiagnostics();
-      const diagnosticErrors = this.collectEditorDiagnostics("error");
-      if (diagnosticErrors.length > 0) {
-        alert(
-          `Translation errors found. Please fix them before saving.\n\n` +
-          `${this.formatDiagnosticsForDisplay(diagnosticErrors, 12)}`
-        );
-        return false;
-      }
-
-      const diagnosticWarnings = this.collectEditorDiagnostics("warning");
-      if (diagnosticWarnings.length > 0) {
-        const details = this.formatDiagnosticsForDisplay(diagnosticWarnings, 12);
-        if (!confirm(`Translation warnings found:\n\n${details}\n\nDo you want to save anyway?`)) return false;
-      }
-
-      const isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, newTranslations);
-      if (isMissing && !confirm("There're missing field in translation!\nAre you sure you want to save?")) return false;
-
-      let lineMismatchInfo = [];
-      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
-        let b = this.editorBlocks[i];
-        let engLines = this.computeTextStats(b?.english ?? "").lines;
-        let trLines = this.computeTextStats(b?.translation ?? "").lines;
-        if (engLines !== trLines) lineMismatchInfo.push(`#${i + 1}: ${trLines}/${engLines}`);
-      }
-      if (lineMismatchInfo.length > 0) {
-        let details = lineMismatchInfo.slice(0, 12).join("\n");
-        let suffix = lineMismatchInfo.length > 12 ? `\n...and ${lineMismatchInfo.length - 12} more` : "";
-        if (!confirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
-      }
-
-      let columnMismatchInfo = [];
-      for (let i = 0; i < (this.editorBlocks || []).length; i++) {
-        let b = this.editorBlocks[i];
-        if (!b?.isTable) continue;
-        let engCols = this.computeTextStats(b?.english ?? "").cols;
-        let trCols = this.computeTextStats(b?.translation ?? "").cols;
-        if (engCols !== trCols) columnMismatchInfo.push(`#${i + 1}: ${trCols}/${engCols}`);
-      }
-      if (columnMismatchInfo.length > 0) {
-        let details = columnMismatchInfo.slice(0, 12).join("\n");
-        let suffix = columnMismatchInfo.length > 12 ? `\n...and ${columnMismatchInfo.length - 12} more` : "";
-        if (!confirm(`Number of table columns mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
-      }
-
-      let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
-      let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
-      if (newTagCount != engTagCount && !confirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return false;
-
-      let newKeywordPopupTagCount = newTranslations.reduce((p, c) => p += countKeywordPopupTag(c), 0);
-      let engKeywordPopupTagCount = desc.translations.English.reduce((p, c) => p += countKeywordPopupTag(c), 0);
-      if (newKeywordPopupTagCount != engKeywordPopupTagCount && !confirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return false;
-
-      let newTextDecorationTagCount = newTranslations.reduce((p, c) => p += countTextDecorationTag(c), 0);
-      let engTextDecorationTagCount = desc.translations.English.reduce((p, c) => p += countTextDecorationTag(c), 0);
-      if (newTextDecorationTagCount != engTextDecorationTagCount && !confirm("Number of text decoration tags (<tag>{{}} tag) mismatched!\nDo you want to save anyway?")) return false;
-
-      const context = this.captureCollaborationContext();
-      const draftAtSave = (this.editorBlocks || []).map(block => block?.translation ?? '');
-      const blocksAtSave = this.editorBlocks;
       this.editorSaving = true;
       try {
+        let desc = this.editorCurrentEditingDesc;
+        let newTranslations = [];
+        for (const editorBlock of this.editorBlocks) {
+          if (editorBlock?.isTable) this.syncEditorBlockFromTableColumns(editorBlock);
+          let ui = editorBlock?.translation ?? "";
+          let normalizedUi = editorBlock?.isMultiline ? this.decodeEscapedNewlines(ui) : ui;
+          newTranslations.push(this.encodeNewlines(normalizedUi));
+        }
+        const context = this.captureCollaborationContext();
+        const draftAtSave = (this.editorBlocks || []).map(block => block?.translation ?? '');
+        const blocksAtSave = this.editorBlocks;
+        const baseAtSave = this._editorCollabBase;
+        const englishAtSave = JSON.stringify(desc?.translations?.English);
+
+        this.refreshEditorDiagnostics();
+        const diagnosticErrors = this.collectEditorDiagnostics("error");
+        if (diagnosticErrors.length > 0) {
+          this.appAlert(
+            `Translation errors found. Please fix them before saving.\n\n` +
+            `${this.formatDiagnosticsForDisplay(diagnosticErrors, 12)}`
+          );
+          return false;
+        }
+
+        const diagnosticWarnings = this.collectEditorDiagnostics("warning");
+        if (diagnosticWarnings.length > 0) {
+          const details = this.formatDiagnosticsForDisplay(diagnosticWarnings, 12);
+          if (!await this.appConfirm(`Translation warnings found:\n\n${details}\n\nDo you want to save anyway?`)) return false;
+        }
+
+        const isMissing = computeIsMissing(Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0, newTranslations);
+        if (isMissing && !await this.appConfirm("There're missing field in translation!\nAre you sure you want to save?")) return false;
+
+        let lineMismatchInfo = [];
+        for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+          let b = this.editorBlocks[i];
+          let engLines = this.computeTextStats(b?.english ?? "").lines;
+          let trLines = this.computeTextStats(b?.translation ?? "").lines;
+          if (engLines !== trLines) lineMismatchInfo.push(`#${i + 1}: ${trLines}/${engLines}`);
+        }
+        if (lineMismatchInfo.length > 0) {
+          let details = lineMismatchInfo.slice(0, 12).join("\n");
+          let suffix = lineMismatchInfo.length > 12 ? `\n...and ${lineMismatchInfo.length - 12} more` : "";
+          if (!await this.appConfirm(`Number of lines mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
+        }
+
+        let columnMismatchInfo = [];
+        for (let i = 0; i < (this.editorBlocks || []).length; i++) {
+          let b = this.editorBlocks[i];
+          if (!b?.isTable) continue;
+          let engCols = this.computeTextStats(b?.english ?? "").cols;
+          let trCols = this.computeTextStats(b?.translation ?? "").cols;
+          if (engCols !== trCols) columnMismatchInfo.push(`#${i + 1}: ${trCols}/${engCols}`);
+        }
+        if (columnMismatchInfo.length > 0) {
+          let details = columnMismatchInfo.slice(0, 12).join("\n");
+          let suffix = columnMismatchInfo.length > 12 ? `\n...and ${columnMismatchInfo.length - 12} more` : "";
+          if (!await this.appConfirm(`Number of table columns mismatched!\n(Translation/English)\n\n${details}${suffix}\n\nDo you want to save anyway?`)) return false;
+        }
+
+        let newTagCount = newTranslations.reduce((p, c) => p += countGGGVarTag(c), 0);
+        let engTagCount = desc.translations.English.reduce((p, c) => p += countGGGVarTag(c), 0);
+        if (newTagCount != engTagCount && !await this.appConfirm("Number of variable tags ({} tag) mismatched!\nDo you want to save anyway?")) return false;
+
+        let newKeywordPopupTagCount = newTranslations.reduce((p, c) => p += countKeywordPopupTag(c), 0);
+        let engKeywordPopupTagCount = desc.translations.English.reduce((p, c) => p += countKeywordPopupTag(c), 0);
+        if (newKeywordPopupTagCount != engKeywordPopupTagCount && !await this.appConfirm("Number of keyword popup tags ([] tag) mismatched!\nDo you want to save anyway?")) return false;
+
+        let newTextDecorationTagCount = newTranslations.reduce((p, c) => p += countTextDecorationTag(c), 0);
+        let engTextDecorationTagCount = desc.translations.English.reduce((p, c) => p += countTextDecorationTag(c), 0);
+        if (newTextDecorationTagCount != engTextDecorationTagCount && !await this.appConfirm("Number of text decoration tags (<tag>{{}} tag) mismatched!\nDo you want to save anyway?")) return false;
+
+        if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocksAtSave
+          || !this.collaborationContextCurrent(context) || this.editorTranslationReadOnly
+          || this._editorCollabBase !== baseAtSave || JSON.stringify(desc?.translations?.English) !== englishAtSave
+          || !arrayEquals(draftAtSave, this.editorBlocks.map(block => block?.translation ?? ''))) {
+          this.collaborationNotice = 'The file changed while confirming the save. Review the current draft and save again.';
+          return false;
+        }
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
-          context, bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+          context, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
@@ -5592,17 +5647,26 @@ const config = Vue.defineComponent({
     async restoreHistoryRevision(rev) {
       const desc = this.editorCurrentEditingDesc;
       if (!desc || !rev || this.editorSaving) return;
-      if (this.historyMode === 'source' || String(rev.lang) === 'English') { alert('Restoring source English text is disabled.'); return; }
+      if (this.historyMode === 'source' || String(rev.lang) === 'English') { this.appAlert('Restoring source English text is disabled.'); return; }
       if (desc.filepath !== rev.filepath || this.lang !== rev.lang || (rev.sourceHash && this.sourceIdentity && rev.sourceHash !== this.sourceIdentity)) {
-        alert('Cannot restore: revision does not match the current source, file and language.'); return;
+        this.appAlert('Cannot restore: revision does not match the current source, file and language.'); return;
       }
       const lines = Array.isArray(rev.translations) ? rev.translations : [];
-      if (lines.length !== desc.translations.English.length) { alert('Cannot restore: the source entry layout differs.'); return; }
-      if (!confirm('Restore this revision? A new saved revision will be created.')) return;
+      if (lines.length !== desc.translations.English.length) { this.appAlert('Cannot restore: the source entry layout differs.'); return; }
+      const context = this.captureCollaborationContext();
+      const blocks = this.editorBlocks;
+      const english = JSON.stringify(desc.translations.English);
+      const base = this._editorCollabBase;
       this.editorSaving = true;
       try {
+        if (!await this.appConfirm('Restore this revision? A new saved revision will be created.', {
+          title: 'Restore saved revision?', confirmLabel: 'Restore revision',
+        })) return;
+        if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocks
+          || !this.collaborationContextCurrent(context) || this._editorCollabBase !== base
+          || JSON.stringify(desc.translations.English) !== english) return;
         const result = await this.persistTranslationBatch([{ desc, lines, needsReview: false }], 'restore', {
-          bases: this._editorCollabBase ? { [desc.filepath]: this._editorCollabBase } : undefined,
+          context, bases: base ? { [desc.filepath]: base } : undefined,
         });
         if (result.stale || result.status === 'conflict') return;
         if (this.editorVisible) this.openEditorFile(desc.filepath);
@@ -5627,14 +5691,30 @@ const config = Vue.defineComponent({
       let current = (this.editorBlocks || []).map(b => b?.translation ?? "");
       return !arrayEquals(original, current);
     },
-    editorExit() {
+    async editorExit() {
       if (this.editorLoading || this.editorLoadError) {
         this._editorOpenCancelRevision = (this._editorOpenCancelRevision || 0) + 1;
         this.cancelEditorOpen();
         this._collaboration?.leaveEdit();
         return;
       }
-      if (this.editorHaveChanges() && !confirm('Are you sure you want to exit without saving?')) return;
+      if (this.editorSaving || this.navigationBusy) return;
+      if (this.editorHaveChanges()) {
+        if (this._editorExitConfirming) return;
+        const blocks = this.editorBlocks;
+        const desc = this.editorCurrentEditingDesc;
+        const context = this.captureCollaborationContext?.();
+        const draft = this.editorBlocks.map(block => block?.translation ?? '');
+        this._editorExitConfirming = true;
+        try {
+          if (!await this.appConfirm('Are you sure you want to exit without saving?', {
+            title: 'Discard unsaved changes?', confirmLabel: 'Discard changes', danger: true,
+          })) return;
+          if (this.editorBlocks !== blocks || this.editorCurrentEditingDesc !== desc
+            || (context && !this.collaborationContextCurrent(context))
+            || !arrayEquals(draft, this.editorBlocks.map(block => block?.translation ?? ''))) return;
+        } finally { this._editorExitConfirming = false; }
+      }
       if (this.editorSaving || this.navigationBusy) return;
       this.saveSettings();
       this.closeHlPopup();
@@ -5762,7 +5842,7 @@ const config = Vue.defineComponent({
       if (!plain) throw new Error('Cannot serialize workspace');
       await window.OfflineStore.setWorkspace(plain, this.gameVersion);
     },
-    useRegex(editorBlock) {
+    async useRegex(editorBlock) {
       if (this.editorTranslationReadOnly) return;
       this.sideTab = 'regex';
       let regexEngineResult = regexEngineLookup(editorBlock.english, this.editorRegexes);
@@ -5775,9 +5855,13 @@ const config = Vue.defineComponent({
       }
       editorBlock.translationReplace = regexEngineResult.replace;
       this.doTranslationReplace(editorBlock);
+      const regexes = this.editorRegexes;
+      const dictionary = this.dictionary;
       
       if (regexEngineResult.failed) {
-        if (confirm("No match for:\n" + regexEngineResult.failStr + "\n\nCreate new regex for it?")) {
+        if (await this.appConfirm("No match for:\n" + regexEngineResult.failStr + "\n\nCreate new regex for it?", {
+          title: 'Create a regex rule?', confirmLabel: 'Create rule', danger: false,
+        }) && this.editorRegexes === regexes && this.dictionary === dictionary) {
           let r = regexEngineCreate(regexEngineResult.failStr, this.dictionary);
           this.addRegex(r.find, r.replace);
         }
@@ -5824,8 +5908,12 @@ const config = Vue.defineComponent({
       this.editorRegexes.unshift({ find, replace });
       this.saveSettings();
     },
-    removeRegex(regex) {
-      if (!confirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`)) return;
+    async removeRegex(regex) {
+      const regexes = this.editorRegexes;
+      if (!await this.appConfirm(`Are you sure you want to remove this regex?\n\n#${regex.find}\n${regex.replace}`, {
+        title: 'Remove regex rule?', confirmLabel: 'Remove rule',
+      })) return;
+      if (this.editorRegexes !== regexes) return;
       this.editorRegexes = this.editorRegexes.filter(o => o !== regex);
       this.saveSettings();
     },
@@ -5857,18 +5945,24 @@ const config = Vue.defineComponent({
       this.focusDictionaryEntryReplaceInput(entry._id);
       this.saveSettings();
     },
-    removeVocab(word) {
-      if (!confirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`)) return;
+    async removeVocab(word) {
+      const dictionary = this.dictionary;
+      if (!await this.appConfirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`, {
+        title: 'Remove Dictionary entry?', confirmLabel: 'Remove entry',
+      })) return;
+      if (this.dictionary !== dictionary) return;
       this.dictionary = this.dictionary.filter(o => o !== word);
       this.saveSettings();
     },
     async exportZip(doFullExport) {
-      if (doFullExport && !confirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes")) return;
+      if (doFullExport && !await this.appConfirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes", {
+        title: 'Export all reviewed files?', confirmLabel: 'Export all', danger: false,
+      })) return;
       let descsToExport = doFullExport
         ? (this.descs || []).filter(o => !o.needsReview)
         : (this.descs || []).filter(o => o.hasChanges);
       if (!descsToExport.length) {
-        alert(`There're no files to be export!`);
+        this.appAlert(`There're no files to be export!`);
         return;
       }
 
@@ -5979,7 +6073,7 @@ const config = Vue.defineComponent({
         'you will need to manually close other instances of SDEditor in your browser tabs/windows. ' +
         'After closing them, this message will disappear automatically.\n\n' +
         'To proceed with this instance, click "Continue Anyway" below.';
-      alert(message);
+      this.appAlert(message);
     },
     
     closeThisInstance() {
@@ -6085,6 +6179,7 @@ function renderUnifiedLineDiff(edits) {
 const app = Vue.createApp(config);
 
 app.component('app-tooltip', AppTooltip);
+app.component('app-dialog', window.AppDialogs?.component || {});
 
 app.directive('tooltip', {
   mounted(el, binding) {

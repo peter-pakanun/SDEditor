@@ -133,7 +133,10 @@
           },
           onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot(), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onRemote: files => { if (this._collaboration === client) this.applyCollaborationFiles(files, ctx.language); },
-          onEditingConflict: ({ filepath }) => { if (this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath) return this.claimCollaborationFile(filepath, false); },
+          onEditingConflict: ({ filepath }) => {
+            const isCurrent = () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath;
+            if (isCurrent()) return this.claimCollaborationFile(filepath, false, isCurrent);
+          },
         });
         this._collaboration = client; this._collabKey = key;
         this.updateCollaborationActivity();
@@ -143,7 +146,9 @@
         client.select(this.selectedFilepath);
         if (this.editorVisible) {
           this._editorCollabBase = originalBase || openFile || client.fileBase(this.editorCurrentEditingDesc.filepath);
-          await this.claimCollaborationFile(this.editorCurrentEditingDesc.filepath, false);
+          const filepath = this.editorCurrentEditingDesc.filepath;
+          await this.claimCollaborationFile(filepath, false,
+            () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath);
         }
       },
       async collabRetry() {
@@ -182,17 +187,24 @@
         this.filterDesc();
       },
       async claimCollaborationFile(filepath, automatic = false, isCurrent = () => true) {
+        const context = this.captureCollaborationContext();
         const client = this._collaboration;
         if (!client) return true;
         if (automatic && client.isEditing(filepath)) return false;
         const result = await client.claim(filepath, { force: false });
-        if (client !== this._collaboration) return false;
+        if (!this.collaborationContextCurrent(context)) return false;
         if (!isCurrent()) { client.leaveEdit(); return false; }
         if (result.granted) return true;
         if (automatic) return false;
         const names = (result.peers || []).map(peer => peer.name).join(', ') || 'Another translator';
-        if (!confirm(`${names} is editing this file. Edit anyway?`)) return false;
+        const confirmed = await this.appConfirm(`${names} is editing this file. Edit anyway?`, {
+          title: 'File already being edited', confirmLabel: 'Edit anyway', danger: true,
+        });
+        if (!this.collaborationContextCurrent(context)) return false;
+        if (!isCurrent()) { client.leaveEdit(); return false; }
+        if (!confirmed) return false;
         const forced = await client.claim(filepath, { force: true });
+        if (!this.collaborationContextCurrent(context)) return false;
         if (!isCurrent()) { client.leaveEdit(); return false; }
         return !!forced.granted;
       },
@@ -246,6 +258,7 @@
         }
       },
       async collabResolve(id, translations, options) {
+        const context = this.captureCollaborationContext();
         const client = this._collaboration;
         const conflict = client.snapshot().conflicts.find(item => item.id === id);
         const lines = Array.isArray(translations) ? translations : translations?.translations;
@@ -264,10 +277,16 @@
         const errors = diagnostics.filter(item => item.level === 'error');
         if (errors.length) throw new Error('Fix the translation errors before saving the result: ' + errors.map(item => item.message).join(' '));
         const warnings = diagnostics.filter(item => item.level === 'warning');
-        if (warnings.length && !confirm('Translation warnings: ' + warnings.map(item => item.message).join('\n') + '\nSave the result anyway?')) return { status: 'conflict' };
         const blocksAtResolution = this.editorBlocks;
+        if (warnings.length) {
+          const confirmed = await this.appConfirm('Translation warnings: ' + warnings.map(item => item.message).join('\n') + '\nSave the result anyway?', {
+            title: 'Save with translation warnings?', confirmLabel: 'Save anyway', danger: true,
+          });
+          if (!this.collaborationContextCurrent(context)) return { status: 'conflict', stale: true };
+          if (!confirmed) return { status: 'conflict' };
+        }
         const result = await client.resolve(id, translations, options);
-        if (client !== this._collaboration) return result;
+        if (!this.collaborationContextCurrent(context)) return { ...result, stale: true };
         if (result.status !== 'conflict') this.collaborationNotice = result.status === 'pending' ? 'Resolution saved locally · Pending sync' : 'Translation conflict resolved.';
         if (result.status !== 'conflict' && conflict && this.editorVisible && this.editorBlocks === blocksAtResolution
           && this.editorCurrentEditingDesc.filepath === conflict.filepath) {

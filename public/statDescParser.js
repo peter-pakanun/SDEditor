@@ -34,9 +34,10 @@ async function parseFile(filepath, zipObject, lang, { strict = false } = {}) {
   if (count == 0) return false;
   if (count > 1) {
     if (strict) throw new Error('Multiple descriptions in ' + filepath);
-    alert(
+    await window.AppDialogs.alert(
       'ERROR: Multiple description declaration\n' +
-      filepath + '\n\n' + text
+      filepath + '\n\n' + text,
+      { title: 'Invalid description file' }
     );
     return false;
   }
@@ -98,18 +99,20 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
     if (desc.name === null) {
       if (lineArray[0] != 'description') {
         if (strict) malformed('Expected a description declaration.', lineIndex);
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Malform description file\n' +
           'expecting description field\n' +
-          filepath + '\n\n' + text
+          filepath + '\n\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
       if (lineArray.length > 2) {
         if (strict) malformed('A description may have only one name.', lineIndex);
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Multiple description declaration\n' +
-          filepath + '\n\n' + text
+          filepath + '\n\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
@@ -124,10 +127,11 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
         malformed('The declared stat count must match the number of stat identifiers.', lineIndex);
       }
       if (!count) {
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Malform description file\n' +
           'expecting stats count\n' +
-          filepath + '\n\n' + text
+          filepath + '\n\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
@@ -143,17 +147,19 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
         malformed('Expected a whole translation count; English must contain at least one entry.', lineIndex);
       }
       if (lineArray.length > 2) {
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Multiple description declaration\n' +
-          filepath + '\n\n' + text
+          filepath + '\n\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
       if (!count && !(strict && count === 0 && curLang !== 'English')) {
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Malform description file\n' +
           'expecting translations count\n' +
-          filepath + '\n\n' + text
+          filepath + '\n\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
@@ -174,10 +180,11 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
       }
       if (!desc.tempTranslations[curLang] || desc.tempTranslations[curLang].count != desc.tempTranslations[curLang].content.length) {
         if (strict) malformed('The declared translation count does not match the preceding block.', lineIndex);
-        alert(
+        void window.AppDialogs.alert(
           'ERROR: Malform description file\n' +
           'missing some/all translation text\n' +
-          filepath + '\n\nLang: ' + curLang + '\n' + text
+          filepath + '\n\nLang: ' + curLang + '\n' + text,
+          { title: 'Invalid description file' }
         );
         return false;
       }
@@ -234,10 +241,11 @@ function parseDesc(filepath, text, lang, { strict = false } = {}) {
     }
     if (!matchs2) {
       if (strict) malformed('Invalid quoted translation entry.', lineIndex);
-      alert(
+      void window.AppDialogs.alert(
         'ERROR: Malform description file\n' +
         'Malform translation text\n' +
-        filepath + '\n\nLang: ' + curLang + '\n' + text
+        filepath + '\n\nLang: ' + curLang + '\n' + text,
+        { title: 'Invalid description file' }
       );
       return false;
     }

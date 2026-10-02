@@ -11,7 +11,7 @@ function harness() {
     CollaborationProtocol: require('../public/collaborationProtocol.js'),
     OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(JSON.parse(JSON.stringify({ workspace, revisions, game }))); } } };
   const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout,
-    alert: message => alerts.push(message), confirm: () => true,
+    alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
@@ -22,6 +22,7 @@ function harness() {
   const editor = Object.assign(mixin.data(), config.data(), mixin.methods, config.methods, {
     lang: 'Thai', gameVersion: 'poe1', sourceIdentity: 'source-one', sourceLoaded: true,
     dictionary: [], $refs: {}, $nextTick: fn => { fn?.(); return Promise.resolve(); },
+    appAlert: async message => { alerts.push(message); }, appConfirm: async () => true,
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {},
   });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
@@ -89,6 +90,53 @@ test('durable save failure retains draft and does not mutate saved translations 
   assert.equal(await e.editorSave(), false);
   assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']); assert.equal(e.editorVisible, true);
   assert.equal(e.editorBlocks[0].translation, 'ใหม่'); assert.match(e.collaborationNotice, /Disk full/);
+});
+test('a pending save warning prevents duplicate submissions and cancellation preserves the draft', async () => {
+  const { editor: e, writes, desc } = saveFixture();
+  let answer, warnings = 0;
+  e.collectEditorDiagnostics = level => level === 'warning' ? [{ level, message: 'Review this translation.' }] : [];
+  e.appConfirm = () => { warnings++; return new Promise(resolve => { answer = resolve; }); };
+  const saving = e.editorSave();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(warnings, 1); assert.equal(e.editorSaving, true);
+  assert.equal(await e.editorSave(), false); assert.equal(warnings, 1); assert.equal(writes.length, 0);
+  answer(false);
+  assert.equal(await saving, false); assert.equal(e.editorSaving, false); assert.equal(writes.length, 0);
+  assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks[0].translation, 'ใหม่');
+  assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
+});
+test('a save warning cannot authorize a different workspace opened during the dialog', async () => {
+  const { editor: e, writes, desc } = saveFixture();
+  let answer;
+  e.collectEditorDiagnostics = level => level === 'warning' ? [{ level, message: 'Review this translation.' }] : [];
+  e.appConfirm = () => new Promise(resolve => { answer = resolve; });
+  const saving = e.editorSave();
+  await new Promise(resolve => setImmediate(resolve));
+  e.gameVersion = 'poe2'; e.sourceIdentity = 'source-two';
+  answer(true);
+  assert.equal(await saving, false); assert.equal(writes.length, 0); assert.equal(e.editorSaving, false);
+  assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
+});
+test('mark reviewed locks duplicate submissions while confirming and cancellation changes nothing', async () => {
+  const { editor: e, writes, desc } = saveFixture(); let answer, confirmations = 0;
+  desc.needsReview = true;
+  e.appConfirm = () => { confirmations++; return new Promise(resolve => { answer = resolve; }); };
+  const reviewing = e.confirmTranslationUnchanged();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(e.editorSaving, true); await e.confirmTranslationUnchanged();
+  assert.equal(confirmations, 1); assert.equal(writes.length, 0);
+  answer(false); await reviewing;
+  assert.equal(desc.needsReview, true); assert.equal(writes.length, 0); assert.equal(e.editorSaving, false);
+});
+test('history restore confirmation cannot write into a workspace selected while it was pending', async () => {
+  const { editor: e, writes, desc } = saveFixture(); let answer;
+  e.appConfirm = () => new Promise(resolve => { answer = resolve; });
+  const restoring = e.restoreHistoryRevision({ filepath: desc.filepath, lang: 'Thai', sourceHash: e.sourceIdentity,
+    translations: ['คืนค่า', 'สอง'] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(e.editorSaving, true); assert.equal(writes.length, 0);
+  e.gameVersion = 'poe2'; e.sourceIdentity = 'source-two'; answer(true); await restoring;
+  assert.equal(writes.length, 0); assert.equal(e.editorSaving, false); assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
 });
 test('save writes workspace and history together before closing and preserves intentional blanks', async () => {
   const { editor: e, writes } = saveFixture();

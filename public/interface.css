@@ -439,3 +439,42 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   background: var(--color-element);
 }
 .dictionaryPagination > span { flex: 1; font-size: 12px; color: var(--ui-muted); }
+
+/* App confirmations use the native modal top layer and a safe initial focus. */
+.appDialog {
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--color-element);
+  color: var(--color-font);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .32);
+  font: inherit;
+}
+.appDialog::backdrop { background: rgba(0, 0, 0, .55); }
+.appDialogHeader { padding: 20px 22px 0; }
+.appDialogHeader h2 { margin: 0; font-size: 21px; line-height: 1.4; }
+.appDialogMessage {
+  max-height: min(45dvh, 420px);
+  margin: 16px 22px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.appDialogPrompt { margin: 18px 22px; }
+.appDialogPrompt label { display: block; margin: 0 0 8px; font-weight: 600; font-size: 14px; }
+.appDialogPrompt input { box-sizing: border-box; width: 100%; padding: 10px 12px; font: inherit; font-size: 15px; }
+.appDialogPrompt p { margin: 8px 0 0; color: var(--ui-muted); font-size: 12px; line-height: 1.5; }
+.appDialogActions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 20px; padding: 16px 22px; border-top: 1px solid var(--ui-border); }
+.appDialogActions button { min-height: 38px; padding: 9px 16px; font: inherit; font-size: 14px; font-weight: 600; }
+.appDialogConfirm { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-on-accent); }
+.appDialogDanger .appDialogConfirm { border-color: #ac293c; background: #ac293c; color: #fff; }
+.appDialogDanger .appDialogConfirm:hover:not(:disabled) { border-color: #8d1e2f; background: #8d1e2f; }
+.appDialog :is(button, input):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
