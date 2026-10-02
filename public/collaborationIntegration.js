@@ -223,7 +223,8 @@
         this._collabDiagnosticBatch = batch;
         try {
           if (!this.testMode) {
-            if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases: options.bases, restore: options.restore });
+            if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases: options.bases, restore: options.restore,
+              waitForSync: origin !== 'save' });
             else await window.OfflineStore.saveWorkspaceWithRevisions(workspace, revisions, ctx.game);
           }
           if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };

@@ -105,6 +105,56 @@ test('typing while storage is committing remains an unsaved open draft', async (
   assert.equal(await saving, false); assert.equal(e.editorVisible, true);
   assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(e.editorBlocks[0].translation, 'พิมพ์ต่อ'); assert.equal(e.editorHaveChanges(), true);
 });
+
+test('Save & close and save-and-next finish after local commit while online sync is still waiting', async t => {
+  for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async t => {
+    const { editor: e, desc, window, writes } = saveFixture();
+    const { Client } = require('../public/collaborationSync.js');
+    e.descs.push(description(2)); e.filterDesc();
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const initial = e.descs.map(item => ({ ...e.collaborationFile(item), revision: 1 }));
+    let state = null, workspace = copy(e.localDescs), hold = false, releaseLocal, releaseNetwork, requests = 0;
+    const localGate = new Promise(resolve => { releaseLocal = resolve; });
+    const networkGate = new Promise(resolve => { releaseNetwork = resolve; });
+    const client = new Client({ WebSocket: null, locks: null,
+      store: { async updateCollaborationState(update, options) {
+        const next = update(copy(state));
+        const nextWorkspace = options.projectWorkspace ? options.projectWorkspace(copy(workspace), next) : workspace;
+        if (hold && options.revisions?.length) {
+          await localGate;
+          await window.OfflineStore.saveWorkspaceWithRevisions(nextWorkspace, options.revisions, 'poe1');
+        }
+        state = copy(next); workspace = copy(nextWorkspace); return copy(state);
+      } },
+      request: async path => {
+        if (hold) { requests++; await networkGate; }
+        if (path.endsWith('/join')) return { roomId: 'room', files: initial, sequence: 1 };
+        if (path.includes('/changes?')) return { events: [], hasMore: false };
+        throw new Error('Unexpected request: ' + path);
+      },
+    });
+    t.after(async () => { const syncing = client.running; client.destroy(); releaseLocal(); releaseNetwork(); await syncing; });
+    await client.connect({ accountId: 'translator', game: 'poe1', language: 'Thai', source: e.descs, files: initial, workspace });
+    e._collaboration = client; e._editorCollabBase = client.fileBase(desc.filepath);
+    const opened = [];
+    e.editFile = async filepath => { opened.push(filepath); return true; };
+    hold = true;
+    const saving = navigate ? e.saveAndSkipFile() : e.editorSave();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(e.editorVisible, true, 'Keep the editor open until local storage commits.');
+    assert.equal(e.editorSaving, true); assert.equal(requests, 0); assert.equal(writes.length, 0);
+    assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
+    releaseLocal();
+    assert.equal(await Promise.race([saving, new Promise(resolve => setImmediate(() => resolve('blocked by network')))]), true);
+    assert.equal(e.editorSaving, false); assert.equal(requests, 1);
+    assert.equal(client.snapshot().pending, 1); assert.equal(writes.length, 1);
+    assert.equal(writes[0].workspace.descs[0].translations.Thai[0], 'ใหม่');
+    assert.equal(writes[0].revisions[0].translations[0], 'ใหม่');
+    assert.equal(e.editorHaveChanges(), false);
+    if (navigate) assert.deepEqual(opened, ['source/002.txt']);
+    else assert.equal(e.editorVisible, false);
+  });
+});
 test('remote updates do not change a typing draft or its captured save base', () => {
   const { editor: e } = saveFixture();
   e._editorCollabBase = { translations: ['เดิม', 'สอง'], revision: 1 };

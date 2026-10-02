@@ -151,6 +151,182 @@ test('save atomically persists working data, recovery history and an offline ret
   client.destroy();
 });
 
+function gate() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function localSaveResult(save) {
+  const waitingForNetwork = Symbol('waiting for network');
+  const result = await Promise.race([save, new Promise(resolve => setImmediate(() => resolve(waitingForNetwork)))]);
+  assert.notEqual(result, waitingForNetwork, 'A durable local save must finish while its network request is still held.');
+  return result;
+}
+
+test('background save waits for local durability but finishes before a held network request', async t => {
+  const { client, store, server } = await fixture();
+  const localEntered = gate(), localRelease = gate(), networkEntered = gate(), networkRelease = gate();
+  t.after(() => { localRelease.resolve(); networkRelease.resolve(); client.destroy(); });
+  const update = store.updateCollaborationState.bind(store), request = client.request;
+  let firstUpdate = true;
+  store.updateCollaborationState = async (...args) => {
+    if (firstUpdate) { firstUpdate = false; localEntered.resolve(); await localRelease.promise; }
+    return update(...args);
+  };
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { networkEntered.resolve(); await networkRelease.promise; }
+    return request(path, options);
+  };
+  const requestCount = server.requests.length;
+  let settled = false;
+  const save = client.save({ waitForSync: false, workspace: store.workspace,
+    files: [{ ...client.fileBase('a.txt'), translations: ['durable local save', 'two'] }],
+    revisions: [{ filepath: 'a.txt', lang: 'Thai', translations: ['durable local save', 'two'] }],
+  }).then(result => { settled = true; return result; });
+  await localEntered.promise;
+  assert.equal(settled, false);
+  assert.equal(server.requests.length, requestCount, 'Synchronization starts only after local persistence.');
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'one');
+  localRelease.resolve();
+  await networkEntered.promise;
+  const result = await localSaveResult(save);
+  assert.equal(result.status, 'pending');
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'durable local save');
+  assert.equal(store.revisions.length, 1);
+  assert.equal(store.revisions[0].translations[0], 'durable local save');
+  assert.equal(Object.values(store.state.rooms)[0].outbox[0].id, result.mutationId);
+  assert.equal(server.receipts.size, 0);
+  networkRelease.resolve();
+  await client.sync();
+  assert.equal(client.snapshot().pending, 0);
+  assert.equal(server.files[0].translations[0], 'durable local save');
+});
+
+test('background save rejects local storage failure without changing state or starting sync', async t => {
+  const { client, store, server } = await fixture();
+  t.after(() => client.destroy());
+  const state = copy(store.state), workspace = copy(store.workspace), requestCount = server.requests.length;
+  store.fail = true;
+  await assert.rejects(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['must remain an unsaved draft', 'two'] }],
+    revisions: [{ filepath: 'a.txt', lang: 'Thai', translations: ['must remain an unsaved draft', 'two'] }],
+  }), /Storage quota exceeded/);
+  assert.deepEqual(store.state, state);
+  assert.deepEqual(store.workspace, workspace);
+  assert.equal(store.revisions.length, 0);
+  assert.equal(client.fileBase('a.txt').translations[0], 'one');
+  assert.equal(server.requests.length, requestCount);
+  assert.equal(client.snapshot().pending, 0);
+});
+
+test('quick background saves of the same file queue and synchronize in order', async t => {
+  const { client, store, server } = await fixture();
+  const firstMutation = gate(), release = gate();
+  t.after(() => { release.resolve(); client.destroy(); });
+  const request = client.request;
+  let mutationCount = 0;
+  client.request = async (path, options) => {
+    if (path.endsWith('/mutations')) {
+      if (++mutationCount === 1) { firstMutation.resolve(); await release.promise; }
+      else {
+        assert.equal(client.fileBase('a.txt').translations[0], 'second save');
+        assert.equal(store.workspace.descs[0].translations.Thai[0], 'second save', 'The first acknowledgment cannot overwrite the newer local save.');
+      }
+    }
+    return request(path, options);
+  };
+  const first = await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['first save', 'two'] }],
+    revisions: [{ filepath: 'a.txt', lang: 'Thai', translations: ['first save', 'two'] }],
+  }));
+  await firstMutation.promise;
+  const second = await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['second save', 'two'] }],
+    revisions: [{ filepath: 'a.txt', lang: 'Thai', translations: ['second save', 'two'] }],
+  }));
+  assert.equal(first.status, 'pending'); assert.equal(second.status, 'pending');
+  assert.deepEqual(Object.values(store.state.rooms)[0].outbox.map(op => op.id), [first.mutationId, second.mutationId]);
+  assert.deepEqual(store.revisions.map(revision => revision.translations[0]), ['first save', 'second save']);
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'second save');
+  release.resolve();
+  await client.sync();
+  assert.equal(client.snapshot().pending, 0);
+  assert.deepEqual(server.requests.filter(entry => entry.path.endsWith('/mutations')).map(entry => entry.options.body.files[0].translations[0]), ['first save', 'second save']);
+  assert.equal(server.files[0].translations[0], 'second save');
+});
+
+test('a conflict discovered after background save retains both copies and the durable operation', async t => {
+  const { client, store, server } = await fixture();
+  const entered = gate(), release = gate();
+  t.after(() => { release.resolve(); client.destroy(); });
+  const request = client.request, base = client.fileBase('a.txt');
+  const snapshots = []; client.onChange = state => snapshots.push(state);
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { entered.resolve(); await release.promise; }
+    return request(path, options);
+  };
+  server.change('a.txt', ['remote edit', 'two']);
+  const save = client.save({ waitForSync: false, bases: { 'a.txt': base },
+    files: [{ ...base, translations: ['local edit', 'two'] }],
+  });
+  await entered.promise;
+  const result = await localSaveResult(save);
+  assert.equal(result.status, 'pending');
+  release.resolve();
+  await client.sync();
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.mutationId, result.mutationId);
+  assert.deepEqual(conflict.yours.translations, ['local edit', 'two']);
+  assert.deepEqual(conflict.shared.translations, ['remote edit', 'two']);
+  assert.equal(Object.values(store.state.rooms)[0].outbox[0].status, 'conflict');
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'local edit');
+  assert.equal(server.receipts.size, 0);
+  assert.equal(snapshots.at(-1).conflicts.length, 1, 'The existing attention UI receives the later conflict.');
+});
+
+test('background permission failures remain visible while subsequent local saves retry', async t => {
+  const { client, store, server } = await fixture();
+  const firstEntered = gate(), firstRelease = gate(), retryEntered = gate(), retryRelease = gate();
+  t.after(() => { firstRelease.resolve(); retryRelease.resolve(); client.destroy(); });
+  const request = client.request, statuses = [];
+  client.onStatus = status => statuses.push(status);
+  let attempt = 0;
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) {
+      if (++attempt === 1) {
+        firstEntered.resolve(); await firstRelease.promise;
+        throw Object.assign(new Error('Translation access was removed.'), { status: 403 });
+      }
+      retryEntered.resolve(); await retryRelease.promise;
+    }
+    return request(path, options);
+  };
+  const firstSave = client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['saved before permission failure', 'two'] }],
+  });
+  await firstEntered.promise;
+  assert.equal((await localSaveResult(firstSave)).status, 'pending');
+  firstRelease.resolve();
+  await client.sync();
+  assert.deepEqual(statuses.at(-1), { message: 'Translation access was removed.', error: true });
+  assert.equal(client.snapshot().pending, 1);
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'saved before permission failure');
+  const statusCount = statuses.length;
+  const secondSave = client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['saved while permission retry waits', 'two'] }],
+  });
+  await retryEntered.promise;
+  assert.equal((await localSaveResult(secondSave)).status, 'pending');
+  assert.equal(statuses.length, statusCount, 'Another local commit and retry start must not clear the failure.');
+  assert.equal(client.snapshot().pending, 2);
+  retryRelease.resolve();
+  await client.sync();
+  assert.equal(client.snapshot().pending, 0);
+  assert.equal(server.files[0].translations[0], 'saved while permission retry waits');
+  assert.deepEqual(statuses.at(-1), { message: '', error: false });
+});
+
 test('captured editor base merges independent remote edits and detects overlapping edits', async () => {
   const { client, server } = await fixture(); const base = client.fileBase('a.txt');
   server.change('a.txt', ['one', 'remote second']); await client.sync();

@@ -215,7 +215,7 @@
       }, { projectWorkspace: this.projection(files, epoch) }, epoch);
       this.onRemote(copy(Object.values(this.room().local)));
     }
-    async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore }) {
+    async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, waitForSync = true }) {
       const epoch = this.epoch; const room = this.room();
       if (!room) throw new Error('Collaboration workspace is not connected.');
       if (!Array.isArray(files) || !files.length) throw new Error('A save must contain at least one file.');
@@ -233,6 +233,14 @@
         for (const yours of normalized) current.local[yours.filepath] = copy(yours);
       }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
         collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, copy(workspace)) }, epoch);
+      if (!waitForSync) {
+        // Workspace, history and outbox are durable. Let editor saves finish even
+        // while a slow request or another tab holds the synchronization lock.
+        this.retry().catch(error => {
+          if (this.current(epoch) && !error.stale) this.handleError(error);
+        });
+        return { status: 'pending', mutationId };
+      }
       await this.retry();
       if (!this.current(epoch)) throw staleError();
       if (this.lastError && !transient(this.lastError)) throw this.lastError;
