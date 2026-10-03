@@ -679,7 +679,6 @@
 
         <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls">
-            <h2>Reference lookup</h2>
             <div class="sideSearchRow">
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
               <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
