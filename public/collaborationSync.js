@@ -29,6 +29,7 @@
       this.claims = new Map(); this.running = null; this.socket = null;
       this.timer = null; this.heartbeat = null; this.backoff = 1000;
       this.destroyed = false;
+      this.localWrites = Promise.resolve(); this.stagedSaves = new Map();
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
@@ -41,8 +42,33 @@
     }
     notify() { this.onChange(this.snapshot({ includeFiles: false })); }
     status(message, error = false) { this.onStatus({ message, error }); }
-    fileBase(filepath) { return copy(this.room()?.local[filepath] || null); }
+    fileBase(filepath) {
+      let file = this.room()?.local[filepath] || null;
+      for (const batch of this.stagedSaves.values()) if (batch.collaboration?.key === this.key) {
+        file = batch.files.find(item => item.filepath === filepath) || file;
+      }
+      return copy(file);
+    }
+    stageLocalSave(batch) { this.stagedSaves.set(batch.jobId, batch); }
+    withLocalWrite(action) {
+      const write = this.localWrites.then(action);
+      this.localWrites = write.catch(() => {});
+      return write;
+    }
+    acceptLocalSave(batch, ack) {
+      this.stagedSaves.delete(batch.jobId);
+      if (this.key !== batch.collaboration?.key || !this.room()) return;
+      const room = this.room();
+      if (ack.duplicate) room.outbox = room.outbox.filter(operation => operation.id !== batch.jobId);
+      if (ack.operation && !room.outbox.some(operation => operation.id === ack.operation.id)) room.outbox.push(copy(ack.operation));
+      for (const file of ack.files || batch.files) room.local[file.filepath] = copy(file);
+      // The worker acknowledgement is durable even if a UI observer fails.
+      try { this.notify(); } catch (_) {}
+    }
     async update(fn, options = {}, epoch = this.epoch) {
+      return this.withLocalWrite(() => this.updateStored(fn, options, epoch));
+    }
+    async updateStored(fn, options = {}, epoch = this.epoch) {
       const key = this.key;
       if (!this.current(epoch)) throw staleError();
       const state = await this.store.updateCollaborationState(state => {

@@ -39,6 +39,7 @@
 <body>
   <div id="app" v-cloak>
     <div class="appRoot" :data-density="uiDensity">
+    <div v-if="localSaveError" class="cloudStorageError" role="alert">Could not finish saving your translations. Your edits remain in this tab. {{ localSaveError }} <button @click="retryPendingSaves">Retry saving</button> <button @click="downloadPendingSaves">Download pending edits</button></div>
     <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
@@ -1153,6 +1154,8 @@
   <script src="translationDiagnostics.js"></script>
   <script src="terminologyDiagnostics.js"></script>
   <script src="offlineStore.js"></script>
+  <script src="saveWorkerClient.js"></script>
+  <script src="pendingSaves.js"></script>
   <script src="dictionarySync.js"></script>
   <script src="cloudSync.js"></script>
   <script src="cloudUi.js"></script>

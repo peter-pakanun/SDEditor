@@ -632,23 +632,16 @@ const config = Vue.defineComponent({
       return Math.max(1, Math.ceil(this.filteredDescs.length / this.pageSize));
     },
     descsDisplay() {
-      let descsToDisplay = this.filteredDescs.slice().sort((a, b) => {
-        let modifier = 1;
-        this.currentSortIcon = '▲';
-        if (this.currentSortDir === 'desc') {
-          modifier = -1;
-          this.currentSortIcon = '▼';
-        }
-        if (a[this.currentSort] < b[this.currentSort]) return -1 * modifier;
-        if (a[this.currentSort] > b[this.currentSort]) return 1 * modifier;
+      const key = this.currentSort;
+      const modifier = this.currentSortDir === 'desc' ? -1 : 1;
+      this.currentSortIcon = modifier === 1 ? '▲' : '▼';
+      const descsToDisplay = this.filteredDescs.slice().sort((a, b) => {
+        if (a[key] < b[key]) return -modifier;
+        if (a[key] > b[key]) return modifier;
         return 0;
       });
-      descsToDisplay = descsToDisplay.filter((row, index) => {
-        let start = (this.currentPage - 1) * this.pageSize;
-        let end = this.currentPage * this.pageSize;
-        if (index >= start && index < end) return true;
-      });
-      return descsToDisplay;
+      const start = (this.currentPage - 1) * this.pageSize;
+      return descsToDisplay.slice(start, start + this.pageSize);
     },
     hlPopupSelectedItem() {
       return this.hlPopup.visible ? this.hlPopup.filtered[this.hlPopup.selectedIndex] || null : null;
@@ -860,6 +853,7 @@ const config = Vue.defineComponent({
       await this.activateGameVersion(version, { checkMigration: true });
     },
     async activateGameVersion(version, { checkMigration = true } = {}) {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       const v = this.normalizeGameVersion(version);
       this.gameVersion = v;
       this.gameVersionSelected = true;
@@ -933,6 +927,7 @@ const config = Vue.defineComponent({
       await this.loadVersionedStorage();
     },
     async loadVersionedStorage() {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       const game = this.gameVersion;
       const generation = this._versionLoadGeneration = (this._versionLoadGeneration || 0) + 1;
       const current = () => generation === this._versionLoadGeneration && game === this.gameVersion;
@@ -4272,6 +4267,9 @@ const config = Vue.defineComponent({
         if (!ok) return;
         if (this.gameVersion !== game || this.localDescs !== workspace
           || (context && !this.collaborationContextCurrent(context))) return;
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+        if (this.gameVersion !== game || this.localDescs !== workspace
+          || (context && !this.collaborationContextCurrent(context))) return;
         try {
           await window.OfflineStore?.clearWorkspace?.(game);
         } catch (_) {
@@ -4420,6 +4418,7 @@ const config = Vue.defineComponent({
     },
 
     async importUpdateZipFile(file, resolvedParsed = null, options = {}) {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
@@ -4511,6 +4510,10 @@ const config = Vue.defineComponent({
       let sourceHash;
       try { sourceHash = await window.CollaborationProtocol.sourceHash(nextSource); }
       catch (error) { this.loadingProgress = this.sourceLoaded ? 100 : 0; this.appAlert('Import aborted. ' + error.message); return; }
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) {
+        this.loadingProgress = this.sourceLoaded ? 100 : 0;
+        return;
+      }
       if ((importContext && !this.collaborationContextCurrent(importContext)) || this.localDescs !== importWorkspace || this.descs !== importSource) {
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         this.collaborationNotice = 'The workspace changed while importing. Import the source again in the intended workspace.';
@@ -4633,6 +4636,7 @@ const config = Vue.defineComponent({
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
@@ -5047,7 +5051,9 @@ const config = Vue.defineComponent({
           });
         }
       }
-      this.filteredDescs = filtered;
+      // Rows are a replaced display snapshot. Tracking every field of 20,000
+      // derived rows makes the next render expensive even for a one-file save.
+      this.filteredDescs = Vue.markRaw ? Vue.markRaw(filtered) : filtered;
       Object.assign(this.statistic, counts);
       Vue.nextTick(() => {
         if (this.currentPage > this.pageCount) this.gotoPage(1);
@@ -5427,7 +5433,7 @@ const config = Vue.defineComponent({
       }
     },
     async editorSave({ close = true } = {}) {
-      if (this.editorLoading || this.editorLoadError || this.editorSaving) return false;
+      if (this.editorLoading || this.editorLoadError || this.editorSaving || this._importingSource || this._resetConfirming || this.versionStorageLoading) return false;
       if (this.editorTranslationReadOnly) return false;
       if (!this.editorHaveChanges()) return false;
 
@@ -5513,7 +5519,7 @@ const config = Vue.defineComponent({
           return false;
         }
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
-          context, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
+          context, close, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
@@ -5537,6 +5543,7 @@ const config = Vue.defineComponent({
       } finally { this.editorSaving = false; }
     },
     async refreshHistory() {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (!this.editorCurrentEditingDesc) {
         this.historyItems = [];
         this.historySelectedA = null;
@@ -5903,6 +5910,7 @@ const config = Vue.defineComponent({
     },
     async saveLocalDescs() {
       if (this.testMode) return;
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before saving the workspace.');
       if (!offlineStoreReady || !window.OfflineStore?.setWorkspace) throw new Error('Local storage is unavailable.');
       const plain = this.toPlainForStorage(this.localDescs);
       if (!plain) throw new Error('Cannot serialize workspace');
@@ -6021,9 +6029,11 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     async exportZip(doFullExport) {
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (doFullExport && !await this.appConfirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes", {
         title: 'Export all reviewed files?', confirmLabel: 'Export all', danger: false,
       })) return;
+      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       let descsToExport = doFullExport
         ? (this.descs || []).filter(o => !o.needsReview)
         : (this.descs || []).filter(o => o.hasChanges);

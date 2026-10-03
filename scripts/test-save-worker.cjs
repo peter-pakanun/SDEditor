@@ -1,0 +1,270 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const { create } = require('../public/saveWorkerClient.js');
+const queued = () => new Promise(resolve => setImmediate(resolve));
+const copy = value => JSON.parse(JSON.stringify(value));
+const identity = { accountId: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai' };
+const key = JSON.stringify(['account', 'poe1', 'source', 'Thai']);
+const file = (text = 'old') => ({ filepath: 'stat.txt', translations: [text], needsReview: false, trackedForExport: true, revision: 2 });
+const batch = (options = {}) => ({ jobId: 'save-1', game: 'poe1', language: 'Thai', sourceHash: 'source', accountId: 'account',
+  files: [file('new')], descriptions: [{ filepath: 'stat.txt', filename: 'stat.txt', translations: { English: ['source text'] } }],
+  statuses: { 'stat.txt': { lastEditedAt: 20 } }, revisions: [{ filepath: 'stat.txt', lang: 'Thai', savedAt: 20, translations: ['new'] }],
+  ...options });
+function fixture({ collaboration = false, worker = false, failRevision = false } = {}) {
+  const kv = new Map([['workspace_poe1', { sourceHash: 'source', collaborationAccountId: 'account', marker: true,
+    descs: [{ filepath: 'stat.txt', translations: { English: ['source text'], Thai: ['old'], French: ['bonjour'] } },
+      { filepath: 'other.txt', translations: { English: ['other'], Thai: ['untouched'] } }],
+    status: { 'stat.txt': { lastExportedAt: 10 }, 'other.txt': { needsReview: true } } }]]);
+  if (collaboration) kv.set('collaboration_v1', { version: 1, rooms: { [key]: { identity, roomId: 'room',
+    manifest: { files: [{ filepath: 'stat.txt', english: ['source text'] }] },
+    local: { 'stat.txt': file() }, shared: { 'stat.txt': file() }, outbox: [], conflicts: [], recovery: [] },
+    unrelated: { local: { untouched: true } } } });
+  const revisions = []; const transactions = [];
+  const db = { transaction(names) {
+    const pending = []; let finished = false;
+    const tx = {
+      objectStore(name) {
+        assert.ok(names.includes(name));
+        return {
+          get(kvKey) {
+            const req = {};
+            queueMicrotask(() => {
+              const written = pending.filter(item => item.store === 'kv' && item.row.key === kvKey).at(-1);
+              const value = written ? written.row.value : kv.get(kvKey);
+              req.result = value === undefined ? undefined : { key: kvKey, value: structuredClone(value) };
+              req.onsuccess?.();
+            }); return req;
+          },
+          put(row) { pending.push({ store: name, row: structuredClone(row) }); },
+          add(row) { if (failRevision) throw new Error('Cannot store history'); pending.push({ store: name, row: structuredClone(row) }); },
+        };
+      },
+      abort(error) { assert.equal(finished, false); finished = true; this.error = error; queueMicrotask(() => this.onabort?.()); },
+      complete() {
+        assert.equal(finished, false); finished = true;
+        for (const item of pending) if (item.store === 'kv') kv.set(item.row.key, item.row.value); else revisions.push(item.row);
+        this.oncomplete?.();
+      },
+    };
+    transactions.push(tx); return tx;
+  } };
+  const indexedDB = { open() { const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess(); }); return req; } };
+  const root = {}; const context = vm.createContext({ ...(worker ? { self: root } : { window: root }), indexedDB, console: { log() {} } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'offlineStore.js'), 'utf8'), context);
+  return { store: root.OfflineStore, kv, revisions, transactions };
+}
+async function commit(f, request) { await queued(); f.transactions.at(-1).complete(); return request; }
+
+test('worker-compatible store commits a touched language and history only after transaction completion', async () => {
+  const f = fixture({ worker: true });
+  let settled = false; const saved = f.store.saveTranslationBatch(batch()).then(value => { settled = true; return value; });
+  await queued(); assert.equal(settled, false); assert.equal(f.revisions.length, 0);
+  assert.equal(f.kv.get('workspace_poe1').descs[0].translations.Thai[0], 'old');
+  f.transactions[0].complete(); const ack = await saved;
+  const workspace = f.kv.get('workspace_poe1');
+  assert.equal(workspace.marker, true); assert.deepEqual(workspace.descs[0].translations.French, ['bonjour']);
+  assert.deepEqual(workspace.descs[1].translations.Thai, ['untouched']); assert.deepEqual(workspace.descs[0].translations.Thai, ['new']);
+  assert.equal(workspace.status['stat.txt'].lastExportedAt, 10); assert.equal(workspace.status['stat.txt'].lastEditedAt, 20);
+  assert.equal(workspace.status['other.txt'].needsReview, true); assert.equal(f.revisions.length, 1);
+  assert.equal(ack.status, 'local'); assert.equal(ack.workspace, undefined); assert.equal(ack.files.length, 1);
+});
+
+test('outbox, touched files, history and receipt commit atomically with independent operation copies', async () => {
+  const f = fixture({ collaboration: true });
+  const ack = await commit(f, f.store.saveTranslationBatch(batch({ collaboration: { key, identity, origin: 'save' } })));
+  const state = f.kv.get('collaboration_v1'); const room = state.rooms[key];
+  assert.equal(ack.mutationId, 'save-1'); assert.equal(ack.pending, 1); assert.equal(ack.operation.id, 'save-1');
+  assert.deepEqual(room.outbox[0].files[0].base.translations, ['old']);
+  assert.deepEqual(room.local['stat.txt'].translations, ['new']);
+  assert.notEqual(room.local['stat.txt'], room.outbox[0].files[0].yours);
+  assert.deepEqual(state.rooms.unrelated, { local: { untouched: true } });
+  assert.equal(f.revisions[0].collaborationAccountId, 'account');
+  assert.equal(f.kv.get('translation_save_receipts_poe1').length, 1);
+});
+
+test('same-ID recovery acknowledges the durable receipt without duplicate revision or outbox', async () => {
+  const f = fixture({ collaboration: true }); const request = batch({ collaboration: { key, identity, origin: 'save' } });
+  await commit(f, f.store.saveTranslationBatch(request));
+  const ack = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(ack.duplicate, true); assert.equal(f.revisions.length, 1);
+  assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox.length, 1);
+});
+
+test('same-ID recovery returns current touched files without resurrecting an already synced outbox operation', async () => {
+  const f = fixture({ collaboration: true }); const request = batch({ collaboration: { key, identity, origin: 'save' } });
+  await commit(f, f.store.saveTranslationBatch(request));
+  const room = f.kv.get('collaboration_v1').rooms[key]; room.outbox = []; room.local['stat.txt'] = file('merged shared');
+  const ack = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(ack.duplicate, true); assert.equal(ack.operation, null); assert.equal(ack.pending, 0); assert.equal(ack.status, 'synced');
+  assert.deepEqual(copy(ack.files[0].translations), ['merged shared']); assert.equal(f.revisions.length, 1);
+  assert.equal(room.outbox.length, 0);
+});
+
+test('same-ID recovery proves the old save without reattaching its operation after source changes', async () => {
+  const f = fixture({ collaboration: true }); const request = batch({ collaboration: { key, identity, origin: 'save' } });
+  await commit(f, f.store.saveTranslationBatch(request));
+  f.kv.get('workspace_poe1').sourceHash = 'different source';
+  const ack = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(ack.duplicate, true); assert.equal(ack.operation, null); assert.equal(ack.pending, 0);
+  assert.deepEqual(copy(ack.files[0].translations), ['new']); assert.equal(f.revisions.length, 1);
+});
+
+test('a reused ID with changed translations rejects instead of falsely acknowledging the new content', async () => {
+  const f = fixture(); await commit(f, f.store.saveTranslationBatch(batch()));
+  await assert.rejects(f.store.saveTranslationBatch(batch({ files: [file('different')] })), /identifier was reused/);
+  assert.deepEqual(f.kv.get('workspace_poe1').descs[0].translations.Thai, ['new']); assert.equal(f.revisions.length, 1);
+});
+
+test('a reused ID with a changed description template also rejects', async () => {
+  const f = fixture(); await commit(f, f.store.saveTranslationBatch(batch()));
+  await assert.rejects(f.store.saveTranslationBatch(batch({ descriptions: [{ filepath: 'stat.txt', name: 'changed source metadata' }] })), /identifier was reused/);
+  assert.equal(f.revisions.length, 1);
+});
+
+test('quota abort leaves every durable record unchanged', async () => {
+  const f = fixture({ collaboration: true }); const before = copy(Object.fromEntries(f.kv));
+  const saved = f.store.saveTranslationBatch(batch({ collaboration: { key, identity } }));
+  const rejection = assert.rejects(saved, /Quota exceeded/);
+  await queued(); f.transactions[0].abort(new Error('Quota exceeded')); await rejection;
+  assert.deepEqual(Object.fromEntries(f.kv), before); assert.equal(f.revisions.length, 0);
+});
+
+test('history failure rolls back already queued workspace and outbox writes', async () => {
+  const f = fixture({ collaboration: true, failRevision: true }); const before = copy(Object.fromEntries(f.kv));
+  await assert.rejects(f.store.saveTranslationBatch(batch({ collaboration: { key, identity } })), /Cannot store history/);
+  assert.deepEqual(Object.fromEntries(f.kv), before); assert.equal(f.revisions.length, 0);
+});
+
+test('source and account mismatches reject with a stale scope error', async () => {
+  for (const options of [{ sourceHash: 'new source' }, { accountId: 'new account' }]) {
+    const f = fixture(); const before = copy(Object.fromEntries(f.kv));
+    await assert.rejects(f.store.saveTranslationBatch(batch(options)), error => error.stale && error.code === 'SAVE_SCOPE_CHANGED');
+    assert.deepEqual(Object.fromEntries(f.kv), before);
+  }
+});
+
+test('a missing room and wrong room identity never claim a successful local save', async () => {
+  for (const roomKey of ['missing', key]) {
+    const f = fixture({ collaboration: true });
+    if (roomKey === key) f.kv.get('collaboration_v1').rooms[key].identity = { ...identity, language: 'French' };
+    await assert.rejects(f.store.saveTranslationBatch(batch({ collaboration: { key: roomKey, identity } })), error => error.stale);
+    assert.deepEqual(f.kv.get('workspace_poe1').descs[0].translations.Thai, ['old']);
+  }
+});
+
+test('consecutive saves capture the latest stored base while explicit draft bases are preserved', async () => {
+  const f = fixture({ collaboration: true });
+  await commit(f, f.store.saveTranslationBatch(batch({ collaboration: { key, identity } })));
+  await commit(f, f.store.saveTranslationBatch(batch({ jobId: 'save-2', files: [file('next')], collaboration: { key, identity } })));
+  await commit(f, f.store.saveTranslationBatch(batch({ jobId: 'save-3', files: [file('third')],
+    collaboration: { key, identity, bases: { 'stat.txt': file('captured') } } })));
+  const operations = f.kv.get('collaboration_v1').rooms[key].outbox;
+  assert.deepEqual(operations[1].files[0].base.translations, ['new']);
+  assert.deepEqual(operations[2].files[0].base.translations, ['captured']);
+});
+
+test('adding a previously untranslated description keeps existing files and limits the template to source language', async () => {
+  const f = fixture();
+  await commit(f, f.store.saveTranslationBatch(batch({ files: [{ ...file('added'), filepath: 'added.txt' }],
+    descriptions: [{ filepath: 'added.txt', translations: { English: ['source'], French: ['unsubmitted'] } }] })));
+  const workspace = f.kv.get('workspace_poe1'); assert.equal(workspace.descs.length, 3);
+  assert.deepEqual(workspace.descs[2].translations, { English: ['source'], Thai: ['added'] });
+});
+
+test('missing workspace and malformed input produce actionable failures', async () => {
+  const f = fixture(); f.kv.delete('workspace_poe1');
+  await assert.rejects(f.store.saveTranslationBatch(batch()), /Keep this tab open/);
+  await assert.rejects(f.store.saveTranslationBatch(batch({ files: [file(), file()] })), /duplicate/);
+  await assert.rejects(f.store.saveTranslationBatch(batch({ game: 'unknown' })), /Invalid local/);
+});
+
+function workerHarness({ postFailure } = {}) {
+  const workers = [];
+  class Worker {
+    constructor(url) { this.url = url; this.messages = []; workers.push(this); }
+    postMessage(message) { if (postFailure) throw postFailure; this.messages.push(structuredClone(message)); }
+    emit(message) { this.onmessage({ data: message }); }
+    terminate() { this.terminated = true; }
+  }
+  return { Worker, workers };
+}
+
+test('no Worker support and blocked construction use the same structured storage command', async () => {
+  for (const Worker of [null, class { constructor() { throw new Error('CSP'); } }]) {
+    const seen = [];
+    const client = create({ Worker, store: { saveTranslationBatch: async value => { seen.push(value.jobId); return { status: 'local' }; } } });
+    const ack = await client.save(batch()); assert.equal(ack.status, 'local'); assert.deepEqual(seen, ['save-1']); client.dispose();
+  }
+});
+
+test('worker handshake and durable acknowledgment control promise completion', async () => {
+  const h = workerHarness(); const client = create({ Worker: h.Worker, store: {} }); const worker = h.workers[0];
+  let settled = false; const saving = client.save(batch()).then(result => { settled = true; return result; });
+  await queued(); assert.equal(worker.messages.length, 0); assert.equal(settled, false);
+  worker.emit({ type: 'ready', version: 1 }); await queued(); assert.equal(worker.messages.length, 1); assert.equal(settled, false);
+  assert.equal(worker.messages[0].batch.workspace, undefined); assert.equal(worker.messages[0].batch.files.length, 1);
+  worker.emit({ type: 'saved', id: 'other-job', result: {} }); assert.equal(settled, false);
+  worker.emit({ type: 'saved', id: 'save-1', result: { status: 'local', jobId: 'save-1' } });
+  assert.equal((await saving).jobId, 'save-1'); client.dispose();
+});
+
+test('worker startup import failure safely falls back before dispatch', async () => {
+  const h = workerHarness(); let calls = 0;
+  const client = create({ Worker: h.Worker, store: { saveTranslationBatch: async () => { calls++; return { status: 'local' }; } } });
+  const saving = client.save(batch()); h.workers[0].onerror();
+  assert.equal((await saving).status, 'local'); assert.equal(calls, 1); assert.equal(h.workers[0].messages.length, 0); client.dispose();
+});
+
+test('worker crash after dispatch rejects as unknown durability without an automatic duplicate write', async () => {
+  const h = workerHarness(); let calls = 0;
+  const client = create({ Worker: h.Worker, store: { saveTranslationBatch: async () => { calls++; return { duplicate: true }; } } });
+  h.workers[0].emit({ type: 'ready', version: 1 });
+  const saving = client.save(batch()); const rejection = assert.rejects(saving, error => error.durableUnknown && error.jobId === 'save-1');
+  await queued(); h.workers[0].onerror(); await rejection; assert.equal(calls, 0);
+  // A user-triggered same-ID retry uses the durable receipt on the fallback store.
+  assert.equal((await client.save(batch())).duplicate, true); assert.equal(calls, 1); client.dispose();
+});
+
+test('serial worker messages preserve save order and continue after an acknowledged storage failure', async () => {
+  const h = workerHarness(); const client = create({ Worker: h.Worker, store: {} }); const worker = h.workers[0];
+  worker.emit({ type: 'ready', version: 1 });
+  const first = client.save(batch()); const rejection = assert.rejects(first, /Quota/);
+  const second = client.save(batch({ jobId: 'save-2' }));
+  await queued(); assert.equal(worker.messages.length, 1);
+  worker.emit({ type: 'error', id: 'save-1', error: { name: 'QuotaExceededError', message: 'Quota exceeded' } }); await rejection;
+  await queued(); assert.equal(worker.messages.length, 2); assert.equal(worker.messages[1].id, 'save-2');
+  worker.emit({ type: 'saved', id: 'save-2', result: { status: 'local' } }); await second; client.dispose();
+});
+
+test('non-plain worker payload errors are surfaced without falling back or acknowledging success', async () => {
+  const h = workerHarness({ postFailure: Object.assign(new Error('not plain'), { name: 'DataCloneError' }) }); let calls = 0;
+  const client = create({ Worker: h.Worker, store: { saveTranslationBatch: async () => { calls++; } } });
+  h.workers[0].emit({ type: 'ready', version: 1 });
+  await assert.rejects(client.save(batch()), error => error.name === 'DataCloneError'); assert.equal(calls, 0); client.dispose();
+});
+
+test('dispose rejects current requests and queued saves rather than leaving promises unresolved', async () => {
+  const h = workerHarness(); const client = create({ Worker: h.Worker, store: {} }); h.workers[0].emit({ type: 'ready', version: 1 });
+  const first = client.save(batch()); const second = client.save(batch({ jobId: 'save-2' }));
+  const rejected = [assert.rejects(first, /closed/), assert.rejects(second, /closed/)];
+  await queued(); client.dispose(); await Promise.all(rejected);
+});
+
+test('worker entrypoint queues actual save commands and sends ACK only after storage resolves', async () => {
+  const messages = [], writes = []; let resolveFirst;
+  const root = { postMessage: message => messages.push(message), OfflineStore: { saveTranslationBatch(value) {
+    writes.push(value.jobId);
+    return value.jobId === 'save-1' ? new Promise(resolve => { resolveFirst = resolve; }) : Promise.resolve({ jobId: value.jobId });
+  } } };
+  const context = vm.createContext({ self: root, importScripts: file => assert.equal(file, 'offlineStore.js') });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'saveWorker.js'), 'utf8'), context);
+  assert.equal(messages[0].type, 'ready');
+  root.onmessage({ data: { type: 'saveTranslations', id: 'save-1', batch: batch() } });
+  root.onmessage({ data: { type: 'saveTranslations', id: 'save-2', batch: batch({ jobId: 'save-2' }) } });
+  await queued(); assert.deepEqual(writes, ['save-1']); assert.equal(messages.length, 1);
+  resolveFirst({ jobId: 'save-1' }); await queued(); assert.deepEqual(writes, ['save-1', 'save-2']);
+  assert.equal(messages[1].id, 'save-1'); assert.equal(messages[2].id, 'save-2');
+});

@@ -49,6 +49,37 @@ function saveFixture() {
   e.testMode = false;
   return { ...h, desc };
 }
+
+function enablePending(h) {
+  const { editor: e, window, context } = h;
+  const calls = [], downloads = [], listeners = new Map();
+  context.crypto = require('node:crypto').webcrypto;
+  context.Blob = Blob;
+  context.saveAs = (blob, filename) => downloads.push({ blob, filename });
+  window.PendingSaves = require('../public/pendingSaves.js');
+  window.SaveWorkerClient = { create: () => ({
+    save: batch => new Promise((resolve, reject) => calls.push({ batch, resolve, reject })),
+  }) };
+  window.addEventListener = (name, handler) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    listeners.get(name).add(handler);
+  };
+  window.removeEventListener = (name, handler) => listeners.get(name)?.delete(handler);
+  e.localDescs = { descs: JSON.parse(JSON.stringify(e.descs)), status: {}, sourceHash: e.sourceIdentity };
+  function acknowledge(call, extra = {}) {
+    call.resolve({ jobId: call.batch.jobId, status: call.batch.collaboration ? 'pending' : 'local', files: call.batch.files,
+      ...(call.batch.collaboration ? { operation: { id: call.batch.jobId, origin: 'save', status: 'pending',
+        files: call.batch.files.map(file => ({ base: call.batch.collaboration.bases[file.filepath] || null, yours: file })) } } : {}), ...extra });
+  }
+  function warnsBeforeUnload() {
+    let prevented = false;
+    const event = { preventDefault() { prevented = true; }, returnValue: undefined };
+    for (const listener of listeners.get('beforeunload') || []) listener(event);
+    return prevented;
+  }
+  return { ...h, calls, downloads, acknowledge, warnsBeforeUnload };
+}
+const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 test('F2 opens first available visible row, F1 opens last available visible row', async () => {
   const { editor: e, opened } = navigationFixture();
   e._collaboration = { isEditing: p => /001|020/.test(p) };
@@ -518,4 +549,141 @@ test('shared-history restore advances a clean editor base but retains a dirty dr
     assert.equal(e._editorCollabBase.translations[0], dirty ? 'เดิม' : 'ประวัติ');
     if (dirty) assert.equal(e.editorBlocks[0].translation, 'ใหม่');
   }
+});
+
+test('worker saves close the editor and navigate before the local transaction acknowledges', async t => {
+  for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async () => {
+    const h = enablePending(saveFixture()), { editor: e, desc, calls, acknowledge, warnsBeforeUnload } = h;
+    e.descs.push(description(2)); e.filterDesc();
+    const opened = [];
+    e.editFile = async filepath => { opened.push(filepath); e.editorVisible = true; e.editorCurrentEditingDesc = e.getDescByFilepath(filepath); return true; };
+    assert.equal(await (navigate ? e.saveAndSkipFile() : e.editorSave()), true);
+    assert.equal(e.editorSaving, false); assert.equal(e.pendingLocalSaves, 1);
+    assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(calls.length, 0);
+    assert.equal(warnsBeforeUnload(), true);
+    if (navigate) assert.deepEqual(opened, ['source/002.txt']);
+    else assert.equal(e.editorVisible, false);
+    await pendingTick(); assert.equal(calls.length, 1);
+    acknowledge(calls[0]); await e._pendingSaves.drain(); assert.equal(e.pendingLocalSaves, 0);
+  });
+});
+
+test('optimistic worker saving still prevents duplicate submissions during a diagnostic confirmation', async () => {
+  const { editor: e, calls, acknowledge } = enablePending(saveFixture());
+  let answer, confirmations = 0;
+  e.collectEditorDiagnostics = level => level === 'warning' ? [{ level, message: 'Review this translation.' }] : [];
+  e.appConfirm = () => { confirmations++; return new Promise(resolve => { answer = resolve; }); };
+  const saving = e.editorSave(); await pendingTick();
+  assert.equal(await e.editorSave(), false); assert.equal(confirmations, 1);
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(calls.length, 0);
+  answer(true); assert.equal(await saving, true); assert.equal(e.pendingLocalSaves, 1);
+  await pendingTick(); assert.equal(calls.length, 1); acknowledge(calls[0]); await e._pendingSaves.drain();
+});
+
+test('a failed background local save retains closed edits, downloadable recovery and an identical retry', async () => {
+  const { editor: e, calls, acknowledge, downloads, warnsBeforeUnload, desc } = enablePending(saveFixture());
+  assert.equal(await e.editorSave(), true); assert.equal(e.editorVisible, false);
+  const drained = e._pendingSaves.drain(); await pendingTick();
+  const originalPayload = JSON.stringify(calls[0].batch);
+  calls[0].reject(new Error('Disk full')); await assert.rejects(drained, /Disk full/);
+  assert.equal(e.pendingLocalSaves, 1); assert.match(e.localSaveError, /Disk full/);
+  assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(warnsBeforeUnload(), true);
+  e.downloadPendingSaves();
+  assert.equal(downloads[0].filename, 'SDEditor_pending_edits.json');
+  const recovery = JSON.parse(await downloads[0].blob.text());
+  assert.equal(recovery.saves[0].jobId, calls[0].batch.jobId);
+  assert.equal(recovery.saves[0].files[0].translations[0], 'ใหม่');
+  const retry = e.retryPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 2); assert.equal(JSON.stringify(calls[1].batch), originalPayload);
+  assert.match(e.localSaveError, /Disk full/, 'Starting a retry must not clear its warning.');
+  acknowledge(calls[1]); await retry;
+  assert.equal(e.localSaveError, ''); assert.equal(e.pendingLocalSaves, 0);
+  assert.equal(e.editorVisible, false); assert.equal(warnsBeforeUnload(), false);
+});
+
+test('beforeunload protects pending local writes and dirty drafts while durable online outboxes stay silent', async () => {
+  const { editor: e, calls, acknowledge, warnsBeforeUnload, desc } = enablePending(saveFixture());
+  e.initializePendingSaves(); e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), true);
+  e.editorBlocks.forEach((block, index) => { block.translation = desc.translations.Thai[index]; });
+  e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), false);
+  e.collaborationState = { pending: 7, pendingCount: 7, connected: false };
+  e.editorVisible = false; e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), false);
+  e.editorVisible = true; e.editorBlocks[0].translation = 'ใหม่';
+  assert.equal(await e.editorSave(), true); assert.equal(warnsBeforeUnload(), true);
+  await pendingTick(); acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(warnsBeforeUnload(), false);
+  e.editorVisible = true; e.editorBlocks[0].translation = 'ร่างใหม่'; e.updateLeaveProtection();
+  assert.equal(warnsBeforeUnload(), true);
+});
+
+test('older worker and remote acknowledgements preserve a newer pending same-file save and a different typing draft', async () => {
+  const { editor: e, window, desc, calls, acknowledge } = enablePending(saveFixture());
+  const { Client } = require('../public/collaborationSync.js');
+  const identity = { accountId: 'translator', game: 'poe1', language: 'Thai', sourceHash: e.sourceIdentity };
+  const client = new Client({ WebSocket: null, locks: null, store: {}, request: async () => ({}) });
+  client.key = window.CollaborationProtocol.scopeKey(identity);
+  const initial = { ...e.collaborationFile(desc), revision: 1 };
+  client.state = { version: 1, rooms: { [client.key]: { identity, roomId: 'room', manifest: window.CollaborationProtocol.manifest(e.descs),
+    local: { [desc.filepath]: initial }, shared: { [desc.filepath]: initial }, outbox: [], conflicts: [], recovery: [] } } };
+  let retries = 0; client.retry = async () => { retries++; return {}; };
+  e.cloudUser = { id: 'translator' }; e._collaboration = client; e._editorCollabBase = client.fileBase(desc.filepath);
+  assert.equal(await e.editorSave(), true);
+  e.editorVisible = true; e.editorBlocks[0].translation = 'ใหม่กว่า';
+  assert.equal(await e.editorSave(), true); assert.equal(e.pendingLocalSaves, 2);
+  e.applyCollaborationFiles([{ ...initial, translations: ['ตอบกลับเก่า', 'สอง'] }]);
+  assert.equal(desc.translations.Thai[0], 'ใหม่กว่า');
+  await pendingTick(); acknowledge(calls[0]); await pendingTick();
+  assert.equal(desc.translations.Thai[0], 'ใหม่กว่า'); assert.equal(client.fileBase(desc.filepath).translations[0], 'ใหม่กว่า');
+  assert.equal(calls.length, 2); assert.equal(calls[1].batch.collaboration.bases[desc.filepath].translations[0], 'ใหม่');
+  const other = description(2); e.descs.push(other);
+  e.editorCurrentEditingDesc = other; e.editorVisible = true;
+  e.editorBlocks = [{ english: 'Original', translation: 'ร่างไฟล์ใหม่' }, { english: 'Second', translation: 'สอง' }];
+  e.editorOriginalTranslations = ['เดิม', 'สอง'];
+  acknowledge(calls[1]); await e._pendingSaves.drain();
+  assert.equal(desc.translations.Thai[0], 'ใหม่กว่า'); assert.equal(e.editorBlocks[0].translation, 'ร่างไฟล์ใหม่');
+  assert.equal(e.editorCurrentEditingDesc, other); assert.equal(e.editorVisible, true); assert.equal(e.editorHaveChanges(), true);
+  assert.equal(retries, 2); client.destroy();
+});
+
+test('game switching waits for queued storage and a failed queue blocks source replacement and reset', async () => {
+  const first = enablePending(saveFixture()), { editor: e, calls, acknowledge } = first;
+  await e.editorSave();
+  let loads = 0; e.loadVersionedStorage = async () => { loads++; };
+  const switching = e.activateGameVersion('poe2', { checkMigration: false });
+  await pendingTick(); assert.equal(e.gameVersion, 'poe1'); assert.equal(loads, 0);
+  acknowledge(calls[0]); await switching; assert.equal(e.gameVersion, 'poe2'); assert.equal(loads, 1);
+
+  const second = enablePending(saveFixture()), s = second.editor;
+  await s.editorSave(); const drained = s._pendingSaves.drain(); await pendingTick();
+  second.calls[0].reject(new Error('Cannot write locally')); await assert.rejects(drained, /Cannot write locally/);
+  let imports = 0, clears = 0, reloads = 0;
+  second.window.OfflineStore.saveSourceWorkspaceWithRevisions = async () => { imports++; };
+  second.window.OfflineStore.clearWorkspace = async () => { clears++; };
+  second.context.location = { reload: () => { reloads++; } };
+  s.confirmProceedByTypingYes = async () => true;
+  await s.activateGameVersion('poe2', { checkMigration: false });
+  assert.equal(s.gameVersion, 'poe1');
+  await s.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 1, lastModified: 1 }, [description(2)]);
+  await s.startFromScratch();
+  assert.equal(imports, 0); assert.equal(clears, 0); assert.equal(reloads, 0); assert.equal(s.pendingLocalSaves, 1);
+});
+
+test('a source import waits for a local save queued while source hashing was in progress', async () => {
+  const { editor: e, window, context, calls, acknowledge } = enablePending(saveFixture());
+  vm.runInContext('offlineStoreReady = true', context);
+  let releaseHash, hashes = 0, imports = 0;
+  window.CollaborationProtocol = { ...window.CollaborationProtocol, sourceHash: () => {
+    hashes++; return new Promise(resolve => { releaseHash = resolve; });
+  } };
+  e.scheduleCollaboration = () => {};
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, workspace) => {
+    imports++; assert.equal(workspace.descs[0].translations.Thai[0], 'ใหม่');
+  };
+  const next = description(1, ['', '']); next.translations.English[0] = 'New source';
+  const importing = e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 1, lastModified: 1 }, [next]);
+  await pendingTick(); assert.equal(hashes, 1);
+  assert.equal(await e.editorSave(), true); releaseHash('new-source-hash'); await pendingTick();
+  assert.equal(calls.length, 1); assert.equal(imports, 0, 'Source replacement must wait for saves queued during its hash await.');
+  acknowledge(calls[0]); await importing;
+  assert.equal(imports, 1); assert.equal(e.pendingLocalSaves, 0); assert.equal(e.sourceIdentity, 'new-source-hash');
 });

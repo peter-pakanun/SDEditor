@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const P = require('../public/collaborationProtocol.js');
 const { Client } = require('../public/collaborationSync.js');
+const { create: createPendingSaves } = require('../public/pendingSaves.js');
 const copy = structuredClone;
 const source = [
   { filepath: 'a.txt', name: '', stats: ['a'], variables: ['#', '#'], remarks: ['', ''], translations: { English: ['One {0}', 'Two {0}'], Thai: ['one', 'two'] } },
@@ -663,4 +664,104 @@ test('initial socket connection is quiet but a real disconnect persists until th
   assert.equal(client.snapshot().connected, true);
   client.disconnect();
   assert.equal(client.snapshot().disconnected, false, 'Leaving a workspace is not an unexpected disconnect.');
+});
+
+function workerBatch(client, jobId, translations) {
+  const identity = copy(client.room().identity);
+  return { jobId, game: identity.game, language: identity.language, sourceHash: identity.sourceHash, accountId: identity.accountId,
+    files: [{ ...client.fileBase('a.txt'), translations, trackedForExport: true }],
+    collaboration: { key: client.key, identity, bases: { 'a.txt': client.fileBase('a.txt') }, origin: 'save' } };
+}
+async function persistWorkerFixture(store, batch) {
+  const operation = { id: batch.jobId, origin: 'save', status: 'pending', files: batch.files.map(yours => ({
+    base: copy(batch.collaboration.bases[yours.filepath]), yours: copy(yours) })) };
+  const state = await store.updateCollaborationState(state => {
+    const room = state.rooms[batch.collaboration.key]; room.outbox.push(copy(operation));
+    for (const file of batch.files) room.local[file.filepath] = copy(file);
+    return state;
+  }, { projectWorkspace: workspace => P.projectWorkspace(workspace, batch.files, batch.language, source, { mutate: true }) });
+  return { jobId: batch.jobId, status: 'pending', mutationId: batch.jobId, operation, files: batch.files,
+    pending: state.rooms[batch.collaboration.key].outbox.length };
+}
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+
+test('held worker write delays concurrent remote projection and new mutation flush until durable ACK', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  const batch = workerBatch(client, 'worker-held', ['worker saved', 'two']); client.stageLocalSave(batch);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; });
+  const oldSequence = client.room().sequence;
+  const local = client.withLocalWrite(async () => {
+    entered(); await gate;
+    const ack = await persistWorkerFixture(store, batch); client.acceptLocalSave(batch, ack); return ack;
+  });
+  await started; server.requests.length = 0; server.change('b.txt', ['remote while saving']);
+  const remote = client.sync(); await nextTurn();
+  assert.equal(client.room().sequence, oldSequence, 'Remote cache updates wait for the local write barrier.');
+  assert.equal(store.state.rooms[client.key].outbox.length, 0, 'An unacknowledged edit is not a durable network operation.');
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['worker saved', 'two'], 'The staged edit remains visible while storage runs.');
+  release(); await local; await remote;
+  assert.deepEqual(server.files.find(file => file.filepath === 'a.txt').translations, ['worker saved', 'two']);
+  assert.deepEqual(store.workspace.descs.find(desc => desc.filepath === 'b.txt').translations.Thai, ['remote while saving']);
+  assert.equal(client.room().outbox.length, 0); assert.equal(client.room().sequence, oldSequence + 1);
+  await client.sync(); assert.equal(client.room().sequence, server.sequence);
+});
+
+test('older worker ACK and intervening remote cache updates cannot hide the newest staged base', async t => {
+  const { client, store } = await fixture(); t.after(() => client.destroy());
+  const first = workerBatch(client, 'worker-first', ['first submitted', 'two']); client.stageLocalSave(first);
+  const latest = workerBatch(client, 'worker-latest', ['latest submitted', 'two']); client.stageLocalSave(latest);
+  const ack = await persistWorkerFixture(store, first); client.acceptLocalSave(first, ack);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['latest submitted', 'two']);
+  assert.deepEqual(latest.collaboration.bases['a.txt'].translations, ['first submitted', 'two'], 'The second draft retains its authored ancestry.');
+  await client.update((state, room) => { room.local['a.txt'].translations = ['remote cache', 'two']; });
+  const captured = client.fileBase('a.txt'); captured.translations[0] = 'external mutation';
+  assert.deepEqual(client.fileBase('a.txt').translations, ['latest submitted', 'two'], 'fileBase returns an independent staged snapshot.');
+  const latestAck = await persistWorkerFixture(store, latest); client.acceptLocalSave(latest, latestAck);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['latest submitted', 'two']); assert.equal(client.stagedSaves.size, 0);
+});
+
+test('queue starts synchronization only after the worker acknowledgment is adopted', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  const batch = workerBatch(client, 'worker-queue', ['queued worker edit', 'two']); client.stageLocalSave(batch);
+  let release, entered; const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; });
+  let syncs = 0;
+  const pending = createPendingSaves({
+    save: request => client.withLocalWrite(async () => {
+      entered(); await gate; const ack = await persistWorkerFixture(store, request); client.acceptLocalSave(request, ack); return ack;
+    }),
+    onCommit: (job, ack) => {
+      assert.ok(client.room().outbox.some(operation => operation.id === ack.mutationId), 'Adoption precedes synchronization.');
+      syncs++; return client.retry();
+    },
+  }); t.after(() => pending.dispose()); server.requests.length = 0;
+  pending.enqueue(batch); const drained = pending.drain(); await started;
+  assert.equal(syncs, 0); assert.equal(server.requests.length, 0); assert.equal(pending.snapshot().pending, 1);
+  release(); await drained; assert.equal(syncs, 1); assert.equal(pending.snapshot().pending, 0);
+  assert.deepEqual(server.files[0].translations, ['queued worker edit', 'two']); assert.equal(client.room().outbox.length, 0);
+});
+
+test('duplicate ACK with no current operation removes a stale memory outbox without resurrecting synced work', async t => {
+  const { client, store } = await fixture(); t.after(() => client.destroy());
+  const batch = workerBatch(client, 'worker-duplicate', ['submitted', 'two']);
+  const ack = await persistWorkerFixture(store, batch); client.stageLocalSave(batch); client.acceptLocalSave(batch, ack);
+  assert.equal(client.room().outbox.length, 1);
+  client.stageLocalSave(batch); client.acceptLocalSave(batch, { ...ack, duplicate: true, operation: null, pending: 0, status: 'synced',
+    files: [{ ...batch.files[0], translations: ['accepted shared', 'two'], revision: 3 }] });
+  assert.equal(client.room().outbox.length, 0); assert.equal(client.stagedSaves.size, 0);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['accepted shared', 'two']);
+});
+
+test('old-scope worker ACK after disconnect leaves the newly selected room unchanged', async t => {
+  const { client, store } = await fixture(); t.after(() => client.destroy());
+  const batch = workerBatch(client, 'worker-old-scope', ['old room edit', 'two']); client.stageLocalSave(batch);
+  const ack = await persistWorkerFixture(store, batch); const oldKey = client.key;
+  client.disconnect();
+  const identity = { ...batch.collaboration.identity, accountId: 'other user' }; const newKey = P.scopeKey(identity);
+  client.state.rooms[newKey] = { ...copy(client.state.rooms[oldKey]), identity, outbox: [], local: { 'a.txt': { ...initial[0], translations: ['new room', 'two'] } } };
+  client.key = newKey; const before = copy(client.room());
+  client.acceptLocalSave(batch, ack);
+  assert.deepEqual(client.room(), before); assert.deepEqual(client.fileBase('a.txt').translations, ['new room', 'two']);
+  assert.equal(client.stagedSaves.has(batch.jobId), false, 'A completed old-scope receipt can release its retained staging record.');
 });

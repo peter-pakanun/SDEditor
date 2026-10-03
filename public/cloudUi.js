@@ -213,6 +213,7 @@
       async cloudLogout() {
         this.cloudBusy = true;
         try {
+          if (this.waitForPendingSaves && !await this.waitForPendingSaves()) return;
           if (!await this.saveSettings()) return;
           await this._cloud.logout(); this.cloudResolverVisible = false;
           this._cloudChannel?.postMessage('account-changed');

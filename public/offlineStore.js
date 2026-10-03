@@ -203,6 +203,155 @@
     await done;
   }
 
+  // Ordinary editor saves send only their touched files to the worker. Read the
+  // latest archive here so other files, languages and background updates survive.
+  async function saveTranslationBatch(batch) {
+    if (!batch || typeof batch.jobId !== 'string' || !batch.jobId
+      || !['poe1', 'poe2'].includes(batch.game) || typeof batch.language !== 'string' || !batch.language
+      || !Array.isArray(batch.files) || !batch.files.length || !Array.isArray(batch.revisions || [])) {
+      throw new TypeError('Invalid local translation save.');
+    }
+    const paths = new Set();
+    const files = batch.files.map(file => {
+      if (!file || typeof file.filepath !== 'string' || !file.filepath || paths.has(file.filepath)
+        || !Array.isArray(file.translations) || file.translations.some(line => typeof line !== 'string')) {
+        throw new TypeError('Invalid or duplicate local translation file.');
+      }
+      paths.add(file.filepath);
+      return { filepath: file.filepath, translations: [...file.translations], needsReview: !!file.needsReview,
+        trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0 };
+    });
+    const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || '')];
+    const signature = JSON.stringify({ scope, files, descriptions: batch.descriptions || [], statuses: batch.statuses || {}, revisions: batch.revisions || [],
+      collaboration: batch.collaboration || null });
+    const receiptKey = 'translation_save_receipts_' + batch.game;
+    const db = await openDb();
+    const revisionsStore = revisionStoreName(batch.game);
+    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV);
+    let failure, result;
+    const values = {};
+    const keys = [workspaceKey(batch.game), receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : [])];
+    let remaining = keys.length;
+    const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
+    const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
+    const apply = () => {
+      try {
+        const receipts = values[receiptKey] || [];
+        const receipt = receipts.find(item => item.jobId === batch.jobId);
+        if (receipt) {
+          if (receipt.signature !== signature) throw new Error('A local save identifier was reused with different content.');
+          result = { ...receipt.result, duplicate: true };
+          if (batch.collaboration) {
+            const workspace = values[workspaceKey(batch.game)];
+            const room = values.collaboration_v1?.rooms?.[batch.collaboration.key];
+            const current = workspace && room && (!workspace.sourceHash || workspace.sourceHash === batch.sourceHash)
+              && (!workspace?.collaborationAccountId || String(workspace.collaborationAccountId) === String(batch.accountId))
+              && JSON.stringify([String(room.identity?.accountId), room.identity?.game, room.identity?.sourceHash, room.identity?.language]) === batch.collaboration.key;
+            // Network synchronization might already have accepted this operation
+            // before the worker reply was lost. Never resurrect an old outbox.
+            result.operation = current ? room.outbox?.find(operation => operation.id === batch.jobId) || null : null;
+            result.pending = current ? room.outbox?.length || 0 : 0;
+            if (current) {
+              result.files = files.map(file => room.local?.[file.filepath] || file);
+              result.status = result.operation ? result.operation.status === 'conflict' ? 'conflict' : 'pending' : 'synced';
+            }
+          }
+          return;
+        }
+        const workspace = values[workspaceKey(batch.game)];
+        if (!workspace || !Array.isArray(workspace.descs)) {
+          throw new Error('The local workspace is unavailable. Keep this tab open and import the source archive before retrying the save.');
+        }
+        if (workspace.sourceHash && workspace.sourceHash !== (batch.sourceHash || '')) {
+          throw stale('The source archive changed before this translation could be saved.');
+        }
+        if (batch.accountId && workspace.collaborationAccountId
+          && String(workspace.collaborationAccountId) !== String(batch.accountId)) {
+          throw stale('The signed-in account changed before this translation could be saved.');
+        }
+        workspace.descs ||= []; workspace.status ||= {};
+        const descriptions = new Map(workspace.descs.map(desc => [desc.filepath, desc]));
+        const templates = new Map((batch.descriptions || []).map(desc => [desc.filepath, desc]));
+        let room, state, operation;
+        const collaboration = batch.collaboration;
+        if (collaboration) {
+          const identity = collaboration.identity;
+          if (!identity || identity.game !== batch.game || identity.language !== batch.language
+            || identity.sourceHash !== batch.sourceHash || String(identity.accountId) !== String(batch.accountId)
+            || collaboration.key !== JSON.stringify([String(identity.accountId), identity.game, identity.sourceHash, identity.language])) {
+            throw stale('This translation save no longer matches its shared workspace.');
+          }
+          state = values.collaboration_v1;
+          room = state?.rooms?.[collaboration.key];
+          if (!room || JSON.stringify([String(room.identity?.accountId), room.identity?.game, room.identity?.sourceHash, room.identity?.language]) !== collaboration.key) {
+            throw stale('The shared workspace changed before this translation could be saved.');
+          }
+          const originals = new Map((room.manifest?.files || []).map(file => [file.filepath, file]));
+          for (const file of files) {
+            const original = originals.get(file.filepath);
+            if (!original || file.translations.length > original.english.length) {
+              throw new Error('Saved file does not match the source: ' + file.filepath);
+            }
+            while (file.translations.length < original.english.length) file.translations.push('');
+          }
+          if (collaboration.restore && (files.length !== 1 || !collaboration.restore.eventId
+            || !['before', 'after'].includes(collaboration.restore.version))) throw new Error('Invalid shared history restore.');
+          room.outbox ||= []; room.local ||= {};
+          const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+          operation = { id: batch.jobId, origin: collaboration.origin || 'save', status: 'pending',
+            ...(collaboration.restore ? { restore: { ...collaboration.restore, translations: [...files[0].translations] } } : {}),
+            files: files.map(yours => ({ base: clone(Object.hasOwn(collaboration.bases || {}, yours.filepath)
+              ? collaboration.bases[yours.filepath] : room.local[yours.filepath] || null), yours: clone(yours) })) };
+          room.outbox.push(operation);
+          for (const file of files) room.local[file.filepath] = clone(file);
+        }
+        for (const file of files) {
+          const template = templates.get(file.filepath);
+          let desc = descriptions.get(file.filepath);
+          if (!desc) {
+            if (!template) throw new Error('The saved file is missing its source description: ' + file.filepath);
+            desc = { ...template, translations: { English: [...(template.translations?.English || [])] } };
+            workspace.descs.push(desc); descriptions.set(file.filepath, desc);
+          } else if (template) {
+            for (const key of ['filedir', 'filename', 'name', 'remarks', 'stats', 'variables']) {
+              if (Object.hasOwn(template, key)) desc[key] = template[key];
+            }
+          }
+          desc.translations ||= {};
+          const count = desc.translations.English?.length ?? template?.translations?.English?.length;
+          if (count != null && file.translations.length > count) throw new Error('Translation count exceeds source entry count: ' + file.filepath);
+          desc.translations[batch.language] = [...file.translations];
+          desc.hasChanges = file.trackedForExport; desc.needsReview = file.needsReview;
+          desc.isMissing = (count != null && file.translations.length < count) || file.translations.some(line => !line.trim());
+          workspace.status[file.filepath] = { ...(workspace.status[file.filepath] || {}), ...(batch.statuses?.[file.filepath] || {}),
+            needsReview: file.needsReview };
+        }
+        if (batch.sourceHash) workspace.sourceHash = batch.sourceHash;
+        if (collaboration) workspace.collaborationAccountId = String(batch.accountId);
+        kv.put({ key: workspaceKey(batch.game), value: workspace });
+        if (state) kv.put({ key: 'collaboration_v1', value: state });
+        for (const revision of batch.revisions || []) tx.objectStore(revisionsStore).add({ ...revision,
+          ...(batch.sourceHash ? { sourceHash: batch.sourceHash } : {}),
+          ...(collaboration ? { collaborationAccountId: String(batch.accountId) } : {}) });
+        result = { jobId: batch.jobId, status: collaboration ? 'pending' : 'local', files,
+          ...(collaboration ? { mutationId: batch.jobId, pending: room.outbox.length, operation } : {}) };
+        // A lost worker response can be retried with the original identifier.
+        // Keep recent receipts without growing the workspace on every save.
+        kv.put({ key: receiptKey, value: [...receipts, { jobId: batch.jobId, signature, result }].slice(-256) });
+      } catch (error) { fail(error); }
+    };
+    try {
+      for (const key of keys) {
+        const read = kv.get(key);
+        read.onsuccess = () => { values[key] = read.result?.value; if (--remaining === 0) apply(); };
+      }
+    } catch (error) { fail(error); }
+    try { await done; } catch (error) { throw failure || error; }
+    return result;
+  }
+
   // Read/modify/write collaboration cache, retry queue, replay cursor and local
   // working/history data in one transaction. Both callbacks must be synchronous.
   async function updateCollaborationState(update, options = {}) {
@@ -364,7 +513,8 @@
     await kvSet(KV_MIGRATED, true);
   }
 
-  window.OfflineStore = {
+  const root = typeof window === 'object' ? window : self;
+  root.OfflineStore = {
     isAvailable,
     normalizeGameVersion,
     setGameVersion,
@@ -377,6 +527,7 @@
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
+    saveTranslationBatch,
     getCollaborationState: () => kvGet('collaboration_v1'),
     updateCollaborationState,
     getSource: (version) => kvGet(sourceKey(version)),

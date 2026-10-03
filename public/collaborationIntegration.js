@@ -2,7 +2,7 @@
 (() => {
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const mixin = {
-    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '' }; },
+    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', pendingLocalSaves: 0, localSaveError: '' }; },
     watch: {
       cloudSignedIn() { this.scheduleCollaboration(); },
       'cloudUser.id'() { this.scheduleCollaboration(); },
@@ -13,9 +13,11 @@
       sourceLoaded() { this.scheduleCollaboration(); },
       sourceIdentity() { this.scheduleCollaboration(); },
       selectedFilepath(path) { this._collaboration?.select(path); },
-      editorVisible(visible) { if (!visible) this._collaboration?.leaveEdit(); },
+      editorVisible(visible) { if (!visible) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
+      pendingLocalSaves() { this.updateLeaveProtection(); },
     },
     mounted() {
+      this.initializePendingSaves(); this.updateLeaveProtection();
       this._collabOnline = () => this.collabRetry().catch(() => {});
       window.addEventListener('online', this._collabOnline);
       this._collabActivityAt = Date.now();
@@ -36,8 +38,67 @@
       document.removeEventListener('visibilitychange', this._collabVisibility);
       this._collaboration?.destroy?.();
       this._collaboration?.disconnect();
+      window.removeEventListener('beforeunload', this._pendingSaveBeforeUnload);
+      this._saveWorker?.dispose?.(); this._pendingSaves?.dispose?.();
     },
     methods: {
+      initializePendingSaves() {
+        if (this._pendingSaves || !window.PendingSaves || !window.SaveWorkerClient) return this._pendingSaves;
+        this._saveWorker = window.SaveWorkerClient.create({ store: window.OfflineStore });
+        this._pendingSaves = window.PendingSaves.create({
+          save: (batch, job) => {
+            const client = job.context?.client;
+            const write = async () => {
+              const ack = await this._saveWorker.save(batch);
+              client?.acceptLocalSave(batch, ack);
+              return ack;
+            };
+            return client ? client.withLocalWrite(write) : write();
+          },
+          onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
+          onCommit: (job, ack) => {
+            if (this.collaborationContextCurrent(job.context)) {
+              const files = (ack.files || job.batch.files).map(file => this._pendingSaves.overlay(this.pendingSaveScope(), file.filepath) || file);
+              const changed = files.some(file => {
+                const desc = this.getDescByFilepath(file.filepath);
+                return desc && (!arrayEquals(desc.translations[job.batch.language] || [], file.translations)
+                  || !!desc.needsReview !== !!file.needsReview || !!desc.hasChanges !== !!file.trackedForExport);
+              });
+              if (changed) this.applyCollaborationFiles(files, job.batch.language);
+            }
+            // Synchronization starts only after workspace, history and outbox commit.
+            if (job.context.client && job.context.client === this._collaboration && job.context.client.key === job.batch.collaboration?.key) {
+              job.context.client.retry().catch(error => this.collaborationFailure(error));
+            }
+          },
+        });
+        return this._pendingSaves;
+      },
+      updateLeaveProtection() {
+        if (!window.addEventListener) return;
+        this._pendingSaveBeforeUnload ||= event => {
+          if (!this.pendingLocalSaves && !(this.editorVisible && this.editorHaveChanges())) return;
+          event.preventDefault(); event.returnValue = 'Unsaved translations';
+        };
+        window.removeEventListener('beforeunload', this._pendingSaveBeforeUnload);
+        if (this.pendingLocalSaves || this.editorVisible) window.addEventListener('beforeunload', this._pendingSaveBeforeUnload);
+      },
+      async retryPendingSaves() {
+        try { await this._pendingSaves?.retry(); }
+        catch (_) { /* The retained queue displays the actionable failure. */ }
+      },
+      downloadPendingSaves() {
+        const jobs = this._pendingSaves?.snapshot().jobs || [];
+        const recovery = { format: 'sdeditor-pending-edits-v1', savedAt: new Date().toISOString(), saves: jobs.map(job => job.batch) };
+        saveAs(new Blob([JSON.stringify(recovery, null, 2)], { type: 'application/json' }), 'SDEditor_pending_edits.json');
+      },
+      async waitForPendingSaves() {
+        try { await this._pendingSaves?.drain(); return true; }
+        catch (_) { return false; }
+      },
+      pendingSaveScope() {
+        return { game: this.gameVersion, language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
+      },
       markCollaborationActivity(now = Date.now()) {
         this._collabActivityAt = now;
         if (this._collabAway) this.updateCollaborationActivity(now);
@@ -117,6 +178,7 @@
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || !this.cloudSignedIn || this.cloudUser?.language !== this.lang || !window.CollaborationSync) return;
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
         const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
@@ -166,7 +228,10 @@
         const batch = this._collabDiagnosticBatch;
         const descriptions = new Map(this.descs.map(desc => [desc.filepath, desc]));
         const locals = new Map(this.localDescs.descs.map(desc => [desc.filepath, desc]));
-        for (const file of files || []) {
+        for (let file of files || []) {
+          // A remote acknowledgement or an older local save cannot hide a newer
+          // edit that is still waiting for its local transaction.
+          file = this._pendingSaves?.overlay(this.pendingSaveScope(), file.filepath) || file;
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
           if (JSON.stringify(desc.translations[lang] || []) !== JSON.stringify(file.translations)) {
@@ -214,6 +279,31 @@
       },
       async persistTranslationBatch(updates, origin, options = {}) {
         const ctx = options.context || this.captureCollaborationContext();
+        if (origin === 'save' && !this.testMode && this.initializePendingSaves()) {
+          if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          const now = Date.now();
+          const files = updates.map(({ desc, lines, needsReview }) => ({ filepath: desc.filepath, translations: [...lines], needsReview: needsReview ?? false, trackedForExport: true }));
+          const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath, {
+            ...(this.localDescs.status?.[desc.filepath] || {}), needsReview: files[index].needsReview, lastEditedAt: now, lastTranslatedAt: now,
+          }]));
+          const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+            files, statuses, descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
+              { hasChanges: true, isMissing: computeIsMissing(desc.translations.English.length, files[index].translations) })),
+            revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
+              lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
+              isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source })),
+            ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity), bases: copy(options.bases || {}), origin } } : {}),
+          };
+          this._pendingSaves.enqueue(batch, { context: ctx });
+          ctx.client?.stageLocalSave(batch);
+          for (const file of files) this.localDescs.status[file.filepath] = statuses[file.filepath];
+          this.applyCollaborationFiles(files, ctx.language);
+          // Close in the same turn as the optimistic update so Vue paints the
+          // file list without first rendering the outgoing editor again.
+          if (options.close) this.editorVisible = false;
+          return { status: 'queued', jobId: batch.jobId };
+        }
+        if (this._pendingSaves && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before continuing.');
         // Collaboration projects saved files onto the latest durable workspace.
         // Ordinary saves only need to stage their metadata, not clone the archive.
         const incremental = !!ctx.client && origin === 'save' && !options.workspace;
@@ -272,6 +362,7 @@
         }
       },
       async collabResolve(id, translations, options) {
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before resolving shared changes.');
         const context = this.captureCollaborationContext();
         const client = this._collaboration;
         const conflict = client.snapshot().conflicts.find(item => item.id === id);
@@ -312,9 +403,13 @@
         }
         return result;
       },
-      collabLoadHistory(filepath, options) { return this._collaboration.history(filepath, options); },
+      async collabLoadHistory(filepath, options) {
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before opening history.');
+        return this._collaboration.history(filepath, options);
+      },
       collabLoadHistoryEntry(id) { return this._collaboration.historyEntry(id); },
       async collabRestoreHistory(id, version, baseRevision) {
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before restoring history.');
         const context = this.captureCollaborationContext();
         const client = this._collaboration;
         const event = await client.historyEntry(id);
