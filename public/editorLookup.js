@@ -8,6 +8,83 @@
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
   const compactText = value => readableText(value).replace(/\s+/gu, ' ').trim();
   const foldText = value => compactText(value).normalize('NFC').toLocaleLowerCase();
+  const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+  function queryRanges(text, query) {
+    const needle = foldText(query);
+    if (!needle) return [];
+    // Keep original offsets when normalization, case folding or whitespace
+    // changes the length of the searchable text. Reference text stays literal.
+    const chunks = [];
+    for (const { segment, index } of graphemes.segment(text)) {
+      let offset = index;
+      for (const piece of segment.split(/(\s+)/u)) {
+        if (!piece) continue;
+        const end = offset + piece.length;
+        if (/^\s+$/u.test(piece)) {
+          if (chunks.at(-1)?.text === ' ') chunks.at(-1).end = end;
+          else chunks.push({ text: ' ', start: offset, end });
+        } else chunks.push({ text: piece.normalize('NFC'), start: offset, end });
+        offset = end;
+      }
+    }
+    if (chunks[0]?.text === ' ') chunks.shift();
+    if (chunks.at(-1)?.text === ' ') chunks.pop();
+    const folded = chunks.map(chunk => chunk.text).join('').toLocaleLowerCase();
+    const starts = [], ends = [];
+    for (const chunk of chunks) {
+      for (let i = 0; i < chunk.text.toLocaleLowerCase().length; i++) {
+        starts.push(chunk.start); ends.push(chunk.end);
+      }
+    }
+    const ranges = [];
+    let from = 0, match;
+    while ((match = folded.indexOf(needle, from)) !== -1) {
+      const start = starts[match], end = ends[match + needle.length - 1];
+      const previous = ranges.at(-1);
+      if (previous && start <= previous.end) previous.end = Math.max(previous.end, end);
+      else ranges.push({ start, end });
+      from = match + needle.length;
+    }
+    return ranges;
+  }
+
+  function textParts(text, ranges, start = 0, end = text.length) {
+    const parts = [];
+    let cursor = start;
+    for (const range of ranges) {
+      const first = Math.max(start, range.start), last = Math.min(end, range.end);
+      if (first >= last) continue;
+      if (first > cursor) parts.push({ text: text.slice(cursor, first), matched: false });
+      parts.push({ text: text.slice(first, last), matched: true });
+      cursor = last;
+    }
+    if (cursor < end) parts.push({ text: text.slice(cursor, end), matched: false });
+    return parts;
+  }
+
+  function highlightParts(value, query) {
+    const text = String(value ?? '');
+    return textParts(text, queryRanges(text, query));
+  }
+
+  function excerptParts(value, query, limit = 150, matches = null) {
+    const text = compactText(value);
+    const ranges = matches || queryRanges(text, query);
+    const wantedStart = Math.max(0, (ranges[0]?.start || 0) - 35);
+    const wantedEnd = Math.min(text.length, wantedStart + limit);
+    let start = wantedStart, end = wantedEnd;
+    // Excerpt edges must not split emoji, accents or other grapheme clusters.
+    for (const { segment, index } of graphemes.segment(text)) {
+      const next = index + segment.length;
+      if (index <= wantedStart && next > wantedStart) start = index;
+      if (index < wantedEnd && next >= wantedEnd) { end = next; break; }
+    }
+    const parts = textParts(text, ranges, start, end);
+    if (start) parts.unshift({ text: '…', matched: false });
+    if (end < text.length) parts.push({ text: '…', matched: false });
+    return parts;
+  }
 
   function buildIndex(descs, lang, workspace = null) {
     const saved = new Map((Array.isArray(workspace?.descs) ? workspace.descs : [])
@@ -42,15 +119,6 @@
       return entry.pathText.includes(needle) || entry.englishText.includes(needle)
         || entry.translationText.includes(needle);
     });
-  }
-
-  function excerpt(value, query, limit = 150) {
-    const text = compactText(value);
-    const needle = foldText(query);
-    const match = needle ? foldText(text).indexOf(needle) : -1;
-    const start = Math.max(0, match - 35);
-    const end = Math.min(text.length, start + limit);
-    return (start ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
   }
 
   function buildReference(desc, lang, local = null) {
@@ -125,11 +193,25 @@
       },
       lookupVisibleResults() {
         const start = (this.lookupCurrentPage - 1) * this.lookupPageSize;
-        return this.lookupResults.slice(start, start + this.lookupPageSize).map(entry => ({
-          filepath: entry.filepath, filename: entry.filename, isDNT: !!entry.desc.isDNT,
-          englishPreview: excerpt(entry.english, this.lookupAppliedQuery),
-          translationPreview: excerpt(entry.translation, this.lookupAppliedQuery),
-        }));
+        const queryFor = scope => this.lookupScope === 'all' || this.lookupScope === scope ? this.lookupAppliedQuery : '';
+        return this.lookupResults.slice(start, start + this.lookupPageSize).map(entry => {
+          const englishParts = excerptParts(entry.english, queryFor('english'));
+          const translationParts = excerptParts(entry.translation, queryFor('translation'));
+          const statsText = compactText(asLines(entry.desc.stats).join(' '));
+          const pathText = entry.filepath + ' ' + statsText;
+          const pathRanges = queryRanges(pathText, queryFor('path'));
+          const statsOffset = entry.filepath.length + 1;
+          const statRanges = pathRanges.filter(range => range.end > statsOffset)
+            .map(range => ({ start: Math.max(0, range.start - statsOffset), end: range.end - statsOffset }));
+          const statsParts = excerptParts(statsText, '', 150, statRanges);
+          return {
+            filepath: entry.filepath, filename: entry.filename, isDNT: !!entry.desc.isDNT,
+            filepathParts: textParts(pathText, pathRanges, 0, entry.filepath.length),
+            englishPreview: englishParts.map(part => part.text).join(''), englishParts,
+            translationPreview: translationParts.map(part => part.text).join(''), translationParts,
+            statsParts: statsParts.some(part => part.matched) ? statsParts : [],
+          };
+        });
       },
       lookupSelectedReference() {
         if (!this.editorVisible || this.sideTab !== 'lookup' || !this.lookupSelectedFilepath) return null;
@@ -201,5 +283,5 @@
     },
   };
 
-  window.EditorLookup = { mixin, buildIndex, searchIndex, buildReference };
+  window.EditorLookup = { mixin, buildIndex, searchIndex, buildReference, highlightParts, excerptParts };
 })();

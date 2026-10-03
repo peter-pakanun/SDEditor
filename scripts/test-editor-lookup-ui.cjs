@@ -209,16 +209,23 @@ test('workspace refresh invalidates saved lookup matches without consulting the 
 test('Lookup panel uses literal text, independent controls, and persistent accessible reference sections', () => {
   assert.ok(panelStart >= 0 && panelEnd > panelStart);
   assert.equal(lookupPanel.includes('v-html'), false, 'Source and translations must render through text interpolation');
-  assert.match(lookupPanel, /\{\{ result\.filepath \}\}/);
+  assert.match(lookupPanel, /v-for="\(part, pi\) in result\.filepathParts"/);
+  assert.match(lookupPanel, /v-for="\(part, pi\) in result\.englishParts"/);
+  assert.match(lookupPanel, /v-for="\(part, pi\) in result\.translationParts"/);
+  assert.match(lookupPanel, /<mark v-if="part\.matched" class="lookupQueryMatch">\{\{ part\.text \}\}<\/mark>/);
   assert.match(lookupPanel, /\{\{ block\.english \|\|/);
   assert.match(lookupPanel, /\{\{ block\.translation \|\|/);
   assert.match(lookupPanel, /v-model="lookupLanguage"/);
   assert.match(lookupPanel, /v-model="lookupQuery"/);
   assert.match(lookupPanel, /aria-label="Reference search results"/);
   assert.match(lookupPanel, /aria-label="Selected reference"/);
-  assert.match(lookupPanel, /Loaded source and saved translations/);
+  assert.doesNotMatch(lookupPanel, /Search all loaded files without leaving your draft\.|Loaded source and saved translations/);
   assert.doesNotMatch(lookupPanel, /v-model="(?:lang|editorBlocks[^" ]*)"/);
   assert.doesNotMatch(lookupPanel, /(?:editFile|editorSave|saveAndSkipFile|commentsOpenFile)\(/);
-  assert.ok(template.indexOf('class="tabBtn lookupTab"') > template.indexOf('class="tabBtn commentsTab"'));
+  const sidebar = template.slice(template.indexOf('<div class="sideTabs">'), template.indexOf('<div v-if="sideTab === \'dictionary\'">'));
+  const orderedTabs = ['dictionary', 'lookup', 'regex', 'history', 'comments']
+    .map(tab => sidebar.indexOf(`sideTab === '${tab}'`));
+  assert.ok(orderedTabs.every((position, index) => position >= 0 && (!index || position > orderedTabs[index - 1])),
+    'Sidebar tabs must remain Dictionary, Lookup, Regex, History, Comments');
   assert.ok(template.indexOf('src="editorLookup.js"') < template.indexOf('src="index.js"'));
 });

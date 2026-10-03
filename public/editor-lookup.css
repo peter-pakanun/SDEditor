@@ -19,6 +19,8 @@
 .lookupResult strong { font-size: 12px; font-weight: 600; }
 .lookupResult span { color: var(--ui-muted); font-size: 12px; margin-top: 3px; }
 .lookupResult .lookupResultEnglish { color: var(--color-font); }
+.lookupResult .lookupResultStats { font-size: 11px; }
+.lookupQueryMatch { padding: 0 1px; border-radius: 2px; background: #ffe08a; color: #352600; font-weight: 650; }
 .lookupReference { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px; }
 .editor .lookupReference h3 { margin: 0 0 5px; font: 600 13px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .lookupReference header p { margin: 0 0 6px; color: var(--ui-muted); font-size: 11px; }

@@ -680,7 +680,6 @@
         <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls">
             <h2>Reference lookup</h2>
-            <p>Search all loaded files without leaving your draft.</p>
             <div class="sideSearchRow">
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
               <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
@@ -698,15 +697,16 @@
           </div>
           <div class="lookupResults" ref="lookupResultsList" tabindex="0" aria-label="Reference search results">
             <button v-for="result in lookupVisibleResults" :key="result.filepath" type="button" class="lookupResult" :class="{ active: lookupSelectedFilepath === result.filepath }" :aria-pressed="lookupSelectedFilepath === result.filepath" @click="lookupSelect(result.filepath)">
-              <strong>{{ result.filepath }}</strong>
-              <span class="lookupResultEnglish" lang="en">{{ result.englishPreview || '(No English text)' }}</span>
-              <span :lang="lookupReferenceBcp47">{{ result.translationPreview || '(No translation)' }}</span>
+              <strong><template v-for="(part, pi) in result.filepathParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></strong>
+              <span v-if="result.statsParts.length" class="lookupResultStats">Stat: <template v-for="(part, pi) in result.statsParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
+              <span class="lookupResultEnglish" lang="en"><template v-for="(part, pi) in result.englishParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.englishPreview">(No English text)</template></span>
+              <span :lang="lookupReferenceBcp47"><template v-for="(part, pi) in result.translationParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.translationPreview">(No translation)</template></span>
             </button>
             <p v-if="!lookupResultCount" class="lookupEmpty">No reference files match. Try another search or language.</p>
           </div>
           <section class="lookupReference" ref="lookupReference" tabindex="0" aria-label="Selected reference">
             <template v-if="lookupSelectedReference">
-              <header><h3>{{ lookupSelectedReference.filepath }}</h3><p>{{ lookupActiveLanguage }} · Loaded source and saved translations</p><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
+              <header><h3>{{ lookupSelectedReference.filepath }}</h3><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
               <article v-for="block in lookupSelectedReference.blocks" :key="block.index" class="lookupReferenceBlock">
                 <h4>Block {{ block.index + 1 }}<span v-if="block.isTable"> · Table (@ separates columns)</span></h4>
                 <div class="lookupTextLabel">English</div><pre class="lookupText" lang="en">{{ block.english || '(No English text)' }}</pre>

@@ -286,3 +286,80 @@ test('destroying lookup cancels pending search work', () => {
   model.lookupQuery = 'waiting'; model.lookupSearchChanged();
   assert.equal(timers.size, 1); api.mixin.beforeUnmount.call(model); assert.equal(timers.size, 0);
 });
+
+test('query highlighting marks every literal case-insensitive occurrence and preserves source text', () => {
+  const { api } = loadLookup();
+  const text = 'FIRE and fire; [.*] <img src=x onerror=alert(1)>';
+  const parts = plain(api.highlightParts(text, 'fire'));
+  assert.deepEqual(parts.filter(part => part.matched).map(part => part.text), ['FIRE', 'fire']);
+  assert.equal(parts.map(part => part.text).join(''), text);
+  assert.deepEqual(plain(api.highlightParts(text, '[.*]')).filter(part => part.matched), [{ text: '[.*]', matched: true }]);
+  assert.deepEqual(plain(api.highlightParts(text, '<img')).filter(part => part.matched), [{ text: '<img', matched: true }]);
+  assert.deepEqual(plain(api.highlightParts(text, ' \n ')), [{ text, matched: false }]);
+  assert.deepEqual(plain(api.highlightParts('', 'fire')), []);
+});
+
+test('highlight offsets follow whitespace and Unicode normalization without changing literal text', () => {
+  const { api } = loadLookup();
+  for (const [text, query, match] of [
+    ['two\n  three', 'two three', 'two\n  three'],
+    ['a  \u0301 b', 'a \u0301 b', 'a  \u0301 b'],
+    ['Cafe\u0301 damage', 'café', 'Cafe\u0301'],
+    ['İ prefix FIRE suffix', 'fire', 'FIRE'],
+    ['İ prefix FIRE suffix', 'i', 'İ'],
+    ['🗡️ ความเสียหายไฟ เพิ่มไฟ', 'ไฟ', 'ไฟ'],
+  ]) {
+    const parts = plain(api.highlightParts(text, query));
+    assert.equal(parts.map(part => part.text).join(''), text);
+    assert.ok(parts.some(part => part.matched && part.text === match), `${query} should mark ${match}`);
+  }
+});
+
+test('visible result highlights follow the applied query and scope, including matching stats', () => {
+  const one = description('FireBlade', 'FIRE damage and fire resistance', 'เพิ่ม Fire damage');
+  const { model } = loadLookup({ descs: [one] });
+  search(model, 'fire');
+  const marked = parts => Array.from(parts).filter(part => part.matched).map(part => part.text);
+  let result = model.lookupVisibleResults[0];
+  assert.deepEqual(marked(result.filepathParts), ['Fire']);
+  assert.deepEqual(marked(result.englishParts), ['FIRE', 'fire']);
+  assert.deepEqual(marked(result.translationParts), ['Fire']);
+  assert.deepEqual(marked(result.statsParts), ['Fire']);
+  model.lookupQuery = 'damage'; model.lookupSearchChanged();
+  assert.deepEqual(marked(model.lookupVisibleResults[0].englishParts), ['FIRE', 'fire'], 'Highlights retain the currently applied search during debounce');
+  search(model, 'fire', 'english');
+  result = model.lookupVisibleResults[0];
+  assert.deepEqual(marked(result.filepathParts), []);
+  assert.deepEqual(marked(result.translationParts), []);
+  assert.deepEqual(marked(result.statsParts), []);
+  assert.deepEqual(marked(result.englishParts), ['FIRE', 'fire']);
+  search(model, 'stat_fireblade', 'path');
+  result = model.lookupVisibleResults[0];
+  assert.deepEqual(marked(result.statsParts), ['stat_FireBlade']);
+  search(model, 'FireBlade.txt stat_FireBlade', 'path');
+  result = model.lookupVisibleResults[0];
+  assert.deepEqual(marked(result.filepathParts), ['FireBlade.txt']);
+  assert.deepEqual(marked(result.statsParts), ['stat_FireBlade']);
+  model.lookupClearSearch();
+  result = model.lookupVisibleResults[0];
+  for (const field of ['filepathParts', 'englishParts', 'translationParts', 'statsParts']) assert.deepEqual(marked(result[field]), []);
+});
+
+test('result excerpts keep highlights visible after normalized prefixes, across blocks and when clipped', () => {
+  const { api, model } = loadLookup({ descs: [description('one', ['Stores poison', 'Deals damage'])] });
+  search(model, 'poison deals');
+  assert.ok(model.lookupVisibleResults[0].englishParts.some(part => part.matched && part.text === 'poison Deals'));
+  const text = 'Cafe\u0301 '.repeat(40) + 'FIRE damage';
+  const parts = plain(api.excerptParts(text, 'fire'));
+  assert.ok(parts.some(part => part.matched && part.text === 'FIRE'));
+  assert.ok(parts.map(part => part.text).join('').startsWith('…'));
+  const longQuery = 'damage '.repeat(35).trim();
+  const clipped = plain(api.excerptParts('Before ' + longQuery + ' after', longQuery));
+  assert.ok(clipped.some(part => part.matched && part.text.startsWith('damage')));
+  assert.ok(clipped.map(part => part.text).join('').endsWith('…'));
+  assert.ok(clipped.map(part => part.text).join('').length <= 151);
+  for (const [source, query] of [['🗡'.repeat(20) + 'Fire damage', 'fire'], ['a'.repeat(149) + '🗡', 'a']]) {
+    const preview = plain(api.excerptParts(source, query)).map(part => part.text).join('');
+    assert.equal(preview.isWellFormed(), true, 'Excerpt boundaries must preserve complete emoji');
+  }
+});
