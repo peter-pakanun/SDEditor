@@ -86,6 +86,16 @@ function browserControls(account, language, secret) {
     await fixtureRequest('remote-comment');
     status.textContent = 'New German comment added to PoE1 / fixture/stat_01.txt. It will appear automatically within 20 seconds.';
   });
+  button('Remove assignment', async () => {
+    await fixtureRequest('assignment', { assigned: false });
+    status.textContent = 'Assignment removed. The next comments refresh must clear cloud access while keeping local drafts.';
+  });
+  button('Restore assignment', async () => {
+    await fixtureRequest('assignment', { assigned: true });
+    const vm = await ready();
+    await vm._cloud.sync();
+    status.textContent = language + ' assignment restored. Shared comments should become available again.';
+  });
   let offline = false, originalFetcher;
   const offlineButton = button('Simulate offline', async () => {
     const vm = await ready(); offline = !offline;
@@ -166,6 +176,12 @@ function browserControls(account, language, secret) {
       next();
     });
     frontend.post('/fixture/bootstrap', (req, res) => res.json({ session: store.createSession('comments-' + account), source: sources[index], sourceHash: hashes[index] }));
+    frontend.post('/fixture/assignment', (req, res) => {
+      if (typeof req.body.assigned !== 'boolean') return res.status(400).json({ error: 'assigned must be boolean' });
+      store.assignLanguage('comments-admin', 'comments-' + account, req.body.assigned ? language : null);
+      api.locals.collaborationRealtime.revalidate();
+      res.json({ assigned: req.body.assigned });
+    });
     frontend.post('/fixture/remote-comment', async (req, res) => {
       try {
         const response = await fetch(apiOrigin + '/v1/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + remoteSession.token },

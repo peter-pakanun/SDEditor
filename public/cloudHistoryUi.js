@@ -16,7 +16,7 @@
     computed: {
       cloudHistoryAvailable() { return !this.testMode && this.cloudSignedIn && !!this.cloudUser?.language; },
       cloudEntryHistoryAvailable() { return this.cloudHistoryAvailable && this.lang === this.cloudUser.language; },
-      cloudHistoryContext() { return [this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language, this.lang].join('|'); },
+      cloudHistoryContext() { return [this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language, this.cloudUser?.assignmentVersion, this.lang].join('|'); },
       cloudHistoryUnavailableReason() {
         if (this.testMode) return 'Shared history is disabled in test mode.';
         if (!this.cloudSignedIn) return 'Sign in to view shared dictionary history.';

@@ -93,6 +93,21 @@ test('account change clears history and discards an outstanding list response', 
   assert.equal(app.cloudHistoryLoading, false);
 });
 
+test('reassignment to the same language closes history and rejects an old response', async () => {
+  const pending = deferred();
+  const app = editor({ getDictionaryHistory: () => pending.promise });
+  app.cloudUser.assignmentVersion = 1;
+  app.cloudHistoryVisible = true;
+  const previousContext = app.cloudHistoryContext, loading = app.cloudLoadHistory();
+  app.cloudUser.assignmentVersion = 2;
+  assert.notEqual(app.cloudHistoryContext, previousContext);
+  app.contextChanged();
+  pending.resolve(page([event()])); await loading;
+  assert.equal(app.cloudHistoryVisible, false);
+  assert.equal(app.cloudHistoryItems.length, 0);
+  assert.equal(app.cloudHistoryAvailable, true);
+});
+
 test('a late detail response cannot replace a newly selected event', async () => {
   const old = deferred();
   const app = editor({ getDictionaryHistoryEvent: id => id === 3 ? old.promise : Promise.resolve(event({ id })) });

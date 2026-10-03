@@ -97,7 +97,7 @@
       scheduleCollaboration() {
         // Invalidate an old room immediately, before the debounce or any network await.
         const eligible = this.cloudSignedIn && this.cloudUser?.language === this.lang && this.sourceLoaded;
-        const key = eligible ? [this.cloudUser.id, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
+        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this.collabReceiveState?.({ status: 'Local workspace', peers: [], conflicts: [], pending: 0, connected: false });
@@ -113,7 +113,7 @@
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || !this.cloudSignedIn || this.cloudUser?.language !== this.lang || !window.CollaborationSync) return;
-        const key = [this.cloudUser.id, this.gameVersion, this.lang, this.sourceIdentity].join('|');
+        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
         const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, language: this.lang };

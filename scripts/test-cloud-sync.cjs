@@ -624,6 +624,125 @@ test('session refresh keeps its credential outside snapshots, and 401 retains lo
   assert.match(h.statuses.at(-1).message, /Session expired/);
 });
 
+test('unassignment closes cloud access without losing the login or queued local drafts', async t => {
+  const h = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'private draft' })] }) });
+  const queued = deferred();
+  h.client.localQueue = queued.promise;
+  const saving = h.client.saveLocal(payload([word('fire', { replace: 'queued local edit' })]));
+  h.api.intercept = request => request.path === '/v1/comments'
+    ? reply({ error: { code: 'LANGUAGE_UNASSIGNED', message: 'An assigned language is required.' } }, 403) : undefined;
+  await assert.rejects(h.client.request('/v1/comments'), error => error.code === 'LANGUAGE_UNASSIGNED');
+  assert.equal(h.client.snapshot().signedIn, true);
+  assert.equal(h.client.snapshot().user.language, null);
+  assert.equal(h.client.snapshot().profileId, 'alice');
+  assert.equal(h.store.state.auth.token, 'token-alice');
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'private draft');
+  assert.equal(h.client.snapshot().editorClipboard, 'local clipboard');
+  queued.resolve(); await saving;
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'queued local edit');
+  assert.equal(h.client.snapshot().user.language, null);
+  assert.match(h.statuses.at(-1).message, /Cloud access unavailable/);
+});
+
+test('a comments response from before confirmed unassignment is discarded', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  const pending = h.api.pause('GET', '/v1/comments');
+  const reading = h.client.request('/v1/comments');
+  await pending.entered.promise;
+  h.api.intercept = request => request.path === '/v1/comments/unread'
+    ? reply({ error: { code: 'LANGUAGE_UNASSIGNED', message: 'An assigned language is required.' } }, 403) : undefined;
+  await assert.rejects(h.client.request('/v1/comments/unread'), error => error.status === 403);
+  pending.release.resolve(reply({ items: [{ id: 1, body: 'Earlier authorized content' }] }));
+  await assert.rejects(reading, error => error.stale === true);
+  assert.equal(h.client.snapshot().signedIn, true);
+  assert.equal(h.client.snapshot().user.language, null);
+});
+
+test('forbidden language refreshes current assignment and leaves local drafts intact', async t => {
+  const h = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'Thai draft' })] }) });
+  h.api.users['token-alice'] = { ...user('alice', 'French'), assignmentVersion: 2 };
+  h.api.intercept = request => request.path === '/v1/dictionaries/Thai'
+    ? reply({ error: { code: 'LANGUAGE_FORBIDDEN', message: 'This is no longer your assigned language.' } }, 403) : undefined;
+  await assert.rejects(h.client.request('/v1/dictionaries/Thai'), error => error.code === 'LANGUAGE_FORBIDDEN');
+  assert.equal(h.client.snapshot().signedIn, true);
+  assert.equal(h.client.snapshot().user.language, 'French');
+  assert.equal(h.client.snapshot().user.assignmentVersion, 2);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Thai draft');
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/dictionaries/Thai', '/v1/me']);
+});
+
+test('an old denial cannot remove a newer assignment to the same language', async t => {
+  const state = authenticatedState(); state.auth.user.assignmentVersion = 1;
+  const h = await harness(t, { state });
+  h.api.users['token-alice'].assignmentVersion = 2;
+  const pending = h.api.pause('GET', '/v1/comments');
+  const reading = h.client.request('/v1/comments');
+  await pending.entered.promise;
+  await h.client.refreshSession(true);
+  pending.release.resolve(reply({ error: { code: 'LANGUAGE_UNASSIGNED', message: 'Old assignment was removed.' } }, 403));
+  await assert.rejects(reading, error => error.stale === true);
+  assert.equal(h.client.snapshot().user.language, 'Thai');
+  assert.equal(h.client.snapshot().user.assignmentVersion, 2);
+  assert.equal(h.client.snapshot().signedIn, true);
+});
+
+test('the first sync after assignment uses its fresh permissions in the same pass', async t => {
+  const h = await harness(t, { state: authenticatedState({ language: null, local: [word('fire', { replace: 'Waiting local edit' })] }) });
+  seedAPI(h.api);
+  h.api.users['token-alice'].assignmentVersion = 2;
+  await h.client.sync();
+  assert.equal(h.client.snapshot().user.language, 'Thai');
+  assert.equal(h.client.snapshot().user.assignmentVersion, 2);
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'Waiting local edit');
+  assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 1);
+  assert.equal(h.changes.some(snapshot => snapshot.user?.assignmentVersion === 2), true);
+});
+
+test('sync reloads a newer same-account assignment stored by another tab', async t => {
+  const state = authenticatedState(); state.auth.user.assignmentVersion = 1;
+  const h = await harness(t, { state });
+  seedAPI(h.api, { remote: dictionary([word('fire', { tlnote: 'New shared note' })], 2) });
+  h.api.users['token-alice'].assignmentVersion = 2;
+  await h.store.updateHybridState(stored => { stored.auth.user.assignmentVersion = 2; return stored; });
+  assert.equal(h.client.snapshot().user.assignmentVersion, 1);
+  await h.client.sync();
+  assert.equal(h.client.snapshot().user.assignmentVersion, 2);
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'New shared note');
+  assert.equal(h.api.calls.some(call => call.path === '/v1/dictionaries/Thai'), true);
+});
+
+test('account switching during the profile commit prevents outgoing-account cloud sync', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api);
+  let gate;
+  const profileReceived = deferred();
+  h.api.after = request => {
+    if (request.path === '/v1/me' && request.token === 'token-alice') {
+      gate = h.store.pauseNextCommit(); profileReceived.resolve();
+    }
+  };
+  const syncing = h.client.sync();
+  await profileReceived.promise; await gate.entered.promise;
+  const switching = h.client.acceptLogin({ token: 'token-bob', user: user('bob'), expiresAt: 1 });
+  gate.release.resolve(); await Promise.all([syncing, switching]);
+  assert.equal(h.client.snapshot().profileId, 'bob');
+  assert.deepEqual(h.api.calls.filter(call => call.token === 'token-alice').map(call => call.path), ['/v1/me']);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'ไฟ');
+});
+
+test('permission changes before a shared merge transaction leave the local draft unchanged', async t => {
+  const state = authenticatedState(); state.auth.user.assignmentVersion = 1;
+  const h = await harness(t, { state });
+  // The storage transaction ahead of the cloud merge publishes another tab's
+  // assignment change before that merge's callback can read the durable state.
+  const reassignment = h.store.updateHybridState(stored => { stored.auth.user.assignmentVersion = 2; return stored; });
+  const merging = h.client.mergeRemote(h.client.context(), 'Thai', dictionary([word('fire', { replace: 'Stale shared result' })], 2));
+  await reassignment;
+  await assert.rejects(merging, error => error.stale === true);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'ไฟ');
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.revision, 1);
+});
+
 test('rapid queued saves from one tab commit in order and the latest captured draft wins', async t => {
   const h = await harness(t, { state: authenticatedState() });
   seedAPI(h.api);

@@ -373,6 +373,25 @@ test('all assigned teams can read across selected language and source hash', asy
   assert.equal(app.commentsEligible, false);
 });
 
+test('confirmed unassignment closes comment views and clears shared rows while keeping drafts', async () => {
+  const { app, calls } = fixture();
+  app.commentsAllVisible = true; app.commentsFileFeed.items = [comment(1)]; app.commentsAllFeed.items = [comment(1)];
+  app.commentsUnreadTotal = 1; app.commentsUnreadFiles = { 'Metadata/test.txt': 1 };
+  const draftKey = app.commentsDraftKey;
+  app.commentsFileDraft = 'Keep this unsent comment';
+  app.cloudUser.language = null;
+  app.commentsResetContext();
+  await app.commentsPoll(); await app.commentsRefreshFile(); await app.commentsRefreshAll();
+  assert.equal(app.cloudSignedIn, true);
+  assert.equal(app.commentsEligible, false);
+  assert.equal(app.commentsAllVisible, false);
+  assert.equal(app.commentsFileItems.length, 0);
+  assert.equal(app.commentsAllItems.length, 0);
+  assert.equal(app.commentsUnreadTotal, 0);
+  assert.equal(app.commentsDrafts[draftKey], 'Keep this unsent comment');
+  assert.equal(calls.length, 0);
+});
+
 test('background refresh preserves content, empty-state and accessible busy state until confirmed changes', async () => {
   const pending = deferred();
   const { app } = fixture(() => pending.promise);

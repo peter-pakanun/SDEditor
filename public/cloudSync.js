@@ -119,14 +119,26 @@
     }
     notify() { this.onChange(this.snapshot()); }
     status(message, error = false, warning = false) { this.onStatus({ message, error, warning }); }
-    context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language }; }
+    context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language, assignmentVersion: this.state.auth?.user?.assignmentVersion }; }
     current(ctx, state = this.state) { return !this.destroyed && ctx.epoch === this.epoch && state.activeProfile === ctx.profile && state.auth?.token === ctx.token; }
+    permissionsCurrent(ctx, state = this.state) {
+      return this.current(ctx, state) && state.auth?.user?.language === ctx.language
+        && state.auth?.user?.assignmentVersion === ctx.assignmentVersion;
+    }
     async update(fn, ctx, notify = true) {
       this.state = await this.store.updateHybridState(state => {
         if (!ctx || this.current(ctx, state)) fn(state, state.profiles[state.activeProfile]);
         return state;
       });
       if (notify) this.notify();
+    }
+    async updateShared(fn, ctx, notify = true) {
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+      await this.update((state, profile) => {
+        if (!this.permissionsCurrent(ctx, state)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+        fn(state, profile);
+      }, ctx, notify);
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
     }
     saveLocal(payload, contextLanguage = payload.lang) {
       const requested = this.context();
@@ -203,7 +215,7 @@
       return { legacySettings: copy(this.state.legacyRecovery), copies: profile.recovery.map(r => ({ at: r.at, reason: r.reason, settings: copy(r.settings), dictionaries: cleanDictionary(r.dictionaries), editorClipboard: r.editorClipboard })) };
     }
     async request(path, options = {}, ctx = this.context()) {
-      if (!this.current(ctx)) throw Object.assign(new Error('Account changed'), { stale: true });
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
       try {
@@ -211,12 +223,28 @@
           headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}) },
           ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
         const data = response.status === 204 ? null : await response.json();
-        if (!this.current(ctx)) throw Object.assign(new Error('Account changed'), { stale: true });
+        if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
         if (!response.ok) {
           const error = Object.assign(new Error(data?.error?.message || 'Cloud request failed'), { status: response.status, code: data?.error?.code, current: data?.current });
           if (response.status === 401 && ctx.token) {
             await this.update(state => { state.auth = { ...state.auth, token: null }; }, ctx);
             this.status('Session expired. Sign in again; your local changes are safe.', true);
+          } else if (response.status === 403 && ctx.token && error.code === 'LANGUAGE_UNASSIGNED') {
+            // Permission revocation keeps the login and all local work, but
+            // immediately closes shared views and stops their background reads.
+            await this.update(state => {
+              if (this.permissionsCurrent(ctx, state)) state.auth.user = { ...state.auth.user, language: null };
+            }, ctx);
+            this.reportError(error);
+          } else if (response.status === 403 && ctx.token && error.code === 'LANGUAGE_FORBIDDEN' && path !== '/v1/me') {
+            // A forbidden room/dictionary may indicate reassignment. Re-read
+            // the profile rather than treating a scoped denial as a sign-out.
+            try {
+              const me = await this.request('/v1/me', {}, ctx);
+              await this.update(state => {
+                if (this.permissionsCurrent(ctx, state)) { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }
+              }, ctx);
+            } catch (refreshError) { if (refreshError.stale) throw refreshError; }
           }
           throw error;
         }
@@ -247,7 +275,9 @@
       this.lastActivityRefresh = Date.now();
       try {
         const result = await this.request('/auth/session/refresh', { method: 'POST' }, ctx);
-        await this.update(state => { state.auth.user = result.user; state.auth.expiresAt = result.expiresAt; }, ctx);
+        await this.update(state => {
+          if (this.permissionsCurrent(ctx, state)) { state.auth.user = result.user; state.auth.expiresAt = result.expiresAt; }
+        }, ctx);
         this.schedule(0);
       } catch (error) { this.lastActivityRefresh = 0; this.reportError(error); }
     }
@@ -276,16 +306,21 @@
       if (!this.state.auth?.token || this.destroyed) return;
       await this.localQueue.catch(() => {});
       if (this.running || !this.state.auth?.token || this.destroyed) return this.running;
-      const ctx = this.context();
+      let ctx = this.context();
       const run = async () => {
         this.state = await this.store.getHybridState();
         if (!this.current(ctx)) { this.notify(); return; }
+        ctx = this.context();
         const me = await this.request('/v1/me', {}, ctx);
-        await this.update(state => { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }, ctx, false);
-        if (!me.user.language) { this.notify(); this.status('Not configured — awaiting admin language assignment', false, true); return; }
+        await this.update(state => {
+          if (this.permissionsCurrent(ctx, state)) { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }
+        }, ctx);
+        if (!this.current(ctx)) return;
+        ctx = this.context();
+        if (!ctx.language) { this.status('Not configured — awaiting admin language assignment', false, true); return; }
         await this.syncSettings(ctx);
         if (!this.current(ctx)) return;
-        const language = me.user.language;
+        const language = ctx.language;
         // Other language drafts stay completely local, including after reassignment.
         await this.syncDictionary(ctx, language);
         this.backoff = 1000;
@@ -316,7 +351,7 @@
           catch (error) { if (error.status !== 409) throw error; }
         }
         const remote = await this.request('/v1/settings', {}, ctx);
-        await this.update((state, profile) => {
+        await this.updateShared((state, profile) => {
           if (!profile.settingsBase && remote.settings) {
             profile.recovery.push({ at: Date.now(), reason: 'Before first cloud restore', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
             profile.settings = preferences(remote.settings);
@@ -340,7 +375,7 @@
     async sendSettingsWrite(ctx, write) {
       try {
         const response = await this.request('/v1/settings', { method: 'PUT', body: write }, ctx);
-        await this.update((state, profile) => {
+        await this.updateShared((state, profile) => {
           profile.settings = mergeSettings(write.settings, profile.settings, response.settings);
           profile.settingsBase = copy(response);
           if (profile.settingsWrite?.mutationId === write.mutationId) profile.settingsWrite = null;
@@ -352,7 +387,7 @@
     }
     async mergeRemote(ctx, language, remote, accepted, mutationId) {
       let result;
-      await this.update((state, profile) => {
+      await this.updateShared((state, profile) => {
         const d = profile.dictionaries[language] ||= newDictionary();
         const baseline = accepted ? preserveConflictBases(accepted, d.conflicts) : d.base;
         result = this.merge.merge(baseline, d.entries, remote);
@@ -422,7 +457,7 @@
     async sendResolution(ctx, language, pending) {
       try {
         const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: { baseRevision: pending.revision, mutationId: pending.mutationId, upserts: pending.entry ? [pending.entry] : [], deletedIds: pending.entry ? [] : [pending.id], ...(pending.origin ? { origins: { [pending.id]: pending.origin } } : {}) } }, ctx);
-        await this.update((state, profile) => {
+        await this.updateShared((state, profile) => {
           const d = profile.dictionaries[language];
           const current = d.entries.find(e => e._id === pending.id) || null;
           const rebased = this.merge.merge(
@@ -453,7 +488,7 @@
       return ctx;
     }
     assertHistoryContext(ctx) {
-      if (!this.current(ctx) || this.state.auth?.user.language !== ctx.language) throw Object.assign(new Error('Account or assigned language changed. Open history again.'), { stale: true });
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed. Open history again.'), { stale: true });
     }
     async getDictionaryHistory(filters = {}) {
       const ctx = this.historyContext();
@@ -512,7 +547,7 @@
     async sendHistoryRestore(ctx, language, pending) {
       try {
         const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language) + '/history/' + encodeURIComponent(pending.eventId) + '/restore', { method: 'POST', body: pending.request }, ctx);
-        await this.update((state, profile) => {
+        await this.updateShared((state, profile) => {
           const d = profile.dictionaries[language];
           const current = d.entries.find(e => e._id === pending.id) || null;
           const rebased = this.merge.merge(

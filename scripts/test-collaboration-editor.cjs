@@ -412,6 +412,29 @@ test('only known pending-sync notices clear after reconnect fully synchronizes',
   e.collaborationNotice = 'Fix the variable error.'; callbacks.onChange(synced); assert.equal(e.collaborationNotice, 'Fix the variable error.');
 });
 
+test('same-language reassignment disconnects the old collaboration client before reconnecting', async () => {
+  const { editor: e, window } = harness(); let disconnected = 0, clients = 0;
+  e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true;
+  e.cloudUser = { id: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e.descs = [description(1)]; e.localDescs = { descs: [], status: {} };
+  e._cloud = { apiBase: 'https://api.example', context() { return {}; }, request() {} };
+  window.CollaborationSync = { Client: class {
+    constructor() { clients++; }
+    async connect() {} select() {} setAway() {} snapshot() { return {}; }
+    disconnect() { disconnected++; }
+  } };
+  await e.initializeCollaboration();
+  const previous = e._collaboration;
+  e.cloudUser.assignmentVersion = 2;
+  e.scheduleCollaboration();
+  assert.equal(disconnected, 1);
+  assert.equal(e._collaboration, null);
+  clearTimeout(e._collabStartTimer);
+  await e.initializeCollaboration();
+  assert.equal(clients, 2);
+  assert.notEqual(e._collaboration, previous);
+});
+
 test('shared conflict resolution rejects missing source table columns before queueing a save', async () => {
   const { editor: e, desc } = saveFixture();
   desc.translations.English[0] = 'Left@Right';
