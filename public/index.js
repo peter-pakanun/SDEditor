@@ -2576,7 +2576,7 @@ const config = Vue.defineComponent({
       editorBlock.metaKwTr = tr.kw;
       editorBlock.metaDecorEn = eng.decor;
       editorBlock.metaDecorTr = tr.decor;
-      if (typeof editorIndex === "number" && editorBlock.isMultiline && !editorBlock.isTable) {
+      if (typeof editorIndex === "number" && !editorBlock.isTable) {
         this.$nextTick(() => this.syncHlScroll('translation', editorIndex));
       }
     },
@@ -2727,12 +2727,12 @@ const config = Vue.defineComponent({
       this.syncEditorBlockFromTableColumns(editorBlock);
       if (typeof editorIndex === "number") {
         this.refreshEditorBlockMeta(editorBlock, editorIndex);
-        if (column.isMultiline) {
-          this.$nextTick(() => {
+        this.$nextTick(() => {
+          if (column.isMultiline) {
             this.autosizeTextarea(this.getEditorRef("translation", editorIndex, columnIndex), { minHeight: 84, maxHeight: 260 });
-            this.syncHlScroll("translation", editorIndex, columnIndex);
-          });
-        }
+          }
+          this.syncHlScroll("translation", editorIndex, columnIndex);
+        });
       }
       this.refreshGamePreview();
       this.queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex);
@@ -3119,7 +3119,6 @@ const config = Vue.defineComponent({
           this.refreshEditorBlockMeta(editorBlock, i);
           this.$nextTick(() => {
             for (let col = 0; col < (editorBlock.tableColumns || []).length; col++) {
-              if (!editorBlock.tableColumns[col]?.isMultiline) continue;
               this.syncHlScroll('english', i, col);
               this.syncHlScroll('translation', i, col);
             }
@@ -3129,6 +3128,10 @@ const config = Vue.defineComponent({
         let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(editorBlock.english);
         editorBlock.HLs = HLs;
         const diagnostics = this.refreshTranslationDiagnostics(editorBlock);
+        this.$nextTick(() => {
+          this.syncHlScroll('english', i);
+          this.syncHlScroll('translation', i);
+        });
         if (!editorBlock.isMultiline) {
           editorBlock.englishHLter = baseEnglishHLter;
           editorBlock.translationHLter = this.buildTagHLter(editorBlock.translation ?? "", diagnostics.diagnostics);
@@ -3139,10 +3142,6 @@ const config = Vue.defineComponent({
         editorBlock.englishHLter = this.wrapHlterByLines(baseEnglishHLter, diff.engMismatch);
         editorBlock.translationHLter = this.wrapHlterByLines(this.buildTagHLter(editorBlock.translation ?? "", diagnostics.diagnostics), diff.trMismatch);
         editorBlock.multilineLineMismatch = diff.mismatch;
-        this.$nextTick(() => {
-          this.syncHlScroll('english', i);
-          this.syncHlScroll('translation', i);
-        });
       }
       if (focusedDictionaryId) this.revealDictionaryEntry(focusedDictionaryId);
       if (this.hlPopup.visible) {
@@ -5357,10 +5356,8 @@ const config = Vue.defineComponent({
         this.$nextTick(() => {
           if (!isCurrent()) return;
           for (let i = 0; i < (this.editorBlocks || []).length; i++) {
-            if (!this.editorBlocks[i]?.isMultiline) continue;
             if (this.editorBlocks[i]?.isTable) {
               for (let col = 0; col < (this.editorBlocks[i].tableColumns || []).length; col++) {
-                if (!this.editorBlocks[i].tableColumns[col]?.isMultiline) continue;
                 this.syncHlScroll('english', i, col);
                 this.syncHlScroll('translation', i, col);
               }

@@ -570,7 +570,7 @@
                 <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
                   <div v-if="editorShowEnglishDiff" class="englishDiff tableEnglishDiff" v-html="column.englishDiffHtml"></div>
                   <div v-else class="textHL" :class="{ multiline: column.isMultiline }">
-                    <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" tabindex="-1">
+                    <input v-if="!column.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" @scroll="syncHlScroll('english', index, colIndex)">
                     <textarea v-else placeholder="English" readonly lang="en" v-model="column.english" :ref='"english_" + index + "_" + colIndex' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index, colIndex)"></textarea>
                     <div v-if="editorReady" class="HLter" :ref='"englishHLter_" + index + "_" + colIndex' v-html="column.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, column)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, column, index, colIndex)">{{ column.englishHLter }}</div>
                   </div>
@@ -584,7 +584,7 @@
               <div v-else class="tableEditorRow tableEditorTranslation">
                 <div class="tableEditorCell" v-for="(column, colIndex) in editorBlock.tableColumns" :class="{ missingSource: !column.englishExists, missingTranslation: !column.translationExists }">
                   <div class="textHL" :class="{ multiline: column.isMultiline }">
-                    <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @compositionend="translationCompositionEnd($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex, $event)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip">
+                    <input v-if="!column.isMultiline" type="text" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @compositionend="translationCompositionEnd($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex, $event)" @scroll="syncHlScroll('translation', index, colIndex)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip">
                     <textarea v-else class="multilineField" rows="4" placeholder="Translation" v-model="column.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index + "_" + colIndex' @focus="setEditorFocus(index, colIndex)" @keydown="translationKeydown($event, index, colIndex)" @compositionend="translationCompositionEnd($event, index, colIndex)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index, colIndex)" @input="tableColumnInput(editorBlock, index, colIndex, $event)" @scroll="syncHlScroll('translation', index, colIndex)" @mousemove="translationTooltipMouseMove($event, index, colIndex)" @mouseleave="hideTooltip"></textarea>
                     <div v-if="editorReady" class="HLter noPointer" :ref='"translationHLter_" + index + "_" + colIndex' v-html="column.translationHLter">{{ column.translationHLter }}</div>
                   </div>
@@ -594,7 +594,7 @@
             <div v-else class="textHL" :class="{ multiline: editorBlock.isMultiline }">
               <div v-if="editorShowEnglishDiff" class="englishDiff" v-html="editorBlock.englishDiffHtml"></div>
               <template v-else>
-                <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" tabindex="-1">
+                <input v-if="!editorBlock.isMultiline" type="text" placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" @scroll="syncHlScroll('english', index)">
                 <textarea v-else placeholder="English" readonly lang="en" v-model="editorBlock.english" :ref='"english_" + index' tabindex="-1" rows="3" @scroll="syncHlScroll('english', index)"></textarea>
                 <div v-if="editorReady" class="HLter" :ref='"englishHLter_" + index' v-html="editorBlock.englishHLter" @mousemove="htmlTooltipMouseMove" @mouseout="hideTooltip" @mouseleave="hideTooltip" @click.ctrl="altClickHighlight($event, editorBlock)" @click.alt="copySpanToClipboard" @click.exact="copySpanToTranslation($event, editorBlock, index)">{{ editorBlock.englishHLter }}</div>
               </template>
@@ -606,7 +606,7 @@
           <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
           <div v-else-if="!editorBlock.isMultiline" class="textHL">
-            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @compositionend="translationCompositionEnd($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index, $event)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip">
+            <input type="text" placeholder="Translation" v-model="editorBlock.translation" :lang="translationEditorBcp47" :readonly="editorTranslationReadOnly" :ref='"translation_" + index' @focus="setEditorFocus(index)" @keydown="translationKeydown($event, index)" @compositionend="translationCompositionEnd($event, index)" @keyup.alt="hotkeyPasteHL($event, editorBlock, index)" @input="translationInput(editorBlock, index, $event)" @scroll="syncHlScroll('translation', index)" @mousemove="translationTooltipMouseMove($event, index)" @mouseleave="hideTooltip">
             <div v-if="editorReady" class="HLter noPointer" :ref='"translationHLter_" + index' v-html="editorBlock.translationHLter">{{ editorBlock.translationHLter }}</div>
           </div>
           <div v-else class="textHL multiline">
