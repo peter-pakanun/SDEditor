@@ -128,6 +128,14 @@ The editor shows each string as a block:
 - **Bottom side (Translation)**: Where you type your translation
 - **Special items highlighted**: Variables and keyword tags are highlighted in both columns
 
+### Reference Lookup
+
+Select **Lookup**, the second tab beside **Dictionary** in the right pane, to search references while keeping your current file and unsaved translation open. Search filenames, stat identifiers, English, or translations across every file in the loaded source, including files hidden by workspace search and status filters. Use **Search in** to narrow the search and **Previous / Next** to page through results.
+
+Select a result to read all of its English and translation blocks. Multiline text retains its line breaks, and `@` separates table columns. Reference text can be selected and copied. The **Reference language** selector changes only the lookup language; your editor language and draft stay in place. References use the loaded source and saved translations, so unsaved changes in the current draft appear only in the editor. Lookup works locally without signing in or opening another SDEditor instance.
+
+The search and selected reference remain when you switch side tabs or move to another editor file. The configured search shortcut (**Ctrl+F**, or **Ctrl+D** in Settings) focuses the lookup search while Lookup is selected. **Esc** inside Lookup clears its search. Editor save and next/previous file shortcuts do not run while a Lookup control has focus.
+
 ### File Comments
 
 Open a file and select **Comments**, beside **History** in the right pane, to discuss that file. Comments are shared with every assigned translator across all team languages and source hashes. Only the selected game (**PoE1** or **PoE2**) and the file path identify a discussion. Importing a new source version therefore keeps its file discussions available; PoE1 and PoE2 discussions remain separate.

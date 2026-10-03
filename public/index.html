@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="settings-ui.css">
   <link rel="stylesheet" href="diagnostics-ui.css">
   <link rel="stylesheet" href="comments.css">
+  <link rel="stylesheet" href="editor-lookup.css">
   <title>SDEditor</title>
 </head>
 <body>
@@ -612,10 +613,11 @@
         </div>
       </div>
 
-      <div class="side fixed" ref="editorSide" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments' }">
+      <div class="side fixed" ref="editorSide" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup' }">
         <div class="twoSided sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
+            <button type="button" class="tabBtn lookupTab" :class="{ active: sideTab === 'lookup' }" @click="openEditorLookup" :aria-pressed="sideTab === 'lookup'" aria-controls="editorLookupPanel"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg> Lookup</button>
             <button class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
             <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
             <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
@@ -674,6 +676,47 @@
             </div>
           </div>
         </div>
+
+        <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
+          <div class="lookupControls">
+            <h2>Reference lookup</h2>
+            <p>Search all loaded files without leaving your draft.</p>
+            <div class="sideSearchRow">
+              <label class="srOnly" for="editorLookupSearch">Search reference files</label>
+              <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
+              <button v-if="lookupQuery" type="button" @click="lookupClearSearch">Clear</button>
+            </div>
+            <div class="lookupOptions">
+              <label for="editorLookupLanguage">Reference language<select id="editorLookupLanguage" v-model="lookupLanguage"><option value="">{{ lang }} (editor language)</option><option v-for="language in lookupLanguages" :key="language" :value="language">{{ language }}</option></select></label>
+              <label for="editorLookupScope">Search in<select id="editorLookupScope" v-model="lookupScope"><option value="all">All text</option><option value="path">Filename / stat</option><option value="english">English</option><option value="translation">Translation</option></select></label>
+            </div>
+            <div class="lookupPagination" aria-label="Reference result pages">
+              <span role="status">{{ lookupRangeLabel }}</span>
+              <button type="button" @click="lookupGoToPage(lookupPage - 1)" :disabled="lookupPage <= 1" aria-label="Previous reference results">Previous</button>
+              <button type="button" @click="lookupGoToPage(lookupPage + 1)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results">Next</button>
+            </div>
+          </div>
+          <div class="lookupResults" ref="lookupResultsList" tabindex="0" aria-label="Reference search results">
+            <button v-for="result in lookupVisibleResults" :key="result.filepath" type="button" class="lookupResult" :class="{ active: lookupSelectedFilepath === result.filepath }" :aria-pressed="lookupSelectedFilepath === result.filepath" @click="lookupSelect(result.filepath)">
+              <strong>{{ result.filepath }}</strong>
+              <span class="lookupResultEnglish" lang="en">{{ result.englishPreview || '(No English text)' }}</span>
+              <span :lang="lookupReferenceBcp47">{{ result.translationPreview || '(No translation)' }}</span>
+            </button>
+            <p v-if="!lookupResultCount" class="lookupEmpty">No reference files match. Try another search or language.</p>
+          </div>
+          <section class="lookupReference" ref="lookupReference" tabindex="0" aria-label="Selected reference">
+            <template v-if="lookupSelectedReference">
+              <header><h3>{{ lookupSelectedReference.filepath }}</h3><p>{{ lookupActiveLanguage }} · Loaded source and saved translations</p><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
+              <article v-for="block in lookupSelectedReference.blocks" :key="block.index" class="lookupReferenceBlock">
+                <h4>Block {{ block.index + 1 }}<span v-if="block.isTable"> · Table (@ separates columns)</span></h4>
+                <div class="lookupTextLabel">English</div><pre class="lookupText" lang="en">{{ block.english || '(No English text)' }}</pre>
+                <div class="lookupTextLabel">{{ lookupActiveLanguage }}</div><pre class="lookupText" :lang="lookupReferenceBcp47">{{ block.translation || '(No translation)' }}</pre>
+              </article>
+              <p v-if="!lookupSelectedReference.blocks.length" class="lookupEmpty">This file has no text blocks.</p>
+            </template>
+            <p v-else class="lookupEmpty">Select a result to read its full text. You can select and copy reference text.</p>
+          </section>
+        </section>
 
         <section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>Shared across all languages and source versions</p></div></header>
@@ -1100,6 +1143,7 @@
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>
   <script src="commentsUi.js"></script>
+  <script src="editorLookup.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

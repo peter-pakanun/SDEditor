@@ -99,7 +99,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -519,6 +519,9 @@ const config = Vue.defineComponent({
       if (!this.lang) return undefined;
       const code = SETTINGS_LANG_TO_BCP47[this.lang];
       return code || undefined;
+    },
+    lookupReferenceBcp47() {
+      return SETTINGS_LANG_TO_BCP47[this.lookupActiveLanguage] || undefined;
     },
     editorTranslationReadOnly() {
       return this.editorLoading || !!this.editorLoadError || (this.editorCompareActive && this.editorCompareMode === 'translation');
@@ -3990,11 +3993,12 @@ const config = Vue.defineComponent({
     isActiveElementInSearchBox() {
       let el = document.activeElement;
       if (!el) return false;
-      return [this.$refs.searchInput, this.$refs.dictionaryFilterInput, this.$refs.regexFilterInput].includes(el);
+      return [this.$refs.searchInput, this.$refs.dictionaryFilterInput, this.$refs.regexFilterInput, this.$refs.lookupSearchInput].includes(el);
     },
     focusSidebarFilterInput() {
       if (!this.editorVisible) return false;
-      let ref = this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
+      let ref = this.sideTab === "lookup" ? this.$refs.lookupSearchInput
+        : this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
       if (!ref) return false;
       ref.focus?.();
       ref.select?.();
@@ -4002,6 +4006,24 @@ const config = Vue.defineComponent({
     },
     isFilterFocusShortcut(e) {
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
+    },
+    openEditorLookup() {
+      this.sideTab = 'lookup';
+      this.$nextTick(() => this.lookupFocusSearch?.());
+    },
+    lookupPanelKeydown(e) {
+      if (this.isImeComposingEvent(e)) return;
+      if (this.isFilterFocusShortcut(e)) {
+        e.preventDefault();
+        this.lookupFocusSearch?.();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        if (this.lookupQuery) this.lookupClearSearch?.();
+      } else if (((e.ctrlKey || e.metaKey) && e.code === 'KeyS')
+        || e.code === 'F1' || e.code === 'F2') {
+        // These editor shortcuts must not save or navigate from reference controls.
+        e.preventDefault();
+      }
     },
     isAutocompleteShortcut(e) {
       if (!e || this.autocompleteShortcut === "disabled") return false;
@@ -4768,6 +4790,7 @@ const config = Vue.defineComponent({
     // 3. Sets isMissing if any translation line is blank or count mismatch.
     // 4. Copies needsReview flag from localDescs.status.
     applyWorkspaceOverlay() {
+      this.invalidateEditorLookupIndex?.();
       const overlay = Array.isArray(this.localDescs?.descs) ? this.localDescs.descs : [];
       const localByPath = new Map();
       for (const o of overlay) {
@@ -4944,6 +4967,7 @@ const config = Vue.defineComponent({
       this.$refs.searchInput?.focus();
     },
     filterDesc() {
+      this.invalidateEditorLookupIndex?.();
       this.filteredDescs = [];
       this.statistic.hasChanges = 0;
       this.statistic.isMissing = 0;
