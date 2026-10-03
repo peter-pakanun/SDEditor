@@ -103,6 +103,7 @@ const config = Vue.defineComponent({
   data() {
     return {
       offlineStoreReady: false,
+      startupReady: false,
       testMode: TEST_MODE,
       gameVersion: "",
       gameVersionSelected: false,
@@ -124,7 +125,7 @@ const config = Vue.defineComponent({
         "Turkish",
       ],
       lang: "",
-      theme: 'light',
+      theme: document.documentElement?.getAttribute('data-theme') || 'light',
       showSetting: false,
       settingsTab: 'general',
       settingsTabs: [
@@ -312,63 +313,71 @@ const config = Vue.defineComponent({
     }
   },
   async mounted() {
-    if (this.testMode) {
-      this.gameVersion = 'poe1';
-      this.gameVersionSelected = true;
-      this.updateDocumentTitle();
-      this.lang = (URL_LANG && this.langs.includes(URL_LANG)) ? URL_LANG : (this.langs[0] || "Thai");
-      this.needsInitialSettings = false;
+    try {
+      if (this.testMode) {
+        this.gameVersion = 'poe1';
+        this.gameVersionSelected = true;
+        this.updateDocumentTitle();
+        this.lang = (URL_LANG && this.langs.includes(URL_LANG)) ? URL_LANG : (this.langs[0] || "Thai");
+        this.needsInitialSettings = false;
+        this.loadingProgress = 0;
+        this.ensureDictionaryIds();
+        document.addEventListener('keydown', this.handleKeydown);
+        this.loadDummyData();
+        return;
+      }
+
+      // Check for multiple instances early
+      this.checkMultipleInstances();
+      this.startMultiInstanceCheck();
+
+      const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
+      if (!canUseOfflineStore) {
+        await this.finishStartup(true);
+        this.appAlert('This app requires IndexedDB for offline storage, but your browser does not support it.');
+        return;
+      }
+
       this.loadingProgress = 0;
+
+      try {
+        await window.OfflineStore.migrateFromLocalStorageIfNeeded();
+      } catch (error) {
+        this.cloudStorageError = 'Could not load existing browser storage. Reload to retry: ' + error.message;
+        return;
+      }
+
+      let settings;
+      try {
+        settings = await window.OfflineStore.getSettings();
+      } catch (error) {
+        this.cloudStorageError = 'Could not load existing settings. Reload to retry: ' + error.message;
+        return;
+      }
+      // The startup cache is only a first-paint hint; local settings remain authoritative.
+      if (settings) this.importSettings(settings);
+      else this.theme = 'light';
+
+
+      this.needsInitialSettings = !this.lang;
+      offlineStoreReady = true;
+      this.offlineStoreReady = true;
       this.ensureDictionaryIds();
       document.addEventListener('keydown', this.handleKeydown);
-      this.loadDummyData();
-      return;
+
+      try { await this.initializeCloud(settings); }
+      catch (error) {
+        offlineStoreReady = false;
+        this.offlineStoreReady = false;
+        this.cloudStorageError = 'Could not initialize local backup storage. Reload to retry: ' + error.message;
+        return;
+      }
+      await this.saveSettings();
+      this.updateDocumentTitle();
+    } finally {
+      // Storage errors and test mode must also reveal their rendered UI.
+      await this.finishStartup(true);
     }
-
-    // Check for multiple instances early
-    this.checkMultipleInstances();
-    this.startMultiInstanceCheck();
-
-    const canUseOfflineStore = !!(window.OfflineStore && typeof window.OfflineStore.isAvailable === 'function' && window.OfflineStore.isAvailable());
-    if (!canUseOfflineStore) {
-      this.appAlert('This app requires IndexedDB for offline storage, but your browser does not support it.');
-      return;
-    }
-
-    this.loadingProgress = 0;
-
-    try {
-      await window.OfflineStore.migrateFromLocalStorageIfNeeded();
-    } catch (error) {
-      this.cloudStorageError = 'Could not load existing browser storage. Reload to retry: ' + error.message;
-      return;
-    }
-
-    let settings;
-    try {
-      settings = await window.OfflineStore.getSettings();
-    } catch (error) {
-      this.cloudStorageError = 'Could not load existing settings. Reload to retry: ' + error.message;
-      return;
-    }
-    if (settings) this.importSettings(settings);
-
-
-    this.needsInitialSettings = !this.lang;
-    offlineStoreReady = true;
-    this.offlineStoreReady = true;
-    this.ensureDictionaryIds();
-    document.addEventListener('keydown', this.handleKeydown);
-
-    try { await this.initializeCloud(settings); }
-    catch (error) {
-      offlineStoreReady = false;
-      this.offlineStoreReady = false;
-      this.cloudStorageError = 'Could not initialize local backup storage. Reload to retry: ' + error.message;
-      return;
-    }
-    await this.saveSettings();
-    this.updateDocumentTitle();
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
@@ -451,7 +460,8 @@ const config = Vue.defineComponent({
       if (this.sideTab === 'history') this.refreshHistory();
     },
     theme(newTheme) {
-      document.documentElement.setAttribute('data-theme', newTheme);
+      // Legacy settings can differ from the active local profile during startup.
+      if (this.startupReady) this.applyTheme(newTheme);
       this.saveSettings();
     },
     selectedFileFilters: {
@@ -5773,6 +5783,20 @@ const config = Vue.defineComponent({
         this.focusSelectedFileRow();
       });
     },
+    applyTheme(theme) {
+      if (!['light', 'grey', 'dark', 'modern-dark'].includes(theme)) return;
+      document.documentElement.setAttribute('data-theme', theme);
+      try { localStorage.setItem('sdeditor-theme', theme); }
+      catch (_) { /* The appearance cache must never block settings or startup. */ }
+    },
+    async finishStartup(preserveBootTheme = false) {
+      if (this.startupReady) return;
+      if (preserveBootTheme) this.theme = document.documentElement.getAttribute('data-theme') || this.theme;
+      this.applyTheme(this.theme);
+      this.startupReady = true;
+      await this.$nextTick();
+      document.documentElement.removeAttribute('data-app-booting');
+    },
     async saveSettings() {
       if (this._cloudApplying) return true;
       if (!offlineStoreReady) return !!this.testMode;
@@ -5855,7 +5879,7 @@ const config = Vue.defineComponent({
       this.ensureDictionaryIds();
       this.editorClipboard = settings.editorClipboard || "";
       this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
-      if (settings.theme) this.theme = settings.theme;
+      if (['light', 'grey', 'dark', 'modern-dark'].includes(settings.theme)) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;

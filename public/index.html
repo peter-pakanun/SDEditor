@@ -1,8 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-app-booting>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Keep the first paint dim and hide Vue templates even before external CSS/JS arrives. -->
+  <style>
+    :root { --color-bg: #202225; --color-font: #D8D9DA; color-scheme: dark; }
+    :root[data-theme="light"] { --color-bg: #F5F7FB; --color-font: #172033; color-scheme: light; }
+    :root[data-theme="grey"] { --color-bg: #e3e5ea; --color-font: #202938; color-scheme: light; }
+    :root[data-theme="modern-dark"] { --color-bg: #181d27; --color-font: #e2e8f2; color-scheme: dark; }
+    html, body { background-color: var(--color-bg); color: var(--color-font); margin: 0; }
+    #app[v-cloak], html[data-app-booting] #app { display: none !important; }
+  </style>
+  <script>
+    (() => {
+      const themes = ['light', 'grey', 'dark', 'modern-dark'];
+      let theme = 'dark';
+      try {
+        const cached = localStorage.getItem('sdeditor-theme');
+        if (themes.includes(cached)) theme = cached;
+      } catch (_) { /* Storage can be unavailable; retain the dim startup canvas. */ }
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
 
   <!-- App UI + in-game preview fallbacks (CJK/Thai) via Google Fonts; Korean primary via Spoqa (jsDelivr). -->
   <link href="https://fonts.googleapis.com/css2?family=Sarabun&family=Kanit:wght@400;600;700&family=Noto+Sans+JP:wght@400;600;700&family=Noto+Sans+KR:wght@400;600;700&family=Noto+Sans+SC:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
@@ -17,7 +37,7 @@
   <title>SDEditor</title>
 </head>
 <body>
-  <div id="app">
+  <div id="app" v-cloak>
     <div class="appRoot" :data-density="uiDensity">
     <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
 

@@ -109,6 +109,8 @@
           await this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] });
           await this.cloudApply(this._cloud.snapshot());
           await this.$nextTick();
+          // Show the restored local profile before any authentication/network request.
+          await this.finishStartup?.();
         } finally { this._cloudApplying = false; this._cloudInitializing = false; }
         const listen = (target, name, handler) => { target.addEventListener(name, handler); (this._cloudListeners ||= []).push([target, name, handler]); };
         listen(window, 'online', () => { this._cloud.refreshSession(true); });
