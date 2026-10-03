@@ -7,7 +7,7 @@ const { readFileSync } = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const { createServer } = require('node:http');
 
-function browserControls(account, secret) {
+function browserControls(account, secret, settings) {
   // This function is serialized only into fixture-served pages, never public/index.html.
   const panel = document.createElement('aside');
   panel.id = 'collaboration-fixture-controls';
@@ -16,6 +16,8 @@ function browserControls(account, secret) {
   const title = document.createElement('strong'); title.textContent = 'Disposable fixture · Translator ' + account.toUpperCase(); panel.append(title);
   const actions = document.createElement('div'); actions.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:7px'; panel.append(actions);
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.style.margin = '7px 0 0'; status.textContent = 'Bootstrapping replaces only this fixture origin’s local source.'; panel.append(status);
+  const timing = document.createElement('pre'); timing.setAttribute('aria-label', 'Save performance');
+  timing.style.cssText = 'font:11px monospace;white-space:pre-wrap;margin:7px 0 0;max-height:230px;overflow:auto'; panel.append(timing);
   const button = (label, action) => {
     const control = document.createElement('button'); control.textContent = label;
     control.style.cssText = 'color:#222;background:#fff;border:1px solid #996d12;padding:6px;border-radius:4px;font:12px system-ui';
@@ -33,11 +35,53 @@ function browserControls(account, secret) {
   };
   let offline = false;
   let originalFetcher;
-  const seed = Array.from({ length: 25 }, (_, index) => {
+  let activeMeasurement = null;
+  const instrument = vm => {
+    const wrap = (owner, name, label = name) => {
+      if (typeof owner?.[name] !== 'function' || owner[name].fixtureMeasured) return;
+      const original = owner[name];
+      const measured = function (...args) {
+        const measurement = activeMeasurement, start = performance.now();
+        const record = () => {
+          if (!measurement) return;
+          const phase = measurement.phases[label] ||= { calls: 0, ms: 0 };
+          phase.calls++; phase.ms += performance.now() - start;
+        };
+        try {
+          const result = original.apply(this, args);
+          if (result && typeof result.then === 'function') return result.finally(record);
+          record(); return result;
+        } catch (error) { record(); throw error; }
+      };
+      measured.fixtureMeasured = true; owner[name] = measured;
+    };
+    for (const name of ['toPlainForStorage', 'refreshEditorDiagnostics', 'persistTranslationBatch', 'applyCollaborationFiles',
+      'rebaseEditorAfterCommit', 'updateEditorHLter', 'saveSettings', 'filterDesc']) wrap(vm, name);
+    for (const name of ['save', 'update', 'snapshot']) wrap(vm._collaboration, name, 'Client.' + name);
+    for (const name of ['updateCollaborationState', 'saveWorkspaceWithRevisions']) wrap(OfflineStore, name, 'IndexedDB.' + name);
+    if (vm.editorSave.fixtureMeasured) return;
+    const originalSave = vm.editorSave;
+    const measuredSave = async function (...args) {
+      const measurement = { phases: {}, start: performance.now() }; activeMeasurement = measurement;
+      timing.textContent = 'Measuring local save…';
+      try { return await originalSave.apply(this, args); }
+      finally {
+        measurement.totalMs = performance.now() - measurement.start;
+        activeMeasurement = null;
+        timing.textContent = 'Save total: ' + measurement.totalMs.toFixed(1) + ' ms\n'
+          + Object.entries(measurement.phases).map(([name, phase]) => name + ': ' + phase.ms.toFixed(1) + ' ms (' + phase.calls + ')').join('\n')
+          + '\nNested phase times overlap.';
+      }
+    };
+    measuredSave.fixtureMeasured = true; vm.editorSave = measuredSave;
+  };
+  const seed = Array.from({ length: settings.fileCount }, (_, index) => {
     const number = String(index + 1).padStart(2, '0');
+    const english = Array.from({ length: settings.entriesPerFile }, (_, entry) => (entry % 2 ? 'Cold' : 'Fire') + ' damage ' + number + (entry > 1 ? ' line ' + (entry + 1) : ''));
+    const thai = Array.from({ length: settings.entriesPerFile }, (_, entry) => 'ความเสียหาย' + (entry % 2 ? 'เย็น' : 'ไฟ') + ' ' + number + (entry > 1 ? ' บรรทัด ' + (entry + 1) : ''));
     return { filepath: 'fixture/stat_' + number + '.txt', filedir: 'fixture', filename: 'stat_' + number + '.txt', name: '',
-      stats: ['fixture_stat_' + number], variables: ['#', '#'], remarks: ['', ''],
-      translations: { English: ['Fire damage ' + number, 'Cold damage ' + number], Thai: ['ความเสียหายไฟ ' + number, 'ความเสียหายเย็น ' + number] },
+      stats: ['fixture_stat_' + number], variables: english.map(() => '#'), remarks: english.map(() => ''),
+      translations: { English: english, Thai: thai },
       isMissing: false, isDNT: false, hasChanges: true, needsReview: false };
   });
   button('Bootstrap translator ' + account.toUpperCase(), async () => {
@@ -58,7 +102,12 @@ function browserControls(account, secret) {
     await vm.activateGameVersion('poe1', { checkMigration: false });
     await vm.$nextTick();
     await vm.initializeCollaboration();
-    status.textContent = 'Translator ' + account.toUpperCase() + ' ready · 25 files · real API + WebSocket.';
+    if (settings.dictionaryCount) {
+      vm.dictionary = Array.from({ length: settings.dictionaryCount }, (_, index) => ({ _id: 'fixture-dictionary-' + index, find: 'Fixture term ' + index, replace: 'คำทดสอบ ' + index }));
+      await vm.saveSettings();
+    }
+    instrument(vm);
+    status.textContent = 'Translator ' + account.toUpperCase() + ' ready · ' + settings.fileCount + ' files · ' + settings.entriesPerFile + ' entries/file · ' + settings.dictionaryCount + ' dictionary entries · real API + WebSocket.';
   });
   const offlineButton = button('Simulate offline', async () => {
     const vm = await ready();
@@ -80,6 +129,7 @@ function browserControls(account, secret) {
     const vm = await ready(); vm.theme = vm.theme === 'grey' ? 'dark' : 'grey';
     status.textContent = 'Theme: ' + vm.theme;
   });
+  button('Measure saves', async () => { instrument(await ready()); status.textContent = 'Save timing enabled for the current workspace.'; });
   document.body.append(panel);
 }
 
@@ -93,6 +143,10 @@ function browserControls(account, secret) {
   const { createApp } = await load('app.js');
   const ports = [Number(process.env.FIXTURE_A_PORT || 34201), Number(process.env.FIXTURE_B_PORT || 34202)];
   const apiPort = Number(process.env.FIXTURE_API_PORT || 34203);
+  const boundedNumber = (name, fallback, max) => Math.min(max, Math.max(1, Number(process.env[name]) || fallback));
+  const fixtureSettings = { fileCount: boundedNumber('FIXTURE_FILE_COUNT', 25, 10000),
+    entriesPerFile: boundedNumber('FIXTURE_ENTRIES_PER_FILE', 2, 100),
+    dictionaryCount: Math.min(10000, Math.max(0, Number(process.env.FIXTURE_DICTIONARY_COUNT) || 0)) };
   const origins = ports.map(port => `http://127.0.0.1:${port}`);
   const apiOrigin = `http://127.0.0.1:${apiPort}`;
   const config = loadConfig({ FRONTEND_ORIGIN: origins[0], ALLOWED_ORIGINS: origins[1], API_PUBLIC_URL: apiOrigin, ADMIN_EMAIL: 'admin@example.test', DATABASE_PATH: ':memory:' });
@@ -119,7 +173,7 @@ function browserControls(account, secret) {
     });
     frontend.get('/', (req, res) => {
       const html = readFileSync(resolve(__dirname, '../public/index.html'), 'utf8');
-      const script = '<script>(' + browserControls.toString() + ')(' + JSON.stringify(account) + ',' + JSON.stringify(secret) + ');</script>';
+      const script = '<script>(' + browserControls.toString() + ')(' + JSON.stringify(account) + ',' + JSON.stringify(secret) + ',' + JSON.stringify(fixtureSettings) + ');</script>';
       res.type('html').send(html.replace('</body>', script + '</body>'));
     });
     frontend.get('/index.js', (req, res) => {

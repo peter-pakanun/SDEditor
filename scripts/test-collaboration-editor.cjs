@@ -154,6 +154,61 @@ test('typing while storage is committing remains an unsaved open draft', async (
   assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(e.editorBlocks[0].translation, 'พิมพ์ต่อ'); assert.equal(e.editorHaveChanges(), true);
 });
 
+test('closing a saved editor skips settings and highlights while save-and-stay refreshes them', async () => {
+  for (const close of [true, false]) {
+    const { editor: e } = saveFixture();
+    let settings = 0, highlights = 0, previews = 0;
+    e.saveSettings = () => { settings++; };
+    e.refreshEditorHLter = () => { highlights++; };
+    e.refreshGamePreview = () => { previews++; };
+    assert.equal(await e.editorSave({ close }), true);
+    assert.equal(e.editorHaveChanges(), false);
+    assert.equal(settings, 0, 'Preference watchers already persist settings independently of translations.');
+    assert.equal(highlights, close ? 0 : 1); assert.equal(previews, close ? 0 : 1);
+  }
+});
+
+test('typing during a closing save retains an open draft with refreshed highlights', async () => {
+  const { editor: e, window } = saveFixture();
+  let finish, highlights = 0, previews = 0;
+  window.OfflineStore.saveWorkspaceWithRevisions = () => new Promise(resolve => { finish = resolve; });
+  e.refreshEditorHLter = () => { highlights++; }; e.refreshGamePreview = () => { previews++; };
+  const saving = e.editorSave(); e.editorBlocks[0].translation = 'ร่างที่พิมพ์ต่อ'; finish();
+  assert.equal(await saving, false); assert.equal(e.editorVisible, true);
+  assert.equal(e.editorHaveChanges(), true); assert.equal(highlights, 1); assert.equal(previews, 1);
+});
+
+test('a collaboration save stages only its file and retains unrelated remote updates during commit', async () => {
+  const { editor: e, desc } = saveFixture(), other = description(2);
+  e.descs.push(other);
+  e.localDescs = { descs: JSON.parse(JSON.stringify(e.descs)), status: { [desc.filepath]: { custom: 'kept' } } };
+  const workspace = e.localDescs, untouched = workspace.descs[1];
+  let finish, payload;
+  const plain = e.toPlainForStorage;
+  e.toPlainForStorage = value => {
+    assert.notEqual(value, workspace, 'Do not clone the whole archive for an ordinary collaboration save.');
+    return plain.call(e, value);
+  };
+  e._collaboration = {
+    save: options => { payload = options; return new Promise(resolve => { finish = resolve; }); },
+    snapshot() { assert.fail('A one-file save must not request every collaboration file.'); },
+    fileBase: () => ({ ...e.collaborationFile(desc), translations: ['ใหม่', 'สอง'], revision: 2 }),
+    leaveEdit() {},
+  };
+  const saving = e.editorSave();
+  assert.equal(payload.workspace.descs.length, 1); assert.equal(payload.workspace.status[desc.filepath].custom, 'kept');
+  e.applyCollaborationFiles([{ filepath: other.filepath, translations: ['ทีมแก้ระหว่างบันทึก', 'สอง'], trackedForExport: true, needsReview: false }]);
+  let applied;
+  const apply = e.applyCollaborationFiles;
+  e.applyCollaborationFiles = files => { applied = files.map(file => file.filepath); apply.call(e, files); };
+  finish({ status: 'pending' });
+  assert.equal(await saving, true); assert.deepEqual(Array.from(applied), [desc.filepath]);
+  assert.equal(e.localDescs, workspace); assert.equal(workspace.descs[1], untouched);
+  assert.equal(other.translations.Thai[0], 'ทีมแก้ระหว่างบันทึก');
+  assert.equal(untouched.translations.Thai[0], 'ทีมแก้ระหว่างบันทึก');
+  assert.equal(workspace.status[desc.filepath].custom, 'kept');
+});
+
 test('Save & close and save-and-next finish after local commit while online sync is still waiting', async t => {
   for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async t => {
     const { editor: e, desc, window, writes } = saveFixture();

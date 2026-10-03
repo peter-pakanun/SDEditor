@@ -25,6 +25,41 @@ function fixture() {
 }
 const source = `description example\n1 damage\n2\n# "First {0}"\n# "Second" negate 1\nlang "Thai"\n2\n# "หนึ่ง {0}"\n# "สอง"`;
 
+test('public workspace projection remains pure and preserves other languages and metadata', () => {
+  const workspace = { descs: [{ filepath: 'a.txt', translations: { English: ['Original'], Thai: ['old'], German: ['German'] } }],
+    status: { 'a.txt': { preserved: true } }, unrelated: { nested: true } };
+  const originals = [{ filepath: 'b.txt', translations: { English: ['Second'], German: ['Another'] }, stats: ['b'] }];
+  const files = [{ filepath: 'a.txt', translations: ['saved'], needsReview: false, trackedForExport: true },
+    { filepath: 'b.txt', translations: ['new saved'], needsReview: true, trackedForExport: true }];
+  const before = structuredClone({ workspace, originals, files });
+  const result = P.projectWorkspace(workspace, files, 'Thai', originals);
+  assert.deepEqual({ workspace, originals, files }, before);
+  assert.deepEqual(result.descs[0].translations.German, ['German']);
+  assert.deepEqual(result.descs[1].translations.English, ['Second']);
+  assert.deepEqual(result.descs[1].translations.German, ['Another']);
+  assert.equal(result.status['a.txt'].preserved, true);
+  assert.equal(result.status['b.txt'].needsReview, true);
+  result.descs[0].translations.German[0] = 'result-only edit';
+  result.descs[1].stats[0] = 'result-only metadata';
+  result.descs[1].translations.Thai[0] = 'result-only translation';
+  result.unrelated.nested = false;
+  assert.deepEqual({ workspace, originals, files }, before);
+});
+
+test('owned workspace projection updates edited rows without serializing untouched content', () => {
+  const untouched = { filepath: 'b.txt', translations: { Thai: ['keep'] } };
+  Object.defineProperty(untouched, 'unreadPayload', { enumerable: true, get() { throw new Error('Unedited content was serialized'); } });
+  const owned = { descs: [{ filepath: 'a.txt', translations: { Thai: ['old'], German: ['German'] } }, untouched], status: {} };
+  const file = { filepath: 'a.txt', translations: ['saved'], needsReview: false, trackedForExport: true };
+  const result = P.projectWorkspace(owned, [file], 'Thai', [], { mutate: true });
+  assert.equal(result, owned);
+  assert.equal(result.descs[1], untouched);
+  assert.deepEqual(result.descs[0].translations.Thai, ['saved']);
+  assert.deepEqual(result.descs[0].translations.German, ['German']);
+  result.descs[0].translations.Thai[0] = 'projected-only edit';
+  assert.deepEqual(file.translations, ['saved'], 'Persisted room state remains independent from projected translations.');
+});
+
 test('strict parser rejects malformed stat counts, numeric suffixes, and nonintegral count lines cleanly', () => {
   const f = fixture();
   for (const line of ['2 damage', '1 damage extra', '1oops damage', '1.5 damage', '-1 damage', '0 damage', '9007199254740992 damage']) {

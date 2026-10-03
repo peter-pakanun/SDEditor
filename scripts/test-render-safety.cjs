@@ -77,6 +77,26 @@ test('description list escapes source and translation markup but preserves inten
   assertOnlyBreakMarkup(result.translation);
 });
 
+test('cached file-list text stays escaped and fresh after edits, array replacement, and language changes', () => {
+  const { editor } = loadEditor();
+  const desc = fixtureDescription(['First'], ['Original']);
+  desc.translations.French = ['Autre']; editor.descs = [desc];
+  editor.filterDesc(); editor.filterDesc();
+  desc.translations.English[0] = '<source>\\nchanged';
+  desc.translations.Thai[0] = '<img src=x> & new';
+  editor.filterDesc();
+  assert.equal(editor.filteredDescs[0].english, '&lt;source&gt;<br />changed');
+  assert.equal(editor.filteredDescs[0].translation, '&lt;img src=x&gt; &amp; new');
+  desc.translations.Thai.push('second'); editor.filterDesc();
+  assert.equal(editor.filteredDescs[0].translation, '&lt;img src=x&gt; &amp; new<br />second');
+  desc.translations.Thai = ['replacement']; editor.filterDesc();
+  assert.equal(editor.filteredDescs[0].translation, 'replacement');
+  editor.lang = 'French'; editor.filterDesc();
+  assert.equal(editor.filteredDescs[0].translation, 'Autre');
+  editor.lang = 'Thai'; editor.filterDesc();
+  assert.equal(editor.filteredDescs[0].translation, 'replacement');
+});
+
 test('dictionary replacement cannot escape highlight attributes or insert markup', () => {
   const { editor } = loadEditor();
   const attack = '"><img src=x onerror="window.highlightAttack=1"><span data-x="';

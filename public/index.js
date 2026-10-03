@@ -4966,25 +4966,42 @@ const config = Vue.defineComponent({
       this.fileSearchChanged();
       this.$refs.searchInput?.focus();
     },
+    renderFileListLines(lines) {
+      const source = Vue.toRaw ? Vue.toRaw(lines) : lines;
+      const cache = this._fileListLineCache ||= Vue.markRaw ? Vue.markRaw(new WeakMap()) : new WeakMap();
+      const cached = cache.get(source);
+      // Check the content as well as the array identity: imported/repaired text
+      // and callers editing an array in place must never reuse stale HTML.
+      if (cached && arrayEquals(cached.lines, source)) return cached.html;
+      const html = source.map(line => escapeHtml(String(line ?? ''))).join('<br />').replaceAll('\\n', '<br />');
+      cache.set(source, { lines: [...source], html });
+      return html;
+    },
     filterDesc() {
       this.invalidateEditorLookupIndex?.();
-      this.filteredDescs = [];
-      this.statistic.hasChanges = 0;
-      this.statistic.isMissing = 0;
-      this.statistic.needsReview = 0;
+      // Build the list before publishing it so thousands of rows do not each
+      // pass through Vue's reactive array and counter updates during a save.
+      const filtered = [];
+      const counts = { hasChanges: 0, isMissing: 0, needsReview: 0 };
+      const hideDNT = this.hideDNT;
+      const lang = this.lang;
+      const selectedFilters = [...this.selectedFileFilters];
+      const search = this.searchText.toLocaleLowerCase();
+      const hasSearch = !!search.trim();
+      const diagnosticResults = this.diagnosticScanResults;
       for (const desc of this.descs) {
-        if (this.hideDNT && desc.isDNT) continue;
+        if (hideDNT && desc.isDNT) continue;
         if (desc.hasChanges) {
-          this.statistic.hasChanges++;
+          counts.hasChanges++;
         }
         if (desc.isMissing) {
-          this.statistic.isMissing++;
+          counts.isMissing++;
         }
         if (desc.needsReview) {
-          this.statistic.needsReview++;
+          counts.needsReview++;
         }
 
-        const diagnosticResult = this.diagnosticScanResults?.[desc.filepath] || null;
+        const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
         const statuses = {
           missing: !!desc.isMissing,
           saved: !!desc.hasChanges,
@@ -4993,22 +5010,22 @@ const config = Vue.defineComponent({
           diagnosticError: !!diagnosticResult?.hasDiagnosticError,
           diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
         };
-        if (!this.selectedFileFilters.some(key => statuses[key])) continue;
+        if (!selectedFilters.some(key => statuses[key])) continue;
 
         if (
-          this.searchText.trim() == "" ||
-          desc.filepath.toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||
-          desc.translations.English?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase()) ||
-          desc.translations[this.lang]?.join("\n").toLocaleLowerCase().includes(this.searchText.toLocaleLowerCase())
+          !hasSearch ||
+          desc.filepath.toLocaleLowerCase().includes(search) ||
+          desc.translations.English?.join("\n").toLocaleLowerCase().includes(search) ||
+          desc.translations[lang]?.join("\n").toLocaleLowerCase().includes(search)
         ) {
-          let englishHtml = (desc.translations.English || []).map(line => escapeHtml(String(line ?? ''))).join("<br />");
-          let translationHtml = (desc.translations[this.lang] || []).map(line => escapeHtml(String(line ?? ''))).join("<br />");
-          this.filteredDescs.push({
+          const englishHtml = this.renderFileListLines(desc.translations.English || []);
+          const translationHtml = this.renderFileListLines(desc.translations[lang] || []);
+          filtered.push({
             filepath: desc.filepath,
             filedir: desc.filedir,
             filename: desc.filename,
-            english: englishHtml.replaceAll("\\n", "<br />"),
-            translation: translationHtml.replaceAll("\\n", "<br />"),
+            english: englishHtml,
+            translation: translationHtml,
             isMissing: desc.isMissing,
             hasChanges: desc.hasChanges,
             needsReview: !!desc.needsReview,
@@ -5020,6 +5037,8 @@ const config = Vue.defineComponent({
           });
         }
       }
+      this.filteredDescs = filtered;
+      Object.assign(this.statistic, counts);
       Vue.nextTick(() => {
         if (this.currentPage > this.pageCount) this.gotoPage(1);
         if (this.currentPage < 1) this.gotoPage(1);
@@ -5490,11 +5509,10 @@ const config = Vue.defineComponent({
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
         const accepted = this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc);
         const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
-          draftBefore: draftAtSave, submittedTranslations: newTranslations,
+          draftBefore: draftAtSave, submittedTranslations: newTranslations, refresh: !close,
         });
         // Typing during a slow save remains a draft; never close it.
         if (typedDuringSave) return false;
-        this.saveSettings();
         this.closeHlPopup();
         if (close) {
           this.editorVisible = false;

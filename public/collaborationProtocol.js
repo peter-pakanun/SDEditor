@@ -76,14 +76,17 @@
   function scopeKey(identity) {
     return JSON.stringify([String(identity.accountId), identity.game, identity.sourceHash, identity.language]);
   }
-  function projectWorkspace(workspace, files, language, source = []) {
-    const result = copy(workspace || { descs: [], status: {} });
+  function projectWorkspace(workspace, files, language, source = [], { mutate = false } = {}) {
+    // Internal transaction projections own their IndexedDB snapshot. Other
+    // callers receive an independent copy.
+    const result = mutate ? workspace || { descs: [], status: {} } : copy(workspace || { descs: [], status: {} });
     result.descs ||= []; result.status ||= {};
     const descriptions = new Map(result.descs.map(desc => [desc.filepath, desc]));
-    const originals = new Map(source.map(desc => [desc.filepath, desc]));
+    let originals;
     for (const file of files) {
       let desc = descriptions.get(file.filepath);
       if (!desc) {
+        originals ||= new Map(source.map(desc => [desc.filepath, desc]));
         const original = originals.get(file.filepath);
         desc = original ? copy(original) : { filepath: file.filepath, translations: {} };
         result.descs.push(desc);

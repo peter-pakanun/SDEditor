@@ -103,6 +103,75 @@ test('malformed source is rejected before creating a workspace', async () => {
   }
 });
 
+test('status notifications omit file contents without enumerating the archive', async () => {
+  const { client } = await fixture();
+  const room = client.room();
+  let enumerations = 0;
+  room.local = new Proxy(room.local, { ownKeys(target) { enumerations++; return Reflect.ownKeys(target); } });
+  const notifications = [];
+  client.onChange = value => notifications.push(value);
+  const compact = client.snapshot({ includeFiles: false });
+  client.notify();
+  assert.equal(enumerations, 0, 'Presence and save-status changes cannot scan every saved translation.');
+  assert.equal(Object.hasOwn(compact, 'files'), false);
+  assert.equal(Object.hasOwn(notifications[0], 'files'), false);
+  assert.equal(compact.roomId, 'room');
+  assert.deepEqual(compact.identity, client.snapshot().identity);
+  const complete = client.snapshot();
+  assert.equal(complete.files.length, source.length, 'Explicit public snapshots still include all files.');
+  complete.files[0].translations[0] = 'snapshot-only edit';
+  assert.equal(client.fileBase('a.txt').translations[0], 'one');
+  client.destroy();
+});
+
+test('transaction projections preserve unrelated rows without traversing their contents', async () => {
+  const { client, store } = await fixture();
+  const storedBefore = copy(store.workspace);
+  const owned = copy(store.workspace);
+  const untouched = owned.descs.find(desc => desc.filepath === 'b.txt');
+  Object.defineProperty(untouched, 'unreadPayload', { enumerable: true, get() { throw new Error('Unedited row was serialized'); } });
+  const staged = { status: { 'a.txt': { lastEditedAt: 123, nested: { saved: true } } } };
+  const project = client.projection([client.fileBase('a.txt')], client.epoch, staged);
+  staged.status['a.txt'].lastEditedAt = 456;
+  staged.status['a.txt'].nested.saved = false;
+  const result = project(owned, client.state);
+  assert.equal(result, owned, 'The transaction already owns a separate IndexedDB snapshot.');
+  assert.equal(result.descs.find(desc => desc.filepath === 'b.txt'), untouched);
+  assert.equal(result.status['a.txt'].lastEditedAt, 123);
+  assert.equal(result.status['a.txt'].nested.saved, true, 'Saved status is captured before asynchronous storage work.');
+  result.descs[0].translations.Thai[0] = 'transaction-only edit';
+  assert.deepEqual(store.workspace, storedBefore, 'Mutating the transaction copy cannot publish before commit.');
+  assert.equal(client.fileBase('a.txt').translations[0], 'one');
+  client.destroy();
+});
+
+test('a missing workspace projection copies its caller-owned fallback', async () => {
+  const { client } = await fixture();
+  const staged = { descs: copy(source), status: { 'a.txt': { lastEditedAt: 123 } }, unrelated: { preserve: true } };
+  const before = copy(staged);
+  const result = client.projection([client.fileBase('a.txt')], client.epoch, staged)(undefined, client.state);
+  assert.notEqual(result, staged);
+  assert.deepEqual(result.descs.find(desc => desc.filepath === 'b.txt').translations.Thai, ['three']);
+  result.descs[0].translations.Thai[0] = 'projected-only edit';
+  result.unrelated.preserve = false;
+  assert.deepEqual(staged, before);
+  client.destroy();
+});
+
+test('saving projects only edited data from a staged workspace', async () => {
+  const { client, store, server } = await fixture();
+  server.offline = true;
+  const staged = { status: { 'a.txt': { lastEditedAt: 123 } } };
+  Object.defineProperty(staged, 'descs', { enumerable: true, get() { throw new Error('Full staged archive was serialized'); } });
+  const result = await client.save({ workspace: staged, waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['local save', 'two'] }] });
+  assert.equal(result.status, 'pending');
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'local save');
+  assert.equal(store.workspace.status['a.txt'].lastEditedAt, 123);
+  assert.deepEqual(store.workspace.descs[1].translations.Thai, ['three']);
+  client.destroy();
+});
+
 test('merge uses entire entries, preserves deliberate blanks, and merges disjoint edits', () => {
   const base = initial[0];
   const yours = { ...base, translations: ['', 'two'] };

@@ -32,14 +32,14 @@
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
-    snapshot() {
+    snapshot({ includeFiles = true } = {}) {
       const room = this.room();
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
         connected: this.connected, disconnected: this.disconnected, pending: room?.outbox?.length || 0,
-        conflicts: copy(room?.conflicts || []), files: Object.values(copy(room?.local || {})),
+        conflicts: copy(room?.conflicts || []), ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
-    notify() { this.onChange(this.snapshot()); }
+    notify() { this.onChange(this.snapshot({ includeFiles: false })); }
     status(message, error = false) { this.onStatus({ message, error }); }
     fileBase(filepath) { return copy(this.room()?.local[filepath] || null); }
     async update(fn, options = {}, epoch = this.epoch) {
@@ -158,17 +158,21 @@
     }
     projection(files, epoch, stagedWorkspace) {
       const identity = copy(this.room().identity); const source = this.source;
+      const statuses = Object.fromEntries(files.filter(file => stagedWorkspace?.status?.[file.filepath])
+        .map(file => [file.filepath, copy(stagedWorkspace.status[file.filepath])]));
       return (workspace, state) => {
         if (!this.current(epoch)) throw staleError();
         const room = state.rooms[scopeKey(identity)];
         if (workspace?.sourceHash && workspace.sourceHash !== identity.sourceHash) return workspace;
         if (workspace?.collaborationAccountId && workspace.collaborationAccountId !== identity.accountId) return workspace;
-        const latest = copy(workspace || stagedWorkspace || { descs: [], status: {} });
+        // IndexedDB returns an independent transaction snapshot. Mutate that
+        // copy directly; only the caller-owned fallback needs another copy.
+        const latest = workspace || copy(stagedWorkspace || { descs: [], status: {} });
         latest.status ||= {};
-        for (const file of files) if (stagedWorkspace?.status?.[file.filepath]) latest.status[file.filepath] = {
-          ...(latest.status[file.filepath] || {}), ...copy(stagedWorkspace.status[file.filepath]),
+        for (const file of files) if (statuses[file.filepath]) latest.status[file.filepath] = {
+          ...(latest.status[file.filepath] || {}), ...statuses[file.filepath],
         };
-        const projected = this.projectWorkspace(latest, files.map(file => room.local[file.filepath]).filter(Boolean), identity.language, source);
+        const projected = this.projectWorkspace(latest, files.map(file => room.local[file.filepath]).filter(Boolean), identity.language, source, { mutate: true });
         projected.sourceHash = identity.sourceHash; projected.collaborationAccountId = identity.accountId;
         return projected;
       };
@@ -232,7 +236,7 @@
           base: copy(Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath] || null), yours })) });
         for (const yours of normalized) current.local[yours.filepath] = copy(yours);
       }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
-        collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, copy(workspace)) }, epoch);
+        collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, workspace) }, epoch);
       if (!waitForSync) {
         // Workspace, history and outbox are durable. Let editor saves finish even
         // while a slow request or another tab holds the synchronization lock.

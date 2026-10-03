@@ -46,7 +46,7 @@
         this._collabAway = !!document.hidden || now - (this._collabActivityAt ?? now) >= 120000;
         this._collaboration?.setAway?.(this._collabAway);
       },
-      rebaseEditorAfterCommit(accepted, { draftBefore, submittedTranslations, savedIndexes, baseBefore, originalsBefore } = {}) {
+      rebaseEditorAfterCommit(accepted, { draftBefore, submittedTranslations, savedIndexes, baseBefore, originalsBefore, refresh = true } = {}) {
         const indexes = savedIndexes == null ? null : new Set(savedIndexes);
         const base = copy(accepted);
         const originals = [];
@@ -76,11 +76,15 @@
             else block.tableColumns = [];
             block.translationReplace = ''; block.words = [];
           }
-          this.refreshEditorBlockMeta(block, index);
         });
         this.editorOriginalTranslations = originals;
         this._editorCollabBase = this._collaboration ? base : undefined;
-        this.refreshEditorHLter(); this.refreshGamePreview();
+        // A closing editor needs its saved baseline, but not another dictionary
+        // lookup and preview render. A newly typed draft still needs both.
+        if (refresh || typedDuringSave) {
+          this.editorBlocks.forEach((block, index) => this.refreshEditorBlockMeta(block, index));
+          this.refreshEditorHLter(); this.refreshGamePreview();
+        }
         return { typedDuringSave };
       },
       collaborationFile(desc, lang = this.lang) {
@@ -108,7 +112,7 @@
       collaborationFailure(error) {
         if (error?.stale) return;
         this.collaborationNotice = error?.message || String(error);
-        this.collabReceiveState?.({ ...(this._collaboration?.snapshot() || {}), status: 'Saved locally · collaboration unavailable', error: this.collaborationNotice });
+        this.collabReceiveState?.({ ...(this._collaboration?.snapshot({ includeFiles: false }) || {}), status: 'Saved locally · collaboration unavailable', error: this.collaborationNotice });
       },
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
@@ -131,7 +135,7 @@
               else if (/^Imported \d+ translated files · Pending sync$/.test(this.collaborationNotice)) this.collaborationNotice = this.collaborationNotice.replace(' · Pending sync', '.');
             }
           },
-          onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot(), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
+          onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot({ includeFiles: false }), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onRemote: files => { if (this._collaboration === client) this.applyCollaborationFiles(files, ctx.language); },
           onEditingConflict: ({ filepath }) => {
             const isCurrent = () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath;
@@ -210,7 +214,10 @@
       },
       async persistTranslationBatch(updates, origin, options = {}) {
         const ctx = options.context || this.captureCollaborationContext();
-        const workspace = options.workspace || this.toPlainForStorage(this.localDescs);
+        // Collaboration projects saved files onto the latest durable workspace.
+        // Ordinary saves only need to stage their metadata, not clone the archive.
+        const incremental = !!ctx.client && origin === 'save' && !options.workspace;
+        const workspace = options.workspace || (incremental ? { descs: [], status: {} } : this.toPlainForStorage(this.localDescs));
         workspace.descs ||= []; workspace.status ||= {};
         const now = Date.now();
         const revisions = options.revisions || [];
@@ -222,7 +229,7 @@
           const local = workspace.descs.find(d => d.filepath === desc.filepath);
           if (local) updateLocalDesc(local, desc, ctx.language, lines, { hasChanges: true, isMissing });
           else workspace.descs.push(makeLocalDesc(desc, ctx.language, lines, { hasChanges: true, isMissing }));
-          workspace.status[desc.filepath] = { ...(workspace.status[desc.filepath] || {}), needsReview,
+          workspace.status[desc.filepath] = { ...(incremental ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]), needsReview,
             lastEditedAt: now, lastTranslatedAt: now };
           if (!options.revisions) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
             lang: ctx.language, savedAt: now, note: origin, translations: lines, isMissing,
@@ -240,9 +247,16 @@
             else await window.OfflineStore.saveWorkspaceWithRevisions(workspace, revisions, ctx.game);
           }
           if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
-          this.localDescs = workspace;
-          // The engine may have combined independent remote changes during this save.
-          const effective = ctx.client?.snapshot()?.files;
+          if (incremental) {
+            // Keep unrelated remote updates that arrived while the transaction
+            // committed instead of replacing them with an older workspace copy.
+            for (const file of files) this.localDescs.status[file.filepath] = {
+              ...(this.localDescs.status[file.filepath] || {}), ...workspace.status[file.filepath],
+            };
+          } else this.localDescs = workspace;
+          // Each submitted file may include independent remote changes. Remote
+          // callbacks already apply other files; avoid rewriting the whole list.
+          const effective = incremental ? files.map(file => ctx.client.fileBase(file.filepath) || file) : ctx.client?.snapshot()?.files;
           this.applyCollaborationFiles(effective?.length ? effective : files, ctx.language);
           if (result.status === 'conflict') {
             if (batch?.touched) this.clearDiagnosticScanResults();
