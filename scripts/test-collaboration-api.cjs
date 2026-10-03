@@ -55,9 +55,29 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
   const source = Array.from({ length: 105 }, (_, index) => ({ filepath: `source/file-${index}.txt`, name: '', stats: ['stat'],
     variables: ['#', '#'], remarks: ['', ''], translations: { English: ['One', 'Two'], Thai: ['หนึ่ง', 'สอง'] } }));
   const files = source.map(file => ({ filepath: file.filepath, translations: file.translations.Thai, needsReview: false, trackedForExport: false }));
-  for (let index = 0; index < clients.length; index++) await clients[index].connect({ accountId: users[index].user.id,
+  const connect = index => clients[index].connect({ accountId: users[index].user.id,
     game: 'poe1', language: 'Thai', source, files, workspace: { descs: copy(source), status: {} } });
-  const [a, b] = clients; await until(() => a.connected && b.connected && a.peers.length === 2 && b.peers.length === 2);
+  const [a, b] = clients;
+  await connect(0);
+  let releaseCatchUp, enteredCatchUp;
+  const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve; });
+  const catchUpEntered = new Promise(resolve => { enteredCatchUp = resolve; });
+  const originalRequest = b.request;
+  b.request = async (pathname, options) => {
+    if (pathname.includes('/changes?')) { enteredCatchUp(); await catchUpGate; }
+    return originalRequest(pathname, options);
+  };
+  let joined = false;
+  const joining = connect(1).then(result => { joined = true; return result; });
+  try {
+    await catchUpEntered;
+    await until(() => a.connected && b.connected && a.peers.length === 2 && b.peers.length === 2);
+    assert.equal(joined, false, 'Real WebSocket presence reaches both browsers while translation catch-up is still pending.');
+  } finally {
+    releaseCatchUp();
+    await joining;
+    b.request = originalRequest;
+  }
   const filepath = source[0].filepath;
   a.select(filepath); assert.equal((await a.claim(filepath)).granted, true);
   await until(() => b.isEditing(filepath));

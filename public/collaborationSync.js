@@ -27,6 +27,7 @@
       this.peers = []; this.sessionId = null; this.selected = null; this.editing = null;
       this.away = false;
       this.claims = new Map(); this.running = null; this.socket = null;
+      this.socketOpening = null; this.presenceError = null;
       this.timer = null; this.heartbeat = null; this.backoff = 1000;
       this.destroyed = false;
       this.localWrites = Promise.resolve(); this.stagedSaves = new Map();
@@ -133,7 +134,7 @@
         await this.initializeRoom(epoch);
         await this.retry();
       } catch (error) {
-        if (error.stale) throw error;
+        if (error.stale || !this.current(epoch)) throw staleError();
         this.handleError(error);
         if (!transient(error)) throw error;
       }
@@ -164,6 +165,7 @@
         snapshot = await this.api('/uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST' }, epoch);
       }
       await this.acceptSnapshot(snapshot, epoch, !room.initialized || snapshot.sequence < room.sequence);
+      this.startPresence(epoch);
     }
     async uploadFiles(id, files, epoch) {
       // Bound serialized bytes rather than only row count: individual translations
@@ -280,25 +282,30 @@
     }
     sync() { return this.retry(); }
     retry() {
-      if (this.running) { this.dirty = true; return this.running; }
       const epoch = this.epoch;
       if (!this.current(epoch)) return Promise.resolve(this.snapshot());
+      // Presence belongs to this browser, so it must not wait for another tab's
+      // translation lock, catch-up requests or queued uploads.
+      this.startPresence(epoch);
+      if (this.running) { this.dirty = true; return this.running; }
       const run = async () => {
-        this.lastError = null;
         try {
+          if (!this.current(epoch)) throw staleError();
           if (!this.room().roomId) await this.initializeRoom(epoch);
           do {
             this.dirty = false;
             await this.catchUp(epoch);
             await this.flush(epoch);
-            await this.openSocket(epoch);
           } while (this.dirty && this.current(epoch));
-          this.backoff = 1000;
+          if (!this.current(epoch)) throw staleError();
+          if (!this.presenceError && !this.disconnected) this.backoff = 1000;
+          this.lastError = null;
           // A completed pass clears an earlier failure. Enqueueing a save or
           // starting another request must never hide an outstanding problem.
-          this.status('');
+          if (this.presenceError) this.reportPresenceError();
+          else this.status('');
         } catch (error) {
-          if (!error.stale) this.handleError(error);
+          if (!error.stale && this.current(epoch)) this.handleError(error);
         }
         return this.snapshot();
       };
@@ -306,6 +313,20 @@
       this.running = promise.finally(() => { if (this.running === tracked) this.running = null; });
       const tracked = this.running;
       return tracked;
+    }
+    reportPresenceError() {
+      this.status(transient(this.presenceError) ? 'Collaboration disconnected · reconnecting automatically' : this.presenceError.message, true);
+    }
+    startPresence(epoch) {
+      if (!this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket || this.socketOpening?.epoch === epoch) return;
+      this.openSocket(epoch).catch(error => {
+        if (error.stale || !this.current(epoch)) return;
+        this.presenceError = error; this.disconnected = true;
+        if (!this.lastError) this.reportPresenceError();
+        this.notify();
+        if (transient(error)) this.schedule();
+        else if ([401, 403].includes(error.status)) this.closeSocket();
+      });
     }
     handleError(error) {
       this.lastError = error;
@@ -503,15 +524,28 @@
       return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history?' + params);
     }
     historyEntry(id) { return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id)); }
-    async openSocket(epoch) {
-      if (!this.WebSocket || this.socket) return;
+    openSocket(epoch) {
+      if (!this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
+      if (this.socketOpening?.epoch === epoch) return this.socketOpening.promise;
+      const opening = { epoch, promise: null }; this.socketOpening = opening;
+      opening.promise = this.createSocket(epoch, opening).catch(error => {
+        if (!this.current(epoch) || this.socketOpening !== opening) throw staleError();
+        throw error;
+      }).finally(() => { if (this.socketOpening === opening) this.socketOpening = null; });
+      return opening.promise;
+    }
+    async createSocket(epoch, opening) {
       const ticket = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/ticket', { method: 'POST' }, epoch);
+      if (!this.current(epoch) || this.socketOpening !== opening) throw staleError();
       const url = new URL(ticket.url || ROOT + '/ws?ticket=' + encodeURIComponent(ticket.ticket), this.apiBase || globalThis.location?.href);
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       const socket = new this.WebSocket(url.href); this.socket = socket;
       socket.onopen = () => {
         if (!this.current(epoch) || this.socket !== socket) { socket.close(); return; }
-        this.connected = true; this.disconnected = false; this.notify(); this.send({ type: 'select', filepath: this.selected });
+        const recovered = !!this.presenceError; this.presenceError = null;
+        this.connected = true; this.disconnected = false; this.backoff = 1000;
+        if (recovered && !this.lastError) this.status('');
+        this.notify(); this.send({ type: 'select', filepath: this.selected });
         this.send({ type: 'activity', away: this.away });
         this.heartbeat = setInterval(() => this.send({ type: 'heartbeat' }), 15000);
         this.heartbeat.unref?.();
@@ -571,6 +605,7 @@
     }
     leaveEdit() { this.editing = null; this.send({ type: 'release' }); }
     closeSocket() {
+      this.socketOpening = null;
       const socket = this.socket; this.socket = null;
       if (socket) { socket.onclose = null; socket.close(); }
       clearInterval(this.heartbeat); this.heartbeat = null;
@@ -579,7 +614,7 @@
     }
     disconnect() {
       this.epoch++; clearTimeout(this.timer); this.timer = null;
-      this.disconnected = false;
+      this.disconnected = false; this.presenceError = null; this.lastError = null;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }
     destroy() { this.disconnect(); this.destroyed = true; }

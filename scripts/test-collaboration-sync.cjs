@@ -227,6 +227,33 @@ function gate() {
   return { promise, resolve };
 }
 
+function presenceFixture(options = {}) {
+  const store = storeFixture(), server = serverFixture(), sockets = [], tickets = [];
+  class Socket {
+    constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this); }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    open() { this.readyState = 1; this.onopen?.(); }
+    close() { this.readyState = 3; }
+    drop() { this.readyState = 3; this.onclose?.(); }
+    receive(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
+  }
+  const client = new Client({ store, WebSocket: Socket, apiBase: 'http://127.0.0.1:3333',
+    locks: options.locks, onStatus: options.onStatus, uuid: () => 'mutation-' + ++nextId,
+    request: async (path, requestOptions) => {
+      if (path.endsWith('/ticket')) {
+        tickets.push({ path, options: copy(requestOptions) });
+        assert.ok(client.room()?.roomId, 'Presence requires a confirmed room identity.');
+        assert.equal(store.state.rooms[client.key].roomId, client.room().roomId, 'Presence subscribes only to a durably confirmed room.');
+        return options.ticket ? options.ticket(tickets.length) : { ticket: 'ticket-' + tickets.length };
+      }
+      return server.request(path, requestOptions);
+    },
+  });
+  const connect = (overrides = {}) => client.connect({ accountId: 'user', game: 'poe1', language: 'Thai',
+    source, files: initial, workspace: { descs: copy(source), status: {} }, ...overrides });
+  return { client, store, server, sockets, tickets, connect };
+}
+
 async function localSaveResult(save) {
   const waitingForNetwork = Symbol('waiting for network');
   const result = await Promise.race([save, new Promise(resolve => setImmediate(() => resolve(waitingForNetwork)))]);
@@ -664,6 +691,245 @@ test('initial socket connection is quiet but a real disconnect persists until th
   assert.equal(client.snapshot().connected, true);
   client.disconnect();
   assert.equal(client.snapshot().disconnected, false, 'Leaving a workspace is not an unexpected disconnect.');
+});
+
+test('joining publishes websocket presence while translation catch-up is still held', async t => {
+  const { client, store, server, sockets, tickets, connect } = presenceFixture();
+  const entered = gate(), release = gate(), request = client.request;
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { entered.resolve(); await release.promise; }
+    return request(path, options);
+  };
+  const connection = connect(); connection.catch(() => {});
+  t.after(async () => { release.resolve(); client.destroy(); await connection.catch(() => {}); });
+  await entered.promise; await nextTurn();
+  assert.equal(tickets.length, 1, 'Joining starts the presence subscription before catch-up completes.');
+  assert.equal(sockets.length, 1);
+  assert.equal(store.state.rooms[client.key].roomId, 'room');
+  sockets[0].open();
+  sockets[0].receive({ type: 'presence', selfId: 'self', peers: [{ sessionId: 'other', name: 'Other translator' }] });
+  assert.equal(client.snapshot().connected, true);
+  assert.equal(client.snapshot().peers[0].name, 'Other translator');
+  assert.equal(server.receipts.size, 0);
+  release.resolve(); await connection;
+});
+
+test('a slow presence ticket does not block translation catch-up or queued uploads', async t => {
+  const ticketEntered = gate(), ticketRelease = gate();
+  const { client, server, sockets, connect } = presenceFixture({ ticket: async () => {
+    ticketEntered.resolve(); await ticketRelease.promise; return { ticket: 'held-ticket' };
+  } });
+  const connection = connect(); connection.catch(() => {});
+  t.after(async () => { ticketRelease.resolve(); client.destroy(); await connection.catch(() => {}); });
+  await ticketEntered.promise; await nextTurn();
+  assert.ok(server.requests.some(request => request.path.includes('/changes?')), 'HTTP catch-up progresses while the ticket is pending.');
+  assert.equal(sockets.length, 0);
+  const save = client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['saved during ticket request', 'two'] }] });
+  await localSaveResult(save); await nextTurn();
+  assert.equal(server.files[0].translations[0], 'saved during ticket request', 'Durable translation uploads progress independently of presence.');
+  ticketRelease.resolve(); await connection; await nextTurn();
+  assert.equal(sockets.length, 1);
+});
+
+test('presence subscribes while another tab holds the translation synchronization lock', async t => {
+  const entered = gate(), release = gate();
+  const { client, server, sockets, tickets, connect } = presenceFixture({ locks: {
+    async request(name, action) { entered.resolve(name); await release.promise; return action(); },
+  } });
+  const connection = connect(); connection.catch(() => {});
+  t.after(async () => { release.resolve(); client.destroy(); await connection.catch(() => {}); });
+  const lockName = await entered.promise; await nextTurn();
+  assert.match(lockName, /^sdeditor-collaboration:/);
+  assert.equal(server.requests.some(request => request.path.includes('/changes?')), false, 'Translation catch-up is still waiting for its lock.');
+  assert.equal(tickets.length, 1, 'Presence does not wait for the translation synchronization lock.');
+  assert.equal(sockets.length, 1);
+  sockets[0].open(); sockets[0].receive({ type: 'presence', peers: [{ sessionId: 'other' }] });
+  assert.equal(client.snapshot().peers.length, 1);
+  release.resolve(); await connection;
+});
+
+test('a queued translation lock released after disconnect cannot report a stale sync failure', async t => {
+  const entered = gate(), release = gate(), statuses = [];
+  const { client, server, sockets, tickets, connect } = presenceFixture({ onStatus: status => statuses.push(status), locks: {
+    async request(name, action) { entered.resolve(); await release.promise; return action(); },
+  } });
+  const connection = connect(); connection.catch(() => {});
+  t.after(async () => { release.resolve(); client.destroy(); await connection.catch(() => {}); });
+  await entered.promise; await nextTurn();
+  assert.equal(sockets.length, 1);
+  sockets[0].open(); client.disconnect();
+  const count = statuses.length;
+  release.resolve(); await connection; await nextTurn();
+  assert.equal(statuses.length, count, 'An obsolete lock callback cannot show a failure in the disconnected workspace.');
+  assert.equal(server.requests.some(request => request.path.includes('/changes?')), false);
+  assert.equal(tickets.length, 1);
+  assert.equal(client.snapshot().connected, false);
+  assert.equal(client.snapshot().roomId, null);
+  assert.deepEqual(client.snapshot().peers, []);
+});
+
+test('presence reconnects during a held sync without clearing the durable save failure', async t => {
+  const statuses = [], entered = gate(), release = gate();
+  const { client, store, server, sockets, connect } = presenceFixture({ onStatus: status => statuses.push(status) });
+  t.after(() => { release.resolve(); client.destroy(); });
+  await connect(); sockets[0].open(); await client.running;
+  server.offline = true;
+  await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['durable pending translation', 'two'] }] }));
+  await client.running;
+  assert.equal(statuses.at(-1).error, true);
+  assert.equal(client.snapshot().pending, 1);
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'durable pending translation');
+  server.offline = false;
+  const request = client.request;
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { entered.resolve(); await release.promise; }
+    return request(path, options);
+  };
+  const syncing = client.sync(); await entered.promise;
+  sockets[0].drop(); const reconnecting = client.sync(); await nextTurn();
+  assert.equal(sockets.length, 2, 'A running HTTP sync cannot delay presence reconnection.');
+  const count = statuses.length;
+  sockets[1].open(); sockets[1].receive({ type: 'presence', peers: [{ sessionId: 'other', name: 'Back online' }] });
+  assert.equal(client.snapshot().connected, true);
+  assert.equal(client.snapshot().peers[0].name, 'Back online');
+  assert.equal(client.snapshot().pending, 1);
+  assert.equal(server.receipts.size, 0);
+  assert.equal(statuses.length, count, 'Presence recovery cannot dismiss an outstanding translation failure.');
+  release.resolve(); await syncing; await reconnecting;
+  assert.equal(server.files[0].translations[0], 'durable pending translation');
+  assert.equal(client.snapshot().pending, 0);
+  assert.deepEqual(statuses.at(-1), { message: '', error: false });
+});
+
+test('presence reconnects before a queued translation mutation finishes uploading', async t => {
+  const entered = gate(), release = gate();
+  const { client, store, server, sockets, connect } = presenceFixture();
+  t.after(() => { release.resolve(); client.destroy(); });
+  await connect(); sockets[0].open(); await client.running;
+  const request = client.request;
+  client.request = async (path, options) => {
+    if (path.endsWith('/mutations')) { entered.resolve(); await release.promise; }
+    return request(path, options);
+  };
+  await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['held upload', 'two'] }] }));
+  await entered.promise;
+  sockets[0].drop(); const reconnecting = client.sync(); await nextTurn();
+  assert.equal(sockets.length, 2, 'A held mutation request cannot delay the replacement presence socket.');
+  sockets[1].open(); sockets[1].receive({ type: 'presence', peers: [{ sessionId: 'other' }] });
+  assert.equal(client.snapshot().connected, true);
+  assert.equal(client.snapshot().peers.length, 1);
+  assert.equal(client.snapshot().pending, 1);
+  assert.equal(store.workspace.descs[0].translations.Thai[0], 'held upload');
+  assert.equal(server.receipts.size, 0);
+  release.resolve(); await reconnecting;
+  assert.equal(client.snapshot().pending, 0);
+  assert.equal(server.files[0].translations[0], 'held upload');
+});
+
+test('concurrent presence retries share one pending ticket and create one socket', async t => {
+  const entered = gate(), release = gate(); let held = false;
+  const { client, sockets, tickets, connect } = presenceFixture({ ticket: async count => {
+    if (held) { entered.resolve(); await release.promise; }
+    return { ticket: 'ticket-' + count };
+  } });
+  t.after(() => { release.resolve(); client.destroy(); });
+  await connect(); client.closeSocket(); held = true;
+  const openings = [client.openSocket(client.epoch), client.openSocket(client.epoch), client.openSocket(client.epoch)];
+  const retries = [client.sync(), client.sync()];
+  await entered.promise; await nextTurn();
+  assert.equal(tickets.length, 2, 'All retries reuse the one replacement ticket request.');
+  assert.equal(sockets.length, 1);
+  release.resolve(); await Promise.all([...openings, ...retries]); await nextTurn();
+  assert.equal(sockets.length, 2, 'Only one replacement socket is constructed.');
+});
+
+test('closing or switching scope invalidates a late websocket ticket', async t => {
+  for (const action of ['close', 'disconnect', 'account', 'source']) await t.test(action, async t => {
+    const entered = gate(), release = gate();
+    const { client, sockets, tickets, connect } = presenceFixture({ ticket: async count => {
+      if (count === 1) { entered.resolve(); await release.promise; }
+      return { ticket: 'ticket-' + count };
+    } });
+    const connections = [connect()]; connections[0].catch(() => {});
+    t.after(async () => { release.resolve(); client.destroy(); await Promise.allSettled(connections); });
+    await entered.promise;
+    if (action === 'close') { client.closeSocket(); connections.push(client.openSocket(client.epoch)); }
+    else if (action === 'disconnect') client.disconnect();
+    else {
+      const changedSource = copy(source); changedSource[0].translations.English[0] += '!';
+      connections.push(connect(action === 'account' ? { accountId: 'new-user' } : { source: changedSource }));
+    }
+    if (connections.length > 1) await connections[1];
+    const count = action === 'disconnect' ? 0 : 1;
+    assert.equal(sockets.length, count);
+    if (count) {
+      sockets[0].open(); sockets[0].receive({ type: 'presence', peers: [{ sessionId: 'current' }] });
+    }
+    release.resolve(); await Promise.allSettled(connections); await nextTurn();
+    assert.equal(sockets.length, count, 'The obsolete ticket cannot construct or replace a socket.');
+    assert.equal(tickets.length, action === 'disconnect' ? 1 : 2);
+    assert.equal(client.snapshot().connected, count === 1);
+    assert.deepEqual(client.snapshot().peers.map(peer => peer.sessionId), count ? ['current'] : []);
+  });
+});
+
+test('late events from a previous websocket cannot replace current avatar presence', async t => {
+  const { client, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); const obsolete = sockets[0];
+  const oldOpen = obsolete.onopen, oldClose = obsolete.onclose, oldMessage = obsolete.onmessage;
+  await connect({ accountId: 'new-user' }); const current = sockets[1];
+  current.open(); current.receive({ type: 'presence', selfId: 'new-self', peers: [{ sessionId: 'current' }] });
+  oldOpen(); oldMessage({ data: JSON.stringify({ type: 'presence', selfId: 'old-self', peers: [{ sessionId: 'obsolete' }] }) }); oldClose();
+  assert.equal(client.snapshot().connected, true);
+  assert.equal(client.snapshot().sessionId, 'new-self');
+  assert.deepEqual(client.snapshot().peers.map(peer => peer.sessionId), ['current']);
+  assert.equal(client.socket, current);
+  await client.running;
+});
+
+test('successful translation sync cannot hide a presence ticket failure before the socket opens', async t => {
+  const statuses = [], entered = gate(), release = gate(); let unavailable = true;
+  const { client, sockets, server, connect } = presenceFixture({ onStatus: status => statuses.push(status), ticket: async () => {
+    if (unavailable) throw Object.assign(new Error('Presence service unavailable'), { status: 503 });
+    return { ticket: 'recovered-ticket' };
+  } });
+  t.after(() => { release.resolve(); client.destroy(); });
+  await connect(); await nextTurn();
+  assert.ok(server.requests.some(request => request.path.includes('/changes?')));
+  assert.equal(statuses.at(-1).error, true, 'Successful translation requests leave the failed presence operation visible.');
+  assert.ok(client.backoff > 1000, 'Successful HTTP requests do not reset the failed presence retry delay.');
+  unavailable = false; await client.sync(); await nextTurn();
+  assert.equal(sockets.length, 1);
+  assert.equal(statuses.at(-1).error, true, 'A ticket alone does not confirm presence recovery.');
+  assert.ok(client.backoff > 1000, 'A replacement ticket does not reset the delay before the socket connects.');
+  const request = client.request;
+  client.request = async (path, options) => {
+    if (path.includes('/changes?')) { entered.resolve(); await release.promise; }
+    return request(path, options);
+  };
+  sockets[0].open(); await entered.promise;
+  assert.deepEqual(statuses.at(-1), { message: '', error: false }, 'The recovered socket clears its own failure independently of held translation requests.');
+  assert.equal(client.backoff, 1000, 'Opening the recovered presence socket resets its retry delay.');
+  release.resolve(); await client.running;
+});
+
+test('presence ticket denial stays actionable while allowed translation saves still synchronize', async t => {
+  const statuses = [];
+  const { client, server, connect } = presenceFixture({ onStatus: status => statuses.push(status), ticket: async () => {
+    throw Object.assign(new Error('Presence access denied'), { status: 403 });
+  } });
+  t.after(() => client.destroy());
+  await connect(); await nextTurn();
+  assert.deepEqual(statuses.at(-1), { message: 'Presence access denied', error: true });
+  await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['translation still allowed', 'two'] }] }));
+  await client.running; await nextTurn();
+  assert.equal(server.files[0].translations[0], 'translation still allowed');
+  assert.equal(client.snapshot().pending, 0);
+  assert.deepEqual(statuses.at(-1), { message: 'Presence access denied', error: true }, 'Completing a different operation cannot dismiss the presence denial.');
 });
 
 function workerBatch(client, jobId, translations) {
