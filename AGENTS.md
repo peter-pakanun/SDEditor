@@ -64,7 +64,7 @@ Env vars: `PORT` (3333), `HOST` (127.0.0.1), `NO_OPEN_BROWSER`, `LOG_REQUESTS`, 
 - Show only actionable sync warnings, errors, and conflicts. Keep a failure visible until the relevant operation succeeds; starting a retry or completing an unrelated request must not clear it.
 - Retry automatically when appropriate. Comments refresh every 20 seconds while the tab is visible and when it becomes visible or connectivity returns. Comment panels and the workspace/editor status bars have no manual Refresh/Retry sync buttons. Settings may offer **Sync now** for an actual warning/error.
 - Explicit user actions such as Save, Post comment, import/export, diagnostics, and requested history loading may show progress and prevent duplicate submissions. Unread counts, presence, source versions, and access guidance remain useful content.
-- Comment badges use the exact label **Different version** when source hashes differ. Show the full hash on hover, with no hash prefix in the visible badge.
+- Comments use a small yellow information icon when source hashes differ. Hover text includes **Different version**, an explanation, and the full source hash.
 
 ## Docs
 

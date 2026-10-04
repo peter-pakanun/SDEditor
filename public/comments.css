@@ -28,7 +28,9 @@
 .commentLanguage { border: 1px solid var(--ui-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--ui-muted); }
 .commentUnreadLabel { display: inline-block; flex: none; padding: 1px 6px; border-radius: 4px; background: #c52f3f; color: #fff; font-size: 10px; font-weight: 650; line-height: 1.5; }
 .commentMeta { color: var(--ui-muted); font-size: 11px; margin-top: 6px; }
-.commentHashBadge { border: 1px solid var(--ui-review); color: var(--ui-review); border-radius: 4px; padding: 1px 5px; }
+.commentVersionIcon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; color: #e0b923; cursor: help; }
+.commentVersionIcon svg { display: block; width: 14px; height: 14px; fill: currentColor; }
+.commentVersionSymbol { fill: #3b3208; }
 .commentBody { white-space: pre-wrap; margin: 10px 0 0; font-size: 13px; line-height: 1.65; }
 .commentFileLink { display: block; text-align: left; width: 100%; margin-bottom: 10px; padding: 0; border: 0; background: transparent; color: var(--ui-accent); font: 600 12px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .commentFileLink:disabled { opacity: .8; color: var(--ui-muted); cursor: default; }
