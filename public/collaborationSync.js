@@ -23,7 +23,7 @@
       this.WebSocket = options.WebSocket === undefined ? globalThis.WebSocket : options.WebSocket;
       this.uuid = options.uuid || (() => globalThis.crypto.randomUUID());
       this.locks = options.locks || globalThis.navigator?.locks;
-      this.state = null; this.key = null; this.epoch = 0; this.connected = false; this.disconnected = false;
+      this.state = null; this.key = null; this.epoch = 0; this.connected = false; this.disconnected = false; this.hashing = false;
       this.peers = []; this.sessionId = null; this.selected = null; this.editing = null;
       this.away = false;
       this.claims = new Map(); this.running = null; this.socket = null;
@@ -37,7 +37,7 @@
     snapshot({ includeFiles = true } = {}) {
       const room = this.room();
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
-        connected: this.connected, disconnected: this.disconnected, pending: room?.outbox?.length || 0,
+        connected: this.connected, disconnected: this.disconnected, hashing: this.hashing, pending: room?.outbox?.length || 0,
         conflicts: copy(room?.conflicts || []), ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
@@ -92,9 +92,21 @@
       this.disconnect(); this.destroyed = false;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
-      const manifest = P.manifest(source);
-      const sourceHash = await P.sourceHash(manifest);
-      if (epoch !== this.epoch) throw staleError();
+      let manifest, sourceHash;
+      this.hashing = true;
+      try {
+        this.notify();
+        // Paint the hashing indicator before preparing a large source manifest.
+        if (typeof globalThis.requestAnimationFrame === 'function' && !globalThis.document?.hidden) {
+          await new Promise(resolve => globalThis.requestAnimationFrame(() => setTimeout(resolve, 0)));
+        }
+        if (epoch !== this.epoch) throw staleError();
+        manifest = P.manifest(source);
+        sourceHash = await P.sourceHash(manifest);
+        if (epoch !== this.epoch) throw staleError();
+      } finally {
+        if (epoch === this.epoch) { this.hashing = false; this.notify(); }
+      }
       const identity = { accountId: String(accountId), game, sourceHash, language };
       this.key = scopeKey(identity); this.context = this.getContext(); this.source = copy(source);
       this.sourceFiles = new Map(manifest.files.map(file => [file.filepath, file]));
@@ -614,7 +626,7 @@
     }
     disconnect() {
       this.epoch++; clearTimeout(this.timer); this.timer = null;
-      this.disconnected = false; this.presenceError = null; this.lastError = null;
+      this.disconnected = false; this.hashing = false; this.presenceError = null; this.lastError = null;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }
     destroy() { this.disconnect(); this.destroyed = true; }

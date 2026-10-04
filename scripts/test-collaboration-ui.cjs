@@ -131,6 +131,33 @@ test('footer avatars precede pagination and away shading preserves the collabora
   assert.match(css, /\.collaborationAvatar\s*\{[^}]*border: 2px solid var\(--collaboration-color/);
 });
 
+test('export version uses the completed local source hash without requiring a signed-in room', () => {
+  const { app } = editor({ sourceIdentity: 'b'.repeat(64) });
+  app.cloudUser = null;
+  app.collabReceiveState({ roomId: '', connected: false, identity: null, sourceHash: '' });
+  assert.equal(app.collaborationExportHash, 'b'.repeat(64));
+  assert.equal(app.collaborationShortVersion, 'b'.repeat(12));
+  app.collabReceiveState({ roomId: 'old-room', identity: { sourceHash: 'a'.repeat(64) } });
+  assert.equal(app.collaborationExportHash, 'b'.repeat(64), 'The current source takes precedence over an older collaboration room.');
+  assert.equal(app.collaborationShortVersion, 'b'.repeat(12));
+});
+
+test('export version falls back to completed room hashes and remains empty until one is available', () => {
+  const { app } = editor({ sourceIdentity: '' });
+  assert.equal(app.collaborationExportHash, 'a'.repeat(64));
+  assert.equal(app.collaborationShortVersion, 'a'.repeat(12));
+  app.collabReceiveState({ identity: null, sourceHash: 'c'.repeat(64) });
+  assert.equal(app.collaborationExportHash, 'c'.repeat(64));
+  assert.equal(app.collaborationShortVersion, 'c'.repeat(12));
+  app.collabReceiveState({ identity: null, sourceHash: '', hashing: true });
+  assert.equal(app.collaborationExportHash, '');
+  assert.equal(app.collaborationShortVersion, '');
+  assert.equal(app.collaborationState.hashing, true);
+  app.collabReceiveState({ identity: { sourceHash: 'd'.repeat(64) }, hashing: false });
+  assert.equal(app.collaborationState.hashing, false);
+  assert.equal(app.collaborationShortVersion, 'd'.repeat(12));
+});
+
 test('untrusted presence names remain text and CSS colors cannot inject external resources', () => {
   const { app } = editor();
   const malicious = { name: '<img src=x onerror=alert(1)>', color: 'url(https://example.invalid/track)', sessionId: 'bob' };

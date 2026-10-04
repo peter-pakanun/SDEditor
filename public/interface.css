@@ -360,6 +360,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .collaborationConnection.warning { background: var(--ui-review); }
 .collaborationConnection.error { background: var(--ui-missing); }
 .collaborationVersion { color: var(--ui-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.collaborationHashing { display: inline-flex; align-items: center; gap: 6px; }
+.collaborationHashSpinner { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: collaborationHashSpin .8s linear infinite; }
+@keyframes collaborationHashSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .collaborationHashSpinner { animation: none; } }
 .collaborationFooterMessage { margin: 5px 0 0; color: var(--ui-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .workspaceFooterRight { display: flex; align-items: center; justify-content: flex-end; gap: 16px; min-width: 0; max-width: 100%; margin-left: auto; }
 .workspaceFooterRight .workspacePagination { flex: none; }

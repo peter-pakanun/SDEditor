@@ -403,7 +403,8 @@
       <footer class="workspaceFooter">
         <div class="workspaceFooterSummary">
         <div class="workspaceStatus" aria-label="Workspace status counts">
-          <span v-if="collaborationShortVersion" class="collaborationVersion" :title="'Export version ' + (collaborationState.identity?.sourceHash || collaborationState.sourceHash)">Export Version {{ collaborationShortVersion }}</span>
+          <span v-if="collaborationState.hashing" class="collaborationVersion collaborationHashing" role="status" aria-live="polite"><span class="collaborationHashSpinner" aria-hidden="true"></span>Hashing…</span>
+          <span v-else-if="collaborationShortVersion" class="collaborationVersion" :title="'Export version ' + collaborationExportHash">Export Version {{ collaborationShortVersion }}</span>
           <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
           <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill error" title="Files with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ diagnosticScanErrorFileCount }}</strong></span>

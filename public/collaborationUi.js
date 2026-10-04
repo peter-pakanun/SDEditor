@@ -1,6 +1,6 @@
 /* Translation collaboration views. Mutations and session lifecycle live in the integration mixin. */
 (() => {
-  const emptyState = () => ({ status: 'local', error: '', roomId: '', sourceHash: '', peers: [], conflicts: [], pendingCount: 0, connected: false, disconnected: false });
+  const emptyState = () => ({ status: 'local', error: '', roomId: '', sourceHash: '', peers: [], conflicts: [], pendingCount: 0, connected: false, disconnected: false, hashing: false });
   const colors = ['#17743b', '#3458b3', '#96408c', '#996015', '#087782', '#ac3f42'];
   const text = value => String(value ?? '');
   const decode = value => text(value).replaceAll('\\n', '\n');
@@ -67,7 +67,8 @@
         const state = this.collaborationState, identity = state.identity || {};
         return [identity.accountId || this.cloudUser?.id || '', state.roomId, identity.game || this.gameVersion, identity.sourceHash || state.sourceHash, identity.language || this.lang].join('|');
       },
-      collaborationShortVersion() { return text(this.collaborationState.identity?.sourceHash || this.collaborationState.sourceHash).slice(0, 12); },
+      collaborationExportHash() { return text(this.sourceIdentity || this.collaborationState.identity?.sourceHash || this.collaborationState.sourceHash); },
+      collaborationShortVersion() { return this.collaborationExportHash.slice(0, 12); },
       collaborationEditorPeers() { return this.collaborationPeersFor(this.editorCurrentEditingDesc?.filepath).filter(peer => peer.editing === this.editorCurrentEditingDesc?.filepath); },
       collaborationParticipants() {
         if (!this.collaborationState.connected) return [];

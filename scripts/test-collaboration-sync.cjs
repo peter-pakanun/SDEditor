@@ -104,6 +104,90 @@ test('malformed source is rejected before creating a workspace', async () => {
   }
 });
 
+test('source hashing publishes pending progress before the digest and clears it when the hash completes', async t => {
+  const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate(), notifications = [];
+  const originalHash = P.sourceHash;
+  const client = new Client({ store, request: server.request.bind(server), WebSocket: null,
+    onChange: state => notifications.push(state) });
+  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
+  P.sourceHash = async (...args) => {
+    assert.equal(client.snapshot().hashing, true, 'The footer can show progress before digest computation begins.');
+    assert.equal(notifications.at(-1).hashing, true);
+    entered.resolve(); await release.promise;
+    return originalHash(...args);
+  };
+  assert.equal(client.snapshot().hashing, false);
+  const connection = client.connect({ accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial });
+  await entered.promise;
+  assert.equal(client.snapshot().hashing, true);
+  assert.equal(client.snapshot().identity, null, 'A pending hash cannot be presented as a completed export version.');
+  assert.equal(server.requests.length, 0, 'Joining a room waits for the completed hash.');
+  release.resolve(); await connection;
+  assert.equal(client.snapshot().hashing, false);
+  assert.equal(client.snapshot().identity.sourceHash, await originalHash(source));
+  assert.ok(notifications.some(state => state.hashing === false && state.identity?.sourceHash));
+});
+
+test('a rejected source digest clears hashing progress without creating a room', async t => {
+  const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate(), notifications = [];
+  const originalHash = P.sourceHash;
+  const client = new Client({ store, request: server.request.bind(server), WebSocket: null,
+    onChange: state => notifications.push(state) });
+  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
+  P.sourceHash = async () => { entered.resolve(); await release.promise; throw new Error('Digest unavailable'); };
+  const connection = client.connect({ accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial });
+  const rejected = assert.rejects(connection, /Digest unavailable/);
+  await entered.promise; assert.equal(client.snapshot().hashing, true);
+  release.resolve(); await rejected;
+  assert.equal(client.snapshot().hashing, false);
+  assert.equal(notifications.at(-1).hashing, false);
+  assert.equal(store.state, null);
+  assert.equal(server.requests.length, 0);
+});
+
+test('disconnect clears hashing progress and ignores a digest that completes afterward', async t => {
+  const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate();
+  const originalHash = P.sourceHash;
+  const client = new Client({ store, request: server.request.bind(server), WebSocket: null });
+  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
+  P.sourceHash = async (...args) => { entered.resolve(); await release.promise; return originalHash(...args); };
+  const connection = client.connect({ accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial });
+  const rejected = assert.rejects(connection, error => error.stale === true);
+  await entered.promise; assert.equal(client.snapshot().hashing, true);
+  client.disconnect(); assert.equal(client.snapshot().hashing, false);
+  release.resolve(); await rejected;
+  assert.equal(client.snapshot().hashing, false);
+  assert.equal(client.snapshot().identity, null);
+  assert.equal(store.state, null);
+  assert.equal(server.requests.length, 0);
+});
+
+test('an older digest cannot clear progress for a newer connection on the same client', async t => {
+  const store = storeFixture(), server = serverFixture(), first = gate(), second = gate(), firstEntered = gate(), secondEntered = gate();
+  const originalHash = P.sourceHash;
+  const client = new Client({ store, request: server.request.bind(server), WebSocket: null });
+  t.after(() => { first.resolve(); second.resolve(); P.sourceHash = originalHash; client.destroy(); });
+  let calls = 0;
+  P.sourceHash = async (...args) => {
+    const firstCall = ++calls === 1;
+    (firstCall ? firstEntered : secondEntered).resolve();
+    await (firstCall ? first : second).promise;
+    return originalHash(...args);
+  };
+  const options = { accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial };
+  const oldConnection = client.connect(options);
+  const oldRejected = assert.rejects(oldConnection, error => error.stale === true);
+  await firstEntered.promise;
+  const newConnection = client.connect(options);
+  await secondEntered.promise;
+  first.resolve(); await oldRejected;
+  assert.equal(client.snapshot().hashing, true, 'Stale digest cleanup must leave the active connection pending.');
+  assert.equal(client.snapshot().identity, null);
+  second.resolve(); await newConnection;
+  assert.equal(client.snapshot().hashing, false);
+  assert.equal(client.snapshot().identity.sourceHash, await originalHash(source));
+});
+
 test('status notifications omit file contents without enumerating the archive', async () => {
   const { client } = await fixture();
   const room = client.room();
