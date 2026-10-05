@@ -215,6 +215,20 @@ test('sparse browser clients share a canonical ZIP baseline with proofed edits, 
   assert.ok(localBaseline); assert.equal(localBaseline.local, true);
   assert.ok(history.items.filter(item => !item.local).length >= 2);
   assert.ok(history.items.filter(item => !item.local).every(item => !['seed', 'baseline'].includes(item.origin)));
+  const savedEvent = history.items.find(item => item.origin === 'save' && item.revision === 1);
+  assert.ok(savedEvent); assert.equal(typeof savedEvent.id, 'number');
+  const savedEntry = await a.historyEntry(savedEvent.id);
+  assert.deepEqual(savedEntry.before.translations, ['หนึ่ง', 'สอง']);
+  assert.ok([['first changed', 'สอง'], ['หนึ่ง', 'second changed']].some(translations => P.equal(savedEntry.after.translations, translations)));
+  assert.deepEqual(await a.historyEntry(String(savedEvent.id)), savedEntry);
+  const savedRestore = await a.save({ origin: 'restore', bases: { [filepath]: a.fileBase(filepath) },
+    files: [{ ...savedEntry.after, trackedForExport: true }], restore: { eventId: savedEvent.id, version: 'after' } });
+  assert.equal(savedRestore.status, 'synced');
+  await b.sync(); assert.deepEqual(b.fileBase(filepath).translations, savedEntry.after.translations);
+  const savedRestoreHistory = (await a.history(filepath)).items[0];
+  assert.equal(savedRestoreHistory.sourceEventId, savedEvent.id); assert.equal(savedRestoreHistory.sourceVersion, 'after');
+  assert.ok(requests.some(request => request.pathname.endsWith('/history/' + savedEvent.id + '/restore')
+    && request.options.method === 'POST'));
   const entry = await a.historyEntry(localBaseline.id);
   assert.deepEqual(entry.after.translations, ['หนึ่ง', 'สอง']);
   const restored = await a.save({ origin: 'restore', bases: { [filepath]: a.fileBase(filepath) },

@@ -392,7 +392,7 @@
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
         return fileState(file, original.english.length);
       });
-      if (room.mode === 'sparse' && restore?.eventId?.startsWith('local-baseline:')) {
+      if (room.mode === 'sparse' && typeof restore?.eventId === 'string' && restore.eventId.startsWith('local-baseline:')) {
         const filepath = decodeURIComponent(restore.eventId.slice('local-baseline:'.length));
         if (normalized.length !== 1 || normalized[0].filepath !== filepath || restore.version !== 'after'
           || !P.equal(normalized[0].translations, this.baselineStates[filepath]?.translations)) throw new Error('Invalid imported baseline restore.');
@@ -687,7 +687,7 @@
         .map(file => ({ ...file, recoveryId: entry.id, savedAt: entry.at, note: entry.reason }))));
     }
     historyEntry(id) {
-      if (this.room()?.mode === 'sparse' && id.startsWith('local-baseline:')) return Promise.resolve(this.baselineHistory(decodeURIComponent(id.slice('local-baseline:'.length))));
+      if (this.room()?.mode === 'sparse' && typeof id === 'string' && id.startsWith('local-baseline:')) return Promise.resolve(this.baselineHistory(decodeURIComponent(id.slice('local-baseline:'.length))));
       return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id));
     }
     openSocket(epoch) {
