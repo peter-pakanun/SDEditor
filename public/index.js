@@ -2006,9 +2006,49 @@ const config = Vue.defineComponent({
       this.clearDiagnosticScanResults();
       this.filterDesc();
     },
-    updateScannedDescDiagnostics() {
-      // Saves/restores can affect peer consistency. Discard results without rescanning.
-      this.clearDiagnosticScanResults();
+    updateScannedDescDiagnostics(changedDescs = []) {
+      // An unfinished scan may have read translations that have just changed.
+      if (this.diagnosticScanRunning) {
+        this.clearDiagnosticScanResults();
+        return;
+      }
+      if (!this.diagnosticScanCompleted || !this.diagnosticScanAppliedChecks) return;
+      const filepaths = new Set((Array.isArray(changedDescs) ? changedDescs : [changedDescs])
+        .map(desc => typeof desc === 'string' ? desc : desc?.filepath));
+      const checks = this.diagnosticScanAppliedChecks;
+      const descs = this.diagnosticScanDescs;
+      const changed = descs.filter(desc => filepaths.has(desc.filepath) && this.diagnosticScanResults[desc.filepath]);
+      if (!changed.length) return;
+      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
+      const affectedSources = new Set();
+      if (checks.consistency) {
+        for (const desc of changed) {
+          const previous = this.diagnosticScanResults[desc.filepath];
+          const english = desc.translations.English || [];
+          const translations = desc.translations[this.lang] || [];
+          for (let i = 0; i < Math.max(english.length, previous.englishLines.length); i++) {
+            const source = normalize(english[i]);
+            const oldSource = normalize(previous.englishLines[i]);
+            if (source === oldSource && normalize(translations[i]) === normalize(previous.translationLines[i])) continue;
+            if (source) affectedSources.add(source);
+            if (oldSource) affectedSources.add(oldSource);
+          }
+        }
+      }
+      const consistencyIndex = checks.consistency
+        ? window.TranslationDiagnostics.createConsistencyIndex(descs, this.lang) : null;
+      const results = { ...this.diagnosticScanResults };
+      // Refresh saved files and peers of changed entries, including clean peers
+      // that now have a conflict. Retain unrelated findings and scan selections.
+      for (const desc of descs) {
+        if (!results[desc.filepath]) continue;
+        if (!filepaths.has(desc.filepath)
+          && !(checks.consistency && desc.translations.English.some(text => affectedSources.has(normalize(text))))) continue;
+        results[desc.filepath] = this.analyzeDescDiagnostics(desc, this.lang, consistencyIndex, checks);
+      }
+      this.diagnosticScanResults = results;
+      this.diagnosticScanErrorFileCount = Object.values(results).filter(result => result.hasDiagnosticError).length;
+      this.diagnosticScanWarningFileCount = Object.values(results).filter(result => result.hasDiagnosticWarning).length;
     },
     openDiagnosticScanDialog() {
       this.hideTooltip();

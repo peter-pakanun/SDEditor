@@ -49,6 +49,20 @@ function saveFixture() {
   e.testMode = false;
   return { ...h, desc };
 }
+function diagnosticSaveFixture() {
+  const h = saveFixture(), e = h.editor, first = h.desc;
+  h.context.document.createElement = () => ({ get value() { return this.innerHTML; } });
+  const remaining = description(2, ['ยังขาดตัวแปร', 'สอง']);
+  const clean = description(3, ['ครบ {0}', 'สอง']);
+  first.translations.English[0] = 'First {0}';
+  remaining.translations.English[0] = 'Remaining {0}';
+  clean.translations.English[0] = 'Clean {0}';
+  e.descs = [first, remaining, clean];
+  e.editorBlocks[0] = { english: first.translations.English[0], translation: 'แก้แล้ว {0}' };
+  e.diagnosticScanChecks = Object.fromEntries(e.diagnosticScanTypes.map(type => [type.key, type.key === 'variables']));
+  e.selectedFileFilters = ['diagnosticError'];
+  return { ...h, remaining, clean };
+}
 
 function enablePending(h) {
   const { editor: e, window, context } = h;
@@ -175,6 +189,92 @@ test('save writes workspace and history together before closing and preserves in
   assert.equal(await e.editorSave(), true); assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].workspace.descs[0].translations.Thai, ['ใหม่', '']);
   assert.deepEqual(writes[0].revisions[0].translations, ['ใหม่', '']); assert.equal(e.editorVisible, false);
+});
+
+test('saving a diagnostic correction preserves the completed scan and remaining error filter', async () => {
+  for (const close of [true, false]) {
+    const { editor: e, desc, remaining, clean, writes, alerts } = diagnosticSaveFixture();
+    await e.scanAllDiagnostics();
+    assert.equal(e.diagnosticScanErrorFileCount, 2);
+    const untouchedResult = e.diagnosticScanResults[remaining.filepath];
+    const cleanResult = e.diagnosticScanResults[clean.filepath];
+    const scanId = e.diagnosticScanRunId, appliedChecks = e.diagnosticScanAppliedChecks;
+    assert.equal(await e.editorSave({ close }), true, JSON.stringify({ alerts, notice: e.collaborationNotice }));
+    assert.equal(writes.length, 1);
+    assert.equal(e.diagnosticScanCompleted, true);
+    assert.equal(e.diagnosticScanRunId, scanId);
+    assert.equal(e.diagnosticScanAppliedChecks, appliedChecks);
+    assert.equal(e.diagnosticScanProcessed, 3); assert.equal(e.diagnosticScanTotal, 3);
+    assert.equal(e.diagnosticScanResults[desc.filepath].hasDiagnosticError, false);
+    assert.equal(e.diagnosticScanResults[remaining.filepath], untouchedResult);
+    assert.equal(e.diagnosticScanResults[clean.filepath], cleanResult);
+    assert.equal(e.diagnosticScanErrorFileCount, 1);
+    assert.deepEqual(Array.from(e.diagnosticScanResultFiles, result => result.filepath), [remaining.filepath]);
+    assert.deepEqual(Array.from(e.selectedFileFilters), ['diagnosticError']);
+    assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [remaining.filepath]);
+    assert.equal(e.editorVisible, !close);
+  }
+});
+
+test('optimistic worker Save & close retains remaining diagnostics before and after acknowledgment', async () => {
+  const { editor: e, desc, remaining, calls, acknowledge } = enablePending(diagnosticSaveFixture());
+  await e.scanAllDiagnostics();
+  const untouchedResult = e.diagnosticScanResults[remaining.filepath];
+  const scanId = e.diagnosticScanRunId, appliedChecks = e.diagnosticScanAppliedChecks;
+  assert.equal(await e.editorSave(), true);
+  assert.equal(e.editorVisible, false); assert.equal(e.pendingLocalSaves, 1);
+  const correctedResult = e.diagnosticScanResults[desc.filepath];
+  const assertRemainingDiagnostics = () => {
+    assert.equal(e.diagnosticScanCompleted, true);
+    assert.equal(e.diagnosticScanRunId, scanId);
+    assert.equal(e.diagnosticScanAppliedChecks, appliedChecks);
+    assert.equal(e.diagnosticScanResults[desc.filepath], correctedResult);
+    assert.equal(correctedResult.hasDiagnosticError, false);
+    assert.equal(e.diagnosticScanResults[remaining.filepath], untouchedResult);
+    assert.equal(e.diagnosticScanErrorFileCount, 1);
+    assert.deepEqual(Array.from(e.diagnosticScanResultFiles, result => result.filepath), [remaining.filepath]);
+    assert.deepEqual(Array.from(e.selectedFileFilters), ['diagnosticError']);
+    assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [remaining.filepath]);
+  };
+  assertRemainingDiagnostics();
+  await pendingTick(); assert.equal(calls.length, 1);
+  acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(e.editorVisible, false);
+  assertRemainingDiagnostics();
+});
+
+test('save-and-next advances to the remaining diagnostic file after removing the corrected error', async () => {
+  const { editor: e, remaining } = diagnosticSaveFixture(), opened = [];
+  await e.scanAllDiagnostics();
+  e.editFile = async filepath => {
+    opened.push(filepath); e.editorCurrentEditingDesc = e.getDescByFilepath(filepath); return true;
+  };
+  assert.equal(await e.saveAndSkipFile(), true);
+  assert.equal(e.diagnosticScanCompleted, true);
+  assert.equal(e.diagnosticScanErrorFileCount, 1);
+  assert.deepEqual(opened, [remaining.filepath]);
+  assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [remaining.filepath]);
+});
+
+test('remote corrections refresh completed diagnostic results while metadata-only updates preserve them', async () => {
+  const { editor: e, desc, remaining } = diagnosticSaveFixture();
+  await e.scanAllDiagnostics();
+  const scanId = e.diagnosticScanRunId;
+  const firstResult = e.diagnosticScanResults[desc.filepath];
+  const remainingResult = e.diagnosticScanResults[remaining.filepath];
+  e.applyCollaborationFiles([{ filepath: desc.filepath, translations: [...desc.translations.Thai], needsReview: true, trackedForExport: false }]);
+  assert.equal(desc.needsReview, true); assert.equal(desc.hasChanges, false);
+  assert.equal(e.diagnosticScanResults[desc.filepath], firstResult);
+  assert.equal(e.diagnosticScanCompleted, true);
+  e.applyCollaborationFiles([{ filepath: remaining.filepath, translations: ['ทีมแก้แล้ว {0}', 'สอง'], needsReview: false, trackedForExport: true }]);
+  assert.equal(e.diagnosticScanCompleted, true);
+  assert.equal(e.diagnosticScanRunId, scanId);
+  assert.equal(e.diagnosticScanResults[desc.filepath], firstResult);
+  assert.notEqual(e.diagnosticScanResults[remaining.filepath], remainingResult);
+  assert.equal(e.diagnosticScanResults[remaining.filepath].hasDiagnosticError, false);
+  assert.equal(e.diagnosticScanErrorFileCount, 1);
+  assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [desc.filepath]);
+  assert.equal(e.editorBlocks[0].translation, 'แก้แล้ว {0}', 'Remote updates leave the current unsaved draft intact.');
 });
 test('typing while storage is committing remains an unsaved open draft', async () => {
   const { editor: e, window, desc } = saveFixture();
@@ -426,7 +526,8 @@ test('consistency commit adopts clean remote entries while preserving unrelated 
   assert.deepEqual(Array.from(e.editorBlocks, block => block.translation), ['ทีมเลือก', 'ร่างส่วนตัว', 'ทีมแก้รายการสาม']);
   assert.deepEqual(Array.from(e.editorOriginalTranslations), ['ทีมเลือก', 'ทีมแก้รายการสอง', 'ทีมแก้รายการสาม']);
   assert.deepEqual(Array.from(e._editorCollabBase.translations), ['ทีมเลือก', 'รายการสอง', 'ทีมแก้รายการสาม']);
-  assert.equal(e.editorHaveChanges(), true); assert.equal(e.diagnosticScanCompleted, false, 'Unrelated remote changes invalidate the completed scan.');
+  assert.equal(e.editorHaveChanges(), true); assert.equal(e.diagnosticScanCompleted, true);
+  assert.deepEqual(Array.from(e.diagnosticScanResults[first.filepath].translationLines), accepted.translations);
   const nextDraft = { ...accepted, translations: e.editorBlocks.map(block => e.encodeNewlines(block.translation)) };
   assert.deepEqual(P.mergeFile(e._editorCollabBase, nextDraft, accepted).indexes, [1]);
 });

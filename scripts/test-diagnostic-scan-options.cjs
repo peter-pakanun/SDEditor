@@ -253,17 +253,161 @@ test('terminology is opt-in and cached table warnings disappear after a draft ch
   assert.deepEqual(calls, scannedCalls);
 });
 
-test('saving or changing the dictionary invalidates results without scheduling a rescan', async () => {
+test('saving a partial correction preserves remaining file issues, unrelated results, and list state', async () => {
   const { editor, config, calls, timers } = loadEditor();
-  const { first } = conflictingEntries(editor);
+  const first = description('first', 'Fire {1}', 'ไฟ');
+  first.translations.English.push('Duration {2}');
+  first.translations.Thai.push('ระยะเวลา');
+  const second = description('second', 'Cold {3}', 'เย็น');
+  const third = description('third', 'Lightning {4}', 'สายฟ้า');
+  editor.descs = [first, second, third];
+  editor.diagnosticScanChecks = only('variables');
+  editor.selectedFileFilters = ['diagnosticError'];
+  editor.diagnosticScanResultsPageSize = 1;
+  editor.filterDesc = config.methods.filterDesc;
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanIssueCounts.errors, 4);
+  editor.diagnosticScanResultsPage = 2;
+  const otherResults = [second, third].map(desc => editor.diagnosticScanResults[desc.filepath]);
+  const appliedChecks = editor.diagnosticScanAppliedChecks;
+  const runId = editor.diagnosticScanRunId;
+  const timerCount = timers.length;
+  editor.scanAllDiagnostics = async () => { throw new Error('A correction must not restart the full scan.'); };
+
+  first.translations.Thai[0] = 'ไฟ {1}';
+  editor.updateScannedDescDiagnostics(first);
+  editor.filterDesc();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanAppliedChecks, appliedChecks);
+  assert.equal(editor.diagnosticScanRunId, runId);
+  assert.equal(editor.diagnosticScanProcessed, 3);
+  assert.equal(editor.diagnosticScanTotal, 3);
+  assert.equal(editor.diagnosticScanErrorFileCount, 3);
+  assert.equal(editor.diagnosticScanIssueCounts.errors, 3);
+  assert.deepEqual(Array.from(editor.diagnosticScanResults[first.filepath].diagnostics, item => item.blockIndex), [1]);
+  assert.equal(editor.diagnosticScanResultsPage, 2);
+  assert.equal(editor.diagnosticScanResultPageCount, 3);
+  assert.equal(editor.diagnosticScanVisibleResults[0].filepath, second.filepath);
+  assert.deepEqual(Array.from(editor.selectedFileFilters), ['diagnosticError']);
+  assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [first.filepath, second.filepath, third.filepath]);
+  assert.equal(editor.diagnosticScanResults[second.filepath], otherResults[0]);
+  assert.equal(editor.diagnosticScanResults[third.filepath], otherResults[1]);
+
+  first.translations.Thai[1] = 'ระยะเวลา {2}';
+  editor.updateScannedDescDiagnostics(first.filepath);
+  editor.filterDesc();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanResults[first.filepath].hasDiagnosticError, false);
+  assert.equal(editor.diagnosticScanErrorFileCount, 2);
+  assert.equal(editor.diagnosticScanIssueCounts.errors, 2);
+  assert.deepEqual(Array.from(editor.filteredDescs, desc => desc.filepath), [second.filepath, third.filepath]);
+  assert.equal(editor.diagnosticScanResultsPage, 2);
+  assert.equal(editor.diagnosticScanResultPageCount, 2);
+  assert.equal(editor.diagnosticScanResults[second.filepath], otherResults[0]);
+  assert.equal(editor.diagnosticScanResults[third.filepath], otherResults[1]);
+  assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
+  assert.equal(timers.length, timerCount, 'Updating completed results must not schedule a full scan.');
+});
+
+test('saved corrections use the completed scan checks after dialog choices change', async () => {
+  const { editor, calls } = loadEditor();
+  const first = description('first', 'Fire damage', 'ผิด');
+  const peer = description('peer', 'Fire damage', ' ไฟ');
+  editor.descs = [first, peer];
   editor.diagnosticScanChecks = only('consistency', 'terminology');
   await editor.scanAllDiagnostics();
-  const beforeSave = { ...calls };
-  first.translations.Thai[0] = 'ความเสียหายไฟ';
+  assert.equal(editor.diagnosticScanResults[first.filepath].warningCount, 2);
+  const checks = editor.diagnosticScanAppliedChecks;
+  editor.diagnosticScanChecks = only('whitespace');
+  first.translations.Thai[0] = ' ไฟ';
+  editor.updateScannedDescDiagnostics([first]);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanAppliedChecks, checks);
+  assert.equal(editor.diagnosticScanResults[first.filepath].warningCount, 0,
+    'The newly selected whitespace check must not alter the completed scan.');
+  assert.equal(editor.diagnosticScanResults[peer.filepath].warningCount, 0,
+    'Resolving the shared group must refresh its already-correct peer.');
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.ok(calls.terminology > 2, 'Previously selected terminology remains part of saved-file analysis.');
+});
+
+test('saving refreshes normalized English peers when consistency resolves or newly appears', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', 'Fire\\nDamage', 'หนึ่ง');
+  first.translations.English.push('Cold damage');
+  first.translations.Thai.push('เย็น');
+  const peer = description('peer', 'Fire\r\nDamage', 'สอง');
+  const unrelated = description('unrelated', 'Cold damage', 'เย็น');
+  editor.descs = [first, peer, unrelated];
+  editor.diagnosticScanChecks = only('consistency');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  const unrelatedResult = editor.diagnosticScanResults[unrelated.filepath];
+  first.translations.Thai[0] = 'สอง';
+  editor.updateScannedDescDiagnostics([first.filepath]);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.equal(editor.diagnosticScanResults[peer.filepath].consistencyDiagnostics.length, 0);
+  assert.equal(editor.diagnosticScanResults[unrelated.filepath], unrelatedResult,
+    'Peers of unchanged entries in the saved file must retain their cached results.');
+
+  first.translations.Thai[0] = 'สาม';
+  editor.updateScannedDescDiagnostics(first);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanIssueCounts.warnings, 2);
+  assert.equal(editor.diagnosticScanResults[first.filepath].consistencyDiagnostics.length, 1);
+  assert.equal(editor.diagnosticScanResults[peer.filepath].consistencyDiagnostics.length, 1,
+    'A previously clean peer must gain the newly created consistency warning.');
+  assert.equal(editor.diagnosticScanResults[unrelated.filepath], unrelatedResult);
+});
+
+test('saved-file updates retain Hide DNT exclusions from results and consistency groups', async () => {
+  const { editor } = loadEditor();
+  const first = description('first', 'Fire damage', 'ไฟ');
+  const peer = description('peer', 'Fire damage', 'ไฟ');
+  const hidden = description('hidden', 'Fire damage', 'เปลวไฟ');
+  hidden.isDNT = true;
+  editor.hideDNT = true;
+  editor.descs = [first, peer, hidden];
+  editor.diagnosticScanChecks = only('whitespace', 'consistency');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  const visibleResults = [first, peer].map(desc => editor.diagnosticScanResults[desc.filepath]);
+  hidden.translations.Thai[0] = ' ซ่อน';
+  editor.updateScannedDescDiagnostics(hidden);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  assert.equal(editor.diagnosticScanResults[hidden.filepath], undefined);
+  assert.equal(editor.diagnosticScanResults[first.filepath], visibleResults[0]);
+  assert.equal(editor.diagnosticScanResults[peer.filepath], visibleResults[1]);
+
+  first.translations.Thai[0] = ' ไฟ';
+  editor.updateScannedDescDiagnostics([hidden, first]);
+  assert.equal(editor.diagnosticScanResults[hidden.filepath], undefined);
+  assert.equal(editor.diagnosticScanTotal, 2);
+  assert.equal(editor.diagnosticScanProcessed, 2);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanIssueCounts.warnings, 3);
+  assert.equal(editor.diagnosticScanResults[first.filepath].consistencyDiagnostics[0].entryCount, 2);
+});
+
+test('saved changes without a manual scan do not start either manual-only analyzer', () => {
+  const { editor, calls, timers } = loadEditor();
+  const { first } = conflictingEntries(editor);
+  first.translations.Thai[0] = 'ไฟ';
   editor.updateScannedDescDiagnostics(first);
   assert.equal(editor.diagnosticScanCompleted, false);
   assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
-  assert.deepEqual(calls, beforeSave);
+  assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
+  assert.equal(timers.length, 0);
+});
+
+test('changing the dictionary invalidates results without scheduling a rescan', async () => {
+  const { editor, config, calls, timers } = loadEditor();
+  conflictingEntries(editor);
+  editor.diagnosticScanChecks = only('consistency', 'terminology');
   await editor.scanAllDiagnostics();
   const beforeDictionaryChange = { ...calls };
   const timerCount = timers.length;

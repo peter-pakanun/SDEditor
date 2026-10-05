@@ -373,7 +373,7 @@
       applyCollaborationFiles(files, lang = this.lang) {
         if (lang !== this.lang) return;
         this.ensureLocalDescsReady();
-        let invalidateDiagnostics = false;
+        const changedFilepaths = [];
         const batch = this._collabDiagnosticBatch;
         const descriptions = new Map(this.descs.map(desc => [desc.filepath, desc]));
         const locals = new Map(this.localDescs.descs.map(desc => [desc.filepath, desc]));
@@ -387,7 +387,7 @@
             const expected = batch?.expected.get(file.filepath);
             if (expected && this.collaborationContextCurrent(batch.context)
               && JSON.stringify(expected) === JSON.stringify(file.translations)) batch.touched = true;
-            else invalidateDiagnostics = true;
+            else changedFilepaths.push(file.filepath);
           }
           desc.translations[lang] = [...file.translations];
           desc.needsReview = !!file.needsReview; desc.hasChanges = !!file.trackedForExport;
@@ -400,7 +400,7 @@
           }
           this.localDescs.status[file.filepath] = { ...(this.localDescs.status[file.filepath] || {}), needsReview: desc.needsReview };
         }
-        if (invalidateDiagnostics) this.updateScannedDescDiagnostics?.();
+        if (changedFilepaths.length) this.updateScannedDescDiagnostics?.(changedFilepaths);
         // editorBlocks and its captured base remain untouched until explicit save/reopen.
         this.filterDesc();
       },
