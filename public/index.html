@@ -439,7 +439,7 @@
       </footer>
       <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc="!$event.isComposing && $event.keyCode !== 229 && ($event.preventDefault(), commentsCloseAll())">
         <header class="commentsPanelHeader">
-          <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · {{ cloudUser?.language || 'Your language' }} + global · All source versions</p></div>
+          <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }}</p></div>
           <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"></path></svg></button>
         </header>
         <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
@@ -741,7 +741,7 @@
         </section>
 
         <section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
-          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>{{ cloudUser?.language || 'Your language' }} + global · All source versions</p></div></header>
+          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
           <template v-else>
             <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
@@ -756,12 +756,13 @@
               <button v-if="commentsFileHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreFile" :disabled="commentsFileFeed.loadingMore">Load older comments</button>
             </div>
             <form class="commentsComposer" @submit.prevent="commentsSubmit">
-              <label for="fileCommentDraft">Add a comment <span>· {{ cloudUser.language }}</span></label>
-              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" placeholder="Share your thoughts…" :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
-              <label class="commentsScopeOption"><input type="checkbox" v-model="commentsFileAllLanguages" :disabled="!commentsCanPost || commentsPosting">Post to all languages</label>
+              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" aria-label="Add a comment" placeholder="Add a comment..." :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
               <p v-if="!sourceIdentity" class="commentsEmpty">Load a source version to post a comment.</p>
               <p v-if="commentsPostError" class="commentsError" role="alert">{{ commentsPostError }}</p>
-              <div class="commentsComposerActions"><button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button></div>
+              <div class="commentsComposerActions">
+                <label class="commentsScopeOption"><input type="checkbox" v-model="commentsFileAllLanguages" :disabled="!commentsCanPost || commentsPosting">Post to all languages</label>
+                <button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button>
+              </div>
             </form>
           </template>
         </section>
