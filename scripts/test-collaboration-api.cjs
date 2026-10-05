@@ -6,6 +6,7 @@ const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { Client } = require('../public/collaborationSync.js');
+const P = require('../public/collaborationProtocol.js');
 const apiRoot = path.resolve(__dirname, '../../SDEditor-API');
 const load = file => import(pathToFileURL(path.join(apiRoot, file)).href);
 const ORIGIN = 'https://sdeditor.pages.dev';
@@ -125,4 +126,103 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
   a.closeSocket(); await until(() => !b.isEditing(filepath));
   await a.sync(); await until(() => a.connected && a.sessionId !== oldSession && b.isEditing(filepath));
   a.leaveEdit(); await until(() => !b.isEditing(filepath));
+});
+
+test('sparse browser clients share a canonical ZIP baseline with proofed edits, untouched presence, conflicts, and incremental history', async t => {
+  const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }] = await Promise.all([
+    load('src/database.js'), load('src/config.js'), load('src/app.js'),
+  ]);
+  const { WebSocket } = createRequire(path.join(apiRoot, 'package.json'))('ws');
+  class OriginSocket extends WebSocket { constructor(url) { super(url, { origin: ORIGIN }); } }
+  const config = loadConfig({ ADMIN_GOOGLE_SUB: 'admin' });
+  const db = openDatabase(':memory:'), store = new CloudStore(db, config);
+  const users = ['first', 'second'].map(id => {
+    store.registerIdentity({ sub: id, email: id + '@example.com', name: 'Translator ' + id });
+    store.assignLanguage('admin', id, 'Thai'); return store.createSession(id);
+  });
+  const app = createApp({ config, store, logger: { warn() {}, error() {} } });
+  const server = createServer(app), realtime = app.locals.collaborationRealtime.attach(server);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const apiBase = 'http://127.0.0.1:' + server.address().port, requests = [];
+  const clients = users.map(user => new Client({ store: memoryStore(), apiBase, WebSocket: OriginSocket,
+    request: async (pathname, options = {}) => {
+      requests.push({ pathname, options: copy(options) });
+      const response = await fetch(apiBase + pathname, { method: options.method || 'GET', headers: {
+        Origin: ORIGIN, Authorization: 'Bearer ' + user.token, ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
+      const body = response.status === 204 ? null : await response.json();
+      if (!response.ok) throw Object.assign(new Error(body.error?.message), { status: response.status, code: body.error?.code, current: body.current, archive: body.archive });
+      return body;
+    },
+  }));
+  t.after(async () => { clients.forEach(client => client.destroy()); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
+  const source = Array.from({ length: 4 }, (_, index) => ({ filepath: `source/file-${index}.txt`, name: '', stats: ['stat-' + index],
+    variables: ['#', '#'], remarks: ['', ''], translations: { English: ['One', 'Two'], Thai: ['หนึ่ง', 'สอง'], French: ['un', 'deux'] } }));
+  const tree = await P.buildBaselineTree(source);
+  const decision = { filepath: source[0].filepath, language: 'Thai', occurrence: 2,
+    blockHash: await P.blockHash({ content: source[0].translations.Thai, variables: ['#', '#'], remarks: ['', ''] }) };
+  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([9, 8, 7])), zipSize: 3,
+    fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [decision], treeRoot: tree.root });
+  const files = source.map(file => ({ filepath: file.filepath, translations: [...file.translations.Thai], needsReview: false, trackedForExport: false }));
+  const connection = (index, selectedArchive = archive) => ({ accountId: users[index].user.id, game: 'poe1', language: 'Thai', source, files,
+    workspace: { descs: copy(source), status: {}, sourceHash: selectedArchive.baselineId }, archive: selectedArchive, baselineSource: source, baselineTree: tree });
+  const [a, b] = clients;
+  await a.connect(connection(0));
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_source_files').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_history').get().n, 0);
+  const different = await P.finalizeArchive({ ...archive, configHash: undefined, baselineId: undefined, decisions: [{ ...decision, occurrence: 1 }] });
+  await assert.rejects(b.connect(connection(1, different)), error => error.code === 'ARCHIVE_CONFIG_MISMATCH' && error.archive.baselineId === archive.baselineId);
+  assert.equal(b.store.state, null, 'Different interpretation cannot write a second local room before agreed choices are applied.');
+  await b.connect(connection(1));
+  await until(() => a.connected && b.connected && a.peers.length === 2 && b.peers.length === 2);
+  const untouched = source[3].filepath;
+  a.select(untouched); assert.equal((await a.claim(untouched)).granted, true);
+  await until(() => b.isEditing(untouched));
+  assert.equal((await b.claim(untouched)).granted, false);
+  a.leaveEdit(); await until(() => !b.isEditing(untouched));
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 0, 'Presence does not materialize baseline translations.');
+  const filepath = source[0].filepath, baseA = a.fileBase(filepath), baseB = b.fileBase(filepath);
+  assert.equal(baseA.revision, 0);
+  const first = await Promise.all([
+    a.save({ bases: { [filepath]: baseA }, files: [{ ...baseA, translations: ['first changed', 'สอง'], trackedForExport: true }] }),
+    b.save({ bases: { [filepath]: baseB }, files: [{ ...baseB, translations: ['หนึ่ง', 'second changed'], trackedForExport: true }] }),
+  ]);
+  assert.ok(first.every(result => result.status === 'synced'));
+  await Promise.all([a.sync(), b.sync()]);
+  assert.deepEqual(a.fileBase(filepath).translations, ['first changed', 'second changed']);
+  assert.deepEqual(b.fileBase(filepath).translations, ['first changed', 'second changed']);
+  const firstWires = requests.filter(request => request.pathname.endsWith('/mutations')).flatMap(request => request.options.body.files);
+  assert.ok(firstWires.some(file => file.baseRevision === 0 && file.baseline && file.proof));
+  assert.ok(firstWires.every(file => file.filepath === filepath));
+  assert.ok(requests.every(request => !request.pathname.includes('/uploads')), 'No initial baseline upload or archive contents are sent.');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 1);
+  const overlapPath = source[1].filepath, overlapA = a.fileBase(overlapPath), overlapB = b.fileBase(overlapPath);
+  const overlapping = await Promise.all([
+    a.save({ bases: { [overlapPath]: overlapA }, files: [{ ...overlapA, translations: ['first overlapping', 'สอง'], trackedForExport: true }] }),
+    b.save({ bases: { [overlapPath]: overlapB }, files: [{ ...overlapB, translations: ['second overlapping', 'สอง'], trackedForExport: true }] }),
+  ]);
+  assert.equal(overlapping.filter(result => result.status === 'synced').length, 1);
+  assert.equal(overlapping.filter(result => result.status === 'conflict').length, 1);
+  const conflicted = overlapping[0].status === 'conflict' ? a : b;
+  const conflict = conflicted.snapshot().conflicts.find(file => file.filepath === overlapPath);
+  assert.deepEqual(conflict.base.translations, ['หนึ่ง', 'สอง']);
+  assert.equal((await conflicted.resolve(conflict.id, ['agreed reviewed', 'สอง'])).status, 'synced');
+  await Promise.all([a.sync(), b.sync()]);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 2);
+  const history = await a.history(filepath);
+  const localBaseline = history.items.find(item => item.origin === 'imported_baseline');
+  assert.ok(localBaseline); assert.equal(localBaseline.local, true);
+  assert.ok(history.items.filter(item => !item.local).length >= 2);
+  assert.ok(history.items.filter(item => !item.local).every(item => !['seed', 'baseline'].includes(item.origin)));
+  const entry = await a.historyEntry(localBaseline.id);
+  assert.deepEqual(entry.after.translations, ['หนึ่ง', 'สอง']);
+  const restored = await a.save({ origin: 'restore', bases: { [filepath]: a.fileBase(filepath) },
+    files: [{ ...entry.after, trackedForExport: true }], restore: { eventId: entry.id, version: 'after' } });
+  assert.equal(restored.status, 'synced');
+  await b.sync(); assert.deepEqual(b.fileBase(filepath).translations, ['หนึ่ง', 'สอง']);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_source_files').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 2);
+  const untouchedHistory = await b.history(untouched);
+  assert.equal(untouchedHistory.items.length, 1); assert.equal(untouchedHistory.items[0].local, true);
 });

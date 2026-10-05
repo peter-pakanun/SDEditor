@@ -158,6 +158,25 @@ test('export version falls back to completed room hashes and remains empty until
   assert.equal(app.collaborationShortVersion, 'd'.repeat(12));
 });
 
+test('export version displays cached original ZIP identity while room identity remains the effective baseline', () => {
+  const { app } = editor({ sourceIdentity: 'b'.repeat(64), importBaseline: { archive: { zipHash: 'c'.repeat(64), baselineId: 'b'.repeat(64) } } });
+  assert.equal(app.collaborationExportHash, 'c'.repeat(64));
+  assert.equal(app.collaborationShortVersion, 'c'.repeat(12));
+  assert.equal(app.sourceIdentity, 'b'.repeat(64));
+  app.importBaseline = null;
+  assert.equal(app.collaborationExportHash, 'b'.repeat(64));
+});
+
+test('import-time original ZIP hashing drives the same footer progress without requiring a room', () => {
+  const { app } = editor({ importBaselineHashing: true });
+  app.collabReceiveState({ identity: null, hashing: false });
+  assert.equal(app.collaborationHashing, true);
+  app.importBaselineHashing = false;
+  assert.equal(app.collaborationHashing, false);
+  app.collabReceiveState({ hashing: true });
+  assert.equal(app.collaborationHashing, true);
+});
+
 test('untrusted presence names remain text and CSS colors cannot inject external resources', () => {
   const { app } = editor();
   const malicious = { name: '<img src=x onerror=alert(1)>', color: 'url(https://example.invalid/track)', sessionId: 'bob' };

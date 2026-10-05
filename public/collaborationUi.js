@@ -23,7 +23,7 @@
       return decode(shared[index]);
     });
   }
-  const originLabels = { save: 'Save', edit: 'Save', seed: 'Initial shared workspace', baseline: 'Initial shared workspace', merge: 'Automatic merge', auto_merge: 'Automatic merge', conflict_resolution: 'Conflict resolved', history_restore: 'History restore', restore: 'History restore', import: 'Import translated', import_translated: 'Import translated', review: 'Confirmed unchanged', confirm: 'Confirmed unchanged', confirm_unchanged: 'Confirmed unchanged', consistency: 'Compare & resolve', consistency_resolution: 'Compare & resolve' };
+  const originLabels = { save: 'Save', edit: 'Save', seed: 'Initial shared workspace', baseline: 'Initial shared workspace', imported_baseline: 'Original imported version', merge: 'Automatic merge', auto_merge: 'Automatic merge', conflict_resolution: 'Conflict resolved', history_restore: 'History restore', restore: 'History restore', import: 'Import translated', import_translated: 'Import translated', review: 'Confirmed unchanged', confirm: 'Confirmed unchanged', confirm_unchanged: 'Confirmed unchanged', consistency: 'Compare & resolve', consistency_resolution: 'Compare & resolve' };
   const mixin = {
     data() { return {
       collaborationState: emptyState(), collaborationNotice: '',
@@ -67,7 +67,8 @@
         const state = this.collaborationState, identity = state.identity || {};
         return [identity.accountId || this.cloudUser?.id || '', state.roomId, identity.game || this.gameVersion, identity.sourceHash || state.sourceHash, identity.language || this.lang].join('|');
       },
-      collaborationExportHash() { return text(this.sourceIdentity || this.collaborationState.identity?.sourceHash || this.collaborationState.sourceHash); },
+      collaborationHashing() { return !!(this.importBaselineHashing || this.collaborationState.hashing); },
+      collaborationExportHash() { return text(this.importBaseline?.archive?.zipHash || this.sourceIdentity || this.collaborationState.identity?.sourceHash || this.collaborationState.sourceHash); },
       collaborationShortVersion() { return this.collaborationExportHash.slice(0, 12); },
       collaborationEditorPeers() { return this.collaborationPeersFor(this.editorCurrentEditingDesc?.filepath).filter(peer => peer.editing === this.editorCurrentEditingDesc?.filepath); },
       collaborationParticipants() {
@@ -306,6 +307,7 @@
       },
       collaborationHistoryActor(event) { return text(event?.actor?.name || event?.actorName) || 'Translator'; },
       collaborationHistoryDate(event) {
+        if (event?.local && event.origin === 'imported_baseline') return 'Saved in this browser';
         const value = event?.createdAt ?? event?.savedAt ?? event?.timestamp;
         if (!value) return 'Unknown date';
         const date = new Date(value);

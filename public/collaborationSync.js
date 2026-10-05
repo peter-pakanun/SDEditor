@@ -19,6 +19,8 @@
       this.onRemote = options.onRemote || (() => {});
       this.onStatus = options.onStatus || (() => {});
       this.onEditingConflict = options.onEditingConflict || (() => {});
+      this.onCanonicalArchive = options.onCanonicalArchive || (() => {});
+      this.allowLegacySeed = options.allowLegacySeed !== false;
       this.projectWorkspace = options.projectWorkspace || P.projectWorkspace;
       this.WebSocket = options.WebSocket === undefined ? globalThis.WebSocket : options.WebSocket;
       this.uuid = options.uuid || (() => globalThis.crypto.randomUUID());
@@ -44,11 +46,51 @@
     notify() { this.onChange(this.snapshot({ includeFiles: false })); }
     status(message, error = false) { this.onStatus({ message, error }); }
     fileBase(filepath) {
-      let file = this.room()?.local[filepath] || null;
+      let file = this.room()?.local[filepath] || (this.room()?.mode === 'sparse' && this.baselineStates?.[filepath]) || null;
       for (const batch of this.stagedSaves.values()) if (batch.collaboration?.key === this.key) {
         file = batch.files.find(item => item.filepath === filepath) || file;
       }
       return copy(file);
+    }
+    sharedBase(filepath) { return copy(this.room()?.shared[filepath] || this.baselineStates?.[filepath] || null); }
+    carryProtected(room, file) {
+      return !!room.carries?.[file.filepath] && (file.needsReview
+        || (Object.hasOwn(room.carryRevisions || {}, file.filepath) && file.revision <= room.carryRevisions[file.filepath]));
+    }
+    async registerLocalCandidate(file, { revisions = [], status } = {}) {
+      if (this.room()?.mode !== 'sparse') return;
+      const identity = copy(this.room().identity);
+      const original = this.sourceFiles.get(file.filepath);
+      if (!original || !file.needsReview || file.trackedForExport) throw new Error('Only a private Needs Review candidate can be restored.');
+      const candidate = fileState(file, original.english.length);
+      await this.update((state, room) => {
+        room.carries ||= {}; room.carryRevisions ||= {};
+        room.carries[file.filepath] = candidate;
+        room.carryRevisions[file.filepath] = (room.shared[file.filepath] || this.baselineStates[file.filepath]).revision;
+      }, { revisions, projectWorkspace: workspace => {
+        if (workspace?.sourceHash && workspace.sourceHash !== identity.sourceHash) throw new Error('The local workspace changed before restoring the candidate.');
+        const result = this.projectWorkspace(workspace, [candidate], identity.language, this.source, { mutate: true });
+        result.sourceHash = identity.sourceHash; result.collaborationAccountId = identity.accountId;
+        if (status) result.status[file.filepath] = { ...result.status[file.filepath], ...copy(status) };
+        return result;
+      } });
+      return { status: 'local' };
+    }
+    preserveCarried(room, files) {
+      if (room.mode !== 'sparse') return;
+      for (const file of files) {
+        const carried = room.carries?.[file.filepath];
+        if (!carried || this.carryProtected(room, file)) continue;
+        if (!P.equal(carried.translations, file.translations)) room.recovery.push({ id: this.uuid(), at: Date.now(),
+          reason: 'Local carried translation before a reviewed shared version', files: [copy(carried)] });
+        delete room.carries[file.filepath];
+        if (room.carryRevisions) delete room.carryRevisions[file.filepath];
+      }
+    }
+    remoteFiles(files) {
+      const room = this.room();
+      return files.filter(file => room.mode !== 'sparse' || !this.carryProtected(room, file))
+        .map(file => copy(room.local[file.filepath])).filter(Boolean);
     }
     stageLocalSave(batch) { this.stagedSaves.set(batch.jobId, batch); }
     withLocalWrite(action) {
@@ -88,8 +130,10 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, language, source, files, workspace }) {
+    async connect({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree }) {
+      if (archive) return this.connectSparse({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree });
       this.disconnect(); this.destroyed = false;
+      this.baselineStates = null; this.baselineTree = null; this.archive = null;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
       let manifest, sourceHash;
@@ -152,13 +196,83 @@
       }
       return this.snapshot();
     }
+    async connectSparse({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree }) {
+      this.disconnect(); this.destroyed = false;
+      if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
+      const epoch = this.epoch;
+      archive = await P.finalizeArchive(archive);
+      if (epoch !== this.epoch) throw staleError();
+      if (!Array.isArray(baselineSource) || baselineSource.length !== archive.descriptionCount
+        || baselineTree?.version !== 1 || baselineTree.root !== archive.treeRoot || baselineTree.paths?.length !== archive.descriptionCount) throw new Error('The imported baseline cache is unavailable. Import the original ZIP again.');
+      const manifest = P.manifest(baselineSource);
+      this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
+      this.baselineFiles = new Map(baselineSource.map(file => [file.filepath, file]));
+      this.sourceFiles = new Map(manifest.files.map(file => [file.filepath, file]));
+      this.baselineStates = byPath(baselineSource.map(file => fileState({ filepath: file.filepath,
+        translations: (file.translations?.[language] || []).slice(0, file.translations.English.length) }, file.translations.English.length)));
+      const identity = { accountId: String(accountId), game, sourceHash: archive.baselineId, language };
+      this.key = scopeKey(identity); this.context = this.getContext();
+      // Resolve the tiny descriptor before creating or altering durable room state.
+      const canonical = await this.api('/archives/resolve', { method: 'POST', body: { game, archive } }, epoch);
+      const known = await P.finalizeArchive(canonical.archive || canonical);
+      if (!P.equal(known, archive)) {
+        this.onCanonicalArchive(copy(known));
+        throw Object.assign(new Error('This original ZIP already has an agreed import configuration.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: known });
+      }
+      const incoming = files.map(file => {
+        const original = this.sourceFiles.get(file.filepath);
+        if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
+        return fileState(file, original.english.length);
+      });
+      await this.update((state, room) => {
+        if (!room) room = state.rooms[this.key] = { mode: 'sparse', identity, archive: copy(archive),
+          manifest: { version: 2, files: manifest.files.map(file => ({ filepath: file.filepath, entryCount: file.english.length })) }, roomId: null, sequence: 0,
+          shared: {}, local: {}, outbox: [], conflicts: [], recovery: [], carries: {}, initialized: false };
+        if (room.mode !== 'sparse' || room.archive.baselineId !== archive.baselineId) throw new Error('The stored collaboration baseline differs.');
+        room.carries ||= {};
+        for (const yours of incoming) {
+          if (!yours.trackedForExport) {
+            if (yours.needsReview) {
+              if (!P.equal(room.carries[yours.filepath]?.translations, yours.translations) && room.carryRevisions) delete room.carryRevisions[yours.filepath];
+              room.carries[yours.filepath] = copy(yours);
+            }
+            continue;
+          }
+          const previous = room.local[yours.filepath] || this.baselineStates[yours.filepath];
+          if (contentEqual(yours, previous)) continue;
+          room.recovery.push({ id: this.uuid(), at: Date.now(), reason: 'Local edited translation before joining', files: [copy(yours)] });
+          room.outbox.push({ id: this.uuid(), origin: 'merge', kind: 'join', status: 'pending', files: [{ base: copy(previous), yours: copy(yours) }] });
+        }
+        this.rebuild(room);
+      }, { version: game, projectWorkspace: stored => {
+        const current = copy(stored || workspace);
+        if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
+        current.sourceHash = identity.sourceHash; current.collaborationAccountId = identity.accountId;
+        return current;
+      } }, epoch);
+      try { await this.initializeRoom(epoch); await this.retry(); }
+      catch (error) {
+        if (error.stale || !this.current(epoch)) throw staleError();
+        if (error.code === 'ARCHIVE_CONFIG_MISMATCH') throw error;
+        this.handleError(error); if (!transient(error)) throw error;
+      }
+      return this.snapshot();
+    }
     async initializeRoom(epoch) {
       const room = this.room();
       const identity = { game: room.identity.game, sourceHash: room.identity.sourceHash, language: room.identity.language };
       let snapshot;
+      if (room.mode === 'sparse') {
+        snapshot = await this.api('/join', { method: 'POST', body: { ...identity, archive: room.archive } }, epoch);
+        if (snapshot.archive && snapshot.archive.baselineId !== room.archive.baselineId) throw Object.assign(new Error('The agreed import configuration changed.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: snapshot.archive });
+        await this.acceptSnapshot(snapshot, epoch, !room.initialized || snapshot.sequence < room.sequence);
+        this.startPresence(epoch); return;
+      }
       try { snapshot = await this.api('/join', { method: 'POST', body: identity }, epoch); }
       catch (error) {
         if (error.status !== 404) throw error;
+        if (!this.allowLegacySeed) throw Object.assign(new Error('Reimport the original upstream ZIP to enable collaboration. Your local translations and history are preserved.'),
+          { status: 409, code: 'UPSTREAM_ZIP_REQUIRED' });
         let upload = room.seedUpload;
         if (!upload || (upload.expiresAt && upload.expiresAt <= Date.now())) {
           const ticket = await this.api('/uploads', { method: 'POST', body: identity }, epoch);
@@ -212,7 +326,9 @@
         for (const file of files) if (statuses[file.filepath]) latest.status[file.filepath] = {
           ...(latest.status[file.filepath] || {}), ...statuses[file.filepath],
         };
-        const projected = this.projectWorkspace(latest, files.map(file => room.local[file.filepath]).filter(Boolean), identity.language, source, { mutate: true });
+        const effective = files.filter(file => room.mode !== 'sparse' || !this.carryProtected(room, file))
+          .map(file => room.local[file.filepath]).filter(Boolean);
+        const projected = this.projectWorkspace(latest, effective, identity.language, source, { mutate: true });
         projected.sourceHash = identity.sourceHash; projected.collaborationAccountId = identity.accountId;
         return projected;
       };
@@ -220,7 +336,7 @@
     rebuild(room) {
       room.local = copy(room.shared);
       for (const operation of room.outbox) for (const entry of operation.files) {
-        const shared = room.local[entry.yours.filepath];
+        const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
         room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
       }
       for (const conflict of room.conflicts) {
@@ -234,7 +350,8 @@
       if (!snapshot?.roomId || !Array.isArray(snapshot.files)) throw new Error('Invalid collaboration snapshot.');
       const files = snapshot.files.map(file => fileState(file));
       await this.update((state, room) => {
-        if (initial) {
+        if (room.mode === 'sparse') this.preserveCarried(room, files);
+        else if (initial) {
           const local = copy(room.local);
           room.recovery.push({ at: Date.now(), reason: 'Before joining shared workspace', files: Object.values(local) });
           const pendingPaths = new Set(room.outbox.flatMap(op => op.files.map(entry => entry.yours.filepath)));
@@ -252,12 +369,18 @@
         }
         room.roomId = snapshot.roomId;
         room.shared = byPath(files);
+        if (room.mode === 'sparse') {
+          room.outbox = room.outbox.filter(operation => operation.kind !== 'join'
+            || !operation.files.every(entry => contentEqual(entry.yours, room.shared[entry.yours.filepath])));
+          const pending = new Set(room.outbox.map(operation => operation.id));
+          room.conflicts = room.conflicts.filter(conflict => pending.has(conflict.mutationId));
+        }
         room.sequence = snapshot.sequence || 0;
         room.initialized = true;
         delete room.seedUpload;
         this.rebuild(room);
       }, { projectWorkspace: this.projection(files, epoch) }, epoch);
-      this.onRemote(copy(Object.values(this.room().local)));
+      this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...files, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
     }
     async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, waitForSync = true }) {
       const epoch = this.epoch; const room = this.room();
@@ -269,11 +392,22 @@
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
         return fileState(file, original.english.length);
       });
+      if (room.mode === 'sparse' && restore?.eventId?.startsWith('local-baseline:')) {
+        const filepath = decodeURIComponent(restore.eventId.slice('local-baseline:'.length));
+        if (normalized.length !== 1 || normalized[0].filepath !== filepath || restore.version !== 'after'
+          || !P.equal(normalized[0].translations, this.baselineStates[filepath]?.translations)) throw new Error('Invalid imported baseline restore.');
+        restore = undefined;
+      }
       if (new Set(normalized.map(file => file.filepath)).size !== normalized.length) throw new Error('A save contains duplicate files.');
       if (restore && (normalized.length !== 1 || !restore.eventId || !['before', 'after'].includes(restore.version))) throw new Error('Invalid shared history restore.');
       await this.update((state, current) => {
+        for (const file of normalized) if (!file.needsReview && current.carries) {
+          delete current.carries[file.filepath];
+          if (current.carryRevisions) delete current.carryRevisions[file.filepath];
+        }
         current.outbox.push({ id: mutationId, origin, ...(restore ? { restore: { ...copy(restore), translations: copy(normalized[0].translations) } } : {}), status: 'pending', files: normalized.map(yours => ({
-          base: copy(Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath] || null), yours })) });
+          base: copy(Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath]
+            || (current.mode === 'sparse' && this.baselineStates[yours.filepath]) || null), yours })) });
         for (const yours of normalized) current.local[yours.filepath] = copy(yours);
       }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
         collaborationAccountId: room.identity.accountId })), projectWorkspace: this.projection(normalized, epoch, workspace) }, epoch);
@@ -374,12 +508,13 @@
           await this.update((state, current) => {
             for (const event of events) {
               if (event.sequence <= current.sequence) continue;
+              this.preserveCarried(current, event.files || []);
               for (const file of event.files || []) if (!current.shared[file.filepath] || file.revision >= current.shared[file.filepath].revision) current.shared[file.filepath] = fileState(file);
               current.sequence = event.sequence;
             }
             this.rebuild(current);
           }, { projectWorkspace: this.projection(changed, epoch) }, epoch);
-          this.onRemote(changed.map(file => copy(this.room().local[file.filepath])));
+          this.onRemote(this.remoteFiles(changed));
         }
         more = result.hasMore;
         if (more && !events.length) throw new Error('Collaboration change cursor did not advance.');
@@ -408,6 +543,7 @@
             const accepted = result.files || result.snapshot?.files;
             if (!Array.isArray(accepted)) throw new Error('Mutation response has no committed file states.');
             await this.update((state, room) => {
+              this.preserveCarried(room, accepted);
               for (const file of accepted) if (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision) room.shared[file.filepath] = fileState(file);
               room.outbox = room.outbox.filter(item => item.id !== id);
               room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id);
@@ -415,7 +551,7 @@
               // the replay cursor here. Only ordered catch-up events can do that.
               this.rebuild(room);
             }, { projectWorkspace: this.projection(accepted, epoch) }, epoch);
-            this.onRemote(accepted.map(file => copy(this.room().local[file.filepath])));
+            this.onRemote(this.remoteFiles(accepted));
             break;
           } catch (error) {
             if (error.status !== 409 || (error.code && error.code !== 'REVISION_CONFLICT')) throw error;
@@ -439,7 +575,7 @@
         const files = []; const conflicts = [];
         let incorporatedRemoteEntries = false;
         for (const entry of op.files) {
-          const shared = room.shared[entry.yours.filepath];
+          const shared = room.shared[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
           const merged = mergeFile(entry.base, entry.yours, shared);
           if (entry.base && !P.equal(merged.file.translations, entry.yours.translations)) incorporatedRemoteEntries = true;
           // Confirm unchanged approves the exact translation the reviewer saw.
@@ -452,7 +588,9 @@
           if (merged.conflict) conflicts.push({ id: id + ':' + shared.filepath, mutationId: id, filepath: shared.filepath,
             kind: op.kind || 'edit', base: copy(entry.base), yours: copy(entry.yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
-            needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport });
+            needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
+            ...(room.mode === 'sparse' && shared.revision === 0 ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
+              proof: P.baselineProof(this.baselineTree, shared.filepath) } : {}) });
         }
         room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id).concat(conflicts);
         if (conflicts.length) op.status = 'conflict';
@@ -490,7 +628,7 @@
       if (options.sharedRevision != null && options.sharedRevision !== observed.shared.revision) return { status: 'conflict', mutationId: observed.mutationId };
       try { await this.catchUp(epoch); } catch (error) { if (!transient(error)) throw error; }
       const chosen = fileState(Array.isArray(resolution) ? { ...observed.yours, translations: resolution } : { ...observed.yours, ...resolution });
-      const source = this.room().manifest.files.find(file => file.filepath === chosen.filepath);
+      const source = this.sourceFiles.get(chosen.filepath);
       if (chosen.translations.length !== source.english.length) throw new Error('Resolve every translation entry before saving.');
       let renewed = false;
       await this.update((state, room) => {
@@ -498,7 +636,7 @@
         if (!conflict) throw new Error('This comparison has already changed.');
         const op = room.outbox.find(item => item.id === conflict.mutationId);
         const entry = op.files.find(item => item.yours.filepath === conflict.filepath);
-        const shared = room.shared[conflict.filepath];
+        const shared = room.shared[conflict.filepath] || (room.mode === 'sparse' && this.baselineStates[conflict.filepath]);
         const merged = mergeFile(observed.shared, chosen, shared);
         if (!merged.conflict && op.kind === 'join' && op.files.length === 1 && contentEqual(merged.file, shared)) {
           room.outbox = room.outbox.filter(item => item.id !== op.id);
@@ -533,9 +671,25 @@
       if (!this.room()?.roomId) return { events: [], hasMore: false };
       const params = new URLSearchParams({ filepath, limit: String(options.limit || 50) });
       if (options.cursor || options.before) params.set('cursor', String(options.cursor || options.before));
-      return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history?' + params);
+      const result = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history?' + params);
+      if (this.room().mode !== 'sparse' || result.nextCursor || result.nextBefore || result.hasMore) return result;
+      const baseline = this.baselineHistory(filepath);
+      return { ...result, items: [...(result.items || []), ...(baseline ? [baseline] : [])] };
     }
-    historyEntry(id) { return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id)); }
+    baselineHistory(filepath) {
+      const state = this.baselineStates?.[filepath];
+      if (!state || this.room()?.mode !== 'sparse') return null;
+      return { id: 'local-baseline:' + encodeURIComponent(filepath), local: true, origin: 'imported_baseline', actorName: 'Original ZIP',
+        filepath, revision: 0, currentRevision: this.sharedBase(filepath).revision, before: null, after: copy(state), current: this.sharedBase(filepath) };
+    }
+    recoveryFiles(filepath) {
+      return copy((this.room()?.recovery || []).flatMap(entry => (entry.files || []).filter(file => file.filepath === filepath)
+        .map(file => ({ ...file, recoveryId: entry.id, savedAt: entry.at, note: entry.reason }))));
+    }
+    historyEntry(id) {
+      if (this.room()?.mode === 'sparse' && id.startsWith('local-baseline:')) return Promise.resolve(this.baselineHistory(decodeURIComponent(id.slice('local-baseline:'.length))));
+      return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id));
+    }
     openSocket(epoch) {
       if (!this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
       if (this.socketOpening?.epoch === epoch) return this.socketOpening.promise;

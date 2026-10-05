@@ -183,7 +183,12 @@
 
   // The source identity must advance in the same durable commit as the imported
   // workspace. Collaboration queues retain their own old source/account scope.
-  async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version) {
+  function importedBaselineKey(id, version) {
+    if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) throw new TypeError('Invalid imported baseline identity');
+    return 'import_baseline_' + normalizeGameVersion(version) + '_' + id;
+  }
+
+  async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version, baseline) {
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
     const revisionsStore = revisionStoreName(gameVersion);
@@ -194,6 +199,10 @@
       const kv = tx.objectStore(STORE_KV);
       kv.put({ key: sourceKey(gameVersion), value: source });
       kv.put({ key: workspaceKey(gameVersion), value: workspace });
+      if (baseline) {
+        if (baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
+        kv.put({ key: importedBaselineKey(baseline.archive.baselineId, gameVersion), value: baseline });
+      }
       for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
     } catch (error) {
       try { tx.abort(); } catch (_) {}
@@ -291,10 +300,11 @@
           const originals = new Map((room.manifest?.files || []).map(file => [file.filepath, file]));
           for (const file of files) {
             const original = originals.get(file.filepath);
-            if (!original || file.translations.length > original.english.length) {
+            const entryCount = original?.entryCount ?? original?.english?.length;
+            if (!original || !Number.isSafeInteger(entryCount) || file.translations.length > entryCount) {
               throw new Error('Saved file does not match the source: ' + file.filepath);
             }
-            while (file.translations.length < original.english.length) file.translations.push('');
+            while (file.translations.length < entryCount) file.translations.push('');
           }
           if (collaboration.restore && (files.length !== 1 || !collaboration.restore.eventId
             || !['before', 'after'].includes(collaboration.restore.version))) throw new Error('Invalid shared history restore.');
@@ -305,7 +315,13 @@
             files: files.map(yours => ({ base: clone(Object.hasOwn(collaboration.bases || {}, yours.filepath)
               ? collaboration.bases[yours.filepath] : room.local[yours.filepath] || null), yours: clone(yours) })) };
           room.outbox.push(operation);
-          for (const file of files) room.local[file.filepath] = clone(file);
+          for (const file of files) {
+            room.local[file.filepath] = clone(file);
+            if (room.mode === 'sparse' && !file.needsReview) {
+              if (room.carries) delete room.carries[file.filepath];
+              if (room.carryRevisions) delete room.carryRevisions[file.filepath];
+            }
+          }
         }
         for (const file of files) {
           const template = templates.get(file.filepath);
@@ -527,6 +543,7 @@
     setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
+    getImportedBaseline: (id, version) => kvGet(importedBaselineKey(id, version)),
     saveTranslationBatch,
     getCollaborationState: () => kvGet('collaboration_v1'),
     updateCollaborationState,

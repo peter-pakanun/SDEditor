@@ -82,7 +82,7 @@ function browserControls(account, secret, settings) {
     return { filepath: 'fixture/stat_' + number + '.txt', filedir: 'fixture', filename: 'stat_' + number + '.txt', name: '',
       stats: ['fixture_stat_' + number], variables: english.map(() => '#'), remarks: english.map(() => ''),
       translations: { English: english, Thai: thai },
-      isMissing: false, isDNT: false, hasChanges: true, needsReview: false };
+      isMissing: false, isDNT: false, hasChanges: false, needsReview: false };
   });
   button('Bootstrap translator ' + account.toUpperCase(), async () => {
     const vm = await ready();
@@ -94,9 +94,16 @@ function browserControls(account, secret, settings) {
     await vm._cloud.acceptLogin(await response.json());
     await vm.cloudApply(vm._cloud.snapshot());
     const source = JSON.parse(JSON.stringify(seed));
-    const workspace = { descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: 0, sourceHash: await CollaborationProtocol.sourceHash(source) };
-    await OfflineStore.setSource(source, 'poe1');
-    await OfflineStore.setWorkspace(workspace, 'poe1');
+    const zip = new JSZip();
+    for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
+    const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+    const tree = await CollaborationProtocol.buildBaselineTree(source);
+    const archive = await CollaborationProtocol.finalizeArchive({ version: 1, zipHash: await CollaborationProtocol.zipHash(bytes),
+      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)), tree };
+    const workspace = { descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: bytes.byteLength,
+      sourceHash: archive.baselineId, importArchive: archive };
+    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], 'poe1', baseline);
     await OfflineStore.setMigratedFromSingleVersion(true);
     vm.showSetting = false; vm.needsInitialSettings = false;
     await vm.activateGameVersion('poe1', { checkMigration: false });
