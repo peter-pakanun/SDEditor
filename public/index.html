@@ -637,7 +637,7 @@
       </div>
 
       <div class="side fixed" ref="editorSide" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup' }">
-        <div class="twoSided sideHeader">
+        <div class="sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
             <button type="button" class="tabBtn lookupTab" :class="{ active: sideTab === 'lookup' }" @click="openEditorLookup" :aria-pressed="sideTab === 'lookup'" aria-controls="editorLookupPanel"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg> Lookup</button>
@@ -645,15 +645,17 @@
             <button class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
             <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
           </div>
+          <div v-if="sideTab === 'dictionary'" class="dictionaryControls sideControls">
+            <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
+            <div class="dictionaryPagination sidePagination" aria-label="Dictionary pages">
+              <span><template v-if="editorReady">{{ dictionaryRangeLabel }} · Matches in this file first</template><template v-else>&nbsp;</template></span>
+              <button type="button" @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="!editorReady || dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
+              <button type="button" @click="setDictionaryPage(dictionaryPage + 1)" :disabled="!editorReady || dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
+            </div>
+          </div>
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
-          <div class="dictionaryPagination" aria-label="Dictionary pages">
-            <span><template v-if="editorReady">{{ dictionaryRangeLabel }} · Matches in this file first</template><template v-else>&nbsp;</template></span>
-            <button @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="!editorReady || dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
-            <button @click="setDictionaryPage(dictionaryPage + 1)" :disabled="!editorReady || dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
-          </div>
           <div class="editBlock" v-for="word in visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
             <div class="twoSided dictEntryBlock">
               <div>
@@ -701,7 +703,7 @@
         </div>
 
         <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
-          <div class="lookupControls">
+          <div class="lookupControls sideControls">
             <div class="sideSearchRow">
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
               <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
@@ -711,7 +713,7 @@
               <label for="editorLookupLanguage">Reference language<select id="editorLookupLanguage" v-model="lookupLanguage"><option value="">{{ lang }} (editor language)</option><option v-for="language in lookupLanguages" :key="language" :value="language">{{ language }}</option></select></label>
               <label for="editorLookupScope">Search in<select id="editorLookupScope" v-model="lookupScope"><option value="all">All text</option><option value="path">Filename / stat</option><option value="english">English</option><option value="translation">Translation</option></select></label>
             </div>
-            <div class="lookupPagination" aria-label="Reference result pages">
+            <div class="lookupPagination sidePagination" aria-label="Reference result pages">
               <span role="status">{{ lookupRangeLabel }}</span>
               <button type="button" @click="lookupGoToPage(lookupPage - 1)" :disabled="lookupPage <= 1" aria-label="Previous reference results">Previous</button>
               <button type="button" @click="lookupGoToPage(lookupPage + 1)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results">Next</button>
@@ -724,7 +726,8 @@
               <span class="lookupResultEnglish" lang="en"><template v-for="(part, pi) in result.englishParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.englishPreview">(No English text)</template></span>
               <span :lang="lookupReferenceBcp47"><template v-for="(part, pi) in result.translationParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.translationPreview">(No translation)</template></span>
             </button>
-            <p v-if="!lookupResultCount" class="lookupEmpty">No reference files match. Try another search or language.</p>
+            <p v-if="!lookupHasAppliedQuery" class="lookupEmpty">Enter a query to search reference files.</p>
+            <p v-else-if="!lookupResultCount" class="lookupEmpty">No reference files match. Try another search or language.</p>
           </div>
           <section class="lookupReference" ref="lookupReference" tabindex="0" aria-label="Selected reference">
             <template v-if="lookupSelectedReference">

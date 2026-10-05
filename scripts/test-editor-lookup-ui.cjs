@@ -177,6 +177,7 @@ test('reference language and selection leave saved text, editor language, and dr
   editor.editorBlocks = [{ english: 'Blade damage', translation: 'Unsaved translation' }];
   editor.sideTab = 'lookup';
   const before = JSON.stringify({ descs: editor.descs, localDescs: editor.localDescs, blocks: editor.editorBlocks });
+  editor.lookupQuery = 'reference'; editor.lookupApplySearch();
   editor.lookupSelect(reference.filepath);
   editor.lookupLanguage = 'French';
   window.EditorLookup.mixin.watch.lookupLanguage.call(editor);

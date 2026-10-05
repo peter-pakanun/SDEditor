@@ -10,7 +10,7 @@ function loadLookup(overrides = {}) {
   let searchFocusCount = 0;
   const context = vm.createContext({
     window: {},
-    setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
+    setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'editorLookup.js'), 'utf8'), context);
@@ -28,7 +28,7 @@ function loadLookup(overrides = {}) {
   }
   return {
     model, api, timers,
-    flushTimers() { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } },
+    flushTimers() { for (const [id, timer] of [...timers]) { timers.delete(id); timer.callback(); } },
     searchFocusCount: () => searchFocusCount,
   };
 }
@@ -108,7 +108,7 @@ test('an explicitly empty saved translation does not resurrect the original tran
   const one = description('one', 'English', 'Original Thai');
   const { model } = loadLookup({ descs: [one], localDescs: { descs: [{ filepath: one.filepath, translations: { Thai: [] } }] } });
   assert.deepEqual(search(model, 'original thai'), []);
-  model.lookupClearSearch(); model.lookupSelect(one.filepath);
+  search(model, 'one', 'path'); model.lookupSelect(one.filepath);
   assert.equal(model.lookupSelectedReference.blocks[0].translation, '');
 });
 
@@ -119,7 +119,7 @@ test('language choices include saved references for loaded files and keep editor
     { filepath: 'Unloaded.txt', translations: { Korean: ['한국어'] } },
   ] } });
   assert.deepEqual(Array.from(model.lookupLanguages), ['Thai', 'French', 'Japanese']);
-  model.lookupLanguage = 'Japanese'; model.lookupSelect(one.filepath);
+  model.lookupLanguage = 'Japanese'; search(model, 'one', 'path'); model.lookupSelect(one.filepath);
   assert.equal(model.lookupSelectedReference.blocks[0].translation, '日本語');
   assert.equal(model.lang, 'Thai');
 });
@@ -128,6 +128,7 @@ test('reference preserves every source and translation entry, multiline text, ta
   const one = description('table', ['Left A\\nLeft B@Right A\\nRight B', 'Second English'], ['ซ้าย A\\nซ้าย B@ขวา A\\nขวา B', 'ไทยสอง', 'Extra saved entry']);
   one.variables = ['# #', '1|#']; one.remarks = ['table_only', 'negate 1'];
   const { model } = loadLookup({ descs: [one] });
+  search(model, 'table', 'path');
   model.lookupSelect(one.filepath);
   const reference = model.lookupSelectedReference;
   assert.deepEqual(plain(reference.stats), ['stat_table']);
@@ -156,21 +157,23 @@ test('lookup methods preserve drafts, current editor, persistence, workspace sea
   for (const name of ['editorSave', 'editFile', 'selectFileRow', 'saveLocalDescs', 'persistTranslationBatch', 'applyWorkspaceOverlay']) {
     model[name] = () => assert.fail(`${name} must not be called by read-only lookup`);
   }
-  model.lookupSelect(two.filepath);
+  search(model, 'two', 'path'); model.lookupSelect(two.filepath);
   model.lookupLanguage = 'French'; model.lookupApplySearch();
-  search(model, 'Autre'); model.lookupGoToPage(2); model.lookupClearSearch();
+  search(model, 'Autre'); model.lookupGoToPage(2);
   model.invalidateEditorLookupIndex();
   const reference = model.lookupSelectedReference;
   reference.stats[0] = 'Mutating a copied view';
   reference.blocks[0].translation = 'Copied text';
   reference.blocks[0].translationColumns[0] = 'Copied column';
+  model.lookupClearSearch();
   assert.equal(JSON.stringify(Object.fromEntries(Object.keys(protectedState).map(key => [key, model[key]]))), before);
   assert.deepEqual(search(model, 'Unsaved draft'), []);
 });
 
-test('empty lookup is paginated and safe page navigation clamps invalid input', () => {
+test('matching lookup is paginated and safe page navigation clamps invalid input', () => {
   const descs = Array.from({ length: 45 }, (_, index) => description(String(index)));
   const { model } = loadLookup({ descs });
+  search(model, 'Reference/', 'path');
   assert.equal(model.lookupResultCount, 45);
   assert.equal(model.lookupVisibleResults.length, 20);
   assert.equal(model.lookupRangeLabel, '1–20 of 45');
@@ -185,6 +188,7 @@ test('empty lookup is paginated and safe page navigation clamps invalid input', 
 
 test('lookup browsing state survives switching tabs and closing/reopening the editor', () => {
   const { model, api } = loadLookup({ descs: Array.from({ length: 45 }, (_, i) => description(String(i))) });
+  search(model, 'Reference/', 'path');
   model.lookupGoToPage(3); model.lookupSelect('Reference/40.txt');
   model.sideTab = 'comments';
   api.mixin.watch.lookupPageCount.call(model, model.lookupPageCount);
@@ -201,10 +205,12 @@ test('lookup browsing state survives switching tabs and closing/reopening the ed
 test('query matching is debounced, retains matching selection and clears nonmatching selection', () => {
   const one = description('one', 'Poison damage'); const two = description('two', 'Fire damage');
   const { model, timers, flushTimers } = loadLookup({ descs: [one, two] });
+  search(model, 'damage');
   model.lookupSelect(one.filepath);
   model.lookupQuery = 'po'; model.lookupSearchChanged();
   model.lookupQuery = 'poison'; model.lookupSearchChanged();
   assert.equal(timers.size, 1); assert.equal(model.lookupResultCount, 2);
+  assert.equal([...timers.values()][0].delay, 250);
   flushTimers();
   assert.equal(model.lookupResultCount, 1); assert.equal(model.lookupSelectedFilepath, one.filepath);
   model.lookupQuery = 'fire'; model.lookupSearchChanged(); flushTimers();
@@ -216,7 +222,30 @@ test('clearing search cancels pending matches and focuses the lookup search only
   model.lookupQuery = 'not found'; model.lookupSearchChanged();
   model.lookupClearSearch();
   assert.equal(timers.size, 0); assert.equal(model.lookupAppliedQuery, '');
-  assert.equal(model.lookupResultCount, 1); assert.equal(searchFocusCount(), 1);
+  assert.equal(model.lookupResultCount, 0); assert.equal(searchFocusCount(), 1);
+});
+
+test('empty and whitespace-only queries have no results and clearing cancels pending search immediately', () => {
+  const one = description('one');
+  const { model, api, timers, flushTimers } = loadLookup({ descs: [one] });
+  const untouchedIndex = { filter() { assert.fail('Empty search must not visit index entries'); } };
+  for (const query of ['', ' ', '\t\n', '\\n', '\u00a0']) {
+    assert.deepEqual(plain(api.searchIndex(untouchedIndex, query)), []);
+    assert.deepEqual(search(model, query), []);
+    assert.equal(model.lookupRangeLabel, '0–0 of 0');
+    assert.equal(model.lookupPageCount, 1);
+    assert.equal(model.lookupVisibleResults.length, 0);
+  }
+  search(model, 'english'); model.lookupSelect(one.filepath);
+  model.lookupQuery = 'new query'; model.lookupSearchChanged();
+  assert.equal(timers.size, 1);
+  model.lookupQuery = ' \t'; model.lookupSearchChanged();
+  assert.equal(timers.size, 0);
+  assert.equal(model.lookupResultCount, 0);
+  assert.equal(model.lookupSelectedFilepath, '');
+  assert.equal(model.lookupSelectedReference, null);
+  flushTimers();
+  assert.equal(model.lookupResultCount, 0);
 });
 
 test('text index is lazy and cached across query changes until saved data is invalidated', () => {
@@ -224,9 +253,14 @@ test('text index is lazy and cached across query changes until saved data is inv
   const one = description('one');
   const translations = one.translations;
   Object.defineProperty(one, 'translations', { get() { translationReads++; return translations; } });
-  const { model } = loadLookup({ descs: [one], sideTab: 'dictionary' });
+  const { model, flushTimers } = loadLookup({ descs: [one], sideTab: 'dictionary' });
   assert.equal(model.lookupResultCount, 0); assert.equal(translationReads, 0);
-  model.sideTab = 'lookup'; assert.equal(model.lookupResultCount, 1);
+  model.sideTab = 'lookup'; assert.equal(model.lookupResultCount, 0); assert.equal(translationReads, 0);
+  model.lookupQuery = ' \n'; model.lookupSearchChanged();
+  assert.equal(model.lookupResultCount, 0); assert.equal(translationReads, 0);
+  model.lookupQuery = 'english'; model.lookupSearchChanged();
+  assert.equal(model.lookupResultCount, 0); assert.equal(translationReads, 0);
+  flushTimers(); assert.equal(model.lookupResultCount, 1);
   const initialReads = translationReads;
   search(model, 'english'); search(model, 'one'); model.lookupGoToPage(1);
   assert.equal(translationReads, initialReads);
@@ -239,6 +273,7 @@ test('text index is lazy and cached across query changes until saved data is inv
 test('replacing source, saved workspace, or reference language rebuilds the index', () => {
   const one = description('one'); const two = description('two', 'Fresh source', 'Fresh Thai', { French: ['Français'] });
   const { model } = loadLookup({ descs: [one] });
+  search(model, 'one');
   assert.equal(model.lookupResultCount, 1);
   model.descs = [two]; assert.deepEqual(search(model, 'fresh source'), [two.filepath]);
   model.localDescs = { descs: [{ filepath: two.filepath, translations: { Thai: ['Fresh workspace'] } }] };
@@ -250,6 +285,7 @@ test('replacing source, saved workspace, or reference language rebuilds the inde
 test('refreshing saved reference text updates selected reference and expires vanished matches', () => {
   const one = description('one'); const local = { filepath: one.filepath, translations: { Thai: ['Old text'] } };
   const { model, api } = loadLookup({ descs: [one], localDescs: { descs: [local] } });
+  search(model, 'one', 'path');
   model.lookupSelect(one.filepath); assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Old text');
   local.translations.Thai = ['Updated text']; model.invalidateEditorLookupIndex();
   assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Updated text');
@@ -272,6 +308,7 @@ test('result excerpts show a later matching passage and reference keeps the comp
 test('changing result or page resets only its own scroll and leaves focus in place', () => {
   const descs = Array.from({ length: 21 }, (_, i) => description(String(i)));
   const { model, searchFocusCount } = loadLookup({ descs });
+  search(model, 'Reference/', 'path');
   model.$refs.lookupReference.scrollTop = 250; model.lookupSelect(descs[0].filepath);
   assert.equal(model.$refs.lookupReference.scrollTop, 0);
   model.$refs.lookupReference.scrollTop = 200; model.lookupSelect(descs[0].filepath);
@@ -341,8 +378,7 @@ test('visible result highlights follow the applied query and scope, including ma
   assert.deepEqual(marked(result.filepathParts), ['FireBlade.txt']);
   assert.deepEqual(marked(result.statsParts), ['stat_FireBlade']);
   model.lookupClearSearch();
-  result = model.lookupVisibleResults[0];
-  for (const field of ['filepathParts', 'englishParts', 'translationParts', 'statsParts']) assert.deepEqual(marked(result[field]), []);
+  assert.deepEqual(Array.from(model.lookupVisibleResults), []);
 });
 
 test('result excerpts keep highlights visible after normalized prefixes, across blocks and when clipped', () => {

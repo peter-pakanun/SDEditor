@@ -1,8 +1,9 @@
 /* Read-only references inside the editor. The index reads saved/source descriptions,
- * never the open translation draft, and is built only while Lookup is visible. */
+ * never the open translation draft, and is built only for a nonempty search
+ * while Lookup is visible. */
 (() => {
   const PAGE_SIZE = 20;
-  const SEARCH_DELAY = 120;
+  const SEARCH_DELAY = 250;
   const caches = new WeakMap();
   const asLines = value => Array.isArray(value) ? value.map(line => String(line ?? '')) : [];
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
@@ -111,7 +112,7 @@
 
   function searchIndex(index, query, scope = 'all') {
     const needle = foldText(query);
-    if (!needle) return index;
+    if (!needle) return [];
     return index.filter(entry => {
       if (scope === 'path') return entry.pathText.includes(needle);
       if (scope === 'english') return entry.englishText.includes(needle);
@@ -152,6 +153,7 @@
     },
     computed: {
       lookupActiveLanguage() { return this.lookupLanguage || this.lang || ''; },
+      lookupHasAppliedQuery() { return !!foldText(this.lookupAppliedQuery); },
       lookupLanguages() {
         // Only keys are inspected here. The text index remains lazy.
         this.lookupRevision;
@@ -167,8 +169,8 @@
         return [...languages].sort((a, b) => a === this.lang ? -1 : b === this.lang ? 1 : a.localeCompare(b));
       },
       lookupResults() {
-        // Closing the editor or using another side tab does no indexing work.
-        if (!this.editorVisible || this.sideTab !== 'lookup') return [];
+        // Wait for an applied nonempty query before indexing the corpus.
+        if (!this.editorVisible || this.sideTab !== 'lookup' || !this.lookupHasAppliedQuery) return [];
         const revision = this.lookupRevision;
         const lang = this.lookupActiveLanguage;
         const source = this.descs;
@@ -247,6 +249,10 @@
       },
       lookupSearchChanged() {
         clearTimeout(this._editorLookupSearchTimer);
+        if (!foldText(this.lookupQuery)) {
+          this.lookupApplySearch();
+          return;
+        }
         this._editorLookupSearchTimer = setTimeout(() => this.lookupApplySearch(), SEARCH_DELAY);
       },
       lookupApplySearch() {
