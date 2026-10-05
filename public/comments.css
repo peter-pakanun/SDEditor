@@ -1,4 +1,4 @@
-/* File discussions are shared by game and path; they do not change translation rooms. */
+/* File discussions include language-specific and global comments without changing translation rooms. */
 .commentsIconButton, .commentsTab { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
 .commentsIconButton { flex: none; width: 38px; height: 38px; padding: 8px; border-radius: 50%; }
 .commentsIconButton.active { background: var(--ui-accent-soft); }
@@ -25,7 +25,7 @@
 .commentByline, .commentMeta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; }
 .commentByline { font-size: 13px; }
 .commentByline strong { font-weight: 650; }
-.commentLanguage { border: 1px solid var(--ui-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--ui-muted); }
+.commentLanguage, .commentScope { border: 1px solid var(--ui-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--ui-muted); }
 .commentUnreadLabel { display: inline-block; flex: none; padding: 1px 6px; border-radius: 4px; background: #c52f3f; color: #fff; font-size: 10px; font-weight: 650; line-height: 1.5; }
 .commentMeta { color: var(--ui-muted); font-size: 11px; margin-top: 6px; }
 .commentVersionIcon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; color: #e0b923; cursor: help; }
@@ -35,8 +35,8 @@
 .commentFileLink { display: block; text-align: left; width: 100%; margin-bottom: 10px; padding: 0; border: 0; background: transparent; color: var(--ui-accent); font: 600 12px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .commentFileLink:disabled { opacity: .8; color: var(--ui-muted); cursor: default; }
 .commentFileGroup > .commentFileLink { box-sizing: border-box; margin: 0; padding: 13px; border-bottom: 1px solid var(--ui-border); border-radius: 8px 8px 0 0; }
-.commentsQuickReply { display: flex; align-items: center; gap: 6px; margin: 0; padding: 10px 12px; border-top: 1px solid var(--ui-border); }
-.commentsQuickReply input { flex: 1; min-width: 0; width: 100%; height: 32px; box-sizing: border-box; padding: 5px 8px; font-size: 12px; }
+.commentsQuickReply { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; padding: 10px 12px; border-top: 1px solid var(--ui-border); }
+.commentsQuickReply input[type="text"] { flex: 1; min-width: 0; width: 100%; height: 32px; box-sizing: border-box; padding: 5px 8px; font-size: 12px; }
 .commentsSendReply { display: grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; border-radius: 5px; }
 .commentsSendReply svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .commentFileGroup .commentReplyError { padding: 0 12px 10px; }
@@ -51,8 +51,10 @@
 .commentsComposer label { display: block; margin-bottom: 6px; font-size: 13px; }
 .commentsComposer label span { color: var(--ui-muted); }
 .commentsComposer textarea { box-sizing: border-box; width: 100%; min-height: 72px; max-height: 160px; resize: vertical; line-height: 1.5; }
-.commentsComposerActions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
-.commentsComposerActions > span { font-size: 11px; color: var(--ui-muted); }
+.commentsComposerActions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+.commentsQuickReply .commentsScopeOption, .commentsComposer .commentsScopeOption { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; cursor: pointer; }
+.commentsQuickReply .commentsScopeOption { flex-basis: 100%; margin-top: 0; }
+.commentsScopeOption input[type="checkbox"] { flex: none; width: auto; height: auto; margin: 0; padding: 0; }
 .commentsComposer .commentsError, .commentsComposer .commentsEmpty { padding: 5px 0; }
 :is(.commentsSidebar, .fileCommentsPanel) :is(button, input, textarea, [tabindex]):focus-visible, .commentsIconButton:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 @media (max-width: 1100px) {

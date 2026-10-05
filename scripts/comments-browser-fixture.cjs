@@ -83,8 +83,12 @@ function browserControls(account, language, secret) {
     status.textContent = language + ' ready · 25 files · comments across three teams and two hashes.';
   });
   button('Add German comment', async () => {
-    await fixtureRequest('remote-comment');
-    status.textContent = 'New German comment added to PoE1 / fixture/stat_01.txt. It will appear automatically within 20 seconds.';
+    await fixtureRequest('remote-comment', { allLanguages: true });
+    status.textContent = 'New German comment for all languages added to PoE1 / fixture/stat_01.txt. It will appear automatically within 20 seconds.';
+  });
+  button('Add German-only comment', async () => {
+    await fixtureRequest('remote-comment', { allLanguages: false });
+    status.textContent = 'New German-only comment added to PoE1 / fixture/stat_01.txt. Only the German editor should show it or count it as unread.';
   });
   button('Remove assignment', async () => {
     await fixtureRequest('assignment', { assigned: false });
@@ -151,7 +155,7 @@ function browserControls(account, language, secret) {
   if (!comments) throw new Error('Comments API is unavailable. Update the sibling SDEditor-API checkout before running this fixture.');
   const sources = [sourceFiles(), sourceFiles(true)];
   const hashes = await Promise.all(sources.map(source => sourceHash(source)));
-  const createComment = (account, game, filepath, hashIndex, body) => comments.create('comments-' + account, { game, filepath, sourceHash: hashes[hashIndex], body, mutationId: randomUUID() });
+  const createComment = (account, game, filepath, hashIndex, body) => comments.create('comments-' + account, { game, filepath, sourceHash: hashes[hashIndex], body, allLanguages: true, mutationId: randomUUID() });
   for (let index = 1; index <= 55; index++) {
     const team = teams[(index - 1) % teams.length];
     createComment(team.account, 'poe1', 'fixture/stat_01.txt', index % 2,
@@ -183,9 +187,11 @@ function browserControls(account, language, secret) {
       res.json({ assigned: req.body.assigned });
     });
     frontend.post('/fixture/remote-comment', async (req, res) => {
+      if (req.body.allLanguages !== undefined && typeof req.body.allLanguages !== 'boolean') return res.status(400).json({ error: 'allLanguages must be boolean' });
       try {
+        const allLanguages = req.body.allLanguages !== false;
         const response = await fetch(apiOrigin + '/v1/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + remoteSession.token },
-          body: JSON.stringify({ game: 'poe1', filepath: 'fixture/stat_01.txt', sourceHash: hashes[1], body: 'A fresh German comment from another source hash.\nAdded with the fixture control at ' + new Date().toISOString(), mutationId: randomUUID() }) });
+          body: JSON.stringify({ game: 'poe1', filepath: 'fixture/stat_01.txt', sourceHash: hashes[1], body: 'A fresh ' + (allLanguages ? 'global' : 'German-only') + ' comment from another source hash.\nAdded with the fixture control at ' + new Date().toISOString(), allLanguages, mutationId: randomUUID() }) });
         const result = await response.json();
         if (!response.ok) return res.status(response.status).json({ error: result?.error?.message || 'Remote comment failed' });
         res.json({ ok: true });

@@ -439,7 +439,7 @@
       </footer>
       <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc="!$event.isComposing && $event.keyCode !== 229 && ($event.preventDefault(), commentsCloseAll())">
         <header class="commentsPanelHeader">
-          <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · All languages and source versions</p></div>
+          <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }} · {{ cloudUser?.language || 'Your language' }} + global · All source versions</p></div>
           <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"></path></svg></button>
         </header>
         <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
@@ -450,13 +450,14 @@
             <section v-for="group in commentsAllGroups" :key="group.filepath" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
               <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!getDescByFilepath(group.filepath) || navigationBusy" :title="getDescByFilepath(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ group.filepath }}</button>
               <article v-for="comment in group.items" :key="comment.id" class="commentGroupEntry" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span></div>
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage" title="Author's team language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
               <form class="commentsQuickReply" :aria-label="'Reply to ' + group.filepath" :aria-busy="commentsReplyPosting(group.filepath)" @submit.prevent="commentsSubmitReply(group.filepath)">
                 <input type="text" :value="commentsReplyDraft(group.filepath)" @input="commentsSetReplyDraft(group.filepath, $event.target.value)" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()" placeholder="Reply..." maxlength="10000" :aria-label="'Reply to ' + group.filepath" :disabled="!commentsCanReply(group.filepath)" :title="!sourceIdentity ? 'Load a source version to reply.' : ''">
                 <button type="submit" class="commentsSendReply btnPrimary" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath) || !commentsReplyDraft(group.filepath).trim()" :aria-label="(commentsReplyPosting(group.filepath) ? 'Sending reply to ' : 'Send reply to ') + group.filepath" :title="commentsReplyPosting(group.filepath) ? 'Sending reply…' : 'Send reply'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 3 18 9-18 9 4-9-4-9Z"></path><path d="M7 12h14"></path></svg></button>
+                <label class="commentsScopeOption"><input type="checkbox" :checked="commentsReplyAllLanguages(group.filepath)" @change="commentsSetReplyAllLanguages(group.filepath, $event.target.checked)" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath)">Post to all languages</label>
               </form>
               <p v-if="commentsReplyError(group.filepath)" class="commentsError commentReplyError" role="alert">{{ commentsReplyError(group.filepath) }}</p>
             </section>
@@ -740,14 +741,14 @@
         </section>
 
         <section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
-          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>Shared across all languages and source versions</p></div></header>
+          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p><p>{{ cloudUser?.language || 'Your language' }} + global · All source versions</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
           <template v-else>
             <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
             <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
             <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
               <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage">{{ comment.language }}</span></div>
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage" title="Author's team language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
@@ -756,10 +757,11 @@
             </div>
             <form class="commentsComposer" @submit.prevent="commentsSubmit">
               <label for="fileCommentDraft">Add a comment <span>· {{ cloudUser.language }}</span></label>
-              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" placeholder="Share your thoughts with all translators…" :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
+              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" placeholder="Share your thoughts…" :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
+              <label class="commentsScopeOption"><input type="checkbox" v-model="commentsFileAllLanguages" :disabled="!commentsCanPost || commentsPosting">Post to all languages</label>
               <p v-if="!sourceIdentity" class="commentsEmpty">Load a source version to post a comment.</p>
               <p v-if="commentsPostError" class="commentsError" role="alert">{{ commentsPostError }}</p>
-              <div class="commentsComposerActions"><span>Ctrl+Enter to post</span><button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button></div>
+              <div class="commentsComposerActions"><button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button></div>
             </form>
           </template>
         </section>

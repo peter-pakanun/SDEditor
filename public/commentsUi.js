@@ -1,4 +1,4 @@
-/* Shared file discussions are scoped by game/path, independently of translation rooms. */
+/* File discussions include the account's language and global posts across source versions. */
 (() => {
   const emptyFeed = () => ({ items: [], loadedIds: [], cursor: null, loading: false, loadingMore: false, moreRequested: false, loaded: false, error: '' });
   const ordered = items => [...new Map(items.map(item => [item.id, item])).values()].sort((a, b) => b.id - a.id);
@@ -6,7 +6,7 @@
     data() { return {
       commentsAllVisible: false, commentsFileFeed: emptyFeed(), commentsAllFeed: emptyFeed(),
       commentsUnreadTotal: 0, commentsUnreadFiles: {}, commentsUnreadFetchError: '', commentsUnreadReadError: '',
-      commentsDrafts: {}, commentsPosts: {}, commentsPostErrors: {},
+      commentsDrafts: {}, commentsDraftScopes: {}, commentsPosts: {}, commentsPostErrors: {},
     }; },
     computed: {
       commentsEligible() {
@@ -19,7 +19,7 @@
       },
       commentsUnavailableReason() {
         if (this.testMode) return 'Shared comments are unavailable in test mode.';
-        if (!this.cloudSignedIn) return 'Sign in to read and share comments with all translation teams.';
+        if (!this.cloudSignedIn) return 'Sign in to read and share comments with your translation team.';
         if (!this.cloudUser?.language) return 'An admin must assign your team language before comments are available.';
         if (!['poe1', 'poe2'].includes(this.gameVersion)) return 'Choose a game to view its comments.';
         return '';
@@ -31,6 +31,10 @@
       commentsFileDraft: {
         get() { return this.commentsDrafts[this.commentsDraftKey] || ''; },
         set(value) { this.commentsDrafts[this.commentsDraftKey] = String(value); this.commentsPostErrors[this.commentsDraftKey] = ''; },
+      },
+      commentsFileAllLanguages: {
+        get() { return this.commentsDraftScopes[this.commentsDraftKey] === true; },
+        set(value) { this.commentsDraftScopes[this.commentsDraftKey] = value === true; },
       },
       commentsCanPost() { return this.commentsCanPostTo(this.commentsFilepath); },
       commentsPosting() { return !!this.commentsPosts[this.commentsDraftKey]?.pending; },
@@ -257,6 +261,8 @@
       },
       commentsReplyDraft(filepath) { return this.commentsDrafts[this.commentsReplyKey(filepath)] || ''; },
       commentsSetReplyDraft(filepath, value) { this.commentsDrafts[this.commentsReplyKey(filepath)] = String(value); },
+      commentsReplyAllLanguages(filepath) { return this.commentsDraftScopes[this.commentsReplyKey(filepath)] === true; },
+      commentsSetReplyAllLanguages(filepath, value) { this.commentsDraftScopes[this.commentsReplyKey(filepath)] = value === true; },
       commentsReplyPosting(filepath) { return !!this.commentsPosts[this.commentsReplyKey(filepath)]?.pending; },
       commentsReplyError(filepath) { return this.commentsPostErrors[this.commentsReplyKey(filepath)] || ''; },
       commentsCanReply(filepath) { return this.commentsCanPostTo(filepath); },
@@ -264,18 +270,22 @@
       commentsSubmit() { return this.commentsSendDraft(this.commentsDraftKey, this.commentsFilepath); },
       async commentsSendDraft(key, filepath) {
         if (!this.commentsCanPostTo(filepath) || this.commentsPosts[key]?.pending) return false;
-        const draft = this.commentsDrafts[key] || '', body = draft.trim();
+        const draft = this.commentsDrafts[key] || '', body = draft.trim(), allLanguages = this.commentsDraftScopes[key] === true;
         if (!body || body.length > 10000) {
           this.commentsPostErrors[key] = body ? 'Keep your comment within 10,000 characters.' : 'Write a comment first.';
           return false;
         }
         const ctx = this.commentsCapture(), sourceHash = this.sourceIdentity;
         const previous = this.commentsPosts[key];
-        const task = { body, mutationId: previous?.body === body ? previous.mutationId : crypto.randomUUID(), pending: true };
+        const task = { body, allLanguages,
+          mutationId: previous?.body === body && previous.allLanguages === allLanguages ? previous.mutationId : crypto.randomUUID(), pending: true };
         this.commentsPosts[key] = task;
         try {
-          const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, mutationId: task.mutationId } }, ctx.auth);
-          if (this.commentsDrafts[key] === draft) this.commentsDrafts[key] = '';
+          const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, allLanguages, mutationId: task.mutationId } }, ctx.auth);
+          if (this.commentsDrafts[key] === draft && (this.commentsDraftScopes[key] === true) === allLanguages) {
+            this.commentsDrafts[key] = '';
+            delete this.commentsDraftScopes[key];
+          }
           delete this.commentsPosts[key]; delete this.commentsPostErrors[key];
           if (!this.commentsCurrent(ctx)) return true;
           const replyFocus = this.commentsCaptureReplyFocus();
@@ -360,6 +370,7 @@
         }
       },
       commentsDifferentHash(comment) { return !!this.sourceIdentity && !!comment.sourceHash && comment.sourceHash !== this.sourceIdentity; },
+      commentsIsGlobal(comment) { return comment?.allLanguages === true || (comment?.allLanguages !== false && comment?.scopeLanguage == null); },
       commentsTime(comment) {
         const date = new Date(comment?.createdAt || comment);
         return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();

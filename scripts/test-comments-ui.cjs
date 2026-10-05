@@ -149,7 +149,7 @@ test('quick replies target the card path and current source version, including a
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, '/v1/comments');
   assert.deepEqual(calls[0].options.body, {
-    game: 'poe1', filepath, sourceHash: HASH_A, body: 'Reply to the older version', mutationId: 'mutation-1',
+    game: 'poe1', filepath, sourceHash: HASH_A, body: 'Reply to the older version', allLanguages: false, mutationId: 'mutation-1',
   });
   assert.equal(calls[0].auth.account, 'account-a');
   assert.equal(app.commentsAllItems[0], accepted);
@@ -322,6 +322,24 @@ test('background and older-page feed changes preserve an active quick reply at i
   }
 });
 
+test('background card reordering preserves audience checkbox focus and viewport without text-selection operations', async () => {
+  const state = fixture(async () => ({ items: [comment(11), comment(10)], nextCursor: 10 }));
+  const { app, document } = state;
+  const { input, root, focusCalls, selections } = activeReplyInput(state);
+  input.selectionStart = null; input.selectionEnd = null; input.selectionDirection = null;
+  input.setSelectionRange = () => { selections.push('unsupported'); throw new Error('Checkboxes do not support text selections.'); };
+  Object.assign(app.commentsAllFeed, { items: [comment(10)], loaded: true, loadedIds: [10], cursor: 10 });
+  let moved = false;
+  app.$nextTick = async () => {
+    if (!moved) { moved = true; input.top = 460; document.activeElement = document.body; }
+  };
+  await app.commentsRefreshAll();
+  assert.equal(document.activeElement, input);
+  assert.equal(root.scrollTop, 560);
+  assert.deepEqual(copy(focusCalls), [{ preventScroll: true }]);
+  assert.deepEqual(selections, []);
+});
+
 test('reply focus preservation respects a newly focused control, detached card, or changed context', async () => {
   for (const interruption of ['focus', 'detached', 'account', 'source']) {
     const state = fixture();
@@ -357,7 +375,7 @@ test('a pending reply response does not reclaim an input the user already left',
   assert.equal(focusCalls.length, 0);
 });
 
-test('all assigned teams can read across selected language and source hash', async () => {
+test('comment eligibility follows the assigned team independently of selected language and source hash', async () => {
   const { app } = fixture();
   app.sourceIdentity = '';
   assert.equal(app.commentsEligible, true);
@@ -371,6 +389,150 @@ test('all assigned teams can read across selected language and source hash', asy
   assert.equal(app.commentsEligible, false);
   app.cloudUser.language = 'Thai'; app.testMode = true;
   assert.equal(app.commentsEligible, false);
+});
+
+test('file comments and quick replies default to their assigned language and explicitly opt into all languages', async () => {
+  for (const reply of [false, true]) {
+    for (const allLanguages of [false, true]) {
+      const { app, calls } = fixture(async () => ({ item: comment(20, { actorId: 'account-a', unread: false }) }));
+      const filepath = app.commentsFilepath;
+      assert.equal(app.commentsFileAllLanguages, false);
+      assert.equal(app.commentsReplyAllLanguages(filepath), false);
+      if (reply) {
+        app.commentsSetReplyDraft(filepath, 'Reply audience');
+        app.commentsSetReplyAllLanguages(filepath, allLanguages);
+      } else {
+        app.commentsFileDraft = 'File audience';
+        app.commentsFileAllLanguages = allLanguages;
+      }
+      assert.equal(await (reply ? app.commentsSubmitReply(filepath) : app.commentsSubmit()), true);
+      assert.equal(calls[0].options.body.allLanguages, allLanguages);
+      assert.equal(Object.hasOwn(calls[0].options.body, 'language'), false);
+      assert.equal(Object.hasOwn(calls[0].options.body, 'scopeLanguage'), false);
+      assert.equal(reply ? app.commentsReplyDraft(filepath) : app.commentsFileDraft, '');
+      assert.equal(reply ? app.commentsReplyAllLanguages(filepath) : app.commentsFileAllLanguages, false);
+    }
+  }
+});
+
+test('comment audience selections stay with each draft across composer, file, account, team, game, and source switches', async () => {
+  const { app } = fixture();
+  const filepath = app.commentsFilepath;
+  app.commentsFileDraft = 'File draft'; app.commentsFileAllLanguages = true;
+  assert.equal(app.commentsReplyAllLanguages(filepath), false);
+  app.commentsSetReplyDraft(filepath, 'Quick reply'); app.commentsSetReplyAllLanguages(filepath, true);
+  assert.equal(app.commentsReplyAllLanguages('Metadata/other.txt'), false);
+  app.editorCurrentEditingDesc = { filepath: 'Metadata/other.txt' };
+  assert.equal(app.commentsFileAllLanguages, false);
+  app.editorCurrentEditingDesc = { filepath };
+  for (const [field, value] of [['account', 'account-b'], ['team', 'German'], ['game', 'poe2'], ['source', HASH_B]]) {
+    const previous = field === 'account' ? app.cloudUser.id : field === 'team' ? app.cloudUser.language : field === 'game' ? app.gameVersion : app.sourceIdentity;
+    const change = next => {
+      if (field === 'account') app.cloudUser.id = next;
+      if (field === 'team') app.cloudUser.language = next;
+      if (field === 'game') app.gameVersion = next;
+      if (field === 'source') app.sourceIdentity = next;
+    };
+    change(value);
+    assert.equal(app.commentsFileAllLanguages, false, field + ' file scope');
+    assert.equal(app.commentsReplyAllLanguages(filepath), false, field + ' reply scope');
+    change(previous);
+    assert.equal(app.commentsFileAllLanguages, true, field + ' restored file scope');
+    assert.equal(app.commentsReplyAllLanguages(filepath), true, field + ' restored reply scope');
+  }
+  app.lang = 'French';
+  assert.equal(app.commentsFileAllLanguages, true);
+  assert.equal(app.commentsReplyAllLanguages(filepath), true);
+  assert.equal(app.commentsFileDraft, 'File draft');
+  assert.equal(app.commentsReplyDraft(filepath), 'Quick reply');
+});
+
+test('failed posts preserve audience and reuse mutations only for an unchanged body and audience', async () => {
+  for (const reply of [false, true]) {
+    const { app, calls } = fixture(async () => { throw new Error('Connection lost after send'); });
+    const filepath = app.commentsFilepath;
+    const setAudience = value => reply ? app.commentsSetReplyAllLanguages(filepath, value) : (app.commentsFileAllLanguages = value);
+    const send = () => reply ? app.commentsSubmitReply(filepath) : app.commentsSubmit();
+    if (reply) app.commentsSetReplyDraft(filepath, 'Keep this audience');
+    else app.commentsFileDraft = 'Keep this audience';
+    setAudience(true);
+    assert.equal(await send(), false);
+    assert.equal(reply ? app.commentsReplyAllLanguages(filepath) : app.commentsFileAllLanguages, true);
+    assert.equal(await send(), false);
+    assert.equal(calls[0].options.body.allLanguages, true);
+    assert.equal(calls[0].options.body.mutationId, calls[1].options.body.mutationId);
+    setAudience(false);
+    assert.equal(await send(), false);
+    assert.equal(calls[2].options.body.allLanguages, false);
+    assert.notEqual(calls[2].options.body.mutationId, calls[1].options.body.mutationId);
+    assert.equal(await send(), false);
+    assert.equal(calls[3].options.body.mutationId, calls[2].options.body.mutationId);
+    assert.equal(reply ? app.commentsReplyDraft(filepath) : app.commentsFileDraft, 'Keep this audience');
+  }
+});
+
+test('a completed post preserves new text and its audience in the same composer', async () => {
+  for (const reply of [false, true]) {
+    const pending = deferred();
+    const { app, calls } = fixture(() => pending.promise);
+    const filepath = app.commentsFilepath;
+    if (reply) {
+      app.commentsSetReplyDraft(filepath, 'First thought'); app.commentsSetReplyAllLanguages(filepath, true);
+    } else {
+      app.commentsFileDraft = 'First thought'; app.commentsFileAllLanguages = true;
+    }
+    const send = reply ? app.commentsSubmitReply(filepath) : app.commentsSubmit();
+    if (reply) app.commentsSetReplyDraft(filepath, 'New thought while sending');
+    else app.commentsFileDraft = 'New thought while sending';
+    pending.resolve({ item: comment(20, { actorId: 'account-a', unread: false, allLanguages: true, scopeLanguage: null }) });
+    assert.equal(await send, true);
+    assert.equal(calls[0].options.body.allLanguages, true);
+    assert.equal(reply ? app.commentsReplyDraft(filepath) : app.commentsFileDraft, 'New thought while sending');
+    assert.equal(reply ? app.commentsReplyAllLanguages(filepath) : app.commentsFileAllLanguages, true);
+  }
+});
+
+test('late posts reset the original audience without clearing another account, team, game, source, or file draft', async () => {
+  for (const reply of [false, true]) {
+    for (const change of ['account', 'team', 'game', 'source', 'file']) {
+      const pending = deferred(), filepath = 'Metadata/test.txt';
+      const { app } = fixture(() => pending.promise);
+      const originalKey = reply ? app.commentsReplyKey(filepath) : app.commentsDraftKey;
+      if (reply) {
+        app.commentsSetReplyDraft(filepath, 'Original context'); app.commentsSetReplyAllLanguages(filepath, true);
+      } else {
+        app.commentsFileDraft = 'Original context'; app.commentsFileAllLanguages = true;
+      }
+      const send = reply ? app.commentsSubmitReply(filepath) : app.commentsSubmit();
+      if (change === 'account') app.cloudUser.id = 'account-b';
+      if (change === 'team') app.cloudUser.language = 'German';
+      if (change === 'game') app.gameVersion = 'poe2';
+      if (change === 'source') app.sourceIdentity = HASH_B;
+      if (change === 'file') app.editorCurrentEditingDesc = { filepath: 'Metadata/other.txt' };
+      const newPath = change === 'file' ? app.commentsFilepath : filepath;
+      if (reply) {
+        app.commentsSetReplyDraft(newPath, 'New context draft'); app.commentsSetReplyAllLanguages(newPath, true);
+      } else {
+        app.commentsFileDraft = 'New context draft'; app.commentsFileAllLanguages = true;
+      }
+      pending.resolve({ item: comment(20, { actorId: 'account-a', unread: false, allLanguages: true, scopeLanguage: null }) });
+      assert.equal(await send, true);
+      assert.equal(reply ? app.commentsReplyDraft(newPath) : app.commentsFileDraft, 'New context draft', change);
+      assert.equal(reply ? app.commentsReplyAllLanguages(newPath) : app.commentsFileAllLanguages, true, change);
+      assert.equal(app.commentsDrafts[originalKey] || '', '');
+      assert.equal(app.commentsDraftScopes[originalKey] || false, false);
+    }
+  }
+});
+
+test('global audience labels include legacy comments and distinguish explicit language-only responses', async () => {
+  const { app } = fixture();
+  assert.equal(app.commentsIsGlobal(comment(1)), true);
+  assert.equal(app.commentsIsGlobal(comment(2, { scopeLanguage: null })), true);
+  assert.equal(app.commentsIsGlobal(comment(3, { allLanguages: true, scopeLanguage: null })), true);
+  assert.equal(app.commentsIsGlobal(comment(4, { allLanguages: false, scopeLanguage: 'Thai' })), false);
+  assert.equal(app.commentsIsGlobal(comment(5, { scopeLanguage: 'German' })), false);
+  assert.equal(app.commentsIsGlobal(comment(6, { allLanguages: false })), false);
 });
 
 test('confirmed unassignment closes comment views and clears shared rows while keeping drafts', async () => {
