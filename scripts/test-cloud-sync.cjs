@@ -57,10 +57,12 @@ class MemoryAPI {
     this.intercept = null;
     this.after = null;
     this.hints = false;
+    this.acks = false;
   }
   async fetch(url, options) {
     const request = {
       path: new URL(url).pathname,
+      query: new URL(url).search,
       method: options.method,
       token: (options.headers.Authorization || '').replace(/^Bearer /, ''),
       body: options.body ? JSON.parse(options.body) : null,
@@ -115,6 +117,9 @@ class MemoryAPI {
     if (this.after) {
       const modified = await this.after(request, clone(response));
       if (modified !== undefined) return modified;
+    }
+    if (this.acks && request.method === 'PATCH' && request.query === '?return=ack' && response.revision === response.appliedRevision) {
+      response = { revision: response.revision, appliedRevision: response.appliedRevision, mutationId: request.body.mutationId };
     }
     return reply(response);
   }
@@ -1114,6 +1119,177 @@ test('a local edit uploads despite unchanged remote revision hints', async t => 
   assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 1);
   const dictionaryState = h.store.state.profiles.alice.dictionaries.Thai;
   assert.equal(dictionaryState.syncedLocalVersion, dictionaryState.localVersion);
+});
+
+test('known unchanged remote revisions upload one small patch and accept a compact acknowledgement without a full merge', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true;
+  await h.client.sync(); h.api.calls = []; h.changes.length = 0;
+  let merges = 0, diffs = 0;
+  h.client.merge = { ...Dictionary, merge(...args) { merges++; return Dictionary.merge(...args); }, changesSince(...args) { diffs++; return Dictionary.changesSince(...args); } };
+  await h.client.saveLocal(payload([word(), word('new', { find: 'Ice', replace: 'น้ำแข็ง' })]));
+  await h.client.sync();
+  const patch = h.api.writes('/v1/dictionaries/Thai')[0];
+  assert.deepEqual(patch.body.upserts.map(entry => entry._id), ['new']);
+  assert.deepEqual(patch.body.deletedIds, []);
+  assert.equal(patch.query, '?return=ack');
+  assert.equal(h.api.calls.filter(call => call.path === '/v1/dictionaries/Thai' && call.method === 'GET').length, 0);
+  assert.equal(merges, 0); assert.equal(diffs, 1);
+  assert.equal(h.client.snapshot().revision, 2);
+  assert.equal(h.client.snapshot().dictionary.length, 2);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.pendingWrite, null);
+  assert.equal(h.changes.some(change => Object.hasOwn(change, 'dictionary')), false, 'acknowledgement keeps the existing editor Dictionary');
+});
+
+test('edits persisted while a compact acknowledgement is pending survive and upload afterwards', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'submitted' })]));
+  const gate = h.api.pause('PATCH', '/v1/dictionaries/Thai');
+  const running = h.client.sync(); const patch = await gate.entered.promise;
+  await h.client.saveLocal(payload([word('fire', { replace: 'typed later', tlnote: 'later note' })]));
+  const accepted = Cloud.acceptedSnapshot(h.api.dictionaries.get('Thai'), patch.body.upserts, patch.body.deletedIds, 2);
+  h.api.dictionaries.set('Thai', accepted);
+  gate.release.resolve(reply({ revision: 2, appliedRevision: 2, mutationId: patch.body.mutationId }));
+  await running;
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'typed later');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'later note');
+  await h.client.sync();
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'typed later');
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].tlnote, 'later note');
+});
+
+test('a cached baseline rejected by a concurrent server edit fetches and rebases before retrying', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'own edit' })]));
+  h.api.calls = [];
+  let raced = false;
+  h.api.intercept = request => {
+    if (request.method !== 'PATCH' || raced) return;
+    raced = true;
+    const newer = dictionary([word('fire', { tlnote: 'concurrent remote note' })], 2);
+    h.api.dictionaries.set('Thai', newer);
+    return reply({ error: { code: 'REVISION_CONFLICT', message: 'Changed' }, current: newer }, 409);
+  };
+  await h.client.sync();
+  assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 2);
+  assert.equal(h.api.calls.filter(call => call.path === '/v1/dictionaries/Thai' && call.method === 'GET').length, 1);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'own edit');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'concurrent remote note');
+  assert.deepEqual(h.client.snapshot().conflicts, []);
+});
+
+test('lost compact acknowledgements replay idempotently and full newer responses preserve subsequent local and remote edits', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'first submitted edit' })]));
+  let lose = true;
+  h.api.after = request => { if (request.method === 'PATCH' && lose) { lose = false; throw new Error('Accepted but acknowledgement lost'); } };
+  await h.client.sync();
+  const pending = clone(h.store.state.profiles.alice.dictionaries.Thai.pendingWrite);
+  assert.ok(pending);
+  await h.client.saveLocal(payload([word('fire', { replace: 'latest local edit' })]));
+  h.api.dictionaries.set('Thai', dictionary([word('fire', { replace: 'first submitted edit', tlnote: 'later remote note' })], 3));
+  h.client.destroy();
+  const next = await harness(t, { store: h.store, api: h.api });
+  await next.client.sync();
+  const requests = h.api.writes('/v1/dictionaries/Thai');
+  assert.equal(requests.length, 3);
+  assert.equal(requests[0].body.mutationId, requests[1].body.mutationId);
+  assert.equal(requests[1].body.mutationId, pending.request.mutationId);
+  assert.notEqual(requests[2].body.mutationId, pending.request.mutationId);
+  assert.equal(next.client.snapshot().dictionary[0].replace, 'latest local edit');
+  assert.equal(next.client.snapshot().dictionary[0].tlnote, 'later remote note');
+  assert.deepEqual(next.client.snapshot().conflicts, []);
+});
+
+test('invalid compact acknowledgements keep the durable pending mutation for a safe retry', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'pending local edit' })]));
+  h.api.intercept = request => request.method === 'PATCH' ? reply({ revision: 2, appliedRevision: 2, mutationId: 'wrong-mutation' }) : undefined;
+  await h.client.sync();
+  assert.ok(h.store.state.profiles.alice.dictionaries.Thai.pendingWrite);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'pending local edit');
+  assert.match(h.statuses.at(-1).message, /Invalid Dictionary save acknowledgement/);
+});
+
+test('compact acknowledgements recheck another tab\'s durable edit inside the transaction', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'submitted' })]));
+  let changed = false;
+  h.client.beforeSharedApply = async () => {
+    if (!h.store.state.profiles.alice.dictionaries.Thai.pendingWrite || changed) return true;
+    changed = true;
+    await h.store.updateHybridState(state => {
+      const d = state.profiles.alice.dictionaries.Thai;
+      d.entries[0].tlnote = 'other tab note'; d.localVersion++;
+      return state;
+    });
+    return true;
+  };
+  await h.client.sync();
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'submitted');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'other tab note');
+  await h.client.sync();
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].tlnote, 'other tab note');
+});
+
+test('before applying a remote dictionary, pending editor drafts become durable and join the merge', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api, { remote: dictionary([word('fire', { tlnote: 'remote note' })], 2) });
+  let flushed = false;
+  h.client.beforeSharedApply = async () => {
+    if (flushed) return true;
+    flushed = true;
+    await h.client.saveLocal(payload([word('fire', { replace: 'unsnapshotted local edit' })]));
+    return true;
+  };
+  await h.client.sync();
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'unsnapshotted local edit');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'remote note');
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'unsnapshotted local edit');
+});
+
+test('failure to flush an editor draft leaves remote changes unapplied and reports an actionable warning', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api, { remote: dictionary([word('fire', { replace: 'remote value' })], 2) });
+  h.client.beforeSharedApply = async () => false;
+  await h.client.sync();
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'ไฟ');
+  assert.equal(h.api.writes().length, 0);
+  assert.match(h.statuses.at(-1).message, /Save local .* before applying shared changes/);
+});
+
+test('captured UI snapshots coalesce queued writes after an active commit without skipping durability', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  const before = h.store.updates;
+  const gate = h.store.pauseNextCommit();
+  const first = h.client.saveLocal(payload([word('fire', { replace: 'first' })]), 'Thai', { captured: true });
+  await gate.entered.promise;
+  const second = h.client.saveLocal(payload([word('fire', { replace: 'second' })]), 'Thai', { captured: true });
+  const latest = h.client.saveLocal(payload([word('fire', { replace: 'latest' })]), 'Thai', { captured: true });
+  assert.equal(second, latest);
+  let settled = false; latest.then(() => { settled = true; });
+  assert.equal(settled, false);
+  gate.release.resolve(); await Promise.all([first, second, latest]);
+  assert.equal(h.store.updates - before, 2);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'latest');
+  assert.equal(h.client.localSaveCount, 0);
+});
+
+test('language boundaries wait for captured local writes before changing the selected dictionary', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  const gate = h.store.pauseNextCommit();
+  const saving = h.client.saveLocal(payload([word('fire', { replace: 'last Thai edit' })]), 'Thai', { captured: true });
+  await gate.entered.promise;
+  const switching = h.client.selectLanguage('French', payload([word('fire', { replace: 'last Thai edit' })], { lang: 'French' }), 'Thai');
+  assert.equal(h.store.state.profiles.alice.settings.lang, 'Thai');
+  gate.release.resolve(); await saving; await switching;
+  assert.equal(h.store.state.profiles.alice.settings.lang, 'French');
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'last Thai edit');
 });
 
 test('unchanged hints still upload a durable edit made by another tab', async t => {

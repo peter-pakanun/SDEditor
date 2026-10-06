@@ -605,9 +605,68 @@ test('highlight refresh keeps a focused dictionary entry visible when matching m
   assert.equal(editor.visibleDictionary.includes(entry), true);
   document.activeElement = { closest() { return { getAttribute() { return entry._id; } }; } };
   entry.find = 'New term';
-  editor.syncEditorHlterWithDictionaryNow();
+  await editor.syncEditorHlterWithDictionaryNow();
   assert.equal(editor.foundDictionarySet.has(entry._id), true);
   assert.equal(editor.filteredDictionary[0], entry);
   assert.equal(editor.dictionaryPage, 1);
   assert.equal(editor.visibleDictionary.includes(entry), true, 'The refresh must adjust the page in the same update as the match reorder.');
+});
+
+test('Dictionary creation paints and focuses its row before preparing matches, keeping translation fields editable', async () => {
+  const { editor, document, calls } = loadEditor({ dictionary: dictionary(20000) });
+  editor.descs = [description('keyword', '[FreshTerm]')];
+  await editor.editFile(editor.descs[0].filepath);
+  const pause = deferred();
+  editor.yieldEditorWork = () => pause.promise;
+  document.querySelector = () => ({ querySelector() { return { focus() { calls.focused++; }, select() { calls.selected++; } }; } });
+  const prior = { sync: calls.syncIndexes, async: calls.asyncIndexes, focus: calls.focused };
+  const entry = editor.ensureDictionaryKeywordTag('FreshTerm', '', 'ใหม่');
+  await editor.$nextTick(); await editor.$nextTick();
+  assert.equal(entry.created, true);
+  assert.equal(calls.focused, prior.focus + 1);
+  assert.equal(calls.syncIndexes, prior.sync, 'Adding must not expand the index in the click handler.');
+  assert.equal(calls.asyncIndexes, prior.async, 'The new row gets a paint opportunity before index preparation.');
+  assert.equal(editor.editorLoading, false);
+  assert.equal(editor.editorTranslationReadOnly, false);
+  pause.resolve();
+  assert.equal(await editor._dictionaryRefreshPending, true);
+  assert.equal(calls.syncIndexes, prior.sync);
+  assert.equal(calls.asyncIndexes, prior.async + 1);
+  assert.equal(editor.editorBlocks[0].HLs[0].dictId, entry.dictId);
+  assert.equal(editor.browserWorkTooltip, '');
+});
+
+test('Dictionary refresh cancels when the file closes without publishing highlights into another editor', async () => {
+  const { editor, calls } = loadEditor({ controlledClock: true });
+  editor.descs = [description('original', 'Term 119'), description('next', 'Term 0')];
+  await editor.editFile(editor.descs[0].filepath);
+  const pause = deferred();
+  editor.yieldEditorWork = () => pause.promise;
+  const highlights = calls.highlights;
+  const pending = editor.syncEditorHlterWithDictionaryNow();
+  await editor.$nextTick();
+  editor.editorVisible = false;
+  editor.editorBlocks = [];
+  pause.resolve();
+  assert.equal(await pending, false);
+  assert.equal(calls.highlights, highlights);
+  assert.equal(editor.browserWorkTooltip, '');
+});
+
+test('Dictionary refresh yields between blocks, reads newer translation input, and replaces only the matches', async () => {
+  const { editor } = loadEditor({ controlledClock: true });
+  editor.descs = [description('many', Array.from({ length: 8 }, () => 'Term 119'))];
+  await editor.editFile(editor.descs[0].filepath);
+  const blocks = editor.editorBlocks, last = blocks.at(-1);
+  let yields = 0;
+  editor.yieldEditorWork = async () => {
+    if (++yields === 3) last.translation = 'Typed during match refresh';
+  };
+  await editor.syncEditorHlterWithDictionaryNow();
+  assert.ok(yields > 3, 'Both index preparation and block refresh should give other input work a turn.');
+  assert.equal(editor.editorBlocks, blocks);
+  assert.equal(editor.editorBlocks.at(-1), last);
+  assert.equal(last.translation, 'Typed during match refresh');
+  assert.match(last.translationHLter, /Typed during match refresh/);
+  assert.equal(editor.editorTranslationReadOnly, false);
 });

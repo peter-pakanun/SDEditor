@@ -30,13 +30,18 @@
     return value;
   }
 
+  function normalizedId(raw, value, prefix, position, used) {
+    const fallback = raw == null || string(raw) === '' ? prefix + hash(JSON.stringify(value)) + '_' + position : '';
+    return uniqueId(raw, fallback, used);
+  }
+
   // Keep the editor's schema and raw text. Normalized Find is for initial
   // identity matching only, never a replacement for the user's stored wording.
   function normalizeEntries(values) {
     const usedEntries = new Set();
     return (Array.isArray(values) ? values : []).filter(value => value && typeof value === 'object').map((value, position) => {
       const entry = {
-        _id: uniqueId(value._id, 'd_sync_' + hash(JSON.stringify(value)) + '_' + position, usedEntries),
+        _id: normalizedId(value._id, value, 'd_sync_', position, usedEntries),
         find: string(value.find),
         replace: string(value.replace),
         alts: [],
@@ -44,7 +49,7 @@
       };
       const usedRows = new Set();
       entry.alts = (Array.isArray(value.alts) ? value.alts : []).filter(row => row && typeof row === 'object').map((row, rowPosition) => ({
-        _id: uniqueId(row._id, 'a_sync_' + hash(JSON.stringify(row)) + '_' + rowPosition, usedRows),
+        _id: normalizedId(row._id, row, 'a_sync_', rowPosition, usedRows),
         find: string(row.find),
         replace: row.replace == null ? entry.replace : string(row.replace)
       }));
@@ -281,5 +286,18 @@
     return { entries, conflicts, upserts, deletedIds };
   }
 
-  return { merge, resolve, normalizeEntries };
+  // When a revision check proves the remote copy still equals the baseline,
+  // only local changes need comparison; there are no remote edits to reconcile.
+  function changesSince(baseSnapshot, localEntries) {
+    const base = normalizeEntries(baseSnapshot?.entries);
+    const local = normalizeEntries(localEntries);
+    const baseById = index(base);
+    const localById = index(local);
+    const entries = combineOrder(ids(base), ids(local), new Set(localById.keys())).map(id => localById.get(id));
+    const upserts = entries.filter(entry => key(entry.find) && !equal(entry, baseById.get(entry._id))).map(copy);
+    const deletedIds = base.filter(entry => !localById.has(entry._id)).map(entry => entry._id);
+    return { entries, conflicts: [], upserts, deletedIds };
+  }
+
+  return { merge, resolve, normalizeEntries, changesSince };
 });

@@ -419,6 +419,40 @@ test('changing the dictionary invalidates results without scheduling a rescan', 
   assert.equal(timers.length, timerCount, 'Dictionary edits must not schedule an automatic scan.');
 });
 
+test('Dictionary edits without a diagnostic scan keep the file list and diagnostic state untouched', () => {
+  const { editor, config, calls, timers } = loadEditor();
+  conflictingEntries(editor);
+  const results = editor.diagnosticScanResults;
+  const run = editor.diagnosticScanRunId;
+  let filtering = 0;
+  editor.filterDesc = () => { filtering++; };
+  for (let i = 0; i < 3; i++) {
+    editor.dictionary[0].replace += 'x';
+    config.watch.dictionary.handler.call(editor);
+  }
+  assert.equal(filtering, 0);
+  assert.equal(editor.diagnosticScanResults, results);
+  assert.equal(editor.diagnosticScanRunId, run);
+  assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
+  assert.equal(timers.length, 0);
+});
+
+test('Dictionary edits remove existing diagnostic rows once and cancel a scan without unnecessary file filtering', () => {
+  const { editor } = loadEditor();
+  let filtering = 0;
+  editor.filterDesc = () => { filtering++; };
+  editor.diagnosticScanResults = { 'test/first.txt': { hasDiagnosticWarning: true } };
+  editor.scheduleDictionaryDiagnosticScan();
+  assert.equal(filtering, 1);
+  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+  editor.diagnosticScanRunning = true;
+  const run = editor.diagnosticScanRunId;
+  editor.scheduleDictionaryDiagnosticScan();
+  assert.equal(editor.diagnosticScanRunning, false);
+  assert.equal(editor.diagnosticScanRunId, run + 1);
+  assert.equal(filtering, 1, 'Cancelling a scan with no published results must not rebuild the file list.');
+});
+
 test('deselecting scan checks does not disable automatic editor errors', async () => {
   const { editor, calls } = loadEditor();
   editor.diagnosticScanChecks = only();

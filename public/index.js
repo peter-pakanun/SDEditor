@@ -252,6 +252,7 @@ const config = Vue.defineComponent({
         maxWidth: 360
       },
       browserWorkItems: {},
+      pendingSettingsSaves: 0,
       hlPopupReturnInfo: null,
       editorBlocks: [
         {
@@ -382,6 +383,11 @@ const config = Vue.defineComponent({
     }
   },
   beforeUnmount() {
+    this._settingsSaveDisposed = true;
+    clearTimeout(this._settingsSaveTimer);
+    window.removeEventListener('beforeunload', this._settingsSaveBeforeUnload);
+    this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
+    clearTimeout(this._hlterRefreshTimer);
     for (const task of this._browserWorkPending?.values() || []) clearTimeout(task.timer);
     this._browserWorkPending?.clear();
   },
@@ -493,7 +499,7 @@ const config = Vue.defineComponent({
       deep: true,
       handler() {
         this.invalidateEditorDictionaryIndex();
-        this.saveSettings();
+        this.scheduleSettingsSave();
         this.scheduleEditorHLterRefresh();
         this.scheduleDictionaryDiagnosticScan();
       }
@@ -2123,8 +2129,10 @@ const config = Vue.defineComponent({
     },
     scheduleDictionaryDiagnosticScan() {
       // Dictionary edits invalidate the snapshot; only the scan button starts a new scan.
+      const hadResults = Object.keys(this.diagnosticScanResults || {}).length > 0;
+      if (!hadResults && !this.diagnosticScanRunning && !this.diagnosticScanCompleted && !this.diagnosticScanStopped) return;
       this.clearDiagnosticScanResults();
-      this.filterDesc();
+      if (hadResults) this.filterDesc();
     },
     updateScannedDescDiagnostics(changedDescs = []) {
       // An unfinished scan may have read translations that have just changed.
@@ -3324,19 +3332,89 @@ const config = Vue.defineComponent({
       }
     },
     scheduleEditorHLterRefresh() {
-      if (!this.editorVisible || this.editorLoading || this.editorLoadError) return;
+      const run = this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
+      if (!this.editorVisible || this.editorLoading || this.editorLoadError) return;
       this._hlterRefreshTimer = setTimeout(() => {
-        this.refreshEditorHLter();
+        this._hlterRefreshTimer = null;
+        this._dictionaryRefreshPending = this.refreshEditorDictionaryHighlights(run);
       }, 150);
     },
-    /** Rebuild english HLs immediately so foundDictionarySet / filteredDictionary match the current dictionary (avoids focus loss when a debounced refresh later re-sorts the sidebar list). */
+    async refreshEditorDictionaryHighlights(run) {
+      const blocks = this.editorBlocks, desc = this.editorCurrentEditingDesc;
+      const lang = this.lang, game = this.gameVersion, source = this.sourceIdentity;
+      const isCurrent = () => this._editorDictionaryRefreshRun === run && this.editorVisible && !this.editorLoading
+        && !this.editorLoadError && this.editorBlocks === blocks && this.editorCurrentEditingDesc === desc
+        && this.lang === lang && this.gameVersion === game && this.sourceIdentity === source;
+      const key = 'dictionary-highlights-' + run;
+      if (!isCurrent()) return false;
+      this.setBrowserWork('editor', { key, label: 'Updating Dictionary matches', active: true });
+      try {
+        // Let a newly added row receive focus and paint before expanding the
+        // Dictionary index. Fields stay editable throughout this refresh.
+        await this.$nextTick();
+        await this.yieldEditorWork();
+        if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
+        const revision = this._editorDictionaryRevision || 0;
+        const matchesCurrent = () => isCurrent() && revision === (this._editorDictionaryRevision || 0);
+        const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+        let batchStarted = now();
+        const preserveFocus = () => {
+          const id = document.activeElement?.closest?.('[data-dict-id]')?.getAttribute?.('data-dict-id');
+          if (id) this.revealDictionaryEntry(id);
+        };
+        for (let i = 0; i < blocks.length; i++) {
+          if (!matchesCurrent()) return false;
+          const block = blocks[i];
+          if (block.isTable) {
+            for (let col = 0; col < (block.tableColumns || []).length; col++) {
+              if (!matchesCurrent()) return false;
+              this.refreshEditorTableColumnHLter(block.tableColumns[col]);
+              this.$nextTick(() => {
+                if (!matchesCurrent()) return;
+                this.syncHlScroll('english', i, col);
+                this.syncHlScroll('translation', i, col);
+              });
+              if (now() - batchStarted >= 6) {
+                preserveFocus();
+                await this.yieldEditorWork(); batchStarted = now();
+              }
+            }
+            if (!matchesCurrent()) return false;
+            this.syncEditorBlockFromTableColumns(block);
+            this.refreshEditorBlockMeta(block, i);
+          } else {
+            this.refreshEditorBlockHLter(i);
+            this.$nextTick(() => {
+              if (!matchesCurrent()) return;
+              this.syncHlScroll('english', i);
+              this.syncHlScroll('translation', i);
+            });
+          }
+          if (now() - batchStarted >= 6) {
+            preserveFocus();
+            await this.yieldEditorWork(); batchStarted = now();
+          }
+        }
+        if (!matchesCurrent()) return false;
+        preserveFocus();
+        if (this.hlPopup.visible) this.$nextTick(() => { if (matchesCurrent()) this.syncHlPopupEnglishHighlight(); });
+        return true;
+      } catch (error) {
+        console.error('Could not update Dictionary matches:', error);
+        return false;
+      } finally {
+        this.setBrowserWork('editor', { key, active: false });
+      }
+    },
+    /** Refresh matches cooperatively and keep a focused Dictionary row on its rendered page when matches reorder the list. */
     syncEditorHlterWithDictionaryNow() {
       this.invalidateEditorDictionaryIndex();
-      if (!this.editorVisible) return;
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
       this._hlterRefreshTimer = null;
-      this.refreshEditorHLter();
+      const run = this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
+      this._dictionaryRefreshPending = this.refreshEditorDictionaryHighlights(run);
+      return this._dictionaryRefreshPending;
     },
     setEditorFocus(index, columnIndex = 0) {
       this.editorFocusedIndex = index;
@@ -6043,10 +6121,8 @@ const config = Vue.defineComponent({
       await this.$nextTick();
       document.documentElement.removeAttribute('data-app-booting');
     },
-    async saveSettings() {
-      if (this._cloudApplying) return true;
-      if (!offlineStoreReady) return !!this.testMode;
-      let settings = {
+    settingsSavePayload() {
+      return {
         editorRegexes: this.editorRegexes,
         dictionary: this.dictionary,
         editorClipboard: this.editorClipboard,
@@ -6062,19 +6138,80 @@ const config = Vue.defineComponent({
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
+      };
+    },
+    scheduleSettingsSave() {
+      if (this._settingsSaveDisposed || this._cloudApplying || !offlineStoreReady) return;
+      const settings = this.settingsSavePayload();
+      const context = this._cloud?.context();
+      const jobs = this._settingsSaveJobs ||= [];
+      const last = jobs.at(-1);
+      const sameContext = last && last !== this._settingsSaveActive && last.client === this._cloud && last.settings.lang === settings.lang
+        && (!context || ['epoch', 'profile', 'token', 'language', 'assignmentVersion'].every(key => last.context?.[key] === context[key]));
+      if (sameContext) last.settings = settings;
+      else jobs.push({ settings, client: this._cloud, context });
+      this.pendingSettingsSaves = jobs.length;
+      this._settingsSaveBeforeUnload ||= event => {
+        if (!this.pendingSettingsSaves) return;
+        event.preventDefault(); event.returnValue = 'Dictionary changes are still saving in this browser.';
+      };
+      window.addEventListener?.('beforeunload', this._settingsSaveBeforeUnload);
+      clearTimeout(this._settingsSaveTimer);
+      this._settingsSaveTimer = setTimeout(() => this.flushScheduledSettingsSave(), 150);
+    },
+    async prepareSettingsSaveSnapshot(settings) {
+      const plain = this.toPlainForStorage({ ...settings, dictionary: [] });
+      if (!plain) throw new Error('Cannot serialize settings');
+      const raw = typeof Vue.toRaw === 'function' ? Vue.toRaw(settings.dictionary) : settings.dictionary;
+      const entries = [...(raw || [])];
+      let started = Date.now();
+      for (const entry of entries) {
+        plain.dictionary.push(this.toPlainForStorage(typeof Vue.toRaw === 'function' ? Vue.toRaw(entry) : entry));
+        if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
       }
-      if (this._cloud) return this.cloudPersist(this.toPlainForStorage(settings));
-      if (window.OfflineStore && typeof window.OfflineStore.setSettings === 'function') {
-        try {
-          const plain = this.toPlainForStorage(settings);
-          if (!plain) throw new Error('Cannot serialize settings');
-          await window.OfflineStore.setSettings(plain);
-        } catch (error) {
-          this.cloudStorageError = 'Could not save settings locally: ' + error.message;
-          return false;
+      return plain;
+    },
+    flushScheduledSettingsSave() {
+      clearTimeout(this._settingsSaveTimer);
+      if (this._settingsSaveDrain) return this._settingsSaveDrain;
+      if (!this._settingsSaveJobs?.length) return Promise.resolve(true);
+      const drain = async () => {
+        while (this._settingsSaveJobs.length) {
+          const job = this._settingsSaveActive = this._settingsSaveJobs[0];
+          try {
+            // Let the new row and its input focus paint before copying data.
+            await this.yieldEditorWork();
+            if (job.client && (job.client !== this._cloud || !job.client.permissionsCurrent(job.context))) {
+              throw new Error('The account or language changed before these settings were saved. Keep this tab open and export your settings.');
+            }
+            const plain = await this.prepareSettingsSaveSnapshot(job.settings);
+            if (job.client) {
+              if (!job.client.permissionsCurrent(job.context)) throw new Error('The account or language changed before these settings were saved. Keep this tab open and export your settings.');
+              if (!await this.cloudPersist(plain)) throw new Error(this.cloudStorageError || 'Local settings could not be saved.');
+            } else if (window.OfflineStore?.setSettings) await window.OfflineStore.setSettings(plain);
+            this._settingsSaveJobs.shift();
+            this.pendingSettingsSaves = this._settingsSaveJobs.length;
+            if (this.cloudStorageError === this._settingsSaveFailure) this.cloudStorageError = '';
+            this._settingsSaveFailure = ''; this._settingsSaveBackoff = 1000;
+          } catch (error) {
+            this._settingsSaveFailure = 'Could not save settings locally: ' + error.message;
+            this.cloudStorageError = this._settingsSaveFailure;
+            if (!this._settingsSaveDisposed) this._settingsSaveTimer = setTimeout(() => this.flushScheduledSettingsSave(), this._settingsSaveBackoff || 1000);
+            this._settingsSaveBackoff = Math.min((this._settingsSaveBackoff || 1000) * 2, 30000);
+            return false;
+          } finally { this._settingsSaveActive = null; }
         }
-      }
-      return true;
+        window.removeEventListener?.('beforeunload', this._settingsSaveBeforeUnload);
+        return true;
+      };
+      this._settingsSaveDrain = drain().finally(() => { this._settingsSaveDrain = null; });
+      return this._settingsSaveDrain;
+    },
+    async saveSettings() {
+      if (this._cloudApplying) return true;
+      if (!offlineStoreReady) return !!this.testMode;
+      this.scheduleSettingsSave();
+      return this.flushScheduledSettingsSave();
     },
     exportSettingsClicked() {
       let settings = {
@@ -6259,7 +6396,6 @@ const config = Vue.defineComponent({
       const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" };
       this.dictionary.unshift(entry);
       this.focusDictionaryEntryReplaceInput(entry._id);
-      this.saveSettings();
     },
     async removeVocab(word) {
       const dictionary = this.dictionary;

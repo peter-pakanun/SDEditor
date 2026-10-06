@@ -102,7 +102,7 @@
     }).map(entry => entry._id);
   }
   class Client {
-    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks, WebSocket: Socket, onWork, yieldWork }) {
+    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks, WebSocket: Socket, onWork, yieldWork, beforeSharedApply }) {
       this.store = store; this.merge = merge; this.fetcher = fetcher;
       this.apiBase = apiBase.replace(/\/$/, '');
       this.onChange = onChange || (() => {}); this.onStatus = onStatus || (() => {});
@@ -114,6 +114,7 @@
       this.socketRetryAt = 0; this.socketBackoff = 1000; this.remoteHints = null; this.hintsContext = null;
       this.lastNotification = null; this.notifiedDictionary = null; this.notifiedConflicts = null;
       this.onWork = onWork || (() => {}); this.yieldWork = yieldWork || (() => Promise.resolve());
+      this.beforeSharedApply = beforeSharedApply || (() => true);
     }
     async initialize(legacy) {
       this.state = await this.store.getHybridState();
@@ -177,13 +178,26 @@
       }, ctx, notify);
       if (!this.permissionsCurrent(ctx, this.state, allowSelectedLanguageChange)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
     }
-    saveLocal(payload, contextLanguage = payload.lang) {
+    saveLocal(payload, contextLanguage = payload.lang, { captured = false } = {}) {
       const requested = this.context();
-      const snapshot = copy(payload);
+      // UI saves already own a detached snapshot. Direct callers retain the
+      // immediate capture contract so later input mutations cannot leak in.
+      const snapshot = captured ? payload : copy(payload);
+      const key = this.hintKey(requested) + ':' + contextLanguage;
+      if (captured && this.pendingLocalJob?.captured && this.pendingLocalJob.key === key && !this.pendingLocalJob.started) {
+        this.pendingLocalJob.payload = snapshot;
+        return this.pendingLocalJob.operation;
+      }
+      const job = { key, payload: snapshot, started: false, captured };
+      this.localSaveCount = (this.localSaveCount || 0) + 1;
       const operation = this.localQueue.catch(() => {}).then(() => {
+        job.started = true;
+        if (this.pendingLocalJob === job) this.pendingLocalJob = null;
         if (!this.current(requested)) return;
-        return this.saveLocalNow(snapshot, contextLanguage);
-      });
+        return this.saveLocalNow(job.payload, contextLanguage);
+      }).finally(() => { this.localSaveCount--; });
+      job.operation = operation;
+      this.pendingLocalJob = job;
       this.localQueue = operation;
       return operation;
     }
@@ -203,14 +217,16 @@
             const combined = this.merge.merge({ entries: prior, tombstones: [], revision: 0 }, payload.dictionary || [], { entries: dictionary.entries, tombstones: [], revision: 0 });
             if (combined.conflicts.length) throw new Error('This dictionary changed in another tab. Export your current settings to preserve this draft, then reload before retrying.');
             replaceEntries(dictionary, combined.entries);
-          } else replaceEntries(dictionary, copy(payload.dictionary || []));
+          } else replaceEntries(dictionary, payload.dictionary || []);
         }
       }, ctx, false);
       const latest = this.state.profiles[ctx.profile];
       if (!equal(latest.settings, preferences(payload)) || !equal(latest.dictionaries[contextLanguage]?.entries || [], payload.dictionary || [])) this.notify();
+      else this.notifiedDictionary = JSON.stringify([ctx.profile, contextLanguage, latest.dictionaries[contextLanguage]?.localVersion || 0]);
       this.schedule();
     }
     async selectLanguage(language, payload, oldLanguage) {
+      if (this.localSaveCount) await this.localQueue;
       this.closeSocket();
       this.epoch++;
       const ctx = this.context();
@@ -235,6 +251,7 @@
       this.schedule(0);
     }
     async importLocal(payload) {
+      if (this.localSaveCount) await this.localQueue;
       validateImport(payload);
       payload = { ...copy(payload), editorRegexes: (payload.editorRegexes || []).map(row => ({ find: row.find, replace: row.replace })), dictionary: this.merge.normalizeEntries(payload.dictionary || []) };
       if (payload.lang !== this.state.profiles[this.state.activeProfile].settings.lang) { this.closeSocket(); this.epoch++; }
@@ -299,6 +316,7 @@
       } finally { clearTimeout(timeout); }
     }
     async acceptLogin(result) {
+      if (this.localSaveCount) await this.localQueue;
       this.closeSocket(); this.remoteHints = null; this.hintsContext = null;
       this.epoch++;
       await this.update((state) => {
@@ -333,6 +351,7 @@
       } catch (error) { this.lastActivityRefresh = 0; this.reportError(error); }
     }
     async logout() {
+      if (this.localSaveCount) await this.localQueue;
       this.closeSocket(); this.remoteHints = null; this.hintsContext = null;
       const ctx = this.context();
       let revoked = true;
@@ -496,6 +515,7 @@
           ctx = this.context();
         }
         const remote = await this.request('/v1/settings', {}, ctx);
+        if (await this.beforeSharedApply() === false) throw new Error('Save local settings before applying shared changes. Automatic sync will retry.');
         await this.updateShared((state, profile) => {
           if (!profile.settingsBase && remote.settings) {
             profile.recovery.push({ at: Date.now(), reason: 'Before first cloud restore', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
@@ -521,6 +541,7 @@
     async sendSettingsWrite(ctx, write) {
       try {
         const response = await this.request('/v1/settings', { method: 'PUT', body: write }, ctx);
+        if (await this.beforeSharedApply() === false) throw new Error('Save local settings before applying shared changes. Automatic sync will retry.');
         await this.updateShared((state, profile) => {
           profile.settings = mergeSettings(write.settings, profile.settings, response.settings);
           profile.settingsBase = copy(response);
@@ -533,20 +554,24 @@
         throw error;
       }
     }
-    async mergeRemote(ctx, language, remote, accepted, mutationId) {
+    async mergeRemote(ctx, language, remote, accepted, mutationId, remoteUnchanged = false) {
       let result;
+      if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before applying shared changes. Automatic sync will retry.');
       this.onWork({ key: 'dictionary', label: 'Updating Dictionary entries', active: true, immediate: true });
       try {
         await this.yieldWork();
         await this.updateShared((state, profile) => {
           const d = profile.dictionaries[language] ||= newDictionary();
           const baseline = accepted ? preserveConflictBases(accepted, d.conflicts) : d.base;
-          result = this.merge.merge(baseline, d.entries, remote);
+          const localOnly = remoteUnchanged && this.merge.changesSince && !d.conflicts.length
+            && revisionMatches(d.base?.revision, remote.revision);
+          result = localOnly ? this.merge.changesSince(d.base, d.entries) : this.merge.merge(baseline, d.entries, remote);
           const priorAutoMerged = (d.autoMergedIds || []).filter(id => !accepted || !d.pendingWrite?.request.upserts.some(e => e._id === id));
-          d.autoMergedIds = autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
+          d.autoMergedIds = localOnly ? priorAutoMerged.filter(id => result.upserts.some(entry => entry._id === id))
+            : autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
           replaceEntries(d, result.entries);
           replaceConflicts(d, result.conflicts);
-          d.base = preserveConflictBases(remote, result.conflicts);
+          if (!localOnly) d.base = preserveConflictBases(remote, result.conflicts);
           d.revision = remote.revision;
           if (!result.upserts.length && !result.deletedIds.length) d.syncedLocalVersion = d.localVersion || 0;
           if (mutationId && d.pendingWrite?.request.mutationId === mutationId) d.pendingWrite = null;
@@ -558,42 +583,79 @@
     }
     async syncDictionary(ctx, language) {
       const path = '/v1/dictionaries/' + encodeURIComponent(language);
+      let fetchRequired = false;
       for (let attempt = 0; attempt < 4; attempt++) {
         const historyRestore = this.state.profiles[ctx.profile].dictionaries[language]?.pendingHistoryRestore;
         if (historyRestore) await this.sendHistoryRestore(ctx, language, historyRestore);
         const pendingWrite = this.state.profiles[ctx.profile].dictionaries[language]?.pendingWrite;
         if (pendingWrite) {
           try { await this.sendDictionaryWrite(ctx, language, pendingWrite); }
-          catch (error) { if (error.status !== 409) throw error; }
+          catch (error) { if (error.status !== 409) throw error; fetchRequired = true; }
         }
         const pending = this.state.profiles[ctx.profile].dictionaries[language]?.pendingResolution;
         if (pending) await this.sendResolution(ctx, language, pending);
-        const remote = await this.request(path, {}, ctx);
-        const merged = await this.mergeRemote(ctx, language, remote);
+        const current = this.state.profiles[ctx.profile].dictionaries[language];
+        const hint = this.hints(ctx)?.dictionaryRevision;
+        if (current?.base && !current.pendingWrite && !current.pendingResolution && !current.pendingHistoryRestore
+          && current.syncedLocalVersion != null && current.syncedLocalVersion === (current.localVersion || 0)
+          && hint != null && revisionMatches(current.revision, hint)) return;
+        // Conflict baselines deliberately retain an older entry, so only a
+        // conflict-free baseline represents the complete current remote copy.
+        const cached = !fetchRequired && current?.base && !current.conflicts.length
+          && hint != null && revisionMatches(current.revision, hint)
+          && revisionMatches(current.base.revision, hint);
+        const remote = cached ? current.base : await this.request(path, {}, ctx);
+        const merged = await this.mergeRemote(ctx, language, remote, null, null, cached);
         if (!merged || !this.current(ctx)) return;
         if (!merged.upserts.length && !merged.deletedIds.length) return;
         const automatic = new Set(this.state.profiles[ctx.profile].dictionaries[language].autoMergedIds || []);
         const origins = Object.fromEntries(merged.upserts.filter(entry => automatic.has(entry._id)).map(entry => [entry._id, 'auto_merge']));
         const request = { baseRevision: remote.revision, mutationId: this.uuid(), upserts: merged.upserts, deletedIds: merged.deletedIds, ...(Object.keys(origins).length ? { origins } : {}) };
         try {
-          const write = { remote, request };
+          const write = { remote, request, localVersion: this.state.profiles[ctx.profile].dictionaries[language].localVersion || 0 };
           await this.updateShared((state, profile) => { profile.dictionaries[language].pendingWrite = write; }, ctx, false);
           await this.sendDictionaryWrite(ctx, language, write);
           return;
-        } catch (error) { if (error.status !== 409 || attempt === 3) throw error; }
+        } catch (error) { if (error.status !== 409 || attempt === 3) throw error; fetchRequired = true; }
       }
     }
     async sendDictionaryWrite(ctx, language, write) {
       try {
-        const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: write.request }, ctx);
+        const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language) + '?return=ack', { method: 'PATCH', body: write.request }, ctx);
         const accepted = acceptedSnapshot(write.remote, write.request.upserts, write.request.deletedIds, response.appliedRevision || response.revision);
-        await this.mergeRemote(ctx, language, response, accepted, write.request.mutationId);
+        if (!Array.isArray(response.entries)) {
+          if (response.revision !== response.appliedRevision || response.mutationId !== write.request.mutationId) throw new Error('Invalid Dictionary save acknowledgement. Automatic sync will retry.');
+          if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before applying shared changes. Automatic sync will retry.');
+          const current = this.state.profiles[ctx.profile].dictionaries[language];
+          if (write.localVersion != null && (current.localVersion || 0) === write.localVersion) {
+            let applied = false;
+            await this.updateShared((state, profile) => {
+              const d = profile.dictionaries[language];
+              // Other tabs can commit while the request is in flight. Recheck
+              // inside the durable transaction before skipping a merge.
+              if ((d.localVersion || 0) !== write.localVersion || d.pendingWrite?.request.mutationId !== write.request.mutationId) return;
+              d.base = preserveConflictBases(accepted, d.conflicts);
+              d.revision = accepted.revision;
+              d.syncedLocalVersion = d.localVersion || 0;
+              d.autoMergedIds = (d.autoMergedIds || []).filter(id => !write.request.upserts.some(entry => entry._id === id));
+              if (d.pendingWrite?.request.mutationId === write.request.mutationId) d.pendingWrite = null;
+              applied = true;
+            }, ctx, false);
+            const latest = this.state.profiles[ctx.profile].dictionaries[language];
+            if (latest.pendingWrite?.request.mutationId === write.request.mutationId) await this.mergeRemote(ctx, language, accepted, accepted, write.request.mutationId);
+            else if (applied) {
+              const hints = this.hints(ctx);
+              if (hints) this.rememberHints({ ...hints, dictionaryRevision: accepted.revision }, ctx);
+            }
+          } else await this.mergeRemote(ctx, language, accepted, accepted, write.request.mutationId);
+        } else await this.mergeRemote(ctx, language, response, accepted, write.request.mutationId);
       } catch (error) {
         if ([400, 409, 413, 422].includes(error.status)) await this.update((state, profile) => { profile.dictionaries[language].pendingWrite = null; }, ctx, false);
         throw error;
       }
     }
     async resolveConflict(id, choices, revision) {
+      if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before resolving this conflict.');
       const ctx = this.context();
       const language = this.state.profiles[ctx.profile].settings.lang;
       if (!ctx.token || !language || language !== ctx.language) throw new Error('This language is local only.');
@@ -612,6 +674,7 @@
     async sendResolution(ctx, language, pending) {
       try {
         const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: { baseRevision: pending.revision, mutationId: pending.mutationId, upserts: pending.entry ? [pending.entry] : [], deletedIds: pending.entry ? [] : [pending.id], ...(pending.origin ? { origins: { [pending.id]: pending.origin } } : {}) } }, ctx);
+        if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before applying shared changes. Automatic sync will retry.');
         await this.updateShared((state, profile) => {
           const d = profile.dictionaries[language];
           const current = d.entries.find(e => e._id === pending.id) || null;
@@ -663,6 +726,7 @@
     }
     async restoreDictionaryHistory(eventId, version, revision) {
       if (!['before', 'after'].includes(version)) throw new Error('Choose a history version to restore.');
+      if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before restoring shared history.');
       const ctx = this.historyContext();
       await this.localQueue.catch(() => {});
       while (this.running) await this.running;
@@ -701,6 +765,7 @@
     async sendHistoryRestore(ctx, language, pending) {
       try {
         const response = await this.request('/v1/dictionaries/' + encodeURIComponent(language) + '/history/' + encodeURIComponent(pending.eventId) + '/restore', { method: 'POST', body: pending.request }, ctx);
+        if (await this.beforeSharedApply() === false) throw new Error('Save local Dictionary edits before applying shared changes. Automatic sync will retry.');
         await this.updateShared((state, profile) => {
           const d = profile.dictionaries[language];
           const current = d.entries.find(e => e._id === pending.id) || null;

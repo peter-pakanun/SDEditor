@@ -113,7 +113,14 @@
           WebSocket: window.WebSocket,
           onWork: work => this.setBrowserWork?.('cloud', work),
           yieldWork: () => this.yieldEditorPaint?.() || new Promise(resolve => setTimeout(resolve, 0)),
-          onChange: snapshot => { this._cloudApplyPending = this.cloudApply(snapshot).catch(error => { this.cloudStorageError = error.message; }); },
+          beforeSharedApply: () => this.flushScheduledSettingsSave?.(),
+          onChange: snapshot => {
+            const pending = !!this.pendingSettingsSaves;
+            this._cloudApplyPending = (async () => {
+              if (pending && await this.flushScheduledSettingsSave() === false) return;
+              await this.cloudApply(pending ? this._cloud.snapshot() : snapshot);
+            })().catch(error => { this.cloudStorageError = error.message; });
+          },
           onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; this.cloudWarning = !!status.warning; },
         });
         try {
@@ -132,13 +139,7 @@
         this._cloudPoll = setInterval(() => { if (!document.hidden && !this.showMultiInstanceGate && !this._cloud.socketReady) this._cloud.sync(); }, 30000);
         if (typeof BroadcastChannel !== 'undefined') {
           this._cloudChannel = new BroadcastChannel('sdeditor-cloud-account');
-          this._cloudChannel.onmessage = async () => {
-            this._cloud.closeSocket();
-            this._cloud.epoch++;
-            this._cloud.state = await window.OfflineStore.getHybridState();
-            await this.cloudApply(this._cloud.snapshot());
-            this._cloud.schedule(0);
-          };
+          this._cloudChannel.onmessage = () => this.cloudReloadAccount();
         }
         const fragment = new URLSearchParams(location.hash.slice(1));
         if (fragment.has('cloudCode')) {
@@ -150,10 +151,19 @@
           this.cloudError = true;
         } else await this._cloud.refreshSession(true);
       },
+      async cloudReloadAccount() {
+        if (await this.flushScheduledSettingsSave?.() === false) return false;
+        this._cloud.closeSocket();
+        this._cloud.epoch++;
+        this._cloud.state = await window.OfflineStore.getHybridState();
+        await this.cloudApply(this._cloud.snapshot());
+        this._cloud.schedule(0);
+        return true;
+      },
       async cloudPersist(payload) {
         if (this._cloudApplying) return true;
         try {
-          await this._cloud.saveLocal(payload);
+          await this._cloud.saveLocal(payload, payload.lang, { captured: true });
           this.cloudStorageError = '';
           return true;
         } catch (error) {
@@ -163,6 +173,12 @@
       },
       async cloudSelectLanguage(language, previous) {
         if (!this._cloud || this._cloudApplying) return true;
+        if (await this.flushScheduledSettingsSave?.() === false) {
+          this._cloudApplying = true;
+          try { this.lang = previous; await this.$nextTick(); }
+          finally { this._cloudApplying = false; }
+          return false;
+        }
         this._cloudApplying = true;
         this.cloudLanguageSwitching = true;
         try {
@@ -178,6 +194,7 @@
         finally { await this.$nextTick(); this._cloudApplying = false; this.cloudLanguageSwitching = false; }
       },
       async cloudImport(payload) {
+        if (await this.flushScheduledSettingsSave?.() === false) return false;
         this._cloudApplying = true;
         try {
           await this._cloud.importLocal(payload);
@@ -225,6 +242,7 @@
         const saved = JSON.parse(sessionStorage.getItem('sdeditor-login') || 'null');
         if (!saved || saved.state !== state || Date.now() - saved.at > 10 * 60 * 1000) throw new Error('Login expired. Please sign in again.');
         const result = await this._cloud.request('/auth/exchange', { method: 'POST', body: { code, verifier: saved.verifier } });
+        if (!await this.saveSettings()) throw new Error('Save local settings before switching accounts.');
         sessionStorage.removeItem('sdeditor-login');
         await this._cloud.acceptLogin(result);
         await this.cloudApply(this._cloud.snapshot());

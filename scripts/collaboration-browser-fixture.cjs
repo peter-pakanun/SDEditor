@@ -196,6 +196,46 @@ function browserControls(account, secret, settings) {
     status.textContent = 'Work indicator preview lasts 15 seconds. Hover or focus its spinner for details.';
   });
   button('Measure saves', async () => { instrument(await ready()); status.textContent = 'Save timing enabled for the current workspace.'; });
+  let dictionaryMeasurement;
+  button('Measure Dictionary edits', async () => {
+    const vm = await ready(); await vm.saveSettings(); await vm._cloud.sync();
+    const requests = [], start = performance.now();
+    const fetcher = vm._cloud.fetcher; let delayNext = true, uploadDelayed = false, typingDuringUpload = false;
+    const recordTyping = event => { if (uploadDelayed && event.target.closest?.('[data-dict-id]')) typingDuringUpload = true; };
+    document.addEventListener('input', recordTyping);
+    vm._cloud.fetcher = async (url, options) => {
+      const isDictionary = new URL(url).pathname.startsWith('/v1/dictionaries/');
+      const body = options?.body ? JSON.parse(options.body) : null;
+      if (isDictionary && options?.method === 'PATCH' && delayNext) {
+        delayNext = false;
+        uploadDelayed = true;
+        status.textContent = 'Dictionary upload delayed for 3 seconds. Adding and typing should stay available.';
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        uploadDelayed = false;
+      }
+      const response = await fetcher(url, options);
+      if (isDictionary) {
+        const data = await response.clone().json();
+        requests.push({ method: options?.method || 'GET', requestBytes: new TextEncoder().encode(options?.body || '').length,
+          responseBytes: new TextEncoder().encode(JSON.stringify(data)).length,
+          upserts: body?.upserts?.length || 0, deletedIds: body?.deletedIds?.length || 0,
+          fullResponse: Array.isArray(data.entries) });
+      }
+      return response;
+    };
+    dictionaryMeasurement = { vm, fetcher, requests, start, recordTyping, didTypeDuringUpload: () => typingDuringUpload };
+    status.textContent = 'Dictionary measurement started. The next upload waits 3 seconds; edit normally.';
+  });
+  button('Finish Dictionary check', async () => {
+    if (!dictionaryMeasurement) return;
+    const { vm, fetcher, requests, start, recordTyping, didTypeDuringUpload } = dictionaryMeasurement;
+    await vm.saveSettings(); await vm._cloud.sync();
+    vm._cloud.fetcher = fetcher; dictionaryMeasurement = null;
+    document.removeEventListener('input', recordTyping);
+    timing.textContent = 'Dictionary checks\n' + JSON.stringify({ requests, localPending: vm.pendingSettingsSaves,
+      typingDuringUpload: didTypeDuringUpload(), elapsedMs: Math.round(performance.now() - start) }, null, 2);
+    status.textContent = 'Dictionary measurement completed. Requests contain no credentials or dictionary text.';
+  });
   document.body.append(panel);
 }
 

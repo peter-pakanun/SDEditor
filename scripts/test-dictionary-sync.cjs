@@ -12,13 +12,32 @@ const snapshot = (entries = [], revision = 1, tombstones = []) => ({ revision, e
 const resultEntry = result => result.entries[0];
 const keep = (conflict, definitions = 'local', note = 'local') => Sync.resolve(conflict, { definitions, note });
 
+test('known unchanged remote revision diffs retain deletion, draft and ordering semantics', () => {
+  const base = snapshot([entry('a', { alts: [alt('x', 'X', 'x'), alt('y', 'Y', 'y')] }), entry('b'), entry('c')], 4, ['old']);
+  const cases = [
+    clone(base.entries),
+    [entry('new'), ...clone(base.entries)],
+    [clone(base.entries[2]), entry('a', { alts: [alt('y', 'Y', 'changed'), alt('new-alt', 'New', 'new'), alt('x', 'X', 'x')], tlnote: 'new note' })],
+    [entry('a', { find: '' }), entry('draft', { find: '', replace: 'unfinished' }), entry('old', { find: 'Restored' })],
+    [entry('a', { find: ' fire ', replace: 'New local spelling', alts: [alt('x', 'X', '')] }), entry('new', { find: 'Fire' }), entry('b')]
+  ];
+  for (const local of cases) {
+    const before = clone({ base, local });
+    assert.deepEqual(Sync.changesSince(base, local), Sync.merge(base, local, base));
+    assert.deepEqual({ base, local }, before);
+  }
+  const changed = Sync.changesSince(base, cases[2]);
+  changed.entries.find(entry => entry._id === 'a').alts[0].replace = 'mutated result';
+  assert.equal(cases[2][1].alts[0].replace, 'changed');
+});
+
 test('browser global and CommonJS expose the same pure interface', () => {
   const context = {};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/dictionarySync.js'), 'utf8'), context);
   assert.equal(typeof context.DictionarySync.merge, 'function');
   assert.equal(typeof context.DictionarySync.resolve, 'function');
   assert.equal(typeof context.DictionarySync.normalizeEntries, 'function');
-  assert.deepEqual(Object.keys(Sync), ['merge', 'resolve', 'normalizeEntries']);
+  assert.deepEqual(Object.keys(Sync), ['merge', 'resolve', 'normalizeEntries', 'changesSince']);
 });
 
 test('does not mutate inputs, and result/candidates do not share nested input references', () => {
