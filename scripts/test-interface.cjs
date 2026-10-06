@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 function loadEditor() {
   let config;
+  const directives = {};
   let searchFocusCount = 0;
   const context = vm.createContext({
     window: { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } },
@@ -13,7 +14,7 @@ function loadEditor() {
     document: { activeElement: null, body: { tagName: 'BODY' } },
     Vue: {
       defineComponent(value) { config = value; return value; },
-      createApp() { return { component() {}, directive() {}, mount() {} }; },
+      createApp() { return { component() {}, directive(name, value) { directives[name] = value; }, mount() {} }; },
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
@@ -29,7 +30,7 @@ function loadEditor() {
   for (const [name, getter] of Object.entries(config.computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
-  return { editor, config, context, searchFocusCount: () => searchFocusCount };
+  return { editor, config, context, directives, searchFocusCount: () => searchFocusCount };
 }
 
 function description(name, flags = {}, english = `English ${name}`, thai = `ภาษาไทย ${name}`) {
@@ -1007,4 +1008,64 @@ test('mobile autocomplete preview leaves the page still while an explicit dictio
   assert.equal(harness.context.document.activeElement, geometry.focusedInput);
   harness.editor.scrollDictionaryEntryIntoView(geometry.row, { allowPageScroll: true });
   assert.equal(geometry.nativeScrolls.length, 1, 'An explicit Ctrl+Enter edit may navigate to the mobile dictionary input.');
+});
+
+test('browser work indicator describes overlapping tasks and clears each scope independently', () => {
+  const { editor: e } = loadEditor();
+  e.setBrowserWork('cloud', { key: 'dictionary', label: 'Updating Dictionary entries', active: true, immediate: true });
+  e.setBrowserWork('collaboration', { key: 'source', label: 'Preparing collaboration data', active: true, immediate: true });
+  assert.match(e.browserWorkTooltip, /Updating Dictionary entries/);
+  assert.match(e.browserWorkTooltip, /Preparing collaboration data/);
+  e.clearBrowserWork('cloud');
+  assert.doesNotMatch(e.browserWorkTooltip, /Updating Dictionary entries/);
+  assert.match(e.browserWorkTooltip, /Preparing collaboration data/);
+  e.clearBrowserWork('collaboration');
+  assert.equal(e.browserWorkTooltip, '');
+  e.editorLoading = true;
+  assert.match(e.browserWorkTooltip, /Preparing translation fields/);
+  e.editorLoading = false;
+  assert.equal(e.browserWorkTooltip, '');
+});
+
+test('a short completed task cannot reveal a stale delayed browser work indicator', () => {
+  const { editor: e, context } = loadEditor();
+  let reveal;
+  context.setTimeout = callback => { reveal = callback; return 1; };
+  context.clearTimeout = () => {};
+  e.setBrowserWork('workspace', { key: 'load', label: 'Preparing stored translation files', active: true });
+  assert.equal(e.browserWorkTooltip, '');
+  e.setBrowserWork('workspace', { key: 'load', active: false });
+  reveal();
+  assert.equal(e.browserWorkTooltip, '');
+});
+
+test('work details appear beside a keyboard-focused indicator and disappear when it finishes', () => {
+  const { editor, directives } = loadEditor();
+  const handlers = new Map();
+  const el = {
+    addEventListener(name, callback) { handlers.set(name, callback); },
+    removeEventListener(name) { handlers.delete(name); }, removeAttribute() {},
+    getBoundingClientRect() { return { left: 100, top: 200, width: 22, height: 22 }; },
+  };
+  let shown, hidden = 0;
+  editor.showTooltip = (point, text) => { shown = { point, text }; };
+  editor.hideTooltip = () => hidden++;
+  directives.tooltip.mounted(el, { value: 'Updating Dictionary entries', instance: editor });
+  handlers.get('focus')();
+  assert.equal(shown.point.clientX, 111); assert.equal(shown.point.clientY, 211);
+  assert.equal(shown.text, 'Updating Dictionary entries');
+  directives.tooltip.unmounted(el);
+  assert.equal(hidden, 1); assert.equal(handlers.size, 0);
+});
+
+test('settings-only cloud updates preserve Dictionary rows and do not normalize them again', () => {
+  const { editor: e } = loadEditor();
+  const dictionary = e.dictionary;
+  let normalized = 0;
+  e.ensureDictionaryIds = () => normalized++;
+  e.importSettings({ dictionary, editorRegexes: e.editorRegexes, lang: 'Thai', theme: 'dark' });
+  assert.equal(e.dictionary, dictionary); assert.equal(normalized, 0); assert.equal(e.theme, 'dark');
+  const nextDictionary = [{ _id: 'remote', find: 'Fire', replace: 'ไฟ' }];
+  e.importSettings({ dictionary: nextDictionary, lang: 'Thai' });
+  assert.equal(e.dictionary, nextDictionary); assert.equal(normalized, 1);
 });

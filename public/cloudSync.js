@@ -38,7 +38,18 @@
       }
     }
   }
-  const newDictionary = entries => ({ entries: copy(entries || []), base: null, conflicts: [], pendingResolution: null, revision: 0 });
+  const newDictionary = entries => ({ entries: copy(entries || []), base: null, conflicts: [], pendingResolution: null, revision: 0, localVersion: 0, syncedLocalVersion: -1 });
+  function replaceEntries(dictionary, entries) {
+    if (equal(dictionary.entries, entries)) return;
+    dictionary.entries = entries;
+    dictionary.localVersion = (dictionary.localVersion || 0) + 1;
+  }
+  function replaceConflicts(dictionary, conflicts) {
+    if (equal(dictionary.conflicts, conflicts)) return;
+    dictionary.conflicts = conflicts;
+    dictionary.conflictVersion = (dictionary.conflictVersion || 0) + 1;
+  }
+  const revisionMatches = (left, right) => left != null && right != null && String(left) === String(right);
   function newProfile(settings) {
     return { settings: preferences(settings), clipboard: String(settings?.editorClipboard || ''), settingsBase: null, dictionaries: {}, unassignedDictionary: null, recovery: [] };
   }
@@ -89,7 +100,7 @@
     }).map(entry => entry._id);
   }
   class Client {
-    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks }) {
+    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks, WebSocket: Socket, onWork, yieldWork }) {
       this.store = store; this.merge = merge; this.fetcher = fetcher;
       this.apiBase = apiBase.replace(/\/$/, '');
       this.onChange = onChange || (() => {}); this.onStatus = onStatus || (() => {});
@@ -97,9 +108,14 @@
       this.state = null; this.epoch = 0; this.timer = null; this.running = null;
       this.backoff = 1000; this.lastActivityRefresh = 0; this.destroyed = false;
       this.localQueue = Promise.resolve();
+      this.WebSocket = Socket; this.socket = null; this.socketOpening = null; this.socketReady = false;
+      this.socketRetryAt = 0; this.socketBackoff = 1000; this.remoteHints = null; this.hintsContext = null;
+      this.lastNotification = null; this.notifiedDictionary = null; this.notifiedConflicts = null;
+      this.onWork = onWork || (() => {}); this.yieldWork = yieldWork || (() => Promise.resolve());
     }
     async initialize(legacy) {
-      this.state = await this.store.updateHybridState(state => {
+      this.state = await this.store.getHybridState();
+      if (!this.state || Object.hasOwn(this.state, 'unassignedDictionary')) this.state = await this.store.updateHybridState(state => {
         if (!state) return initializeState(legacy);
         if (Object.hasOwn(state, 'unassignedDictionary')) {
           (state.profiles[state.activeProfile] || state.profiles.guest).unassignedDictionary = state.unassignedDictionary;
@@ -107,17 +123,29 @@
         }
         return state;
       });
-      this.notify();
-      return this.snapshot();
+      return this.notify();
     }
-    snapshot() {
+    snapshot({ includeDictionary = true, includeConflicts = true } = {}) {
       const profile = this.state?.profiles[this.state.activeProfile];
       if (!profile) return null;
       const dictionary = profile.dictionaries[profile.settings.lang] || newDictionary();
       // Never expose a bearer token to reactive Vue state or exports.
-      return { settings: copy(profile.settings), editorClipboard: profile.clipboard, dictionary: copy(dictionary.entries), conflicts: copy(dictionary.conflicts), revision: dictionary.revision, user: copy(this.state.auth?.user || null), signedIn: !!this.state.auth?.token, profileId: this.state.activeProfile, needsDictionaryLanguage: !!profile.unassignedDictionary?.length, recoveryCount: profile.recovery.length };
+      return { settings: copy(profile.settings), editorClipboard: profile.clipboard, ...(includeDictionary ? { dictionary: copy(dictionary.entries) } : {}), ...(includeConflicts ? { conflicts: copy(dictionary.conflicts) } : {}), revision: dictionary.revision, user: copy(this.state.auth?.user || null), signedIn: !!this.state.auth?.token, profileId: this.state.activeProfile, needsDictionaryLanguage: !!profile.unassignedDictionary?.length, recoveryCount: profile.recovery.length };
     }
-    notify() { this.onChange(this.snapshot()); }
+    notify() {
+      const profile = this.state?.profiles[this.state.activeProfile];
+      if (!profile) return;
+      const d = profile.dictionaries[profile.settings.lang];
+      const dictionaryKey = JSON.stringify([this.state.activeProfile, profile.settings.lang, d?.localVersion || 0]);
+      const conflictsKey = JSON.stringify([this.state.activeProfile, profile.settings.lang, d?.conflictVersion || 0]);
+      const signature = JSON.stringify([profile.settings, profile.clipboard, conflictsKey, d?.revision || 0, this.state.auth?.user,
+        !!this.state.auth?.token, this.state.activeProfile, !!profile.unassignedDictionary?.length, profile.recovery.length, dictionaryKey]);
+      if (signature === this.lastNotification) return;
+      const snapshot = this.snapshot({ includeDictionary: dictionaryKey !== this.notifiedDictionary, includeConflicts: conflictsKey !== this.notifiedConflicts });
+      this.lastNotification = signature; this.notifiedDictionary = dictionaryKey; this.notifiedConflicts = conflictsKey;
+      this.onChange(snapshot);
+      return snapshot;
+    }
     status(message, error = false, warning = false) { this.onStatus({ message, error, warning }); }
     context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language, assignmentVersion: this.state.auth?.user?.assignmentVersion }; }
     current(ctx, state = this.state) { return !this.destroyed && ctx.epoch === this.epoch && state.activeProfile === ctx.profile && state.auth?.token === ctx.token; }
@@ -152,7 +180,7 @@
     }
     async saveLocalNow(payload, contextLanguage) {
       const ctx = this.context();
-      const observed = copy(this.state.profiles[ctx.profile]);
+      const observed = this.state.profiles[ctx.profile];
       await this.update((state, profile) => {
         // A language switch may already be queued. Never put the old dictionary
         // into a new language, even when Vue watchers finish out of order.
@@ -165,8 +193,8 @@
           if (!equal(dictionary.entries, prior)) {
             const combined = this.merge.merge({ entries: prior, tombstones: [], revision: 0 }, payload.dictionary || [], { entries: dictionary.entries, tombstones: [], revision: 0 });
             if (combined.conflicts.length) throw new Error('This dictionary changed in another tab. Export your current settings to preserve this draft, then reload before retrying.');
-            dictionary.entries = combined.entries;
-          } else dictionary.entries = copy(payload.dictionary || []);
+            replaceEntries(dictionary, combined.entries);
+          } else replaceEntries(dictionary, copy(payload.dictionary || []));
         }
       }, ctx, false);
       const latest = this.state.profiles[ctx.profile];
@@ -174,11 +202,12 @@
       this.schedule();
     }
     async selectLanguage(language, payload, oldLanguage) {
+      this.closeSocket();
       this.epoch++;
       const ctx = this.context();
       await this.update((state, profile) => {
         if (oldLanguage && profile.settings.lang === oldLanguage) {
-          (profile.dictionaries[oldLanguage] ||= newDictionary()).entries = copy(payload.dictionary || []);
+          replaceEntries(profile.dictionaries[oldLanguage] ||= newDictionary(), copy(payload.dictionary || []));
         }
         profile.settings = { ...preferences(payload), lang: language };
         if (profile.unassignedDictionary?.length && language) {
@@ -186,8 +215,8 @@
           if (existing) {
             const remote = { entries: existing.entries, tombstones: existing.base?.tombstones || [], revision: existing.revision };
             const merged = this.merge.merge(null, profile.unassignedDictionary, remote);
-            existing.entries = merged.entries;
-            existing.conflicts = merged.conflicts;
+            replaceEntries(existing, merged.entries);
+            replaceConflicts(existing, merged.conflicts);
             existing.base = preserveConflictBases(remote, merged.conflicts);
           } else profile.dictionaries[language] = newDictionary(profile.unassignedDictionary);
           profile.unassignedDictionary = null;
@@ -204,7 +233,7 @@
         profile.recovery.push({ at: Date.now(), reason: 'Before settings import', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
         profile.settings = preferences(payload);
         profile.clipboard = String(payload.editorClipboard || '');
-        if (payload.lang) (profile.dictionaries[payload.lang] ||= newDictionary()).entries = copy(payload.dictionary || []);
+        if (payload.lang) replaceEntries(profile.dictionaries[payload.lang] ||= newDictionary(), copy(payload.dictionary || []));
         else profile.unassignedDictionary = copy(payload.dictionary || []);
       }, ctx);
       this.schedule();
@@ -252,6 +281,7 @@
       } finally { clearTimeout(timeout); }
     }
     async acceptLogin(result) {
+      this.closeSocket(); this.remoteHints = null; this.hintsContext = null;
       this.epoch++;
       await this.update((state) => {
         const id = result.user.id;
@@ -278,10 +308,14 @@
         await this.update(state => {
           if (this.permissionsCurrent(ctx, state)) { state.auth.user = result.user; state.auth.expiresAt = result.expiresAt; }
         }, ctx);
+        const current = this.context();
+        this.rememberHints(result.sync, current);
+        if (this.hintKey(ctx) !== this.hintKey(current)) this.closeSocket();
         this.schedule(0);
       } catch (error) { this.lastActivityRefresh = 0; this.reportError(error); }
     }
     async logout() {
+      this.closeSocket(); this.remoteHints = null; this.hintsContext = null;
       const ctx = this.context();
       let revoked = true;
       try { if (ctx.token) await this.request('/auth/logout', { method: 'POST' }, ctx); }
@@ -300,6 +334,75 @@
       const prefix = error.status === 403 ? 'Cloud access unavailable' : 'Saved locally · cloud unavailable';
       this.status(prefix + ': ' + error.message, true);
     }
+    hintKey(ctx = this.context()) { return JSON.stringify([ctx.epoch, ctx.profile, ctx.token, ctx.language, ctx.assignmentVersion]); }
+    rememberHints(hints, ctx = this.context(), authoritative = false) {
+      if (!hints || hints.language !== ctx.language || !this.permissionsCurrent(ctx)) return;
+      const key = this.hintKey(ctx);
+      const prior = !authoritative && this.hintsContext === key ? this.remoteHints : null;
+      this.remoteHints = { ...hints };
+      for (const field of ['settingsRevision', 'dictionaryRevision']) {
+        if (prior?.[field] != null && Number(prior[field]) > Number(hints[field])) this.remoteHints[field] = prior[field];
+      }
+      this.hintsContext = key;
+    }
+    hints(ctx = this.context()) { return this.hintsContext === this.hintKey(ctx) ? this.remoteHints : null; }
+    openSocket() {
+      const ctx = this.context();
+      if (!this.WebSocket || !ctx.token || !ctx.language || this.destroyed || Date.now() < this.socketRetryAt) return Promise.resolve();
+      const key = this.hintKey(ctx);
+      if (this.socket && this.socketContext !== key) this.closeSocket();
+      if (this.socket || this.socketOpening) return this.socketOpening || Promise.resolve();
+      const operation = (async () => {
+        const ticket = await this.request('/v1/sync/ticket', { method: 'POST' }, ctx);
+        if (!this.permissionsCurrent(ctx)) return;
+        const url = new URL(ticket.url || '/v1/collaboration/ws?ticket=' + encodeURIComponent(ticket.ticket), this.apiBase);
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new this.WebSocket(url.href);
+        this.socket = socket; this.socketContext = key;
+        socket.onmessage = event => {
+          if (this.socket !== socket || !this.permissionsCurrent(ctx)) return;
+          this.lastSocketMessage = Date.now();
+          let message; try { message = JSON.parse(event.data); } catch (_) { return; }
+          if (!['sync_ready', 'sync_changed'].includes(message.type)) return;
+          if (message.sync?.language !== ctx.language) { this.closeSocket(); this.schedule(0); return; }
+          this.socketReady = true; this.socketBackoff = 1000; this.socketRetryAt = 0;
+          const before = JSON.stringify(this.hints(ctx));
+          this.rememberHints(message.sync, ctx, message.type === 'sync_ready');
+          if (before !== JSON.stringify(this.hints(ctx))) this.schedule(0);
+        };
+        socket.onopen = () => {
+          if (this.socket !== socket || !this.permissionsCurrent(ctx)) { socket.close(); return; }
+          this.lastSocketMessage = Date.now();
+          this.socketHeartbeat = setInterval(() => {
+            if (Date.now() - this.lastSocketMessage > 45000) { socket.close(); return; }
+            if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'heartbeat' }));
+          }, 15000);
+          this.socketHeartbeat.unref?.();
+        };
+        socket.onerror = () => {};
+        socket.onclose = () => {
+          if (this.socket !== socket) return;
+          this.closeSocket();
+          if (this.permissionsCurrent(ctx)) {
+            this.socketRetryAt = Date.now() + this.socketBackoff;
+            this.schedule(this.socketBackoff);
+            this.socketBackoff = Math.min(this.socketBackoff * 2, 30000);
+          }
+        };
+      })().catch(error => {
+        if (this.permissionsCurrent(ctx)) this.socketRetryAt = Date.now() + 30000;
+        // Revision checks remain available when a proxy or older API lacks sockets.
+        if (error.status === 401 || error.status === 403) this.reportError(error);
+      }).finally(() => { if (this.socketOpening === operation) this.socketOpening = null; });
+      this.socketOpening = operation;
+      return operation;
+    }
+    closeSocket() {
+      const socket = this.socket; this.socket = null; this.socketReady = false; this.socketContext = null;
+      this.socketOpening = null;
+      clearInterval(this.socketHeartbeat); this.socketHeartbeat = null;
+      if (socket) { socket.onclose = null; socket.close(); }
+    }
     async sync() {
       clearTimeout(this.timer);
       if (this.running) { this.resyncRequested = true; return this.running; }
@@ -311,26 +414,40 @@
         this.state = await this.store.getHybridState();
         if (!this.current(ctx)) { this.notify(); return; }
         ctx = this.context();
-        const me = await this.request('/v1/me', {}, ctx);
-        await this.update(state => {
-          if (this.permissionsCurrent(ctx, state)) { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }
-        }, ctx);
+        if (!this.socketReady || !this.hints(ctx)) {
+          const me = await this.request('/v1/me', {}, ctx);
+          if (!equal(this.state.auth.user, me.user)) {
+            await this.update(state => {
+              if (this.permissionsCurrent(ctx, state)) { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }
+            }, ctx);
+          }
+          if (!this.current(ctx)) return;
+          ctx = this.context();
+          this.rememberHints(me.sync, ctx, true);
+        }
         if (!this.current(ctx)) return;
         ctx = this.context();
         if (!ctx.language) { this.status('Not configured — awaiting admin language assignment', false, true); return; }
-        await this.syncSettings(ctx);
+        const hints = this.hints(ctx);
+        const profile = this.state.profiles[ctx.profile];
+        if (profile.settingsWrite || !revisionMatches(profile.settingsBase?.revision, hints?.settingsRevision)
+          || !equal(profile.settings, profile.settingsBase?.settings)) await this.syncSettings(ctx);
         if (!this.current(ctx)) return;
         const language = ctx.language;
         // Other language drafts stay completely local, including after reassignment.
-        await this.syncDictionary(ctx, language);
+        const d = this.state.profiles[ctx.profile].dictionaries[language];
+        if (!d?.base || d.pendingWrite || d.pendingResolution || d.pendingHistoryRestore
+          || d.syncedLocalVersion == null || d.syncedLocalVersion !== (d.localVersion || 0)
+          || !revisionMatches(d.revision, hints?.dictionaryRevision)) await this.syncDictionary(ctx, language);
         this.backoff = 1000;
         this.notify();
-        const snapshot = this.snapshot();
         // Leave existing failures visible throughout retries; only a completed
         // sync can clear them. Routine saves and polling have no visible status.
-        const warning = snapshot.conflicts.length ? 'Saved locally · dictionary conflicts need your choice'
-          : snapshot.settings.lang !== language ? 'Selected dictionary language is local only' : '';
+        const active = this.state.profiles[this.state.activeProfile];
+        const warning = active.dictionaries[active.settings.lang]?.conflicts.length ? 'Saved locally · dictionary conflicts need your choice'
+          : active.settings.lang !== language ? 'Selected dictionary language is local only' : '';
         this.status(warning, false, !!warning);
+        this.openSocket().catch(() => {});
       };
       this.running = (this.locks ? this.locks.request('sdeditor-cloud-sync', run) : run()).catch(error => {
         this.reportError(error);
@@ -380,6 +497,8 @@
           profile.settingsBase = copy(response);
           if (profile.settingsWrite?.mutationId === write.mutationId) profile.settingsWrite = null;
         }, ctx, false);
+        const hints = this.hints(ctx);
+        if (hints) this.rememberHints({ ...hints, settingsRevision: response.revision }, ctx);
       } catch (error) {
         if ([400, 409, 413, 422].includes(error.status)) await this.update((state, profile) => { profile.settingsWrite = null; }, ctx, false);
         throw error;
@@ -387,18 +506,25 @@
     }
     async mergeRemote(ctx, language, remote, accepted, mutationId) {
       let result;
-      await this.updateShared((state, profile) => {
-        const d = profile.dictionaries[language] ||= newDictionary();
-        const baseline = accepted ? preserveConflictBases(accepted, d.conflicts) : d.base;
-        result = this.merge.merge(baseline, d.entries, remote);
-        const priorAutoMerged = (d.autoMergedIds || []).filter(id => !accepted || !d.pendingWrite?.request.upserts.some(e => e._id === id));
-        d.autoMergedIds = autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
-        d.entries = result.entries;
-        d.conflicts = result.conflicts;
-        d.base = preserveConflictBases(remote, result.conflicts);
-        d.revision = remote.revision;
-        if (mutationId && d.pendingWrite?.request.mutationId === mutationId) d.pendingWrite = null;
-      }, ctx, false);
+      this.onWork({ key: 'dictionary', label: 'Updating Dictionary entries', active: true, immediate: true });
+      try {
+        await this.yieldWork();
+        await this.updateShared((state, profile) => {
+          const d = profile.dictionaries[language] ||= newDictionary();
+          const baseline = accepted ? preserveConflictBases(accepted, d.conflicts) : d.base;
+          result = this.merge.merge(baseline, d.entries, remote);
+          const priorAutoMerged = (d.autoMergedIds || []).filter(id => !accepted || !d.pendingWrite?.request.upserts.some(e => e._id === id));
+          d.autoMergedIds = autoMergedIds(this.merge, d.entries, remote, result, priorAutoMerged);
+          replaceEntries(d, result.entries);
+          replaceConflicts(d, result.conflicts);
+          d.base = preserveConflictBases(remote, result.conflicts);
+          d.revision = remote.revision;
+          if (!result.upserts.length && !result.deletedIds.length) d.syncedLocalVersion = d.localVersion || 0;
+          if (mutationId && d.pendingWrite?.request.mutationId === mutationId) d.pendingWrite = null;
+        }, ctx, false);
+      } finally { this.onWork({ key: 'dictionary', label: 'Updating Dictionary entries', active: false }); }
+      const hints = this.hints(ctx);
+      if (hints) this.rememberHints({ ...hints, dictionaryRevision: remote.revision }, ctx);
       return result;
     }
     async syncDictionary(ctx, language) {
@@ -465,8 +591,8 @@
             current ? [current] : [],
             { entries: pending.entry ? [pending.entry] : [], tombstones: pending.entry ? [] : [pending.id], revision: response.revision }
           );
-          d.entries = d.entries.filter(e => e._id !== pending.id).concat(rebased.entries);
-          d.conflicts = d.conflicts.filter(c => c.id !== pending.id).concat(rebased.conflicts);
+          replaceEntries(d, d.entries.filter(e => e._id !== pending.id).concat(rebased.entries));
+          replaceConflicts(d, d.conflicts.filter(c => c.id !== pending.id).concat(rebased.conflicts));
           d.base = preserveConflictBases(acceptedSnapshot(d.base || { entries: [], tombstones: [] }, pending.entry ? [pending.entry] : [], pending.entry ? [] : [pending.id], response.appliedRevision || response.revision), d.conflicts);
           d.pendingResolution = null;
         }, ctx, false);
@@ -555,9 +681,10 @@
             current ? [current] : [],
             { entries: pending.entry ? [pending.entry] : [], tombstones: pending.entry ? [] : [pending.id], revision: response.appliedRevision || response.revision }
           );
-          d.entries = d.entries.flatMap(e => e._id === pending.id ? rebased.entries : [e]);
-          if (!current) d.entries.push(...rebased.entries);
-          d.conflicts = d.conflicts.filter(c => c.id !== pending.id).concat(rebased.conflicts);
+          const entries = d.entries.flatMap(e => e._id === pending.id ? rebased.entries : [e]);
+          if (!current) entries.push(...rebased.entries);
+          replaceEntries(d, entries);
+          replaceConflicts(d, d.conflicts.filter(c => c.id !== pending.id).concat(rebased.conflicts));
           d.base = preserveConflictBases(acceptedSnapshot(d.base || { entries: [], tombstones: [] }, pending.entry ? [pending.entry] : [], pending.entry ? [] : [pending.id], response.appliedRevision || response.revision), d.conflicts);
           d.pendingHistoryRestore = null;
         }, ctx, false);
@@ -580,7 +707,7 @@
       const result = await this.request('/v1/admin/users/' + encodeURIComponent(id) + '/language', { method: 'PUT', body: { language: language || null } });
       await this.refreshSession(true); return result.user;
     }
-    destroy() { this.destroyed = true; this.epoch++; clearTimeout(this.timer); }
+    destroy() { this.destroyed = true; this.epoch++; clearTimeout(this.timer); this.closeSocket(); }
   }
   return { Client, SETTING_KEYS, DEFAULT_SETTINGS, initializeState, mergeSettings, preferences, completeSettings, validateImport, preserveConflictBases, acceptedSnapshot };
 });

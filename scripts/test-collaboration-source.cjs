@@ -25,6 +25,26 @@ function fixture() {
 }
 const source = `description example\n1 damage\n2\n# "First {0}"\n# "Second" negate 1\nlang "Thai"\n2\n# "หนึ่ง {0}"\n# "สอง"`;
 
+test('cooperative hashing preserves canonical source identity and yields between bounded preparation slices', async () => {
+  const source = Array.from({ length: 130 }, (_, index) => ({ filepath: `source/${130 - index}.txt`, name: 'ภาษาไทย 😀',
+    stats: ['damage'], variables: ['#'], remarks: [''], translations: { English: ['Damage {0} \\n quoted "text"'], Thai: ['ความเสียหาย {0}'] } }));
+  const before = structuredClone(source); let yields = 0;
+  assert.equal(await P.sourceHashAsync(source, { budgetMs: 0, yieldTask: async () => { yields++; } }), await P.sourceHash(source));
+  assert.ok(yields >= 6, 'Validation, serialization and byte assembly all give the browser a chance to respond.');
+  assert.deepEqual(source, before);
+  assert.deepEqual(await P.manifestAsync(source), P.manifest(source));
+  assert.equal(await P.sourceHashAsync(P.manifest(source)), await P.sourceHash(source));
+});
+
+test('cooperative source preparation cancels before hashing or publishing a stale workspace', async () => {
+  const source = Array.from({ length: 130 }, (_, index) => ({ filepath: `${index}.txt`, stats: ['damage'], variables: ['#'], remarks: [''], translations: { English: ['Original'] } }));
+  let cancelled = false, digests = 0;
+  await assert.rejects(P.sourceHashAsync(source, { budgetMs: 0, isCancelled: () => cancelled,
+    yieldTask: async () => { cancelled = true; }, cryptoProvider: { subtle: { digest() { digests++; } } } }), error => error.stale === true);
+  assert.equal(digests, 0);
+  await assert.rejects(P.manifestAsync([...source, source[0]], { budgetMs: 0, yieldTask: async () => {} }), /duplicate source/);
+});
+
 test('public workspace projection remains pure and preserves other languages and metadata', () => {
   const workspace = { descs: [{ filepath: 'a.txt', translations: { English: ['Original'], Thai: ['old'], German: ['German'] } }],
     status: { 'a.txt': { preserved: true } }, unrelated: { nested: true } };

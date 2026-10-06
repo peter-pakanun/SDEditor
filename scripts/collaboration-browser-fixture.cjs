@@ -28,7 +28,7 @@ function browserControls(account, secret, settings) {
   const ready = async () => {
     for (let index = 0; index < 200; index++) {
       const vm = getApp();
-      if (vm?._cloud?.state && vm.offlineStoreReady) return vm;
+      if (vm?._cloud?.state && vm.offlineStoreReady && vm.startupReady && !vm._cloudInitializing && !vm._cloudApplying) return vm;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw new Error('Editor initialization did not finish. Inspect visible storage or script errors.');
@@ -89,10 +89,16 @@ function browserControls(account, secret, settings) {
     status.textContent = 'Preparing disposable account and source…';
     const response = await fetch('/fixture/session', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Fixture-Key': secret }, body: '{}' });
     if (!response.ok) throw new Error('Fixture session refused');
-    vm.lang = 'Thai'; vm.theme = account === 'a' ? 'grey' : 'dark';
+    vm._cloudApplying = true;
+    try {
+      vm.lang = 'Thai'; vm.theme = account === 'a' ? 'grey' : 'dark';
+      await vm.$nextTick();
+      await vm._cloud.selectLanguage('Thai', vm.cloudPayload(), vm._cloud.state.profiles[vm._cloud.state.activeProfile].settings.lang);
+    } finally { vm._cloudApplying = false; }
     await vm.saveSettings();
     await vm._cloud.acceptLogin(await response.json());
     await vm.cloudApply(vm._cloud.snapshot());
+    if (vm.lang !== 'Thai') await vm.cloudSelectLanguage('Thai', vm.lang);
     const source = JSON.parse(JSON.stringify(seed));
     const zip = new JSZip();
     for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
@@ -135,6 +141,39 @@ function browserControls(account, secret, settings) {
   button('Switch theme', async () => {
     const vm = await ready(); vm.theme = vm.theme === 'grey' ? 'dark' : 'grey';
     status.textContent = 'Theme: ' + vm.theme;
+  });
+  button('Check idle sync', async () => {
+    const vm = await ready();
+    await vm._cloud.sync();
+    const counts = { storageWrites: 0, dictionaryMerges: 0, dictionaryDownloads: 0, fullFileSnapshots: 0 };
+    const restores = [];
+    const wrap = (owner, key, observe) => {
+      const original = owner[key];
+      owner[key] = function (...args) { observe(args); return original.apply(this, args); };
+      restores.push(() => { owner[key] = original; });
+    };
+    wrap(OfflineStore, 'updateHybridState', () => counts.storageWrites++);
+    wrap(DictionarySync, 'merge', () => counts.dictionaryMerges++);
+    wrap(vm._cloud, 'request', args => { if (args[0].startsWith('/v1/dictionaries/')) counts.dictionaryDownloads++; });
+    if (vm._collaboration) wrap(vm._collaboration, 'snapshot', args => { if (args[0]?.includeFiles !== false) counts.fullFileSnapshots++; });
+    try { await vm._cloud.sync(); await vm.collabRetry(); }
+    finally { for (const restore of restores.reverse()) restore(); }
+    timing.textContent = 'Unchanged sync checks\n' + Object.entries(counts).map(([key, value]) => key + ': ' + value).join('\n');
+    status.textContent = 'Checks finished. Idle data should require no writes, merges, downloads or full file copies.';
+  });
+  button('Update shared Dictionary', async () => {
+    const vm = await ready(), language = vm.cloudUser.language;
+    const remote = await vm._cloud.request('/v1/dictionaries/' + encodeURIComponent(language));
+    const entry = { _id: 'fixture-push-term', find: 'Push fixture term', replace: 'แจ้งจากทีม ' + Date.now(), alts: [], tlnote: '' };
+    await vm._cloud.request('/v1/dictionaries/' + encodeURIComponent(language), { method: 'PATCH', body: { baseRevision: remote.revision,
+      mutationId: crypto.randomUUID(), upserts: [entry], deletedIds: [] } });
+    status.textContent = 'Shared Dictionary changed. Both translators should receive it through the account socket.';
+  });
+  button('Preview work indicator', async () => {
+    const vm = await ready();
+    vm.setBrowserWork('fixture', { key: 'preview', label: 'Preparing collaboration data (fixture preview)', active: true, immediate: true });
+    setTimeout(() => vm.clearBrowserWork('fixture'), 15000);
+    status.textContent = 'Work indicator preview lasts 15 seconds. Hover or focus its spinner for details.';
   });
   button('Measure saves', async () => { instrument(await ready()); status.textContent = 'Save timing enabled for the current workspace.'; });
   document.body.append(panel);

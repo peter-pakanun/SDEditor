@@ -99,6 +99,15 @@
         if (sameScope) for (const key of ['status', 'error']) if (!Object.prototype.hasOwnProperty.call(state, key)) next[key] = previous[key];
         if (sameScope && previous.error && Object.prototype.hasOwnProperty.call(state, 'error') && !next.error
           && this.collaborationNotice === previous.error) this.collaborationNotice = '';
+        // Keep unchanged nested values stable so presence/status updates do not
+        // restart conflict watchers or redraw the editor for an identical tick.
+        let changed = false;
+        for (const key of Object.keys(next)) {
+          if (Object.is(next[key], previous[key]) || (next[key] && typeof next[key] === 'object'
+            && JSON.stringify(next[key]) === JSON.stringify(previous[key]))) next[key] = previous[key];
+          else changed = true;
+        }
+        if (!changed) return;
         this.collaborationState = next;
       },
       collaborationPeersFor(filepath) {

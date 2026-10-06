@@ -56,6 +56,7 @@ class MemoryAPI {
     this.online = true;
     this.intercept = null;
     this.after = null;
+    this.hints = false;
   }
   async fetch(url, options) {
     const request = {
@@ -73,7 +74,9 @@ class MemoryAPI {
     }
     const identity = this.users[request.token];
     if (!identity) return reply({ error: { code: 'UNAUTHORIZED', message: 'Session expired' } }, 401);
-    const me = { user: clone(identity), expiresAt: Date.now() + 30 * 86400000 };
+    const me = { user: clone(identity), expiresAt: Date.now() + 30 * 86400000,
+      ...(this.hints ? { sync: { language: identity.language, settingsRevision: this.settings.get(identity.id)?.revision || 0,
+        dictionaryRevision: this.dictionaries.get(identity.language)?.revision || 0 } } : {}) };
     let response;
     if (request.path === '/v1/me' || request.path === '/auth/session/refresh') response = me;
     else if (request.path === '/auth/logout') return reply(null, 204);
@@ -142,13 +145,13 @@ function authenticatedState({ local = [word()], base = dictionary([word()]), loc
 }
 
 let clientNumber = 0;
-async function harness(t, { state = null, legacy = payload([word()]), store = new MemoryStore(state), api = new MemoryAPI() } = {}) {
+async function harness(t, { state = null, legacy = payload([word()]), store = new MemoryStore(state), api = new MemoryAPI(), WebSocket } = {}) {
   const changes = [];
   const statuses = [];
   let uuid = 0;
   const namespace = ++clientNumber;
   const client = new Cloud.Client({ store, merge: Dictionary, fetch: api.fetch.bind(api), apiBase: 'https://api.example.test', uuid: () => 'client-' + namespace + '-mutation-' + ++uuid,
-    onChange: value => changes.push(clone(value)), onStatus: value => statuses.push(clone(value)) });
+    onChange: value => changes.push(clone(value)), onStatus: value => statuses.push(clone(value)), WebSocket });
   // Advance polls explicitly; tests do not leave timer-driven background work.
   client.scheduled = [];
   client.schedule = delay => client.scheduled.push(delay ?? 1000);
@@ -714,6 +717,7 @@ test('sync reloads a newer same-account assignment stored by another tab', async
 test('account switching during the profile commit prevents outgoing-account cloud sync', async t => {
   const h = await harness(t, { state: authenticatedState() });
   seedAPI(h.api);
+  h.api.users['token-alice'].name = 'Updated profile';
   let gate;
   const profileReceived = deferred();
   h.api.after = request => {
@@ -926,4 +930,180 @@ test('offline logout clears local authentication while retaining isolated accoun
   assert.equal(h.client.snapshot().dictionary.some(entry => entry._id === privateEntry._id), false);
   assert.match(h.statuses.at(-1).message, /Signed out in this browser/);
   assert.match(h.statuses.at(-1).message, /revocation could not be confirmed/);
+});
+
+test('unchanged revision checks perform no data fetches, merges, writes or dictionary snapshots', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true;
+  await h.client.sync(); // Legacy dictionaries establish a durable processed version once.
+  const updates = h.store.updates, changes = h.changes.length;
+  h.api.calls.length = 0;
+  let merges = 0, snapshots = 0;
+  h.client.merge = { ...Dictionary, merge() { merges++; throw new Error('An unchanged dictionary must not merge'); } };
+  const snapshot = h.client.snapshot.bind(h.client);
+  h.client.snapshot = options => { snapshots++; return snapshot(options); };
+  await h.client.sync();
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/me']);
+  assert.equal(h.store.updates, updates);
+  assert.equal(h.changes.length, changes);
+  assert.equal(merges, 0); assert.equal(snapshots, 0);
+});
+
+test('settings-only changes never fetch or notify the complete dictionary', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; await h.client.sync();
+  h.api.calls.length = 0; h.changes.length = 0;
+  h.api.settings.set('alice', { revision: 2, settings: settings({ theme: 'dark' }) });
+  await h.client.sync();
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/me', '/v1/settings']);
+  assert.equal(h.changes.length, 1);
+  assert.equal(h.changes[0].settings.theme, 'dark');
+  assert.equal(Object.hasOwn(h.changes[0], 'dictionary'), false);
+});
+
+test('a local edit uploads despite unchanged remote revision hints', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { replace: 'New local translation' })]));
+  await h.client.sync();
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'New local translation');
+  assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 1);
+  const dictionaryState = h.store.state.profiles.alice.dictionaries.Thai;
+  assert.equal(dictionaryState.syncedLocalVersion, dictionaryState.localVersion);
+});
+
+test('unchanged hints still upload a durable edit made by another tab', async t => {
+  const store = new MemoryStore(authenticatedState()), api = new MemoryAPI();
+  seedAPI(api); api.hints = true;
+  const first = await harness(t, { store, api }); await first.client.sync();
+  const second = await harness(t, { store, api });
+  await second.client.saveLocal(payload([word('fire', { tlnote: 'Other tab note' })]));
+  await first.client.sync();
+  assert.equal(api.dictionaries.get('Thai').entries[0].tlnote, 'Other tab note');
+  assert.equal(api.writes('/v1/dictionaries/Thai').length, 1);
+});
+
+test('unchanged revisions retain unresolved conflicts without rebuilding them', async t => {
+  const h = await harness(t, { state: authenticatedState({ local: [word('fire', { replace: 'Local choice' })] }) });
+  seedAPI(h.api, { remote: dictionary([word('fire', { replace: 'Remote choice' })], 2) });
+  h.api.hints = true; await h.client.sync();
+  assert.equal(h.client.snapshot().conflicts.length, 1);
+  const updates = h.store.updates;
+  h.client.merge = { ...Dictionary, merge() { throw new Error('Unchanged conflicts must remain settled'); } };
+  await h.client.sync();
+  assert.equal(h.store.updates, updates);
+  assert.equal(h.client.snapshot().conflicts.length, 1);
+  assert.equal(h.statuses.at(-1).warning, true);
+});
+
+class SyncSocket {
+  static instances = [];
+  constructor(url) { this.url = url; this.readyState = 0; this.sent = []; SyncSocket.instances.push(this); }
+  open() { this.readyState = 1; this.onopen?.(); }
+  message(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
+  send(value) { this.sent.push(JSON.parse(value)); }
+  close() { this.readyState = 3; this.onclose?.(); }
+}
+
+test('account socket revision notifications retrieve only changed data and clean up on sign-out', async t => {
+  const h = await harness(t, { state: authenticatedState(), WebSocket: SyncSocket });
+  seedAPI(h.api); h.api.hints = true;
+  h.api.intercept = request => request.path === '/v1/sync/ticket' ? reply({ ticket: 'sync-ticket', url: '/v1/collaboration/ws?ticket=sync-ticket' }) : undefined;
+  await h.client.sync(); await h.client.openSocket();
+  const socket = SyncSocket.instances.at(-1);
+  assert.equal(socket.url, 'wss://api.example.test/v1/collaboration/ws?ticket=sync-ticket');
+  socket.open(); socket.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 1, dictionaryRevision: 1 } });
+  assert.equal(h.client.socketReady, true);
+  h.api.calls.length = 0;
+  await h.client.sync();
+  assert.equal(h.api.calls.length, 0, 'A live socket and settled revisions need no HTTP requests');
+  h.api.dictionaries.set('Thai', dictionary([word('fire', { tlnote: 'Live note' })], 2));
+  socket.message({ type: 'sync_changed', sync: { language: 'Thai', settingsRevision: 1, dictionaryRevision: 2 } });
+  await h.client.sync();
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/dictionaries/Thai']);
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'Live note');
+  await h.client.logout();
+  assert.equal(socket.readyState, 3); assert.equal(h.client.socketReady, false);
+  assert.equal(h.client.socketHeartbeat, null);
+});
+
+test('socket reconnect rechecks assignment and changed data missed while disconnected', async t => {
+  const h = await harness(t, { state: authenticatedState(), WebSocket: SyncSocket });
+  seedAPI(h.api); h.api.hints = true;
+  h.api.intercept = request => request.path === '/v1/sync/ticket' ? reply({ ticket: 'sync-ticket', url: '/v1/collaboration/ws?ticket=sync-ticket' }) : undefined;
+  await h.client.sync(); await h.client.openSocket();
+  const socket = SyncSocket.instances.at(-1); socket.open();
+  socket.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 1, dictionaryRevision: 1 } });
+  socket.close();
+  h.api.users['token-alice'].language = null; h.api.users['token-alice'].assignmentVersion = 2;
+  h.api.calls.length = 0; await h.client.sync();
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/me']);
+  assert.equal(h.client.snapshot().user.language, null);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'ไฟ');
+});
+
+test('dictionary work reports its label before yielding and always clears on storage failure', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  const events = [];
+  h.client.onWork = work => events.push(work);
+  h.client.yieldWork = async () => { events.push('paint'); };
+  h.store.nextError = new Error('Storage unavailable');
+  await assert.rejects(h.client.mergeRemote(h.client.context(), 'Thai', dictionary([word()])), /Storage unavailable/);
+  assert.equal(events[0].label, 'Updating Dictionary entries');
+  assert.equal(events[0].active, true); assert.equal(events[1], 'paint');
+  assert.equal(events.at(-1).active, false);
+});
+
+test('restoring an existing local profile reads it without rewriting or duplicating its snapshot', async t => {
+  const state = authenticatedState(), store = new MemoryStore(state);
+  const h = await harness(t, { store });
+  assert.equal(store.updates, 0);
+  assert.equal(h.changes.length, 1);
+  assert.deepEqual(h.changes[0].dictionary, state.profiles.alice.dictionaries.Thai.entries);
+});
+
+test('switching the local dictionary language reconnects the account notification socket', async t => {
+  const h = await harness(t, { state: authenticatedState(), WebSocket: SyncSocket });
+  seedAPI(h.api); h.api.hints = true;
+  h.api.intercept = request => request.path === '/v1/sync/ticket' ? reply({ ticket: 'sync-ticket', url: '/v1/collaboration/ws?ticket=sync-ticket' }) : undefined;
+  await h.client.sync(); await h.client.openSocket();
+  const first = SyncSocket.instances.at(-1); first.open();
+  first.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 1, dictionaryRevision: 1 } });
+  await h.client.selectLanguage('French', payload([word()]), 'Thai');
+  assert.equal(first.readyState, 3); assert.equal(h.client.socketReady, false);
+  await h.client.sync(); await h.client.openSocket();
+  const second = SyncSocket.instances.at(-1); assert.notEqual(second, first);
+  second.open(); second.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 2, dictionaryRevision: 1 } });
+  assert.equal(h.client.socketReady, true);
+});
+
+test('applying settings-only cloud changes preserves dictionary and regex references', async () => {
+  const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+  const window = { CloudSync: Cloud, DictionarySync: Dictionary };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/cloudUi.js'), 'utf8'), { window });
+  const dictionaryEntries = [word()], regexes = [];
+  let imports = 0;
+  const editor = { ...Cloud.completeSettings(settings()), dictionary: dictionaryEntries, editorRegexes: regexes, editorClipboard: 'clipboard',
+    cloudUser: user(), cloudSignedIn: true, cloudConflicts: [], cloudRevision: 1, cloudConflictIndex: 0,
+    importSettings(next) { imports++; Object.assign(this, next); }, $nextTick: async () => {},
+    cloudPayload() { throw new Error('Partial updates must not serialize the full dictionary'); } };
+  Object.defineProperty(editor, 'cloudConflict', { get() { return this.cloudConflicts[this.cloudConflictIndex] || null; } });
+  await window.CloudUI.mixin.methods.cloudApply.call(editor, { settings: settings({ theme: 'dark' }), editorClipboard: 'clipboard',
+    user: user(), signedIn: true, conflicts: [], revision: 1, needsDictionaryLanguage: false, recoveryCount: 0 });
+  assert.equal(imports, 1); assert.equal(editor.theme, 'dark');
+  assert.equal(editor.dictionary, dictionaryEntries); assert.equal(editor.editorRegexes, regexes);
+});
+
+test('fresh revision checks accept counters lowered by a restored server database', async t => {
+  const h = await harness(t, { state: authenticatedState({ base: dictionary([word()], 10) }) });
+  seedAPI(h.api, { remote: dictionary([word()], 10) }); h.api.hints = true;
+  await h.client.sync();
+  h.api.dictionaries.set('Thai', dictionary([word('fire', { tlnote: 'Restored database' })], 7));
+  await h.client.sync();
+  assert.equal(h.client.hints().dictionaryRevision, 7);
+  assert.equal(h.client.snapshot().revision, 7);
+  h.api.dictionaries.set('Thai', dictionary([word('fire', { tlnote: 'Edit after restore' })], 8));
+  await h.client.sync();
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'Edit after restore');
+  assert.equal(h.client.snapshot().revision, 8);
 });

@@ -421,6 +421,7 @@
         <p v-if="collaborationUserNotice" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</p>
         </div>
         <div class="workspaceFooterRight">
+        <span class="browserWorkSlot"><span v-if="browserWorkTooltip" class="browserWorkStatus" tabindex="0" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></span>
         <ul v-if="collaborationParticipants.length" class="collaborationAvatars" aria-label="Collaborators in this workspace">
           <li v-for="participant in collaborationParticipants" :key="participant.key">
             <span class="collaborationAvatar" :class="{ away: participant.away }" :style="{ '--collaboration-color': collaborationPeerColor(participant) }" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(participant)" v-tooltip="collaborationParticipantLabel(participant)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(participant) }}</span></span>
@@ -533,6 +534,7 @@
         </div>
         <div class="twoSided editorActions">
           <h1 style="flex-grow: 1;">🧾 Translation</h1>
+          <span class="browserWorkSlot"><span v-if="browserWorkTooltip" class="browserWorkStatus" tabindex="0" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></span>
           <span v-if="editorDiagnosticWarningCount > 0" class="editorDiagPill warning" v-tooltip="editorDiagnosticWarningTitle">Warning: {{ editorDiagnosticWarningCount }}</span>
           <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" v-tooltip="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
           <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy" title="Save this translation and close the file">{{ editorSaving ? 'Saving…' : 'Save & close' }}</button>

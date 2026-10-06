@@ -106,11 +106,11 @@ test('malformed source is rejected before creating a workspace', async () => {
 
 test('source hashing publishes pending progress before the digest and clears it when the hash completes', async t => {
   const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate(), notifications = [];
-  const originalHash = P.sourceHash;
+  const originalHash = P.sourceHashAsync;
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null,
     onChange: state => notifications.push(state) });
-  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
-  P.sourceHash = async (...args) => {
+  t.after(() => { release.resolve(); P.sourceHashAsync = originalHash; client.destroy(); });
+  P.sourceHashAsync = async (...args) => {
     assert.equal(client.snapshot().hashing, true, 'The footer can show progress before digest computation begins.');
     assert.equal(notifications.at(-1).hashing, true);
     entered.resolve(); await release.promise;
@@ -129,28 +129,30 @@ test('source hashing publishes pending progress before the digest and clears it 
 });
 
 test('a rejected source digest clears hashing progress without creating a room', async t => {
-  const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate(), notifications = [];
-  const originalHash = P.sourceHash;
+  const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate(), notifications = [], work = [];
+  const originalHash = P.sourceHashAsync;
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null,
-    onChange: state => notifications.push(state) });
-  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
-  P.sourceHash = async () => { entered.resolve(); await release.promise; throw new Error('Digest unavailable'); };
+    onChange: state => notifications.push(state), onWork: value => work.push(value) });
+  t.after(() => { release.resolve(); P.sourceHashAsync = originalHash; client.destroy(); });
+  P.sourceHashAsync = async () => { entered.resolve(); await release.promise; throw new Error('Digest unavailable'); };
   const connection = client.connect({ accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial });
   const rejected = assert.rejects(connection, /Digest unavailable/);
   await entered.promise; assert.equal(client.snapshot().hashing, true);
+  assert.equal(work.at(-1).active, true);
   release.resolve(); await rejected;
   assert.equal(client.snapshot().hashing, false);
   assert.equal(notifications.at(-1).hashing, false);
   assert.equal(store.state, null);
   assert.equal(server.requests.length, 0);
+  assert.deepEqual(work.at(-1), { key: 'source', active: false });
 });
 
 test('disconnect clears hashing progress and ignores a digest that completes afterward', async t => {
   const store = storeFixture(), server = serverFixture(), release = gate(), entered = gate();
-  const originalHash = P.sourceHash;
+  const originalHash = P.sourceHashAsync;
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null });
-  t.after(() => { release.resolve(); P.sourceHash = originalHash; client.destroy(); });
-  P.sourceHash = async (...args) => { entered.resolve(); await release.promise; return originalHash(...args); };
+  t.after(() => { release.resolve(); P.sourceHashAsync = originalHash; client.destroy(); });
+  P.sourceHashAsync = async (...args) => { entered.resolve(); await release.promise; return originalHash(...args); };
   const connection = client.connect({ accountId: 'user', game: 'poe1', language: 'Thai', source, files: initial });
   const rejected = assert.rejects(connection, error => error.stale === true);
   await entered.promise; assert.equal(client.snapshot().hashing, true);
@@ -164,11 +166,11 @@ test('disconnect clears hashing progress and ignores a digest that completes aft
 
 test('an older digest cannot clear progress for a newer connection on the same client', async t => {
   const store = storeFixture(), server = serverFixture(), first = gate(), second = gate(), firstEntered = gate(), secondEntered = gate();
-  const originalHash = P.sourceHash;
+  const originalHash = P.sourceHashAsync;
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null });
-  t.after(() => { first.resolve(); second.resolve(); P.sourceHash = originalHash; client.destroy(); });
+  t.after(() => { first.resolve(); second.resolve(); P.sourceHashAsync = originalHash; client.destroy(); });
   let calls = 0;
-  P.sourceHash = async (...args) => {
+  P.sourceHashAsync = async (...args) => {
     const firstCall = ++calls === 1;
     (firstCall ? firstEntered : secondEntered).resolve();
     await (firstCall ? first : second).promise;
@@ -195,11 +197,14 @@ test('status notifications omit file contents without enumerating the archive', 
   room.local = new Proxy(room.local, { ownKeys(target) { enumerations++; return Reflect.ownKeys(target); } });
   const notifications = [];
   client.onChange = value => notifications.push(value);
+  client.peers = [{ sessionId: 'other', selected: 'a.txt' }];
   const compact = client.snapshot({ includeFiles: false });
   client.notify();
   assert.equal(enumerations, 0, 'Presence and save-status changes cannot scan every saved translation.');
   assert.equal(Object.hasOwn(compact, 'files'), false);
   assert.equal(Object.hasOwn(notifications[0], 'files'), false);
+  client.notify();
+  assert.equal(notifications.length, 1, 'Identical compact state does not restart Vue rendering.');
   assert.equal(compact.roomId, 'room');
   assert.deepEqual(compact.identity, client.snapshot().identity);
   const complete = client.snapshot();
@@ -207,6 +212,60 @@ test('status notifications omit file contents without enumerating the archive', 
   complete.files[0].translations[0] = 'snapshot-only edit';
   assert.equal(client.fileBase('a.txt').translations[0], 'one');
   client.destroy();
+});
+
+test('unchanged collaboration passes avoid full file snapshots, storage writes and repeated healthy notices', async t => {
+  const { client, store, remote } = await fixture(); t.after(() => client.destroy());
+  let enumerations = 0, writes = 0, statuses = 0, notifications = 0;
+  client.room().local = new Proxy(client.room().local, { ownKeys(target) { enumerations++; return Reflect.ownKeys(target); } });
+  const update = store.updateCollaborationState.bind(store);
+  store.updateCollaborationState = (...args) => { writes++; return update(...args); };
+  client.onStatus = () => { statuses++; }; client.onChange = () => { notifications++; }; remote.length = 0;
+  for (let index = 0; index < 4; index++) assert.equal(Object.hasOwn(await client.sync(), 'files'), false);
+  assert.deepEqual({ enumerations, writes, statuses, notifications, remote: remote.length },
+    { enumerations: 0, writes: 0, statuses: 0, notifications: 0, remote: 0 });
+});
+
+test('healthy room sockets announce changes while background checks stay idle and disconnected fallback still catches up', async t => {
+  const { client, server, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); sockets[0].open(); await client.running;
+  server.requests.length = 0;
+  await client.sync({ background: true }); await client.sync({ background: true });
+  assert.equal(server.requests.length, 0, 'A healthy websocket removes unchanged /changes polling.');
+  server.change('a.txt', ['changed remotely', 'two']);
+  sockets[0].receive({ type: 'changed', sequence: server.sequence }); await client.running;
+  assert.deepEqual(client.fileBase('a.txt').translations, ['changed remotely', 'two']);
+  const requests = server.requests.length;
+  sockets[0].receive({ type: 'changed', sequence: server.sequence });
+  assert.equal(server.requests.length, requests, 'A change hint already caught up does not repeat the request.');
+  await client.sync(); assert.equal(server.requests.length, requests + 1, 'Focus/manual recovery still verifies the cursor.');
+  sockets[0].drop(); server.change('a.txt', ['changed while disconnected', 'two']);
+  await client.sync({ background: true });
+  assert.deepEqual(client.fileBase('a.txt').translations, ['changed while disconnected', 'two']);
+});
+
+test('background recovery flushes queued saves even while the room websocket remains healthy', async t => {
+  const { client, server, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); sockets[0].open(); await client.running;
+  server.offline = true;
+  await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['queued save', 'two'] }], waitForSync: false });
+  await client.running;
+  assert.equal(client.connected, true); assert.equal(client.room().outbox.length, 1);
+  server.offline = false;
+  await client.sync({ background: true });
+  assert.equal(client.room().outbox.length, 0);
+  assert.deepEqual(server.files[0].translations, ['queued save', 'two']);
+});
+
+test('equivalent presence packets and healthy status reports retain observer state', async t => {
+  const { client, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); sockets[0].open(); await client.running;
+  let notifications = 0; client.onChange = () => { notifications++; };
+  const message = { type: 'presence', selfId: 'self', peers: [{ sessionId: 'self', userId: 'user', selected: 'a.txt' }] };
+  sockets[0].receive(message); const peers = client.peers;
+  sockets[0].receive(copy(message));
+  assert.equal(client.peers, peers); assert.equal(notifications, 1);
+  sockets[0].receive({ type: 'heartbeat' }); assert.equal(notifications, 1);
 });
 
 test('transaction projections preserve unrelated rows without traversing their contents', async () => {

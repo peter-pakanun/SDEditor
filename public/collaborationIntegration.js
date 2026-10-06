@@ -25,21 +25,27 @@
       this._collabVisibility = () => {
         if (!document.hidden) this._collabActivityAt = Date.now();
         this.updateCollaborationActivity();
+        if (!document.hidden) this.collabRetry().catch(() => {});
       };
+      this._collabFocus = () => this.collabRetry().catch(() => {});
       for (const event of ['keydown', 'pointerdown', 'pointermove', 'wheel', 'focus']) window.addEventListener(event, this._collabActivity, { passive: true });
       document.addEventListener('visibilitychange', this._collabVisibility);
+      window.addEventListener('focus', this._collabFocus);
       this.updateCollaborationActivity();
-      this._collabPoll = setInterval(() => { this.updateCollaborationActivity(); if (!document.hidden) this.collabRetry().catch(() => {}); }, 15000);
+      this._collabPoll = setInterval(() => { this.updateCollaborationActivity(); if (!document.hidden) this.collabRetry({ background: true }).catch(() => {}); }, 15000);
     },
     beforeUnmount() {
       clearTimeout(this._collabStartTimer); clearInterval(this._collabPoll);
       window.removeEventListener('online', this._collabOnline);
       for (const event of ['keydown', 'pointerdown', 'pointermove', 'wheel', 'focus']) window.removeEventListener(event, this._collabActivity);
       document.removeEventListener('visibilitychange', this._collabVisibility);
+      window.removeEventListener('focus', this._collabFocus);
       this._collaboration?.destroy?.();
       this._collaboration?.disconnect();
       window.removeEventListener('beforeunload', this._pendingSaveBeforeUnload);
       this._saveWorker?.dispose?.(); this._pendingSaves?.dispose?.();
+      this._collabFileIndexes = null;
+      this.clearBrowserWork?.('collaboration');
     },
     methods: {
       async readImportZipIdentity(file, zip) {
@@ -299,6 +305,8 @@
         const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
+          this._collabFileIndexes = null;
+          this.clearBrowserWork?.('collaboration');
           this.collabReceiveState?.({ status: 'Local workspace', peers: [], conflicts: [], pending: 0, connected: false });
         }
         clearTimeout(this._collabStartTimer);
@@ -332,7 +340,8 @@
             }
           },
           onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot({ includeFiles: false }), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
-          onRemote: files => { if (this._collaboration === client) this.applyCollaborationFiles(files, ctx.language); },
+          onWork: work => { if (this._collaboration === client) this.setBrowserWork?.('collaboration', work); },
+          onRemote: files => { if (this._collaboration === client) return this.receiveCollaborationFiles(files, ctx.language); },
           onEditingConflict: ({ filepath }) => {
             const isCurrent = () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath;
             if (isCurrent()) return this.claimCollaborationFile(filepath, false, isCurrent);
@@ -341,9 +350,25 @@
         this._collaboration = client; this._collabKey = key;
         this.updateCollaborationActivity();
         try {
-          await client.connect({ ...ctx, source: this.toPlainForStorage(this.descs),
+          const activeSource = this.descs, activeWorkspace = this.localDescs;
+          const source = Vue.toRaw ? Vue.toRaw(activeSource) : activeSource;
+          const workspace = Vue.toRaw ? Vue.toRaw(activeWorkspace) : activeWorkspace, files = [];
+          const context = this.captureCollaborationContext();
+          let sliceStart = Date.now();
+          this.setBrowserWork?.('collaboration', { key: 'source', label: 'Preparing collaboration data', active: true });
+          try {
+            for (let index = 0; index < source.length; index++) {
+              files.push(this.collaborationFile(source[index]));
+              if (index % 64 === 63 && Date.now() - sliceStart >= 8) {
+                await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now();
+                if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
+              }
+            }
+          } finally { this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
+          if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
+          await client.connect({ ...ctx, source,
             ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
-            files: this.descs.map(desc => this.collaborationFile(desc)), workspace: this.toPlainForStorage(this.localDescs) });
+            files, workspace });
         } catch (error) {
           if (error.code === 'ARCHIVE_CONFIG_MISMATCH' && this._collaboration === client && error.archive) {
             if (!await this.reconcileImportArchive(error.archive) && this._collaboration === client) {
@@ -359,50 +384,104 @@
         if (this._collaboration !== client) return;
         client.select(this.selectedFilepath);
         if (this.editorVisible) {
-          this._editorCollabBase = originalBase || (this.importBaseline ? client.fileBase(this.editorCurrentEditingDesc.filepath) : openFile)
-            || client.fileBase(this.editorCurrentEditingDesc.filepath);
           const filepath = this.editorCurrentEditingDesc.filepath;
+          // The editor may have opened or changed files while preparation was
+          // yielding. Keep the ancestor paired with its visible draft.
+          this._editorCollabBase = this._editorCollabBase
+            || (openFile?.filepath === filepath ? originalBase || openFile : null)
+            || client.fileBase(filepath);
           await this.claimCollaborationFile(filepath, false,
             () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath);
         }
       },
-      async collabRetry() {
+      async collabRetry(options) {
         if (!this._collaboration) return this.initializeCollaboration();
-        return this._collaboration.sync();
+        return this._collaboration.sync(options);
       },
-      applyCollaborationFiles(files, lang = this.lang) {
-        if (lang !== this.lang) return;
+      collaborationFileIndexes() {
+        let index = this._collabFileIndexes;
+        if (!index || index.source !== this.descs || index.local !== this.localDescs.descs
+          || index.sourceLength !== this.descs.length || index.localLength !== this.localDescs.descs.length) {
+          index = this._collabFileIndexes = { source: this.descs, local: this.localDescs.descs,
+            sourceLength: this.descs.length, localLength: this.localDescs.descs.length,
+            descriptions: new Map(this.descs.map(desc => [desc.filepath, desc])),
+            locals: new Map(this.localDescs.descs.map(desc => [desc.filepath, desc])) };
+        }
+        return index;
+      },
+      async receiveCollaborationFiles(files, lang = this.lang) {
+        if (lang !== this.lang || !files?.length) return;
+        if (files.length < 100) return this.applyCollaborationFiles(files, lang);
+        const context = this.captureCollaborationContext();
+        const batchState = { changedFilepaths: [], displayChanged: false };
+        this.setBrowserWork?.('collaboration', { key: 'remote', label: 'Applying shared translations', active: true });
+        try {
+          await new Promise(resolve => {
+            if (typeof requestAnimationFrame === 'function' && !document.hidden) requestAnimationFrame(() => setTimeout(resolve, 0));
+            else setTimeout(resolve, 0);
+          });
+          let sliceStart = Date.now();
+          for (let index = 0; index < files.length; index += 64) {
+            if (!this.collaborationContextCurrent(context)) return;
+            this.applyCollaborationFiles(files.slice(index, index + 64), lang, batchState);
+            if (Date.now() - sliceStart >= 8) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); }
+          }
+          if (!this.collaborationContextCurrent(context)) return;
+          if (batchState.changedFilepaths.length) this.updateScannedDescDiagnostics?.(batchState.changedFilepaths);
+          if (batchState.displayChanged) this.filterDesc();
+        } finally {
+          if (this._collaboration === context.client) this.setBrowserWork?.('collaboration', { key: 'remote', active: false });
+        }
+      },
+      applyCollaborationFiles(files, lang = this.lang, batchState = null) {
+        if (lang !== this.lang || !files?.length) return;
         this.ensureLocalDescsReady();
-        const changedFilepaths = [];
+        if (this.editorVisible && !this._editorCollabBase && this.editorCurrentEditingDesc?.filepath) {
+          const desc = this.editorCurrentEditingDesc;
+          const known = this._collaboration?.fileBase?.(desc.filepath);
+          this._editorCollabBase = { ...this.collaborationFile(desc, lang), revision: known?.revision || 0 };
+        }
+        const changedFilepaths = batchState?.changedFilepaths || [];
+        let displayChanged = false;
         const batch = this._collabDiagnosticBatch;
-        const descriptions = new Map(this.descs.map(desc => [desc.filepath, desc]));
-        const locals = new Map(this.localDescs.descs.map(desc => [desc.filepath, desc]));
+        const indexes = this.collaborationFileIndexes(), { descriptions, locals } = indexes;
         for (let file of files || []) {
           // A remote acknowledgement or an older local save cannot hide a newer
           // edit that is still waiting for its local transaction.
           file = this._pendingSaves?.overlay(this.pendingSaveScope(), file.filepath) || file;
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
-          if (JSON.stringify(desc.translations[lang] || []) !== JSON.stringify(file.translations)) {
+          const translationChanged = !arrayEquals(desc.translations[lang] || [], file.translations);
+          const needsReview = !!file.needsReview, hasChanges = !!file.trackedForExport;
+          const isMissing = computeIsMissing(desc.translations.English.length, file.translations);
+          const metadataChanged = desc.needsReview !== needsReview || desc.hasChanges !== hasChanges || desc.isMissing !== isMissing;
+          const local = locals.get(file.filepath);
+          const localChanged = !local || !arrayEquals(local.translations?.[lang] || [], file.translations)
+            || !arrayEquals(local.translations?.English || [], desc.translations.English)
+            || local.hasChanges !== hasChanges || local.isMissing !== isMissing;
+          const statusChanged = this.localDescs.status[file.filepath]?.needsReview !== needsReview;
+          if (!translationChanged && !metadataChanged && !localChanged && !statusChanged) continue;
+          displayChanged ||= translationChanged || metadataChanged;
+          if (translationChanged) {
             const expected = batch?.expected.get(file.filepath);
             if (expected && this.collaborationContextCurrent(batch.context)
               && JSON.stringify(expected) === JSON.stringify(file.translations)) batch.touched = true;
             else changedFilepaths.push(file.filepath);
           }
-          desc.translations[lang] = [...file.translations];
-          desc.needsReview = !!file.needsReview; desc.hasChanges = !!file.trackedForExport;
-          desc.isMissing = computeIsMissing(desc.translations.English.length, file.translations);
-          const local = locals.get(file.filepath);
-          if (local) updateLocalDesc(local, desc, lang, file.translations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
-          else {
+          if (translationChanged) desc.translations[lang] = [...file.translations];
+          if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; }
+          if (local && localChanged) updateLocalDesc(local, desc, lang, file.translations, { hasChanges, isMissing });
+          else if (!local) {
             const added = makeLocalDesc(desc, lang, file.translations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
             this.localDescs.descs.push(added); locals.set(file.filepath, added);
           }
-          this.localDescs.status[file.filepath] = { ...(this.localDescs.status[file.filepath] || {}), needsReview: desc.needsReview };
+          if (statusChanged) this.localDescs.status[file.filepath] = { ...(this.localDescs.status[file.filepath] || {}), needsReview };
         }
+        indexes.localLength = this.localDescs.descs.length;
+        if (batchState) { batchState.displayChanged ||= displayChanged; return; }
         if (changedFilepaths.length) this.updateScannedDescDiagnostics?.(changedFilepaths);
         // editorBlocks and its captured base remain untouched until explicit save/reopen.
-        this.filterDesc();
+        if (displayChanged) this.filterDesc();
       },
       async claimCollaborationFile(filepath, automatic = false, isCurrent = () => true) {
         const context = this.captureCollaborationContext();

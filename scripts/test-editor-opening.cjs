@@ -365,6 +365,24 @@ test('a closed pending claim serializes the next claim without releasing the new
   assert.equal(editor._openingFile, false);
 });
 
+test('opening during room preparation retains the saved draft ancestor', async () => {
+  const { editor } = loadEditor();
+  const desc = description('starting-room', 'Term 1', 'ก่อน');
+  editor.descs = [desc];
+  editor.yieldEditorPaint = async () => {};
+  editor._collaboration = {
+    isEditing() { return false; },
+    async claim() { return { granted: true }; },
+    fileBase() { return null; },
+    leaveEdit() {},
+  };
+  assert.equal(await editor.editFile(desc.filepath), true, editor.editorLoadError);
+  desc.translations.Thai[0] = 'ใหม่';
+  assert.equal(editor._editorCollabBase.filepath, desc.filepath);
+  assert.equal(editor._editorCollabBase.translations[0], 'ก่อน');
+  assert.equal(editor.editorOriginalTranslations[0], 'ก่อน');
+});
+
 test('translation snapshots keep all deferred blocks aligned with the captured collaboration base', async () => {
   const { editor } = loadEditor();
   const desc = description('snapshot', ['Term 1', 'Term 119'], ['ก่อน 1', 'ก่อน 119']);

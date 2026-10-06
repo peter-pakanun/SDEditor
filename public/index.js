@@ -250,6 +250,7 @@ const config = Vue.defineComponent({
         y: 0,
         maxWidth: 360
       },
+      browserWorkItems: {},
       hlPopupReturnInfo: null,
       editorBlocks: [
         {
@@ -379,6 +380,10 @@ const config = Vue.defineComponent({
       await this.finishStartup(true);
     }
   },
+  beforeUnmount() {
+    for (const task of this._browserWorkPending?.values() || []) clearTimeout(task.timer);
+    this._browserWorkPending?.clear();
+  },
   beforeDestroy() {
     document.removeEventListener('keydown', this.handleKeydown);
     // Clean up multi-instance detection
@@ -496,6 +501,12 @@ const config = Vue.defineComponent({
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
   },
   computed: {
+    browserWorkTooltip() {
+      const labels = Object.values(this.browserWorkItems);
+      if (this.editorLoading) labels.push('Preparing translation fields and Dictionary matches');
+      if (this.diagnosticScanRunning) labels.push('Checking translation diagnostics');
+      return labels.length ? 'Browser is processing data\n' + [...new Set(labels)].join('\n') : '';
+    },
     settingsDialogVisible() {
       return this.gameVersionSelected && (this.showSetting || this.needsInitialSettings)
         && !this.showMultiInstanceGate && !this.pendingSingleVersionMigration && !this.duplicateLangImportWarning;
@@ -765,6 +776,28 @@ const config = Vue.defineComponent({
     }
   },
   methods: {
+    setBrowserWork(scope, { key, label, active, immediate = false }) {
+      const id = scope + ':' + key;
+      const pending = this._browserWorkPending ||= new Map();
+      clearTimeout(pending.get(id)?.timer);
+      if (!active) {
+        pending.delete(id);
+        delete this.browserWorkItems[id];
+        return;
+      }
+      const task = { label };
+      pending.set(id, task);
+      const show = () => {
+        if (pending.get(id) === task) this.browserWorkItems[id] = label;
+      };
+      if (immediate) show();
+      else task.timer = setTimeout(show, 80);
+    },
+    clearBrowserWork(scope) {
+      for (const id of this._browserWorkPending?.keys() || []) {
+        if (id.startsWith(scope + ':')) this.setBrowserWork(scope, { key: id.slice(scope.length + 1), active: false });
+      }
+    },
     appAlert(message, options) {
       return window.AppDialogs.alert(message, options);
     },
@@ -935,6 +968,8 @@ const config = Vue.defineComponent({
       const generation = this._versionLoadGeneration = (this._versionLoadGeneration || 0) + 1;
       const current = () => generation === this._versionLoadGeneration && game === this.gameVersion;
       this.versionStorageLoading = true;
+      const workKey = 'load-' + generation;
+      this.setBrowserWork('workspace', { key: workKey, label: 'Preparing stored translation files', active: true });
       this.resetVersionedState();
       this.loadingProgress = 0.001;
       try {
@@ -955,21 +990,36 @@ const config = Vue.defineComponent({
           }
           source = importedBaseline.source; sourceHash = archive.baselineId;
         } else if (Array.isArray(source) && source.length && window.CollaborationProtocol) {
-          try { sourceHash = await window.CollaborationProtocol.sourceHash(source); }
+          try {
+            sourceHash = window.CollaborationProtocol.sourceHashAsync
+              ? await window.CollaborationProtocol.sourceHashAsync(source, { isCancelled: () => !current(), yieldTask: () => this.yieldEditorWork() })
+              : await window.CollaborationProtocol.sourceHash(source);
+          }
           catch (error) { if (current()) this.collaborationNotice = 'Source identity could not be verified. Reimport the source ZIP. ' + error.message; }
         }
         if (!current()) return;
         if (workspace?.sourceHash && sourceHash && workspace.sourceHash !== sourceHash) {
           throw new Error('Stored translations and source have different version hashes. Reimport the matching source ZIP; existing browser data has been preserved.');
         }
+        let prepared;
+        if (Array.isArray(source) && source.length) {
+          // Preferences may arrive while preparation yields. Apply the latest
+          // language before publishing any descriptions to the workspace.
+          let language;
+          do {
+            language = this.lang;
+            prepared = await this.prepareStoredWorkspaceSource(prepared || source, workspace, !prepared && !!importedBaseline, current);
+            if (!prepared || !current()) return;
+          } while (language !== this.lang);
+        }
         if (workspace) this.localDescs = workspace;
-        this.importBaseline = importedBaseline;
+        this.importBaseline = importedBaseline && Vue.markRaw ? Vue.markRaw(importedBaseline) : importedBaseline;
         this.ensureLocalDescsReady();
         this.sourceIdentity = sourceHash;
         if (sourceHash) this.localDescs.sourceHash = sourceHash;
         if (Array.isArray(source) && source.length) {
-          this.descs = this.toPlainForStorage(source); this.sourceLoaded = true;
-          this.applyWorkspaceOverlay(); this.filterDesc(); this.loadingProgress = 100;
+          this.descs = prepared; this.sourceLoaded = true;
+          this.filterDesc(); this.loadingProgress = 100;
         } else this.loadingProgress = 0;
       } catch (error) {
         if (current()) {
@@ -977,8 +1027,40 @@ const config = Vue.defineComponent({
           this.cloudStorageError = 'Could not load this workspace. ' + error.message;
         }
       } finally {
+        this.setBrowserWork('workspace', { key: workKey, active: false });
         if (current()) { this.versionStorageLoading = false; this.scheduleCollaboration?.(); }
       }
+    },
+    async prepareStoredWorkspaceSource(source, workspace, cloneSource, isCurrent) {
+      const localByPath = new Map();
+      const statuses = workspace?.status || {};
+      const prepared = [];
+      const language = this.lang;
+      let started = Date.now();
+      for (const desc of workspace?.descs || []) {
+        if (!isCurrent()) return null;
+        if (desc?.filepath) localByPath.set(desc.filepath, desc);
+        if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
+      }
+      for (const original of source) {
+        if (!isCurrent()) return null;
+        // IndexedDB already detached storedSource. Only the immutable imported
+        // baseline needs another copy, one description at a time.
+        const desc = cloneSource ? this.toPlainForStorage(original) : original;
+        if (!desc) throw new Error('Could not prepare the stored source.');
+        const local = localByPath.get(desc.filepath);
+        const raw = local?.translations?.[language] || desc.translations?.[language] || [];
+        const length = desc.translations?.English?.length || 0;
+        const lines = Array.from({ length }, (_, index) => raw[index] ?? '');
+        desc.translations ||= { English: [] };
+        desc.translations[language] = lines;
+        if (local && typeof local.hasChanges !== 'undefined') desc.hasChanges = !!local.hasChanges;
+        desc.isMissing = computeIsMissing(length, lines);
+        desc.needsReview = !!statuses[desc.filepath]?.needsReview;
+        prepared.push(desc);
+        if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
+      }
+      return isCurrent() ? prepared : null;
     },
     getGamePreviewFontFamily(lang) {
       let map = this.gamePreviewFonts;
@@ -5251,7 +5333,8 @@ const config = Vue.defineComponent({
           if (this._editorOpenRun === request.run) this.cancelEditorOpen();
           return false;
         }
-        this._editorCollabBase = this._collaboration?.fileBase(filepath);
+        this._editorCollabBase = this._collaboration?.fileBase(filepath)
+          || this.collaborationFile(this.editorCurrentEditingDesc);
         // A claim can bring in newer saved translations. Pair the visible text
         // and the hydration snapshot with the base captured above.
         this.seedEditorOpenSource(request);
@@ -6000,8 +6083,11 @@ const config = Vue.defineComponent({
     },
     importSettings(settings) {
       this.editorRegexes = settings.editorRegexes || [];
-      this.dictionary = settings.dictionary || [];
-      this.ensureDictionaryIds();
+      const dictionary = settings.dictionary || [];
+      if (dictionary !== this.dictionary) {
+        this.dictionary = dictionary;
+        this.ensureDictionaryIds();
+      }
       this.editorClipboard = settings.editorClipboard || "";
       this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
       if (['light', 'grey', 'dark', 'modern-dark'].includes(settings.theme)) this.theme = settings.theme;
@@ -6378,12 +6464,20 @@ app.component('app-dialog', window.AppDialogs?.component || {});
 app.directive('tooltip', {
   mounted(el, binding) {
     el.__sdTooltipValue = binding.value;
-    const show = (e) => binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
-    const hide = () => binding.instance?.hideTooltip?.();
-    el.__sdTooltipHandlers = { show, hide };
+    const show = (e) => {
+      el.__sdTooltipShown = true;
+      binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
+    };
+    const focus = () => {
+      const rect = el.getBoundingClientRect();
+      show({ clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+    };
+    const hide = () => { el.__sdTooltipShown = false; binding.instance?.hideTooltip?.(); };
+    el.__sdTooltipHandlers = { show, focus, hide };
     el.addEventListener('mouseenter', show);
     el.addEventListener('mousemove', show);
     el.addEventListener('mouseleave', hide);
+    el.addEventListener('focus', focus);
     el.addEventListener('blur', hide);
     el.removeAttribute('title');
   },
@@ -6397,7 +6491,9 @@ app.directive('tooltip', {
     el.removeEventListener('mouseenter', handlers.show);
     el.removeEventListener('mousemove', handlers.show);
     el.removeEventListener('mouseleave', handlers.hide);
+    el.removeEventListener('focus', handlers.focus);
     el.removeEventListener('blur', handlers.hide);
+    if (el.__sdTooltipShown) handlers.hide();
     delete el.__sdTooltipHandlers;
     delete el.__sdTooltipValue;
   }

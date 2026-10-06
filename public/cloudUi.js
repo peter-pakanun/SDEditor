@@ -44,6 +44,7 @@
     },
     beforeUnmount() {
       this._cloud?.destroy();
+      this.clearBrowserWork?.('cloud');
       for (const [target, name, handler] of (this._cloudListeners || [])) target.removeEventListener(name, handler);
       clearInterval(this._cloudPoll);
       this._cloudChannel?.close();
@@ -65,11 +66,11 @@
       },
       async cloudApply(snapshot) {
         if (!snapshot) return;
-        this.cloudUser = snapshot.user;
+        if (!same(this.cloudUser, snapshot.user)) this.cloudUser = snapshot.user;
         this.cloudSignedIn = snapshot.signedIn;
         const prior = this.cloudConflict;
         const priorRevision = this.cloudRevision;
-        this.cloudConflicts = snapshot.conflicts;
+        if (Object.hasOwn(snapshot, 'conflicts') && !same(this.cloudConflicts, snapshot.conflicts)) this.cloudConflicts = snapshot.conflicts;
         this.cloudRevision = snapshot.revision;
         this.cloudNeedsDictionaryLanguage = snapshot.needsDictionaryLanguage;
         this.cloudRecoveryCount = snapshot.recoveryCount;
@@ -78,8 +79,12 @@
         if (!same(prior, this.cloudConflict) || priorRevision !== snapshot.revision) {
           this.cloudDefinitionsChoice = ''; this.cloudNoteChoice = '';
         }
-        const payload = { ...window.CloudSync.completeSettings(snapshot.settings), dictionary: snapshot.dictionary, editorClipboard: snapshot.editorClipboard };
-        if (same(this.cloudPayload(), payload)) return;
+        const settings = window.CloudSync.completeSettings(snapshot.settings);
+        const rawDictionary = typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
+        const dictionaryChanged = Object.hasOwn(snapshot, 'dictionary') && !same(rawDictionary, snapshot.dictionary);
+        if (!dictionaryChanged && same(window.CloudSync.preferences(this), settings) && this.editorClipboard === snapshot.editorClipboard) return;
+        const payload = { ...settings, dictionary: dictionaryChanged ? snapshot.dictionary : this.dictionary, editorClipboard: snapshot.editorClipboard };
+        if (same(this.editorRegexes, payload.editorRegexes)) payload.editorRegexes = this.editorRegexes;
         this._cloudApplying = true;
         try {
           this.importSettings(payload);
@@ -102,12 +107,15 @@
         this._cloudApplying = true;
         this._cloud = new window.CloudSync.Client({ store: window.OfflineStore, merge: window.DictionarySync,
           fetch: window.fetch.bind(window), apiBase: apiBase(), locks: navigator.locks,
-          onChange: snapshot => { this.cloudApply(snapshot).catch(error => { this.cloudStorageError = error.message; }); },
+          WebSocket: window.WebSocket,
+          onWork: work => this.setBrowserWork?.('cloud', work),
+          yieldWork: () => this.yieldEditorPaint?.() || new Promise(resolve => setTimeout(resolve, 0)),
+          onChange: snapshot => { this._cloudApplyPending = this.cloudApply(snapshot).catch(error => { this.cloudStorageError = error.message; }); },
           onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; this.cloudWarning = !!status.warning; },
         });
         try {
           await this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] });
-          await this.cloudApply(this._cloud.snapshot());
+          await (this._cloudApplyPending || this.cloudApply(this._cloud.snapshot()));
           await this.$nextTick();
           // Show the restored local profile before any authentication/network request.
           await this.finishStartup?.();
@@ -118,13 +126,15 @@
         listen(document, 'visibilitychange', () => { if (!document.hidden) this._cloud.refreshSession(true); });
         const activity = () => { if (!document.hidden) this._cloud.refreshSession(); };
         listen(document, 'keydown', activity); listen(document, 'pointerdown', activity);
-        this._cloudPoll = setInterval(() => { if (!document.hidden && !this.showMultiInstanceGate) this._cloud.sync(); }, 30000);
+        this._cloudPoll = setInterval(() => { if (!document.hidden && !this.showMultiInstanceGate && !this._cloud.socketReady) this._cloud.sync(); }, 30000);
         if (typeof BroadcastChannel !== 'undefined') {
           this._cloudChannel = new BroadcastChannel('sdeditor-cloud-account');
           this._cloudChannel.onmessage = async () => {
+            this._cloud.closeSocket();
             this._cloud.epoch++;
             this._cloud.state = await window.OfflineStore.getHybridState();
             await this.cloudApply(this._cloud.snapshot());
+            this._cloud.schedule(0);
           };
         }
         const fragment = new URLSearchParams(location.hash.slice(1));

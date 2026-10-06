@@ -127,27 +127,71 @@
     }
     return offset === proof.siblings.length && hash === treeRoot;
   }
+  function manifestFile(desc, paths) {
+    const english = desc?.english || desc?.translations?.English;
+    if (!desc || typeof desc.filepath !== 'string' || !desc.filepath || paths.has(desc.filepath)
+      || desc.filepath.includes('\\') || /[\u0000-\u001f]/.test(desc.filepath)
+      || desc.filepath.split('/').some(part => !part || part === '.' || part === '..')
+      || !strings(english) || !english.length || !strings(desc.stats) || !desc.stats.length
+      || !strings(desc.variables) || !strings(desc.remarks)
+      || desc.variables.length !== english.length || desc.remarks.length !== english.length
+      || (desc.name != null && typeof desc.name !== 'string')
+      || desc.duplicateLangEntries?.some(item => item.lang === 'English')) {
+      throw new Error('Malformed or duplicate source description: ' + (desc?.filepath || '(unknown)'));
+    }
+    paths.add(desc.filepath);
+    return { filepath: desc.filepath, name: desc.name || '', stats: [...desc.stats], english: [...english], variables: [...desc.variables], remarks: [...desc.remarks] };
+  }
   function manifest(source) {
     if (!Array.isArray(source) || !source.length) throw new Error('Collaboration requires a nonempty source archive.');
     const paths = new Set();
-    const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string');
-    const files = source.map(desc => {
-      const english = desc?.english || desc?.translations?.English;
-      if (!desc || typeof desc.filepath !== 'string' || !desc.filepath || paths.has(desc.filepath)
-        || desc.filepath.includes('\\') || /[\u0000-\u001f]/.test(desc.filepath)
-        || desc.filepath.split('/').some(part => !part || part === '.' || part === '..')
-        || !strings(english) || !english.length || !strings(desc.stats) || !desc.stats.length
-        || !strings(desc.variables) || !strings(desc.remarks)
-        || desc.variables.length !== english.length || desc.remarks.length !== english.length
-        || (desc.name != null && typeof desc.name !== 'string')
-        || desc.duplicateLangEntries?.some(item => item.lang === 'English')) {
-        throw new Error('Malformed or duplicate source description: ' + (desc?.filepath || '(unknown)'));
-      }
-      paths.add(desc.filepath);
-      return { filepath: desc.filepath, name: desc.name || '', stats: copy(desc.stats), english: copy(english), variables: copy(desc.variables), remarks: copy(desc.remarks) };
-    });
+    const files = source.map(desc => manifestFile(desc, paths));
     files.sort((a, b) => a.filepath < b.filepath ? -1 : a.filepath > b.filepath ? 1 : 0);
     return { version: 1, files };
+  }
+  function preparationSlice({ isCancelled = () => false, yieldTask = () => new Promise(resolve => setTimeout(resolve, 0)), budgetMs = 8 } = {}) {
+    let start = Date.now();
+    const check = () => { if (isCancelled()) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true }); };
+    return async force => {
+      check();
+      if (force || Date.now() - start >= budgetMs) {
+        await yieldTask(); check(); start = Date.now();
+      }
+    };
+  }
+  async function manifestAsync(source, options = {}) {
+    if (!Array.isArray(source) || !source.length) throw new Error('Collaboration requires a nonempty source archive.');
+    const checkpoint = preparationSlice(options), paths = new Set(), files = [];
+    for (const desc of source) {
+      files.push(manifestFile(desc, paths));
+      if (files.length % 64 === 0) await checkpoint();
+    }
+    await checkpoint();
+    files.sort((a, b) => compare(a.filepath, b.filepath));
+    await checkpoint();
+    return { version: 1, files };
+  }
+  async function sourceHashAsync(source, options = {}) {
+    const value = await manifestAsync(source?.version === 1 && Array.isArray(source.files) ? source.files : source, options);
+    options.onManifest?.(value);
+    const provider = cryptoProvider(options.cryptoProvider), encoder = new TextEncoder(), checkpoint = preparationSlice(options);
+    const chunks = [encoder.encode('{"version":1,"files":[')];
+    let length = chunks[0].length;
+    for (let index = 0; index < value.files.length; index++) {
+      const bytes = encoder.encode((index ? ',' : '') + JSON.stringify(value.files[index]));
+      chunks.push(bytes); length += bytes.length;
+      if (index % 64 === 63) await checkpoint();
+    }
+    chunks.push(encoder.encode(']}')); length += 2;
+    const bytes = new Uint8Array(length); let offset = 0;
+    for (let index = 0; index < chunks.length; index++) {
+      bytes.set(chunks[index], offset); offset += chunks[index].length;
+      if (index % 64 === 63) await checkpoint();
+    }
+    await checkpoint();
+    const digest = await provider.subtle.digest('SHA-256', bytes);
+    await checkpoint();
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   }
   async function sourceHash(source, cryptoProvider) {
     const value = source?.version === 1 && Array.isArray(source.files) ? manifest(source.files) : manifest(source);
@@ -221,7 +265,7 @@
     }
     return result;
   }
-  return { copy, equal, manifest, sourceHash, fingerprint: sourceHash, fileState, contentEqual, mergeFile, scopeKey, projectWorkspace,
+  return { copy, equal, manifest, manifestAsync, sourceHash, sourceHashAsync, fingerprint: sourceHash, fileState, contentEqual, mergeFile, scopeKey, projectWorkspace,
     zipHash, witness, leafHash, parentHash, blockHash, normalizeDecisions, configHash, baselineId, normalizeArchive, finalizeArchive,
     buildBaselineTree, baselineProof, verifyBaselineProof };
 });

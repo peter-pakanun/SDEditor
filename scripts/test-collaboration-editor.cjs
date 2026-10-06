@@ -396,6 +396,55 @@ test('remote updates do not change a typing draft or its captured save base', ()
   assert.equal(e.descs[0].translations.Thai[0], 'ทีม'); assert.equal(e.editorBlocks[0].translation, 'ใหม่');
   assert.equal(e._editorCollabBase.revision, 1); assert.equal(e._editorCollabBase.translations[0], 'เดิม');
 });
+
+test('startup shared data preserves the ancestor of a draft opened before collaboration was ready', () => {
+  const { editor: e, window } = saveFixture();
+  const shared = { filepath: e.descs[0].filepath, translations: ['ทีม', 'สอง'], trackedForExport: true, needsReview: false, revision: 2 };
+  e._editorCollabBase = undefined; e._collaboration = { fileBase: () => shared };
+  e.applyCollaborationFiles([shared]);
+  assert.deepEqual([...e._editorCollabBase.translations], ['เดิม', 'สอง']);
+  assert.equal(e.editorBlocks[0].translation, 'ใหม่');
+  const merged = window.CollaborationProtocol.mergeFile(e._editorCollabBase,
+    { ...e._editorCollabBase, translations: ['ใหม่', 'สอง'] }, shared);
+  assert.deepEqual(merged.indexes, [0], 'An unseen startup edit must conflict with the older typing draft.');
+});
+
+test('empty and equivalent shared data preserve display snapshots and Lookup caches', () => {
+  const { editor: e } = saveFixture(); let filters = 0;
+  e.filterDesc = () => { filters++; };
+  e.applyCollaborationFiles([]); assert.equal(filters, 0);
+  const files = [{ filepath: e.descs[0].filepath, translations: ['เดิม', 'สอง'], trackedForExport: true, needsReview: false }];
+  e.applyCollaborationFiles(files);
+  filters = 0; const translation = e.descs[0].translations.Thai, saved = e.localDescs.descs[0].translations.Thai;
+  e.applyCollaborationFiles(files);
+  assert.equal(filters, 0); assert.equal(e.descs[0].translations.Thai, translation);
+  assert.equal(e.localDescs.descs[0].translations.Thai, saved);
+});
+
+test('large shared batches refresh the list and diagnostics once while preserving the current draft', async () => {
+  const { editor: e } = saveFixture(); const draft = e.editorBlocks, base = { revision: 1 };
+  e._editorCollabBase = base;
+  e.descs = Array.from({ length: 130 }, (_, index) => description(index + 1));
+  const files = e.descs.map(desc => ({ filepath: desc.filepath, translations: ['ทีมแก้แล้ว', 'สอง'], trackedForExport: true, needsReview: false }));
+  let filters = 0; const refreshed = [], work = [];
+  e.filterDesc = () => { filters++; };
+  e.updateScannedDescDiagnostics = paths => refreshed.push([...paths]);
+  e.setBrowserWork = (scope, value) => work.push({ scope, ...value });
+  await e.receiveCollaborationFiles(files);
+  assert.equal(filters, 1); assert.equal(refreshed.length, 1); assert.equal(refreshed[0].length, 130);
+  assert.ok(e.descs.every(desc => desc.translations.Thai[0] === 'ทีมแก้แล้ว'));
+  assert.equal(e.editorBlocks, draft); assert.equal(e._editorCollabBase, base);
+  assert.equal(work[0].active, true); assert.equal(work.at(-1).active, false);
+});
+
+test('a large pending shared batch cannot touch a workspace selected before its first paint', async () => {
+  const { editor: e } = saveFixture(); const original = e.descs[0].translations.Thai;
+  const files = Array.from({ length: 100 }, () => ({ filepath: e.descs[0].filepath, translations: ['obsolete', 'สอง'], trackedForExport: true }));
+  const pending = e.receiveCollaborationFiles(files);
+  e.sourceIdentity = 'new-source';
+  await pending;
+  assert.equal(e.descs[0].translations.Thai, original);
+});
 test('account or source change during save never closes or replaces the new editor', async () => {
   const { editor: e, window } = saveFixture(); let finish;
   window.OfflineStore.saveWorkspaceWithRevisions = () => new Promise(resolve => { finish = resolve; });

@@ -83,7 +83,7 @@ function harness({ realImport = false } = {}) {
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   editor.descs = [description()]; editor.localDescs = { descs: plain(editor.descs), status: {}, sourceHash: 'old-hash' };
   if (realImport) { editor.testMode = false; editor.confirmProceedByTypingYes = () => true; }
-  return { editor, window, document: context.document, writes, alerts, confirmations, approve(value) { approved = value; } };
+  return { editor, window, context, document: context.document, writes, alerts, confirmations, approve(value) { approved = value; } };
 }
 
 test('presence becomes away after two minutes or a hidden tab and activity restores it', () => {
@@ -146,6 +146,45 @@ test('stored source/workspace hash mismatch preserves all database values and bl
   assert.equal(e.sourceLoaded, false); assert.equal(e.sourceIdentity, ''); assert.equal(e.versionStorageLoading, false);
   assert.match(e.cloudStorageError, /different version hashes/); assert.equal(writes.length, 0);
   assert.deepEqual(plain({ workspace, source }), expected);
+});
+
+test('batched startup overlays stored translations without modifying the immutable baseline', async () => {
+  const { editor: e } = harness();
+  const source = [description('source')], original = plain(source);
+  const saved = description('source'); saved.translations.Thai = ['แก้ไขแล้ว', 'สอง'];
+  const workspace = { descs: [saved], status: { [saved.filepath]: { needsReview: true } } };
+  const prepared = await e.prepareStoredWorkspaceSource(source, workspace, true, () => true);
+  assert.deepEqual(plain(source), original);
+  assert.deepEqual(plain(prepared[0].translations.Thai), saved.translations.Thai);
+  assert.equal(prepared[0].needsReview, true);
+  prepared[0].translations.English[0] = 'Editor mutation';
+  assert.deepEqual(plain(source), original);
+});
+
+test('startup preparation yields and cancels without publishing a partial workspace', async () => {
+  const { editor: e, context } = harness();
+  let clock = 0, active = true, yields = 0;
+  context.Date = { now: () => clock += 8 };
+  e.yieldEditorWork = async () => { yields++; active = false; };
+  const existing = e.descs;
+  const result = await e.prepareStoredWorkspaceSource([description('first'), description('second')], null, true, () => active);
+  assert.equal(result, null); assert.equal(yields, 1); assert.equal(e.descs, existing);
+});
+
+test('preferences arriving during startup preparation activate only the final language overlay', async () => {
+  const { editor: e, window, context } = harness();
+  const source = [description('first'), description('second')];
+  const saved = plain(source);
+  for (const desc of saved) desc.translations.German = ['Deutsch', 'Zwei'];
+  window.OfflineStore.getSource = async () => source;
+  window.OfflineStore.getWorkspace = async () => ({ descs: saved, status: {} });
+  let clock = 0;
+  context.Date = { now: () => clock += 8 };
+  e.yieldEditorWork = async () => { e.lang = 'German'; };
+  await e.loadVersionedStorage();
+  assert.equal(e.sourceLoaded, true);
+  for (const desc of e.descs) assert.deepEqual(plain(desc.translations.German), ['Deutsch', 'Zwei']);
+  assert.deepEqual(plain(e.browserWorkItems), {});
 });
 
 test('a stale failed storage read cannot report an error in the new game workspace', async () => {

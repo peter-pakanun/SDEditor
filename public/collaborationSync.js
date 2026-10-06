@@ -18,6 +18,7 @@
       this.onChange = options.onChange || (() => {});
       this.onRemote = options.onRemote || (() => {});
       this.onStatus = options.onStatus || (() => {});
+      this.onWork = options.onWork || (() => {});
       this.onEditingConflict = options.onEditingConflict || (() => {});
       this.onCanonicalArchive = options.onCanonicalArchive || (() => {});
       this.allowLegacySeed = options.allowLegacySeed !== false;
@@ -33,6 +34,7 @@
       this.timer = null; this.heartbeat = null; this.backoff = 1000;
       this.destroyed = false;
       this.localWrites = Promise.resolve(); this.stagedSaves = new Map();
+      this.lastStatus = null; this.lastNotification = null;
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
@@ -43,8 +45,33 @@
         conflicts: copy(room?.conflicts || []), ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
-    notify() { this.onChange(this.snapshot({ includeFiles: false })); }
-    status(message, error = false) { this.onStatus({ message, error }); }
+    notify() {
+      const state = this.snapshot({ includeFiles: false }), serialized = JSON.stringify(state);
+      if (serialized === this.lastNotification) return;
+      this.lastNotification = serialized; this.onChange(state);
+    }
+    status(message, error = false) {
+      if (this.lastStatus?.message === message && this.lastStatus.error === error) return;
+      this.lastStatus = { message, error }; this.onStatus(this.lastStatus);
+    }
+    async prepareWork(action, epoch = this.epoch) {
+      if (epoch !== this.epoch || this.destroyed) throw staleError();
+      this.onWork({ key: 'source', label: 'Preparing collaboration data', active: true });
+      try { return await action(); }
+      finally { if (epoch === this.epoch) this.onWork({ key: 'source', active: false }); }
+    }
+    async prepareItems(items, prepare, epoch) {
+      const result = []; let start = Date.now();
+      for (let index = 0; index < items.length; index++) {
+        if (epoch !== this.epoch || this.destroyed) throw staleError();
+        result.push(prepare(items[index], index));
+        if (index % 64 === 63 && Date.now() - start >= 8) {
+          await new Promise(resolve => setTimeout(resolve, 0)); start = Date.now();
+        }
+      }
+      if (epoch !== this.epoch || this.destroyed) throw staleError();
+      return result;
+    }
     fileBase(filepath) {
       let file = this.room()?.local[filepath] || (this.room()?.mode === 'sparse' && this.baselineStates?.[filepath]) || null;
       for (const batch of this.stagedSaves.values()) if (batch.collaboration?.key === this.key) {
@@ -145,23 +172,30 @@
           await new Promise(resolve => globalThis.requestAnimationFrame(() => setTimeout(resolve, 0)));
         }
         if (epoch !== this.epoch) throw staleError();
-        manifest = P.manifest(source);
-        sourceHash = await P.sourceHash(manifest);
+        sourceHash = await this.prepareWork(() => P.sourceHashAsync(source, {
+          isCancelled: () => epoch !== this.epoch || this.destroyed,
+          onManifest: value => { manifest = value; },
+        }), epoch);
         if (epoch !== this.epoch) throw staleError();
       } finally {
         if (epoch === this.epoch) { this.hashing = false; this.notify(); }
       }
       const identity = { accountId: String(accountId), game, sourceHash, language };
-      this.key = scopeKey(identity); this.context = this.getContext(); this.source = copy(source);
-      this.sourceFiles = new Map(manifest.files.map(file => [file.filepath, file]));
-      const incoming = byPath(files.map(file => {
-        const original = this.sourceFiles.get(file.filepath);
-        if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
-        return fileState(file, original.english.length);
-      }));
-      for (const original of manifest.files) if (!incoming[original.filepath]) {
-        incoming[original.filepath] = fileState({ filepath: original.filepath, translations: [] }, original.english.length);
-      }
+      let incoming;
+      await this.prepareWork(async () => {
+        this.source = await this.prepareItems(source, desc => copy(desc), epoch);
+        this.sourceFiles = new Map(); incoming = {};
+        await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
+        await this.prepareItems(files, file => {
+          const original = this.sourceFiles.get(file.filepath);
+          if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
+          incoming[file.filepath] = fileState(file, original.english.length);
+        }, epoch);
+        await this.prepareItems(manifest.files, original => {
+          if (!incoming[original.filepath]) incoming[original.filepath] = fileState({ filepath: original.filepath, translations: [] }, original.english.length);
+        }, epoch);
+      }, epoch);
+      this.key = scopeKey(identity); this.context = this.getContext();
       await this.update((state, room) => {
         if (!room) state.rooms[this.key] = { identity, manifest, roomId: null, sequence: 0,
           shared: {}, local: incoming, outbox: [], conflicts: [], recovery: [], initialized: false };
@@ -180,7 +214,7 @@
           }
         }
       }, { version: game, projectWorkspace: stored => {
-        const current = copy(stored || workspace);
+        const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash;
         current.collaborationAccountId = identity.accountId;
@@ -194,7 +228,7 @@
         this.handleError(error);
         if (!transient(error)) throw error;
       }
-      return this.snapshot();
+      return this.snapshot({ includeFiles: false });
     }
     async connectSparse({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree }) {
       this.disconnect(); this.destroyed = false;
@@ -204,12 +238,18 @@
       if (epoch !== this.epoch) throw staleError();
       if (!Array.isArray(baselineSource) || baselineSource.length !== archive.descriptionCount
         || baselineTree?.version !== 1 || baselineTree.root !== archive.treeRoot || baselineTree.paths?.length !== archive.descriptionCount) throw new Error('The imported baseline cache is unavailable. Import the original ZIP again.');
-      const manifest = P.manifest(baselineSource);
-      this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
-      this.baselineFiles = new Map(baselineSource.map(file => [file.filepath, file]));
-      this.sourceFiles = new Map(manifest.files.map(file => [file.filepath, file]));
-      this.baselineStates = byPath(baselineSource.map(file => fileState({ filepath: file.filepath,
-        translations: (file.translations?.[language] || []).slice(0, file.translations.English.length) }, file.translations.English.length)));
+      let manifest;
+      await this.prepareWork(async () => {
+        manifest = await P.manifestAsync(baselineSource, { isCancelled: () => epoch !== this.epoch || this.destroyed });
+        this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
+        this.baselineFiles = new Map(); this.sourceFiles = new Map(); this.baselineStates = {};
+        await this.prepareItems(baselineSource, file => {
+          this.baselineFiles.set(file.filepath, file);
+          this.baselineStates[file.filepath] = fileState({ filepath: file.filepath,
+            translations: (file.translations?.[language] || []).slice(0, file.translations.English.length) }, file.translations.English.length);
+        }, epoch);
+        await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
+      }, epoch);
       const identity = { accountId: String(accountId), game, sourceHash: archive.baselineId, language };
       this.key = scopeKey(identity); this.context = this.getContext();
       // Resolve the tiny descriptor before creating or altering durable room state.
@@ -245,7 +285,7 @@
         }
         this.rebuild(room);
       }, { version: game, projectWorkspace: stored => {
-        const current = copy(stored || workspace);
+        const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash; current.collaborationAccountId = identity.accountId;
         return current;
@@ -256,7 +296,7 @@
         if (error.code === 'ARCHIVE_CONFIG_MISMATCH') throw error;
         this.handleError(error); if (!transient(error)) throw error;
       }
-      return this.snapshot();
+      return this.snapshot({ includeFiles: false });
     }
     async initializeRoom(epoch) {
       const room = this.room();
@@ -380,7 +420,8 @@
         delete room.seedUpload;
         this.rebuild(room);
       }, { projectWorkspace: this.projection(files, epoch) }, epoch);
-      this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...files, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
+      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...files, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
+      if (!this.current(epoch)) throw staleError();
     }
     async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, waitForSync = true }) {
       const epoch = this.epoch; const room = this.room();
@@ -426,10 +467,18 @@
       if (remaining?.status === 'pending') this.schedule();
       return { status: !remaining ? 'synced' : remaining.status === 'conflict' || remaining.blockedByConflict ? 'conflict' : 'pending', mutationId };
     }
-    sync() { return this.retry(); }
+    sync({ background = false } = {}) {
+      // The room websocket announces committed translations. Idle timers only
+      // retry disconnected rooms or saves that still need to be uploaded.
+      if (background && this.connected && this.socket?.readyState === 1
+        && !this.room()?.outbox.some(operation => operation.status !== 'conflict' && !operation.blockedByConflict)) {
+        return Promise.resolve();
+      }
+      return this.retry();
+    }
     retry() {
       const epoch = this.epoch;
-      if (!this.current(epoch)) return Promise.resolve(this.snapshot());
+      if (!this.current(epoch)) return Promise.resolve(this.snapshot({ includeFiles: false }));
       // Presence belongs to this browser, so it must not wait for another tab's
       // translation lock, catch-up requests or queued uploads.
       this.startPresence(epoch);
@@ -453,7 +502,7 @@
         } catch (error) {
           if (!error.stale && this.current(epoch)) this.handleError(error);
         }
-        return this.snapshot();
+        return this.snapshot({ includeFiles: false });
       };
       const promise = this.locks ? this.locks.request('sdeditor-collaboration:' + this.key, run) : run();
       this.running = promise.finally(() => { if (this.running === tracked) this.running = null; });
@@ -514,7 +563,8 @@
             }
             this.rebuild(current);
           }, { projectWorkspace: this.projection(changed, epoch) }, epoch);
-          this.onRemote(this.remoteFiles(changed));
+          await this.onRemote(this.remoteFiles(changed));
+          if (!this.current(epoch)) throw staleError();
         }
         more = result.hasMore;
         if (more && !events.length) throw new Error('Collaboration change cursor did not advance.');
@@ -551,7 +601,8 @@
               // the replay cursor here. Only ordered catch-up events can do that.
               this.rebuild(room);
             }, { projectWorkspace: this.projection(accepted, epoch) }, epoch);
-            this.onRemote(this.remoteFiles(accepted));
+            await this.onRemote(this.remoteFiles(accepted));
+            if (!this.current(epoch)) throw staleError();
             break;
           } catch (error) {
             if (error.status !== 409 || (error.code && error.code !== 'REVISION_CONFLICT')) throw error;
@@ -662,7 +713,8 @@
         collaborationAccountId: this.room().identity.accountId, savedAt: Date.now(),
         note: 'Resolve shared translation conflict', translations: copy(chosen.translations),
         isMissing: chosen.translations.some(text => !text.trim()) }] }, epoch);
-      this.onRemote([copy(this.room().local[chosen.filepath])]);
+      await this.onRemote([copy(this.room().local[chosen.filepath])]);
+      if (!this.current(epoch)) throw staleError();
       if (!renewed) await this.retry();
       const remaining = this.room().outbox.find(item => item.id === observed.mutationId);
       return { status: !remaining ? 'synced' : remaining.status === 'conflict' ? 'conflict' : 'pending', mutationId: observed.mutationId };
@@ -729,12 +781,14 @@
         if (!this.current(epoch) || this.socket !== socket) return;
         let message; try { message = JSON.parse(event.data); } catch (_) { return; }
         if (message.type === 'presence') {
-          this.peers = message.peers || []; this.sessionId = message.selfId || message.sessionId || this.sessionId; this.notify();
+          const peers = message.peers || [], sessionId = message.selfId || message.sessionId || this.sessionId;
+          if (sessionId === this.sessionId && P.equal(peers, this.peers)) return;
+          this.peers = peers; this.sessionId = sessionId; this.notify();
         } else if (message.type === 'welcome') { this.sessionId = message.sessionId; this.notify(); }
         else if (message.type === 'claim-result') {
           const pending = this.claims.get(message.requestId);
           if (pending) { clearTimeout(pending.timer); this.claims.delete(message.requestId); if (message.granted) this.editing = pending.filepath; pending.resolve({ granted: !!message.granted, peers: message.peers || [] }); }
-        } else if (message.type === 'changed') { this.retry(); }
+        } else if (message.type === 'changed' && (!Number.isSafeInteger(message.sequence) || message.sequence > (this.room()?.sequence || 0))) { this.retry(); }
       };
       socket.onerror = () => { /* onclose drives retry and clears obsolete claims. */ };
       socket.onclose = () => {
@@ -780,6 +834,7 @@
     }
     disconnect() {
       this.epoch++; clearTimeout(this.timer); this.timer = null;
+      this.onWork({ key: 'source', active: false });
       this.disconnected = false; this.hashing = false; this.presenceError = null; this.lastError = null;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }

@@ -33,6 +33,19 @@ function editor(wrappers = {}) {
   return { app: instance, focus, mixin };
 }
 
+test('unchanged compact state retains reactive identity while presence updates preserve conflict state', () => {
+  const { app } = editor(); const previous = app.collaborationState;
+  app.collabReceiveState(copy(previous));
+  assert.equal(app.collaborationState, previous);
+  const conflicts = [conflict()];
+  app.collabReceiveState({ ...previous, conflicts });
+  const withConflicts = app.collaborationState;
+  app.collabReceiveState({ ...copy(withConflicts), peers: [{ sessionId: 'other', editing: 'stat.txt' }] });
+  assert.notEqual(app.collaborationState, withConflicts);
+  assert.equal(app.collaborationState.conflicts, withConflicts.conflicts);
+  assert.equal(app.collaborationState.identity, withConflicts.identity);
+});
+
 test('file presence excludes this browser and clears stale presence when disconnected', () => {
   const { app } = editor();
   app.collaborationState.peers = [
