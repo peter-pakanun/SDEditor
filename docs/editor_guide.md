@@ -246,6 +246,8 @@ The **Dictionary** tab lets you define how specific terms should be translated.
 
 Entries matched in the current file appear first, including matches in table columns. The panel shows 40 entries per page; use **Previous** and **Next** to browse more. Search covers the entire Dictionary, and jumping to an entry from autocomplete opens its page automatically. Large dictionaries use a reusable lookup index, so opening another file does not rebuild every definition.
 
+New entries appear at the top. While editing Dictionary fields, entries stay in place as match highlights update. Moving between Find, Replace, Alternates, and TL note keeps the same order; leaving the entries restores matches-first ordering. An entry being edited stays visible even if its text stops matching the current search.
+
 **Adding a Dictionary Entry:**
 1. Click **Add entry** beside the search box underneath the Dictionary tabs
 2. Enter a word or phrase in the "Find" field

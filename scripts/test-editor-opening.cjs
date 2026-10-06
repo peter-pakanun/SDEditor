@@ -25,6 +25,19 @@ function dictionary(size = 120) {
   }));
 }
 
+function dictionaryField(dictId) {
+  return {
+    closest(selector) {
+      if (!selector.includes('data-dict-id')) return null;
+      return { getAttribute(name) { return name === 'data-dict-id' ? dictId : null; } };
+    },
+  };
+}
+
+function dictionaryIds(entries) {
+  return Array.from(entries, entry => entry._id);
+}
+
 function loadEditor(options = {}) {
   let config;
   let clock = 0;
@@ -596,31 +609,199 @@ test('adding a dictionary entry from a later page reveals and focuses its row', 
   assert.equal(calls.selected, 1);
 });
 
-test('highlight refresh keeps a focused dictionary entry visible when matching moves it to an earlier page', async () => {
+test('typing a dictionary Find keeps its row, page and scroll stable while source matches update', async () => {
   const { editor, document } = loadEditor();
   editor.descs = [description('new-term', 'New term')];
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
   editor.dictionaryPage = 3;
   const entry = editor.dictionary[119];
   assert.equal(editor.visibleDictionary.includes(entry), true);
-  document.activeElement = { closest() { return { getAttribute() { return entry._id; } }; } };
-  entry.find = 'New term';
+  const field = document.activeElement = dictionaryField(entry._id);
+  editor.dictionaryEntryFocusIn({ target: field });
+  const order = dictionaryIds(editor.filteredDictionary);
+  editor.$refs.editorSide.scrollTop = 275;
+  for (const find of ['New term', 'Unmatched term', 'New term']) {
+    entry.find = find;
+    await editor.syncEditorHlterWithDictionaryNow();
+    assert.equal(editor.foundDictionarySet.has(entry._id), find === 'New term', 'Highlight matches must remain live while ordering is held.');
+    assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
+    assert.equal(editor.dictionaryPage, 3);
+    assert.equal(editor.visibleDictionary[39], entry);
+    assert.equal(editor.$refs.editorSide.scrollTop, 275);
+    assert.equal(document.activeElement, field);
+  }
+  document.activeElement = null;
+  editor.dictionaryEntryFocusOut();
+  await editor.$nextTick();
+  assert.equal(editor.filteredDictionary[0], entry, 'Matches-first ranking resumes once dictionary editing ends.');
+});
+
+test('a new blank dictionary entry stays first while typing despite existing source matches', async () => {
+  const { editor, document } = loadEditor();
+  editor.descs = [description('new-term', 'Term 119 and New term')];
+  await editor.editFile(editor.descs[0].filepath);
+  assert.equal(editor.filteredDictionary[0]._id, 'word-119');
+  document.querySelector = () => ({
+    querySelector() {
+      return {
+        focus() { document.activeElement = dictionaryField(editor.dictionary[0]._id); },
+        select() {},
+      };
+    },
+  });
+  editor.sideAddClicked();
+  const entry = editor.dictionary[0];
+  assert.equal(editor.filteredDictionary[0], entry, 'The insertion must establish its position before the asynchronous focus callback.');
+  await editor.$nextTick(); await editor.$nextTick();
+  const order = dictionaryIds(editor.filteredDictionary);
+  for (const find of ['New term', 'Not in this file']) {
+    entry.find = find;
+    entry.replace = 'Typed replacement';
+    await editor.syncEditorHlterWithDictionaryNow();
+    assert.equal(editor.foundDictionarySet.has(entry._id), find === 'New term');
+    assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
+    assert.equal(editor.visibleDictionary[0], entry);
+    assert.equal(editor.dictionaryPage, 1);
+  }
+});
+
+test('other rows gaining matches cannot push the edited row across a dictionary page boundary', async () => {
+  const { editor, document } = loadEditor();
+  editor.descs = [description('new-term', 'New term')];
+  await editor.editFile(editor.descs[0].filepath);
+  editor.setDictionaryPage(2);
+  const entry = editor.dictionary[79];
+  const field = document.activeElement = dictionaryField(entry._id);
+  editor.dictionaryEntryFocusIn({ target: field });
+  assert.equal(editor.visibleDictionary[39], entry);
+  const order = dictionaryIds(editor.filteredDictionary);
+  editor.dictionary[119].find = 'New term';
   await editor.syncEditorHlterWithDictionaryNow();
-  assert.equal(editor.foundDictionarySet.has(entry._id), true);
-  assert.equal(editor.filteredDictionary[0], entry);
-  assert.equal(editor.dictionaryPage, 1);
-  assert.equal(editor.visibleDictionary.includes(entry), true, 'The refresh must adjust the page in the same update as the match reorder.');
+  assert.equal(editor.foundDictionarySet.has('word-119'), true);
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
+  assert.equal(editor.dictionaryPage, 2);
+  assert.equal(editor.visibleDictionary[39], entry);
+});
+
+test('dictionary focus transitions retain editing order through fields and rows, then release it on exit', async () => {
+  const { editor, document } = loadEditor();
+  editor.editorVisible = true;
+  const entry = editor.dictionary[119];
+  const fields = Array.from({ length: 4 }, () => dictionaryField(entry._id));
+  document.activeElement = fields[0];
+  editor.dictionaryEntryFocusIn({ target: fields[0] });
+  const order = Array.from(editor.dictionaryEditOrder);
+  for (const field of fields.slice(1)) {
+    editor.dictionaryEntryFocusOut();
+    document.activeElement = field;
+    editor.dictionaryEntryFocusIn({ target: field });
+    await editor.$nextTick();
+    assert.equal(editor.dictionaryEditingId, entry._id);
+    assert.deepEqual(Array.from(editor.dictionaryEditOrder), order);
+  }
+  const nextField = dictionaryField('word-118');
+  document.activeElement = null;
+  editor.dictionaryEntryFocusOut({ relatedTarget: nextField });
+  assert.equal(editor.dictionaryEditingId, 'word-118', 'Native relatedTarget must preserve the incoming row before focus settles.');
+  await editor.$nextTick();
+  assert.equal(editor.dictionaryEditingId, 'word-118', 'Transient body focus must not release a known dictionary transition.');
+  assert.deepEqual(Array.from(editor.dictionaryEditOrder), order);
+  document.activeElement = nextField;
+  editor.dictionaryEntryFocusIn({ target: nextField });
+  editor.dictionaryEntryFocusOut();
+  document.activeElement = { closest() { return null; } };
+  await editor.$nextTick();
+  assert.equal(editor.dictionaryEditingId, '');
+  assert.equal(editor.dictionaryEditOrder.length, 0);
+});
+
+test('editing a filtered dictionary result keeps its row visible when its text stops matching the filter', async () => {
+  const { editor, config, document } = loadEditor();
+  editor.editorVisible = true;
+  editor.dictionaryFilter = 'Term 119';
+  config.watch.dictionaryFilter.call(editor);
+  const entry = editor.filteredDictionary[0];
+  const field = document.activeElement = dictionaryField(entry._id);
+  editor.dictionaryEntryFocusIn({ target: field });
+  entry.find = 'New spelling';
+  entry.replace = 'New replacement';
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), [entry._id]);
+  assert.equal(editor.visibleDictionary[0], entry);
+  document.activeElement = null;
+  editor.dictionaryEntryFocusOut();
+  await editor.$nextTick();
+  assert.equal(editor.filteredDictionary.length, 0, 'Normal filtering resumes after leaving the edited row.');
+});
+
+test('shared dictionary replacement preserves editing order while rendering current objects and appended entries', async () => {
+  const { editor, document } = loadEditor();
+  editor.descs = [description('new-term', 'New term')];
+  await editor.editFile(editor.descs[0].filepath);
+  const oldEntry = editor.dictionary[39];
+  const field = document.activeElement = dictionaryField(oldEntry._id);
+  editor.dictionaryEntryFocusIn({ target: field });
+  const order = dictionaryIds(editor.filteredDictionary);
+  const replacement = Array.from(editor.dictionary, entry => ({ ...entry, alts: [] })).reverse();
+  const liveEntry = replacement.find(entry => entry._id === oldEntry._id);
+  liveEntry.replace = 'Updated shared translation';
+  replacement.find(entry => entry._id === 'word-119').find = 'New term';
+  const remoteEntry = { _id: 'remote-new', find: 'Another shared term', replace: 'Shared translation', alts: [], tlnote: '' };
+  editor.dictionary = [remoteEntry, ...replacement];
+  await editor.syncEditorHlterWithDictionaryNow();
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), [...order, remoteEntry._id]);
+  assert.equal(editor.visibleDictionary[39], liveEntry, 'Ordering must resolve IDs against current objects instead of retaining detached snapshots.');
+  assert.equal(editor.visibleDictionary[39].replace, 'Updated shared translation');
+  editor.visibleDictionary[39].replace = 'Typed after shared update';
+  assert.equal(liveEntry.replace, 'Typed after shared update');
+  assert.notEqual(oldEntry.replace, liveEntry.replace);
+  assert.equal(document.activeElement, field);
+});
+
+test('explicit dictionary search, page, tab and editor navigation release held editing order', async () => {
+  const { editor, config, document } = loadEditor();
+  editor.descs = [description('first', 'Term 119'), description('second', 'Term 0')];
+  await editor.editFile(editor.descs[0].filepath);
+  const begin = () => editor.beginDictionaryEdit('word-119');
+  const released = () => {
+    assert.equal(editor.dictionaryEditingId, '');
+    assert.equal(editor.dictionaryEditOrder.length, 0);
+  };
+  begin();
+  editor.dictionaryEntryFocusOut();
+  document.activeElement = { closest() { return null; } };
+  await editor.$nextTick();
+  editor.dictionaryFilter = 'Term';
+  config.watch.dictionaryFilter.call(editor);
+  released();
+  begin();
+  editor.setDictionaryPage(2);
+  released();
+  begin();
+  editor.sideTab = 'regex';
+  config.watch.sideTab.call(editor);
+  released();
+  editor.sideTab = 'dictionary';
+  begin();
+  await editor.editFile(editor.descs[1].filepath);
+  released();
+  begin();
+  await editor.editorExit();
+  config.watch.editorVisible.call(editor, editor.editorVisible);
+  released();
+  assert.equal(editor.editorVisible, false);
 });
 
 test('Dictionary creation paints and focuses its row before preparing matches, keeping translation fields editable', async () => {
   const { editor, document, calls } = loadEditor({ dictionary: dictionary(20000) });
-  editor.descs = [description('keyword', '[FreshTerm]')];
+  editor.descs = [description('keyword', '[FreshTerm] Term 19999')];
   await editor.editFile(editor.descs[0].filepath);
+  assert.equal(editor.filteredDictionary[0]._id, 'word-19999');
   const pause = deferred();
   editor.yieldEditorWork = () => pause.promise;
   document.querySelector = () => ({ querySelector() { return { focus() { calls.focused++; }, select() { calls.selected++; } }; } });
   const prior = { sync: calls.syncIndexes, async: calls.asyncIndexes, focus: calls.focused };
   const entry = editor.ensureDictionaryKeywordTag('FreshTerm', '', 'ใหม่');
+  assert.equal(editor.filteredDictionary[0]._id, entry.dictId, 'Keyword creation must pin its new row ahead of existing source matches before focus.');
   await editor.$nextTick(); await editor.$nextTick();
   assert.equal(entry.created, true);
   assert.equal(calls.focused, prior.focus + 1);
@@ -633,6 +814,7 @@ test('Dictionary creation paints and focuses its row before preparing matches, k
   assert.equal(calls.syncIndexes, prior.sync);
   assert.equal(calls.asyncIndexes, prior.async + 1);
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, entry.dictId);
+  assert.equal(editor.filteredDictionary[0]._id, entry.dictId);
   assert.equal(editor.browserWorkTooltip, '');
 });
 

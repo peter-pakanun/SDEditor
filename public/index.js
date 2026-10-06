@@ -197,6 +197,8 @@ const config = Vue.defineComponent({
       dictionaryFilter: '',
       dictionaryPage: 1,
       dictionaryPageSize: 40,
+      dictionaryEditOrder: [],
+      dictionaryEditingId: '',
       regexFilter: '',
       dictionaryFlashId: '',
 
@@ -463,6 +465,7 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     lang(language, previous) {
+      this.endDictionaryEdit();
       if (!this._cloudApplying) this._cloudLanguageSwitch = Promise.resolve(this.cloudSelectLanguage(language, previous));
       this.clearDiagnosticScanResults();
       if (this.sourceLoaded) {
@@ -472,7 +475,11 @@ const config = Vue.defineComponent({
       if (this.sideTab === 'history') this.refreshHistory();
     },
     sideTab() {
+      if (this.sideTab !== 'dictionary') this.endDictionaryEdit();
       if (this.sideTab === 'history') this.refreshHistory();
+    },
+    editorVisible(visible) {
+      if (!visible) this.endDictionaryEdit();
     },
     theme(newTheme) {
       // Legacy settings can differ from the active local profile during startup.
@@ -711,14 +718,35 @@ const config = Vue.defineComponent({
       }
       return map;
     },
+    orderedDictionary() {
+      const dictionary = this.dictionary || [];
+      // Resolve the captured order against live entries so cloud replacements
+      // still update the fields without moving the row being edited.
+      if (this.dictionaryEditOrder.length) {
+        const entries = new Map(dictionary.map(entry => [String(entry?._id), entry]));
+        const ordered = [];
+        for (const id of this.dictionaryEditOrder) {
+          if (!entries.has(id)) continue;
+          ordered.push(entries.get(id));
+          entries.delete(id);
+        }
+        return ordered.concat(Array.from(entries.values()));
+      }
+      const foundSet = this.foundDictionarySet;
+      if (!foundSet || foundSet.size <= 0) return dictionary;
+      const found = [], rest = [];
+      for (const entry of dictionary) (foundSet.has(entry?._id) ? found : rest).push(entry);
+      return found.concat(rest);
+    },
     filteredDictionary() {
-      let dictionary = this.dictionary || [];
+      let dictionary = this.orderedDictionary;
       let f = (this.dictionaryFilter || "").trim().toLowerCase();
       let list;
       if (!f) {
         list = dictionary.slice();
       } else {
         list = dictionary.filter(word => {
+        if (this.dictionaryEditingId && String(word?._id) === this.dictionaryEditingId) return true;
         let find = (word?.find || "").toLowerCase();
         let replace = (word?.replace || "").toLowerCase();
         let alts = "";
@@ -735,12 +763,7 @@ const config = Vue.defineComponent({
         });
       }
 
-      let foundSet = this.foundDictionarySet;
-      if (!foundSet || foundSet.size <= 0) return list;
-
-      const found = [], rest = [];
-      for (const entry of list) (foundSet.has(entry?._id) ? found : rest).push(entry);
-      return found.concat(rest);
+      return list;
     },
     dictionaryPageCount() {
       return Math.max(1, Math.ceil(this.filteredDictionary.length / this.dictionaryPageSize));
@@ -2972,9 +2995,42 @@ const config = Vue.defineComponent({
         this.addRegex();
         this.regexFilter = "";
       } else {
-        this.addVocab();
         this.dictionaryFilter = "";
+        this.addVocab();
       }
+    },
+    beginDictionaryEdit(dictId, options = {}) {
+      const id = String(dictId || '');
+      if (!id || !this.dictionary.some(entry => String(entry?._id) === id)) return;
+      if (!this.dictionaryEditOrder.length || options.newEntry) {
+        const order = this.orderedDictionary.map(entry => String(entry?._id));
+        this.dictionaryEditOrder = options.newEntry ? [id, ...order.filter(entryId => entryId !== id)] : order;
+      }
+      this.dictionaryEditingId = id;
+    },
+    endDictionaryEdit() {
+      if (this.dictionaryEditOrder.length) this.dictionaryEditOrder = [];
+      this.dictionaryEditingId = '';
+    },
+    dictionaryEntryFocusIn(event) {
+      const id = event.target?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
+      if (id) this.beginDictionaryEdit(id);
+    },
+    dictionaryEntryFocusOut(event) {
+      const nextId = event?.relatedTarget?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
+      if (nextId) {
+        this.beginDictionaryEdit(nextId);
+        return;
+      }
+      const editingId = this.dictionaryEditingId;
+      // Find -> Replace -> Alternates -> TL note is one editing session.
+      // Wait until the next field has focus before releasing the row order.
+      return this.$nextTick(() => {
+        if (editingId !== this.dictionaryEditingId) return;
+        const id = document.activeElement?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
+        if (id && this.editorVisible && this.sideTab === 'dictionary') this.beginDictionaryEdit(id);
+        else this.endDictionaryEdit();
+      });
     },
     invalidateEditorDictionaryIndex() {
       this._editorDictionaryRevision = (this._editorDictionaryRevision || 0) + 1;
@@ -3009,6 +3065,7 @@ const config = Vue.defineComponent({
       return false;
     },
     setDictionaryPage(page) {
+      this.endDictionaryEdit();
       this.dictionaryPage = Math.max(1, Math.min(page, this.dictionaryPageCount));
       this.$nextTick(() => { const side = this.$refs.editorSide; if (side) side.scrollTop = 0; });
     },
@@ -3407,7 +3464,7 @@ const config = Vue.defineComponent({
         this.setBrowserWork('editor', { key, active: false });
       }
     },
-    /** Refresh matches cooperatively and keep a focused Dictionary row on its rendered page when matches reorder the list. */
+    /** Refresh matches cooperatively while keeping the focused Dictionary row visible. */
     syncEditorHlterWithDictionaryNow() {
       this.invalidateEditorDictionaryIndex();
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
@@ -3805,6 +3862,7 @@ const config = Vue.defineComponent({
         tlnote: ""
       };
       this.dictionary.unshift(entry);
+      this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.dictionaryFlashId = entry._id;
       if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
       this._dictFlashTimer = setTimeout(() => {
@@ -3943,6 +4001,7 @@ const config = Vue.defineComponent({
     },
     focusDictionaryEntryReplaceInput(dictId, options = {}) {
       if (!dictId) return;
+      this.beginDictionaryEdit(dictId);
       let esc = (s) => {
         if (window?.CSS?.escape) return window.CSS.escape(String(s));
         return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -5665,6 +5724,7 @@ const config = Vue.defineComponent({
       this.editorVisible = true;
       this.editorFocusedIndex = 0;
       this.editorFocusedColumnIndex = 0;
+      this.endDictionaryEdit();
       this.dictionaryPage = 1;
       const run = this._editorOpenRun = (this._editorOpenRun || 0) + 1;
       const lang = this.lang, version = this.gameVersion, sourceIdentity = this.sourceIdentity;
@@ -6437,6 +6497,7 @@ const config = Vue.defineComponent({
     addVocab() {
       const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" };
       this.dictionary.unshift(entry);
+      this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.focusDictionaryEntryReplaceInput(entry._id);
     },
     async removeVocab(word) {
@@ -6445,6 +6506,7 @@ const config = Vue.defineComponent({
         title: 'Remove Dictionary entry?', confirmLabel: 'Remove entry',
       })) return;
       if (this.dictionary !== dictionary) return;
+      if (String(word?._id) === this.dictionaryEditingId) this.endDictionaryEdit();
       this.dictionary = this.dictionary.filter(o => o !== word);
       this.saveSettings();
     },

@@ -668,7 +668,7 @@
         </div>
 
         <div v-if="sideTab === 'dictionary'">
-          <div class="editBlock" v-for="word in visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }">
+          <div class="editBlock" v-for="word in visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: isDictionaryEntryFound(word), dictNew: word._id === dictionaryFlashId }" @focusin="dictionaryEntryFocusIn" @focusout="dictionaryEntryFocusOut">
             <div class="twoSided dictEntryBlock">
               <div>
                 <div class="dictRow" :data-dict-id="word._id">
