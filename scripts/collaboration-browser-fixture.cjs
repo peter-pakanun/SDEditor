@@ -169,6 +169,26 @@ function browserControls(account, secret, settings) {
       mutationId: crypto.randomUUID(), upserts: [entry], deletedIds: [] } });
     status.textContent = 'Shared Dictionary changed. Both translators should receive it through the account socket.';
   });
+  let releaseTranslationUpload;
+  button('Hold next translation upload', async () => {
+    const vm = await ready();
+    if (releaseTranslationUpload) return;
+    const fetcher = vm._cloud.fetcher;
+    const held = new Promise(resolve => { releaseTranslationUpload = resolve; });
+    vm._cloud.fetcher = async (url, options) => {
+      if (options?.method === 'POST' && new URL(url).pathname.endsWith('/mutations')) {
+        vm._cloud.fetcher = fetcher;
+        status.textContent = 'Translation upload held. Inspect the status bar spinner, then release the upload.';
+        await held;
+      }
+      return fetcher(url, options);
+    };
+    status.textContent = 'The next translation upload will wait. Open a file, edit, and Save.';
+  });
+  button('Release translation upload', async () => {
+    releaseTranslationUpload?.(); releaseTranslationUpload = null;
+    status.textContent = 'Translation upload released.';
+  });
   button('Preview work indicator', async () => {
     const vm = await ready();
     vm.setBrowserWork('fixture', { key: 'preview', label: 'Preparing collaboration data (fixture preview)', active: true, immediate: true });

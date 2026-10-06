@@ -1174,3 +1174,132 @@ test('old-scope worker ACK after disconnect leaves the newly selected room uncha
   assert.deepEqual(client.room(), before); assert.deepEqual(client.fileBase('a.txt').translations, ['new room', 'two']);
   assert.equal(client.stagedSaves.has(batch.jobId), false, 'A completed old-scope receipt can release its retained staging record.');
 });
+
+test('saved translation upload stays active through the network reply and durable acknowledgment', async t => {
+  const { client, store } = await fixture();
+  const networkEntered = gate(), networkRelease = gate(), acknowledgmentEntered = gate(), acknowledgmentRelease = gate();
+  t.after(() => { networkRelease.resolve(); acknowledgmentRelease.resolve(); client.destroy(); });
+  const work = []; client.onWork = value => work.push(copy(value));
+  const request = client.request, update = store.updateCollaborationState.bind(store);
+  let acknowledging = false;
+  client.request = async (path, options) => {
+    if (!path.endsWith('/mutations')) return request(path, options);
+    networkEntered.resolve(); await networkRelease.promise;
+    const result = await request(path, options); acknowledging = true; return result;
+  };
+  store.updateCollaborationState = async (...args) => {
+    if (acknowledging) {
+      acknowledging = false; acknowledgmentEntered.resolve(); await acknowledgmentRelease.promise;
+    }
+    return update(...args);
+  };
+  const save = client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['upload in progress', 'two'] }] });
+  await networkEntered.promise;
+  assert.equal((await localSaveResult(save)).status, 'pending', 'A visible upload does not delay the durable local save.');
+  assert.deepEqual(work.at(-1), { key: 'upload', label: 'Saving translations to shared workspace', active: true });
+  networkRelease.resolve(); await acknowledgmentEntered.promise;
+  assert.equal(work.at(-1).active, true, 'The server reply still needs to be durably adopted.');
+  acknowledgmentRelease.resolve(); await client.sync();
+  assert.deepEqual(work.at(-1), { key: 'upload', active: false });
+  assert.equal(client.snapshot().pending, 0);
+});
+
+test('failed saved translation uploads clear progress and retain the queued save and actionable error', async t => {
+  const { client } = await fixture(); t.after(() => client.destroy());
+  const work = [], statuses = []; client.onWork = value => work.push(copy(value)); client.onStatus = value => statuses.push(copy(value));
+  const request = client.request;
+  client.request = (path, options) => path.endsWith('/mutations')
+    ? Promise.reject(Object.assign(new Error('Shared workspace is unavailable'), { status: 503 })) : request(path, options);
+  const result = await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['safe pending save', 'two'] }] });
+  assert.equal(result.status, 'pending'); assert.equal(client.snapshot().pending, 1);
+  assert.deepEqual(work, [
+    { key: 'upload', label: 'Saving translations to shared workspace', active: true },
+    { key: 'upload', active: false },
+  ]);
+  assert.equal(statuses.at(-1).error, true); assert.match(statuses.at(-1).message, /offline|pending sync/i);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['safe pending save', 'two']);
+});
+
+test('revision conflicts end saved upload progress while retaining both copies for comparison', async t => {
+  const { client, server } = await fixture(); t.after(() => client.destroy());
+  const work = []; client.onWork = value => work.push(copy(value));
+  const request = client.request;
+  client.request = async (path, options) => {
+    if (path.endsWith('/mutations')) server.change('a.txt', ['overlapping peer edit', 'two']);
+    return request(path, options);
+  };
+  const result = await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['overlapping local edit', 'two'] }] });
+  assert.equal(result.status, 'conflict'); assert.equal(client.snapshot().pending, 1);
+  assert.deepEqual(work.map(value => value.active), [true, false]);
+  assert.deepEqual(client.snapshot().conflicts[0].yours.translations, ['overlapping local edit', 'two']);
+  assert.deepEqual(client.snapshot().conflicts[0].shared.translations, ['overlapping peer edit', 'two']);
+  const count = work.length; await client.sync();
+  assert.equal(work.length, count, 'A save awaiting conflict resolution is not an active upload.');
+});
+
+test('staged saved translation upload remains active until finalization commits the whole batch', async t => {
+  const { client } = await fixture(); const finalized = gate(), release = gate();
+  t.after(() => { release.resolve(); client.destroy(); });
+  const work = [], chunks = []; client.onWork = value => work.push(copy(value));
+  const request = client.request; let metadata;
+  client.request = async (path, options = {}) => {
+    if (path.endsWith('/rooms/room/uploads')) { metadata = copy(options.body); return { uploadId: 'saved-upload' }; }
+    if (path.endsWith('/uploads/saved-upload')) return { receivedChunks: [] };
+    if (path.includes('/uploads/saved-upload/chunks/')) { chunks.push(...copy(options.body.files)); return {}; }
+    if (path.endsWith('/uploads/saved-upload/finalize')) {
+      finalized.resolve(); await release.promise;
+      return request('/v1/collaboration/rooms/room/mutations', { method: 'POST',
+        body: { mutationId: metadata.mutationId, origin: metadata.origin, files: chunks } });
+    }
+    return request(path, options);
+  };
+  const translations = ['ก'.repeat(90000), 'ข'.repeat(90000)];
+  const saving = client.save({ waitForSync: false, files: [{ ...client.fileBase('a.txt'), translations }] });
+  await finalized.promise;
+  assert.equal((await localSaveResult(saving)).status, 'pending');
+  assert.equal(chunks.length, 1); assert.deepEqual(chunks[0].translations, translations);
+  assert.equal(work.at(-1).active, true, 'Sending all chunks has not committed the staged save.');
+  assert.deepEqual(work.map(value => value.active), [true]);
+  release.resolve(); await client.sync();
+  assert.deepEqual(work.at(-1), { key: 'upload', active: false }); assert.equal(client.snapshot().pending, 0);
+});
+
+test('disconnect clears upload progress and an old reply cannot clear a newer account upload', async t => {
+  const { client, server } = await fixture();
+  const oldEntered = gate(), oldRelease = gate(), newEntered = gate(), newRelease = gate();
+  t.after(() => { oldRelease.resolve(); newRelease.resolve(); client.destroy(); });
+  const work = []; client.onWork = value => { if (value.key === 'upload') work.push(copy(value)); };
+  const request = client.request; let mutations = 0;
+  client.request = async (path, options) => {
+    if (!path.endsWith('/mutations')) return request(path, options);
+    if (++mutations === 1) {
+      const result = await request(path, options); oldEntered.resolve(); await oldRelease.promise; return result;
+    }
+    newEntered.resolve(); await newRelease.promise; return request(path, options);
+  };
+  await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['old account save', 'two'] }] }));
+  await oldEntered.promise; const oldRun = client.running;
+  assert.equal(work.at(-1).active, true); client.disconnect();
+  assert.deepEqual(work.at(-1), { key: 'upload', active: false });
+  await client.connect({ accountId: 'new user', game: 'poe1', language: 'Thai', source, files: copy(server.files),
+    workspace: { descs: copy(source), status: {} } });
+  await localSaveResult(client.save({ waitForSync: false,
+    files: [{ ...client.fileBase('a.txt'), translations: ['new account save', 'two'] }] }));
+  await newEntered.promise; const count = work.length;
+  assert.equal(work.at(-1).active, true); oldRelease.resolve(); await oldRun;
+  assert.equal(work.length, count, 'An obsolete upload must not dismiss the current workspace progress.');
+  assert.equal(work.at(-1).active, true);
+  newRelease.resolve(); await client.sync();
+  assert.deepEqual(work.at(-1), { key: 'upload', active: false }); assert.equal(client.snapshot().pending, 0);
+});
+
+test('idle synchronization and received peer changes do not publish saved upload progress', async t => {
+  const { client, server } = await fixture(); t.after(() => client.destroy());
+  const work = []; client.onWork = value => work.push(copy(value));
+  await client.retry(); await client.sync({ background: true });
+  server.change('b.txt', ['received peer translation']); await client.retry();
+  assert.equal(work.some(value => value.key === 'upload' && value.active), false);
+  assert.equal(client.snapshot().pending, 0);
+});

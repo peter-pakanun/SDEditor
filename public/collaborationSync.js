@@ -589,6 +589,7 @@
           const current = this.room().outbox.find(item => item.id === id);
           if (!current || current.status === 'conflict') { paths.forEach(path => blocked.add(path)); break; }
           try {
+            this.onWork({ key: 'upload', label: 'Saving translations to shared workspace', active: true });
             const result = await this.sendMutation(current, epoch);
             const accepted = result.files || result.snapshot?.files;
             if (!Array.isArray(accepted)) throw new Error('Mutation response has no committed file states.');
@@ -614,6 +615,8 @@
               this.rebuild(room);
             }, { projectWorkspace: this.projection(latest.files, epoch) }, epoch);
             if (attempt === 3) this.schedule();
+          } finally {
+            if (epoch === this.epoch) this.onWork({ key: 'upload', active: false });
           }
         }
       }
@@ -835,6 +838,7 @@
     disconnect() {
       this.epoch++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
+      this.onWork({ key: 'upload', active: false });
       this.disconnected = false; this.hashing = false; this.presenceError = null; this.lastError = null;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }

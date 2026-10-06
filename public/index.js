@@ -509,7 +509,7 @@ const config = Vue.defineComponent({
       const labels = Object.values(this.browserWorkItems);
       if (this.editorLoading) labels.push('Preparing translation fields and Dictionary matches');
       if (this.diagnosticScanRunning) labels.push('Checking translation diagnostics');
-      return labels.length ? 'Browser is processing data\n' + [...new Set(labels)].join('\n') : '';
+      return labels.length ? 'Work in progress\n' + [...new Set(labels)].join('\n') : '';
     },
     settingsDialogVisible() {
       return this.gameVersionSelected && (this.showSetting || this.needsInitialSettings)
