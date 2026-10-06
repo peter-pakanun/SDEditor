@@ -325,8 +325,9 @@
       },
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
-          || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
+          || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+        if (this._importingSource || this._reconcilingImport || this.pendingDuplicateLangImport?.mode === 'update') return;
         const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
@@ -376,6 +377,7 @@
             ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
             files, workspace });
         } catch (error) {
+          if (this._collaboration !== client) return;
           if (error.code === 'ARCHIVE_CONFIG_MISMATCH' && this._collaboration === client && error.archive) {
             if (!await this.reconcileImportArchive(error.archive) && this._collaboration === client) {
               client.disconnect(); this._collaboration = null; this._collabKey = '';
@@ -401,6 +403,7 @@
         }
       },
       async collabRetry(options) {
+        if (this._importingSource || this.pendingDuplicateLangImport?.mode === 'update') return;
         if (!this._collaboration) return this.initializeCollaboration();
         return this._collaboration.sync(options);
       },

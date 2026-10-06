@@ -891,8 +891,8 @@ test('game switching waits for queued storage and a failed queue blocks source r
   assert.equal(imports, 0); assert.equal(clears, 0); assert.equal(reloads, 0); assert.equal(s.pendingLocalSaves, 1);
 });
 
-test('a source import waits for a local save queued while source hashing was in progress', async () => {
-  const { editor: e, window, context, calls, acknowledge } = enablePending(saveFixture());
+test('a source import blocks new editor saves and waits for an in-flight save queued during hashing', async () => {
+  const { editor: e, window, context, desc, calls, acknowledge } = enablePending(saveFixture());
   vm.runInContext('offlineStoreReady = true', context);
   let releaseHash, hashes = 0, imports = 0;
   window.CollaborationProtocol = { ...window.CollaborationProtocol, sourceHash: () => {
@@ -905,7 +905,12 @@ test('a source import waits for a local save queued while source hashing was in 
   const next = description(1, ['', '']); next.translations.English[0] = 'New source';
   const importing = e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 1, lastModified: 1 }, [next]);
   await pendingTick(); assert.equal(hashes, 1);
-  assert.equal(await e.editorSave(), true); releaseHash('new-source-hash'); await pendingTick();
+  assert.equal(await e.editorSave(), false);
+  assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks[0].translation, 'ใหม่');
+  assert.deepEqual(e.editorOriginalTranslations, ['เดิม', 'สอง']); assert.equal(calls.length, 0);
+  // A save already in flight may hand its batch to the queue after import preparation starts.
+  const queued = await e.persistTranslationBatch([{ desc, lines: ['ใหม่', 'สอง'] }], 'save');
+  assert.equal(queued.status, 'queued'); releaseHash('new-source-hash'); await pendingTick();
   assert.equal(calls.length, 1); assert.equal(imports, 0, 'Source replacement must wait for saves queued during its hash await.');
   acknowledge(calls[0]); await importing;
   assert.equal(imports, 1); assert.equal(e.pendingLocalSaves, 0); assert.equal(e.sourceIdentity, 'new-source-hash');

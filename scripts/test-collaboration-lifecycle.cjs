@@ -923,3 +923,242 @@ test('a failed raw ZIP digest restores settled import progress while preserving 
   assert.equal(e.localDescs, workspace); assert.equal(e.descs, source); assert.equal(e.sourceIdentity, 'old-hash');
   assert.equal(writes.length, 0); assert.match(alerts[0], /Import aborted.*temporarily unavailable/);
 });
+
+function prepareSourceImportCollaboration(editor, window, join = async () => {}) {
+  const activity = { clients: 0, joins: 0, syncs: 0, disconnects: 0 };
+  editor.offlineStoreReady = true;
+  editor.cloudSignedIn = true; editor.cloudCanAccessAllLanguages = true;
+  editor.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  editor._cloud = { apiBase: 'http://api.test', context: () => ({}), request: async () => undefined };
+  window.CollaborationSync = { Client: class {
+    constructor() { activity.clients++; }
+    connect(input) { activity.joins++; return join(input); }
+    sync() { activity.syncs++; }
+    disconnect() { activity.disconnects++; }
+    room() { return null; }
+    select() {} setAway() {}
+  } };
+  return activity;
+}
+
+test('source import survives an old join 404 throughout parsing and archive preparation', async t => {
+  for (const stage of ['parse', 'zipHash', 'archiveLookup', 'baselineTree']) await t.test(stage, async () => {
+    const { editor: e, window, writes, alerts } = harness({ realImport: true });
+    const oldJoin = deferred(), entered = deferred(), release = deferred();
+    const activity = prepareSourceImportCollaboration(e, window, () => oldJoin.promise);
+    let joinError;
+    const joining = e.initializeCollaboration().catch(error => { joinError = error; });
+    assert.equal(activity.joins, 1);
+    const file = zipFixture(importText({ broken: false }), { archive: true });
+    if (stage === 'parse') {
+      const entry = file.files[repairedPath], read = entry.async;
+      entry.async = async (...args) => { entered.resolve(); await release.promise; return read(...args); };
+    } else if (stage === 'archiveLookup') {
+      const lookup = e.lookupImportArchive;
+      e.lookupImportArchive = async (...args) => { entered.resolve(); await release.promise; return lookup.apply(e, args); };
+    } else {
+      const method = stage === 'zipHash' ? 'zipHash' : 'buildBaselineTree';
+      window.CollaborationProtocol[method] = async (...args) => { entered.resolve(); await release.promise; return protocol[method](...args); };
+    }
+    const previousSource = e.descs, previousWorkspace = e.localDescs;
+    const importing = e.importUpdateZipFile(file);
+    await entered.promise;
+    const locked = !!e._importingSource, detached = e._collaboration === null;
+    oldJoin.reject(Object.assign(new Error('Collaboration join returned 404'), { status: 404 }));
+    await joining;
+    await e.initializeCollaboration(); await e.collabRetry();
+    const joinsDuringImport = activity.joins, clientsDuringImport = activity.clients, syncsDuringImport = activity.syncs;
+    const writesDuringImport = writes.length;
+    release.resolve(); await importing;
+    assert.equal(joinError, undefined, 'A discarded room failure does not report an error in the active import.');
+    assert.doesNotMatch(e.collaborationNotice, /join returned 404/i);
+    assert.equal(locked, true, 'Source import owns its entire parsing and hashing lifetime.');
+    assert.equal(detached, true, 'The previous room is detached before asynchronous import preparation.');
+    assert.equal(joinsDuringImport, 1); assert.equal(clientsDuringImport, 1); assert.equal(syncsDuringImport, 0);
+    assert.equal(writesDuringImport, 0);
+    assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(e.importBaselineHashing, false);
+    assert.equal(!!e._importingSource, false); assert.notEqual(e.descs, previousSource); assert.notEqual(e.localDescs, previousWorkspace);
+    assert.equal(e.sourceIdentity, e.importBaseline.archive.baselineId); assert.deepEqual(alerts, []);
+  });
+});
+
+test('raw source ZIP preparation aborts real workspace changes with settled progress', async t => {
+  for (const [name, change] of Object.entries({
+    account: e => { e.cloudUser = { ...e.cloudUser, id: 'other-account' }; },
+    language: e => { e.lang = 'German'; },
+    game: e => { e.gameVersion = 'poe2'; },
+    workspace: e => { e.localDescs = { descs: [], status: {}, sourceHash: 'other-source' }; },
+    source: e => { e.descs = [description('other-source')]; },
+  })) await t.test(name, async () => {
+    const { editor: e, window, writes } = harness({ realImport: true });
+    const entered = deferred(), digest = deferred();
+    window.CollaborationProtocol.zipHash = () => { entered.resolve(); return digest.promise; };
+    const importing = e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+    await entered.promise;
+    change(e); const source = e.descs, workspace = e.localDescs, sourceIdentity = e.sourceIdentity;
+    digest.resolve('a'.repeat(64)); await importing;
+    assert.equal(writes.length, 0); assert.equal(e.descs, source); assert.equal(e.localDescs, workspace);
+    assert.equal(e.sourceIdentity, sourceIdentity); assert.equal(e.loadingProgress, 100);
+    assert.equal(e.importBaselineHashing, false); assert.equal(!!e._importingSource, false);
+  });
+});
+
+test('source archive storage failure releases import ownership and permits a later import', async () => {
+  const { editor: e, window, writes, alerts } = harness({ realImport: true });
+  const source = e.descs, workspace = e.localDescs, original = plain({ source, workspace });
+  const save = window.OfflineStore.saveSourceWorkspaceWithRevisions;
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async () => { throw new Error('Storage quota exceeded'); };
+  await e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+  assert.equal(e.descs, source); assert.equal(e.localDescs, workspace); assert.deepEqual(plain({ source, workspace }), original);
+  assert.equal(e.sourceIdentity, 'old-hash'); assert.equal(e.loadingProgress, 100); assert.equal(e.importBaselineHashing, false);
+  assert.equal(!!e._importingSource, false); assert.equal(writes.length, 0);
+  assert.match(alerts[0], /Could not save the imported source.*Storage quota exceeded/);
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = save;
+  await e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+  assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+  assert.notEqual(e.sourceIdentity, 'old-hash');
+});
+
+test('source import drains local saves before disconnecting and prevents a waiting join from restarting', async () => {
+  const { editor: e, window, writes } = harness({ realImport: true });
+  const activity = prepareSourceImportCollaboration(e, window);
+  await e.initializeCollaboration();
+  const saves = deferred(), hashing = deferred(), digest = deferred(); let pending = true;
+  e._pendingSaves = { snapshot: () => ({ jobs: pending ? [{ id: 'durable-save' }] : [] }) };
+  e.waitForPendingSaves = () => saves.promise;
+  window.CollaborationProtocol.zipHash = async file => { hashing.resolve(); await digest.promise; return protocol.zipHash(file); };
+  const joining = e.initializeCollaboration();
+  const importing = e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+  const disconnectsBeforeDurability = activity.disconnects;
+  await e.collabRetry();
+  pending = false; saves.resolve(true);
+  await joining; await hashing.promise;
+  const joinsDuringImport = activity.joins, syncsDuringImport = activity.syncs;
+  digest.resolve(); await importing;
+  assert.equal(disconnectsBeforeDurability, 0, 'The client needed by pending local saves remains available until they finish.');
+  assert.equal(joinsDuringImport, 1, 'A join awaiting the same save queue rechecks import ownership when it resumes.');
+  assert.equal(syncsDuringImport, 0); assert.equal(activity.disconnects, 1);
+  assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+  await e.initializeCollaboration(); assert.equal(activity.joins, 2);
+});
+
+test('source import cannot switch scope while awaiting pending local saves', async t => {
+  for (const [name, change] of Object.entries({
+    account: e => { e.cloudUser = { ...e.cloudUser, id: 'other-account' }; },
+    language: e => { e.lang = 'German'; },
+    game: e => { e.gameVersion = 'poe2'; },
+    workspace: e => { e.localDescs = { descs: [], status: {}, sourceHash: 'other-source' }; },
+    source: e => { e.descs = [description('other-source')]; },
+  })) await t.test(name, async () => {
+    const { editor: e, writes } = harness({ realImport: true }); const saves = deferred(); let pending = true;
+    e._pendingSaves = { snapshot: () => ({ jobs: pending ? [{ id: 'durable-save' }] : [] }) };
+    e.waitForPendingSaves = () => saves.promise;
+    const importing = e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+    change(e); const source = e.descs, workspace = e.localDescs, sourceIdentity = e.sourceIdentity;
+    pending = false; saves.resolve(true); await importing;
+    assert.equal(writes.length, 0); assert.equal(e.descs, source); assert.equal(e.localDescs, workspace);
+    assert.equal(e.sourceIdentity, sourceIdentity); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+  });
+});
+
+test('a collaboration teardown during pending local saves does not cancel the source import', async () => {
+  const { editor: e, writes } = harness({ realImport: true }); const saves = deferred(); let pending = true;
+  e._collaboration = { disconnect() {} };
+  e._pendingSaves = { snapshot: () => ({ jobs: pending ? [{ id: 'durable-save' }] : [] }) };
+  e.waitForPendingSaves = () => saves.promise;
+  const importing = e.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
+  e._collaboration = null; pending = false; saves.resolve(true); await importing;
+  assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+});
+
+test('confirming the detected game version imports into its newly loaded workspace', async () => {
+  const { editor: e, writes, confirmations } = harness({ realImport: true });
+  const previousSource = e.descs, previousWorkspace = e.localDescs;
+  const file = zipFixture(importText({ broken: false }), { archive: true, extra: {
+    'stat_descriptions/specific_skill_stat_descriptions/explosive_grenade.txt': importText({ broken: false }),
+  } });
+  e.countZipTxtFiles = () => 5000;
+  await e.importUpdateZipFile(file);
+  assert.equal(confirmations.length, 1); assert.match(confirmations[0], /Switch to .* and import it there/);
+  assert.equal(writes.length, 1); assert.equal(writes[0][3], 'poe2'); assert.equal(e.gameVersion, 'poe2');
+  assert.notEqual(e.descs, previousSource); assert.notEqual(e.localDescs, previousWorkspace);
+  assert.equal(e.sourceLoaded, true); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+  assert.equal(e.sourceIdentity, e.importBaseline.archive.baselineId);
+});
+
+test('source duplicate choices keep background retries paused and can resume the import', async () => {
+  const { editor: e, window, writes } = harness({ realImport: true });
+  const activity = prepareSourceImportCollaboration(e, window);
+  await e.initializeCollaboration(); assert.equal(activity.joins, 1);
+  const text = importText({ broken: false }) + 'lang "Thai"\n1\n# "Second choice"\n';
+  await e.importUpdateZipFile(zipFixture(text, { archive: true }));
+  assert.equal(e.pendingDuplicateLangImport.mode, 'update'); assert.equal(e.loadingProgress, 100);
+  assert.equal(!!e._importingSource, false); assert.equal(writes.length, 0);
+  await e.initializeCollaboration(); await e.collabRetry();
+  assert.equal(activity.joins, 1); assert.equal(activity.clients, 1); assert.equal(activity.syncs, 0);
+  const group = e.duplicateLangImportWarning.groups[0]; group.selectedOptionId = group.options[1].id;
+  await e.confirmDuplicateLangImportResolution();
+  assert.equal(writes.length, 1); assert.equal(e.pendingDuplicateLangImport, null); assert.equal(e.duplicateLangImportWarning, null);
+  assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+  assert.deepEqual(plain(e.importBaseline.source[0].translations.Thai), ['Second choice']);
+  await e.initializeCollaboration();
+  assert.equal(activity.joins, 2, 'Background collaboration can start for the committed source.');
+});
+
+test('cancelling source duplicate choices resumes collaboration without writing the archive', async () => {
+  const { editor: e, window, writes } = harness({ realImport: true });
+  const activity = prepareSourceImportCollaboration(e, window);
+  await e.initializeCollaboration();
+  const text = importText({ broken: false }) + 'lang "Thai"\n1\n# "Second choice"\n';
+  await e.importUpdateZipFile(zipFixture(text, { archive: true }));
+  await e.collabRetry(); assert.equal(activity.joins, 1);
+  e.closeDuplicateLangImportWarning(); await e.initializeCollaboration();
+  assert.equal(activity.joins, 2); assert.equal(writes.length, 0); assert.equal(e.sourceIdentity, 'old-hash');
+  assert.equal(e.pendingDuplicateLangImport, null); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+});
+
+test('stale source import failures preserve a newer workspace load and remain quiet', async t => {
+  for (const stage of ['parse', 'archiveLookup', 'baselineTree']) await t.test(stage, async () => {
+    const { editor: e, window, writes, alerts } = harness({ realImport: true });
+    const entered = deferred(), failure = deferred(), newerSource = deferred();
+    const file = zipFixture(importText({ broken: false }), { archive: true });
+    if (stage === 'parse') {
+      file.files[repairedPath].async = () => { entered.resolve(); return failure.promise; };
+    } else if (stage === 'archiveLookup') {
+      e.lookupImportArchive = () => { entered.resolve(); return failure.promise; };
+    } else {
+      window.CollaborationProtocol.buildBaselineTree = () => { entered.resolve(); return failure.promise; };
+    }
+    const importing = e.importUpdateZipFile(file); await entered.promise;
+    window.OfflineStore.getSource = game => game === 'poe2' ? newerSource.promise : Promise.resolve(undefined);
+    e.gameVersion = 'poe2'; const loading = e.loadVersionedStorage();
+    const source = e.descs, workspace = e.localDescs;
+    assert.equal(e.versionStorageLoading, true); assert.equal(e.loadingProgress, 0.001);
+    failure.reject(new Error('Old import preparation failed')); await importing;
+    assert.equal(e.loadingProgress, 0.001, 'The newer workspace retains its active load state.');
+    assert.equal(e.versionStorageLoading, true); assert.equal(e.descs, source); assert.equal(e.localDescs, workspace);
+    assert.equal(writes.length, 0); assert.deepEqual(alerts, []); assert.equal(!!e._importingSource, false);
+    newerSource.resolve([description('newer')]); await loading;
+    assert.equal(e.versionStorageLoading, false); assert.equal(e.loadingProgress, 100); assert.equal(e.descs[0].filename, 'newer.txt');
+  });
+});
+
+test('a translated import waiting for local saves yields to a source import before reading or writing', async () => {
+  const { editor: e, writes } = harness({ realImport: true });
+  const saves = deferred(), sourceRead = deferred(), sourceRelease = deferred(); let pending = true, translatedReads = 0;
+  e._pendingSaves = { snapshot: () => ({ jobs: pending ? [{ id: 'durable-save' }] : [] }) };
+  e.waitForPendingSaves = () => saves.promise;
+  const translated = zipFixture(importText({ broken: false, translated: 'racing transfer' }), { translated: true });
+  const translatedEntry = translated.files[repairedPath], readTranslated = translatedEntry.async;
+  translatedEntry.async = (...args) => { translatedReads++; return readTranslated(...args); };
+  const translating = e.importTranslatedZipFile(translated);
+  const source = zipFixture(importText({ broken: false }), { archive: true });
+  const sourceEntry = source.files[repairedPath], readSource = sourceEntry.async;
+  sourceEntry.async = async (...args) => { sourceRead.resolve(); await sourceRelease.promise; return readSource(...args); };
+  const importing = e.importUpdateZipFile(source);
+  pending = false; saves.resolve(true); await translating; await sourceRead.promise;
+  const readsDuringSourceImport = translatedReads, writesDuringSourceImport = writes.length;
+  sourceRelease.resolve(); await importing;
+  assert.equal(readsDuringSourceImport, 0); assert.equal(writesDuringSourceImport, 0);
+  assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
+});

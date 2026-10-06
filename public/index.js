@@ -4485,8 +4485,10 @@ const config = Vue.defineComponent({
       this.importDialogVisible = false;
     },
     closeDuplicateLangImportWarning() {
+      const sourceImport = this.pendingDuplicateLangImport?.mode === 'update';
       this.duplicateLangImportWarning = null;
       this.pendingDuplicateLangImport = null;
+      if (sourceImport) this.scheduleCollaboration?.();
     },
     importNextVersionZipClicked() {
       this.closeImportDialog();
@@ -4688,7 +4690,6 @@ const config = Vue.defineComponent({
 
     async importUpdateZipFile(file, resolvedParsed = null, options = {}) {
       if (this._importingSource || this._reconcilingImport) return;
-      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
@@ -4696,11 +4697,45 @@ const config = Vue.defineComponent({
         return;
       }
 
-      const isPostMigrationImport = typeof options.isPostMigrationImport === 'boolean' ? options.isPostMigrationImport : !!this.needsPostMigrationImport;
+      if (options.generation && options.generation !== this._sourceImportGeneration) return;
       const generation = options.generation || (this._sourceImportGeneration = (this._sourceImportGeneration || 0) + 1);
+      const requestedContext = this.captureCollaborationContext?.();
+      const requestedWorkspace = this.localDescs, requestedSource = this.descs;
+      this._importingSource = true;
+      try {
+        // Finish durable local saves before retiring their collaboration client.
+        // Suspend the old room before parsing: even a failed background join
+        // must not change the context captured by this source import.
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+        const currentContext = this.captureCollaborationContext?.();
+        if ((requestedContext && Object.entries(requestedContext).some(([key, value]) => key !== 'client' && value !== currentContext?.[key]))
+          || this.localDescs !== requestedWorkspace || this.descs !== requestedSource) return;
+        clearTimeout(this._collabStartTimer);
+        this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
+        this._collabFileIndexes = null;
+        this.clearBrowserWork?.('collaboration');
+        await this.performSourceZipImport(file, resolvedParsed, { ...options, generation });
+      } finally {
+        this._importingSource = false;
+        if (generation === this._sourceImportGeneration) {
+          this.importBaselineHashing = false;
+          if (!this.versionStorageLoading && this.loadingProgress > 0 && this.loadingProgress < 100) {
+            this.loadingProgress = this.sourceLoaded ? 100 : 0;
+          }
+        }
+        this.scheduleCollaboration?.();
+      }
+    },
+
+    async performSourceZipImport(file, resolvedParsed, options) {
+      const isPostMigrationImport = typeof options.isPostMigrationImport === 'boolean' ? options.isPostMigrationImport : !!this.needsPostMigrationImport;
+      const generation = options.generation;
       const importCurrent = () => generation === this._sourceImportGeneration;
 
       let parseContext = this.captureCollaborationContext?.();
+      let parseWorkspace = this.localDescs, parseSource = this.descs;
+      const parseCurrent = () => importCurrent() && (!parseContext || this.collaborationContextCurrent(parseContext))
+        && this.localDescs === parseWorkspace && this.descs === parseSource;
       let parsed = resolvedParsed;
       let identity = options.identity || null;
       let acceptedArchive = options.acceptedArchive || null;
@@ -4711,18 +4746,20 @@ const config = Vue.defineComponent({
         try {
           zip = await new JSZip().loadAsync(file);
         } catch (error) {
-          this.loadingProgress = 0;
+          if (!parseCurrent()) return;
+          this.loadingProgress = this.sourceLoaded ? 100 : 0;
           this.appAlert('Cannot open this file');
           return;
         }
 
+        if (!parseCurrent()) return;
         const txtFileCount = this.countZipTxtFiles(zip);
         if (txtFileCount === 0) {
           this.loadingProgress = 100;
           this.appAlert('No .txt files found in this ZIP.');
           return;
         }
-        if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
+        if (!parseCurrent()) return;
         const detectedGameVersion = this.detectGameVersionFromZip(zip);
         if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
           const detectedLabel = this.formatGameVersion(detectedGameVersion);
@@ -4735,9 +4772,10 @@ const config = Vue.defineComponent({
             this.loadingProgress = 100;
             return;
           }
-          if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
+          if (!parseCurrent()) return;
           await this.activateGameVersion(detectedGameVersion, { checkMigration: true });
           parseContext = this.captureCollaborationContext?.();
+          parseWorkspace = this.localDescs; parseSource = this.descs;
           if (this.pendingSingleVersionMigration) {
             this.loadingProgress = 0;
             this.appAlert('Please finish or skip the migration before importing this ZIP.');
@@ -4760,34 +4798,37 @@ const config = Vue.defineComponent({
           }
         }
 
-        if (parseContext && !this.collaborationContextCurrent(parseContext)) return;
+        if (!parseCurrent()) return;
         const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
         try {
           parsed = await allProgress(parseFuncs, (p) => {
+            if (!parseCurrent()) return;
             const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
             this.loadingProgress = percent;
           });
         } catch (error) {
+          if (!parseCurrent()) return;
           this.loadingProgress = this.sourceLoaded ? 100 : 0;
           this.appAlert('Import aborted. ' + error.message);
           return;
         }
-        if (!importCurrent() || (parseContext && !this.collaborationContextCurrent(parseContext))) return;
+        if (!parseCurrent()) return;
         rawSource = this.toPlainForStorage(parsed);
         try {
           this.importBaselineHashing = true;
           identity = await this.readImportZipIdentity(file, zip);
-          if (!importCurrent() || (parseContext && !this.collaborationContextCurrent(parseContext))) return;
+          if (!parseCurrent()) return;
           acceptedArchive = await this.lookupImportArchive(identity);
-          if (!importCurrent() || (parseContext && !this.collaborationContextCurrent(parseContext))) return;
+          if (!parseCurrent()) return;
           if (acceptedArchive) parsed = await this.sourceWithImportDecisions(rawSource, acceptedArchive.decisions);
         } catch (error) {
-          if (importCurrent()) this.loadingProgress = this.sourceLoaded ? 100 : 0;
-          if (!error.stale && importCurrent()) this.appAlert('Import aborted. ' + error.message);
+          if (!parseCurrent()) return;
+          this.loadingProgress = this.sourceLoaded ? 100 : 0;
+          if (!error.stale) this.appAlert('Import aborted. ' + error.message);
           return;
         } finally { if (importCurrent()) this.importBaselineHashing = false; }
-        if (!importCurrent() || (parseContext && !this.collaborationContextCurrent(parseContext))) return;
+        if (!parseCurrent()) return;
         if (!acceptedArchive && this.startDuplicateLangResolution(parsed, file, { mode: 'update', importMode: 'Import Next Version',
           isPostMigrationImport, rawSource, identity, generation })) return;
       }
@@ -4797,6 +4838,8 @@ const config = Vue.defineComponent({
       const importContext = this.captureCollaborationContext?.();
       const importWorkspace = this.localDescs;
       const importSource = this.descs;
+      const workspaceCurrent = () => importCurrent() && (!importContext || this.collaborationContextCurrent(importContext))
+        && this.localDescs === importWorkspace && this.descs === importSource;
       let sourceHash;
       let importedBaseline = null;
       try {
@@ -4805,13 +4848,18 @@ const config = Vue.defineComponent({
         if (importedBaseline) { sourceHash = importedBaseline.archive.baselineId; nextSource = this.toPlainForStorage(importedBaseline.source); }
         else sourceHash = await window.CollaborationProtocol.sourceHash(nextSource);
       }
-      catch (error) { this.loadingProgress = this.sourceLoaded ? 100 : 0; this.appAlert('Import aborted. ' + error.message); return; }
+      catch (error) {
+        if (!workspaceCurrent()) return;
+        this.loadingProgress = this.sourceLoaded ? 100 : 0;
+        this.appAlert('Import aborted. ' + error.message);
+        return;
+      }
       finally { if (importCurrent()) this.importBaselineHashing = false; }
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) {
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         return;
       }
-      if (this._reconcilingImport || !importCurrent() || (importContext && !this.collaborationContextCurrent(importContext)) || this.localDescs !== importWorkspace || this.descs !== importSource) {
+      if (this._reconcilingImport || !workspaceCurrent()) {
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
         this.collaborationNotice = 'The workspace changed while importing. Import the source again in the intended workspace.';
         return;
@@ -4822,8 +4870,6 @@ const config = Vue.defineComponent({
       if (importedBaseline) nextWorkspace.importArchive = importedBaseline.archive;
       else delete nextWorkspace.importArchive;
       const sourceRevisions = [];
-      this._importingSource = true;
-      this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
 
 
       nextWorkspace.lastModified = file.lastModified;
@@ -4919,16 +4965,12 @@ const config = Vue.defineComponent({
       try {
         await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(importedBaseline?.source || nextSource), nextWorkspace, sourceRevisions, game, importedBaseline);
       } catch (error) {
+        if (!workspaceCurrent()) return;
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
-        this._importingSource = false;
-        this.scheduleCollaboration?.();
         this.appAlert('Could not save the imported source. Existing work is unchanged. ' + error.message);
         return;
       }
-      this._importingSource = false;
-      if (this.gameVersion !== game || this.lang !== language
-        || (importContext && (this.sourceIdentity !== importContext.source || (this.cloudUser?.id || '') !== importContext.account))
-        || this.localDescs !== importWorkspace || this.descs !== importSource) return;
+      if (!workspaceCurrent()) return;
       this.localDescs = nextWorkspace;
       this.importBaseline = importedBaseline;
       this.sourceIdentity = sourceHash;
@@ -4937,14 +4979,14 @@ const config = Vue.defineComponent({
       this.clearDiagnosticScanResults();
       this.loadingProgress = 100;
       this.filterDesc();
-      this.scheduleCollaboration?.();
       const repairSummary = this.getImportRepairSummary(parsed);
       if (repairSummary) this.appAlert('Source import completed.\n\n' + repairSummary);
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
-      if (this._reconcilingImport) return;
+      if (this._importingSource || this._reconcilingImport) return;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+      if (this._importingSource || this._reconcilingImport) return;
       if (!file) return;
       if (!offlineStoreReady) return;
       if (!this.lang) {
