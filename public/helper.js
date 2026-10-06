@@ -90,7 +90,8 @@ async function decodeZipTxtFile(zipObject, lang) {
 }
 
 function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing } = {}) {
-  const english = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
+  // Detach flat string arrays from Vue proxies before they enter a storage snapshot.
+  const english = Array.isArray(desc?.translations?.English) ? [...desc.translations.English] : [];
   const local = {
     filedir: desc?.filedir,
     filename: desc?.filename,
@@ -98,14 +99,14 @@ function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing } = {}) {
     hasChanges: typeof hasChanges === "undefined" ? !!desc?.hasChanges : !!hasChanges,
     isMissing: typeof isMissing === "undefined" ? !!desc?.isMissing : !!isMissing,
     name: desc?.name,
-    remarks: desc?.remarks,
-    stats: desc?.stats,
-    variables: desc?.variables,
+    remarks: Array.isArray(desc?.remarks) ? [...desc.remarks] : desc?.remarks,
+    stats: Array.isArray(desc?.stats) ? [...desc.stats] : desc?.stats,
+    variables: Array.isArray(desc?.variables) ? [...desc.variables] : desc?.variables,
     translations: {
       English: english,
     }
   };
-  if (lang) local.translations[lang] = Array.isArray(lines) ? lines : [];
+  if (lang) local.translations[lang] = Array.isArray(lines) ? [...lines] : [];
   return local;
 }
 
@@ -115,12 +116,12 @@ function updateLocalDesc(localDesc, desc, lang, lines, { hasChanges, isMissing }
   localDesc.filename = desc?.filename;
   localDesc.filepath = desc?.filepath;
   localDesc.name = desc?.name;
-  localDesc.remarks = desc?.remarks;
-  localDesc.stats = desc?.stats;
-  localDesc.variables = desc?.variables;
+  localDesc.remarks = Array.isArray(desc?.remarks) ? [...desc.remarks] : desc?.remarks;
+  localDesc.stats = Array.isArray(desc?.stats) ? [...desc.stats] : desc?.stats;
+  localDesc.variables = Array.isArray(desc?.variables) ? [...desc.variables] : desc?.variables;
   if (typeof hasChanges !== "undefined") localDesc.hasChanges = !!hasChanges;
   if (typeof isMissing !== "undefined") localDesc.isMissing = !!isMissing;
   if (!localDesc.translations || typeof localDesc.translations !== "object") localDesc.translations = {};
-  if (Array.isArray(desc?.translations?.English)) localDesc.translations.English = desc.translations.English;
-  if (lang) localDesc.translations[lang] = Array.isArray(lines) ? lines : [];
+  if (Array.isArray(desc?.translations?.English)) localDesc.translations.English = [...desc.translations.English];
+  if (lang) localDesc.translations[lang] = Array.isArray(lines) ? [...lines] : [];
 }

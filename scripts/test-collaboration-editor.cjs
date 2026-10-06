@@ -9,7 +9,7 @@ function harness() {
   const writes = [], alerts = [];
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} },
     CollaborationProtocol: require('../public/collaborationProtocol.js'),
-    OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(JSON.parse(JSON.stringify({ workspace, revisions, game }))); } } };
+    OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(structuredClone({ workspace, revisions, game })); } } };
   const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout,
     alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
     document: { activeElement: null, body: {}, querySelector: () => null },
@@ -453,6 +453,79 @@ test('confirm unchanged saves review and export tracking even without a text cha
   await e.confirmTranslationUnchanged();
   assert.equal(writes.length, 1); assert.equal(writes[0].workspace.status[desc.filepath].needsReview, false);
   assert.equal(writes[0].workspace.descs[0].hasChanges, true); assert.equal(writes[0].revisions[0].note, 'confirm');
+});
+
+// Vue wraps nested objects and arrays lazily. Keep the same shape here without
+// loading Vue, so the storage stub enforces IndexedDB's structured-clone rules.
+function reactiveFixture(value, cache = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (!cache.has(value)) cache.set(value, new Proxy(value, {
+    get(target, key, receiver) { return reactiveFixture(Reflect.get(target, key, receiver), cache); },
+  }));
+  return cache.get(value);
+}
+function unchangedReviewFixture(existingLocal) {
+  const h = harness(), e = h.editor;
+  const plain = {
+    filepath: 'stat_descriptions/crossbow_bolt_additional_number_of_targets_to_pierce.txt',
+    filedir: 'stat_descriptions', filename: 'crossbow_bolt_additional_number_of_targets_to_pierce.txt', name: null,
+    stats: ['crossbow_bolt_additional_number_of_targets_to_pierce'], variables: ['1', '2|#'], remarks: ['', ''],
+    translations: { English: ['Bolts [Pierce] an additional target', 'Bolts [Pierce] {0} additional targets'],
+      Japanese: ['ボルトは対象を追加で1体[Pierce|貫通]する', ''], French: ['Autre langue', 'Deuxième ligne'] },
+    hasChanges: false, needsReview: true, isMissing: true,
+  };
+  const desc = reactiveFixture(plain), unrelated = description(2);
+  unrelated.translations.French = ['Bonjour', 'Deuxième'];
+  const originalWorkspace = { sourceHash: e.sourceIdentity,
+    descs: [...(existingLocal ? [structuredClone(plain)] : []), unrelated],
+    status: { [plain.filepath]: { needsReview: true, lastExportedAt: 17, marker: 'keep review metadata' },
+      [unrelated.filepath]: { needsReview: true, marker: 'keep unrelated status' } } };
+  e.lang = 'Japanese'; e.testMode = false; e.descs = [desc, unrelated];
+  e.localDescs = structuredClone(originalWorkspace);
+  e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+  e.editorOriginalTranslations = [...desc.translations.Japanese];
+  e.editorBlocks = desc.translations.English.map((english, index) => ({ english, translation: desc.translations.Japanese[index] }));
+  return { ...h, desc, originalWorkspace };
+}
+
+for (const existingLocal of [false, true]) {
+  test(`confirm unchanged persists nested reactive source arrays with ${existingLocal ? 'an existing' : 'a new'} local row`, async () => {
+    const { editor: e, writes, desc, originalWorkspace } = unchangedReviewFixture(existingLocal);
+    const translations = [...desc.translations.Japanese];
+    assert.throws(() => structuredClone(desc.translations.English), { name: 'DataCloneError' });
+    await e.confirmTranslationUnchanged();
+    assert.equal(writes.length, 1, e.collaborationNotice);
+    const saved = writes[0], local = saved.workspace.descs.find(item => item.filepath === desc.filepath);
+    assert.deepEqual(local.translations.Japanese, translations, 'The unchanged review retains the intentional blank.');
+    assert.deepEqual(local.translations.English, [...desc.translations.English]);
+    for (const key of ['stats', 'variables', 'remarks']) assert.deepEqual(local[key], [...desc[key]]);
+    if (existingLocal) assert.deepEqual(local.translations.French, originalWorkspace.descs[0].translations.French);
+    assert.deepEqual(saved.workspace.descs.find(item => item.filepath === 'source/002.txt'), originalWorkspace.descs.at(-1));
+    assert.deepEqual(saved.workspace.status['source/002.txt'], originalWorkspace.status['source/002.txt']);
+    assert.equal(saved.workspace.status[desc.filepath].needsReview, false);
+    assert.equal(saved.workspace.status[desc.filepath].lastExportedAt, 17);
+    assert.equal(saved.workspace.status[desc.filepath].marker, 'keep review metadata');
+    assert.equal(local.hasChanges, true); assert.equal(local.isMissing, true);
+    assert.equal(saved.revisions.length, 1); assert.equal(saved.revisions[0].note, 'confirm');
+    assert.equal(saved.revisions[0].lang, 'Japanese'); assert.equal(saved.revisions[0].sourceHash, e.sourceIdentity);
+    assert.deepEqual(saved.revisions[0].translations, translations);
+    assert.equal(desc.needsReview, false); assert.equal(desc.hasChanges, true);
+    assert.equal(e.localDescs.status[desc.filepath].needsReview, false); assert.equal(e.editorSaving, false);
+  });
+}
+
+test('a failed reactive unchanged review preserves saved translations and review/export flags', async () => {
+  const { editor: e, window, writes, desc, originalWorkspace } = unchangedReviewFixture(true);
+  window.OfflineStore.saveWorkspaceWithRevisions = async (workspace, revisions) => {
+    structuredClone({ workspace, revisions });
+    throw new Error('Quota exceeded');
+  };
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 0); assert.equal(desc.needsReview, true); assert.equal(desc.hasChanges, false);
+  assert.deepEqual(e.localDescs, originalWorkspace);
+  assert.deepEqual([...desc.translations.Japanese], originalWorkspace.descs[0].translations.Japanese);
+  assert.equal(e.editorVisible, true); assert.equal(e.editorSaving, false);
+  assert.match(e.collaborationNotice, /Could not save the review: Quota exceeded/);
 });
 
 function mergedSaveFixture() {
