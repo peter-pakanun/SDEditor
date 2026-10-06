@@ -8,6 +8,8 @@
       'cloudUser.id'() { this.scheduleCollaboration(); },
       'cloudUser.language'() { this.scheduleCollaboration(); },
       'cloudUser.assignmentVersion'() { this.scheduleCollaboration(); },
+      'cloudUser.role'() { this.scheduleCollaboration(); },
+      cloudCanAccessAllLanguages() { this.scheduleCollaboration(); },
       lang() { this.scheduleCollaboration(); },
       gameVersion() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
@@ -64,7 +66,7 @@
         return { ...identity };
       },
       async lookupImportArchive(identity, game = this.gameVersion) {
-        if (!identity || !this.cloudSignedIn || this.cloudUser?.language !== this.lang || !this._cloud?.request) return null;
+        if (!identity || !this.cloudSignedIn || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !this._cloud?.request) return null;
         try {
           const result = await this._cloud.request('/v1/collaboration/archives/' + game + '/' + identity.zipHash);
           return result?.archive || result;
@@ -293,16 +295,20 @@
           needsReview: !!desc.needsReview, trackedForExport: !!desc.hasChanges };
       },
       captureCollaborationContext() {
-        return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '', client: this._collaboration };
+        return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
+          assignmentVersion: this.cloudUser?.assignmentVersion, role: this.cloudUser?.role,
+          allLanguagesAccess: this.cloudCanAccessAllLanguages, client: this._collaboration };
       },
       collaborationContextCurrent(ctx) {
         return ctx.game === this.gameVersion && ctx.language === this.lang && ctx.source === this.sourceIdentity
-          && ctx.account === (this.cloudUser?.id || '') && ctx.client === this._collaboration;
+          && ctx.account === (this.cloudUser?.id || '') && ctx.assignmentVersion === this.cloudUser?.assignmentVersion
+          && ctx.role === this.cloudUser?.role && ctx.allLanguagesAccess === this.cloudCanAccessAllLanguages && ctx.client === this._collaboration;
       },
       scheduleCollaboration() {
         // Invalidate an old room immediately, before the debounce or any network await.
-        const eligible = this.cloudSignedIn && this.cloudUser?.language === this.lang && this.sourceLoaded;
-        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
+        const eligible = this.cloudSignedIn && !!this.cloudUser?.id && !!this.lang
+          && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang) && this.sourceLoaded;
+        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this._collabFileIndexes = null;
@@ -319,9 +325,9 @@
       },
       async initializeCollaboration() {
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
-          || !this.cloudSignedIn || this.cloudUser?.language !== this.lang || !window.CollaborationSync) return;
+          || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
-        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.gameVersion, this.lang, this.sourceIdentity].join('|');
+        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
         const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, language: this.lang };

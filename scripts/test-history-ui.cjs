@@ -33,6 +33,25 @@ function editor(client = {}) {
   return instance;
 }
 
+test('manager history targets the selected language and closes when access changes', async () => {
+  const pending = deferred();
+  const app = editor({ getDictionaryHistory: async () => pending.promise });
+  app.cloudUser = { id: 'manager', role: 'manager', language: null };
+  app.cloudCanAccessAllLanguages = true; app.lang = 'German';
+  assert.equal(app.cloudHistoryAvailable, true);
+  assert.equal(app.cloudEntryHistoryAvailable, true);
+  assert.equal(app.cloudHistoryLanguage, 'German');
+  const opened = app.cloudOpenHistory('german-entry');
+  await Promise.resolve();
+  app.cloudUser.role = 'translator'; app.cloudCanAccessAllLanguages = false;
+  app.contextChanged();
+  pending.resolve(page([event()]));
+  await opened;
+  assert.equal(app.cloudHistoryAvailable, false);
+  assert.equal(app.cloudHistoryVisible, false);
+  assert.equal(app.cloudHistoryItems.length, 0);
+});
+
 test('entry shortcut sets the stable ID filter and settings history clears it', async () => {
   const calls = [];
   const app = editor({ getDictionaryHistory: async filters => { calls.push(clone(filters)); return page([event()]); } });

@@ -61,6 +61,49 @@ function activeReplyInput({ app, document }) {
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
 
+test('managers can read without assignment and post in the selected language with isolated drafts', async () => {
+  const { app, calls } = fixture(async (url, options) => options.method === 'POST'
+    ? { item: comment(100, { body: options.body.body, scopeLanguage: options.body.language }) }
+    : { items: [comment(9, { scopeLanguage: 'German' })], nextCursor: null });
+  app.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  app.cloudCanAccessAllLanguages = true;
+  app.lang = 'Thai';
+  assert.equal(app.commentsEligible, true);
+  assert.equal(app.commentsUnavailableReason, '');
+  await app.commentsRefreshFile();
+  assert.equal(app.commentsFileItems[0].scopeLanguage, 'German');
+  app.commentsFileDraft = 'Thai review';
+  app.commentsSetReplyDraft('other.txt', 'Thai reply');
+  const thaiKey = app.commentsDraftKey;
+  app.lang = 'German';
+  assert.notEqual(app.commentsDraftKey, thaiKey);
+  assert.equal(app.commentsFileDraft, '');
+  assert.equal(app.commentsReplyDraft('other.txt'), '');
+  app.commentsFileDraft = 'German review';
+  await app.commentsSubmit();
+  const sent = calls.find(call => call.options.method === 'POST');
+  assert.equal(sent.options.body.language, 'German');
+  assert.equal(sent.options.body.allLanguages, false);
+  app.lang = 'Thai';
+  assert.equal(app.commentsFileDraft, 'Thai review');
+  assert.equal(app.commentsReplyDraft('other.txt'), 'Thai reply');
+});
+
+test('manager role revocation invalidates pending comments and preserves language drafts', async () => {
+  const pending = deferred();
+  const { app } = fixture(() => pending.promise);
+  app.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  app.cloudCanAccessAllLanguages = true; app.lang = 'Thai'; app.commentsFileDraft = 'Saved draft';
+  const oldKey = app.commentsDraftKey;
+  const load = app.commentsRefreshFile();
+  app.cloudUser.role = 'translator'; app.cloudCanAccessAllLanguages = false;
+  assert.equal(app.commentsEligible, false);
+  pending.resolve({ items: [comment(5)], nextCursor: null });
+  await load;
+  assert.equal(app.commentsFileItems.length, 0);
+  assert.equal(app.commentsDrafts[oldKey], 'Saved draft');
+});
+
 test('all comments group by latest activity with oldest-first conversation rows across languages and hashes', async () => {
   const { app } = fixture();
   assert.equal(app.commentsAllGroups.length, 0);

@@ -18,18 +18,21 @@
   const mixin = {
     data() { return {
       cloudUser: null, cloudSignedIn: false, cloudStatus: '', cloudError: false, cloudWarning: false,
-      cloudBusy: false, cloudStorageError: '', cloudConflicts: [], cloudRevision: 0,
+      cloudBusy: false, cloudLanguageSwitching: false, cloudStorageError: '', cloudConflicts: [], cloudRevision: 0,
       cloudResolverVisible: false, cloudConflictIndex: 0, cloudDefinitionsChoice: '', cloudNoteChoice: '',
       cloudAdminVisible: false, cloudAdminUsers: [], cloudNeedsDictionaryLanguage: false, cloudRecoveryCount: 0,
       cloudLoginUrl: '',
       settingsImportDraft: null, settingsImportConfirm: '',
     }; },
     computed: {
+      cloudCanAccessAllLanguages() {
+        return this.cloudSignedIn && window.CloudSync.canAccessAllLanguages(this.cloudUser);
+      },
       cloudSyncIssue() {
         if (this.cloudError || this.cloudWarning) return this.cloudStatus;
-        if (this.cloudSignedIn && !this.cloudUser?.language) return 'Not configured — awaiting admin language assignment';
+        if (this.cloudSignedIn && !this.cloudCanAccessAllLanguages && !this.cloudUser?.language) return 'Not configured — awaiting admin language assignment';
         if (this.cloudConflicts.length) return 'Saved locally · dictionary conflicts need your choice';
-        if (this.cloudSignedIn && this.cloudUser?.language && this.lang !== this.cloudUser.language) return 'Selected dictionary language is local only';
+        if (this.cloudSignedIn && !this.cloudCanAccessAllLanguages && this.cloudUser?.language && this.lang !== this.cloudUser.language) return 'Selected dictionary language is local only';
         return '';
       },
       cloudConflict() { return this.cloudConflicts[this.cloudConflictIndex] || null; },
@@ -159,13 +162,20 @@
         }
       },
       async cloudSelectLanguage(language, previous) {
-        if (!this._cloud || this._cloudApplying) return;
+        if (!this._cloud || this._cloudApplying) return true;
         this._cloudApplying = true;
+        this.cloudLanguageSwitching = true;
         try {
           await this._cloud.selectLanguage(language, this.cloudPayload(), previous);
           await this.cloudApply(this._cloud.snapshot());
-        } catch (error) { this.cloudStorageError = 'Could not switch language: ' + error.message; }
-        finally { await this.$nextTick(); this._cloudApplying = false; }
+          if (this.cloudStorageError.startsWith('Could not switch language:')) this.cloudStorageError = '';
+          return true;
+        } catch (error) {
+          await this.cloudApply(this._cloud.snapshot());
+          this.cloudStorageError = 'Could not switch language: ' + error.message;
+          return false;
+        }
+        finally { await this.$nextTick(); this._cloudApplying = false; this.cloudLanguageSwitching = false; }
       },
       async cloudImport(payload) {
         this._cloudApplying = true;
@@ -266,6 +276,12 @@
         this.cloudBusy = true;
         try { await this._cloud.assignLanguage(user.id, event.target.value); this.cloudAdminUsers = await this._cloud.listUsers(); }
         catch (error) { event.target.value = user.language || ''; this.cloudStatus = error.message; this.cloudError = true; }
+        finally { this.cloudBusy = false; }
+      },
+      async cloudAssignRole(user, event) {
+        this.cloudBusy = true;
+        try { await this._cloud.assignRole(user.id, event.target.value); this.cloudAdminUsers = await this._cloud.listUsers(); }
+        catch (error) { event.target.value = user.role || 'translator'; this.cloudStatus = error.message; this.cloudError = true; }
         finally { this.cloudBusy = false; }
       },
       cloudDownloadRecovery() {

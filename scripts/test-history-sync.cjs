@@ -60,7 +60,7 @@ class MemoryAPI {
     } else {
       const match = request.path.match(/^\/v1\/dictionaries\/([^/]+)(?:\/history(?:\/([^/]+)(\/restore)?)?)?$/);
       assert.ok(match, 'Unexpected API path: ' + request.path);
-      if (decodeURIComponent(match[1]) !== identity.language) return reply({ error: { message: 'Language access denied' } }, 403);
+      if (decodeURIComponent(match[1]) !== identity.language && !Cloud.canAccessAllLanguages(identity)) return reply({ error: { message: 'Language access denied' } }, 403);
       if (request.path.endsWith('/history')) response = { items: [...this.events.values()], nextCursor: null, revision: this.remote.revision, actors: [user('bob')], coverage: { complete: true } };
       else if (match[2]) {
         const event = this.events.get(decodeURIComponent(match[2]));
@@ -343,6 +343,74 @@ test('history access requires a signed-in account with an assigned language', as
   await assert.rejects(h.client.getDictionaryHistoryEvent(1));
   await assert.rejects(h.client.restoreDictionaryHistory(1, 'before', 1));
   assert.equal(h.api.calls.length, 0);
+});
+
+test('manager history reads and restores the selected language while preserving the assigned-language draft', async t => {
+  const french = word('fire', { replace: 'Feu' });
+  const state = stateFor([word('fire', { replace: 'Private Thai draft' })], dictionary([word()]));
+  state.auth.user = { ...state.auth.user, language: null, role: 'manager', canAccessAllLanguages: true };
+  state.profiles.alice.settings.lang = 'French';
+  state.profiles.alice.dictionaries.French = { entries: [french], base: dictionary([french]), revision: 1, conflicts: [], pendingResolution: null };
+  const h = await harness(t, { state, remote: dictionary([french]) });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  h.api.event(1, 'fire', { ...french, replace: 'Ancien feu' }, french);
+  assert.equal((await h.client.getDictionaryHistory()).items.length, 1);
+  assert.equal((await h.client.getDictionaryHistoryEvent(1)).before.replace, 'Ancien feu');
+  await h.client.restoreDictionaryHistory(1, 'before', 1);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Ancien feu');
+  assert.equal(h.api.historyWrites, 1);
+  assert.equal(h.api.calls.every(call => call.path.startsWith('/v1/dictionaries/French')), true);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'Private Thai draft');
+});
+
+test('manager history discards a late response after selected-language switching', async t => {
+  const state = stateFor([word()], dictionary([word()]));
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  h.api.event(1, 'fire', null, word());
+  const entered = deferred(); const release = deferred();
+  h.api.before = async request => { if (request.path.endsWith('/history')) { entered.resolve(); await release.promise; } };
+  const reading = h.client.getDictionaryHistory();
+  await entered.promise;
+  await h.client.selectLanguage('French', payload([word()]), 'Thai');
+  release.resolve();
+  await assert.rejects(reading, error => error.stale === true);
+  assert.deepEqual(h.client.snapshot().dictionary, []);
+});
+
+test('manager history discards pending responses after role revocation without an assignment version', async t => {
+  const state = stateFor([word()], dictionary([word()]));
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  h.api.event(1, 'fire', null, word());
+  const entered = deferred(); const release = deferred();
+  h.api.before = async request => { if (request.path.endsWith('/history')) { entered.resolve(); await release.promise; } };
+  const reading = h.client.getDictionaryHistory();
+  await entered.promise;
+  await h.client.update(stored => { stored.auth.user = { ...stored.auth.user, role: 'translator', canAccessAllLanguages: false }; });
+  release.resolve();
+  await assert.rejects(reading, error => error.stale === true);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'ไฟ');
+});
+
+test('manager conflict resolution edits a selected language outside its assignment', async t => {
+  const base = word('fire', { replace: 'Feu' });
+  const state = stateFor([word('fire', { replace: 'Thai draft' })], dictionary([word()]));
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  state.profiles.alice.settings.lang = 'French';
+  state.profiles.alice.settingsBase.settings.lang = 'French';
+  state.profiles.alice.dictionaries.French = { entries: [{ ...base, replace: 'Feu local' }], base: dictionary([base]), revision: 1, conflicts: [], pendingResolution: null };
+  const h = await harness(t, { state, remote: dictionary([{ ...base, replace: 'Feu distant' }], 2) });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  h.api.settings.settings.lang = 'French';
+  await h.client.sync();
+  assert.equal(h.client.snapshot().conflicts.length, 1);
+  await h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2);
+  assert.equal(h.api.remote.entries[0].replace, 'Feu local');
+  assert.equal(h.api.patches().at(-1).path, '/v1/dictionaries/French');
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'Thai draft');
 });
 
 test('a queued restore stays with its original language after reassignment', async t => {

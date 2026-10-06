@@ -1,4 +1,4 @@
-/* File discussions include the account's language and global posts across source versions. */
+/* File discussions include authorized language teams and global posts across source versions. */
 (() => {
   const emptyFeed = () => ({ items: [], loadedIds: [], cursor: null, loading: false, loadingMore: false, moreRequested: false, loaded: false, error: '' });
   const ordered = items => [...new Map(items.map(item => [item.id, item])).values()].sort((a, b) => b.id - a.id);
@@ -10,23 +10,24 @@
     }; },
     computed: {
       commentsEligible() {
-        return !this.testMode && this.cloudSignedIn && !!this.cloudUser?.id && !!this.cloudUser?.language
+        return !this.testMode && this.cloudSignedIn && !!this.cloudUser?.id && !!(this.cloudCanAccessAllLanguages || this.cloudUser?.language)
           && ['poe1', 'poe2'].includes(this.gameVersion) && !!this._cloud;
       },
+      commentsLanguage() { return this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language; },
       commentsContextKey() {
         return JSON.stringify([this.testMode, this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language,
-          this.cloudUser?.assignmentVersion, this.gameVersion]);
+          this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages, this.commentsLanguage, this.gameVersion]);
       },
       commentsUnavailableReason() {
         if (this.testMode) return 'Shared comments are unavailable in test mode.';
         if (!this.cloudSignedIn) return 'Sign in to read and share comments with your translation team.';
-        if (!this.cloudUser?.language) return 'An admin must assign your team language before comments are available.';
+        if (!this.cloudCanAccessAllLanguages && !this.cloudUser?.language) return 'An admin must assign your team language before comments are available.';
         if (!['poe1', 'poe2'].includes(this.gameVersion)) return 'Choose a game to view its comments.';
         return '';
       },
       commentsFilepath() { return this.editorCurrentEditingDesc?.filepath || ''; },
       commentsDraftKey() {
-        return JSON.stringify([this.cloudUser?.id, this.cloudUser?.language, this.gameVersion, this.commentsFilepath, this.sourceIdentity]);
+        return JSON.stringify([this.cloudUser?.id, this.commentsLanguage, this.gameVersion, this.commentsFilepath, this.sourceIdentity]);
       },
       commentsFileDraft: {
         get() { return this.commentsDrafts[this.commentsDraftKey] || ''; },
@@ -103,7 +104,8 @@
     methods: {
       commentsCapture() {
         return { key: this.commentsContextKey, generation: this._commentsGeneration || 0,
-          game: this.gameVersion, client: this._cloud, auth: this._cloud?.context() };
+          game: this.gameVersion, language: this.commentsLanguage, allLanguagesAccess: !!this.cloudCanAccessAllLanguages,
+          client: this._cloud, auth: this._cloud?.context() };
       },
       commentsCurrent(ctx) {
         return !this._commentsDestroyed && this.commentsEligible && ctx.key === this.commentsContextKey
@@ -257,7 +259,7 @@
           && !this.versionStorageLoading && !this._importingSource && !this._commentsDestroyed;
       },
       commentsReplyKey(filepath) {
-        return JSON.stringify(['reply', this.cloudUser?.id, this.cloudUser?.language, this.gameVersion, filepath, this.sourceIdentity]);
+        return JSON.stringify(['reply', this.cloudUser?.id, this.commentsLanguage, this.gameVersion, filepath, this.sourceIdentity]);
       },
       commentsReplyDraft(filepath) { return this.commentsDrafts[this.commentsReplyKey(filepath)] || ''; },
       commentsSetReplyDraft(filepath, value) { this.commentsDrafts[this.commentsReplyKey(filepath)] = String(value); },
@@ -281,7 +283,8 @@
           mutationId: previous?.body === body && previous.allLanguages === allLanguages ? previous.mutationId : crypto.randomUUID(), pending: true };
         this.commentsPosts[key] = task;
         try {
-          const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, allLanguages, mutationId: task.mutationId } }, ctx.auth);
+          const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, allLanguages,
+            ...(ctx.allLanguagesAccess && ctx.language ? { language: ctx.language } : {}), mutationId: task.mutationId } }, ctx.auth);
           if (this.commentsDrafts[key] === draft && (this.commentsDraftScopes[key] === true) === allLanguages) {
             this.commentsDrafts[key] = '';
             delete this.commentsDraftScopes[key];

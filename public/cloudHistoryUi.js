@@ -14,13 +14,15 @@
       cloudHistoryRestoreVersion: '', cloudHistoryRestoring: false,
     }; },
     computed: {
-      cloudHistoryAvailable() { return !this.testMode && this.cloudSignedIn && !!this.cloudUser?.language; },
-      cloudEntryHistoryAvailable() { return this.cloudHistoryAvailable && this.lang === this.cloudUser.language; },
-      cloudHistoryContext() { return [this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language, this.cloudUser?.assignmentVersion, this.lang].join('|'); },
+      cloudHistoryLanguage() { return this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language; },
+      cloudHistoryAvailable() { return !this.testMode && this.cloudSignedIn && !!(this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language); },
+      cloudEntryHistoryAvailable() { return this.cloudHistoryAvailable && (this.cloudCanAccessAllLanguages || this.lang === this.cloudUser.language); },
+      cloudHistoryContext() { return [this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages, this.lang].join('|'); },
       cloudHistoryUnavailableReason() {
         if (this.testMode) return 'Shared history is disabled in test mode.';
         if (!this.cloudSignedIn) return 'Sign in to view shared dictionary history.';
-        if (!this.cloudUser?.language) return 'An admin must assign your language before shared history is available.';
+        if (this.cloudCanAccessAllLanguages && !this.lang) return 'Choose a translation language to view its shared dictionary history.';
+        if (!this.cloudCanAccessAllLanguages && !this.cloudUser?.language) return 'An admin must assign your language before shared history is available.';
         return '';
       },
       cloudEntryHistoryHint() {

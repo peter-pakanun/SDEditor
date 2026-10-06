@@ -128,6 +128,7 @@ const config = Vue.defineComponent({
       theme: document.documentElement?.getAttribute('data-theme') || 'light',
       showSetting: false,
       settingsTab: 'general',
+      settingsGameVersion: '',
       settingsTabs: [
         { id: 'general', label: 'General' },
         { id: 'editor', label: 'Editor & shortcuts' },
@@ -401,11 +402,14 @@ const config = Vue.defineComponent({
         this._settingsBodyOverflow = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
         this.settingsMessage = '';
+        this.settingsGameVersion = this.gameVersion;
         if (this.needsInitialSettings) this.settingsTab = 'general';
         this.$nextTick(() => {
           if (!this.settingsDialogVisible) return;
-          if (this.needsInitialSettings && !this.lang) this.$refs.settingsLanguage?.focus();
+          if (this._settingsFocusControl) this.$refs[this._settingsFocusControl]?.focus();
+          else if (this.needsInitialSettings && !this.lang) this.$refs.settingsLanguage?.focus();
           else this.$refs.settingsDialog?.querySelector('[role="tab"][aria-selected="true"]')?.focus();
+          this._settingsFocusControl = '';
         });
       } else {
         document.body.style.overflow = this._settingsBodyOverflow || '';
@@ -453,7 +457,7 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     lang(language, previous) {
-      this.cloudSelectLanguage(language, previous);
+      if (!this._cloudApplying) this._cloudLanguageSwitch = Promise.resolve(this.cloudSelectLanguage(language, previous));
       this.clearDiagnosticScanResults();
       if (this.sourceLoaded) {
         this.applyWorkspaceOverlay();
@@ -895,6 +899,12 @@ const config = Vue.defineComponent({
       window.OfflineStore?.setGameVersion?.(v);
       this.updateDocumentTitle();
 
+      if (this.testMode) {
+        this.resetVersionedState();
+        this.loadDummyData();
+        return;
+      }
+
       if (checkMigration) {
         await this.prepareSingleVersionMigration();
         if (this.pendingSingleVersionMigration) return;
@@ -1224,9 +1234,16 @@ const config = Vue.defineComponent({
       if (!Array.isArray(this.localDescs.descs)) this.localDescs.descs = [];
       if (!this.localDescs.status || typeof this.localDescs.status !== 'object') this.localDescs.status = {};
     },
-    openSettings(tab = 'general') {
+    openSettings(tab = 'general', focusControl = '') {
+      this._settingsFocusControl = ['settingsGameVersion', 'settingsLanguage'].includes(focusControl) ? focusControl : '';
       this.setSettingsTab(tab);
       this.settingsMessage = '';
+      if (this.settingsDialogVisible && this._settingsFocusControl) {
+        this.$nextTick(() => {
+          this.$refs[this._settingsFocusControl]?.focus();
+          this._settingsFocusControl = '';
+        });
+      }
       this.showSetting = true;
     },
     setSettingsTab(tab, focusTab = false) {
@@ -1271,9 +1288,30 @@ const config = Vue.defineComponent({
       this.settingsSaving = true;
       this.settingsMessage = '';
       try {
+        const languageSwitch = this._cloudLanguageSwitch;
+        if (languageSwitch) {
+          const switched = await languageSwitch;
+          if (this._cloudLanguageSwitch === languageSwitch) this._cloudLanguageSwitch = null;
+          if (switched === false) {
+            this.settingsMessage = this.cloudStorageError || 'Could not switch language. Please try again.';
+            return;
+          }
+        }
+        const nextGame = this.normalizeGameVersion(this.settingsGameVersion || this.gameVersion);
+        if (nextGame !== this.gameVersion && (this.editorVisible || this.navigationBusy || this.versionStorageLoading)) {
+          this.settingsMessage = 'Close the current editor and finish pending work before changing game version.';
+          return;
+        }
         if (await this.saveSettings() === false) {
           this.settingsMessage = this.cloudStorageError || 'Could not save preferences. Please try again.';
           return;
+        }
+        if (nextGame !== this.gameVersion) {
+          await this.selectGameVersion(nextGame);
+          if (this.gameVersion !== nextGame) {
+            this.settingsMessage = this.localSaveError || 'Finish saving your translations before changing game version.';
+            return;
+          }
         }
         this.needsInitialSettings = false;
         this.showSetting = false;

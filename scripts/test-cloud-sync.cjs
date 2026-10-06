@@ -81,7 +81,7 @@ class MemoryAPI {
     if (request.path === '/v1/me' || request.path === '/auth/session/refresh') response = me;
     else if (request.path === '/auth/logout') return reply(null, 204);
     else if (request.path === '/v1/settings') {
-      if (!identity.language) return reply({ error: { message: 'Not configured' } }, 403);
+      if (!identity.language && !Cloud.canAccessAllLanguages(identity)) return reply({ error: { message: 'Not configured' } }, 403);
       const current = this.settings.get(identity.id) || { revision: 0, settings: null };
       if (request.method === 'GET') response = clone(current);
       else {
@@ -97,7 +97,7 @@ class MemoryAPI {
       }
     } else if (request.path.startsWith('/v1/dictionaries/')) {
       const language = decodeURIComponent(request.path.slice('/v1/dictionaries/'.length));
-      if (language !== identity.language) return reply({ error: { message: 'Language access denied' } }, 403);
+      if (language !== identity.language && !Cloud.canAccessAllLanguages(identity)) return reply({ error: { message: 'Language access denied' } }, 403);
       const current = this.dictionaries.get(language) || dictionary([], 0);
       if (request.method === 'GET') response = clone(current);
       else {
@@ -562,6 +562,150 @@ test('switching the local language cancels a delayed cloud response from the pre
   assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 0);
 });
 
+test('all-language access recognizes manager/admin roles and ignores stale admin flags after demotion', () => {
+  assert.equal(Cloud.canAccessAllLanguages({ role: 'manager', language: null }), true);
+  assert.equal(Cloud.canAccessAllLanguages({ role: 'admin', language: null }), true);
+  assert.equal(Cloud.canAccessAllLanguages({ isAdmin: true }), true);
+  assert.equal(Cloud.canAccessAllLanguages({ role: 'translator', isAdmin: true }), false);
+  assert.equal(Cloud.canAccessAllLanguages(user()), false);
+  assert.equal(Cloud.canAccessAllLanguages(null), false);
+});
+
+test('managers without assignments read and edit the selected dictionary while preserving other language drafts', async t => {
+  const french = word('fire', { replace: 'Feu' });
+  const state = authenticatedState({ language: null, localSettings: settings({ lang: 'French' }),
+    settingsBase: { revision: 1, settings: settings({ lang: 'French' }) }, base: dictionary([french]),
+    local: [{ ...french, tlnote: 'Manager French edit' }] });
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  state.profiles.alice.dictionaries.Thai = { entries: [word('fire', { replace: 'Thai manager draft' })], base: dictionary([word()]), conflicts: [], revision: 1 };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api, { remoteSettings: settings({ lang: 'French' }) });
+  h.api.dictionaries.set('French', dictionary([french]));
+  await h.client.sync();
+  assert.equal(h.api.dictionaries.get('French').entries[0].tlnote, 'Manager French edit');
+  assert.equal(h.api.calls.some(call => call.path === '/v1/dictionaries/Thai'), false);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'Thai manager draft');
+  await h.client.selectLanguage('Thai', payload(h.client.snapshot().dictionary, { lang: 'French' }), 'French');
+  await h.client.sync();
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'Thai manager draft');
+  assert.equal(h.store.state.profiles.alice.dictionaries.French.entries[0].tlnote, 'Manager French edit');
+  assert.equal(h.statuses.at(-1).message, '');
+});
+
+test('manager settings restoration selects its language before reading shared dictionary data', async t => {
+  const state = authenticatedState({ language: null, settingsBase: null, local: [word('fire', { replace: 'Private Thai draft' })] });
+  state.auth.user = { ...state.auth.user, role: 'admin', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api, { remoteSettings: settings({ lang: 'French' }) });
+  h.api.dictionaries.set('French', dictionary([word('fire', { replace: 'Feu partagé' })]));
+  await h.client.sync();
+  assert.equal(h.client.snapshot().settings.lang, 'French');
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Feu partagé');
+  assert.equal(h.api.calls.some(call => call.path === '/v1/dictionaries/Thai'), false);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'Private Thai draft');
+});
+
+test('a cloud-selected manager language checks its own revisions instead of the previous language hints', async t => {
+  const french = word('fire', { replace: 'Feu' });
+  const state = authenticatedState();
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  state.profiles.alice.dictionaries.French = { entries: [french], base: dictionary([french]), revision: 1,
+    localVersion: 0, syncedLocalVersion: 0, conflicts: [], pendingResolution: null };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api, { remoteSettings: settings({ lang: 'French' }), settingsRevision: 2 }); h.api.hints = true;
+  h.api.dictionaries.set('French', dictionary([{ ...french, tlnote: 'New French revision' }], 2));
+  await h.client.sync();
+  assert.equal(h.client.snapshot().settings.lang, 'French');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'New French revision');
+  assert.equal(h.client.snapshot().revision, 2);
+});
+
+test('manager language switching discards pending results and keeps each draft with its original language', async t => {
+  const state = authenticatedState({ language: null });
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api);
+  h.api.dictionaries.set('French', dictionary([word('fire', { replace: 'Feu partagé' })]));
+  const gate = h.api.pause('GET', '/v1/dictionaries/Thai');
+  const syncing = h.client.sync();
+  await gate.entered.promise;
+  await h.client.selectLanguage('French', payload([word('fire', { replace: 'Thai saved draft' })]), 'Thai');
+  gate.release.resolve(reply(dictionary([word('fire', { replace: 'Late Thai response' })], 2)));
+  await syncing;
+  assert.deepEqual(h.client.snapshot().dictionary, []);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'Thai saved draft');
+  await h.client.sync();
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Feu partagé');
+  assert.equal(h.api.writes('/v1/dictionaries/Thai').length, 0);
+});
+
+test('manager role revocation cancels pending cross-language work even without an assignment version', async t => {
+  const state = authenticatedState({ localSettings: settings({ lang: 'French' }),
+    settingsBase: { revision: 1, settings: settings({ lang: 'French' }) }, local: [word('fire', { replace: 'Private French draft' })] });
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api, { remoteSettings: settings({ lang: 'French' }) });
+  const gate = h.api.pause('GET', '/v1/dictionaries/French');
+  const syncing = h.client.sync();
+  await gate.entered.promise;
+  h.api.users['token-alice'] = { ...user(), role: 'translator', canAccessAllLanguages: false };
+  await h.client.refreshSession(true);
+  gate.release.resolve(reply(dictionary([word('fire', { replace: 'Late French response' })], 2)));
+  await syncing;
+  assert.equal(h.client.snapshot().user.role, 'translator');
+  assert.equal(h.client.snapshot().user.language, 'Thai');
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Private French draft');
+  assert.equal(h.api.writes('/v1/dictionaries/French').length, 0);
+});
+
+test('unassignment after manager revocation refreshes the role and keeps all local work', async t => {
+  const state = authenticatedState({ language: null, local: [word('fire', { replace: 'Manager draft' })] });
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  h.api.users['token-alice'] = { ...user('alice', null), role: 'translator', canAccessAllLanguages: false };
+  h.api.intercept = request => request.path === '/v1/comments'
+    ? reply({ error: { code: 'LANGUAGE_UNASSIGNED', message: 'An assigned language is required.' } }, 403) : undefined;
+  await assert.rejects(h.client.request('/v1/comments'), error => error.code === 'LANGUAGE_UNASSIGNED');
+  assert.equal(h.client.snapshot().user.role, 'translator');
+  assert.equal(Cloud.canAccessAllLanguages(h.client.snapshot().user), false);
+  assert.equal(h.client.snapshot().signedIn, true);
+  assert.equal(h.client.snapshot().dictionary[0].replace, 'Manager draft');
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/comments', '/v1/me']);
+});
+
+test('a durable role revocation rejects manager merges before the storage transaction commits', async t => {
+  const state = authenticatedState();
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state });
+  const demoting = h.store.updateHybridState(stored => {
+    stored.auth.user = { ...stored.auth.user, role: 'translator', canAccessAllLanguages: false }; return stored;
+  });
+  const merging = h.client.mergeRemote(h.client.context(), 'Thai', dictionary([word('fire', { replace: 'Unauthorized result' })], 2));
+  await demoting;
+  await assert.rejects(merging, error => error.stale === true);
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].replace, 'ไฟ');
+});
+
+test('assigning a role refreshes the current profile and its access immediately', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  h.api.intercept = request => {
+    if (request.path !== '/v1/admin/users/alice/role') return undefined;
+    assert.deepEqual(request.body, { role: 'manager' });
+    h.api.users['token-alice'] = { ...user(), role: 'manager', canAccessAllLanguages: true, assignmentVersion: 2 };
+    return reply({ user: h.api.users['token-alice'] });
+  };
+  const assigned = await h.client.assignRole('alice', 'manager');
+  assert.equal(assigned.role, 'manager');
+  assert.equal(h.client.snapshot().user.role, 'manager');
+  assert.equal(h.client.snapshot().user.assignmentVersion, 2);
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/admin/users/alice/role', '/auth/session/refresh']);
+});
+
 test('two stale clients saving the same account preserve each other\'s independent edits and additions', async t => {
   const original = [word('a'), word('b', { find: 'Ice' })];
   const first = await harness(t, { state: authenticatedState({ local: original, base: dictionary(original) }) });
@@ -1011,6 +1155,7 @@ test('account socket revision notifications retrieve only changed data and clean
   h.api.intercept = request => request.path === '/v1/sync/ticket' ? reply({ ticket: 'sync-ticket', url: '/v1/collaboration/ws?ticket=sync-ticket' }) : undefined;
   await h.client.sync(); await h.client.openSocket();
   const socket = SyncSocket.instances.at(-1);
+  assert.equal(h.api.calls.find(call => call.path === '/v1/sync/ticket').body, null);
   assert.equal(socket.url, 'wss://api.example.test/v1/collaboration/ws?ticket=sync-ticket');
   socket.open(); socket.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 1, dictionaryRevision: 1 } });
   assert.equal(h.client.socketReady, true);
@@ -1077,6 +1222,40 @@ test('switching the local dictionary language reconnects the account notificatio
   assert.equal(h.client.socketReady, true);
 });
 
+test('manager account notifications use the selected language and reconnect after switching it', async t => {
+  const french = word('fire', { replace: 'Feu' });
+  const state = authenticatedState({ localSettings: settings({ lang: 'French' }), local: [french], base: dictionary([french]),
+    settingsBase: { revision: 1, settings: settings({ lang: 'French' }) } });
+  state.auth.user = { ...state.auth.user, role: 'manager', canAccessAllLanguages: true };
+  const h = await harness(t, { state, WebSocket: SyncSocket });
+  h.api.users['token-alice'] = clone(state.auth.user);
+  seedAPI(h.api, { remoteSettings: settings({ lang: 'French' }) }); h.api.hints = true;
+  h.api.dictionaries.set('French', dictionary([french]));
+  h.api.intercept = request => request.path === '/v1/sync/ticket' ? reply({ ticket: 'sync-ticket' }) : undefined;
+  await h.client.sync(); await h.client.openSocket();
+  assert.deepEqual(h.api.calls.find(call => call.path === '/v1/sync/ticket').body, { language: 'French' });
+  const first = SyncSocket.instances.at(-1); first.open();
+  first.message({ type: 'sync_ready', sync: { language: 'French', settingsRevision: 1, dictionaryRevision: 1 } });
+  assert.equal(h.client.socketReady, true);
+  h.api.dictionaries.set('French', dictionary([{ ...french, tlnote: 'French realtime edit' }], 2));
+  h.api.calls.length = 0;
+  first.message({ type: 'sync_changed', sync: { language: 'French', settingsRevision: 1, dictionaryRevision: 2 } });
+  await h.client.sync();
+  assert.deepEqual(h.api.calls.map(call => call.path), ['/v1/dictionaries/French']);
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'French realtime edit');
+  await h.client.selectLanguage('Thai', payload(h.client.snapshot().dictionary, { lang: 'French' }), 'French');
+  assert.equal(first.readyState, 3);
+  await h.client.sync(); await h.client.openSocket();
+  assert.deepEqual(h.api.calls.filter(call => call.path === '/v1/sync/ticket').at(-1).body, { language: 'Thai' });
+  const second = SyncSocket.instances.at(-1); second.open();
+  second.message({ type: 'sync_ready', sync: { language: 'Thai', settingsRevision: 2, dictionaryRevision: 1 } });
+  assert.equal(h.client.socketReady, true);
+  h.api.users['token-alice'] = { ...user(), role: 'translator', canAccessAllLanguages: false };
+  await h.client.refreshSession(true);
+  assert.equal(second.readyState, 3);
+  assert.equal(h.client.socketReady, false);
+});
+
 test('applying settings-only cloud changes preserves dictionary and regex references', async () => {
   const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
   const window = { CloudSync: Cloud, DictionarySync: Dictionary };
@@ -1092,6 +1271,104 @@ test('applying settings-only cloud changes preserves dictionary and regex refere
     user: user(), signedIn: true, conflicts: [], revision: 1, needsDictionaryLanguage: false, recoveryCount: 0 });
   assert.equal(imports, 1); assert.equal(editor.theme, 'dark');
   assert.equal(editor.dictionary, dictionaryEntries); assert.equal(editor.editorRegexes, regexes);
+});
+
+function cloudUiEditor(client) {
+  const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+  const window = { CloudSync: Cloud, DictionarySync: Dictionary };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/cloudUi.js'), 'utf8'), { window });
+  const mixin = window.CloudUI.mixin;
+  const editor = { ...Cloud.completeSettings({}), ...mixin.data(), ...mixin.methods,
+    _cloud: client, dictionary: [], editorClipboard: '', toPlainForStorage: clone,
+    importSettings(next) { Object.assign(this, next); }, $nextTick: async () => {} };
+  for (const [name, getter] of Object.entries(mixin.computed)) Object.defineProperty(editor, name, { get() { return getter.call(editor); } });
+  return editor;
+}
+
+test('language selection waits for durable storage and UI application while preserving unrelated errors', async t => {
+  const state = authenticatedState();
+  state.profiles.alice.dictionaries.French = { entries: [word('fr', { replace: 'Feu' })], conflicts: [], revision: 0 };
+  const h = await harness(t, { state });
+  const editor = cloudUiEditor(h.client);
+  await editor.cloudApply(h.client.snapshot());
+  editor.cloudStorageError = 'Could not import settings: An unrelated import failed';
+  editor.lang = 'French';
+  const gate = h.store.pauseNextCommit();
+  const applied = deferred(); const painted = deferred();
+  editor.$nextTick = () => { applied.resolve(); return painted.promise; };
+  let finished = false;
+  const switching = editor.cloudSelectLanguage('French', 'Thai').then(result => { finished = true; return result; });
+  await gate.entered.promise;
+  assert.equal(finished, false);
+  assert.equal(editor.cloudLanguageSwitching, true);
+  assert.equal(editor._cloudApplying, true);
+  assert.equal(h.store.state.profiles.alice.settings.lang, 'Thai');
+  gate.release.resolve();
+  await applied.promise;
+  assert.equal(finished, false, 'Selection remains pending until the restored language is rendered');
+  assert.equal(editor.cloudLanguageSwitching, true);
+  painted.resolve();
+  assert.equal(await switching, true);
+  assert.equal(editor.lang, 'French');
+  assert.equal(editor.dictionary[0].replace, 'Feu');
+  assert.equal(h.store.state.profiles.alice.settings.lang, 'French');
+  assert.equal(editor.cloudStorageError, 'Could not import settings: An unrelated import failed');
+  assert.equal(editor.cloudLanguageSwitching, false);
+  assert.equal(editor._cloudApplying, false);
+});
+
+test('a successful language switch clears its prior switch failure and releases its UI guards', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  const editor = cloudUiEditor(h.client);
+  await editor.cloudApply(h.client.snapshot());
+  editor.cloudStorageError = 'Could not switch language: Storage temporarily unavailable';
+  editor.lang = 'French';
+  assert.equal(await editor.cloudSelectLanguage('French', 'Thai'), true);
+  assert.equal(editor.cloudStorageError, '');
+  assert.equal(editor.lang, 'French');
+  assert.deepEqual(editor.dictionary, []);
+  assert.equal(editor.cloudLanguageSwitching, false);
+  assert.equal(editor._cloudApplying, false);
+});
+
+test('failed language selection restores the saved language and dictionary and keeps an actionable error', async t => {
+  const saved = word('fire', { replace: 'Saved Thai draft' });
+  const h = await harness(t, { state: authenticatedState({ local: [saved] }) });
+  const editor = cloudUiEditor(h.client);
+  await editor.cloudApply(h.client.snapshot());
+  editor.lang = 'French';
+  h.store.nextError = new Error('Storage full');
+  assert.equal(await editor.cloudSelectLanguage('French', 'Thai'), false);
+  assert.equal(editor.lang, 'Thai');
+  assert.deepEqual(editor.dictionary, [saved]);
+  assert.equal(h.client.snapshot().settings.lang, 'Thai');
+  assert.deepEqual(h.client.snapshot().dictionary, [saved]);
+  assert.equal(h.store.state.profiles.alice.settings.lang, 'Thai');
+  assert.equal(editor.cloudStorageError, 'Could not switch language: Storage full');
+  assert.equal(editor.cloudLanguageSwitching, false);
+  assert.equal(editor._cloudApplying, false);
+  assert.equal(h.api.calls.length, 0);
+});
+
+test('manager UI access has no assignment warning while translator languages retain local-only guidance', () => {
+  const editor = cloudUiEditor();
+  editor.cloudSignedIn = true;
+  editor.cloudUser = { ...user('alice', null), role: 'manager', canAccessAllLanguages: true };
+  editor.lang = 'French';
+  assert.equal(editor.cloudCanAccessAllLanguages, true);
+  assert.equal(editor.cloudSyncIssue, '');
+  editor.cloudError = true; editor.cloudStatus = 'A relevant sync failure';
+  assert.equal(editor.cloudSyncIssue, 'A relevant sync failure');
+  editor.cloudError = false;
+  editor.cloudUser = { ...user(), role: 'translator', canAccessAllLanguages: false };
+  assert.equal(editor.cloudCanAccessAllLanguages, false);
+  assert.equal(editor.cloudSyncIssue, 'Selected dictionary language is local only');
+  editor.cloudUser.language = null;
+  assert.equal(editor.cloudSyncIssue, 'Not configured — awaiting admin language assignment');
+  editor.cloudUser = { ...user('alice', null), role: 'manager', canAccessAllLanguages: true };
+  editor.cloudSignedIn = false;
+  assert.equal(editor.cloudCanAccessAllLanguages, false);
+  assert.equal(editor.cloudSyncIssue, '');
 });
 
 test('fresh revision checks accept counters lowered by a restored server database', async t => {

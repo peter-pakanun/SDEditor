@@ -86,6 +86,46 @@ function harness({ realImport = false } = {}) {
   return { editor, window, context, document: context.document, writes, alerts, confirmations, approve(value) { approved = value; } };
 }
 
+test('manager collaboration joins the selected language without an assignment and revocation disconnects it', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  e.lang = 'German';
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  const joins = []; let disconnected = 0;
+  window.CollaborationSync = { Client: class {
+    async connect(input) { joins.push(plain(input)); }
+    select() {} setAway() {} disconnect() { disconnected++; }
+  } };
+  await e.initializeCollaboration();
+  assert.equal(joins.length, 1);
+  assert.equal(joins[0].language, 'German');
+  assert.equal(joins[0].accountId, 'manager');
+  const captured = e.captureCollaborationContext();
+  e.cloudUser.role = 'translator'; e.cloudCanAccessAllLanguages = false;
+  assert.equal(e.collaborationContextCurrent(captured), false);
+  window.CollaborationIntegration.mixin.methods.scheduleCollaboration.call(e);
+  clearTimeout(e._collabStartTimer);
+  assert.equal(disconnected, 1);
+  assert.equal(e._collaboration, null);
+  await e.initializeCollaboration();
+  assert.equal(joins.length, 1);
+});
+
+test('manager archive lookup uses shared import decisions across languages', async () => {
+  const { editor: e } = harness();
+  e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'manager', role: 'manager', language: null };
+  const requests = [];
+  e._cloud = { request: async path => { requests.push(path); return { archive: { zipHash: 'archive' } }; } };
+  assert.deepEqual(plain(await e.lookupImportArchive({ zipHash: 'archive' })), { zipHash: 'archive' });
+  assert.equal(requests.length, 1);
+  e.cloudCanAccessAllLanguages = false;
+  assert.equal(await e.lookupImportArchive({ zipHash: 'archive' }), null);
+  assert.equal(requests.length, 1);
+});
+
 test('presence becomes away after two minutes or a hidden tab and activity restores it', () => {
   const { editor: e, document } = harness(); const states = [];
   e._collaboration = { setAway: away => states.push(away) };

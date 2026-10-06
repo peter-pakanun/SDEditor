@@ -45,6 +45,58 @@ function description(name, flags = {}, english = `English ${name}`, thai = `р╕ар
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
 const defaultStatuses = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
 
+test('changing game in Settings waits for the selected dictionary and durable preferences', async () => {
+  const { editor } = loadEditor();
+  let finishLanguage;
+  editor.showSetting = true; editor.gameVersion = 'poe1'; editor.settingsGameVersion = 'poe2';
+  editor._cloudLanguageSwitch = new Promise(resolve => { finishLanguage = resolve; });
+  const events = [];
+  editor.saveSettings = async () => { events.push('saved'); return true; };
+  editor.selectGameVersion = async game => { events.push(game); editor.gameVersion = game; };
+  const closing = editor.settingsSaveClose();
+  await Promise.resolve();
+  assert.equal(events.length, 0);
+  assert.equal(editor.showSetting, true);
+  finishLanguage(true);
+  await closing;
+  assert.deepEqual(events, ['saved', 'poe2']);
+  assert.equal(editor.showSetting, false);
+  assert.equal(editor.settingsSaving, false);
+});
+
+test('failed dictionary selection or preferences keeps Settings open and the original game', async () => {
+  for (const failure of ['language', 'preferences', 'pending translations']) {
+    const { editor } = loadEditor();
+    editor.showSetting = true; editor.gameVersion = 'poe1'; editor.settingsGameVersion = 'poe2';
+    editor.cloudStorageError = 'Could not switch language: storage unavailable';
+    editor._cloudLanguageSwitch = Promise.resolve(failure !== 'language');
+    editor.saveSettings = async () => failure !== 'preferences';
+    editor.selectGameVersion = async () => {
+      assert.equal(failure, 'pending translations');
+      editor.localSaveError = 'Translations still need saving';
+    };
+    await editor.settingsSaveClose();
+    assert.equal(editor.gameVersion, 'poe1', failure);
+    assert.equal(editor.showSetting, true, failure);
+    assert.ok(editor.settingsMessage, failure);
+    assert.equal(editor.settingsSaving, false, failure);
+  }
+});
+
+test('navbar shortcuts focus the matching controls in General Settings', () => {
+  const { editor, config, context } = loadEditor();
+  context.document.body.style = {};
+  const focuses = [];
+  editor.$refs.settingsGameVersion = { focus: () => focuses.push('game') };
+  editor.$refs.settingsLanguage = { focus: () => focuses.push('language') };
+  editor.openSettings('general', 'settingsGameVersion');
+  config.watch.settingsDialogVisible.call(editor, true);
+  assert.deepEqual(focuses, ['game']);
+  editor.openSettings('general', 'settingsLanguage');
+  assert.deepEqual(focuses, ['game', 'language']);
+  assert.equal(editor.settingsTab, 'general');
+});
+
 test('opening file comments preserves a dirty translation when saving fails', async () => {
   const { editor } = loadEditor();
   editor.descs = [description('one')];

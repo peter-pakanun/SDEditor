@@ -13,6 +13,8 @@
   const equal = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
   const preferences = value => Object.fromEntries(SETTING_KEYS.filter(k => value && Object.hasOwn(value, k)).map(k => [k, copy(value[k])]));
   const completeSettings = value => ({ ...copy(DEFAULT_SETTINGS), ...preferences(value) });
+  const canAccessAllLanguages = user => !!user && (user.role === 'admin' || user.role === 'manager' || (!user.role && user.isAdmin === true));
+  const sharedLanguage = (state, profile = state.profiles[state.activeProfile]) => canAccessAllLanguages(state.auth?.user) ? profile.settings.lang : state.auth?.user?.language;
   function validateImport(value) {
     const object = v => v && typeof v === 'object' && !Array.isArray(v);
     const string = v => typeof v === 'string';
@@ -147,11 +149,18 @@
       return snapshot;
     }
     status(message, error = false, warning = false) { this.onStatus({ message, error, warning }); }
-    context() { return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token, language: this.state.auth?.user?.language, assignmentVersion: this.state.auth?.user?.assignmentVersion }; }
+    context() {
+      const user = this.state.auth?.user;
+      return { epoch: this.epoch, profile: this.state.activeProfile, token: this.state.auth?.token,
+        language: sharedLanguage(this.state), assignedLanguage: user?.language, assignmentVersion: user?.assignmentVersion,
+        role: user?.role, allLanguages: canAccessAllLanguages(user) };
+    }
     current(ctx, state = this.state) { return !this.destroyed && ctx.epoch === this.epoch && state.activeProfile === ctx.profile && state.auth?.token === ctx.token; }
-    permissionsCurrent(ctx, state = this.state) {
-      return this.current(ctx, state) && state.auth?.user?.language === ctx.language
-        && state.auth?.user?.assignmentVersion === ctx.assignmentVersion;
+    permissionsCurrent(ctx, state = this.state, allowSelectedLanguageChange = false) {
+      return this.current(ctx, state) && state.auth?.user?.language === ctx.assignedLanguage
+        && state.auth?.user?.assignmentVersion === ctx.assignmentVersion && state.auth?.user?.role === ctx.role
+        && canAccessAllLanguages(state.auth?.user) === ctx.allLanguages
+        && (allowSelectedLanguageChange || sharedLanguage(state) === ctx.language);
     }
     async update(fn, ctx, notify = true) {
       this.state = await this.store.updateHybridState(state => {
@@ -160,13 +169,13 @@
       });
       if (notify) this.notify();
     }
-    async updateShared(fn, ctx, notify = true) {
-      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+    async updateShared(fn, ctx, notify = true, allowSelectedLanguageChange = false) {
+      if (!this.permissionsCurrent(ctx, this.state, allowSelectedLanguageChange)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
       await this.update((state, profile) => {
-        if (!this.permissionsCurrent(ctx, state)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+        if (!this.permissionsCurrent(ctx, state, allowSelectedLanguageChange)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
         fn(state, profile);
       }, ctx, notify);
-      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+      if (!this.permissionsCurrent(ctx, this.state, allowSelectedLanguageChange)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
     }
     saveLocal(payload, contextLanguage = payload.lang) {
       const requested = this.context();
@@ -228,6 +237,7 @@
     async importLocal(payload) {
       validateImport(payload);
       payload = { ...copy(payload), editorRegexes: (payload.editorRegexes || []).map(row => ({ find: row.find, replace: row.replace })), dictionary: this.merge.normalizeEntries(payload.dictionary || []) };
+      if (payload.lang !== this.state.profiles[this.state.activeProfile].settings.lang) { this.closeSocket(); this.epoch++; }
       const ctx = this.context();
       await this.update((state, profile) => {
         profile.recovery.push({ at: Date.now(), reason: 'Before settings import', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
@@ -244,7 +254,7 @@
       return { legacySettings: copy(this.state.legacyRecovery), copies: profile.recovery.map(r => ({ at: r.at, reason: r.reason, settings: copy(r.settings), dictionaries: cleanDictionary(r.dictionaries), editorClipboard: r.editorClipboard })) };
     }
     async request(path, options = {}, ctx = this.context()) {
-      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
       try {
@@ -252,7 +262,7 @@
           headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}) },
           ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
         const data = response.status === 204 ? null : await response.json();
-        if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed'), { stale: true });
+        if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
         if (!response.ok) {
           const error = Object.assign(new Error(data?.error?.message || 'Cloud request failed'), { status: response.status, code: data?.error?.code, current: data?.current });
           if (response.status === 401 && ctx.token) {
@@ -261,9 +271,16 @@
           } else if (response.status === 403 && ctx.token && error.code === 'LANGUAGE_UNASSIGNED') {
             // Permission revocation keeps the login and all local work, but
             // immediately closes shared views and stops their background reads.
+            let currentUser;
+            if (ctx.allLanguages && path !== '/v1/me') {
+              try { currentUser = (await this.request('/v1/me', {}, ctx)).user; }
+              catch (refreshError) { if (refreshError.stale) throw refreshError; }
+            }
             await this.update(state => {
-              if (this.permissionsCurrent(ctx, state)) state.auth.user = { ...state.auth.user, language: null };
+              if (this.permissionsCurrent(ctx, state)) state.auth.user = currentUser || { ...state.auth.user, language: null,
+                ...(ctx.allLanguages ? { role: 'translator', canAccessAllLanguages: false, isAdmin: false } : {}) };
             }, ctx);
+            this.closeSocket();
             this.reportError(error);
           } else if (response.status === 403 && ctx.token && error.code === 'LANGUAGE_FORBIDDEN' && path !== '/v1/me') {
             // A forbidden room/dictionary may indicate reassignment. Re-read
@@ -273,6 +290,7 @@
               await this.update(state => {
                 if (this.permissionsCurrent(ctx, state)) { state.auth.user = me.user; state.auth.expiresAt = me.expiresAt; }
               }, ctx);
+              if (!this.permissionsCurrent(ctx)) this.closeSocket();
             } catch (refreshError) { if (refreshError.stale) throw refreshError; }
           }
           throw error;
@@ -334,7 +352,7 @@
       const prefix = error.status === 403 ? 'Cloud access unavailable' : 'Saved locally · cloud unavailable';
       this.status(prefix + ': ' + error.message, true);
     }
-    hintKey(ctx = this.context()) { return JSON.stringify([ctx.epoch, ctx.profile, ctx.token, ctx.language, ctx.assignmentVersion]); }
+    hintKey(ctx = this.context()) { return JSON.stringify([ctx.epoch, ctx.profile, ctx.token, ctx.language, ctx.assignedLanguage, ctx.assignmentVersion, ctx.role, ctx.allLanguages]); }
     rememberHints(hints, ctx = this.context(), authoritative = false) {
       if (!hints || hints.language !== ctx.language || !this.permissionsCurrent(ctx)) return;
       const key = this.hintKey(ctx);
@@ -353,7 +371,7 @@
       if (this.socket && this.socketContext !== key) this.closeSocket();
       if (this.socket || this.socketOpening) return this.socketOpening || Promise.resolve();
       const operation = (async () => {
-        const ticket = await this.request('/v1/sync/ticket', { method: 'POST' }, ctx);
+        const ticket = await this.request('/v1/sync/ticket', { method: 'POST', ...(ctx.allLanguages ? { body: { language: ctx.language } } : {}) }, ctx);
         if (!this.permissionsCurrent(ctx)) return;
         const url = new URL(ticket.url || '/v1/collaboration/ws?ticket=' + encodeURIComponent(ticket.ticket), this.apiBase);
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -422,19 +440,27 @@
             }, ctx);
           }
           if (!this.current(ctx)) return;
+          const priorContext = ctx;
           ctx = this.context();
+          if (this.hintKey(priorContext) !== this.hintKey(ctx)) this.closeSocket();
           this.rememberHints(me.sync, ctx, true);
         }
         if (!this.current(ctx)) return;
         ctx = this.context();
-        if (!ctx.language) { this.status('Not configured — awaiting admin language assignment', false, true); return; }
-        const hints = this.hints(ctx);
+        if (!ctx.language && !ctx.allLanguages) { this.status('Not configured — awaiting admin language assignment', false, true); return; }
+        let hints = this.hints(ctx);
         const profile = this.state.profiles[ctx.profile];
         if (profile.settingsWrite || !revisionMatches(profile.settingsBase?.revision, hints?.settingsRevision)
           || !equal(profile.settings, profile.settingsBase?.settings)) await this.syncSettings(ctx);
-        if (!this.current(ctx)) return;
+        if (!this.permissionsCurrent(ctx, this.state, true)) return;
+        const priorContext = ctx;
+        ctx = this.context();
+        if (this.hintKey(priorContext) !== this.hintKey(ctx)) this.closeSocket();
+        hints = this.hints(ctx);
+        if (!ctx.language) { this.notify(); this.status('Choose a language to access shared work', false, true); return; }
         const language = ctx.language;
-        // Other language drafts stay completely local, including after reassignment.
+        // Translator drafts outside the assignment stay local. Managers sync
+        // only the selected language, keeping every draft in its own dictionary.
         const d = this.state.profiles[ctx.profile].dictionaries[language];
         if (!d?.base || d.pendingWrite || d.pendingResolution || d.pendingHistoryRestore
           || d.syncedLocalVersion == null || d.syncedLocalVersion !== (d.localVersion || 0)
@@ -466,6 +492,8 @@
         if (pending) {
           try { await this.sendSettingsWrite(ctx, pending); }
           catch (error) { if (error.status !== 409) throw error; }
+          if (!this.permissionsCurrent(ctx, this.state, true)) return;
+          ctx = this.context();
         }
         const remote = await this.request('/v1/settings', {}, ctx);
         await this.updateShared((state, profile) => {
@@ -476,14 +504,15 @@
             profile.settings = mergeSettings(profile.settingsBase.settings, profile.settings, remote.settings || {});
           }
           profile.settingsBase = copy(remote);
-        }, ctx, false);
-        if (!this.current(ctx)) return;
+        }, ctx, false, true);
+        if (!this.permissionsCurrent(ctx, this.state, true)) return;
+        ctx = this.context();
         const profile = this.state.profiles[ctx.profile];
         const submitted = copy(profile.settings);
         if (remote.settings && equal(submitted, remote.settings)) return;
         try {
           const write = { baseRevision: remote.revision, mutationId: this.uuid(), settings: submitted };
-          await this.update((state, latest) => { latest.settingsWrite = write; }, ctx, false);
+          await this.updateShared((state, latest) => { latest.settingsWrite = write; }, ctx, false);
           await this.sendSettingsWrite(ctx, write);
           return;
         } catch (error) { if (error.status !== 409 || attempt === 3) throw error; }
@@ -496,7 +525,7 @@
           profile.settings = mergeSettings(write.settings, profile.settings, response.settings);
           profile.settingsBase = copy(response);
           if (profile.settingsWrite?.mutationId === write.mutationId) profile.settingsWrite = null;
-        }, ctx, false);
+        }, ctx, false, true);
         const hints = this.hints(ctx);
         if (hints) this.rememberHints({ ...hints, settingsRevision: response.revision }, ctx);
       } catch (error) {
@@ -548,7 +577,7 @@
         const request = { baseRevision: remote.revision, mutationId: this.uuid(), upserts: merged.upserts, deletedIds: merged.deletedIds, ...(Object.keys(origins).length ? { origins } : {}) };
         try {
           const write = { remote, request };
-          await this.update((state, profile) => { profile.dictionaries[language].pendingWrite = write; }, ctx, false);
+          await this.updateShared((state, profile) => { profile.dictionaries[language].pendingWrite = write; }, ctx, false);
           await this.sendDictionaryWrite(ctx, language, write);
           return;
         } catch (error) { if (error.status !== 409 || attempt === 3) throw error; }
@@ -567,8 +596,8 @@
     async resolveConflict(id, choices, revision) {
       const ctx = this.context();
       const language = this.state.profiles[ctx.profile].settings.lang;
-      if (language !== this.state.auth?.user.language) throw new Error('This language is local only.');
-      await this.update((state, profile) => {
+      if (!ctx.token || !language || language !== ctx.language) throw new Error('This language is local only.');
+      await this.updateShared((state, profile) => {
         const d = profile.dictionaries[language];
         const conflict = d.conflicts.find(c => c.id === id);
         if (!conflict || d.revision !== revision) throw new Error('The dictionary changed. Review the current conflict again.');
@@ -610,11 +639,11 @@
     }
     historyContext() {
       const ctx = this.context();
-      if (!ctx.token || !ctx.language) throw new Error('Sign in with an assigned language to view shared history.');
+      if (!ctx.token || !ctx.language) throw new Error('Sign in with language access and choose a language to view shared history.');
       return ctx;
     }
     assertHistoryContext(ctx) {
-      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or assigned language changed. Open history again.'), { stale: true });
+      if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed. Open history again.'), { stale: true });
     }
     async getDictionaryHistory(filters = {}) {
       const ctx = this.historyContext();
@@ -652,8 +681,7 @@
         if (event.action === 'baseline' && version === 'before') throw new Error('The version before history started is unavailable.');
         const entry = event[version];
         if (entry === undefined || (entry && entry._id !== event.entryId)) throw new Error('The selected history version is invalid.');
-        await this.update((state, profile) => {
-          this.assertHistoryContext(ctx);
+        await this.updateShared((state, profile) => {
           const d = profile.dictionaries[ctx.language] ||= newDictionary();
           profile.recovery.push({ at: Date.now(), reason: 'Before shared history restore', settings: copy(profile.settings), dictionaries: copy(profile.dictionaries), editorClipboard: profile.clipboard });
           d.pendingHistoryRestore = { id: event.entryId, eventId, entry: copy(entry), originalLocal: copy(d.entries.find(e => e._id === event.entryId) || null), request: { baseRevision: revision, mutationId: this.uuid(), version } };
@@ -707,7 +735,11 @@
       const result = await this.request('/v1/admin/users/' + encodeURIComponent(id) + '/language', { method: 'PUT', body: { language: language || null } });
       await this.refreshSession(true); return result.user;
     }
+    async assignRole(id, role) {
+      const result = await this.request('/v1/admin/users/' + encodeURIComponent(id) + '/role', { method: 'PUT', body: { role } });
+      await this.refreshSession(true); return result.user;
+    }
     destroy() { this.destroyed = true; this.epoch++; clearTimeout(this.timer); this.closeSocket(); }
   }
-  return { Client, SETTING_KEYS, DEFAULT_SETTINGS, initializeState, mergeSettings, preferences, completeSettings, validateImport, preserveConflictBases, acceptedSnapshot };
+  return { Client, SETTING_KEYS, DEFAULT_SETTINGS, initializeState, mergeSettings, preferences, completeSettings, validateImport, preserveConflictBases, acceptedSnapshot, canAccessAllLanguages };
 });

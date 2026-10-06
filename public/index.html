@@ -112,8 +112,16 @@
             <h3>Language &amp; appearance</h3>
             <p class="settingsHelp">These preferences apply across your workspaces.</p>
             <div class="settingsField">
+              <label for="settingsGameVersion">Game version</label>
+              <select id="settingsGameVersion" ref="settingsGameVersion" v-model="settingsGameVersion" :disabled="settingsSaving || editorVisible || navigationBusy || versionStorageLoading">
+                <option value="poe1">PoE1</option>
+                <option value="poe2">PoE2</option>
+              </select>
+              <small>Source files, translations, and history are stored separately for each game. Save and close to switch.</small>
+            </div>
+            <div class="settingsField">
               <label for="settingsLanguage">Translation language</label>
-              <select id="settingsLanguage" ref="settingsLanguage" v-model="lang">
+              <select id="settingsLanguage" ref="settingsLanguage" v-model="lang" :disabled="settingsSaving || cloudLanguageSwitching">
                 <option disabled value="">Choose a language</option>
                 <option v-for="language in langs" :key="language" :value="language">{{ language }}</option>
               </select>
@@ -147,8 +155,8 @@
           </section>
           <section id="settings-panel-cloud" class="settingsPanel cloudSettings" role="tabpanel" aria-labelledby="settings-tab-cloud" v-show="settingsTab === 'cloud'" tabindex="0">
             <h3>Cloud backup</h3>
-            <p class="settingsHelp">Settings and regex rules are personal. Dictionaries are shared with translators assigned to the same language.</p>
-            <p class="settingsHelp">When signed in with an assigned language, saved translations automatically collaborate with translators using the same game and source version. Your name and selected or open file are visible to them. Typing stays in your draft until Save.</p>
+            <p class="settingsHelp">Settings and regex rules are personal. Dictionaries are shared by language. Managers and admins can work in every language.</p>
+            <p class="settingsHelp">When signed in with language access, saved translations automatically collaborate with translators using the same game and source version. Your name and selected or open file are visible to them. Typing stays in your draft until Save.</p>
             <p class="settingsHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
             <p v-if="testMode" class="settingsNotice">Cloud backup is disabled in test mode.</p>
             <template v-else>
@@ -156,7 +164,8 @@
               <p v-if="cloudLoginUrl"><a :href="cloudLoginUrl">Continue sign-in in this tab</a></p>
               <div v-if="cloudUser" class="settingsAccount">
                 <strong>{{ cloudUser.name || cloudUser.email }}</strong><span>{{ cloudUser.email }}</span>
-                <p v-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
+                <p v-if="cloudCanAccessAllLanguages"><strong>{{ cloudUser.isAdmin ? 'Admin' : 'Manager' }}</strong> · Access to every language</p>
+                <p v-else-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
               </div>
               <p v-if="cloudSyncIssue" class="cloudStatus settingsNotice cloudWarning" role="alert">{{ cloudSyncIssue }}</p>
               <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose your translation language in <button class="settingsTextButton" @click="setSettingsTab('general', true)">General</button> to keep your existing dictionary under that language before cloud backup.</p>
@@ -169,10 +178,11 @@
                 <button v-if="cloudRecoveryCount" @click="cloudDownloadRecovery">Download recovery copies</button>
               </div>
               <div v-if="cloudAdminVisible" class="cloudAdmin">
-                <h4>Language assignments</h4>
-                <p>Users appear here after their first Google sign-in. Clearing an assignment stops cloud access and keeps their local work.</p>
+                <h4>User access</h4>
+                <p>Users appear after their first Google sign-in. Managers can view and edit every language. Translators need an assigned language; clearing it stops their cloud access and keeps their local work.</p>
                 <div v-for="user in cloudAdminUsers" :key="user.id" class="cloudAdminRow">
                   <span>{{ user.name || user.email }}<small>{{ user.email }}{{ user.isAdmin ? ' · Admin' : '' }}</small></span>
+                  <select :value="user.role || (user.isAdmin ? 'admin' : 'translator')" :aria-label="'Role for ' + user.email" @change="cloudAssignRole(user, $event)" :disabled="cloudBusy || user.isAdmin"><option v-if="user.isAdmin" value="admin">Admin</option><option value="translator">Translator</option><option value="manager">Manager</option></select>
                   <select :value="user.language || ''" :aria-label="'Language for ' + user.email" @change="cloudAssign(user, $event)" :disabled="cloudBusy"><option value="">Not configured</option><option v-for="language in langs" :key="language" :value="language">{{ language }}</option></select>
                 </div>
               </div>
@@ -313,7 +323,7 @@
       <header class="workspaceHeader">
         <div class="workspaceBrand">
           <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
-          <div><strong>SDEditor</strong><span>{{ gameVersionLabel }} <span aria-hidden="true">·</span> {{ lang }}</span></div>
+          <div><strong>SDEditor</strong><span><a class="workspaceContextLink" href="#settingsGameVersion" @click.prevent="openSettings('general', 'settingsGameVersion')" title="Change game version" :aria-label="'Change game version, current game ' + gameVersionLabel">{{ gameVersionLabel }}</a> <span aria-hidden="true">·</span> <a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#settingsLanguage" @click.prevent="openSettings('general', 'settingsLanguage')" title="Change translation language" :aria-label="'Change translation language, current language ' + lang">{{ lang }}</a><template v-else>{{ lang }}</template></span></div>
         </div>
         <section class="workspaceSearch" aria-label="Search and filters">
           <div class="searchToolbar">
@@ -451,7 +461,7 @@
             <section v-for="group in commentsAllGroups" :key="group.filepath" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
               <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!getDescByFilepath(group.filepath) || navigationBusy" :title="getDescByFilepath(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ group.filepath }}</button>
               <article v-for="comment in group.items" :key="comment.id" class="commentGroupEntry" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage" title="Author's team language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span v-if="comment.language" class="commentLanguage" title="Comment language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
@@ -753,7 +763,7 @@
             <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
             <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
               <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span class="commentLanguage" title="Author's team language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
+                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span v-if="comment.language" class="commentLanguage" title="Comment language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
@@ -778,7 +788,7 @@
             <div class="historyMeta">
               <div class="historyTitle">{{ editorCurrentEditingDesc.filename }}</div>
               <p class="collaborationLocalHistoryLabel">Local history · saved in this browser</p>
-              <button class="collaborationHistoryButton" @click="collaborationOpenHistory(editorCurrentEditingDesc.filepath)" :disabled="!collaborationAvailable" :title="collaborationAvailable ? 'View shared translation changes for this source version' : 'Sign in with your assigned language and load a matching source version'">Shared translation history</button>
+              <button class="collaborationHistoryButton" @click="collaborationOpenHistory(editorCurrentEditingDesc.filepath)" :disabled="!collaborationAvailable" :title="collaborationAvailable ? 'View shared translation changes for this source version' : 'Sign in with language access and load a matching source version'">Shared translation history</button>
               <div class="historySubtitle">
                 <button class="historyModeBtn" :class="{ active: historyMode === 'translation' }" @click="setHistoryMode('translation')">Translation</button>
                 <button class="historyModeBtn" :class="{ active: historyMode === 'source' }" @click="setHistoryMode('source')">Source</button>
@@ -1025,7 +1035,7 @@
     <div v-if="cloudHistoryVisible" class="cloudResolverBackdrop cloudHistoryBackdrop" @keydown.esc.stop.prevent="cloudCloseHistory" @keydown.tab="cloudHistoryTrapFocus">
       <section class="cloudResolver cloudHistoryDialog" ref="cloudHistoryDialog" role="dialog" aria-modal="true" aria-labelledby="cloudHistoryTitle" tabindex="-1">
         <div class="cloudResolverHeading">
-          <div><h2 id="cloudHistoryTitle">Shared dictionary history</h2><p><strong>{{ cloudUser && cloudUser.language }}</strong> · See who changed each entry and restore an earlier version.</p></div>
+          <div><h2 id="cloudHistoryTitle">Shared dictionary history</h2><p><strong>{{ cloudHistoryLanguage }}</strong> · See who changed each entry and restore an earlier version.</p></div>
           <button ref="cloudHistoryClose" @click="cloudCloseHistory" aria-label="Close shared dictionary history">✕</button>
         </div>
         <p v-if="cloudHistoryCoverage" class="cloudHistoryCoverage">History recording began {{ cloudHistoryDate(cloudHistoryCoverage.startedAt) }}. Earlier entries appear as a baseline without author attribution.<span v-if="cloudHistoryCoverage.legacyDeletions"> {{ cloudHistoryCoverage.legacyDeletions }} earlier deletion(s) have no saved content to restore.</span> Automatic merge labels describe the synchronizing editor's merge decision.</p>
@@ -1061,7 +1071,7 @@
           </div>
           <div v-if="cloudHistoryRestoreVersion" class="cloudHistoryRestorePreview" ref="cloudHistoryRestorePreview">
             <h3>Review shared restore</h3>
-            <p>This changes the shared entry for all {{ cloudUser && cloudUser.language }} translators and keeps the same entry ID. Your current local version is preserved in a recovery copy.</p>
+            <p>This changes the shared entry for all {{ cloudHistoryLanguage }} translators and keeps the same entry ID. Your current local version is preserved in a recovery copy.</p>
             <div class="cloudHistoryVersions"><div><h4>Currently shared · revision {{ cloudHistoryEvent.currentRevision }}</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryEvent.current) }}</pre></div><div><h4>Result after restore</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryRestoreEntry) }}</pre></div></div>
             <p v-if="!cloudHistoryRestoreEntry" class="cloudWarning">The selected version has no entry. Restoring it deletes this entry from the shared dictionary.</p>
             <p>If the shared dictionary changes before saving, review a fresh version before trying again.</p>
