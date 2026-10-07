@@ -10,7 +10,8 @@ const source = [
 ];
 const initial = source.map(desc => ({ filepath: desc.filepath, translations: [...desc.translations.Thai], needsReview: false, trackedForExport: false }));
 function storeFixture(sourceFiles = source) {
-  return { state: null, workspace: { descs: copy(sourceFiles), status: {} }, revisions: [], writes: 0,
+  return { state: null, workspace: { descs: copy(sourceFiles), status: {} }, revisions: [], writes: 0, reads: 0,
+    async getCollaborationState() { this.reads++; return copy(this.state); },
     async updateCollaborationState(fn, options = {}) {
       const next = fn(copy(this.state));
       let workspace = copy(this.workspace);
@@ -432,4 +433,225 @@ test('a repair response from an old scope cannot change the new workspace after 
   assert.deepEqual(value.store.workspace, nextWorkspace);
   assert.deepEqual(value.store.state, roomsBefore);
   assert.equal(remote.length, notificationsBefore, 'The late reset is not published in the new UI scope.');
+});
+
+async function queuedPlaceholderFixture(count) {
+  const baselineSource = Array.from({ length: count }, (_, index) => ({ filepath: 'blank-' + index + '.txt', name: '',
+    stats: ['blank-' + index], variables: ['#'], remarks: [''], translations: { English: ['English ' + index] } }));
+  baselineSource.push({ filepath: 'keep.txt', name: '', stats: ['keep'], variables: ['#'], remarks: [''],
+    translations: { English: ['Keep'], Thai: ['kept baseline'] } });
+  const value = await fixture({ source: baselineSource, beforeConnect({ store, archive }) {
+    W.initializeWorkspace(store.workspace, { source: baselineSource, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+    store.workspace.collaborationAccountId = 'user';
+  } });
+  const room = value.store.state.rooms[value.client.key];
+  room.placeholderRepairs = [];
+  value.store.workspace.placeholderRepairArchive = {};
+  for (let index = 0; index < count; index++) {
+    const filepath = baselineSource[index].filepath, id = 'queued-repair-' + index;
+    const staged = { sourceHash: value.archive.baselineId, translations: [''], before: [], savedAt: 7 };
+    room.placeholderRepairs.push({ id, filepath, baseRevision: 1 });
+    room.local[filepath] = P.fileState({ filepath, translations: [''], trackedForExport: true });
+    value.store.workspace.placeholderRepairArchive[id] = { filepath, language: 'Thai', sourceHash: value.archive.baselineId,
+      staged, status: 'pending', reason: 'Recovered migration placeholder' };
+  }
+  value.client.state = copy(value.store.state);
+  value.store.writes = 0; value.store.reads = 0; value.remote.length = 0; value.server.requests.length = 0;
+  return value;
+}
+
+function addDurableExplicitSave(value, filepath, id, translations) {
+  const room = value.store.state.rooms[value.client.key];
+  const base = value.client.sharedBase(filepath), yours = P.fileState({ filepath, translations, trackedForExport: true });
+  room.outbox.push({ id, status: 'pending', origin: 'save', kind: 'edit', files: [{ base, yours }] });
+  room.local[filepath] = copy(yours);
+  W.stageTranslation(value.store.workspace, yours, 'Thai', { sourceHash: value.archive.baselineId, saveOrigin: 'save' });
+  value.store.revisions.push({ filepath, lang: 'Thai', translations: copy(translations), savedAt: 12, origin: 'save' });
+  return copy(room.outbox.at(-1));
+}
+
+async function sharedPlaceholderFixture(count) {
+  const value = await queuedPlaceholderFixture(count), room = value.store.state.rooms[value.client.key];
+  value.store.workspace.staged.Thai ||= {};
+  for (const repair of room.placeholderRepairs) {
+    const file = P.fileState({ filepath: repair.filepath, translations: [''], trackedForExport: true, revision: 1 });
+    room.shared[repair.filepath] = copy(file); room.local[repair.filepath] = copy(file);
+    value.server.files.push(copy(file));
+    value.store.workspace.staged.Thai[repair.filepath] = copy(value.store.workspace.placeholderRepairArchive[repair.id].staged);
+  }
+  value.client.state = copy(value.store.state);
+  return value;
+}
+
+test('65 shared placeholder repairs retain their original mutation ids and use three durable batches', async t => {
+  const value = await sharedPlaceholderFixture(65); t.after(() => value.client.destroy());
+  const ids = value.client.room().placeholderRepairs.map(repair => repair.id);
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  const requests = value.server.requests.filter(request => request.path.endsWith('/placeholder-repairs'));
+  assert.deepEqual(requests.map(request => request.options.body.mutationId), ids);
+  assert.ok(requests.every(request => request.options.body.files.length === 1 && request.options.body.files[0].baseRevision === 1));
+  assert.deepEqual({ reads: value.store.reads, writes: value.store.writes, requests: requests.length, callbacks: value.remote.length },
+    { reads: 1, writes: 3, requests: 65, callbacks: 3 });
+  assert.deepEqual(value.remote.map(files => files.length), [32, 32, 1]);
+  assert.deepEqual(value.store.state.rooms[value.client.key].placeholderRepairs, []);
+  for (const id of ids) assert.equal(value.store.workspace.placeholderRepairArchive[id].status, 'repaired');
+  for (let index = 0; index < ids.length; index++) {
+    const file = W.workspaceFile(value.store.workspace, value.connection.source[index], 'Thai');
+    assert.equal(file.hasChanges, false); assert.equal(file.isMissing, true);
+  }
+  assert.equal(value.server.events.length, 65); assert.equal(value.server.receipts.size, 65);
+});
+
+test('a later lost repair reply persists earlier batches and retries the remaining original ids without duplicate events', async t => {
+  const value = await sharedPlaceholderFixture(65); t.after(() => value.client.destroy());
+  const ids = value.client.room().placeholderRepairs.map(repair => repair.id), request = value.client.request;
+  let attempts = 0;
+  value.client.request = async (path, options) => {
+    if (path.endsWith('/placeholder-repairs') && ++attempts === 41) value.server.loseRepairReply = 1;
+    return request(path, options);
+  };
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  assert.match(value.client.placeholderRepairError.message, /reply was lost/);
+  assert.deepEqual({ reads: value.store.reads, writes: value.store.writes, requests: attempts, callbacks: value.remote.length },
+    { reads: 1, writes: 2, requests: 41, callbacks: 2 });
+  assert.deepEqual(value.remote.map(files => files.length), [32, 8]);
+  assert.deepEqual(value.store.state.rooms[value.client.key].placeholderRepairs.map(repair => repair.id), ids.slice(40));
+  for (const id of ids.slice(0, 40)) assert.equal(value.store.workspace.placeholderRepairArchive[id].status, 'repaired');
+  for (const id of ids.slice(40)) assert.equal(value.store.workspace.placeholderRepairArchive[id].status, 'pending');
+  assert.equal(value.server.events.length, 41, 'The uncertain reply includes an already committed server repair.');
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  assert.equal(value.client.placeholderRepairError, null);
+  assert.deepEqual(value.store.state.rooms[value.client.key].placeholderRepairs, []);
+  assert.deepEqual(value.server.requests.filter(item => item.path.endsWith('/placeholder-repairs')).map(item => item.options.body.mutationId),
+    [...ids.slice(0, 41), ...ids.slice(40)]);
+  assert.equal(value.store.reads, 2); assert.equal(value.store.writes, 3);
+  assert.equal(value.server.events.length, 65); assert.equal(value.server.receipts.size, 65);
+  for (const id of ids) assert.equal(value.store.workspace.placeholderRepairArchive[id].status, 'repaired');
+});
+
+test('a repair conflict flushes buffered successes before accepting a peer snapshot and preserves peer text', async t => {
+  const value = await sharedPlaceholderFixture(3); t.after(() => value.client.destroy());
+  value.server.change('blank-1.txt', ['new peer translation']);
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  assert.equal(value.client.placeholderRepairError, null);
+  assert.deepEqual(value.store.state.rooms[value.client.key].placeholderRepairs, []);
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-0'].status, 'repaired');
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-1'].status, 'protected');
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-2'].status, 'repaired');
+  assert.deepEqual(value.client.fileBase('blank-1.txt').translations, ['new peer translation']);
+  assert.deepEqual(value.store.workspace.staged.Thai['blank-1.txt'].translations, ['new peer translation']);
+  assert.equal(W.workspaceFile(value.store.workspace, value.connection.source[0], 'Thai').hasChanges, false);
+  assert.equal(W.workspaceFile(value.store.workspace, value.connection.source[2], 'Thai').hasChanges, false);
+  assert.equal(value.server.events.length, 3, 'Only the peer edit and the two eligible repairs author events.');
+  assert.equal(value.server.receipts.size, 2);
+});
+
+for (const count of [100, 1000]) test(count + ' blocked placeholder repairs reload once without rewriting durable state', async t => {
+  const value = await queuedPlaceholderFixture(count); t.after(() => value.client.destroy());
+  for (let index = 0; index < count; index++) addDurableExplicitSave(value, 'blank-' + index + '.txt', 'explicit-' + index, ['authored ' + index]);
+  value.client.state = copy(value.store.state);
+  const stateBefore = copy(value.store.state), workspaceBefore = copy(value.store.workspace), historyBefore = copy(value.store.revisions);
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  assert.deepEqual({ reads: value.store.reads, writes: value.store.writes, remote: value.remote.length, requests: value.server.requests.length },
+    { reads: 1, writes: 0, remote: 0, requests: 0 });
+  assert.deepEqual(value.store.state, stateBefore); assert.deepEqual(value.store.workspace, workspaceBefore);
+  assert.deepEqual(value.store.revisions, historyBefore);
+  assert.equal(value.client.room().placeholderRepairs.length, count);
+});
+
+test('large local-only repair queues complete in one transaction and preserve unrelated durable saves and history', async t => {
+  const count = 300, value = await queuedPlaceholderFixture(count); t.after(() => value.client.destroy());
+  const keep = addDurableExplicitSave(value, 'keep.txt', 'keep-unrelated-save', ['kept authored text']);
+  const german = { sourceHash: value.archive.baselineId, translations: ['German authored'], before: ['old German'], savedAt: 9 };
+  value.store.workspace.staged.German = { 'keep.txt': copy(german) };
+  value.client.state = copy(value.store.state);
+  const historyBefore = copy(value.store.revisions);
+  await value.client.flushPlaceholderRepairs(value.client.epoch);
+  assert.deepEqual({ reads: value.store.reads, writes: value.store.writes, requests: value.server.requests.length },
+    { reads: 1, writes: 1, requests: 0 });
+  const persisted = value.store.state.rooms[value.client.key];
+  assert.deepEqual(persisted.placeholderRepairs, []); assert.deepEqual(persisted.outbox, [keep]);
+  assert.deepEqual(value.store.revisions, historyBefore); assert.deepEqual(value.store.workspace.staged.German['keep.txt'], german);
+  assert.deepEqual(value.store.workspace.staged.Thai['keep.txt'].translations, ['kept authored text']);
+  for (let index = 0; index < count; index++) {
+    assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-' + index].status, 'local');
+    const file = W.workspaceFile(value.store.workspace, value.connection.source[index], 'Thai');
+    assert.equal(file.hasChanges, false); assert.equal(file.isMissing, true);
+  }
+  assert.equal(value.remote.length, 1); assert.equal(value.remote[0].length, count);
+  assert.ok(value.remote[0].every(file => file.stagingReset && !file.trackedForExport));
+});
+
+test('an explicit save committed while the readonly repair snapshot is pending survives local repair batching', async t => {
+  const value = await queuedPlaceholderFixture(2); t.after(() => value.client.destroy());
+  const entered = deferred(), release = deferred(), read = value.store.getCollaborationState.bind(value.store);
+  value.store.getCollaborationState = async () => {
+    const snapshot = await read(); entered.resolve(); await release.promise; return snapshot;
+  };
+  const repair = value.client.flushPlaceholderRepairs(value.client.epoch);
+  await entered.promise;
+  const authored = addDurableExplicitSave(value, 'blank-0.txt', 'worker-save-during-read', ['explicit authored text']);
+  const historyBefore = copy(value.store.revisions);
+  release.resolve(); await repair;
+  const persisted = value.store.state.rooms[value.client.key];
+  assert.deepEqual(persisted.outbox, [authored]); assert.equal(persisted.placeholderRepairs.length, 1);
+  assert.equal(persisted.placeholderRepairs[0].filepath, 'blank-0.txt');
+  assert.deepEqual(persisted.local['blank-0.txt'].translations, ['explicit authored text']);
+  assert.deepEqual(value.store.workspace.staged.Thai['blank-0.txt'].translations, ['explicit authored text']);
+  assert.deepEqual(value.store.revisions, historyBefore);
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-0'].status, 'pending');
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-1'].status, 'local');
+  assert.deepEqual(value.remote.flat().map(file => file.filepath), ['blank-1.txt']);
+});
+
+test('worker saves serialize with a blocked repair reload and retain their acknowledged pending work', async t => {
+  const value = await queuedPlaceholderFixture(1); t.after(() => value.client.destroy());
+  const blocked = addDurableExplicitSave(value, 'blank-0.txt', 'existing-blocked-save', ['existing authored text']);
+  value.client.state = copy(value.store.state);
+  const entered = deferred(), release = deferred(), read = value.store.getCollaborationState.bind(value.store);
+  t.after(() => release.resolve());
+  value.store.getCollaborationState = async () => {
+    const snapshot = await read();
+    if (value.store.reads === 1) { entered.resolve(); await release.promise; }
+    return snapshot;
+  };
+  const repair = value.client.flushPlaceholderRepairs(value.client.epoch);
+  await entered.promise;
+  let authored;
+  // The editor queues the worker write and acknowledgment through this same
+  // barrier, so an acknowledgment cannot be overwritten by an older reload.
+  const write = value.client.withLocalWrite(async () => {
+    authored = addDurableExplicitSave(value, 'keep.txt', 'worker-ack-after-read', ['worker authored text']);
+    value.client.acceptLocalSave({ jobId: authored.id, collaboration: { key: value.client.key }, files: [authored.files[0].yours] },
+      { operations: [authored], files: [authored.files[0].yours] });
+  });
+  await Promise.resolve(); assert.equal(authored, undefined, 'The worker save waits for the readonly reload.');
+  release.resolve(); await Promise.all([repair, write]);
+  assert.deepEqual(value.client.room().outbox, [blocked, authored]);
+  assert.deepEqual(value.client.fileBase('keep.txt').translations, ['worker authored text']);
+  assert.deepEqual(value.store.state.rooms[value.client.key].outbox, [blocked, authored]);
+  assert.equal(value.store.workspace.placeholderRepairArchive['queued-repair-0'].status, 'pending');
+  assert.equal(value.store.writes, 0); assert.equal(value.remote.length, 0); assert.equal(value.server.requests.length, 0);
+});
+
+test('a readonly repair reload from an old account cannot replace the new room or notify its editor', async t => {
+  const value = await queuedPlaceholderFixture(1); t.after(() => value.client.destroy());
+  const entered = deferred(), release = deferred(), read = value.store.getCollaborationState.bind(value.store);
+  value.store.getCollaborationState = async () => {
+    const snapshot = await read(); entered.resolve(); await release.promise; return snapshot;
+  };
+  const repair = value.client.flushPlaceholderRepairs(value.client.epoch);
+  const rejection = assert.rejects(repair, error => error.stale === true);
+  await entered.promise;
+  const oldRoom = value.client.room(), identity = { ...oldRoom.identity, accountId: 'other-account' }, nextKey = P.scopeKey(identity);
+  value.client.disconnect();
+  const nextState = { version: 1, rooms: { [nextKey]: { ...copy(oldRoom), identity, placeholderRepairs: [], outbox: [] } } };
+  value.client.state = copy(nextState); value.client.key = nextKey;
+  value.store.state = copy(nextState); value.store.workspace.collaborationAccountId = identity.accountId;
+  const workspaceBefore = copy(value.store.workspace), remoteBefore = value.remote.length;
+  let notifications = 0; value.client.onChange = () => { notifications++; };
+  release.resolve(); await rejection;
+  assert.deepEqual(value.client.state, nextState); assert.deepEqual(value.store.state, nextState);
+  assert.deepEqual(value.store.workspace, workspaceBefore);
+  assert.equal(value.store.writes, 0); assert.equal(value.remote.length, remoteBefore); assert.equal(notifications, 0);
 });

@@ -201,6 +201,14 @@
       this.state = state; this.notify();
       return this.room();
     }
+    async refreshStored(epoch = this.epoch) {
+      const key = this.key;
+      if (!this.current(epoch)) throw staleError();
+      const state = await this.store.getCollaborationState();
+      if (!this.current(epoch) || this.key !== key || !state?.rooms?.[key]) throw staleError();
+      this.state = state; this.notify();
+      return this.room();
+    }
     async api(path, options, epoch = this.epoch) {
       if (!this.current(epoch)) throw staleError();
       const result = await this.request(ROOT + path, options || {}, this.context);
@@ -814,40 +822,91 @@
       } while (more);
     }
     async finishPlaceholderRepair(repair, files, status, epoch) {
+      return this.finishPlaceholderRepairs([{ repair, files, status }], epoch);
+    }
+    placeholderRepairIndex(room) {
+      const repairs = room.placeholderRepairs || [], outbox = room.outbox;
+      const blocked = new Set();
+      for (const operation of outbox) for (const entry of operation.files) blocked.add(entry.yours.filepath);
+      return { room, repairs, outbox, outboxLength: outbox.length,
+        byId: new Map(repairs.map(repair => [repair.id, repair])), blocked };
+    }
+    localPlaceholderRepair(room, repair, blocked) {
+      if (!repair || blocked.has(repair.filepath)) return null;
+      const shared = room.shared[repair.filepath];
+      if (!shared) return { repair, file: { ...this.baselineStates[repair.filepath], stagingReset: true }, status: 'local' };
+      if (shared.stagingReset || shared.revision !== repair.baseRevision || shared.needsReview
+        || !shared.trackedForExport || !P.equal(shared.translations, this.baselineStates[repair.filepath]?.translations)) {
+        return { repair, file: shared, status: shared.stagingReset ? 'repaired' : 'superseded' };
+      }
+      return null;
+    }
+    async finishLocalPlaceholderRepairs(ids, epoch) {
+      return this.finishPlaceholderRepairs([], epoch, ids);
+    }
+    async finishPlaceholderRepairs(completions, epoch, localIds = []) {
+      if (!completions.length && !localIds.length) return;
+      let completed = [], files = [];
       await this.update((state, room) => {
+        // Recheck the durable snapshot: a worker or another tab may have saved
+        // an explicit translation after the read-only refresh.
+        completed = completions.slice();
+        if (localIds.length) {
+          const index = this.placeholderRepairIndex(room);
+          for (const id of localIds) {
+            const local = this.localPlaceholderRepair(room, index.byId.get(id), index.blocked);
+            if (local) completed.push({ repair: local.repair, files: [local.file], status: local.status });
+          }
+        }
+        if (!completed.length) return;
+        const byPath = new Map();
+        for (const item of completed) for (const file of item.files) {
+          const previous = byPath.get(file.filepath);
+          if (!previous || file.revision >= previous.revision) byPath.set(file.filepath, file);
+        }
+        files = [...byPath.values()];
         for (const file of files) if (file.revision > 0 && (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision)) {
           room.shared[file.filepath] = fileState(file);
         }
-        room.placeholderRepairs = (room.placeholderRepairs || []).filter(item => item.id !== repair.id);
+        const finished = new Set(completed.map(item => item.repair.id));
+        room.placeholderRepairs = (room.placeholderRepairs || []).filter(repair => !finished.has(repair.id));
         this.rebuild(room);
       }, { projectWorkspace: (workspace, state) => {
+        if (!completed.length) return undefined;
         const projected = this.projection(files, epoch)(workspace, state);
-        if (projected?.placeholderRepairArchive?.[repair.id]) projected.placeholderRepairArchive[repair.id].status = status;
+        for (const item of completed) if (projected?.placeholderRepairArchive?.[item.repair.id]) {
+          projected.placeholderRepairArchive[item.repair.id].status = item.status;
+        }
         return projected;
       } }, epoch);
-      await this.onRemote(files.map(file => copy(this.room().local[file.filepath] || file)));
+      if (completed.length) await this.onRemote(files.map(file => copy(this.room().local[file.filepath] || file)));
       if (!this.current(epoch)) throw staleError();
     }
     async flushPlaceholderRepairs(epoch) {
       if (this.room().mode !== 'sparse') return;
       this.placeholderRepairError = null;
+      if (!this.room().placeholderRepairs?.length) return;
+      // Refresh once without rewriting the full collaboration cache. Migration
+      // can queue thousands of local-only repairs, all committed in one batch.
+      await this.withLocalWrite(() => this.refreshStored(epoch));
       const ids = (this.room().placeholderRepairs || []).map(item => item.id);
+      let index = this.placeholderRepairIndex(this.room());
+      const local = ids.filter(id => this.localPlaceholderRepair(index.room, index.byId.get(id), index.blocked));
+      await this.finishLocalPlaceholderRepairs(local, epoch);
+      const deferredLocal = [];
+      const completed = [];
+      const flushCompleted = async () => {
+        const completions = completed.splice(0), localIds = deferredLocal.splice(0);
+        await this.finishPlaceholderRepairs(completions, epoch, localIds);
+      };
       for (const id of ids) {
-        // Reload durable state after any worker save before touching its file.
-        await this.update(() => {}, {}, epoch);
-        const repair = this.room().placeholderRepairs?.find(item => item.id === id);
+        const room = this.room();
+        if (index.room !== room || index.outbox !== room.outbox || index.outboxLength !== room.outbox.length
+          || index.repairs !== room.placeholderRepairs) index = this.placeholderRepairIndex(room);
+        const repair = index.byId.get(id);
         if (!repair) continue;
-        if (this.room().outbox.some(op => op.files.some(entry => entry.yours.filepath === repair.filepath))) continue;
-        const shared = this.room().shared[repair.filepath];
-        if (!shared) {
-          await this.finishPlaceholderRepair(repair, [{ ...this.baselineStates[repair.filepath], stagingReset: true }], 'local', epoch);
-          continue;
-        }
-        if (shared.stagingReset || shared.revision !== repair.baseRevision || shared.needsReview
-          || !shared.trackedForExport || !P.equal(shared.translations, this.baselineStates[repair.filepath]?.translations)) {
-          await this.finishPlaceholderRepair(repair, [shared], shared.stagingReset ? 'repaired' : 'superseded', epoch);
-          continue;
-        }
+        if (index.blocked.has(repair.filepath)) continue;
+        if (this.localPlaceholderRepair(room, repair, index.blocked)) { deferredLocal.push(id); continue; }
         try {
           this.onWork({ key: 'placeholder-repair', label: 'Correcting saved translation status', active: true });
           const result = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/placeholder-repairs', {
@@ -857,23 +916,29 @@
           if (!Array.isArray(result.files) || !result.files.some(file => file.filepath === repair.filepath)) {
             throw new Error('Saved status repair response has no committed file state.');
           }
-          await this.finishPlaceholderRepair(repair, result.files, 'repaired', epoch);
+          completed.push({ repair, files: result.files, status: 'repaired' });
+          // Preserve each server mutation's stable ID while amortizing the
+          // full durable cache and workspace projection across a bounded batch.
+          if (completed.length >= 32) await flushCompleted();
         } catch (error) {
           if (error.stale || !this.current(epoch)) throw staleError();
           if (error.code === 'PLACEHOLDER_REPAIR_CONFLICT') {
+            await flushCompleted();
             await this.acceptSnapshot(await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/snapshot', {}, epoch), epoch);
             const current = this.room().shared[repair.filepath];
-            await this.finishPlaceholderRepair(repair, current ? [current] : [], 'protected', epoch);
+            completed.push({ repair, files: current ? [current] : [], status: 'protected' });
             continue;
           }
           if (error.status === 404) error.message = 'Saved status repair requires an updated collaboration API. Your translations are preserved.';
           this.placeholderRepairError = error;
           // Ordinary saves remain free to synchronize while this repair retries.
+          await flushCompleted();
           return;
         } finally {
           if (epoch === this.epoch) this.onWork({ key: 'placeholder-repair', active: false });
         }
       }
+      await flushCompleted();
     }
     async flush(epoch) {
       const blocked = new Set();
