@@ -9,6 +9,7 @@ const TEST_MODE = (() => {
 })();
 const URL_LANG = urlParams.get('lang');
 const ZIP_TXT_FILE_COUNT_THRESHOLD = 5000;
+const FILE_SEARCH_DELAY = 250;
 const DIAGNOSTIC_SCAN_TYPES = [
   { key: 'whitespace', label: 'Whitespace', description: 'Leading, trailing, and repeated spaces.' },
   { key: 'dash', label: 'Dash spacing', description: 'Dashes at line boundaries or next to spaces.' },
@@ -387,6 +388,9 @@ const config = Vue.defineComponent({
     }
   },
   beforeUnmount() {
+    clearTimeout(this._fileSearchTimer);
+    this._fileSearchTimer = null;
+    this._fileSearchSnapshot = null;
     this._settingsSaveDisposed = true;
     clearTimeout(this._settingsSaveTimer);
     window.removeEventListener('beforeunload', this._settingsSaveBeforeUnload);
@@ -4597,6 +4601,7 @@ const config = Vue.defineComponent({
     },
     async saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
       if (this.editorLoading || this.editorLoadError || this.navigationBusy || this.editorSaving || this.collaborationConflictVisible || this.collaborationHistoryVisible) return false;
+      if (!this.editorVisible && this._fileSearchTimer != null) this.applyFileSearch();
       this.navigationBusy = true;
       const ctx = this.captureCollaborationContext?.();
       const cancelRevision = this._editorOpenCancelRevision || 0;
@@ -5395,6 +5400,7 @@ const config = Vue.defineComponent({
       // keep their native arrow behavior, even while the workspace is visible.
       if ((!isSearchArrow && this.isFileNavigationInput(target))
         || target?.closest?.('.fileFilters, [role="tablist"], [role="menu"], [role="listbox"]')) return false;
+      if (isSearchArrow && this._fileSearchTimer != null) this.applyFileSearch();
       const rows = this.descsDisplay;
       if (!rows.length) return false;
       let index = Math.max(0, rows.findIndex(row => row.filepath === this.selectedFilepath));
@@ -5441,16 +5447,34 @@ const config = Vue.defineComponent({
       this.$refs.fileFiltersButton?.focus();
     },
     resetFileSearch() {
+      clearTimeout(this._fileSearchTimer);
+      this._fileSearchTimer = null;
+      this._fileSearchComposing = false;
       this.searchText = '';
       this.selectedFileFilters = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
       this.currentPage = 1;
       this.filterDesc();
     },
-    fileSearchChanged() {
+    fileSearchChanged(event) {
+      clearTimeout(this._fileSearchTimer);
+      this._fileSearchTimer = null;
+      this._fileSearchComposing = this.isImeComposingEvent(event) || !!event?.target?.composing;
+      if (this._fileSearchComposing) return;
+      if (!this.searchText.trim()) {
+        this.applyFileSearch();
+        return;
+      }
+      this._fileSearchTimer = setTimeout(() => this.applyFileSearch(), FILE_SEARCH_DELAY);
+    },
+    applyFileSearch(event) {
+      if (this._fileSearchComposing || this.isImeComposingEvent(event) || event?.target?.composing) return;
+      clearTimeout(this._fileSearchTimer);
+      this._fileSearchTimer = null;
       this.currentPage = 1;
-      this.filterDesc();
+      this.filterDesc({ searchOnly: true });
     },
     clearFileSearch() {
+      this._fileSearchComposing = false;
       this.searchText = '';
       this.fileSearchChanged();
       this.$refs.searchInput?.focus();
@@ -5466,70 +5490,87 @@ const config = Vue.defineComponent({
       cache.set(source, { lines: [...source], html });
       return html;
     },
-    filterDesc() {
-      this.invalidateEditorLookupIndex?.();
-      // Build the list before publishing it so thousands of rows do not each
-      // pass through Vue's reactive array and counter updates during a save.
-      const filtered = [];
-      const counts = { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
+    filterDesc({ searchOnly = false } = {}) {
       const hideDNT = this.hideDNT;
       const lang = this.lang;
       const selectedFilters = this.selectedFileFilters.map(key => key === 'review' ? 'dropped' : key === 'edited' ? 'revised' : key);
       if (this.selectedFileFilters.some(key => key === 'review' || key === 'edited')) this.selectedFileFilters = [...new Set(selectedFilters)];
-      const search = this.searchText.toLocaleLowerCase();
+      // Data refreshes keep the settled query while the user is still typing.
+      const query = this._fileSearchTimer != null || this._fileSearchComposing ? (this._fileSearchAppliedText || '') : this.searchText;
+      const search = query.toLocaleLowerCase();
       const hasSearch = !!search.trim();
       const diagnosticResults = this.diagnosticScanResults;
-      for (const desc of this.descs) {
-        if (hideDNT && desc.isDNT) continue;
-        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
-        const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, lang) : desc;
-        if (state.hasChanges) counts.hasChanges++;
-        if (state.isRevised) counts.isRevised++;
-        if (state.isMissing) counts.isMissing++;
-        if (state.isDropped) counts.isDropped++;
+      const descs = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
+      const workspace = Vue.toRaw ? Vue.toRaw(this.localDescs) : this.localDescs;
+      const filters = selectedFilters.join(',');
+      let snapshot = this._fileSearchSnapshot;
+      if (!searchOnly || !snapshot || snapshot.descs !== descs || snapshot.workspace !== workspace
+        || snapshot.lang !== lang || snapshot.game !== this.gameVersion || snapshot.source !== this.sourceIdentity
+        || snapshot.hideDNT !== hideDNT || snapshot.filters !== filters || snapshot.diagnostics !== diagnosticResults) {
+        this.invalidateEditorLookupIndex?.();
+        const entries = [];
+        const counts = { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
+        // Read raw data once and prepare a replaced display/search snapshot.
+        // Typing then only searches strings, without recalculating statuses,
+        // copying translation arrays, escaping HTML, or invalidating Lookup.
+        for (const desc of descs) {
+          if (hideDNT && desc.isDNT) continue;
+          const baseline = workspace?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
+          const state = baseline ? window.WorkspaceState.workspaceFile(workspace, baseline, lang) : desc;
+          if (state.hasChanges) counts.hasChanges++;
+          if (state.isRevised) counts.isRevised++;
+          if (state.isMissing) counts.isMissing++;
+          if (state.isDropped) counts.isDropped++;
 
-        const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
-        const statuses = {
-          missing: !!state.isMissing,
-          saved: !!state.hasChanges,
-          revised: !!state.isRevised,
-          dropped: !!state.isDropped,
-          unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
-          diagnosticError: !!diagnosticResult?.hasDiagnosticError,
-          diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
-        };
-        if (!selectedFilters.some(key => statuses[key])) continue;
+          const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
+          const statuses = {
+            missing: !!state.isMissing,
+            saved: !!state.hasChanges,
+            revised: !!state.isRevised,
+            dropped: !!state.isDropped,
+            unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
+            diagnosticError: !!diagnosticResult?.hasDiagnosticError,
+            diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
+          };
+          if (!selectedFilters.some(key => statuses[key])) continue;
 
-        if (
-          !hasSearch ||
-          desc.filepath.toLocaleLowerCase().includes(search) ||
-          desc.translations.English?.join("\n").toLocaleLowerCase().includes(search) ||
-          desc.translations[lang]?.join("\n").toLocaleLowerCase().includes(search)
-        ) {
-          const englishHtml = this.renderFileListLines(desc.translations.English || []);
-          const translationHtml = this.renderFileListLines(desc.translations[lang] || []);
-          filtered.push({
-            filepath: desc.filepath,
-            filedir: desc.filedir,
-            filename: desc.filename,
-            english: englishHtml,
-            translation: translationHtml,
-            isMissing: !!state.isMissing,
-            hasChanges: !!state.hasChanges,
-            isRevised: !!state.isRevised,
-            isDropped: !!state.isDropped,
-            hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
-            hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
-            diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
-            diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
-            diagnosticScanTitle: this.getDiagnosticScanTitle(diagnosticResult),
+          const english = desc.translations.English || [];
+          const translation = desc.translations[lang] || [];
+          entries.push({
+            path: desc.filepath.toLocaleLowerCase(),
+            english: english.join('\n').toLocaleLowerCase(),
+            translation: translation.join('\n').toLocaleLowerCase(),
+            row: {
+              filepath: desc.filepath,
+              filedir: desc.filedir,
+              filename: desc.filename,
+              english: this.renderFileListLines(english),
+              translation: this.renderFileListLines(translation),
+              isMissing: !!state.isMissing,
+              hasChanges: !!state.hasChanges,
+              isRevised: !!state.isRevised,
+              isDropped: !!state.isDropped,
+              hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
+              hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
+              diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
+              diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
+              diagnosticScanTitle: this.getDiagnosticScanTitle(diagnosticResult),
+            },
           });
         }
+        snapshot = { descs, workspace, lang, game: this.gameVersion, source: this.sourceIdentity,
+          hideDNT, filters, diagnostics: diagnosticResults, entries };
+        this._fileSearchSnapshot = Vue.markRaw ? Vue.markRaw(snapshot) : snapshot;
+        Object.assign(this.statistic, counts);
       }
+      const filtered = [];
+      for (const entry of snapshot.entries) {
+        if (!hasSearch || entry.path.includes(search) || entry.english.includes(search) || entry.translation.includes(search)) filtered.push(entry.row);
+      }
+      this._fileSearchAppliedText = query;
       // Rows are a replaced display snapshot. Tracking every field of 20,000
       // derived rows makes the next render expensive even for a one-file save.
       this.filteredDescs = Vue.markRaw ? Vue.markRaw(filtered) : filtered;
-      Object.assign(this.statistic, counts);
       Vue.nextTick(() => {
         if (this.currentPage > this.pageCount) this.gotoPage(1);
         if (this.currentPage < 1) this.gotoPage(1);

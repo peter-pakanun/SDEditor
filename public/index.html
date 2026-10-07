@@ -330,7 +330,7 @@
             <div class="searchField">
               <label class="srOnly" for="searchInp">Search files and translations</label>
               <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
-              <input id="searchInp" ref="searchInput" type="search" placeholder="Search filenames, English, or translations…" v-model="searchText" @input="fileSearchChanged" @keydown.esc.stop.prevent="clearFileSearch">
+              <input id="searchInp" ref="searchInput" type="search" placeholder="Search filenames, English, or translations…" v-model="searchText" @input="fileSearchChanged" @keydown.enter.stop.prevent="applyFileSearch" @keydown.esc.stop.prevent="clearFileSearch">
               <button v-if="searchText" class="clearSearch" @click="clearFileSearch">Clear</button>
               <kbd v-else>{{ filterShortcutCtrlD ? 'Ctrl D' : 'Ctrl F' }}</kbd>
               <button ref="fileFiltersButton" class="filterToggle" :class="{ active: fileFiltersVisible }" @click="fileFiltersVisible = !fileFiltersVisible" :aria-expanded="fileFiltersVisible" aria-controls="fileFilterPanel" aria-label="Filters" title="Filters">

@@ -42,7 +42,7 @@ For more details, see the [**Import Workflow**](import_workflow.md).
 
 ### Finding Files and Navigating Pages
 
-The main action header stays visible while you scroll, with labeled controls for exporting, settings, importing, and diagnostic scans. Search the file list by name, English source, or translation using the search field in this sticky navigation bar.
+The main action header stays visible while you scroll, with labeled controls for exporting, settings, importing, and diagnostic scans. Search the file list by name, English source, or translation using the search field in this sticky navigation bar. Results update after typing pauses for 250 ms; press **Enter** to apply the search immediately. Clearing the field or pressing **Esc** restores the list immediately, keeping the selected status filters.
 
 Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Revised translations**, **Dropped translations**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
 

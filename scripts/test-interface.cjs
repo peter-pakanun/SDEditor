@@ -4,13 +4,40 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+function fakeTimers() {
+  const pending = new Map();
+  let now = 0, nextId = 1;
+  return {
+    setTimeout(callback, delay = 0, ...args) {
+      const id = nextId++;
+      pending.set(id, { at: now + Math.max(0, Number(delay) || 0), callback, args });
+      return id;
+    },
+    clearTimeout(id) { pending.delete(id); },
+    advance(milliseconds) {
+      const until = now + milliseconds;
+      while (true) {
+        const next = [...pending].filter(([, timer]) => timer.at <= until)
+          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+        if (!next) break;
+        const [id, timer] = next;
+        pending.delete(id); now = timer.at;
+        timer.callback(...timer.args);
+      }
+      now = until;
+    },
+    get pendingCount() { return pending.size; },
+  };
+}
+
 function loadEditor() {
   let config;
   const directives = {};
   let searchFocusCount = 0;
+  const timers = fakeTimers();
   const context = vm.createContext({
     window: { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } },
-    URLSearchParams, console, setTimeout, clearTimeout,
+    URLSearchParams, console, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
     document: { activeElement: null, body: { tagName: 'BODY' } },
     Vue: {
       defineComponent(value) { config = value; return value; },
@@ -30,7 +57,7 @@ function loadEditor() {
   for (const [name, getter] of Object.entries(config.computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
-  return { editor, config, context, directives, searchFocusCount: () => searchFocusCount };
+  return { editor, config, context, directives, timers, searchFocusCount: () => searchFocusCount };
 }
 
 function description(name, flags = {}, english = `English ${name}`, thai = `ภาษาไทย ${name}`) {
@@ -466,17 +493,225 @@ test('search matches filename, English, and Thai while respecting selected statu
     description('hidden-status', {}, 'Fire damage', 'ไฟ'),
   ];
   editor.searchText = 'fIrE';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   assert.deepEqual(names(editor.filteredDescs), ['Fire-file', 'source-match', 'translation-match']);
   editor.selectedFileFilters = ['saved'];
   editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['source-match', 'translation-match']);
   editor.searchText = 'ไฟ';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   assert.deepEqual(names(editor.filteredDescs), ['source-match']);
   editor.searchText = '   ';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   assert.deepEqual(names(editor.filteredDescs), ['source-match', 'translation-match']);
+});
+
+test('typing batches file searches after 250 ms and preserves results, page, and selection meanwhile', () => {
+  const { editor, timers } = loadEditor();
+  paginatedFixtures(editor);
+  editor.gotoPage(3);
+  editor.selectedFilepath = 'test/entry-45.txt';
+  const originalResults = editor.filteredDescs;
+  let searches = 0;
+  const filter = editor.filterDesc;
+  editor.filterDesc = function (...args) { searches++; return filter.apply(this, args); };
+  editor.searchText = 'S'; editor.fileSearchChanged();
+  timers.advance(249);
+  assert.equal(searches, 0);
+  assert.equal(editor.filteredDescs, originalResults);
+  assert.equal(editor.currentPage, 3);
+  assert.equal(editor.selectedFilepath, 'test/entry-45.txt');
+  editor.searchText = 'Source 05'; editor.fileSearchChanged();
+  timers.advance(249);
+  assert.equal(searches, 0, 'Each keystroke restarts the debounce delay.');
+  assert.equal(editor.filteredDescs, originalResults);
+  assert.equal(editor.currentPage, 3);
+  timers.advance(1);
+  assert.equal(searches, 1);
+  assert.deepEqual(names(editor.filteredDescs), ['entry-05']);
+  assert.equal(editor.currentPage, 1);
+  assert.equal(timers.pendingCount, 0);
+});
+
+test('clearing or resetting search applies immediately and cancels a pending query', () => {
+  for (const action of ['clearFileSearch', 'resetFileSearch']) {
+    const { editor, timers, searchFocusCount } = loadEditor();
+    paginatedFixtures(editor);
+    editor.searchText = 'Source 05'; editor.applyFileSearch();
+    editor.searchText = 'nothing matches'; editor.fileSearchChanged();
+    assert.equal(timers.pendingCount, 1);
+    editor[action]();
+    assert.equal(editor.searchText, '');
+    assert.equal(editor.filteredDescs.length, 45, action);
+    assert.equal(editor.currentPage, 1);
+    assert.equal(timers.pendingCount, 0);
+    timers.advance(1000);
+    assert.equal(editor.filteredDescs.length, 45, 'Canceled input cannot replace the cleared results.');
+    if (action === 'clearFileSearch') assert.equal(searchFocusCount(), 1);
+    else assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
+  }
+});
+
+test('blank input restores file results immediately and cancels the preceding query', () => {
+  const { editor, timers } = loadEditor();
+  paginatedFixtures(editor);
+  editor.searchText = 'Source 05'; editor.applyFileSearch();
+  editor.searchText = 'nothing'; editor.fileSearchChanged();
+  editor.searchText = '   '; editor.fileSearchChanged();
+  assert.equal(editor.filteredDescs.length, 45);
+  assert.equal(timers.pendingCount, 0);
+  timers.advance(250);
+  assert.equal(editor.filteredDescs.length, 45);
+});
+
+test('unmounting cancels a pending file search without publishing it', () => {
+  const { editor, config, context, timers } = loadEditor();
+  paginatedFixtures(editor);
+  const originalResults = editor.filteredDescs;
+  context.window.removeEventListener = () => {};
+  editor.searchText = 'Source 05'; editor.fileSearchChanged();
+  config.beforeUnmount.call(editor);
+  assert.equal(timers.pendingCount, 0);
+  timers.advance(1000);
+  assert.equal(editor.filteredDescs, originalResults);
+});
+
+test('IME composition cannot publish unfinished file search text or flush it with Enter', () => {
+  const { editor, timers } = loadEditor();
+  paginatedFixtures(editor);
+  const originalResults = editor.filteredDescs;
+  editor.searchText = 'Source'; editor.fileSearchChanged();
+  editor.searchText = '仮'; editor.fileSearchChanged({ isComposing: true });
+  timers.advance(1000);
+  assert.equal(editor.filteredDescs, originalResults);
+  assert.equal(timers.pendingCount, 0, 'Composition cancels an earlier ordinary-input timer.');
+  editor.applyFileSearch({ isComposing: true });
+  editor.applyFileSearch({ keyCode: 229 });
+  assert.equal(editor.filteredDescs, originalResults);
+  editor.searchText = 'Source 05'; editor.fileSearchChanged({ isComposing: false });
+  editor.applyFileSearch({ keyCode: 229 });
+  assert.equal(editor.filteredDescs, originalResults, 'The legacy IME key code also blocks Enter after the input flag clears.');
+  assert.equal(timers.pendingCount, 1);
+  timers.advance(250);
+  assert.deepEqual(names(editor.filteredDescs), ['entry-05']);
+});
+
+test('Enter and search arrow navigation flush the latest query before using file results', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  assert.match(html, /<input\b[^>]*\bid="searchInp"[^>]*@keydown\.enter\.stop\.prevent="applyFileSearch"/);
+  for (const key of ['Enter', 'ArrowDown', 'ArrowUp']) {
+    const harness = loadEditor();
+    const { editor, timers } = harness;
+    paginatedFixtures(editor);
+    const table = attachFileList(harness);
+    editor.gotoPage(3);
+    table.document.activeElement = editor.$refs.searchInput;
+    editor.searchText = 'Source 05'; editor.fileSearchChanged();
+    const event = keyboardEvent(key, editor.$refs.searchInput);
+    if (key === 'Enter') editor.applyFileSearch(event);
+    else editor.handleFileListKeydown(event);
+    assert.deepEqual(names(editor.filteredDescs), ['entry-05'], key);
+    assert.equal(editor.currentPage, 1, key);
+    assert.equal(timers.pendingCount, 0, key);
+    if (key !== 'Enter') {
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(editor.selectedFilepath, 'test/entry-05.txt');
+      assert.equal(table.document.activeElement, table.rowElement('test/entry-05.txt'));
+    }
+  }
+});
+
+test('save-and-next or previous from the workspace flushes pending search before choosing a file', async () => {
+  for (const key of ['F2', 'F1']) {
+    const harness = loadEditor();
+    const { editor, timers } = harness;
+    paginatedFixtures(editor);
+    const table = attachFileList(harness);
+    editor.gotoPage(3);
+    editor.searchText = 'Source 05'; editor.fileSearchChanged();
+    let navigation;
+    const saveAndSkip = editor.saveAndSkipFile;
+    editor.saveAndSkipFile = function (...args) { navigation = saveAndSkip.apply(this, args); return navigation; };
+    const event = keyboardEvent(key, editor.$refs.searchInput, { code: key });
+    editor.handleKeydown(event);
+    assert.equal(event.defaultPrevented, true, key);
+    assert.equal(await navigation, true, key);
+    assert.deepEqual(table.openedFiles, ['test/entry-05.txt']);
+    assert.equal(editor.currentPage, 1);
+    assert.equal(timers.pendingCount, 0);
+  }
+  const harness = loadEditor();
+  paginatedFixtures(harness.editor);
+  const table = attachFileList(harness);
+  harness.editor.searchText = 'absent'; harness.editor.fileSearchChanged();
+  assert.equal(await harness.editor.saveAndSkipFile(false, true), false);
+  assert.deepEqual(table.openedFiles, [], 'A no-result query must never open a stale result.');
+});
+
+test('repeated file queries reuse prepared statuses, text, and rows without invalidating Lookup', () => {
+  const { editor, context, timers } = loadEditor();
+  editor.descs = [description('one', {}, 'Fire source', 'ไฟ'), description('two', {}, 'Cold source', 'เย็น')];
+  editor.localDescs = {
+    stagedVersion: 1, sourceHash: 'source', staged: { Thai: {
+      'test/one.txt': { sourceHash: 'source', translations: ['ไฟ'] },
+      'test/two.txt': { sourceHash: 'source', translations: ['เย็น'] },
+    } },
+  };
+  const source = new Map(editor.descs.map(desc => [desc.filepath, desc]));
+  editor.workspaceSourceFile = filepath => source.get(filepath);
+  const calls = { statuses: 0, rows: 0, lookup: 0 };
+  const workspaceFile = context.window.WorkspaceState.workspaceFile;
+  context.window.WorkspaceState.workspaceFile = (...args) => { calls.statuses++; return workspaceFile(...args); };
+  const render = editor.renderFileListLines;
+  editor.renderFileListLines = function (...args) { calls.rows++; return render.apply(this, args); };
+  editor.invalidateEditorLookupIndex = () => { calls.lookup++; };
+  editor.filterDesc();
+  assert.equal(calls.statuses, 2);
+  assert.ok(calls.rows >= 2);
+  const originalCounts = JSON.parse(JSON.stringify(editor.statistic));
+  calls.statuses = calls.rows = calls.lookup = 0;
+  for (const [query, expected] of [['fire', ['one']], ['ไฟ', ['one']], ['cold', ['two']], ['absent', []]]) {
+    editor.searchText = query; editor.fileSearchChanged(); timers.advance(250);
+    assert.deepEqual(names(editor.filteredDescs), expected, query);
+    assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), originalCounts);
+  }
+  assert.deepEqual(calls, { statuses: 0, rows: 0, lookup: 0 }, 'Typing only searches the prepared snapshot.');
+});
+
+test('refreshing in-place source and translation edits keeps the applied query until pending input settles', () => {
+  const { editor, timers } = loadEditor();
+  const first = description('one', { hasChanges: true }, 'Needle original', 'เก่า');
+  const second = description('two', { hasChanges: true }, 'Other', 'อื่น');
+  editor.descs = [first, second]; editor.filterDesc();
+  editor.searchText = 'needle'; editor.applyFileSearch();
+  editor.searchText = 'needle new'; editor.fileSearchChanged();
+  second.translations.English[0] = 'Needle new';
+  second.translations.Thai.push('ไฟใหม่');
+  editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['one', 'two'], 'A refresh uses the last applied query.');
+  timers.advance(250);
+  assert.deepEqual(names(editor.filteredDescs), ['two']);
+  editor.searchText = 'ไฟใหม่'; editor.applyFileSearch();
+  assert.deepEqual(names(editor.filteredDescs), ['two'], 'The refreshed translation text is searchable.');
+  assert.match(editor.filteredDescs[0].translation, /ไฟใหม่/);
+});
+
+test('switching selected language refreshes pending file search against that language only', () => {
+  const { editor, timers } = loadEditor();
+  const first = description('one', { hasChanges: true }, 'First source', 'Shared Thai');
+  const second = description('two', { hasChanges: true }, 'Second source', 'Other Thai');
+  first.translations.German = ['New Deutsch']; second.translations.German = ['Shared Deutsch'];
+  editor.descs = [first, second]; editor.filterDesc();
+  editor.searchText = 'shared'; editor.applyFileSearch();
+  assert.deepEqual(names(editor.filteredDescs), ['one']);
+  editor.searchText = 'new deutsch'; editor.fileSearchChanged();
+  editor.lang = 'German'; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['two'], 'The applied query refreshes for the selected language.');
+  timers.advance(250);
+  assert.deepEqual(names(editor.filteredDescs), ['one']);
+  assert.equal(editor.filteredDescs[0].translation, 'New Deutsch');
+  editor.searchText = 'shared thai'; editor.applyFileSearch();
+  assert.equal(editor.filteredDescs.length, 0, 'An inactive language does not leak into search.');
 });
 
 test('status totals respect Hide DNT and remain independent of search and status choices', () => {
@@ -541,7 +776,7 @@ test('search and status changes return to page one even when later pages remain 
   paginatedFixtures(editor);
   editor.gotoPage(3);
   editor.searchText = 'Source';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   assert.equal(editor.currentPage, 1);
   assert.equal(editor.pageCount, 3);
   editor.gotoPage(3);
@@ -551,7 +786,7 @@ test('search and status changes return to page one even when later pages remain 
   assert.equal(editor.pageCount, 3);
   editor.gotoPage(2);
   editor.searchText = 'nothing matches';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   assert.equal(editor.currentPage, 1);
   assert.equal(editor.fileRangeLabel, '0–0 of 0');
   editor.clearFileSearch();
@@ -1032,7 +1267,7 @@ test('selection stays visible after sorting, page changes, or a search, and clea
   config.watch.descsDisplay.call(editor);
   assert.ok(editor.descsDisplay.some(row => row.filepath === editor.selectedFilepath));
   editor.searchText = 'Source 05';
-  editor.fileSearchChanged();
+  editor.applyFileSearch();
   config.watch.descsDisplay.call(editor);
   assert.equal(editor.selectedFilepath, 'test/entry-05.txt');
   editor.selectedFileFilters = [];

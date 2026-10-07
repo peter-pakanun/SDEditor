@@ -42,6 +42,12 @@ Run `node scripts/editor-opening-browser-fixture.cjs` and open the loopback URL 
 
 Use **Hold preparation for layout check**, then open a file. Source/translation text and preview should already be visible, fields read-only, Save and Apply regex disabled, and highlight layers absent. **Finish preparation** adds highlights and enables editing without replacing or moving the fields. Also test **Close** and **Escape** during the hold: the file must stay closed with no partial draft. The fixture is separate from the normal server and is intended for local comparisons, not production timing guarantees.
 
+## Large Workspace Search Fixture
+
+Run `node scripts/workspace-search-browser-fixture.cjs` and open its loopback URL. Click **Load 20,000 files**, then **Run search benchmark** to measure prepared local searches. **Simulate fast typing** sends four input events 45 ms apart and reports the number of searches and the longest synchronous input event. It should apply one search after typing stops. The fixture has Thai/German and all four theme controls; also check Clear, Escape, Enter, and arrow navigation from the main search field.
+
+Use `--baseline <path-to-old-index.js>` to compare with an earlier implementation. The fixture keeps its immutable source separate from staged translations and bypasses storage/cloud. Timings describe this synthetic local workspace, not production performance.
+
 ## Shared Comments Fixture
 
 Run `node scripts/comments-browser-fixture.cjs` after installing dependencies in the sibling `SDEditor-API` checkout. Open either editor URL printed by the script and click its **Bootstrap Thai** or **Bootstrap German** button. These are separate loopback origins with normal IndexedDB storage and an in-memory API, using disposable accounts rather than Google sign-in. Do not add `testMode=1` to their URLs.
