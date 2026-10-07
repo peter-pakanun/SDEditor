@@ -23,7 +23,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'editorLookup.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'editorLookup.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),

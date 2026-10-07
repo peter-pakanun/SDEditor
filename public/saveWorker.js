@@ -1,6 +1,6 @@
 /* IndexedDB persistence lives off the editor's rendering thread. */
 'use strict';
-importScripts('offlineStore.js');
+importScripts('workspaceState.js', 'offlineStore.js');
 
 let saves = Promise.resolve();
 self.onmessage = event => {

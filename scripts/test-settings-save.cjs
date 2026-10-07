@@ -14,7 +14,7 @@ function harness() {
     setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout(id) { timers.delete(id); },
     Vue: { defineComponent(value) { config = value; return value; }, toRaw(value) { return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; } } });
-  for (const file of ['cloudUi.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context);
+  for (const file of ['workspaceState.js', 'cloudUi.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context);
   vm.runInContext('offlineStoreReady = true', context);
   const e = Object.assign({}, ...config.mixins.map(m => m.data?.() || {}), config.data(),
     ...config.mixins.map(m => m.methods || {}), config.methods, {

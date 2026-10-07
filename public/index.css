@@ -6,8 +6,8 @@
   --color-element-highlight: #4E6BD6;
   --color-accent: #C76519;
   --color-line-diff: rgba(210, 48, 48, 0.18);
-  --color-diagnostic-warning: rgba(255, 198, 41, 0.42);
-  --color-diagnostic-warning-border: #9B6900;
+  --color-diagnostic-warning: rgba(255, 151, 48, 0.3);
+  --color-diagnostic-warning-border: var(--ui-warning);
   --color-diagnostic-error: rgba(230, 54, 68, 0.32);
   --color-diagnostic-error-border: #B00020;
   --color-shadow: rgba(36, 48, 70, 0.22);
@@ -23,8 +23,8 @@
   --color-element-highlight: #51619bff;
   --color-accent: #D46A00;
   --color-line-diff: rgba(200, 0, 0, 0.22);
-  --color-diagnostic-warning: rgba(255, 190, 40, 0.45);
-  --color-diagnostic-warning-border: #8A5A00;
+  --color-diagnostic-warning: rgba(255, 151, 48, 0.3);
+  --color-diagnostic-warning-border: var(--ui-warning);
   --color-diagnostic-error: rgba(210, 40, 54, 0.34);
   --color-diagnostic-error-border: #A50016;
   --color-shadow: rgba(0, 0, 0, 0.3);
@@ -39,8 +39,8 @@
   --color-element-highlight: #677BC4;
   --color-accent: #FFB86B;
   --color-line-diff: rgba(255, 120, 120, 0.22);
-  --color-diagnostic-warning: rgba(255, 198, 41, 0.34);
-  --color-diagnostic-warning-border: #D69B16;
+  --color-diagnostic-warning: rgba(255, 151, 48, 0.25);
+  --color-diagnostic-warning-border: var(--ui-warning);
   --color-diagnostic-error: rgba(255, 72, 92, 0.34);
   --color-diagnostic-error-border: #FF6073;
   --color-shadow: rgba(0, 0, 0, 0.3);
@@ -988,6 +988,11 @@ tr.hasChanges>td.translationTr {
   font-weight: bold;
 }
 
+tr.isRevised>td,
+tr.isRevised:nth-child(even)>td {
+  background-color: color-mix(in srgb, var(--ui-revised) 10%, transparent);
+}
+
 tr.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.08);
 }
@@ -1000,36 +1005,36 @@ table:not(#table) tbody>tr:hover.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.3);
 }
 
-tr.needsReview>td {
-  background-color: rgba(255, 180, 0, 0.08);
+tr.isDropped>td {
+  background-color: color-mix(in srgb, var(--ui-dropped) 8%, transparent);
 }
 
-tr.needsReview:nth-child(even)>td {
-  background-color: rgba(255, 180, 0, 0.12);
+tr.isDropped:nth-child(even)>td {
+  background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
-table:not(#table) tbody>tr:hover.needsReview>td {
-  background-color: rgba(255, 180, 0, 0.3);
+table:not(#table) tbody>tr:hover.isDropped>td {
+  background-color: color-mix(in srgb, var(--ui-dropped) 30%, transparent);
 }
 
-tr.needsReview {
-  background-color: rgba(255, 180, 0, 0.08);
+tr.isDropped {
+  background-color: color-mix(in srgb, var(--ui-dropped) 8%, transparent);
 }
 
-tr.needsReview:nth-child(even) {
-  background-color: rgba(255, 180, 0, 0.12);
+tr.isDropped:nth-child(even) {
+  background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
-table:not(#table) tbody>tr:hover.needsReview {
-  background-color: rgba(255, 180, 0, 0.3);
+table:not(#table) tbody>tr:hover.isDropped {
+  background-color: color-mix(in srgb, var(--ui-dropped) 30%, transparent);
 }
 
-table#table tbody tr.needsReview td {
-  background-color: rgba(255, 180, 0, 0.08);
+table#table tbody tr.isDropped td {
+  background-color: color-mix(in srgb, var(--ui-dropped) 8%, transparent);
 }
 
-table#table tbody tr.needsReview:nth-child(even) td {
-  background-color: rgba(255, 180, 0, 0.12);
+table#table tbody tr.isDropped:nth-child(even) td {
+  background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
 table#table tbody tr.diagnosticWarning td,
@@ -1042,14 +1047,14 @@ table#table tbody tr.diagnosticError:nth-child(even) td {
   background-color: var(--color-diagnostic-error);
 }
 
-.needsReviewBanner {
+.droppedTranslationBanner {
   display: flex;
   align-items: center;
   gap: calc(0.6em * var(--density));
   margin-top: calc(0.5em * var(--density));
   padding: calc(0.4em * var(--density)) calc(0.6em * var(--density));
-  background: rgba(255, 180, 0, 0.12);
-  border: 1px solid rgba(255, 180, 0, 0.35);
+  background: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-dropped) 35%, transparent);
 }
 
 .compareBanner {

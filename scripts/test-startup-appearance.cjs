@@ -47,7 +47,7 @@ function harness(options = {}) {
   for (const match of head.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
     if (!/\bsrc\s*=/.test(match[1])) vm.runInContext(match[2], context, { filename: 'startup-bootstrap' });
   }
-  for (const name of ['cloudSync.js', 'cloudUi.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'cloudSync.js', 'cloudUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),

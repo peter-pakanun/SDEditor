@@ -26,7 +26,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {

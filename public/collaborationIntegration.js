@@ -50,6 +50,36 @@
       this.clearBrowserWork?.('collaboration');
     },
     methods: {
+      workspaceSource() {
+        return this.importBaseline?.source || this._workspaceSourceBaseline || this.descs || [];
+      },
+      workspaceSourceFile(filepath) {
+        const source = this.workspaceSource();
+        if (!this._workspaceBaselineIndex || this._workspaceBaselineIndex.source !== source) {
+          this._workspaceBaselineIndex = { source, files: new Map(source.map(desc => [desc.filepath, desc])) };
+        }
+        return this._workspaceBaselineIndex.files.get(filepath);
+      },
+      droppedCandidateMatches(candidate, current) {
+        if (!candidate || !current || candidate.originSourceHash !== current.originSourceHash) return false;
+        return ['english', 'variables', 'remarks', 'stats', 'name', 'translations'].every(field =>
+          JSON.stringify(candidate.snapshot?.[field]) === JSON.stringify(current.snapshot?.[field]));
+      },
+      capturedDroppedPromotion(filepath, candidate = this.editorDroppedCandidate) {
+        if (!candidate) return null;
+        if (this.localDescs.droppedConflicts?.[this.lang]?.[filepath]) throw new Error('Resolve the competing dropped copies before saving this file.');
+        const current = window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
+        if (!this.droppedCandidateMatches(candidate, current)) throw new Error('The dropped translation changed. Reopen this file to review the current copy.');
+        return { id: current.id, revision: current.revision || 0, targetSourceHash: this.sourceIdentity };
+      },
+      applyRemoteDropped(records, lang = this.lang, snapshot) {
+        if (lang !== this.lang) return;
+        if (snapshot) for (const field of ['dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts']) {
+          if (snapshot[field] !== undefined) this.localDescs[field] = copy(snapshot[field]);
+        }
+        else window.WorkspaceState.acceptDropped(this.localDescs, records, { game: this.gameVersion, language: lang, acknowledge: true });
+        this.applyWorkspaceOverlay(); this.filterDesc();
+      },
       async readImportZipIdentity(file, zip) {
         if (typeof file?.arrayBuffer !== 'function' || !window.CollaborationProtocol?.zipHash) return null;
         this._importZipIdentities ||= new WeakMap();
@@ -137,7 +167,9 @@
           const baseline = await this.buildImportedBaseline(oldBaseline.archive, oldBaseline.rawSource, [], archive);
           if (this.editorVisible || !this.collaborationContextCurrent(ctx) || this.importBaseline !== oldBaseline || this.localDescs !== oldWorkspace || this.descs !== oldSource) return false;
           const workspace = copy(oldWorkspace);
-          workspace.importArchive = baseline.archive; workspace.sourceHash = baseline.archive.baselineId;
+          window.WorkspaceState.upgradeSource(workspace, { previousSource: this.workspaceSource(), source: baseline.source,
+            previousSourceHash: ctx.source, sourceHash: baseline.archive.baselineId, game: ctx.game });
+          workspace.importArchive = baseline.archive;
           workspace.importRecovery ||= [];
           workspace.importRecovery.push({ sourceHash: ctx.source, at: Date.now(), reason: 'Shared import decisions', descs: copy(workspace.descs), status: copy(workspace.status) });
           const originals = new Map(oldSource.map(desc => [desc.filepath, desc]));
@@ -145,27 +177,17 @@
           const revisions = [];
           for (const desc of baseline.source) {
             const local = locals.get(desc.filepath), previous = originals.get(desc.filepath);
-            const candidate = !!local?.hasChanges || !!previous?.needsReview;
-            const previousLines = [...(local?.translations?.[ctx.language] || [])];
-            const sameLayout = JSON.stringify([previous?.translations?.English, previous?.stats, previous?.variables, previous?.remarks])
-              === JSON.stringify([desc.translations.English, desc.stats, desc.variables, desc.remarks]);
-            const lines = candidate ? Array.from({ length: desc.translations.English.length }, (_, index) => local?.translations?.[ctx.language]?.[index] || '')
-              : [...(desc.translations[ctx.language] || [])];
-            const tracked = candidate && !!local?.hasChanges && sameLayout;
+            const state = window.WorkspaceState.workspaceFile(workspace, desc, ctx.language);
+            const lines = state.translations;
+            const tracked = state.hasChanges;
             const status = workspace.status[desc.filepath] ||= {};
-            status.needsReview = candidate && !tracked;
-            if (status.needsReview) {
-              status.reviewCandidates ||= {};
-              status.reviewCandidates[ctx.language] = { sourceHash: ctx.source, translations: previousLines, savedAt: Date.now() };
-            }
-            const replacement = makeLocalDesc(desc, ctx.language, lines, { hasChanges: tracked,
-              isMissing: computeIsMissing(desc.translations.English.length, lines) });
+            window.WorkspaceState.setFileMetadata(status, ctx.language, {}, local);
+            const replacement = makeLocalDesc(desc, ctx.language, lines, { derivedStatus: true });
             if (local) {
               replacement.translations = { ...local.translations, ...replacement.translations };
+              replacement.languageStatus = { ...local.languageStatus, ...replacement.languageStatus };
               Object.assign(local, replacement);
             } else workspace.descs.push(replacement);
-            if (candidate) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: ctx.language,
-              savedAt: Date.now(), note: 'Preserved before shared import decisions', translations: previousLines, sourceHash: ctx.source });
           }
           await window.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, revisions, ctx.game, baseline);
           if (!this.collaborationContextCurrent(ctx) || this.localDescs !== oldWorkspace || this.descs !== oldSource) {
@@ -174,6 +196,7 @@
           }
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this.importBaseline = baseline; this.localDescs = workspace; this.sourceIdentity = baseline.archive.baselineId;
+          this._workspaceSourceBaseline = baseline.source; this._workspaceBaselineIndex = null;
           this.descs = copy(baseline.source); this.applyWorkspaceOverlay(); this.clearDiagnosticScanResults(); this.filterDesc();
           this.scheduleCollaboration();
           return true;
@@ -291,8 +314,13 @@
         return { typedDuringSave };
       },
       collaborationFile(desc, lang = this.lang) {
-        return { filepath: desc.filepath, translations: [...(desc.translations?.[lang] || [])],
-          needsReview: !!desc.needsReview, trackedForExport: !!desc.hasChanges };
+        const modern = this.localDescs?.stagedVersion >= 1;
+        const baseline = modern ? this.workspaceSourceFile(desc.filepath) : null;
+        const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, lang) : desc;
+        return { filepath: desc.filepath, translations: [...(baseline ? state.translations : desc.translations?.[lang] || [])],
+          // Older servers use these wire fields; current workspace status comes
+          // exclusively from staged records, never from persisted booleans.
+          needsReview: modern ? false : !!desc.needsReview, trackedForExport: !!state.hasChanges };
       },
       captureCollaborationContext() {
         return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
@@ -349,6 +377,7 @@
           onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot({ includeFiles: false }), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onWork: work => { if (this._collaboration === client) this.setBrowserWork?.('collaboration', work); },
           onRemote: files => { if (this._collaboration === client) return this.receiveCollaborationFiles(files, ctx.language); },
+          onRemoteDropped: (records, snapshot) => { if (this._collaboration === client) return this.applyRemoteDropped(records, ctx.language, snapshot); },
           onEditingConflict: ({ filepath }) => {
             const isCurrent = () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath;
             if (isCurrent()) return this.claimCollaborationFile(filepath, false, isCurrent);
@@ -454,37 +483,48 @@
         let displayChanged = false;
         const batch = this._collabDiagnosticBatch;
         const indexes = this.collaborationFileIndexes(), { descriptions, locals } = indexes;
+        window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
+          sourceHash: this.sourceIdentity, game: this.gameVersion, language: lang });
         for (let file of files || []) {
           // A remote acknowledgement or an older local save cannot hide a newer
           // edit that is still waiting for its local transaction.
           file = this._pendingSaves?.overlay(this.pendingSaveScope(), file.filepath) || file;
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
-          const translationChanged = !arrayEquals(desc.translations[lang] || [], file.translations);
-          const needsReview = !!file.needsReview, hasChanges = !!file.trackedForExport;
-          const isMissing = computeIsMissing(desc.translations.English.length, file.translations);
-          const metadataChanged = desc.needsReview !== needsReview || desc.hasChanges !== hasChanges || desc.isMissing !== isMissing;
+          const original = this.workspaceSourceFile(file.filepath) || desc;
+          if (file.needsReview) {
+            if (!window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang)
+              && (file.translations || []).some(text => String(text).trim())) {
+              window.WorkspaceState.dropTranslation(this.localDescs, original, lang, {
+                game: this.gameVersion, translations: file.translations, originSourceHash: '', originSourceAvailable: false,
+                targetSourceHash: this.sourceIdentity, reason: 'Recovered dropped translation',
+              });
+            }
+          } else if (file.trackedForExport || file.revision > 0) window.WorkspaceState.stageTranslation(this.localDescs, file, lang,
+            { source: original, sourceHash: this.sourceIdentity, game: this.gameVersion });
+          const state = window.WorkspaceState.workspaceFile(this.localDescs, original, lang);
+          const translationChanged = !arrayEquals(desc.translations[lang] || [], state.translations);
+          const needsReview = state.needsReview, hasChanges = state.hasChanges, isMissing = state.isMissing;
+          const metadataChanged = desc.needsReview !== needsReview || desc.hasChanges !== hasChanges
+            || desc.isMissing !== isMissing || desc.isRevised !== state.isRevised || desc.isDropped !== state.isDropped;
           const local = locals.get(file.filepath);
-          const localChanged = !local || !arrayEquals(local.translations?.[lang] || [], file.translations)
-            || !arrayEquals(local.translations?.English || [], desc.translations.English)
-            || local.hasChanges !== hasChanges || local.isMissing !== isMissing;
-          const statusChanged = this.localDescs.status[file.filepath]?.needsReview !== needsReview;
-          if (!translationChanged && !metadataChanged && !localChanged && !statusChanged) continue;
+          const localChanged = !local || !arrayEquals(local.translations?.[lang] || [], state.translations)
+            || !arrayEquals(local.translations?.English || [], desc.translations.English);
+          if (!translationChanged && !metadataChanged && !localChanged) continue;
           displayChanged ||= translationChanged || metadataChanged;
           if (translationChanged) {
             const expected = batch?.expected.get(file.filepath);
             if (expected && this.collaborationContextCurrent(batch.context)
-              && JSON.stringify(expected) === JSON.stringify(file.translations)) batch.touched = true;
+              && JSON.stringify(expected) === JSON.stringify(state.translations)) batch.touched = true;
             else changedFilepaths.push(file.filepath);
           }
-          if (translationChanged) desc.translations[lang] = [...file.translations];
-          if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; }
-          if (local && localChanged) updateLocalDesc(local, desc, lang, file.translations, { hasChanges, isMissing });
+          if (translationChanged) desc.translations[lang] = [...state.translations];
+          if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; desc.isRevised = state.isRevised; desc.isDropped = state.isDropped; }
+          if (local && localChanged) updateLocalDesc(local, desc, lang, state.translations, { derivedStatus: true });
           else if (!local) {
-            const added = makeLocalDesc(desc, lang, file.translations, { hasChanges: desc.hasChanges, isMissing: desc.isMissing });
+            const added = makeLocalDesc(desc, lang, state.translations, { derivedStatus: true });
             this.localDescs.descs.push(added); locals.set(file.filepath, added);
           }
-          if (statusChanged) this.localDescs.status[file.filepath] = { ...(this.localDescs.status[file.filepath] || {}), needsReview };
         }
         indexes.localLength = this.localDescs.descs.length;
         if (batchState) { batchState.displayChanged ||= displayChanged; return; }
@@ -519,26 +559,43 @@
         this._translationWrites = (this._translationWrites || 0) + 1;
         try {
           const ctx = options.context || this.captureCollaborationContext();
+          if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
+            sourceHash: ctx.source, game: ctx.game, language: ctx.language });
+          const promotions = { ...(options.promoteDroppedByPath || {}) };
+          for (const { desc } of updates) {
+            const candidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, ctx.language);
+            if (candidate) promotions[desc.filepath] ||= this.capturedDroppedPromotion(desc.filepath, candidate);
+          }
+          if (options.promoteDropped && updates.length === 1) promotions[updates[0].desc.filepath] = options.promoteDropped;
+          const promotion = updates.length === 1 ? promotions[updates[0].desc.filepath] : null;
+          const hasPromotions = Object.keys(promotions).length > 0;
           if (origin === 'save' && !this.testMode && this.initializePendingSaves()) {
             if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+            window.WorkspaceState.scopeWorkspace(this.localDescs, ctx.language);
             const now = Date.now();
-            const files = updates.map(({ desc, lines, needsReview }) => ({ filepath: desc.filepath, translations: [...lines], needsReview: needsReview ?? false, trackedForExport: true }));
-            const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath, {
-              ...(this.localDescs.status?.[desc.filepath] || {}), needsReview: files[index].needsReview, lastEditedAt: now, lastTranslatedAt: now,
-            }]));
+            const files = updates.map(({ desc, lines }) => ({ filepath: desc.filepath, translations: [...lines], needsReview: false,
+              trackedForExport: true, beforeTranslations: [...(desc.translations?.[ctx.language] || [])] }));
+            const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath,
+              window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language,
+                { lastEditedAt: now, lastTranslatedAt: now })]));
             const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
-              files, statuses, descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
-                { hasChanges: true, isMissing: computeIsMissing(desc.translations.English.length, files[index].translations) })),
+              files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
+              descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
+                { derivedStatus: true })),
               revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
                 lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
                 isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source })),
               ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity),
                 bases: copy(Object.fromEntries(files.map(file => [file.filepath,
-                  Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin } } : {}),
+                  Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin,
+                ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}) } } : {}),
             };
             this._pendingSaves.enqueue(batch, { context: ctx });
             ctx.client?.stageLocalSave(batch);
             for (const file of files) this.localDescs.status[file.filepath] = statuses[file.filepath];
+            for (const file of files) window.WorkspaceState.stageTranslation(this.localDescs, file, ctx.language,
+              { source: this.workspaceSourceFile(file.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[file.filepath] });
             this.applyCollaborationFiles(files, ctx.language);
             // Close in the same turn as the optimistic update so Vue paints the
             // file list without first rendering the outgoing editor again.
@@ -548,25 +605,30 @@
           if (this._pendingSaves && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before continuing.');
           // Collaboration projects saved files onto the latest durable workspace.
           // Ordinary saves only need to stage their metadata, not clone the archive.
-          const incremental = !!ctx.client && origin === 'save' && !options.workspace;
+          const incremental = !!ctx.client && origin === 'save' && !options.workspace && !hasPromotions;
           const workspace = options.workspace || (incremental ? { descs: [], status: {} } : this.toPlainForStorage(this.localDescs));
           workspace.descs ||= []; workspace.status ||= {};
+          window.WorkspaceState.scopeWorkspace(workspace, ctx.language);
           const now = Date.now();
           const revisions = options.revisions || [];
           const files = updates.map(update => {
             const desc = update.desc;
             const lines = [...update.lines];
-            const needsReview = update.needsReview ?? desc.needsReview ?? false;
+            const needsReview = false;
             const isMissing = computeIsMissing(desc.translations.English.length, lines);
             const local = workspace.descs.find(d => d.filepath === desc.filepath);
-            if (local) updateLocalDesc(local, desc, ctx.language, lines, { hasChanges: true, isMissing });
-            else workspace.descs.push(makeLocalDesc(desc, ctx.language, lines, { hasChanges: true, isMissing }));
-            workspace.status[desc.filepath] = { ...(incremental ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]), needsReview,
-              lastEditedAt: now, lastTranslatedAt: now };
+            if (local) updateLocalDesc(local, desc, ctx.language, lines, { derivedStatus: true });
+            else workspace.descs.push(makeLocalDesc(desc, ctx.language, lines, { derivedStatus: true }));
+            workspace.status[desc.filepath] = window.WorkspaceState.setFileMetadata(
+              copy((incremental ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]) || {}), ctx.language,
+              { lastEditedAt: now, lastTranslatedAt: now });
             if (!options.revisions) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
               lang: ctx.language, savedAt: now, note: origin, translations: lines, isMissing,
               ...(ctx.source ? { sourceHash: ctx.source } : {}) });
-            return { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true };
+            const file = { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true };
+            window.WorkspaceState.stageTranslation(workspace, file, ctx.language,
+              { source: this.workspaceSourceFile(desc.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[desc.filepath] });
+            return file;
           });
           let result = { status: 'local' };
           const previousBatch = this._collabDiagnosticBatch;
@@ -575,17 +637,21 @@
           try {
             if (!this.testMode) {
               if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases: options.bases, restore: options.restore,
-                waitForSync: origin !== 'save' });
+                waitForSync: origin !== 'save', promoteDropped: promotion, promoteDroppedByPath: promotions });
               else await window.OfflineStore.saveWorkspaceWithRevisions(workspace, revisions, ctx.game);
             }
             if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
             if (incremental) {
               // Keep unrelated remote updates that arrived while the transaction
               // committed instead of replacing them with an older workspace copy.
-              for (const file of files) this.localDescs.status[file.filepath] = {
-                ...(this.localDescs.status[file.filepath] || {}), ...workspace.status[file.filepath],
-              };
-            } else this.localDescs = workspace;
+              for (const file of files) this.localDescs.status[file.filepath] = window.WorkspaceState.setFileMetadata(
+                this.localDescs.status[file.filepath] || {}, ctx.language, workspace.status[file.filepath]);
+            } else {
+              const committed = ctx.client && !this.testMode && window.OfflineStore.getWorkspace
+                ? await window.OfflineStore.getWorkspace(ctx.game, ctx.language) : null;
+              if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
+              this.localDescs = committed || workspace;
+            }
             // Each submitted file may include independent remote changes. Remote
             // callbacks already apply other files; avoid rewriting the whole list.
             const effective = incremental ? files.map(file => ctx.client.fileBase(file.filepath) || file) : ctx.client?.snapshot()?.files;
@@ -656,23 +722,33 @@
         try {
           if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) throw new Error('Finish pending local saves before recovering a translation.');
           if (!this.collaborationContextCurrent(context)) return { stale: true };
-          const file = { filepath: desc.filepath, translations: [...lines], needsReview: true, trackedForExport: false };
           const now = Date.now();
-          const status = { ...(this.localDescs.status?.[desc.filepath] || {}), needsReview: true,
-            reviewCandidates: { ...(this.localDescs.status?.[desc.filepath]?.reviewCandidates || {}),
-              [context.language]: { sourceHash: context.source, savedAt: now, translations: [...lines] } } };
+          const source = copy(this.workspaceSourceFile(desc.filepath) || desc);
+          const id = crypto.randomUUID();
+          const candidate = { id, recoveryId: id, game: context.game, language: context.language, filepath: desc.filepath,
+            originSourceHash: context.source, targetSourceHash: context.source, originSourceAvailable: true,
+            reason: 'Recovered translation', snapshot: { name: source.name || '', english: [...source.translations.English],
+              variables: copy(source.variables || []), remarks: copy(source.remarks || []), stats: copy(source.stats || []), translations: [...lines] } };
           const revisions = [{ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: context.language,
-            savedAt: now, note: 'Recovered translation · Needs Review', needsReview: true, translations: [...lines], sourceHash: context.source }];
-          const result = context.client?.registerLocalCandidate
-            ? await context.client.registerLocalCandidate(file, { revisions, status })
-            : await window.OfflineStore.saveTranslationBatch({ jobId: crypto.randomUUID(), game: context.game,
-            language: context.language, sourceHash: context.source, accountId: context.account, files: [file],
-            statuses: { [desc.filepath]: status }, descriptions: [makeLocalDesc(desc, context.language, lines,
-              { hasChanges: false, isMissing: computeIsMissing(desc.translations.English.length, lines) })],
-            revisions });
+            savedAt: now, note: 'Recovered dropped translation', needsReview: true, translations: [...lines], sourceHash: context.source }];
+          let result;
+          if (context.client?.registerDroppedCandidate) result = await context.client.registerDroppedCandidate(candidate, { revisions });
+          else {
+            const recover = workspace => {
+              if (!this.collaborationContextCurrent(context) || workspace.sourceHash !== context.source) throw new Error('The workspace changed before recovery.');
+              window.WorkspaceState.initializeWorkspace(workspace, { source: this.workspaceSource(), sourceHash: context.source,
+                game: context.game, language: context.language });
+              window.WorkspaceState.dropTranslation(workspace, source, context.language, { ...candidate, snapshot: candidate.snapshot });
+              return workspace;
+            };
+            const workspace = this.testMode ? recover(copy(this.localDescs))
+              : await window.OfflineStore.updateWorkspace(recover, context.game, { revisions });
+            result = { status: 'local' };
+            if (!this.collaborationContextCurrent(context)) return { stale: true };
+            this.localDescs = workspace;
+          }
           if (!this.collaborationContextCurrent(context)) return { stale: true };
-          this.localDescs.status[desc.filepath] = status;
-          this.applyCollaborationFiles([file], context.language);
+          this.applyWorkspaceOverlay(); this.filterDesc();
           this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
           return result;
         } finally { this._translationWrites--; }

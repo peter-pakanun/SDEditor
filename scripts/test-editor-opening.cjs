@@ -69,7 +69,7 @@ function loadEditor(options = {}) {
       markRaw(value) { return value; }, toRaw(value) { return value; },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [method, counter] of [['create', 'syncIndexes'], ['createAsync', 'asyncIndexes']]) {
@@ -94,6 +94,62 @@ function loadEditor(options = {}) {
   }
   return { editor, config, calls, document, window };
 }
+
+test('opening a missing translation with a Dropped copy seeds its candidate draft without changing current text', async () => {
+  const { editor, window } = loadEditor({ dictionary: [] });
+  const previous = description('dropped', 'Original source', 'Translation for the original source');
+  const current = description('dropped', 'Changed source', '');
+  editor.sourceIdentity = 'changed-source'; editor.sourceLoaded = true;
+  editor._workspaceSourceBaseline = [JSON.parse(JSON.stringify(current))];
+  editor.descs = [current]; editor.localDescs = { sourceHash: 'original-source', descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(editor.localDescs, { source: [previous], sourceHash: 'original-source',
+    game: editor.gameVersion, language: editor.lang });
+  window.WorkspaceState.upgradeSource(editor.localDescs, { previousSource: [previous], source: [current],
+    previousSourceHash: 'original-source', sourceHash: editor.sourceIdentity, game: editor.gameVersion, language: editor.lang });
+  editor.applyWorkspaceOverlay();
+  const paint = deferred(); editor.yieldEditorPaint = () => paint.promise;
+  const opening = editor.editFile(current.filepath);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.editorLoading, true);
+  assert.equal(editor.editorTranslationReadOnly, true);
+  assert.equal(editor.editorBlocks[0].english, 'Changed source');
+  assert.equal(editor.editorBlocks[0].translation, 'Translation for the original source');
+  assert.equal(editor.editorDroppedCandidate.snapshot.english[0], 'Original source');
+  assert.deepEqual(Array.from(current.translations.Thai), ['']);
+  assert.equal(current.hasChanges, false); assert.equal(current.isMissing, true);
+  assert.equal(current.isDropped, true);
+  paint.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.deepEqual(Array.from(current.translations.Thai), ['']);
+  assert.equal(editor.editorBlocks[0].translation, 'Translation for the original source');
+  assert.equal(current.hasChanges, false); assert.equal(current.needsReview, true);
+});
+
+test('opening a complete ZIP translation still offers its Dropped copy while retaining current text in the draft', async () => {
+  const { editor, window } = loadEditor({ dictionary: [] });
+  const current = description('complete-with-dropped', 'Current source', 'Current ZIP translation');
+  current.translations.German = ['Aktuelle ZIP Übersetzung'];
+  const previous = description('complete-with-dropped', 'Original source', 'Old preserved translation');
+  editor.sourceIdentity = 'current-source'; editor.sourceLoaded = true;
+  editor._workspaceSourceBaseline = [JSON.parse(JSON.stringify(current))];
+  editor.descs = [current]; editor.localDescs = { sourceHash: editor.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(editor.localDescs, { source: [current], sourceHash: editor.sourceIdentity,
+    game: editor.gameVersion, language: editor.lang });
+  window.WorkspaceState.dropTranslation(editor.localDescs, previous, 'Thai', {
+    game: editor.gameVersion, originSourceHash: 'original-source', targetSourceHash: editor.sourceIdentity,
+  });
+  editor.applyWorkspaceOverlay();
+  assert.equal(current.isDropped, true); assert.equal(current.isMissing, false); assert.equal(current.hasChanges, false);
+  assert.equal(await editor.editFile(current.filepath), true, editor.editorLoadError);
+  assert.equal(editor.editorBlocks[0].translation, 'Current ZIP translation');
+  assert.equal(editor.editorDroppedCandidate.snapshot.translations[0], 'Old preserved translation');
+  assert.equal(editor.editorDroppedCandidate.snapshot.english[0], 'Original source');
+  assert.equal(editor.editorHaveChanges(), false);
+  editor.lang = 'German'; editor.applyWorkspaceOverlay();
+  assert.equal(current.isDropped, false);
+  assert.equal(await editor.editFile(current.filepath), true, editor.editorLoadError);
+  assert.equal(editor.editorDroppedCandidate, null);
+  assert.equal(editor.editorBlocks[0].translation, 'Aktuelle ZIP Übersetzung');
+});
 
 test('opening publishes real read-only text before dictionary work and blocks Save', async () => {
   const { editor, calls } = loadEditor();

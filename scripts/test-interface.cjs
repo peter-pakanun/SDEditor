@@ -18,7 +18,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
@@ -37,13 +37,160 @@ function description(name, flags = {}, english = `English ${name}`, thai = `ภ�
   return {
     filepath: `test/${name}.txt`, filedir: 'test', filename: `${name}.txt`,
     translations: { English: [english], Thai: [thai] },
-    isMissing: false, hasChanges: false, needsReview: false, isDNT: false,
+    isMissing: false, hasChanges: false, isDropped: false, isDNT: false,
     ...flags,
   };
 }
 
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
-const defaultStatuses = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
+const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
+
+test('Revised filters changed existing translations separately from initial fills and saved baseline files', () => {
+  const { editor } = loadEditor();
+  editor.descs = [
+    description('missing', { isMissing: true }),
+    description('baseline-saved', { hasChanges: true }),
+    description('initial-fill', { hasChanges: true, isRevised: false }),
+    description('changed-existing', { hasChanges: true, isRevised: true }),
+    description('dropped', { isDropped: true, isMissing: true }),
+  ];
+  assert.ok(editor.fileFilterOptions.some(option => option.key === 'revised'));
+  editor.selectedFileFilters = ['revised']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['changed-existing']);
+  assert.equal(editor.statistic.hasChanges, 3);
+  assert.equal(editor.statistic.isRevised, 1);
+  assert.equal(editor.statistic.isMissing, 2);
+  assert.equal(editor.statistic.isDropped, 1);
+  editor.selectedFileFilters = ['saved']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['baseline-saved', 'initial-fill', 'changed-existing']);
+  editor.selectedFileFilters = ['dropped']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['dropped']);
+});
+
+test('Dropped counts unresolved copies beside complete ZIP translations and ignores stale projected status flags', () => {
+  const { editor, context } = loadEditor();
+  const W = context.window.WorkspaceState;
+  const baseline = description('complete-with-copy', {}, 'Current English', 'Current ZIP translation');
+  baseline.translations.German = ['Aktuelle ZIP Übersetzung'];
+  const previous = JSON.parse(JSON.stringify(baseline));
+  previous.translations.English = ['Old English']; previous.translations.Thai = ['Old dropped translation'];
+  editor.gameVersion = 'poe1'; editor.sourceIdentity = 'source-current';
+  editor.workspaceSource = () => [baseline];
+  editor.workspaceSourceFile = filepath => filepath === baseline.filepath ? baseline : null;
+  editor.localDescs = { sourceHash: editor.sourceIdentity, descs: [], status: {} };
+  W.initializeWorkspace(editor.localDescs, { source: [baseline], sourceHash: editor.sourceIdentity, game: 'poe1', language: 'Thai' });
+  W.dropTranslation(editor.localDescs, previous, 'Thai', {
+    game: 'poe1', originSourceHash: 'source-old', targetSourceHash: editor.sourceIdentity,
+  });
+  editor.descs = [{ ...JSON.parse(JSON.stringify(baseline)), hasChanges: true, isRevised: true, isMissing: true, isDropped: false }];
+  editor.selectedFileFilters = ['dropped']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['complete-with-copy']);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 1 });
+  assert.equal(editor.filteredDescs[0].isDropped, true);
+  assert.equal(editor.filteredDescs[0].hasChanges, false); assert.equal(editor.filteredDescs[0].isRevised, false); assert.equal(editor.filteredDescs[0].isMissing, false);
+  editor.lang = 'German'; editor.filterDesc();
+  assert.equal(editor.filteredDescs.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  editor.lang = 'Thai'; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['complete-with-copy']);
+  assert.equal(editor.statistic.isDropped, 1);
+});
+
+test('Revised filtering derives original Missing and resolved Dropped exclusions per language after workspace reload', () => {
+  const { editor, context } = loadEditor();
+  const W = context.window.WorkspaceState;
+  const missing = description('original-missing', {}, 'English Missing', '');
+  const correction = description('original-complete', {}, 'English Complete', 'Original complete translation');
+  const dropped = description('resolved-dropped', {}, 'English Dropped', 'Complete current ZIP translation');
+  const source = [missing, correction, dropped];
+  for (const file of source) file.translations.German = ['Original German translation'];
+  editor.gameVersion = 'poe1'; editor.sourceIdentity = 'revised-current';
+  editor.workspaceSource = () => source;
+  editor.workspaceSourceFile = filepath => source.find(file => file.filepath === filepath) || null;
+  editor.localDescs = { sourceHash: editor.sourceIdentity, descs: [], status: {} };
+  W.initializeWorkspace(editor.localDescs, { source, sourceHash: editor.sourceIdentity, game: 'poe1', language: 'Thai' });
+  const candidate = W.dropTranslation(editor.localDescs, dropped, 'Thai', {
+    game: 'poe1', originSourceHash: 'revised-previous', targetSourceHash: editor.sourceIdentity,
+    translations: ['Preserved previous translation'],
+  });
+  for (const [file, translation] of [[missing, 'First complete translation'], [correction, 'First correction'], [dropped, 'Accepted preserved translation']]) {
+    W.stageTranslation(editor.localDescs, { filepath: file.filepath, translations: [translation] }, 'Thai', {
+      source: file, sourceHash: editor.sourceIdentity, game: 'poe1',
+      ...(file === dropped ? { promoteDropped: { id: candidate.id, revision: candidate.revision, targetSourceHash: editor.sourceIdentity } } : {}),
+    });
+    W.stageTranslation(editor.localDescs, { filepath: file.filepath, translations: ['Later correction for ' + file.filename] }, 'Thai', {
+      source: file, sourceHash: editor.sourceIdentity, game: 'poe1',
+    });
+  }
+  editor.localDescs = JSON.parse(JSON.stringify(editor.localDescs));
+  editor.descs = source.map(file => ({ ...JSON.parse(JSON.stringify(file)), hasChanges: false,
+    isRevised: file !== correction, isMissing: true, isDropped: true }));
+  editor.selectedFileFilters = ['revised']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['original-complete']);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 1, isMissing: 0, isDropped: 0 });
+  editor.selectedFileFilters = ['saved']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['original-missing', 'original-complete', 'resolved-dropped']);
+  editor.lang = 'German'; editor.filterDesc();
+  assert.equal(editor.filteredDescs.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  editor.lang = 'Thai'; editor.selectedFileFilters = ['revised']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['original-complete']);
+});
+
+test('an older Review filter selection migrates to Dropped without hiding unresolved copies', () => {
+  const { editor } = loadEditor();
+  statusFixtures(editor);
+  editor.selectedFileFilters = ['review']; editor.filterDesc();
+  assert.deepEqual(Array.from(editor.selectedFileFilters), ['dropped']);
+  assert.deepEqual(names(editor.filteredDescs), ['dropped', 'overlap']);
+  assert.equal(editor.fileFilterOptions.some(option => option.key === 'review'), false);
+});
+
+test('an older Edited filter selection maps to the Revised category without retaining the old UI name', () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('correction', { hasChanges: true, isRevised: true }),
+    description('fill', { hasChanges: true, isRevised: false })];
+  editor.selectedFileFilters = ['edited']; editor.filterDesc();
+  assert.deepEqual(Array.from(editor.selectedFileFilters), ['revised']);
+  assert.deepEqual(names(editor.filteredDescs), ['correction']);
+  assert.equal(editor.fileFilterOptions.some(option => option.key === 'edited'), false);
+});
+
+test('the status bar includes Revised and shares red, orange, purple, and green status colors across themes', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../public/interface.css'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  for (const tone of ['missing', 'dropped', 'revised', 'saved', 'error', 'warning']) {
+    assert.match(css, new RegExp('\\.statusPill\\.' + tone + '\\s+\\.statusDot\\s*\\{[^}]*color:\\s*var\\(--ui-' + tone + '\\)'));
+    assert.match(html, new RegExp('class="statusPill ' + tone + '"'));
+  }
+  assert.match(html, /class="statusPill revised"[^>]*>[\s\S]*?Revised <strong>\{\{ statistic\.isRevised \}\}/);
+  assert.match(html, /class="statusPill dropped"[^>]*>[\s\S]*?Dropped <strong>\{\{ statistic\.isDropped \}\}/);
+  assert.doesNotMatch(html, /class="statusPill review"/);
+  const declarations = block => Object.fromEntries(Array.from(block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g), match => [match[1], match[2].trim()]));
+  const root = declarations(css.match(/:root\s*\{([^}]*)\}/)[1]);
+  function hue(value) {
+    const normalized = value.replace('#', '');
+    assert.match(normalized, /^[a-f\d]{6}$/i, value);
+    const [r, g, b] = [0, 2, 4].map(index => parseInt(normalized.slice(index, index + 2), 16) / 255);
+    const maximum = Math.max(r, g, b), delta = maximum - Math.min(r, g, b);
+    assert.ok(delta > 0.05, 'Status colors must remain distinguishable from neutral grey.');
+    let result = maximum === r ? (g - b) / delta : maximum === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+    return ((result * 60) + 360) % 360;
+  }
+  for (const theme of ['grey', 'dark', 'modern-dark']) {
+    const block = css.match(new RegExp('\\[data-theme="' + theme + '"\\]\\s*\\{([^}]*)\\}'))?.[1] || '';
+    const palette = { ...root, ...declarations(block) };
+    const resolve = name => palette[name].startsWith('var(') ? resolve(palette[name].slice(4, -1)) : palette[name];
+    const red = hue(resolve('--ui-missing')), orange = hue(resolve('--ui-dropped'));
+    const purple = hue(resolve('--ui-revised')), green = hue(resolve('--ui-saved'));
+    assert.ok(red < 15 || red > 340, theme + ' Missing/Error red');
+    assert.ok(orange >= 15 && orange < 55, theme + ' Dropped/Warning orange');
+    assert.ok(purple >= 250 && purple <= 310, theme + ' Revised purple');
+    assert.ok(green >= 90 && green <= 165, theme + ' Saved green');
+    assert.equal(resolve('--ui-error'), resolve('--ui-missing'));
+    assert.equal(resolve('--ui-warning'), resolve('--ui-dropped'));
+  }
+});
 
 test('changing game in Settings waits for the selected dictionary and durable preferences', async () => {
   const { editor } = loadEditor();
@@ -172,8 +319,8 @@ function statusFixtures(editor) {
   editor.descs = [
     description('missing', { isMissing: true }),
     description('saved', { hasChanges: true }),
-    description('review', { needsReview: true }),
-    description('overlap', { isMissing: true, hasChanges: true, needsReview: true }),
+    description('dropped', { isDropped: true }),
+    description('overlap', { isMissing: true, hasChanges: true, isDropped: true }),
     description('unchanged'),
   ];
 }
@@ -247,28 +394,28 @@ test('default status choices include work needing translation or diagnostics and
   assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
   assert.deepEqual(Array.from(editor.fileFilterOptions, option => option.key), [...defaultStatuses, 'unchanged']);
   editor.filterDesc();
-  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap']);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'dropped', 'overlap']);
   editor.descs.push(description('warning-only'), description('error-only'));
   editor.diagnosticScanResults = {
     'test/warning-only.txt': { hasDiagnosticWarning: true, warningCount: 1 },
     'test/error-only.txt': { hasDiagnosticError: true, errorCount: 1 },
   };
   editor.filterDesc();
-  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap', 'warning-only', 'error-only']);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'dropped', 'overlap', 'warning-only', 'error-only']);
 });
 
 test('status choices combine with OR and overlapping files appear once', () => {
   const { editor } = loadEditor();
   statusFixtures(editor);
-  editor.selectedFileFilters = ['missing', 'review'];
+  editor.selectedFileFilters = ['missing', 'dropped'];
   editor.filterDesc();
-  assert.deepEqual(names(editor.filteredDescs), ['missing', 'review', 'overlap']);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'dropped', 'overlap']);
   editor.selectedFileFilters = ['saved'];
   editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['saved', 'overlap']);
 });
 
-test('Unchanged includes only files without missing, saved, or review flags', () => {
+test('Unchanged excludes missing translations, saved work, and unresolved dropped copies', () => {
   const { editor } = loadEditor();
   statusFixtures(editor);
   editor.selectedFileFilters = ['unchanged'];
@@ -307,7 +454,7 @@ test('clearing all statuses gives a stable empty page; Select all restores every
   editor.selectAllFileFilters();
   config.watch.selectedFileFilters.handler.call(editor);
   assert.equal(editor.allFileFiltersSelected, true);
-  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap', 'unchanged']);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'dropped', 'overlap', 'unchanged']);
 });
 
 test('search matches filename, English, and Thai while respecting selected statuses', () => {
@@ -335,16 +482,16 @@ test('search matches filename, English, and Thai while respecting selected statu
 test('status totals respect Hide DNT and remain independent of search and status choices', () => {
   const { editor } = loadEditor();
   statusFixtures(editor);
-  editor.descs.push(description('hidden-dnt', { isMissing: true, hasChanges: true, needsReview: true, isDNT: true }));
+  editor.descs.push(description('hidden-dnt', { isMissing: true, hasChanges: true, isDropped: true, isDNT: true }));
   editor.hideDNT = true;
   editor.searchText = 'does not match';
   editor.selectedFileFilters = ['unchanged'];
   editor.filterDesc();
   assert.equal(editor.filteredDescs.length, 0);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 2, isMissing: 2, needsReview: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 2, isRevised: 0, isMissing: 2, isDropped: 2 });
   editor.hideDNT = false;
   editor.filterDesc();
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isMissing: 3, needsReview: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 0, isMissing: 3, isDropped: 3 });
 });
 
 test('45 files render correctly sorted pages, ranges, and a shorter final page', () => {
@@ -424,7 +571,7 @@ test('Reset search clears the query and restores the default status choices', ()
   assert.equal(editor.searchText, '');
   assert.equal(editor.currentPage, 1);
   assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
-  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'review', 'overlap']);
+  assert.deepEqual(names(editor.filteredDescs), ['missing', 'saved', 'dropped', 'overlap']);
 });
 
 test('focusing the file list selects its first row and explicit row selection can move focus', () => {

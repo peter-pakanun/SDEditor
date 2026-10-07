@@ -23,7 +23,7 @@ Open **Settings → Cloud backup → Back up with Google** to connect personal s
 
 An administrator can change an account's role between **Translator** and **Manager** in **Settings → Cloud backup → Manage users**. Managers and admins can view and edit shared dictionaries and saved translations in every language, inspect and restore shared history, and read all language teams' comments. Select the language to work in; managers and admins also have a navbar language link that opens its Settings selector. User management remains an admin control.
 
-Settings and Regex rules stay personal to each account. Dictionaries are shared by language; saved translations and new shared history synchronize within the same game, source version, and language. The editor clipboard, original ZIPs, unsaved typing, carried Needs Review work, and legacy local history stay in this browser. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
+Settings and Regex rules stay personal to each account. Dictionaries are shared by language; saved translations and new shared history synchronize within the same game, source version, and language. Dropped translations synchronize separately across source versions for that game and language. The editor clipboard, original ZIPs, unsaved typing, and legacy local history stay in this browser. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
 
 ### Settings
 
@@ -44,9 +44,9 @@ For more details, see the [**Import Workflow**](import_workflow.md).
 
 The main action header stays visible while you scroll, with labeled controls for exporting, settings, importing, and diagnostic scans. Search the file list by name, English source, or translation using the search field in this sticky navigation bar.
 
-Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Needs review**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
+Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Revised translations**, **Dropped translations**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
 
-Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Scan errors**, **Review**, **Scan warnings**, **Saved**. Scan counts show files with errors or warnings while a scan runs and after it completes; they disappear when results are cleared or a scan is stopped. **Missing**, **Review**, **Saved**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. **Export Version** shows the current export's short hash; hover to see the full hash. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
+Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Scan errors**, **Dropped**, **Scan warnings**, **Revised**, **Saved**. Scan counts show files with errors or warnings while a scan runs and after it completes; they disappear when results are cleared or a scan is stopped. **Missing**, **Dropped**, **Saved**, **Revised**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. **Export Version** shows the current export's short hash; hover to see the full hash. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
 
 ### File Status Indicators
 
@@ -54,19 +54,27 @@ In the file list, colors indicate each file's state. The bottom navigation bar s
 
 | Color   | Meaning                                                                                |
 |---------|----------------------------------------------------------------------------------------|
-| Red     | Missing lines or line count mismatch                                                   |
+| Red     | Missing lines, line count mismatch, or diagnostic errors                                |
+| Orange  | Dropped translations or diagnostic warnings                                            |
+| Purple  | Revised an already complete original ZIP translation                                  |
 | Green   | Saved changes                                                                          |
-| Yellow  | Review required                                                                        |
+| Neutral | Unchanged current translation                                                         |
 
 | Counter | Meaning                                                                                |
 |---------|----------------------------------------------------------------------------------------|
-| Missing | Translation has blank lines or doesn't match English line count                        |
-| Saved   | You've saved changes to this file at least once and are “tracked for export”           |
-| Review  | The English source changed since your last save; consider re-checking your translation |
+| Missing | Current committed translation has blank lines or doesn't match English line count     |
+| Saved   | A staged translation exists for this language, including blanks or unchanged confirmations |
+| Revised | Saved text differs from a complete original ZIP translation, for a file that has not been Dropped in this source version |
+| Dropped | An unresolved dropped copy exists for this file and language, even when its current translation is complete |
+| Unchanged | Current translation is complete, with no staged save or unresolved dropped copy      |
+
+These statuses come from the immutable original ZIP, committed staged translations, dropped copies, and diagnostic results. A file can match more than one status. A complete current ZIP translation can still be **Dropped** because an older copy awaits a decision; the older copy stays separate from the current text. Switching language recalculates the statuses for that language. Unsaved typing does not change the workspace counters.
+
+**Revised** identifies corrections outside this source version's Missing or Dropped workload. A file that started Missing stays **Saved** without becoming **Revised**, even after you complete it and edit it again. A file that was Dropped in this source version also stays outside **Revised** after confirmation, replacement, or discard. For an eligible file, saving exactly its original ZIP translation is **Saved** without **Revised**; saving different text is **Saved** and **Revised**. A saved blank can still be **Missing**. See the [workspace status contract](workspace_statuses.md) for examples and the precise scope.
 
 #### What “Missing” Actually Means
 
-“Missing” is calculated from your current translation lines:
+“Missing” is calculated from your current committed translation: the staged save, if one exists, otherwise the original ZIP translation.
 
 - Any blank/empty translation line → Missing
 - Different number of lines compared to English → Missing
@@ -89,7 +97,7 @@ If a **Resolve conflicts** button appears in the main action header, it opens sh
 
 Click **Scan diagnostics** to choose which checks to run. The modal has a checkbox for whitespace, dash spacing, tag syntax, variable tags, keyword popup tags, text decoration tags, inconsistent translations, and Dictionary terminology. Every check starts selected except **Dictionary terminology**. **Start scan** checks every loaded file in the selected language, including files hidden by search or status filters. When **Hide DNT entries** is enabled, DNT files are excluded from all selected checks, including inconsistent-translation comparisons.
 
-The scan modal shows progress followed by **Diagnostic checks**, then **Files to review** when results are ready. During a scan, the progress bar shows processed files and live warning/error counts, which also appear in the bottom status bar. **Close** or **Escape** lets the scan continue in the background; open **Scan diagnostics** again to return to it. **Stop scan** cancels without keeping partial results. Longer result lists use a visible range and previous/next arrows.
+The scan modal shows progress followed by **Diagnostic checks**, then **Files with findings** when results are ready. During a scan, the progress bar shows processed files and live warning/error counts, which also appear in the bottom status bar. **Close** or **Escape** lets the scan continue in the background; open **Scan diagnostics** again to return to it. **Stop scan** cancels without keeping partial results. Longer result lists use a visible range and previous/next arrows.
 
 Completed results show warning/error totals and a paginated list of affected files, with entry and column details. Expand additional issues when needed, or click **Open file** to inspect a translation in the editor. Reopening the modal retains the completed results until a workspace change clears them. **Scan again** uses the currently selected checks. The file list's diagnostic warning/error status filters also help you focus on affected files.
 
@@ -386,10 +394,10 @@ The **History** panel on the right shows all saved versions of the current file.
 If the English source was updated but your translation still fits (source typo, etc.), you can manually confirm it hasn't changed:
 
 1. Open the file in the editor
-2. Click **"Confirm unchanged"** button (appears when "Review" flag is set)
-3. This clears the "Review" flag without requiring you to edit the translation.
+2. Expand **Compare dropped version → current** to inspect the preserved English source and translation. The dropped translation may be loaded as an editor draft, while the current committed text remains unchanged.
+3. Click **Confirm unchanged** to stage the preserved translation for this source version. If the entry layout changed or the draft needs corrections, edit it and **Save** the replacement instead.
 
-> **Note**: All file which haven't been reviewed will **not be exported**, you will have to translate them again next export if you don't confirm them. So it is important to review your translations before exporting.
+Dropped copies do not enter exports. They remain stored locally and in the cloud until you stage a translation or choose **Discard**. Reloading, exporting, and importing later versions do not remove unresolved copies. Older copies without preserved English identify that limitation in the viewer.
 
 ### Exporting Your Work
 
@@ -403,15 +411,15 @@ Click the **Export** button at the top of the editor to export your work. This c
 
 2. **Use Alternatives for context**: If you have more than one translation for a keyword, create Alternatives to distinguish between them, you can have multiple entries for each keyword by adding number next to the name, e.g. `Hit1`, `Hit2`, etc.
 
-3. **Filter by status**: Tick **Missing translation**, **Saved changes**, **Needs review**, or **Unchanged** to focus your work. Combine statuses to show files matching any of them.
+3. **Filter by status**: Tick **Missing translation**, **Saved changes**, **Revised translations**, **Dropped translations**, or **Unchanged** to focus your work. Combine statuses to show files matching any of them.
 
-4. **Check the History**: Before exporting, check the **Needs review** filter to verify all your major edits were saved correctly. These are the files that will be discarded if you export them without reviewing.
+4. **Review dropped translations**: Use **Dropped translations** to find preserved work that may still fit the current source. Unresolved copies remain available after export, including when a complete current ZIP translation already exists.
 
 ## What Happens During Import/Export
 
 See [Import Workflow](import_workflow.md) for details on:
 - What "Missing" files mean during export
-- How "Done" and "Review" flags affect export
+- How Saved translations and separate Dropped copies affect export
 - Managing multiple game versions
 - How to transfer translations between your PCs
 

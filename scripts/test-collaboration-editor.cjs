@@ -15,7 +15,7 @@ function harness() {
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   const mixin = window.CollaborationIntegration.mixin;
@@ -26,7 +26,7 @@ function harness() {
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {},
   });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
-  return { editor, window, writes, alerts, context };
+  return { editor, window, writes, alerts, context, config };
 }
 function description(index, translations = ['เดิม', 'สอง']) {
   const name = String(index).padStart(3, '0');
@@ -48,6 +48,80 @@ function saveFixture() {
   e.editorBlocks = [{ english: 'Original', translation: 'ใหม่' }, { english: 'Second', translation: 'สอง' }];
   e.testMode = false;
   return { ...h, desc };
+}
+function droppedReviewFixture() {
+  const h = harness(), e = h.editor;
+  const previous = description(1, ['Translation approved for the original source', 'Second translation']);
+  previous.hasChanges = false;
+  const current = JSON.parse(JSON.stringify(previous));
+  current.translations.English = ['Changed source', 'Second'];
+  current.translations.Thai = ['', ''];
+  const workspace = { sourceHash: 'previous-source', descs: [], status: {} };
+  h.window.WorkspaceState.initializeWorkspace(workspace, {
+    source: [previous], sourceHash: 'previous-source', game: 'poe1', language: 'Thai',
+  });
+  h.window.WorkspaceState.stageTranslation(workspace, { filepath: previous.filepath,
+    translations: previous.translations.Thai }, 'Thai', { source: [previous], sourceHash: 'previous-source', game: 'poe1' });
+  h.window.WorkspaceState.upgradeSource(workspace, { previousSource: [previous], source: [current],
+    previousSourceHash: 'previous-source', sourceHash: e.sourceIdentity, game: 'poe1' });
+  e.localDescs = workspace; e.descs = [current]; e.testMode = false;
+  e._workspaceSourceBaseline = [JSON.parse(JSON.stringify(current))];
+  e.applyWorkspaceOverlay(); e.filterDesc();
+  e.editorVisible = true; e.editorCurrentEditingDesc = current;
+  e.editorOriginalTranslations = [...current.translations.Thai];
+  e.editorBlocks = current.translations.English.map((english, index) => ({ english,
+    translation: current.translations.Thai[index], isTable: false }));
+  return { ...h, previous, desc: current };
+}
+function droppedConflictFixture() {
+  const h = droppedReviewFixture(), e = h.editor;
+  const candidate = JSON.parse(JSON.stringify(h.window.WorkspaceState.droppedForFile(e.localDescs, h.desc.filepath, 'Thai')));
+  const conflict = { game: e.gameVersion, language: e.lang, filepath: h.desc.filepath, kind: 'put', yours: candidate,
+    shared: { ...candidate, id: 'shared-copy', revision: 2,
+      snapshot: { ...candidate.snapshot, translations: ['Shared preserved translation', 'Second shared translation'] } } };
+  h.window.WorkspaceState.recordDroppedConflict(e.localDescs, conflict);
+  e.editorDroppedCandidate = candidate;
+  e.editorBlocks = h.desc.translations.English.map((english, index) => ({ english,
+    translation: candidate.snapshot.translations[index], isTable: false }));
+  e.editorOriginalTranslations = [...candidate.snapshot.translations];
+  const calls = [], opened = [];
+  e._collaboration = { async resolveDroppedConflict(filepath, choice) {
+    calls.push({ filepath, choice }); h.window.WorkspaceState.resolveDroppedConflict(e.localDescs, filepath, e.lang, choice);
+  } };
+  e.openEditorFile = async filepath => { opened.push(filepath); e.seedEditorOpenSource({ desc: h.desc }); };
+  return { ...h, candidate, conflict, calls, opened };
+}
+function historyRecoveryFixture() {
+  const h = saveFixture(), e = h.editor, desc = h.desc;
+  h.context.crypto = require('node:crypto').webcrypto;
+  desc.hasChanges = false;
+  const baseline = JSON.parse(JSON.stringify(desc));
+  e._workspaceSourceBaseline = [baseline];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  h.window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: [baseline], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+  });
+  let durable = JSON.parse(JSON.stringify(e.localDescs));
+  h.window.OfflineStore.updateWorkspace = async (update, game, options = {}) => {
+    const next = update(JSON.parse(JSON.stringify(durable)));
+    durable = JSON.parse(JSON.stringify(next));
+    h.writes.push(structuredClone({ workspace: durable, revisions: options.revisions || [], game }));
+    return JSON.parse(JSON.stringify(durable));
+  };
+  h.window.OfflineStore.saveWorkspaceWithRevisions = async (workspace, revisions, game) => {
+    durable = JSON.parse(JSON.stringify(workspace));
+    h.writes.push(structuredClone({ workspace: durable, revisions, game }));
+  };
+  const opened = [];
+  e.openEditorFile = async filepath => {
+    opened.push(filepath); e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+    e.seedEditorOpenSource({ desc }); return true;
+  };
+  e.refreshHistory = async () => {};
+  e.applyWorkspaceOverlay(); e.seedEditorOpenSource({ desc });
+  const revision = { id: 'legacy-review-entry', filepath: desc.filepath, lang: e.lang,
+    sourceHash: e.sourceIdentity, needsReview: true, translations: ['Recovered original translation', 'Recovered second translation'] };
+  return { ...h, baseline, revision, opened };
 }
 function diagnosticSaveFixture() {
   const h = saveFixture(), e = h.editor, first = h.desc;
@@ -257,13 +331,14 @@ test('save-and-next advances to the remaining diagnostic file after removing the
 });
 
 test('remote corrections refresh completed diagnostic results while metadata-only updates preserve them', async () => {
-  const { editor: e, desc, remaining } = diagnosticSaveFixture();
+  const { editor: e, window, desc, remaining } = diagnosticSaveFixture();
   await e.scanAllDiagnostics();
   const scanId = e.diagnosticScanRunId;
   const firstResult = e.diagnosticScanResults[desc.filepath];
   const remainingResult = e.diagnosticScanResults[remaining.filepath];
   e.applyCollaborationFiles([{ filepath: desc.filepath, translations: [...desc.translations.Thai], needsReview: true, trackedForExport: false }]);
-  assert.equal(desc.needsReview, true); assert.equal(desc.hasChanges, false);
+  assert.equal(desc.needsReview, false); assert.equal(desc.hasChanges, false);
+  assert.deepEqual(Array.from(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), Array.from(desc.translations.Thai));
   assert.equal(e.diagnosticScanResults[desc.filepath], firstResult);
   assert.equal(e.diagnosticScanCompleted, true);
   e.applyCollaborationFiles([{ filepath: remaining.filepath, translations: ['ทีมแก้แล้ว {0}', 'สอง'], needsReview: false, trackedForExport: true }]);
@@ -344,7 +419,8 @@ test('Save & close and save-and-next finish after local commit while online sync
   for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async t => {
     const { editor: e, desc, window, writes } = saveFixture();
     const { Client } = require('../public/collaborationSync.js');
-    e.descs.push(description(2)); e.filterDesc();
+    const next = description(2, ['', '']); next.isMissing = true;
+    e.descs.push(next); e.filterDesc();
     const copy = value => JSON.parse(JSON.stringify(value));
     const initial = e.descs.map(item => ({ ...e.collaborationFile(item), revision: 1 }));
     let state = null, workspace = copy(e.localDescs), hold = false, releaseLocal, releaseNetwork, requests = 0;
@@ -460,7 +536,7 @@ test('collaboration modal and IME own their keys instead of triggering save-and-
   e.handleKeydown({ code: 'F2', key: 'F2', isComposing: true, preventDefault() {} });
   assert.equal(navigation, 0);
 });
-test('Next Version commits source, carried translations and source history together before activation', async () => {
+test('Next Version commits source, separate dropped translations and source history before activation', async () => {
   const { editor: e, window, context } = harness();
   vm.runInContext('offlineStoreReady = true', context);
   e.scheduleCollaboration = () => {};
@@ -470,8 +546,10 @@ test('Next Version commits source, carried translations and source history toget
   window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, workspace, revisions, game) => {
     writes++; assert.equal(e.descs[0], old, 'Activation waits for the durable transaction');
     assert.equal(game, 'poe1'); assert.equal(source[0].translations.English[0], 'Changed source');
-    assert.deepEqual(Array.from(workspace.descs[0].translations.Thai), ['เดิม', 'สอง']);
-    assert.equal(workspace.status[old.filepath].needsReview, true);
+    assert.deepEqual(Array.from(workspace.descs[0].translations.Thai), ['', '']);
+    const candidate = window.WorkspaceState.droppedForFile(workspace, old.filepath, 'Thai');
+    assert.deepEqual(Array.from(candidate.snapshot.translations), ['เดิม', 'สอง']);
+    assert.deepEqual(Array.from(candidate.snapshot.english), ['Original', 'Second']);
     assert.equal(revisions.length, 1); assert.equal(revisions[0].sourceHash, workspace.sourceHash);
   };
   await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
@@ -497,11 +575,495 @@ test('translated import stages every file in one durable save and failure change
   await e.importTranslatedZipFile({ name: 'StatDescriptions_Translated.zip' }, [description(1, ['สูญหาย', 'สอง'])]);
   assert.equal(JSON.stringify(e.localDescs), saved); assert.equal(e.descs[0].translations.Thai[0], 'หนึ่ง');
 });
-test('confirm unchanged saves review and export tracking even without a text change', async () => {
-  const { editor: e, writes, desc } = saveFixture(); desc.needsReview = true;
+test('translated import resolves every replaced dropped copy in one atomic workspace save', async () => {
+  const { editor: e, window, context, writes, desc } = droppedReviewFixture();
+  vm.runInContext('offlineStoreReady = true', context);
+  const second = description(2, ['', '']); second.hasChanges = false;
+  second.translations.English[0] = 'Second changed English';
+  const previous = JSON.parse(JSON.stringify(second));
+  previous.translations.English[0] = 'Second original English'; previous.translations.Thai = ['Second old candidate', 'Second old line'];
+  e._workspaceSourceBaseline.push(JSON.parse(JSON.stringify(second))); e.descs.push(second);
+  window.WorkspaceState.dropTranslation(e.localDescs, previous, 'Thai', {
+    game: e.gameVersion, originSourceHash: 'second-previous-source', targetSourceHash: e.sourceIdentity,
+  });
+  e.applyWorkspaceOverlay();
+  const candidates = e.descs.map(file => window.WorkspaceState.droppedForFile(e.localDescs, file.filepath, 'Thai'));
+  assert.equal(candidates.filter(Boolean).length, 2);
+  const imported = JSON.parse(JSON.stringify(e.descs));
+  imported[0].translations.Thai = ['First imported replacement', 'First second line'];
+  imported[1].translations.Thai = ['Second imported replacement', 'Second second line'];
+  const before = JSON.parse(JSON.stringify(e.localDescs));
+  const persist = window.OfflineStore.saveWorkspaceWithRevisions;
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('Quota exceeded'); };
+  await e.importTranslatedZipFile({ name: 'StatDescriptions_Translated.zip' }, imported);
+  assert.equal(writes.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), before);
+  assert.ok(e.descs.every(file => file.needsReview && !file.hasChanges && file.translations.Thai.every(text => !text)));
+  window.OfflineStore.saveWorkspaceWithRevisions = persist;
+  await e.importTranslatedZipFile({ name: 'StatDescriptions_Translated.zip' }, imported);
+  assert.equal(writes.length, 1, e.collaborationNotice);
+  assert.equal(writes[0].revisions.length, 2);
+  for (const [index, file] of [desc, second].entries()) {
+    assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, file.filepath, 'Thai'), null);
+    assert.equal(writes[0].workspace.droppedArchive[candidates[index].id].status, 'promoted');
+    assert.deepEqual(Array.from(writes[0].workspace.staged.Thai[file.filepath].translations), imported[index].translations.Thai);
+    assert.equal(file.hasChanges, true); assert.equal(file.needsReview, false);
+  }
+});
+test('an older review confirmation stages unchanged text without persisting authoritative status flags', async () => {
+  const { editor: e, writes, window, desc } = saveFixture(); desc.needsReview = true;
   await e.confirmTranslationUnchanged();
-  assert.equal(writes.length, 1); assert.equal(writes[0].workspace.status[desc.filepath].needsReview, false);
-  assert.equal(writes[0].workspace.descs[0].hasChanges, true); assert.equal(writes[0].revisions[0].note, 'confirm');
+  assert.equal(writes.length, 1); assert.equal(writes[0].workspace.status[desc.filepath].needsReview, undefined);
+  assert.equal(writes[0].workspace.descs[0].hasChanges, undefined);
+  assert.equal(window.WorkspaceState.workspaceFile(writes[0].workspace, desc, 'Thai').hasChanges, true);
+  assert.deepEqual(Array.from(writes[0].workspace.staged.Thai[desc.filepath].translations), ['เดิม', 'สอง']);
+  assert.equal(writes[0].revisions[0].note, 'confirm');
+});
+
+test('confirm dropped translation stages the candidate text instead of the missing current translation', async () => {
+  const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+  assert.equal(desc.isMissing, true); assert.equal(desc.hasChanges, false);
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 1, e.collaborationNotice);
+  assert.deepEqual(Array.from(desc.translations.Thai), previous.translations.Thai);
+  assert.equal(desc.isMissing, false); assert.equal(desc.hasChanges, true);
+  assert.equal(desc.needsReview, false);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'), null);
+  assert.deepEqual(Array.from(writes[0].workspace.staged.Thai[desc.filepath].translations), previous.translations.Thai);
+});
+
+test('Confirm unchanged can promote a Dropped copy beside complete current ZIP text after showing its source diff', async () => {
+  const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
+  e._workspaceSourceBaseline[0].translations.Thai = ['Complete current ZIP text', 'Second current ZIP line'];
+  e.applyWorkspaceOverlay(); e.seedEditorOpenSource({ desc });
+  assert.equal(desc.isDropped, true); assert.equal(desc.isMissing, false); assert.equal(desc.hasChanges, false);
+  assert.equal(e.editorBlocks[0].translation, 'Complete current ZIP text');
+  const comparisons = [];
+  e.renderInlineDiffHtml = (oldText, newText) => { comparisons.push([oldText, newText]); return ''; };
+  await e.prepareEditorEnglishDiff();
+  assert.deepEqual(comparisons, previous.translations.English.map((oldText, index) => [oldText, desc.translations.English[index]]));
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 1, e.collaborationNotice);
+  assert.deepEqual(Array.from(desc.translations.Thai), previous.translations.Thai);
+  assert.equal(desc.hasChanges, true); assert.equal(desc.isDropped, false);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'), null);
+});
+
+test('a valid current ZIP draft cannot authorize promotion of a different Dropped copy with invalid tags', async () => {
+  const { editor: e, window, writes, alerts, desc } = droppedReviewFixture();
+  const baseline = e._workspaceSourceBaseline[0];
+  baseline.translations.English[0] = 'Current source {0}'; desc.translations.English[0] = baseline.translations.English[0];
+  baseline.translations.Thai = ['Valid current ZIP translation {0}', 'Second current ZIP line'];
+  window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations[0] = 'Malformed dropped variable {0';
+  e.applyWorkspaceOverlay(); e.seedEditorOpenSource({ desc }); e.refreshEditorDiagnostics();
+  assert.equal(e.collectEditorDiagnostics('error').length, 0);
+  assert.equal(e.editorBlocks[0].translation, 'Valid current ZIP translation {0}');
+  const before = JSON.parse(JSON.stringify(e.localDescs));
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), before);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['Valid current ZIP translation {0}', 'Second current ZIP line']);
+  assert.equal(desc.isDropped, true); assert.equal(desc.hasChanges, false);
+  assert.match(alerts.at(-1), /dropped translation has errors/);
+});
+
+test('modern Dropped state is never sent as an authored legacy collaboration review flag', () => {
+  const { editor: e, window, desc, previous } = droppedReviewFixture();
+  assert.equal(desc.isDropped, true);
+  const file = e.collaborationFile(desc);
+  assert.equal(file.needsReview, false);
+  assert.equal(file.trackedForExport, false);
+  assert.deepEqual(Array.from(file.translations), ['', '']);
+  assert.deepEqual(Array.from(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations),
+    previous.translations.Thai);
+});
+
+test('an older shared Needs Review flag does not replace an existing dropped snapshot with current source context', () => {
+  const { editor: e, window, desc } = droppedReviewFixture();
+  const before = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  e.applyCollaborationFiles([{ filepath: desc.filepath, translations: ['', ''], needsReview: true,
+    trackedForExport: false, revision: 0 }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'))), before);
+  assert.equal(Object.keys(e.localDescs.droppedArchive).length, 1);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+});
+
+test('a failed dropped promotion preserves its candidate and leaves current text unstaged', async () => {
+  const { editor: e, window, writes, desc } = droppedReviewFixture();
+  const before = JSON.parse(JSON.stringify(e.localDescs));
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('Quota exceeded'); };
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 0);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+  assert.equal(desc.hasChanges, false); assert.equal(desc.needsReview, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), before);
+  assert.match(e.collaborationNotice, /Could not save the dropped translation: Quota exceeded/);
+});
+
+test('a dropped candidate updated while confirmation is open cannot promote the stale snapshot', async () => {
+  const { editor: e, window, writes, desc } = droppedReviewFixture();
+  const captured = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  e.editorDroppedCandidate = captured;
+  let finish;
+  e.appConfirm = () => new Promise(resolve => { finish = resolve; });
+  const confirming = e.confirmTranslationUnchanged();
+  const replacement = { ...captured, revision: captured.revision + 1,
+    snapshot: { ...captured.snapshot, translations: ['Peer updated candidate', 'Second translation'] } };
+  e.localDescs.dropped.Thai[desc.filepath] = replacement;
+  finish(true); await confirming;
+  assert.equal(writes.length, 0);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').revision, replacement.revision);
+  assert.deepEqual(Array.from(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), replacement.snapshot.translations);
+});
+
+test('saving a replacement resolves the dropped candidate while a failed save preserves it', async () => {
+  const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
+  const candidate = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  e.editorBlocks[0].translation = 'Reviewed replacement'; e.editorBlocks[1].translation = 'Second replacement';
+  const persist = window.OfflineStore.saveWorkspaceWithRevisions;
+  window.OfflineStore.saveWorkspaceWithRevisions = async () => { throw new Error('Disk full'); };
+  assert.equal(await e.editorSave(), false);
+  assert.equal(e.editorVisible, true);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+  assert.deepEqual(JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'))), candidate);
+  assert.deepEqual(Array.from(candidate.snapshot.translations), previous.translations.Thai);
+  window.OfflineStore.saveWorkspaceWithRevisions = persist;
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['Reviewed replacement', 'Second replacement']);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'), null);
+  assert.deepEqual(Array.from(writes[0].workspace.staged.Thai[desc.filepath].translations), ['Reviewed replacement', 'Second replacement']);
+});
+
+test('dropped review diffs use the captured original English when source history is unavailable', async () => {
+  const { editor: e, window, previous } = droppedReviewFixture();
+  let historyReads = 0;
+  window.OfflineStore.listRevisions = async () => { historyReads++; throw new Error('Source history unavailable'); };
+  const comparisons = [];
+  e.renderInlineDiffHtml = (oldText, newText) => { comparisons.push([oldText, newText]); return ''; };
+  await e.prepareEditorEnglishDiff();
+  assert.deepEqual(comparisons, previous.translations.English.map((oldText, index) => [oldText, e.descs[0].translations.English[index]]));
+  assert.equal(historyReads, 0, 'A stored dropped snapshot already identifies its original English.');
+});
+
+test('legacy dropped candidates without original English do not invent a source diff', async () => {
+  const { editor: e, window, desc } = droppedReviewFixture();
+  const candidate = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai');
+  candidate.originSourceAvailable = false; candidate.snapshot.english = [];
+  let comparisons = 0, historyReads = 0;
+  e.renderInlineDiffHtml = () => { comparisons++; return ''; };
+  window.OfflineStore.listRevisions = async () => { historyReads++; return [{ translations: ['Unrelated earlier source'] }]; };
+  await e.prepareEditorEnglishDiff();
+  assert.equal(comparisons, 0); assert.equal(historyReads, 0);
+});
+
+test('dropped comparison HTML is registered as computed values and renders escaped source and translation diffs', () => {
+  const { editor: e, window, config, desc, previous } = droppedReviewFixture();
+  assert.equal(typeof config.computed.editorDroppedSourceDiff, 'function');
+  assert.equal(typeof config.computed.editorDroppedTranslationDiff, 'function');
+  assert.equal(Object.hasOwn(config.methods, 'editorDroppedSourceDiff'), false);
+  assert.equal(Object.hasOwn(config.methods, 'editorDroppedTranslationDiff'), false);
+  window.Diff = { diffWordsWithSpace(oldText, newText) {
+    return [{ value: oldText, removed: true }, { value: newText, added: true }];
+  } };
+  e.editorDroppedCandidate = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  e.editorDroppedCandidate.snapshot.english[0] = 'Original <tag> & source';
+  assert.equal(typeof e.editorDroppedSourceDiff, 'string');
+  assert.match(e.editorDroppedSourceDiff, /diffInlineDel[^>]*>Original &lt;tag&gt; &amp; source/);
+  assert.match(e.editorDroppedSourceDiff, /diffInlineAdd[^>]*>Changed source/);
+  assert.equal(typeof e.editorDroppedTranslationDiff, 'string');
+  assert.ok(e.editorDroppedTranslationDiff.includes(previous.translations.Thai[0]));
+  e.editorDroppedCandidate.originSourceAvailable = false;
+  assert.equal(e.editorDroppedSourceDiff, '');
+});
+
+test('Save unchanged stages a complete current ZIP translation as Saved without marking it Revised', async () => {
+  const { editor: e, window, writes, desc } = saveFixture();
+  desc.hasChanges = false;
+  e._workspaceSourceBaseline = [JSON.parse(JSON.stringify(desc))];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+  });
+  e.editorBlocks = desc.translations.English.map((english, index) => ({ english, translation: desc.translations.Thai[index] }));
+  assert.equal(e.editorHaveChanges(), false);
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.equal(writes.length, 1);
+  assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, false);
+  assert.deepEqual(Array.from(e.localDescs.staged.Thai[desc.filepath].translations), ['เดิม', 'สอง']);
+});
+
+test('a competing dropped copy blocks Save and Confirm until the comparison is resolved', async () => {
+  const { editor: e, writes, calls } = droppedConflictFixture();
+  assert.ok(e.editorDroppedConflict);
+  assert.equal(e.editorDroppedCanPromote, false);
+  assert.equal(await e.editorSave(), false);
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 0); assert.equal(calls.length, 0);
+  assert.match(e.collaborationNotice, /competing dropped copies/);
+});
+
+test('resolving competing dropped copies reopens a clean editor but preserves an existing dirty draft', async () => {
+  for (const dirty of [false, true]) {
+    const { editor: e, calls, opened, desc } = droppedConflictFixture();
+    if (dirty) e.editorBlocks[0].translation = 'My pending manual draft';
+    const blocks = e.editorBlocks;
+    await e.resolveDroppedTranslationConflict('shared');
+    assert.deepEqual(calls, [{ filepath: desc.filepath, choice: 'shared' }]);
+    assert.equal(e.editorDroppedConflict, null);
+    assert.equal(e.editorDroppedCandidate.id, 'shared-copy');
+    if (dirty) {
+      assert.equal(opened.length, 0); assert.equal(e.editorBlocks, blocks);
+      assert.equal(e.editorBlocks[0].translation, 'My pending manual draft');
+      assert.equal(e.editorHaveChanges(), true);
+    } else {
+      assert.deepEqual(opened, [desc.filepath]);
+      assert.equal(e.editorBlocks[0].translation, 'Shared preserved translation');
+    }
+  }
+});
+
+test('a source change or newer conflict while confirmation is open cannot resolve the captured copies', async () => {
+  for (const change of ['source', 'conflict']) {
+    const { editor: e, calls, opened } = droppedConflictFixture();
+    let finish;
+    e.appConfirm = () => new Promise(resolve => { finish = resolve; });
+    const resolving = e.resolveDroppedTranslationConflict('shared');
+    if (change === 'source') e.sourceIdentity = 'different-source';
+    else e.editorDroppedConflict.shared.revision++;
+    finish(true); await resolving;
+    assert.equal(calls.length, 0); assert.equal(opened.length, 0);
+    assert.ok(e.editorDroppedConflict);
+    if (change === 'conflict') assert.match(e.collaborationNotice, /competing copies changed/);
+  }
+});
+
+test('typing during a dropped comparison confirmation or durable resolution never reopens over that new draft', async () => {
+  for (const phase of ['confirmation', 'resolution']) {
+    const { editor: e, calls, opened } = droppedConflictFixture();
+    let finish;
+    if (phase === 'confirmation') e.appConfirm = () => new Promise(resolve => { finish = resolve; });
+    else {
+      const resolveConflict = e._collaboration.resolveDroppedConflict;
+      e._collaboration.resolveDroppedConflict = (...args) => new Promise(resolve => { finish = async () => {
+        await resolveConflict(...args); resolve();
+      }; });
+    }
+    const resolving = e.resolveDroppedTranslationConflict('shared');
+    if (phase === 'resolution') await new Promise(resolve => setImmediate(resolve));
+    e.editorBlocks[0].translation = 'Typed while waiting for ' + phase;
+    const blocks = e.editorBlocks;
+    await finish(true); await resolving;
+    assert.equal(calls.length, 1); assert.equal(opened.length, 0, phase);
+    assert.equal(e.editorBlocks, blocks);
+    assert.equal(e.editorBlocks[0].translation, 'Typed while waiting for ' + phase);
+    assert.equal(e.editorHaveChanges(), true);
+  }
+});
+
+test('a file originally Missing stays ordinary Saved after filling and correcting its complete text', async () => {
+  const { editor: e, window, desc } = saveFixture();
+  desc.translations.Thai = ['', '']; desc.hasChanges = false; desc.needsReview = false;
+  const source = JSON.parse(JSON.stringify(desc));
+  e._workspaceSourceBaseline = [source];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+  });
+  e.editorOriginalTranslations = ['', ''];
+  e.editorBlocks = [{ english: 'Original', translation: 'First complete translation' },
+    { english: 'Second', translation: 'Second complete translation' }];
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, false);
+  assert.equal(desc.isMissing, false);
+  e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+  e.editorOriginalTranslations = [...desc.translations.Thai];
+  e.editorBlocks = [{ english: 'Original', translation: 'Changed complete translation' },
+    { english: 'Second', translation: 'Second complete translation' }];
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, false);
+  assert.deepEqual(Array.from(e.localDescs.staged.Thai[desc.filepath].before), ['First complete translation', 'Second complete translation']);
+});
+
+test('an outside-assignment correction stays Revised on another save and clears on reverting to ZIP text', async () => {
+  const { editor: e, window, desc } = saveFixture();
+  desc.hasChanges = false;
+  const source = JSON.parse(JSON.stringify(desc));
+  e._workspaceSourceBaseline = [source];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+  });
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.equal(desc.isRevised, true); assert.equal(desc.hasChanges, true);
+  for (const lines of [desc.translations.Thai, source.translations.Thai]) {
+    e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+    e.editorOriginalTranslations = [...desc.translations.Thai];
+    e.editorBlocks = desc.translations.English.map((english, index) => ({ english, translation: lines[index] }));
+    assert.equal(await e.editorSave(), true, e.collaborationNotice);
+    assert.equal(desc.isRevised, lines === source.translations.Thai ? false : true);
+    assert.equal(desc.hasChanges, true);
+  }
+  assert.deepEqual(Array.from(desc.translations.Thai), source.translations.Thai);
+  assert.equal(e.localDescs.descs[0].isRevised, undefined, 'Revised is derived, never persisted.');
+});
+
+test('real test-mode dummy data retains an immutable source through correction, repeated save and ZIP-text restore', async () => {
+  const { editor: e, context, writes } = harness();
+  for (const file of ['statDescParser.js', 'dummyFiles.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
+  }
+  context.document.createElement = () => ({ get value() { return this.innerHTML; } });
+  e.sourceLoaded = false;
+  e._workspaceBaselineIndex = { source: [], files: new Map([['test/dummy1.txt', { stale: true }]]) };
+  e.loadDummyData();
+  const desc = e.getDescByFilepath('test/dummy1.txt');
+  const baseline = e.workspaceSourceFile(desc.filepath);
+  const zipTranslations = [...baseline.translations.Thai];
+  assert.equal(e.sourceLoaded, true); assert.equal(e.localDescs.stagedVersion, 1);
+  assert.notEqual(desc, baseline); assert.notEqual(desc.translations.Thai, baseline.translations.Thai);
+  assert.equal(desc.hasChanges, false); assert.equal(desc.isRevised, false);
+  const correction = zipTranslations.map((text, index) => index ? text + ' correction' : text);
+  for (const lines of [correction, correction, zipTranslations]) {
+    e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+    e.editorOriginalTranslations = [...desc.translations.Thai];
+    e.editorBlocks = desc.translations.English.map((english, index) => ({ english, translation: lines[index] }));
+    assert.equal(await e.editorSave({ close: false }), true, e.collaborationNotice);
+    assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, lines !== zipTranslations);
+    assert.equal(e.statistic.hasChanges, 1); assert.equal(e.statistic.isRevised, lines !== zipTranslations ? 1 : 0);
+    assert.deepEqual(Array.from(baseline.translations.Thai), zipTranslations);
+  }
+  assert.equal(writes.length, 0, 'Test mode continues to bypass IndexedDB.');
+});
+
+test('a complete original ZIP file assigned Dropped stays ordinary Saved after resolving and correcting it, including reload', async () => {
+  for (const decision of ['confirm', 'discard']) {
+    const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
+    const baseline = e._workspaceSourceBaseline[0];
+    baseline.translations.Thai = ['Complete current ZIP text', 'Second current ZIP line'];
+    const zipTranslations = [...baseline.translations.Thai];
+    e.applyWorkspaceOverlay(); e.seedEditorOpenSource({ desc });
+    assert.equal(desc.isMissing, false); assert.equal(desc.isDropped, true);
+    const candidate = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai');
+    if (decision === 'confirm') await e.confirmTranslationUnchanged();
+    else await e.discardDroppedTranslation();
+    assert.equal(writes.length, 1, decision + ': ' + e.collaborationNotice);
+    assert.equal(desc.isDropped, false); assert.equal(desc.isRevised, false);
+    assert.equal(e.localDescs.droppedArchive[candidate.id].status, decision === 'confirm' ? 'promoted' : 'discarded');
+    assert.deepEqual(Array.from(desc.translations.Thai), decision === 'confirm' ? previous.translations.Thai : zipTranslations);
+
+    for (const translation of ['First correction after ' + decision, 'Second correction after ' + decision]) {
+      e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+      e.editorOriginalTranslations = [...desc.translations.Thai];
+      e.editorBlocks = desc.translations.English.map((english, index) => ({ english,
+        translation: index ? 'Second corrected line' : translation }));
+      assert.equal(await e.editorSave({ close: false }), true, decision + ': ' + e.collaborationNotice);
+      assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, false);
+      assert.equal(desc.isMissing, false); assert.equal(desc.isDropped, false);
+      assert.deepEqual(Array.from(baseline.translations.Thai), zipTranslations, 'Saving must preserve the original ZIP baseline.');
+    }
+
+    const reloaded = harness().editor;
+    reloaded.testMode = false;
+    reloaded._workspaceSourceBaseline = [JSON.parse(JSON.stringify(baseline))];
+    reloaded.descs = [JSON.parse(JSON.stringify(baseline))];
+    reloaded.localDescs = JSON.parse(JSON.stringify(writes.at(-1).workspace));
+    reloaded.applyWorkspaceOverlay(); reloaded.filterDesc();
+    assert.equal(reloaded.descs[0].hasChanges, true); assert.equal(reloaded.descs[0].isRevised, false);
+    assert.equal(reloaded.statistic.hasChanges, 1); assert.equal(reloaded.statistic.isRevised, 0);
+    assert.equal(reloaded.descs[0].translations.Thai[0], 'Second correction after ' + decision);
+  }
+});
+
+test('explicitly recovering the same history entry after discard or promotion creates a fresh dropped copy without staging recovery', async t => {
+  for (const decision of ['discard', 'confirm']) await t.test(decision, async () => {
+    const { editor: e, window, desc, baseline, revision, writes } = historyRecoveryFixture();
+    await e.restoreHistoryRevision(revision);
+    const first = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang)));
+    assert.ok(first, e.collaborationNotice); assert.equal(first.recoveryId, first.id);
+    assert.deepEqual(Array.from(desc.translations.Thai), baseline.translations.Thai);
+    assert.equal(desc.hasChanges, false); assert.equal(desc.isDropped, true);
+    if (decision === 'discard') await e.discardDroppedTranslation();
+    else await e.confirmTranslationUnchanged();
+    assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang), null, e.collaborationNotice);
+    const resolvedStatus = decision === 'discard' ? 'discarded' : 'promoted';
+    assert.equal(e.localDescs.droppedArchive[first.id].status, resolvedStatus);
+    const committedBeforeRecovery = JSON.parse(JSON.stringify(e.localDescs.staged));
+    const translationBeforeRecovery = [...desc.translations.Thai];
+
+    await e.restoreHistoryRevision(revision);
+    const second = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang);
+    assert.ok(second, e.collaborationNotice); assert.notEqual(second.id, first.id);
+    assert.equal(second.recoveryId, second.id); assert.equal(second.status, 'dropped');
+    assert.deepEqual(Array.from(second.snapshot.translations), revision.translations);
+    assert.deepEqual(Array.from(second.snapshot.english), baseline.translations.English);
+    assert.deepEqual(Array.from(desc.translations.Thai), translationBeforeRecovery);
+    assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs.staged)), committedBeforeRecovery);
+    assert.equal(e.localDescs.droppedArchive[first.id].status, resolvedStatus);
+    assert.equal(desc.hasChanges, decision === 'confirm'); assert.equal(desc.isDropped, true); assert.equal(desc.isRevised, false);
+    assert.deepEqual(Array.from(baseline.translations.Thai), ['เดิม', 'สอง']);
+    assert.equal(writes.at(-1).revisions.length, 1); assert.equal(writes.at(-1).revisions[0].needsReview, true);
+    assert.deepEqual(writes.at(-1).revisions[0].translations, revision.translations);
+  });
+});
+
+test('a failed explicit re-recovery keeps its resolved archive, committed text and editor draft unchanged', async () => {
+  const { editor: e, window, desc, revision, opened } = historyRecoveryFixture();
+  await e.restoreHistoryRevision(revision);
+  await e.discardDroppedTranslation();
+  const before = JSON.parse(JSON.stringify(e.localDescs)), translations = [...desc.translations.Thai];
+  const blocks = e.editorBlocks, opens = opened.length;
+  e.editorBlocks[0].translation = 'Typing before failed recovery';
+  window.OfflineStore.updateWorkspace = async update => {
+    const next = update(JSON.parse(JSON.stringify(before)));
+    assert.ok(window.WorkspaceState.droppedForFile(next, desc.filepath, e.lang));
+    throw new Error('Recovery storage full');
+  };
+  await e.restoreHistoryRevision(revision);
+  assert.match(e.collaborationNotice, /Could not restore the translation: Recovery storage full/);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), before);
+  assert.deepEqual(Array.from(desc.translations.Thai), translations);
+  assert.equal(e.editorBlocks, blocks); assert.equal(e.editorBlocks[0].translation, 'Typing before failed recovery');
+  assert.equal(opened.length, opens); assert.equal(desc.isDropped, false);
+});
+
+test('normal export includes staged files while full export uses current complete ZIP text beside an unresolved Dropped copy', async () => {
+  const { editor: e, window, context, desc } = droppedReviewFixture();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/statDescParser.js'), 'utf8'), context,
+    { filename: 'statDescParser.js' });
+  const saved = description(2, ['', '']); saved.hasChanges = false;
+  const complete = description(3, ['Current ZIP translation', 'Second current ZIP translation']); complete.hasChanges = false;
+  const previous = JSON.parse(JSON.stringify(complete));
+  previous.translations.English[0] = 'Earlier English'; previous.translations.Thai[0] = 'Old hidden dropped text';
+  e._workspaceSourceBaseline.push(JSON.parse(JSON.stringify(saved)), JSON.parse(JSON.stringify(complete)));
+  e.descs.push(saved, complete);
+  window.WorkspaceState.stageTranslation(e.localDescs, { filepath: saved.filepath,
+    translations: ['Explicit saved translation', 'Second saved translation'] }, 'Thai',
+  { source: saved, sourceHash: e.sourceIdentity });
+  window.WorkspaceState.dropTranslation(e.localDescs, previous, 'Thai', {
+    game: e.gameVersion, originSourceHash: 'older-source', targetSourceHash: e.sourceIdentity,
+  });
+  e.applyWorkspaceOverlay();
+  assert.equal(desc.needsReview, true);
+  assert.equal(complete.needsReview, false);
+  assert.equal(complete.isDropped, true);
+  const exports = [];
+  context.JSZip = class {
+    constructor() { this.files = []; exports.push(this.files); }
+    file(filepath, data) { this.files.push({ filepath, text: new TextDecoder('utf-16le').decode(data) }); }
+    async generateAsync() { return {}; }
+  };
+  context.saveAs = () => {};
+  await e.exportZip(false);
+  assert.deepEqual(exports[0].map(file => file.filepath), [saved.filepath]);
+  assert.match(exports[0][0].text, /Explicit saved translation/);
+  await e.exportZip(true);
+  assert.deepEqual(exports[1].map(file => file.filepath), [saved.filepath, complete.filepath]);
+  assert.match(exports[1][1].text, /Current ZIP translation/);
+  assert.ok(exports.flat().every(file => !file.text.includes('Old hidden dropped text')
+    && !file.text.includes('Translation approved for the original source')));
 });
 
 // Vue wraps nested objects and arrays lazily. Keep the same shape here without
@@ -539,7 +1101,7 @@ function unchangedReviewFixture(existingLocal) {
 
 for (const existingLocal of [false, true]) {
   test(`confirm unchanged persists nested reactive source arrays with ${existingLocal ? 'an existing' : 'a new'} local row`, async () => {
-    const { editor: e, writes, desc, originalWorkspace } = unchangedReviewFixture(existingLocal);
+    const { editor: e, writes, window, desc, originalWorkspace } = unchangedReviewFixture(existingLocal);
     const translations = [...desc.translations.Japanese];
     assert.throws(() => structuredClone(desc.translations.English), { name: 'DataCloneError' });
     await e.confirmTranslationUnchanged();
@@ -549,32 +1111,49 @@ for (const existingLocal of [false, true]) {
     assert.deepEqual(local.translations.English, [...desc.translations.English]);
     for (const key of ['stats', 'variables', 'remarks']) assert.deepEqual(local[key], [...desc[key]]);
     if (existingLocal) assert.deepEqual(local.translations.French, originalWorkspace.descs[0].translations.French);
-    assert.deepEqual(saved.workspace.descs.find(item => item.filepath === 'source/002.txt'), originalWorkspace.descs.at(-1));
-    assert.deepEqual(saved.workspace.status['source/002.txt'], originalWorkspace.status['source/002.txt']);
-    assert.equal(saved.workspace.status[desc.filepath].needsReview, false);
+    const { languageStatus: unrelatedDescriptionStatus, statusLanguage: unrelatedDescriptionLanguage, ...unrelatedDescription }
+      = saved.workspace.descs.find(item => item.filepath === 'source/002.txt');
+    const { hasChanges, isMissing, isRevised, isDropped, needsReview, trackedForExport, ...originalDescription } = originalWorkspace.descs.at(-1);
+    assert.deepEqual(unrelatedDescription, originalDescription);
+    assert.equal(unrelatedDescriptionStatus?.[unrelatedDescriptionLanguage]?.hasChanges, undefined);
+    const { languageStatus: unrelatedFileStatus, statusLanguage: unrelatedFileLanguage, ...unrelatedStatus }
+      = saved.workspace.status['source/002.txt'];
+    const { needsReview: historicalNeedsReview, ...originalStatus } = originalWorkspace.status['source/002.txt'];
+    assert.deepEqual(unrelatedStatus, originalStatus);
+    assert.equal(unrelatedFileStatus?.[unrelatedFileLanguage]?.needsReview, undefined);
+    assert.equal(saved.workspace.status[desc.filepath].needsReview, undefined);
     assert.equal(saved.workspace.status[desc.filepath].lastExportedAt, 17);
     assert.equal(saved.workspace.status[desc.filepath].marker, 'keep review metadata');
-    assert.equal(local.hasChanges, true); assert.equal(local.isMissing, true);
+    assert.equal(local.hasChanges, undefined); assert.equal(local.isMissing, undefined);
+    const state = window.WorkspaceState.workspaceFile(saved.workspace, desc, 'Japanese');
+    assert.equal(state.hasChanges, true); assert.equal(state.isMissing, true);
     assert.equal(saved.revisions.length, 1); assert.equal(saved.revisions[0].note, 'confirm');
     assert.equal(saved.revisions[0].lang, 'Japanese'); assert.equal(saved.revisions[0].sourceHash, e.sourceIdentity);
     assert.deepEqual(saved.revisions[0].translations, translations);
     assert.equal(desc.needsReview, false); assert.equal(desc.hasChanges, true);
-    assert.equal(e.localDescs.status[desc.filepath].needsReview, false); assert.equal(e.editorSaving, false);
+    assert.equal(e.localDescs.status[desc.filepath].needsReview, undefined); assert.equal(e.editorSaving, false);
   });
 }
 
-test('a failed reactive unchanged review preserves saved translations and review/export flags', async () => {
-  const { editor: e, window, writes, desc, originalWorkspace } = unchangedReviewFixture(true);
+test('a failed reactive confirmation preserves staged work and legacy recovery metadata', async () => {
+  const { editor: e, window, writes, desc } = unchangedReviewFixture(true);
+  const secondTranslation = 'ボルトは対象を追加で{0}体[Pierce|貫通]する';
+  desc.translations.Japanese[1] = secondTranslation; desc.isMissing = false;
+  e.localDescs.descs[0].translations.Japanese[1] = secondTranslation; e.localDescs.descs[0].isMissing = false;
+  e.editorBlocks[1].translation = secondTranslation; e.editorOriginalTranslations[1] = secondTranslation;
+  window.WorkspaceState.initializeWorkspace(e.localDescs, { source: e.descs, sourceHash: e.sourceIdentity,
+    game: e.gameVersion, language: e.lang });
+  const beforeSave = JSON.parse(JSON.stringify(e.localDescs));
   window.OfflineStore.saveWorkspaceWithRevisions = async (workspace, revisions) => {
     structuredClone({ workspace, revisions });
     throw new Error('Quota exceeded');
   };
   await e.confirmTranslationUnchanged();
   assert.equal(writes.length, 0); assert.equal(desc.needsReview, true); assert.equal(desc.hasChanges, false);
-  assert.deepEqual(e.localDescs, originalWorkspace);
-  assert.deepEqual([...desc.translations.Japanese], originalWorkspace.descs[0].translations.Japanese);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), beforeSave);
+  assert.deepEqual([...desc.translations.Japanese], beforeSave.descs[0].translations.Japanese);
   assert.equal(e.editorVisible, true); assert.equal(e.editorSaving, false);
-  assert.match(e.collaborationNotice, /Could not save the review: Quota exceeded/);
+  assert.match(e.collaborationNotice, /Could not save the dropped translation: Quota exceeded/);
 });
 
 function mergedSaveFixture() {
@@ -777,7 +1356,8 @@ test('shared-history restore advances a clean editor base but retains a dirty dr
 test('worker saves close the editor and navigate before the local transaction acknowledges', async t => {
   for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async () => {
     const h = enablePending(saveFixture()), { editor: e, desc, calls, acknowledge, warnsBeforeUnload } = h;
-    e.descs.push(description(2)); e.filterDesc();
+    const next = description(2, ['', '']); next.isMissing = true;
+    e.descs.push(next); e.filterDesc();
     const opened = [];
     e.editFile = async filepath => { opened.push(filepath); e.editorVisible = true; e.editorCurrentEditingDesc = e.getDescByFilepath(filepath); return true; };
     assert.equal(await (navigate ? e.saveAndSkipFile() : e.editorSave()), true);
@@ -900,7 +1480,8 @@ test('a source import blocks new editor saves and waits for an in-flight save qu
   } };
   e.scheduleCollaboration = () => {};
   window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, workspace) => {
-    imports++; assert.equal(workspace.descs[0].translations.Thai[0], 'ใหม่');
+    imports++; assert.equal(workspace.descs[0].translations.Thai[0], '');
+    assert.equal(window.WorkspaceState.droppedForFile(workspace, desc.filepath, 'Thai').snapshot.translations[0], 'ใหม่');
   };
   const next = description(1, ['', '']); next.translations.English[0] = 'New source';
   const importing = e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 1, lastModified: 1 }, [next]);

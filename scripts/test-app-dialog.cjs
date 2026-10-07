@@ -172,7 +172,7 @@ function editorHarness() {
     prompt: () => assert.fail('Native prompts must not be used'),
     Vue: { defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['helper.js', 'regexEngine.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
+  for (const file of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   const editor = Object.assign(config.data(), config.methods, { lang: 'Thai', gameVersion: 'poe1', $refs: {},
     $nextTick: fn => Promise.resolve().then(fn) });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: getter.bind(editor) });

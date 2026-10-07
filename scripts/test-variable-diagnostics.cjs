@@ -26,7 +26,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const integration = window.CollaborationIntegration.mixin;
@@ -144,7 +144,7 @@ test('extra percentage is included in the diagnostic highlight and disappears af
   assert.doesNotMatch(editor.buildTagHLter(block.translation, block.translationDiagnostics), /diagError/);
 });
 
-test('editorSave blocks a suffix mismatch and clears completed scan results after a valid save', async () => {
+test('editorSave blocks a suffix mismatch and refreshes the retained scan after a valid save', async () => {
   const { editor, alerts, confirmations } = loadEditor();
   const desc = fixtureDescription('save', 'Damage {1}%', 'ความเสียหายเดิม {1}');
   editor.descs = [desc];
@@ -172,9 +172,15 @@ test('editorSave blocks a suffix mismatch and clears completed scan results afte
   assert.equal(persisted, 1);
   assert.equal(editor.editorVisible, false);
   assert.equal(editor.editorBlocks[0].diagnosticErrorCount, 0);
-  assert.equal(editor.diagnosticScanCompleted, false);
-  assert.equal(editor.diagnosticScanResults[desc.filepath], undefined);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  const result = editor.diagnosticScanResults[desc.filepath];
+  assert.equal(result.errorCount, 0);
+  assert.equal(result.warningCount, 0);
+  assert.deepEqual(Array.from(result.diagnostics), []);
+  assert.equal(result.hasDiagnosticError, false);
+  assert.equal(result.hasDiagnosticWarning, false);
   assert.equal(editor.diagnosticScanErrorFileCount, 0);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
   assert.deepEqual(confirmations, []);
 });
 

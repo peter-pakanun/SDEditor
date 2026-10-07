@@ -7,6 +7,7 @@ const path = require('node:path');
 const { createRequire } = require('node:module');
 const { Client } = require('../public/collaborationSync.js');
 const P = require('../public/collaborationProtocol.js');
+const W = require('../public/workspaceState.js');
 const apiRoot = path.resolve(__dirname, '../../SDEditor-API');
 const load = file => import(pathToFileURL(path.join(apiRoot, file)).href);
 const ORIGIN = 'https://sdeditor.pages.dev';
@@ -239,4 +240,62 @@ test('sparse browser clients share a canonical ZIP baseline with proofed edits, 
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 2);
   const untouchedHistory = await b.history(untouched);
   assert.equal(untouchedHistory.items.length, 1); assert.equal(untouchedHistory.items[0].local, true);
+});
+
+test('real API and client recover identical resolved history as a new generation without reviving retries', async t => {
+  const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }] = await Promise.all([
+    load('src/database.js'), load('src/config.js'), load('src/app.js'),
+  ]);
+  const config = loadConfig({ ADMIN_GOOGLE_SUB: 'admin' }), db = openDatabase(':memory:');
+  const cloud = new CloudStore(db, config);
+  cloud.registerIdentity({ sub: 'translator', email: 'translator@example.test', name: 'Translator' });
+  cloud.assignLanguage('admin', 'translator', 'Thai');
+  const user = cloud.createSession('translator');
+  const app = createApp({ config, store: cloud, logger: { warn() {}, error() {} } });
+  const server = createServer(app), realtime = app.locals.collaborationRealtime.attach(server);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const apiBase = 'http://127.0.0.1:' + server.address().port;
+  const source = [{ filepath: 'source/fixture.txt', name: '', stats: ['fixture'], variables: ['#'], remarks: [''],
+    translations: { English: ['One'], Thai: ['ZIP translation'] } }];
+  const tree = await P.buildBaselineTree(source);
+  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([6, 7, 8])), zipSize: 3,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const store = memoryStore();
+  store.getWorkspace = async () => copy(store.workspace);
+  store.updateWorkspace = async fn => { store.workspace = fn(copy(store.workspace)); return copy(store.workspace); };
+  const workspace = { game: 'poe1', sourceHash: archive.baselineId, descs: copy(source), status: {} };
+  W.initializeWorkspace(workspace, { source, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+  const client = new Client({ store, apiBase, WebSocket: null, request: async (pathname, options = {}) => {
+    const response = await fetch(apiBase + pathname, { method: options.method || 'GET', headers: {
+      Origin: ORIGIN, Authorization: 'Bearer ' + user.token, ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
+    const body = response.status === 204 ? null : await response.json();
+    if (!response.ok) throw Object.assign(new Error(body.error?.message), { status: response.status, code: body.error?.code, current: body.current });
+    return body;
+  } });
+  t.after(async () => { client.destroy(); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
+  await client.connect({ accountId: user.user.id, game: 'poe1', language: 'Thai', source,
+    files: [{ filepath: source[0].filepath, translations: ['ZIP translation'], needsReview: false, trackedForExport: false }],
+    workspace, archive, baselineSource: source, baselineTree: tree });
+  const input = { id: 'recover-first', recoveryId: 'recover-first', game: 'poe1', language: 'Thai', filepath: source[0].filepath,
+    originSourceHash: archive.baselineId, targetSourceHash: archive.baselineId, reason: 'Recovered translation', originSourceAvailable: true,
+    snapshot: { name: '', english: ['One'], stats: ['fixture'], variables: ['#'], remarks: [''], translations: ['Historical Thai'] } };
+  assert.equal((await client.registerDroppedCandidate(input)).status, 'synced');
+  const first = W.droppedForFile(store.workspace, input.filepath, 'Thai');
+  assert.ok(first && first.id !== input.id);
+  assert.deepEqual(W.workspaceFile(store.workspace, source[0], 'Thai').translations, ['ZIP translation']);
+  await client.discardDropped(input.filepath, { ...first, targetSourceHash: archive.baselineId });
+  assert.equal(W.droppedForFile(store.workspace, input.filepath, 'Thai'), null);
+  const secondResult = await client.registerDroppedCandidate({ ...input, id: 'recover-second', recoveryId: 'recover-second' });
+  assert.equal(secondResult.status, 'synced');
+  const second = W.droppedForFile(store.workspace, input.filepath, 'Thai');
+  assert.ok(second && second.id !== first.id);
+  assert.equal(store.workspace.droppedArchive[first.id].status, 'discarded');
+  const replay = await client.registerDroppedCandidate(input);
+  assert.equal(replay.candidate.id, first.id); assert.equal(replay.candidate.status, 'discarded');
+  assert.equal(W.droppedForFile(store.workspace, input.filepath, 'Thai').id, second.id);
+  const candidates = await client.api('/dropped?' + new URLSearchParams({ game: 'poe1', language: 'Thai', includeResolved: '1' }), {}, client.epoch);
+  assert.equal(candidates.items.filter(candidate => candidate.status === 'dropped').length, 1);
+  assert.equal(candidates.items.filter(candidate => candidate.status === 'discarded').length, 1);
+  assert.equal(store.workspace.droppedOutbox.length, 0);
 });

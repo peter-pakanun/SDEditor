@@ -150,8 +150,9 @@ const config = Vue.defineComponent({
       filteredDescs: [],
       statistic: {
         hasChanges: 0,
+        isRevised: 0,
         isMissing: 0,
-        needsReview: 0
+        isDropped: 0
       },
       currentSort: "english",
       currentSortDir: 'asc',
@@ -159,7 +160,7 @@ const config = Vue.defineComponent({
       pageSize: 20,
       currentPage: 1,
       searchText: "",
-      selectedFileFilters: ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'],
+      selectedFileFilters: ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'],
       fileFiltersVisible: false,
       selectedFilepath: '',
       diagnosticScanResults: {},
@@ -222,6 +223,7 @@ const config = Vue.defineComponent({
       editorFocusedIndex: 0,
       editorFocusedColumnIndex: 0,
       editorOriginalTranslations: [],
+      editorDroppedCandidate: null,
       editorShowEnglishDiff: false,
       editorCompareActive: false,
       editorCompareMode: 'translation',
@@ -465,6 +467,7 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     lang(language, previous) {
+      window.WorkspaceState.scopeWorkspace(this.localDescs, previous);
       this.endDictionaryEdit();
       if (!this._cloudApplying) this._cloudLanguageSwitch = Promise.resolve(this.cloudSelectLanguage(language, previous));
       this.clearDiagnosticScanResults();
@@ -518,6 +521,27 @@ const config = Vue.defineComponent({
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
   },
   computed: {
+    editorDroppedConflict() {
+      return this.localDescs?.droppedConflicts?.[this.lang]?.[this.editorCurrentEditingDesc?.filepath] || null;
+    },
+    editorDroppedSourceDiff() {
+      const candidate = this.editorDroppedCandidate;
+      if (!candidate || candidate.originSourceAvailable === false) return '';
+      return this.renderInlineDiffHtml((candidate.snapshot.english || []).map(this.decodeEscapedNewlines).join('\n'),
+        (this.editorCurrentEditingDesc?.translations?.English || []).map(this.decodeEscapedNewlines).join('\n'));
+    },
+    editorDroppedTranslationDiff() {
+      const candidate = this.editorDroppedCandidate;
+      if (!candidate) return '';
+      return this.renderInlineDiffHtml((candidate.snapshot.translations || []).map(this.decodeEscapedNewlines).join('\n'),
+        (this.editorCurrentEditingDesc?.translations?.[this.lang] || []).map(this.decodeEscapedNewlines).join('\n'));
+    },
+    editorDroppedCanPromote() {
+      const candidate = this.editorDroppedCandidate;
+      const desc = this.editorCurrentEditingDesc;
+      return !!candidate && candidate.snapshot.translations?.length === desc?.translations?.English?.length
+        && !this.editorDroppedConflict && !!this.editorReady && !this.editorSaving && !this.editorHaveChanges();
+    },
     browserWorkTooltip() {
       const labels = Object.values(this.browserWorkItems);
       if (this.editorLoading) labels.push('Preparing translation fields and Dictionary matches');
@@ -644,7 +668,8 @@ const config = Vue.defineComponent({
       return [
         { key: 'missing', label: 'Missing translation', tone: 'missing' },
         { key: 'saved', label: 'Saved changes', tone: 'saved' },
-        { key: 'review', label: 'Needs review', tone: 'review' },
+        { key: 'revised', label: 'Revised translations', tone: 'revised' },
+        { key: 'dropped', label: 'Dropped translations', tone: 'dropped' },
         { key: 'diagnosticError', label: 'Diagnostic errors', tone: 'error' },
         { key: 'diagnosticWarning', label: 'Diagnostic warnings', tone: 'warning' },
         { key: 'unchanged', label: 'Unchanged', tone: '' },
@@ -901,6 +926,9 @@ const config = Vue.defineComponent({
       this._editorCollabBase = undefined;
       this.sourceIdentity = '';
       this.importBaseline = null;
+      this._workspaceSourceBaseline = null;
+      this._workspaceBaselineIndex = null;
+      this.editorDroppedCandidate = null;
       this.clearDiagnosticScanResults();
       this.descs = [];
       this.filteredDescs = [];
@@ -1013,7 +1041,7 @@ const config = Vue.defineComponent({
       this.loadingProgress = 0.001;
       try {
         const [workspace, storedSource] = await Promise.all([
-          window.OfflineStore.getWorkspace(game), window.OfflineStore.getSource(game),
+          window.OfflineStore.getWorkspace(game, this.lang), window.OfflineStore.getSource(game),
         ]);
         if (!current()) return;
         let source = storedSource;
@@ -1040,6 +1068,10 @@ const config = Vue.defineComponent({
         if (workspace?.sourceHash && sourceHash && workspace.sourceHash !== sourceHash) {
           throw new Error('Stored translations and source have different version hashes. Reimport the matching source ZIP; existing browser data has been preserved.');
         }
+        this._workspaceSourceBaseline = importedBaseline?.source || this.toPlainForStorage(source);
+        this._workspaceBaselineIndex = null;
+        window.WorkspaceState.initializeWorkspace(workspace, { source: this._workspaceSourceBaseline,
+          sourceHash, game, language: this.lang });
         let prepared;
         if (Array.isArray(source) && source.length) {
           // Preferences may arrive while preparation yields. Apply the latest
@@ -1071,31 +1103,25 @@ const config = Vue.defineComponent({
       }
     },
     async prepareStoredWorkspaceSource(source, workspace, cloneSource, isCurrent) {
-      const localByPath = new Map();
-      const statuses = workspace?.status || {};
       const prepared = [];
       const language = this.lang;
       let started = Date.now();
-      for (const desc of workspace?.descs || []) {
-        if (!isCurrent()) return null;
-        if (desc?.filepath) localByPath.set(desc.filepath, desc);
-        if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
-      }
+      window.WorkspaceState.initializeWorkspace(workspace, { source: this.workspaceSource(),
+        sourceHash: workspace?.sourceHash || this.sourceIdentity, game: this.gameVersion, language });
       for (const original of source) {
         if (!isCurrent()) return null;
         // IndexedDB already detached storedSource. Only the immutable imported
         // baseline needs another copy, one description at a time.
         const desc = cloneSource ? this.toPlainForStorage(original) : original;
         if (!desc) throw new Error('Could not prepare the stored source.');
-        const local = localByPath.get(desc.filepath);
-        const raw = local?.translations?.[language] || desc.translations?.[language] || [];
-        const length = desc.translations?.English?.length || 0;
-        const lines = Array.from({ length }, (_, index) => raw[index] ?? '');
+        const state = window.WorkspaceState.workspaceFile(workspace, this.workspaceSourceFile(desc.filepath) || desc, language);
         desc.translations ||= { English: [] };
-        desc.translations[language] = lines;
-        if (local && typeof local.hasChanges !== 'undefined') desc.hasChanges = !!local.hasChanges;
-        desc.isMissing = computeIsMissing(length, lines);
-        desc.needsReview = !!statuses[desc.filepath]?.needsReview;
+        desc.translations[language] = [...state.translations];
+        desc.hasChanges = state.hasChanges;
+        desc.isRevised = state.isRevised;
+        desc.isMissing = state.isMissing;
+        desc.isDropped = state.isDropped;
+        desc.needsReview = state.needsReview;
         prepared.push(desc);
         if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
       }
@@ -1358,43 +1384,61 @@ const config = Vue.defineComponent({
     async confirmTranslationUnchanged() {
       if (!this.editorReady) return;
       const desc = this.editorCurrentEditingDesc;
-      if (!desc || !desc.needsReview || this.editorSaving) return;
+      if (!desc || this.editorSaving) return;
       const context = this.captureCollaborationContext();
       const blocks = this.editorBlocks;
-      const lines = [...(desc.translations[this.lang] || [])];
+      const candidate = this.editorDroppedCandidate || window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, this.lang);
+      if (!candidate && !desc.needsReview) return; // Older workspace compatibility.
+      const lines = [...(candidate?.snapshot?.translations || desc.translations[this.lang] || [])];
+      if (lines.length !== desc.translations.English.length) {
+        this.appAlert('The source entry count changed. Review the dropped copy and save a replacement translation.'); return;
+      }
+      if (candidate && this.editorHaveChanges()) return;
+      const savedLines = [...(desc.translations[this.lang] || [])];
+      let promotion;
+      try { promotion = candidate ? this.capturedDroppedPromotion(desc.filepath, candidate) : null; }
+      catch (error) { this.collaborationNotice = error.message; return; }
       const english = JSON.stringify(desc.translations.English);
       const base = this._editorCollabBase;
       this.editorSaving = true;
       try {
-        if (!await this.appConfirm('Confirm that the translation does NOT need changes for this source revision? This clears Needs Review and marks the file for export.', {
-          title: 'Mark translation as reviewed?', confirmLabel: 'Mark reviewed',
+        const candidateMatchesDraft = candidate && arrayEquals(blocks.map(block => this.encodeNewlines(block.translation)), lines);
+        if (candidateMatchesDraft) this.refreshEditorDiagnostics();
+        const candidateErrors = candidate && !candidateMatchesDraft
+          ? this.analyzeDescDiagnostics({ ...desc, translations: { ...desc.translations, [this.lang]: lines } },
+            this.lang, null, defaultDiagnosticScanChecks()).errorCount : 0;
+        if (candidate && (candidateErrors || (candidateMatchesDraft && this.collectEditorDiagnostics('error').length))) {
+          this.appAlert('The dropped translation has errors against the current source. Correct them and save a replacement.'); return;
+        }
+        if (!await this.appConfirm('Use the dropped translation unchanged for the current source version? This stages it for export and sharing.', {
+          title: 'Promote dropped translation?', confirmLabel: 'Confirm unchanged',
         })) return;
         if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocks
           || !this.collaborationContextCurrent(context) || this._editorCollabBase !== base
           || JSON.stringify(desc.translations.English) !== english
-          || !arrayEquals(lines, desc.translations[this.lang] || [])) return;
+          || !arrayEquals(savedLines, desc.translations[this.lang] || [])) return;
+        if (candidate) this.capturedDroppedPromotion(desc.filepath, candidate);
         const result = await this.persistTranslationBatch([{ desc, lines, needsReview: false }], 'confirm', {
-          context, bases: base ? { [desc.filepath]: base } : undefined,
+          context, bases: base ? { [desc.filepath]: base } : undefined, promoteDropped: promotion,
         });
         if (result.stale || result.status === 'conflict') return;
         this.editorShowEnglishDiff = false;
+        this.editorDroppedCandidate = null;
         this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
-        this.collaborationNotice = 'Marked as reviewed (unchanged).';
-      } catch (error) { this.collaborationNotice = 'Could not save the review: ' + error.message; }
+        this.rebaseEditorAfterCommit(this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc), {
+          draftBefore: blocks.map(block => block.translation), submittedTranslations: lines,
+        });
+        this.collaborationNotice = 'Dropped translation saved unchanged.';
+      } catch (error) { this.collaborationNotice = 'Could not save the dropped translation: ' + error.message; }
       finally { this.editorSaving = false; }
     },
     async prepareEditorEnglishDiff() {
       if (!this.editorVisible) return;
       if (!this.editorCurrentEditingDesc) return;
-      if (!this.editorCurrentEditingDesc.needsReview) return;
-
       const filepath = this.editorCurrentEditingDesc.filepath;
-      let prevEng = null;
-      try {
-        const items = await window.OfflineStore.listRevisions(filepath, 'English', 2, this.gameVersion);
-        if (Array.isArray(items) && items.length >= 2) prevEng = items[1]?.translations;
-      } catch (_) {
-      }
+      const candidate = this.editorDroppedCandidate || window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
+      if (!candidate || candidate.originSourceAvailable === false) return;
+      const prevEng = candidate?.snapshot?.english || [];
       const curEng = Array.isArray(this.editorCurrentEditingDesc?.translations?.English) ? this.editorCurrentEditingDesc.translations.English : [];
 
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
@@ -1422,6 +1466,60 @@ const config = Vue.defineComponent({
         if (p?.removed) return `<span class="diffInlineDel">${v}</span>`;
         return v;
       }).join('');
+    },
+    async resolveDroppedTranslationConflict(choice) {
+      const desc = this.editorCurrentEditingDesc, conflict = this.editorDroppedConflict;
+      if (!desc || !conflict || this.editorSaving) return;
+      const context = this.captureCollaborationContext(), captured = JSON.stringify(conflict);
+      const hadChanges = this.editorHaveChanges();
+      this.editorSaving = true;
+      try {
+        const local = choice === 'local';
+        if (!await this.appConfirm(local ? 'Replace the shared dropped copy with your preserved copy? This does not stage a translation.'
+          : 'Use the shared dropped copy for review? Your other copy remains in local recovery storage.', {
+          title: 'Resolve dropped copies', confirmLabel: local ? 'Keep this dropped copy' : 'Use shared dropped copy',
+        }) || !this.collaborationContextCurrent(context)) return;
+        if (JSON.stringify(this.editorDroppedConflict) !== captured) throw new Error('The competing copies changed. Review them again.');
+        if (!context.client?.resolveDroppedConflict) throw new Error('Reconnect to resolve these dropped copies.');
+        await context.client.resolveDroppedConflict(desc.filepath, choice);
+        if (!this.collaborationContextCurrent(context)) return;
+        this.editorDroppedCandidate = this.toPlainForStorage(window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, this.lang));
+        this.editorShowEnglishDiff = false;
+        this.applyWorkspaceOverlay(); this.filterDesc();
+        if (!hadChanges && !this.editorHaveChanges()) await this.openEditorFile(desc.filepath);
+      } catch (error) { this.collaborationNotice = 'Could not resolve the dropped copies: ' + error.message; }
+      finally { this.editorSaving = false; }
+    },
+    async discardDroppedTranslation() {
+      const desc = this.editorCurrentEditingDesc;
+      const candidate = this.editorDroppedCandidate;
+      if (!desc || !candidate || this.editorSaving) return;
+      const context = this.captureCollaborationContext();
+      this.editorSaving = true;
+      try {
+        const expected = this.capturedDroppedPromotion(desc.filepath, candidate);
+        if (!await this.appConfirm('Discard this dropped translation? It will no longer appear for review.', {
+          title: 'Discard dropped translation?', confirmLabel: 'Discard', danger: true,
+        }) || !this.collaborationContextCurrent(context)) return;
+        this.capturedDroppedPromotion(desc.filepath, candidate);
+        if (context.client?.discardDropped) await context.client.discardDropped(desc.filepath, expected);
+        else {
+          const discard = workspace => {
+            window.WorkspaceState.discardDropped(workspace, desc.filepath, context.language, expected);
+            return workspace;
+          };
+          const workspace = !this.testMode && window.OfflineStore.updateWorkspace
+            ? await window.OfflineStore.updateWorkspace(discard, context.game)
+            : discard(this.toPlainForStorage(this.localDescs));
+          if (!this.testMode && !window.OfflineStore.updateWorkspace) await window.OfflineStore.saveWorkspaceWithRevisions(workspace, [], context.game);
+          if (!this.collaborationContextCurrent(context)) return;
+          this.localDescs = workspace;
+        }
+        if (!this.collaborationContextCurrent(context)) return;
+        this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
+        this.applyWorkspaceOverlay(); this.filterDesc();
+      } catch (error) { this.collaborationNotice = 'Could not discard the translation: ' + error.message; }
+      finally { this.editorSaving = false; }
     },
     getEditorDisplayText(raw) {
       const s = String(raw ?? '');
@@ -1897,6 +1995,7 @@ const config = Vue.defineComponent({
       }
       if (!Array.isArray(nextWorkspace.descs)) nextWorkspace.descs = [];
       if (!nextWorkspace.status) nextWorkspace.status = {};
+      window.WorkspaceState.scopeWorkspace(nextWorkspace, resolver.lang);
       const encoded = this.encodeNewlines(text);
       const updates = new Map();
       const revisions = [];
@@ -1913,9 +2012,10 @@ const config = Vue.defineComponent({
       for (const { desc, before, lines } of updates.values()) {
         const isMissing = computeIsMissing(desc.translations.English.length, lines);
         const local = nextWorkspace.descs.find(item => item.filepath === desc.filepath);
-        if (local) updateLocalDesc(local, desc, resolver.lang, lines, { hasChanges: true, isMissing });
-        else nextWorkspace.descs.push(makeLocalDesc(desc, resolver.lang, lines, { hasChanges: true, isMissing }));
-        nextWorkspace.status[desc.filepath] = { ...(nextWorkspace.status[desc.filepath] || {}), lastTranslatedAt: savedAt, lastEditedAt: savedAt };
+        if (local) updateLocalDesc(local, desc, resolver.lang, lines, { derivedStatus: true });
+        else nextWorkspace.descs.push(makeLocalDesc(desc, resolver.lang, lines, { derivedStatus: true }));
+        nextWorkspace.status[desc.filepath] = window.WorkspaceState.setFileMetadata(nextWorkspace.status[desc.filepath] || {}, resolver.lang,
+          { lastTranslatedAt: savedAt, lastEditedAt: savedAt }, local);
         const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: resolver.lang };
         revisions.push(
           { ...metadata, savedAt: savedAt - 1, note: 'Before consistency resolution', translations: before, isMissing: computeIsMissing(desc.translations.English.length, before) },
@@ -1951,10 +2051,10 @@ const config = Vue.defineComponent({
       const sameVersion = this.gameVersion === resolver.gameVersion;
       const sameEditor = sameVersion && this.lang === resolver.lang && this.editorBlocks === originalBlocks
         && this.editorCurrentEditingDesc?.filepath === resolver.filepath && this.editorVisible;
-      if (updates.size && sameVersion) this.localDescs = nextWorkspace;
+      if (updates.size && sameVersion && !this.persistTranslationBatch) this.localDescs = nextWorkspace;
       for (const { desc, lines } of updates.values()) {
         desc.translations[resolver.lang] = lines;
-        desc.hasChanges = true;
+        if (this.lang === resolver.lang) desc.hasChanges = true;
         desc.isMissing = computeIsMissing(desc.translations.English.length, desc.translations[this.lang] || []);
       }
       // Matching entries commit; unrelated drafts retain their own merge bases.
@@ -2950,7 +3050,11 @@ const config = Vue.defineComponent({
       if (!desc1) return;
       if (!desc2) return;
       if (!desc3) return;
+      this._workspaceSourceBaseline = this.toPlainForStorage([desc1, desc2, desc3]);
+      this._workspaceBaselineIndex = null;
       this.descs = [desc1, desc2, desc3];
+      this.sourceLoaded = true;
+      this.applyWorkspaceOverlay();
       this.loadingProgress = 100;
       this.filterDesc();
     },
@@ -4925,7 +5029,10 @@ const config = Vue.defineComponent({
       }
       const nextWorkspace = this.toPlainForStorage(this.localDescs);
       nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
-      nextWorkspace.sourceHash = sourceHash;
+      const baselineSource = importedBaseline?.source || this.toPlainForStorage(nextSource);
+      const prevSource = this.workspaceSource();
+      window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
+        previousSourceHash: this.sourceIdentity, sourceHash, game });
       if (importedBaseline) nextWorkspace.importArchive = importedBaseline.archive;
       else delete nextWorkspace.importArchive;
       const sourceRevisions = [];
@@ -4935,8 +5042,8 @@ const config = Vue.defineComponent({
       nextWorkspace.size = file.size;
 
 
-      const prevSource = Array.isArray(this.descs) ? this.descs : [];
       const prevSourceMap = new Map(prevSource.map(d => [d.filepath, d]));
+      const baselineSourceMap = new Map(baselineSource.map(d => [d.filepath, d]));
       const nextSourceMap = new Map(nextSource.map(d => [d.filepath, d]));
       const oldWorkspaceMap = new Map((nextWorkspace.descs || []).map(d => [d.filepath, d]));
       const now = Date.now();
@@ -4957,61 +5064,37 @@ const config = Vue.defineComponent({
         const nextEng = Array.isArray(nextDesc?.translations?.English) ? nextDesc.translations.English : [];
 
         const oldLocal = oldWorkspaceMap.get(filepath);
-        const oldWorkspaceLines = Array.isArray(oldLocal?.translations?.[language]) ? oldLocal.translations[language] : [];
-        const hadOldWorkspaceTranslation = oldWorkspaceLines.some(v => String(v ?? '').trim() !== '');
-        const oldLinesRaw = Array.isArray(oldLocal?.translations?.[language]) ? oldLocal.translations[language] : (Array.isArray(prevDesc?.translations?.[language]) ? prevDesc.translations[language] : []);
-        const importedLinesRaw = Array.isArray(nextDesc?.translations?.[language]) ? nextDesc.translations[language] : [];
-
-        const engLen = nextEng.length;
-        let needsReview = false;
-        const merged = [];
-        for (let i = 0; i < engLen; i++) {
-          const imported = String(importedLinesRaw[i] ?? '');
-          if (imported.trim() !== '') {
-            merged.push(importedLinesRaw[i]);
-            continue;
-          }
-          const old = String(oldLinesRaw[i] ?? '');
-          if (old.trim() !== '') {
-            merged.push(oldLinesRaw[i]);
-            if (!isPostMigrationImport) needsReview = true;
-          } else {
-            merged.push('');
-          }
-        }
+        const state = window.WorkspaceState.workspaceFile(nextWorkspace,
+          baselineSourceMap.get(filepath) || nextDesc, language);
+        const merged = state.translations;
 
         if (!nextDesc.translations) nextDesc.translations = { English: nextEng };
         nextDesc.translations.English = nextEng;
         nextDesc.translations[language] = merged;
 
-        nextDesc.isMissing = computeIsMissing(engLen, merged);
-        nextDesc.needsReview = isPostMigrationImport ? false : needsReview;
-        const hasChanges = isPostMigrationImport && hadOldWorkspaceTranslation;
+        nextDesc.isMissing = state.isMissing;
+        nextDesc.needsReview = state.needsReview;
+        nextDesc.isDropped = state.isDropped;
+        nextDesc.isRevised = state.isRevised;
+        const hasChanges = state.hasChanges;
         nextDesc.hasChanges = hasChanges;
 
         const st = nextWorkspace.status[filepath] || {};
         st.deleted = false;
         st.deletedAt = 0;
         st.lastImportedAt = now;
-        st.needsReview = isPostMigrationImport ? false : needsReview;
-        if (importedBaseline && needsReview) {
-          st.reviewCandidates ||= {};
-          st.reviewCandidates[language] = { sourceHash: importContext?.source || '', translations: [...merged], savedAt: now };
-          sourceRevisions.push({ filepath, filename: nextDesc.filename, filedir: nextDesc.filedir,
-            lang: language, savedAt: now, note: 'Carried translation · Needs Review', translations: [...merged],
-            needsReview: true, isMissing: nextDesc.isMissing, sourceHash });
-        }
+        window.WorkspaceState.setFileMetadata(st, language, { lastImportedAt: now }, oldLocal);
         if (prevDesc && !arrayEquals(prevEng, nextEng)) st.lastSourceAt = now;
         if (!prevDesc) st.lastSourceAt = now;
         nextWorkspace.status[filepath] = st;
 
         let localDesc = oldLocal;
         if (!localDesc) {
-          localDesc = makeLocalDesc(nextDesc, language, merged, { hasChanges, isMissing: nextDesc.isMissing });
+          localDesc = makeLocalDesc(nextDesc, language, merged, { derivedStatus: true });
           nextWorkspace.descs.push(localDesc);
           oldWorkspaceMap.set(nextDesc.filepath, localDesc);
         } else {
-          updateLocalDesc(localDesc, nextDesc, language, merged, { hasChanges, isMissing: nextDesc.isMissing });
+          updateLocalDesc(localDesc, nextDesc, language, merged, { derivedStatus: true });
         }
 
         if (!prevDesc || !arrayEquals(prevEng, nextEng)) {
@@ -5022,7 +5105,7 @@ const config = Vue.defineComponent({
       }
 
       try {
-        await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(importedBaseline?.source || nextSource), nextWorkspace, sourceRevisions, game, importedBaseline);
+        await window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(baselineSource), nextWorkspace, sourceRevisions, game, importedBaseline);
       } catch (error) {
         if (!workspaceCurrent()) return;
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
@@ -5032,6 +5115,8 @@ const config = Vue.defineComponent({
       if (!workspaceCurrent()) return;
       this.localDescs = nextWorkspace;
       this.importBaseline = importedBaseline;
+      this._workspaceSourceBaseline = baselineSource;
+      this._workspaceBaselineIndex = null;
       this.sourceIdentity = sourceHash;
       this.descs = nextSource;
       this.sourceLoaded = true;
@@ -5206,40 +5291,21 @@ const config = Vue.defineComponent({
         this.appAlert('Could not save imported translations. Existing work is unchanged. ' + error.message);
       }
     },
-    // Applies local workspace translations and status flags on top of the source descs.
-    // For each file in descs it:
-    // 1. Overlays the current language translations from localDescs.descs (or keeps source ones if none).
-    // 2. Copies hasChanges flag from localDescs if present.
-    // 3. Sets isMissing if any translation line is blank or count mismatch.
-    // 4. Copies needsReview flag from localDescs.status.
+    // Overlay staged text on the immutable ZIP baseline. Status fields on these
+    // visible descriptions are caches derived from text and unresolved copies.
     applyWorkspaceOverlay() {
       this.invalidateEditorLookupIndex?.();
-      const overlay = Array.isArray(this.localDescs?.descs) ? this.localDescs.descs : [];
-      const localByPath = new Map();
-      for (const o of overlay) {
-        if (!o || !o.filepath) continue;
-        localByPath.set(o.filepath, o);
-      }
-      const statusByPath = (this.localDescs?.status && typeof this.localDescs.status === 'object') ? this.localDescs.status : {};
-
+      window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
+        sourceHash: this.sourceIdentity, game: this.gameVersion, language: this.lang });
       for (const desc of this.descs || []) {
-        const localDesc = localByPath.get(desc.filepath);
-        const raw = Array.isArray(localDesc?.translations?.[this.lang])
-          ? localDesc.translations[this.lang]
-          : (Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : []);
-        const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
-        const merged = Array.from({ length: engLen }).map((_, i) => raw[i] ?? "");
+        const state = window.WorkspaceState.workspaceFile(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc, this.lang);
         if (!desc.translations) desc.translations = { English: [] };
-        desc.translations[this.lang] = merged;
-
-        if (localDesc && typeof localDesc?.hasChanges !== 'undefined') {
-          desc.hasChanges = !!localDesc.hasChanges;
-        }
-
-        desc.isMissing = computeIsMissing(engLen, merged);
-
-        const st = statusByPath[desc.filepath];
-        desc.needsReview = !!st?.needsReview;
+        desc.translations[this.lang] = [...state.translations];
+        desc.hasChanges = state.hasChanges;
+        desc.isRevised = state.isRevised;
+        desc.isMissing = state.isMissing;
+        desc.isDropped = state.isDropped;
+        desc.needsReview = state.needsReview;
       }
     },
     selectAllFileFilters() {
@@ -5376,7 +5442,7 @@ const config = Vue.defineComponent({
     },
     resetFileSearch() {
       this.searchText = '';
-      this.selectedFileFilters = ['missing', 'saved', 'review', 'diagnosticError', 'diagnosticWarning'];
+      this.selectedFileFilters = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
       this.currentPage = 1;
       this.filterDesc();
     },
@@ -5405,31 +5471,30 @@ const config = Vue.defineComponent({
       // Build the list before publishing it so thousands of rows do not each
       // pass through Vue's reactive array and counter updates during a save.
       const filtered = [];
-      const counts = { hasChanges: 0, isMissing: 0, needsReview: 0 };
+      const counts = { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
       const hideDNT = this.hideDNT;
       const lang = this.lang;
-      const selectedFilters = [...this.selectedFileFilters];
+      const selectedFilters = this.selectedFileFilters.map(key => key === 'review' ? 'dropped' : key === 'edited' ? 'revised' : key);
+      if (this.selectedFileFilters.some(key => key === 'review' || key === 'edited')) this.selectedFileFilters = [...new Set(selectedFilters)];
       const search = this.searchText.toLocaleLowerCase();
       const hasSearch = !!search.trim();
       const diagnosticResults = this.diagnosticScanResults;
       for (const desc of this.descs) {
         if (hideDNT && desc.isDNT) continue;
-        if (desc.hasChanges) {
-          counts.hasChanges++;
-        }
-        if (desc.isMissing) {
-          counts.isMissing++;
-        }
-        if (desc.needsReview) {
-          counts.needsReview++;
-        }
+        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
+        const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, lang) : desc;
+        if (state.hasChanges) counts.hasChanges++;
+        if (state.isRevised) counts.isRevised++;
+        if (state.isMissing) counts.isMissing++;
+        if (state.isDropped) counts.isDropped++;
 
         const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
         const statuses = {
-          missing: !!desc.isMissing,
-          saved: !!desc.hasChanges,
-          review: !!desc.needsReview,
-          unchanged: !desc.isMissing && !desc.hasChanges && !desc.needsReview,
+          missing: !!state.isMissing,
+          saved: !!state.hasChanges,
+          revised: !!state.isRevised,
+          dropped: !!state.isDropped,
+          unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
           diagnosticError: !!diagnosticResult?.hasDiagnosticError,
           diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
         };
@@ -5449,9 +5514,10 @@ const config = Vue.defineComponent({
             filename: desc.filename,
             english: englishHtml,
             translation: translationHtml,
-            isMissing: desc.isMissing,
-            hasChanges: desc.hasChanges,
-            needsReview: !!desc.needsReview,
+            isMissing: !!state.isMissing,
+            hasChanges: !!state.hasChanges,
+            isRevised: !!state.isRevised,
+            isDropped: !!state.isDropped,
             hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
             hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
             diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
@@ -5591,6 +5657,7 @@ const config = Vue.defineComponent({
       this.editorVisible = false;
       this.editorBlocks = [];
       this.editorOriginalTranslations = [];
+      this.editorDroppedCandidate = null;
       this.restoreFileTableFocusAfterEditor();
     },
     applyPreparedEditorBlocks(blocks) {
@@ -5613,9 +5680,14 @@ const config = Vue.defineComponent({
     },
     seedEditorOpenSource(request) {
       const desc = request.desc;
+      const candidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, this.lang);
+      this.editorDroppedCandidate = candidate ? this.toPlainForStorage(candidate) : null;
+      const candidateLines = candidate?.snapshot?.translations;
+      const draft = desc.needsReview && candidateLines?.length === desc.translations.English.length
+        ? candidateLines : (desc.translations[this.lang] || []);
       request.source = {
         english: [...desc.translations.English],
-        translations: [...(desc.translations[this.lang] || [])],
+        translations: [...draft],
         needsReview: desc.needsReview,
       };
       const blocks = request.source.english.map((english, index) =>
@@ -5713,6 +5785,7 @@ const config = Vue.defineComponent({
       this.closeHlPopup();
       this.editorBlocks = [];
       this.editorOriginalTranslations = [];
+      this.editorDroppedCandidate = null;
       this.editorShowEnglishDiff = false;
       this.editorCompareActive = false;
       this.editorCompareTitle = '';
@@ -5845,7 +5918,7 @@ const config = Vue.defineComponent({
     async editorSave({ close = true } = {}) {
       if (this.editorLoading || this.editorLoadError || this.editorSaving || this._importingSource || this._resetConfirming || this.versionStorageLoading) return false;
       if (this.editorTranslationReadOnly) return false;
-      if (!this.editorHaveChanges()) return false;
+      if (this.editorDroppedConflict) { this.collaborationNotice = 'Resolve the competing dropped copies before saving this file.'; return false; }
 
       this.editorSaving = true;
       try {
@@ -5930,6 +6003,7 @@ const config = Vue.defineComponent({
         }
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
           context, close, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
+          promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
@@ -5937,6 +6011,7 @@ const config = Vue.defineComponent({
         const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
           draftBefore: draftAtSave, submittedTranslations: newTranslations, refresh: !close,
         });
+        this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
         // Typing during a slow save remains a draft; never close it.
         if (typedDuringSave) return false;
         this.closeHlPopup();
@@ -5980,7 +6055,7 @@ const config = Vue.defineComponent({
           if (lang === this.lang && this.importBaseline && this._collaboration?.recoveryFiles) {
             const recoveries = this._collaboration.recoveryFiles(filepath).map((item, index) => ({
               ...item, id: 'local-carry:' + index + ':' + item.recoveryId, filepath, lang,
-              sourceHash: this.sourceIdentity, needsReview: true, note: item.note || 'Carried translation · Needs Review' }));
+              sourceHash: this.sourceIdentity, needsReview: true, note: item.note || 'Dropped translation' }));
             this.historyItems.push(...recoveries);
           }
         } else {
@@ -6134,7 +6209,7 @@ const config = Vue.defineComponent({
       const base = this._editorCollabBase;
       this.editorSaving = true;
       try {
-        if (!await this.appConfirm(rev.needsReview ? 'Recover this translation as a local Needs Review candidate? It will be shared after Save or Confirm unchanged.'
+        if (!await this.appConfirm(rev.needsReview ? 'Recover this as a dropped translation? The copy will be synchronized for review. Save or Confirm unchanged stages it for export.'
           : 'Restore this revision? A new saved revision will be created.', {
           title: 'Restore saved revision?', confirmLabel: 'Restore revision',
         })) return;
@@ -6513,12 +6588,16 @@ const config = Vue.defineComponent({
     async exportZip(doFullExport) {
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (doFullExport && !await this.appConfirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes", {
-        title: 'Export all reviewed files?', confirmLabel: 'Export all', danger: false,
+        title: 'Export full translation set?', confirmLabel: 'Export all', danger: false,
       })) return;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
-      let descsToExport = doFullExport
-        ? (this.descs || []).filter(o => !o.needsReview)
-        : (this.descs || []).filter(o => o.hasChanges);
+      const descsToExport = (this.descs || []).filter(desc => {
+        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
+        const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang) : desc;
+        // An unresolved copy never replaces current ZIP/staged text. Keep valid
+        // current translations exportable even while their older copy is dropped.
+        return doFullExport ? !(state.isDropped && state.isMissing && !state.hasChanges) : !!state.hasChanges;
+      });
       if (!descsToExport.length) {
         this.appAlert(`There're no files to be export!`);
         return;

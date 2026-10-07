@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const P = require('../public/collaborationProtocol.js');
+const W = require('../public/workspaceState.js');
 const { Client } = require('../public/collaborationSync.js');
 const copy = structuredClone;
 const source = [
@@ -95,7 +96,7 @@ test('sparse first save sends one edited witness; later saves omit it and intent
   assert.deepEqual(server.files[0].translations, ['', '']); assert.equal(server.files[0].trackedForExport, true);
 });
 
-test('joining with a local Needs Review carry does not author it; incoming reviewed text preserves carry before callbacks', async t => {
+test('joining with a legacy carried translation does not author it; committed text preserves recovery before callbacks', async t => {
   const carry = { ...initial[0], translations: ['old local carry', 'two'], needsReview: true };
   let recoveryObserved = false;
   const fixtureValue = await fixture({ files: [carry, initial[1]], onRemote(files, store) {
@@ -108,6 +109,10 @@ test('joining with a local Needs Review carry does not author it; incoming revie
   assert.equal(server.files.length, 0);
   assert.equal(client.snapshot().pending, 0);
   assert.deepEqual(client.fileBase('a.txt').translations, ['one', 'two'], 'Unreviewed carry never becomes the authored merge base.');
+  const dropped = W.droppedForFile(store.workspace, 'a.txt', 'Thai');
+  assert.equal(dropped.originSourceHash, ''); assert.equal(dropped.originSourceAvailable, false);
+  assert.equal(dropped.targetSourceHash, fixtureValue.archive.baselineId);
+  assert.deepEqual(dropped.snapshot.translations, carry.translations);
   server.change('a.txt', ['peer reviewed', 'two']); await client.sync();
   assert.ok(recoveryObserved);
   assert.deepEqual(store.workspace.descs[0].translations.Thai, ['peer reviewed', 'two']);
@@ -115,7 +120,24 @@ test('joining with a local Needs Review carry does not author it; incoming revie
   assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
 });
 
-test('pre-existing local Edited records are uploaded without including unedited export files', async t => {
+test('modern derived display flags never replace a dropped snapshot with current blank source text on join', async t => {
+  const store = storeFixture();
+  W.initializeWorkspace(store.workspace, { source, language: 'Thai', game: 'poe1' });
+  const old = { ...source[0], translations: { English: ['Older English', 'Older second'], Thai: ['old authored', 'old second'] } };
+  const candidate = W.dropTranslation(store.workspace, old, 'Thai', { id: 'original-candidate', game: 'poe1', originSourceHash: 'b'.repeat(64) });
+  const { client, server } = await fixture({ store, files: [{ ...initial[0], translations: ['', ''], needsReview: true }, initial[1]] });
+  t.after(() => client.destroy());
+  const preserved = W.droppedForFile(store.workspace, 'a.txt', 'Thai');
+  assert.equal(preserved.id, candidate.id);
+  assert.equal(preserved.originSourceHash, 'b'.repeat(64)); assert.equal(preserved.originSourceAvailable, true);
+  assert.deepEqual(preserved.snapshot.english, ['Older English', 'Older second']);
+  assert.deepEqual(preserved.snapshot.translations, ['old authored', 'old second']);
+  assert.equal(Object.keys(store.workspace.droppedArchive).length, 1);
+  assert.equal(Object.keys(client.room().carries).length, 0);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+});
+
+test('pre-existing local Saved records are uploaded without including untouched export files', async t => {
   const { client, server } = await fixture({ files: [{ ...initial[0], translations: ['edited', 'two'], trackedForExport: true }, initial[1]] });
   t.after(() => client.destroy());
   assert.deepEqual(server.files.map(file => file.filepath), ['a.txt']);
@@ -123,7 +145,7 @@ test('pre-existing local Edited records are uploaded without including unedited 
   assert.deepEqual(client.fileBase('b.txt').translations, ['three']);
 });
 
-test('an initial Edited record already identical to shared text does not create a redundant authored history event', async t => {
+test('an initial Saved record already identical to shared text does not create a redundant authored history event', async t => {
   const first = await fixture(); first.client.destroy();
   first.server.change('a.txt', ['already shared', 'two']);
   const { client, server } = await fixture({ server: first.server, files: [{ ...initial[0], translations: ['already shared', 'two'], trackedForExport: true }, initial[1]] });
@@ -133,14 +155,17 @@ test('an initial Edited record already identical to shared text does not create 
   assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
 });
 
-test('restoring a private carry is atomic and survives unchanged snapshots until a newer reviewed override', async t => {
+test('recovering a private dropped copy preserves staged peer text through unchanged and newer snapshots', async t => {
   const { client, server, store, remote } = await fixture(); t.after(() => client.destroy());
   server.change('a.txt', ['peer', 'two']); await client.sync();
   const candidate = { filepath: 'a.txt', translations: ['recovered carry', 'two'], needsReview: true, trackedForExport: false };
   const beforeWrites = store.writes;
   await client.registerLocalCandidate(candidate, { status: { needsReview: true, restoredAt: 123 }, revisions: [{ filepath: 'a.txt', translations: candidate.translations }] });
   assert.equal(store.writes, beforeWrites + 1);
-  assert.deepEqual(store.workspace.descs[0].translations.Thai, candidate.translations);
+  assert.deepEqual(store.workspace.descs[0].translations.Thai, ['peer', 'two']);
+  assert.deepEqual(W.droppedForFile(store.workspace, 'a.txt', 'Thai').snapshot.translations, candidate.translations);
+  assert.equal(W.workspaceFile(store.workspace, source[0], 'Thai').hasChanges, true);
+  assert.equal(W.workspaceFile(store.workspace, source[0], 'Thai').isDropped, true);
   assert.equal(store.workspace.status['a.txt'].restoredAt, 123);
   assert.deepEqual(store.revisions.at(-1).translations, candidate.translations);
   const room = Object.values(store.state.rooms)[0];
@@ -148,10 +173,13 @@ test('restoring a private carry is atomic and survives unchanged snapshots until
   const remoteCount = remote.flat().length;
   await client.acceptSnapshot(server.snapshot(), client.epoch);
   assert.equal(remote.flat().length, remoteCount);
-  assert.deepEqual(store.workspace.descs[0].translations.Thai, candidate.translations);
+  assert.deepEqual(store.workspace.descs[0].translations.Thai, ['peer', 'two']);
+  assert.deepEqual(W.workspaceFile(store.workspace, source[0], 'Thai').translations, ['peer', 'two']);
+  assert.deepEqual(W.droppedForFile(store.workspace, 'a.txt', 'Thai').snapshot.translations, candidate.translations);
   assert.deepEqual(client.fileBase('a.txt').translations, ['peer', 'two']);
   server.change('a.txt', ['new reviewed peer', 'two']); await client.sync();
   assert.deepEqual(store.workspace.descs[0].translations.Thai, ['new reviewed peer', 'two']);
+  assert.equal(W.workspaceFile(store.workspace, source[0], 'Thai').isDropped, true, 'Only explicit promotion or discard resolves the separate dropped copy.');
   assert.ok(client.recoveryFiles('a.txt').some(file => file.translations[0] === 'recovered carry'));
   assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
 });

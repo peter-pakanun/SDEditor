@@ -33,7 +33,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
@@ -115,7 +115,7 @@ test('resolver groups all exact-source occurrences, including duplicate entries 
   assert.equal(dialogs.closed, 1);
 });
 
-test('accepting This persists every matching entry while preserving unrelated drafts, languages, and review state', async () => {
+test('accepting This persists matching entries while preserving unrelated drafts, languages, and metadata', async () => {
   const { editor, first, peer, writes } = setup({ drafts: true });
   const french = editor.descs.map(desc => snapshot(desc.translations.French));
   await editor.scanAllDiagnostics();
@@ -133,7 +133,7 @@ test('accepting This persists every matching entry while preserving unrelated dr
   assert.deepEqual(editor.descs.map(desc => snapshot(desc.translations.French)), french);
   for (const desc of editor.descs) {
     assert.equal(desc.needsReview, true);
-    assert.equal(editor.localDescs.status[desc.filepath].needsReview, true);
+    assert.equal(editor.localDescs.status[desc.filepath].needsReview, undefined);
     assert.equal(editor.localDescs.status[desc.filepath].custom, `retain ${desc.filename.replace('.txt', '')}`);
     assert.deepEqual(snapshot(editor.localDescs.descs.find(item => item.filepath === desc.filepath).translations.Thai), snapshot(desc.translations.Thai));
   }
@@ -147,6 +147,42 @@ test('accepting This persists every matching entry while preserving unrelated dr
   assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
   assert.ok(editor.consistencyResolutionNotice);
   assert.equal(writes.length, 0, 'Test mode must bypass IndexedDB.');
+});
+
+test('a consistency result preserves accepted peer merges, before text, and resolved dropped receipts', async () => {
+  const W = require('../public/workspaceState.js');
+  const { editor, first } = setup();
+  const baseline = snapshot(editor.descs), sourceHash = 'a'.repeat(64), oldHash = 'b'.repeat(64);
+  editor.sourceIdentity = sourceHash;
+  editor.localDescs = W.initializeWorkspace({ sourceHash, descs: [], status: {} }, { source: baseline, sourceHash, game: 'poe1', language: 'Thai' });
+  const candidate = W.dropTranslation(editor.localDescs, baseline[0], 'Thai',
+    { id: 'local-candidate', game: 'poe1', originSourceHash: oldHash, targetSourceHash: sourceHash });
+  const priorText = [...baseline[0].translations.Thai]; let committed, accepted;
+  editor.persistTranslationBatch = async (updates, origin, options) => {
+    assert.equal(origin, 'consistency');
+    committed = snapshot(options.workspace);
+    accepted = updates.map(({ desc, lines }) => ({ filepath: desc.filepath, translations: [...lines], trackedForExport: true,
+      revision: 3, beforeTranslations: [...baseline.find(item => item.filepath === desc.filepath).translations.Thai] }));
+    accepted.find(file => file.filepath === first.filepath).translations[1] = 'peer duration {2}';
+    for (const file of accepted) W.stageTranslation(committed, file, 'Thai', { source: baseline, sourceHash,
+      ...(file.filepath === first.filepath ? { promoteDropped: { id: candidate.id, revision: 0, targetSourceHash: sourceHash } } : {}) });
+    W.acceptDropped(committed, [{ ...snapshot(candidate), id: 'server-candidate', revision: 2, status: 'promoted', snapshot: null }],
+      { acknowledge: true, acknowledgeId: candidate.id, acknowledgeKind: 'put' });
+    editor.localDescs = committed;
+    return { status: 'synced' };
+  };
+  editor._collaboration = { snapshot: () => ({ files: accepted }), fileBase: filepath => accepted?.find(file => file.filepath === filepath) };
+  await editor.openConsistencyResolver(0);
+  assert.equal(await editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text), true);
+  assert.equal(editor.localDescs, committed, 'The detached pre-ACK workspace must not replace the committed result.');
+  const saved = editor.localDescs.staged.Thai[first.filepath];
+  assert.equal(saved.translations[1], 'peer duration {2}'); assert.deepEqual(saved.before, priorText);
+  assert.equal(editor.localDescs.droppedAliases['local-candidate'].id, 'server-candidate');
+  assert.equal(editor.localDescs.droppedAliases['local-candidate'].revision, 2);
+  assert.equal(editor.localDescs.droppedArchive['server-candidate'].status, 'promoted');
+  assert.equal(editor.localDescs.droppedOutbox.length, 0);
+  const status = W.workspaceFile(editor.localDescs, baseline[0], 'Thai');
+  assert.equal(status.hasChanges, true); assert.equal(status.isDropped, false); assert.equal(status.translations[1], 'peer duration {2}');
 });
 
 test('accepting another version advances matching editor baselines and clears a clean editor', async () => {

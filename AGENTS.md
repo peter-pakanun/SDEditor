@@ -7,6 +7,22 @@ Minimal, verified facts for working in this repo.
 - **PoE StatDescriptions.zip translation editor** — vanilla JS SPA, Vue 3 loaded via CDN, Express dev server.
 - Single monolithic Vue 3 Options API component in `public/index.js` (~3000 lines). No build step, no bundler, no router.
 
+## Workspace status intent
+
+Read [`docs/workspace_statuses.md`](docs/workspace_statuses.md) before changing status calculation, assignment scope, import, save, dropped recovery, or synchronization. These names describe the selected language in the current game/source version. **Assignment scope** here means this version's Missing/Dropped file workload, not the account's assigned language.
+
+| Status | Product meaning | Color |
+|---|---|---|
+| Missing | Current committed translation has a blank entry or a different entry count from English. | Red |
+| Dropped | An unresolved preserved translation exists separately from current committed text. | Orange |
+| Revised | A saved correction to a complete original ZIP translation outside this version's Missing/Dropped assignment scope. | Purple |
+| Saved | A staged translation exists, including an unchanged or intentionally blank save. | Green |
+| Error | A retained diagnostic scan found an error in this file. | Red |
+| Warning | A retained diagnostic scan found a warning in this file. | Orange |
+| Unchanged | Complete current translation with no staged save or unresolved dropped copy. | Neutral |
+
+Statuses are derived from immutable ZIP content, staged translations, dropped snapshots and their source-version provenance, and diagnostic results. Do not persist or trust UI status booleans. Legacy wire/history fields remain compatibility data. Revised is **not** any edit or a difference from the previous save: a file originally Missing or Dropped remains ordinary Saved work after later edits in that version. Reverting a correction to the ZIP translation removes Revised while keeping Saved. Counts overlap; Revised is also Saved, and Dropped may also be Missing. Review is an action on a dropped translation, not a status. Dropped copies retain their own source and translation locally and in cloud sync until an explicit save/promotion/discard resolves them; they are never active text or exported directly.
+
 ## Platform Support
 
 - **Desktop-first:** supported use is a desktop or laptop browser with a keyboard and mouse or trackpad.

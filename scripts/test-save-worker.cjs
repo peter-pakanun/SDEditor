@@ -6,6 +6,15 @@ const vm = require('node:vm');
 const { create } = require('../public/saveWorkerClient.js');
 const queued = () => new Promise(resolve => setImmediate(resolve));
 const copy = value => JSON.parse(JSON.stringify(value));
+const W = require('../public/workspaceState.js');
+function assertNoStatusFlags(workspace) {
+  const flags = ['hasChanges', 'isEdited', 'isRevised', 'isMissing', 'isDropped', 'needsReview', 'trackedForExport'];
+  for (const value of [...(workspace.descs || []), ...Object.values(workspace.status || {})]) {
+    for (const metadata of [value, ...Object.values(value.languageStatus || {})]) {
+      for (const flag of flags) assert.equal(Object.hasOwn(metadata, flag), false, flag + ' is derived, not persisted');
+    }
+  }
+}
 const identity = { accountId: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai' };
 const key = JSON.stringify(['account', 'poe1', 'source', 'Thai']);
 const file = (text = 'old') => ({ filepath: 'stat.txt', translations: [text], needsReview: false, trackedForExport: true, revision: 2 });
@@ -53,7 +62,9 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
   } };
   const indexedDB = { open() { const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess(); }); return req; } };
   const root = {}; const context = vm.createContext({ ...(worker ? { self: root } : { window: root }), indexedDB, console: { log() {} } });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'offlineStore.js'), 'utf8'), context);
+  for (const file of ['workspaceState.js', 'offlineStore.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), context);
+  }
   return { store: root.OfflineStore, kv, revisions, transactions };
 }
 async function commit(f, request) { await queued(); f.transactions.at(-1).complete(); return request; }
@@ -68,8 +79,69 @@ test('worker-compatible store commits a touched language and history only after 
   assert.equal(workspace.marker, true); assert.deepEqual(workspace.descs[0].translations.French, ['bonjour']);
   assert.deepEqual(workspace.descs[1].translations.Thai, ['untouched']); assert.deepEqual(workspace.descs[0].translations.Thai, ['new']);
   assert.equal(workspace.status['stat.txt'].lastExportedAt, 10); assert.equal(workspace.status['stat.txt'].lastEditedAt, 20);
-  assert.equal(workspace.status['other.txt'].needsReview, true); assert.equal(f.revisions.length, 1);
+  assert.deepEqual(workspace.dropped.Thai['other.txt'].snapshot.translations, ['untouched']);
+  assertNoStatusFlags(workspace); assert.equal(f.revisions.length, 1);
   assert.equal(ack.status, 'local'); assert.equal(ack.workspace, undefined); assert.equal(ack.files.length, 1);
+});
+
+test('durable German and Thai staged translations and dropped copies retain independent state without stored status flags', async () => {
+  const f = fixture({ worker: true });
+  const initial = f.kv.get('workspace_poe1');
+  const original = initial.descs[0];
+  delete original.translations.French;
+  original.hasChanges = true; original.isMissing = false;
+  initial.status['stat.txt'] = { needsReview: true, lastEditedAt: 11 };
+  const source = structuredClone(original);
+  await commit(f, f.store.saveTranslationBatch(batch({ jobId: 'german-save', language: 'German',
+    files: [{ ...file('eins'), trackedForExport: false, needsReview: false }],
+    statuses: { 'stat.txt': { needsReview: false, lastEditedAt: 22 } },
+    revisions: [{ filepath: 'stat.txt', lang: 'German', translations: ['eins'] }] })));
+  let workspace = f.kv.get('workspace_poe1'), local = workspace.descs[0], status = workspace.status['stat.txt'];
+  assert.deepEqual(local.translations.Thai, ['old']);
+  assert.deepEqual(local.translations.German, ['eins']);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, false);
+  assert.equal(W.workspaceFile(workspace, source, 'German').hasChanges, true, 'Saving creates staged data regardless of old wire flags.');
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, true);
+  assert.equal(W.workspaceFile(workspace, source, 'German').isDropped, false);
+  assertNoStatusFlags(workspace);
+  assert.equal(W.fileStatus(status, 'Thai', local).lastEditedAt, 11);
+  assert.equal(W.fileStatus(status, 'German', local).lastEditedAt, 22);
+  const candidate = workspace.dropped.Thai['stat.txt'];
+  await commit(f, f.store.saveTranslationBatch(batch({ jobId: 'thai-save',
+    promoteDropped: { id: candidate.id, revision: candidate.revision, targetSourceHash: 'source' },
+    statuses: { 'stat.txt': { needsReview: false, lastEditedAt: 33 } } })));
+  workspace = f.kv.get('workspace_poe1'); local = workspace.descs[0]; status = workspace.status['stat.txt'];
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+  assert.equal(W.workspaceFile(workspace, source, 'German').hasChanges, true);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, false);
+  assert.equal(W.workspaceFile(workspace, source, 'German').isDropped, false);
+  assertNoStatusFlags(workspace);
+  assert.equal(W.fileStatus(status, 'Thai', local).lastEditedAt, 33);
+  assert.equal(W.fileStatus(status, 'German', local).lastEditedAt, 22);
+  assert.deepEqual(local.translations.German, ['eins']);
+  assert.equal(f.revisions.length, 2);
+});
+
+test('modern save stages actual translations regardless of obsolete flags and leaves historical flags intact', async () => {
+  const f = fixture({ worker: true, collaboration: true });
+  const initial = f.kv.get('workspace_poe1');
+  W.initializeWorkspace(initial, { source: initial.descs, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const oldDrop = structuredClone(initial.dropped.Thai['other.txt']);
+  const ack = await commit(f, f.store.saveTranslationBatch(batch({
+    files: [{ ...file('new'), needsReview: true, trackedForExport: false }],
+    statuses: { 'stat.txt': { needsReview: true, trackedForExport: false, isMissing: true, lastEditedAt: 33 } },
+    revisions: [{ filepath: 'stat.txt', lang: 'Thai', savedAt: 33, needsReview: true, translations: ['historical dropped copy'] }],
+    collaboration: { key, identity, origin: 'save' },
+  })));
+  const workspace = f.kv.get('workspace_poe1');
+  assert.deepEqual(workspace.staged.Thai['stat.txt'].translations, ['new']);
+  assert.equal(workspace.dropped.Thai['stat.txt'], undefined);
+  assert.deepEqual(workspace.dropped.Thai['other.txt'], oldDrop, 'An unrelated recoverable copy survives the save.');
+  assert.equal(workspace.status['stat.txt'].lastEditedAt, 33); assertNoStatusFlags(workspace);
+  assert.equal(ack.files[0].needsReview, false); assert.equal(ack.files[0].trackedForExport, true);
+  assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox[0].files[0].yours.needsReview, false);
+  assert.equal(f.revisions[0].needsReview, true, 'Immutable history retains the meaning of old revisions.');
+  assert.deepEqual(f.revisions[0].translations, ['historical dropped copy']);
 });
 
 test('outbox, touched files, history and receipt commit atomically with independent operation copies', async () => {
@@ -83,6 +155,61 @@ test('outbox, touched files, history and receipt commit atomically with independ
   assert.deepEqual(state.rooms.unrelated, { local: { untouched: true } });
   assert.equal(f.revisions[0].collaborationAccountId, 'account');
   assert.equal(f.kv.get('translation_save_receipts_poe1').length, 1);
+});
+
+test('promotion stages reviewed text, resolves its candidate, and queues the guarded mutation in one durable commit', async () => {
+  const W = require('../public/workspaceState.js'), f = fixture({ collaboration: true });
+  const workspace = f.kv.get('workspace_poe1');
+  W.initializeWorkspace(workspace, { source: workspace.descs, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  W.dropTranslation(workspace, workspace.descs[0], 'Thai', { id: 'drop', game: 'poe1', originSourceHash: 'old-source', revision: 4 });
+  const promoteDropped = { id: 'drop', revision: 4, targetSourceHash: 'source' };
+  const saved = f.store.saveTranslationBatch(batch({ promoteDropped, collaboration: { key, identity, origin: 'save', promoteDropped } }));
+  await queued(); assert.equal(f.kv.get('workspace_poe1').dropped.Thai['stat.txt'].id, 'drop');
+  f.transactions.at(-1).complete(); await saved;
+  const committed = f.kv.get('workspace_poe1');
+  assert.deepEqual(copy(committed.staged.Thai['stat.txt'].translations), ['new']);
+  assert.equal(committed.dropped.Thai['stat.txt'], undefined);
+  assert.equal(committed.droppedArchive.drop.status, 'promoted');
+  assert.deepEqual(copy(f.kv.get('collaboration_v1').rooms[key].outbox[0].promoteDropped), promoteDropped);
+  assert.equal(f.revisions.length, 1);
+});
+
+test('stale promotion revision rolls back staged text, candidate archive, history, and shared outbox', async () => {
+  const W = require('../public/workspaceState.js'), f = fixture({ collaboration: true });
+  const workspace = f.kv.get('workspace_poe1');
+  W.initializeWorkspace(workspace, { source: workspace.descs, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  W.dropTranslation(workspace, workspace.descs[0], 'Thai', { id: 'drop', game: 'poe1', originSourceHash: 'old-source', revision: 4 });
+  const before = copy(Object.fromEntries(f.kv));
+  await assert.rejects(f.store.saveTranslationBatch(batch({ promoteDropped: { id: 'drop', revision: 3, targetSourceHash: 'source' },
+    collaboration: { key, identity, origin: 'save' } })), /changed before/);
+  assert.deepEqual(copy(Object.fromEntries(f.kv)), before); assert.equal(f.revisions.length, 0);
+});
+
+test('bulk promotion maps stage and resolve each candidate atomically with separate guarded outbox entries', async () => {
+  const W = require('../public/workspaceState.js'), f = fixture({ collaboration: true });
+  const workspace = f.kv.get('workspace_poe1'), room = f.kv.get('collaboration_v1').rooms[key];
+  W.initializeWorkspace(workspace, { source: workspace.descs, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const promotions = {};
+  for (const filepath of ['stat.txt', 'other.txt']) {
+    const desc = workspace.descs.find(item => item.filepath === filepath);
+    const candidate = W.dropTranslation(workspace, desc, 'Thai', { id: 'drop-' + filepath, game: 'poe1', originSourceHash: 'old', targetSourceHash: 'source' });
+    promotions[filepath] = { id: candidate.id, revision: 0, targetSourceHash: 'source' };
+    if (filepath !== 'stat.txt') { room.manifest.files.push({ filepath, english: ['other'] }); room.local[filepath] = { ...file('untouched'), filepath }; room.shared[filepath] = copy(room.local[filepath]); }
+  }
+  const command = batch({ files: ['stat.txt', 'other.txt'].map(filepath => ({ ...file('accepted ' + filepath), filepath })),
+    descriptions: copy(workspace.descs), promoteDroppedByPath: promotions, collaboration: { key, identity } });
+  const saved = f.store.saveTranslationBatch(command); await queued();
+  assert.equal(W.droppedForFile(f.kv.get('workspace_poe1'), 'stat.txt', 'Thai').id, 'drop-stat.txt');
+  f.transactions.at(-1).complete(); const ack = await saved;
+  assert.equal(ack.operations.length, 2); assert.equal(ack.mutationIds.length, 2);
+  assert.ok(ack.operations.every(op => op.files.length === 1 && op.promoteDropped));
+  for (const filepath of ['stat.txt', 'other.txt']) {
+    assert.equal(W.droppedForFile(f.kv.get('workspace_poe1'), filepath, 'Thai'), null);
+    assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai[filepath].translations, ['accepted ' + filepath]);
+  }
+  const replay = await commit(f, f.store.saveTranslationBatch(command));
+  assert.equal(replay.duplicate, true); assert.equal(replay.operations.length, 2);
+  assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox.length, 2);
 });
 
 test('same-ID recovery acknowledges the durable receipt without duplicate revision or outbox', async () => {
@@ -259,7 +386,7 @@ test('worker entrypoint queues actual save commands and sends ACK only after sto
     writes.push(value.jobId);
     return value.jobId === 'save-1' ? new Promise(resolve => { resolveFirst = resolve; }) : Promise.resolve({ jobId: value.jobId });
   } } };
-  const context = vm.createContext({ self: root, importScripts: file => assert.equal(file, 'offlineStore.js') });
+  const context = vm.createContext({ self: root, importScripts: (...files) => assert.deepEqual(files, ['workspaceState.js', 'offlineStore.js']) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'saveWorker.js'), 'utf8'), context);
   assert.equal(messages[0].type, 'ready');
   root.onmessage({ data: { type: 'saveTranslations', id: 'save-1', batch: batch() } });

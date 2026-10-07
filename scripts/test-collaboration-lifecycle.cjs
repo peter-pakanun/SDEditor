@@ -67,7 +67,7 @@ function harness({ realImport = false } = {}) {
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['helper.js', 'statDescParser.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'helper.js', 'statDescParser.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   vm.runInContext('offlineStoreReady = true', context);
@@ -124,6 +124,127 @@ test('manager archive lookup uses shared import decisions across languages', asy
   e.cloudCanAccessAllLanguages = false;
   assert.equal(await e.lookupImportArchive({ zipHash: 'archive' }), null);
   assert.equal(requests.length, 1);
+});
+
+test('admin language switching keeps Saved and Dropped counts within their language', () => {
+  const { editor: e } = harness();
+  e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'admin', role: 'admin', language: 'Thai' };
+  e.descs = ['saved', 'review', 'missing'].map(name => {
+    const desc = description(name);
+    desc.hasChanges = false; desc.needsReview = false;
+    desc.translations.German = ['Deutsch', 'Zwei'];
+    if (name !== 'saved') desc.translations.Thai = ['', ''];
+    return desc;
+  });
+  // A pre-existing workspace saved by a Thai translator has no language maps.
+  e.localDescs = { descs: e.descs.slice(0, 2).map(desc => {
+    const local = plain(desc);
+    delete local.translations.German;
+    local.hasChanges = desc.filename === 'saved.txt';
+    if (desc.filename === 'review.txt') local.translations.Thai = ['Review candidate', 'Second'];
+    return local;
+  }), status: { 'source/review.txt': { needsReview: true } } };
+  e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1 });
+  e.lang = 'German'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  assert.deepEqual(plain(e.localDescs.descs[0].translations.Thai), ['เดิม {0}', 'สอง']);
+  e.lang = 'Thai'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1 });
+});
+
+test('German collaboration metadata does not erase Saved or Dropped state in Thai', () => {
+  const { editor: e } = harness();
+  const saved = description('saved'), review = description('review');
+  saved.hasChanges = false; review.hasChanges = false;
+  saved.translations.German = ['Deutsch', 'Zwei']; review.translations.German = ['Deutsch', 'Zwei'];
+  review.translations.Thai = ['', ''];
+  e.descs = [saved, review];
+  const localSaved = plain(saved), localReview = plain(review);
+  delete localSaved.translations.German; delete localReview.translations.German;
+  localSaved.hasChanges = true; localReview.translations.Thai = ['Thai review candidate', 'Second'];
+  e.localDescs = { descs: [localSaved, localReview], status: { [review.filepath]: { needsReview: true } } };
+  e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 1); assert.equal(e.statistic.isDropped, 1);
+  e.lang = 'German'; e.applyWorkspaceOverlay();
+  e.applyCollaborationFiles(e.descs.map(desc => ({ filepath: desc.filepath, translations: ['Neu', 'Zwei'],
+    trackedForExport: false, needsReview: false })), 'German');
+  e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isDropped, 0);
+  e.lang = 'Thai'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 1); assert.equal(e.statistic.isDropped, 1);
+  assert.deepEqual(plain(saved.translations.Thai), ['เดิม {0}', 'สอง']);
+  assert.deepEqual(plain(review.translations.Thai), ['', '']);
+});
+
+test('startup in German does not adopt Thai Saved or Dropped state from a stored workspace', async () => {
+  const { editor: e, window } = harness();
+  const source = [description('stored')];
+  source[0].hasChanges = false; source[0].translations.Thai = ['', ''];
+  source[0].translations.German = ['Deutsch', 'Zwei'];
+  const original = plain(source);
+  const local = plain(source[0]); delete local.translations.German;
+  local.translations.Thai = ['แก้ไขแล้ว', 'สอง'];
+  const workspace = { descs: [local], status: { [source[0].filepath]: { needsReview: true } } };
+  e.lang = 'German';
+  const prepared = await e.prepareStoredWorkspaceSource(source, workspace, true, () => true);
+  assert.equal(prepared[0].hasChanges, false); assert.equal(prepared[0].needsReview, false);
+  assert.deepEqual(plain(prepared[0].translations.German), ['Deutsch', 'Zwei']);
+  assert.deepEqual(plain(source), original);
+  e.lang = 'Thai';
+  const thai = await e.prepareStoredWorkspaceSource(source, workspace, true, () => true);
+  assert.equal(thai[0].hasChanges, false); assert.equal(thai[0].needsReview, true);
+  assert.deepEqual(plain(thai[0].translations.Thai), ['', '']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(workspace, source[0].filepath, 'Thai').snapshot.translations), ['แก้ไขแล้ว', 'สอง']);
+});
+
+test('joining an empty German sparse room does not publish Thai saved or review metadata', async t => {
+  const { editor: e } = harness({ realImport: true });
+  const source = [description('saved'), description('review')];
+  for (const desc of source) {
+    desc.hasChanges = false; desc.needsReview = false;
+    desc.translations.German = ['Deutsch', 'Zwei'];
+  }
+  e.descs = plain(source);
+  e.localDescs = { descs: source.map((desc, index) => ({ filepath: desc.filepath,
+    hasChanges: index === 0,
+    translations: { English: [...desc.translations.English], Thai: [...desc.translations.Thai] } })),
+    status: { [source[1].filepath]: { needsReview: true } } };
+  e.applyWorkspaceOverlay();
+  e.lang = 'German'; e.applyWorkspaceOverlay();
+  const tree = await protocol.buildBaselineTree(source);
+  const archive = await protocol.finalizeArchive({ version: 1,
+    zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+    fileCount: source.length, descriptionCount: source.length, parserVersion: 1,
+    decisions: [], treeRoot: tree.root });
+  let state;
+  const requests = [];
+  const client = new (require('../public/collaborationSync.js').Client)({
+    WebSocket: null,
+    store: { async updateCollaborationState(fn, options = {}) {
+      state = fn(state ? plain(state) : undefined);
+      if (options.projectWorkspace) e.localDescs = options.projectWorkspace(e.localDescs, state);
+      return plain(state);
+    } },
+    request: async (path, options = {}) => {
+      requests.push({ path, options: plain(options) });
+      if (path.endsWith('/archives/resolve')) return { archive };
+      if (path.endsWith('/join')) return { mode: 'sparse', roomId: 'German', archive, sequence: 0, files: [] };
+      if (path.includes('/changes?')) return { events: [], hasMore: false };
+      if (path.endsWith('/mutations')) return { roomId: 'German', sequence: 1,
+        files: options.body.files.map(file => protocol.fileState({ ...file, revision: 1 })) };
+      throw new Error('Unexpected sparse endpoint: ' + path);
+    },
+  });
+  t.after(() => client.destroy());
+  await client.connect({ accountId: 'admin', game: 'poe1', language: 'German', source,
+    files: e.descs.map(desc => e.collaborationFile(desc)), workspace: e.localDescs,
+    archive, baselineSource: source, baselineTree: tree });
+  assert.equal(requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  const room = Object.values(state.rooms)[0];
+  assert.deepEqual(plain(room.carries), {});
+  assert.deepEqual(plain(room.outbox), []);
 });
 
 test('presence becomes away after two minutes or a hidden tab and activity restores it', () => {
@@ -188,14 +309,16 @@ test('stored source/workspace hash mismatch preserves all database values and bl
   assert.deepEqual(plain({ workspace, source }), expected);
 });
 
-test('batched startup overlays stored translations without modifying the immutable baseline', async () => {
-  const { editor: e } = harness();
-  const source = [description('source')], original = plain(source);
+test('batched startup preserves review candidates separately without modifying the immutable baseline', async () => {
+  const { editor: e, window } = harness();
+  const source = [description('source')]; source[0].translations.Thai = ['', ''];
+  const original = plain(source);
   const saved = description('source'); saved.translations.Thai = ['แก้ไขแล้ว', 'สอง'];
   const workspace = { descs: [saved], status: { [saved.filepath]: { needsReview: true } } };
   const prepared = await e.prepareStoredWorkspaceSource(source, workspace, true, () => true);
   assert.deepEqual(plain(source), original);
-  assert.deepEqual(plain(prepared[0].translations.Thai), saved.translations.Thai);
+  assert.deepEqual(plain(prepared[0].translations.Thai), ['', '']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(workspace, saved.filepath, 'Thai').snapshot.translations), saved.translations.Thai);
   assert.equal(prepared[0].needsReview, true);
   prepared[0].translations.English[0] = 'Editor mutation';
   assert.deepEqual(plain(source), original);
@@ -480,8 +603,8 @@ test('conflict resolution cannot remove a table column even when its text has no
   assert.equal(saves, 0);
 });
 
-test('archive import stores the immutable upstream baseline before Needs Review carry-forward', async () => {
-  const { editor: e, writes } = harness({ realImport: true });
+test('archive import stores the immutable upstream baseline with dropped work kept separately', async () => {
+  const { editor: e, writes, window } = harness({ realImport: true });
   const old = description('old', ['Old upstream source']);
   old.filepath = repairedPath; old.translations.Thai = ['recovered translation'];
   e.descs = [old]; e.localDescs = { sourceHash: 'old-hash', descs: plain(e.descs), status: {} };
@@ -498,23 +621,134 @@ test('archive import stores the immutable upstream baseline before Needs Review 
   assert.deepEqual(source[0].translations.Thai, ['']);
   assert.deepEqual(baseline.source[0].translations.Thai, ['']);
   assert.deepEqual(baseline.rawSource[0].translations.Thai, ['']);
-  assert.deepEqual(workspace.descs[0].translations.Thai, ['recovered translation']);
-  assert.deepEqual(plain(e.descs[0].translations.Thai), ['recovered translation']);
+  assert.deepEqual(workspace.descs[0].translations.Thai, ['']);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(workspace, old.filepath, 'Thai').snapshot.translations), ['recovered translation']);
   assert.equal(e.descs[0].needsReview, true); assert.equal(e.descs[0].hasChanges, false);
   assert.ok(revisions.length > 0); assert.ok(revisions.every(item => item.sourceHash === archive.baselineId));
-  assert.deepEqual(revisions.find(item => item.lang === 'Thai').translations, ['recovered translation']);
+  assert.ok(revisions.every(item => item.lang === 'English'));
   e.descs[0].translations.Thai[0] = 'later working edit';
   assert.deepEqual(plain(e.importBaseline.source[0].translations.Thai), ['']);
   assert.equal(e.importBaseline.archive.baselineId, archive.baselineId);
 });
 
-test('archive reload reuses persisted identity and proof cache while overlaying local candidates', async () => {
+test('importing a changed source preserves dropped saved work separately for both Thai and German', async () => {
+  const { editor: e, writes, window } = harness({ realImport: true });
+  const old = description('old', ['Old upstream source']);
+  old.filepath = repairedPath;
+  old.translations.Thai = ['Thai carried translation'];
+  old.translations.German = ['German saved translation'];
+  const local = plain(old);
+  local.statusLanguage = 'Thai';
+  local.languageStatus = {
+    Thai: { hasChanges: true, isMissing: false },
+    German: { hasChanges: true, isMissing: false },
+  };
+  e.descs = [old];
+  e.localDescs = { sourceHash: 'old-hash', descs: [local], status: {
+    [repairedPath]: { statusLanguage: 'Thai', needsReview: false, languageStatus: {
+      Thai: { needsReview: false }, German: { needsReview: false },
+    } },
+  } };
+  const text = importText({ broken: false }) + 'lang "German"\n1\n# ""\n';
+  await e.importUpdateZipFile(zipFixture(text, { archive: true }));
+  assert.equal(writes.length, 1);
+  e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isDropped, 1);
+  e.lang = 'German'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isDropped, 1);
+  assert.equal(e.statistic.isMissing, 1);
+  assert.deepEqual(plain(e.descs[0].translations.German), ['']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'German').snapshot.translations), ['German saved translation']);
+  e.lang = 'Thai'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isDropped, 1);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(writes[0][1], repairedPath, 'Thai').snapshot.translations), ['Thai carried translation']);
+  assert.equal(writes[0][1].staged.German[repairedPath], undefined);
+});
+
+test('source upgrades retain a dropped Thai snapshot separately from current translations across reload', async () => {
+  const { editor: e, writes, window } = harness({ realImport: true });
+  const previous = description('old', ['Original English']);
+  previous.filepath = repairedPath; previous.variables = ['#']; previous.remarks = [''];
+  previous.translations.Thai = ['Original Thai translation']; previous.translations.German = [''];
+  previous.hasChanges = false; previous.needsReview = false;
+  e.descs = [previous];
+  e.localDescs = { sourceHash: 'old-hash', descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: [previous], sourceHash: 'old-hash', game: 'poe1', language: 'Thai',
+  });
+  const upstream = english => 'description\n1 ignite_delay\n1\n# "' + english
+    + '"\nlang "Thai"\n1\n# ""\nlang "German"\n1\n# ""\n';
+  await e.importUpdateZipFile(zipFixture(upstream('Changed English'), { archive: true }));
+  assert.equal(writes.length, 1);
+  const first = window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'Thai');
+  assert.ok(first, 'The old complete translation remains available for an explicit review.');
+  assert.deepEqual(plain(first.snapshot.english), ['Original English']);
+  assert.deepEqual(plain(first.snapshot.translations), ['Original Thai translation']);
+  assert.equal(first.originSourceHash, 'old-hash');
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+  e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isMissing, 1);
+  assert.equal(e.statistic.isDropped, 1);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'German'), null);
+  e.lang = 'German'; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isDropped, 0);
+  e.lang = 'Thai'; e.applyWorkspaceOverlay();
+  await e.importUpdateZipFile(zipFixture(upstream('Newest English'), { archive: true }));
+  assert.equal(writes.length, 2);
+  const second = window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'Thai');
+  assert.deepEqual(plain(second.snapshot), plain(first.snapshot));
+  assert.equal(second.originSourceHash, first.originSourceHash);
+  assert.equal(second.targetSourceHash, e.sourceIdentity);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+
+  const [source, workspace, , , baseline] = writes[1];
+  const loaded = harness({ realImport: true });
+  loaded.window.OfflineStore.getSource = async () => plain(source);
+  loaded.window.OfflineStore.getWorkspace = async () => plain(workspace);
+  loaded.window.OfflineStore.getImportedBaseline = async () => plain(baseline);
+  await loaded.editor.loadVersionedStorage();
+  assert.equal(loaded.editor.sourceLoaded, true);
+  const restored = loaded.window.WorkspaceState.droppedForFile(loaded.editor.localDescs, repairedPath, 'Thai');
+  assert.deepEqual(plain(restored.snapshot), plain(first.snapshot));
+  assert.deepEqual(plain(loaded.editor.descs[0].translations.Thai), ['']);
+  assert.equal(loaded.editor.descs[0].hasChanges, false);
+  assert.equal(loaded.editor.descs[0].needsReview, true);
+});
+
+test('a source upgrade drops the last saved translation instead of the older ZIP translation', async () => {
+  const { editor: e, writes, window } = harness({ realImport: true });
+  const previous = description('old', ['Original English']);
+  previous.filepath = repairedPath; previous.variables = ['#']; previous.remarks = [''];
+  previous.translations.Thai = ['Translation from the original ZIP']; previous.hasChanges = false;
+  e.descs = [plain(previous)]; e._workspaceSourceBaseline = [plain(previous)];
+  e.localDescs = { sourceHash: 'old-hash', descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: [previous], sourceHash: 'old-hash', game: 'poe1', language: 'Thai',
+  });
+  window.WorkspaceState.stageTranslation(e.localDescs, { filepath: repairedPath,
+    translations: ['Last saved translation'] }, 'Thai', { source: [previous], sourceHash: 'old-hash', game: 'poe1' });
+  e.applyWorkspaceOverlay();
+  const text = 'description\n1 ignite_delay\n1\n# "Changed English"\nlang "Thai"\n1\n# ""\n';
+  await e.importUpdateZipFile(zipFixture(text, { archive: true }));
+  assert.equal(writes.length, 1);
+  const candidate = window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'Thai');
+  assert.ok(candidate);
+  assert.deepEqual(plain(candidate.snapshot.translations), ['Last saved translation']);
+  assert.deepEqual(plain(candidate.snapshot.english), ['Original English']);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+  assert.equal(e.descs[0].hasChanges, false); assert.equal(e.descs[0].needsReview, true);
+});
+
+test('archive reload reuses persisted identity and proof cache while retaining separate dropped candidates', async () => {
   const imported = harness({ realImport: true });
   await imported.editor.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
   const [source, workspace, , , baseline] = imported.writes[0];
-  const local = workspace.descs.find(desc => desc.filepath === repairedPath);
-  local.translations.Thai = ['local recovery candidate'];
-  local.hasChanges = false; workspace.status[repairedPath].needsReview = true;
+  imported.window.WorkspaceState.dropTranslation(workspace, source[0], 'Thai', {
+    game: 'poe1', translations: ['local recovery candidate'], originSourceHash: workspace.sourceHash,
+    targetSourceHash: workspace.sourceHash,
+  });
   const loaded = harness({ realImport: true }); const e = loaded.editor;
   loaded.window.OfflineStore.getSource = async () => plain(source);
   loaded.window.OfflineStore.getWorkspace = async () => plain(workspace);
@@ -526,7 +760,8 @@ test('archive reload reuses persisted identity and proof cache while overlaying 
   }
   await e.loadVersionedStorage();
   assert.equal(e.sourceLoaded, true); assert.equal(e.sourceIdentity, workspace.importArchive.baselineId);
-  assert.deepEqual(plain(e.descs[0].translations.Thai), ['local recovery candidate']);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['']);
+  assert.deepEqual(plain(loaded.window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'Thai').snapshot.translations), ['local recovery candidate']);
   assert.equal(e.descs[0].needsReview, true); assert.equal(e.descs[0].hasChanges, false);
   assert.deepEqual(plain(e.importBaseline.source[0].translations.Thai), ['']);
   assert.deepEqual(plain(e.importBaseline.tree), baseline.tree);
@@ -638,9 +873,11 @@ test('offline configuration reconciliation preserves saved edits, candidates and
   assert.deepEqual(plain(e.descs[0].translations.Thai), ['reviewed local edit']);
   assert.equal(e.descs[0].hasChanges, true); assert.equal(e.descs[0].needsReview, false);
   assert.deepEqual(plain(e.localDescs.descs[0].translations.French), ['saved French work']);
-  assert.deepEqual(plain(e.localDescs.importRecovery[0].descs), oldWorkspace.descs);
-  assert.deepEqual(writes[0][2][0].translations, ['reviewed local edit']);
-  assert.equal(writes[0][2][0].sourceHash, first.archive.baselineId);
+  const recovery = plain(e.localDescs.importRecovery[0].descs);
+  assert.deepEqual(recovery.map(({ languageStatus, statusLanguage, ...desc }) => desc),
+    oldWorkspace.descs.map(({ hasChanges, isMissing, isRevised, isDropped, needsReview, trackedForExport, ...desc }) => desc));
+  assert.equal(recovery[0].hasChanges, undefined);
+  assert.deepEqual(writes[0][2], [], 'An unchanged English source does not create an invented translation revision.');
 });
 
 test('a stale canonical reconstruction cannot replace a switched local workspace', async () => {
@@ -699,9 +936,10 @@ test('missing cached baseline preserves old browser data and refuses sparse coll
   assert.deepEqual(plain({ source, workspace }), before); assert.match(e.cloudStorageError, /baseline is unavailable/);
 });
 
-test('changing English block metadata requires review even when its source text stays identical', async () => {
-  const { editor: e } = harness({ realImport: true });
+test('changing English block metadata drops saved text separately even when source text stays identical', async () => {
+  const { editor: e, window } = harness({ realImport: true });
   const raw = description('metadata', ['Same source']); raw.variables = ['#']; raw.remarks = [''];
+  raw.translations.Thai = ['Current ZIP translation'];
   raw.duplicateLangGroups = [{ filepath: raw.filepath, lang: 'English', options: [
     { id: 'English', lang: 'English', occurrence: 1, content: ['Same source'], variables: ['#'], remarks: [''] },
     { id: 'English-2', lang: 'English', occurrence: 2, content: ['Same source'], variables: ['1'], remarks: ['new_rule'] },
@@ -716,35 +954,41 @@ test('changing English block metadata requires review even when its source text 
   e.descs[0].translations.Thai = ['saved local edit']; e.descs[0].hasChanges = true;
   e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
   assert.equal(await e.reconcileImportArchive(second.archive), true);
-  assert.deepEqual(plain(e.descs[0].translations.Thai), ['saved local edit']);
-  assert.deepEqual(plain(e.descs[0].variables), ['1']); assert.equal(e.descs[0].hasChanges, false); assert.equal(e.descs[0].needsReview, true);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['Current ZIP translation']);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, raw.filepath, 'Thai').snapshot.translations), ['saved local edit']);
+  assert.deepEqual(plain(e.descs[0].variables), ['1']); assert.equal(e.descs[0].hasChanges, false); assert.equal(e.descs[0].needsReview, false);
 });
 
-test('recovering a Needs Review history candidate waits for local durability and does not enqueue collaboration', async () => {
+test('recovering a history candidate waits for local durability and does not stage its translation', async () => {
   const { editor: e, window } = harness({ realImport: true });
   const desc = e.descs[0], lines = ['recovered {0}', 'recovered second'];
+  desc.hasChanges = false; e.localDescs.descs[0].hasChanges = false;
   const original = plain(desc.translations.Thai), commit = deferred(); let batch;
   e._collaboration = {
     fileBase: () => ({ filepath: desc.filepath, translations: original, revision: 3 }),
     save: () => assert.fail('Private recovery cannot publish a collaborative save'),
     retry: () => assert.fail('Private recovery cannot trigger an outbox upload'),
   };
-  window.OfflineStore.saveTranslationBatch = async value => { batch = plain(value); await commit.promise; return { status: 'local' }; };
+  window.OfflineStore.updateWorkspace = async (recover, game, options) => {
+    const workspace = recover(plain(e.localDescs)); batch = plain({ workspace, game, revisions: options.revisions });
+    await commit.promise; return workspace;
+  };
   const context = e.captureCollaborationContext();
   const restoring = e.restoreReviewCandidate(desc, lines, context); await tick();
   assert.deepEqual(plain(desc.translations.Thai), original);
-  assert.equal(batch.collaboration, undefined); assert.equal(batch.sourceHash, 'old-hash');
-  assert.equal(batch.files[0].needsReview, true); assert.equal(batch.files[0].trackedForExport, false);
+  assert.equal(batch.workspace.sourceHash, 'old-hash'); assert.equal(batch.game, 'poe1');
+  assert.deepEqual(batch.workspace.staged, {});
+  assert.deepEqual(batch.workspace.dropped.Thai[desc.filepath].snapshot.translations, lines);
   assert.equal(batch.revisions[0].needsReview, true); assert.deepEqual(batch.revisions[0].translations, lines);
   commit.resolve(); assert.equal((await restoring).status, 'local');
-  assert.deepEqual(plain(desc.translations.Thai), lines); assert.equal(desc.needsReview, true); assert.equal(desc.hasChanges, false);
-  assert.deepEqual(plain(e.localDescs.status[desc.filepath].reviewCandidates.Thai.translations), lines);
+  assert.deepEqual(plain(desc.translations.Thai), original); assert.equal(desc.needsReview, false); assert.equal(desc.hasChanges, false);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), lines);
   assert.equal(e._editorCollabBase.revision, 3);
 });
 
 test('failed private candidate persistence leaves the saved translation and review status unchanged', async () => {
   const { editor: e, window } = harness({ realImport: true }); const desc = e.descs[0], before = plain(e.localDescs);
-  window.OfflineStore.saveTranslationBatch = async () => { throw new Error('Storage unavailable'); };
+  window.OfflineStore.updateWorkspace = async () => { throw new Error('Storage unavailable'); };
   await assert.rejects(e.restoreReviewCandidate(desc, ['candidate {0}', 'second']), /Storage unavailable/);
   assert.deepEqual(plain(e.localDescs), before); assert.deepEqual(plain(desc.translations.Thai), before.descs[0].translations.Thai);
   assert.equal(desc.needsReview, false);
@@ -752,7 +996,7 @@ test('failed private candidate persistence leaves the saved translation and revi
 
 test('a private review candidate cannot activate in another account after storage completes', async () => {
   const { editor: e, window } = harness({ realImport: true }); const desc = e.descs[0], before = plain(desc);
-  const commit = deferred(); window.OfflineStore.saveTranslationBatch = () => commit.promise;
+  const commit = deferred(); window.OfflineStore.updateWorkspace = () => commit.promise;
   const restoring = e.restoreReviewCandidate(desc, ['candidate {0}', 'second']);
   e.cloudUser = { id: 'other-account' }; commit.resolve({ status: 'local' });
   assert.equal((await restoring).stale, true); assert.deepEqual(plain(desc), before);
@@ -768,22 +1012,29 @@ test('duplicate import continuation shares one ZIP digest and excludes archive d
   assert.equal(a.zipHash, 'd'.repeat(64)); assert.equal(a.zipSize, file.size);
 });
 
-test('connected recovery registers a private carry in the active room without publishing an edit', async () => {
+test('connected recovery registers a separate dropped candidate without publishing a translation edit', async () => {
   const { editor: e, window } = harness({ realImport: true }); const desc = e.descs[0], commit = deferred();
   const original = plain(desc.translations.Thai), lines = ['recovered {0}', 'second recovered']; let candidate;
-  window.OfflineStore.saveTranslationBatch = () => assert.fail('The connected room registers candidate and workspace atomically');
+  window.OfflineStore.updateWorkspace = () => assert.fail('The connected client registers candidate and workspace atomically');
   e._collaboration = {
-    registerLocalCandidate: async (file, options) => { candidate = plain({ file, options }); await commit.promise; return { status: 'local' }; },
+    registerDroppedCandidate: async (file, options) => {
+      candidate = plain({ file, options }); await commit.promise;
+      window.WorkspaceState.dropTranslation(e.localDescs, desc, 'Thai', { ...file, snapshot: file.snapshot });
+      return { status: 'local' };
+    },
     fileBase: () => ({ filepath: desc.filepath, translations: original, revision: 5 }),
     save: () => assert.fail('A review candidate cannot publish an edit'),
     retry: () => assert.fail('Candidate registration must not upload changes'),
   };
   const recovering = e.restoreReviewCandidate(desc, lines); await tick();
-  assert.deepEqual(plain(desc.translations.Thai), original); assert.deepEqual(candidate.file.translations, lines);
-  assert.equal(candidate.file.needsReview, true); assert.equal(candidate.file.trackedForExport, false);
-  assert.deepEqual(candidate.options.revisions[0].translations, lines); assert.equal(candidate.options.status.needsReview, true);
+  assert.deepEqual(plain(desc.translations.Thai), original); assert.deepEqual(candidate.file.snapshot.translations, lines);
+  assert.equal(candidate.file.originSourceHash, e.sourceIdentity);
+  assert.equal(candidate.file.targetSourceHash, e.sourceIdentity);
+  assert.deepEqual(candidate.options.revisions[0].translations, lines);
   commit.resolve(); assert.equal((await recovering).status, 'local');
-  assert.deepEqual(plain(desc.translations.Thai), lines); assert.equal(e._editorCollabBase.revision, 5);
+  assert.deepEqual(plain(desc.translations.Thai), original);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), lines);
+  assert.equal(e._editorCollabBase.revision, 5);
 });
 
 test('a failed ZIP digest is retried for the same File while successful identity remains cached', async () => {

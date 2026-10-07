@@ -1,9 +1,9 @@
 /* Source identity and entry-level merge rules shared by the browser and Node checks. */
 (function (root, factory) {
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./workspaceState.js') : root.WorkspaceState);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.CollaborationProtocol = api;
-})(typeof window === 'object' ? window : this, function () {
+})(typeof window === 'object' ? window : this, function (WorkspaceState) {
   'use strict';
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -209,7 +209,8 @@
       while (translations.length < count) translations.push('');
     }
     return { filepath: file.filepath, translations, needsReview: !!file.needsReview,
-      trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0 };
+      trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
+      ...(Array.isArray(file.beforeTranslations) ? { beforeTranslations: copy(file.beforeTranslations) } : {}) };
   }
   function contentEqual(a, b) {
     return !!a && !!b && equal(a.translations, b.translations)
@@ -245,6 +246,7 @@
     // callers receive an independent copy.
     const result = mutate ? workspace || { descs: [], status: {} } : copy(workspace || { descs: [], status: {} });
     result.descs ||= []; result.status ||= {};
+    WorkspaceState.initializeWorkspace(result, { source, language });
     const descriptions = new Map(result.descs.map(desc => [desc.filepath, desc]));
     let originals;
     for (const file of files) {
@@ -257,13 +259,21 @@
         descriptions.set(file.filepath, desc);
       }
       desc.translations ||= {};
-      desc.translations[language] = copy(file.translations);
-      desc.hasChanges = !!file.trackedForExport;
-      desc.needsReview = !!file.needsReview;
-      desc.isMissing = file.translations.some(text => !text.trim());
-      result.status[file.filepath] = { ...(result.status[file.filepath] || {}), needsReview: !!file.needsReview };
+      originals ||= new Map(source.map(desc => [desc.filepath, desc]));
+      if (file.needsReview) {
+        if (!WorkspaceState.droppedForFile(result, file.filepath, language) && file.translations.some(text => text.trim())) {
+          WorkspaceState.dropTranslation(result, desc, language, { translations: file.translations,
+            originSourceHash: '', originSourceAvailable: false, targetSourceHash: result.sourceHash,
+            reason: 'Preserved legacy dropped translation' });
+        }
+      } else if (file.trackedForExport || file.revision > 0) {
+        WorkspaceState.stageTranslation(result, file, language, { source: originals.get(file.filepath) });
+      }
+      desc.translations[language] = file.needsReview
+        ? WorkspaceState.workspaceFile(result, originals.get(file.filepath) || desc, language).translations
+        : copy(file.translations);
     }
-    return result;
+    return WorkspaceState.pruneWorkspaceStatus(result);
   }
   return { copy, equal, manifest, manifestAsync, sourceHash, sourceHashAsync, fingerprint: sourceHash, fileState, contentEqual, mergeFile, scopeKey, projectWorkspace,
     zipHash, witness, leafHash, parentHash, blockHash, normalizeDecisions, configHash, baselineId, normalizeArchive, finalizeArchive,

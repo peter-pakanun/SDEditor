@@ -389,9 +389,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" v-bind:class="{ selectedFileRow: selectedFilepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, needsReview: desc.needsReview, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath)" @click="openFileRow(desc.filepath)">
+          <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" v-bind:class="{ selectedFileRow: selectedFilepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, isRevised: desc.isRevised, isDropped: desc.isDropped, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath)" @click="openFileRow(desc.filepath)">
             <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
-            <td><button class="fileOpenButton" tabindex="-1" @click.stop="openFileRow(desc.filepath)" :aria-label="'Edit ' + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.needsReview" class="fileReviewLabel">Needs review</span></td>
+            <td><button class="fileOpenButton" tabindex="-1" @click.stop="openFileRow(desc.filepath)" :aria-label="'Edit ' + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.isDropped" class="fileDroppedLabel">Dropped</span><span v-if="desc.isRevised" class="fileRevisedLabel">Revised</span></td>
             <td data-label="English"><span v-html="desc.english"></span></td>
             <td class="translationTr collaborationCell" :class="{ collaborationSelected: collaborationPeersFor(desc.filepath).length, collaborationEditing: collaborationEditing(desc.filepath) }" :style="collaborationCellStyle(desc.filepath)" :data-label="lang + ' translation'" v-tooltip="collaborationSelectionLabel(desc.filepath)" :aria-description="collaborationSelectionLabel(desc.filepath) || undefined">
               <div v-if="collaborationEditing(desc.filepath)" class="collaborationPeerLabels" aria-label="Other translators editing this file">
@@ -418,9 +418,10 @@
           <span class="workspaceLoaded"><strong>{{ descs.length }}</strong> loaded files</span>
           <span class="statusPill missing" title="Files with blank translations or a different line count"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ statistic.isMissing }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill error" title="Files with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ diagnosticScanErrorFileCount }}</strong></span>
-          <span class="statusPill review" title="Files whose English source changed since the last translation save"><span class="statusDot" aria-hidden="true"></span>Review <strong>{{ statistic.needsReview }}</strong></span>
+          <span class="statusPill dropped" title="Files with an unresolved dropped translation"><span class="statusDot" aria-hidden="true"></span>Dropped <strong>{{ statistic.isDropped }}</strong></span>
           <span v-if="diagnosticScanRunning || diagnosticScanCompleted" class="statusPill warning" title="Files with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ diagnosticScanWarningFileCount }}</strong></span>
-          <span class="statusPill saved" title="Files with saved changes tracked for export"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
+          <span class="statusPill revised" title="Corrections to existing translations outside this version's Missing/Dropped assignment scope"><span class="statusDot" aria-hidden="true"></span>Revised <strong>{{ statistic.isRevised }}</strong></span>
+          <span class="statusPill saved" title="Files with a staged translation for the selected language"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
           <div class="collaborationStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
             <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
@@ -570,11 +571,33 @@
             <span>{{ editorCompareTitle }}</span>
             <button @click="exitEditorCompareMode">Exit compare</button>
           </div>
-          <div v-if="editorCurrentEditingDesc.needsReview" class="needsReviewBanner">
-            <span>⚠ Source changed since your last translation save.</span>
-            <button @click="sideTab = 'history'; setHistoryMode('source')" :disabled="!editorReady">Show source history</button>
-            <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
-            <button @click="confirmTranslationUnchanged" :disabled="!editorReady">Confirm unchanged</button>
+          <div v-if="editorDroppedConflict" class="droppedTranslationPanel" role="alert">
+            <div class="droppedTranslationBanner">
+              <strong>Competing dropped translations</strong>
+              <button @click="resolveDroppedTranslationConflict('local')" :disabled="editorSaving">Keep this dropped copy</button>
+              <button @click="resolveDroppedTranslationConflict('shared')" :disabled="editorSaving">Use shared dropped copy</button>
+            </div>
+            <div class="droppedComparison">
+              <section><h4>Your dropped copy</h4><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.translations || []).join('\n') }}</pre></section>
+              <section><h4>Shared dropped copy</h4><p v-if="!editorDroppedConflict.shared?.snapshot">This copy has already been resolved.</p><template v-else><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.translations || []).join('\n') }}</pre></template></section>
+            </div>
+            <p v-if="editorDroppedConflict.kind === 'promotion'">Your saved result remains local. Resolve these copies, then Save again to share it.</p>
+          </div>
+          <div v-if="editorDroppedCandidate" class="droppedTranslationPanel">
+            <div class="droppedTranslationBanner">
+              <span><strong>Dropped translation</strong> · {{ editorDroppedCandidate.reason || 'Source changed' }}</span>
+              <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
+              <button @click="confirmTranslationUnchanged" :disabled="!editorDroppedCanPromote">Confirm unchanged</button>
+              <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict">Discard dropped copy</button>
+            </div>
+            <details open>
+              <summary :title="editorDroppedCandidate.originSourceHash">Compare dropped version → current version</summary>
+              <div class="droppedComparison">
+                <section><h4>English source</h4><p v-if="editorDroppedCandidate.originSourceAvailable === false">The original English source was not preserved in this older workspace.</p><div v-else class="englishDiff" v-html="editorDroppedSourceDiff"></div></section>
+                <section><h4>Translation</h4><div class="englishDiff" v-html="editorDroppedTranslationDiff"></div></section>
+              </div>
+              <p v-if="editorDroppedCandidate.snapshot.translations.length !== editorCurrentEditingDesc.translations.English.length">The source entry count changed. Review the dropped copy and save a replacement.</p>
+            </details>
           </div>
         </div>
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks" :key="index">
@@ -875,7 +898,7 @@
           </details>
           <section v-if="diagnosticScanCompleted" class="diagnosticScanResults" aria-label="Scan results">
             <div class="diagnosticScanResultsHeading">
-              <h3>{{ diagnosticScanResultFiles.length ? 'Files to review' : 'No issues found' }}</h3>
+              <h3>{{ diagnosticScanResultFiles.length ? 'Files with findings' : 'No issues found' }}</h3>
               <span v-if="diagnosticScanResultFiles.length">{{ diagnosticScanResultFiles.length }} {{ diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }}</span>
             </div>
             <nav v-if="diagnosticScanResultPageCount > 1" class="diagnosticScanResultPagination" aria-label="Scan result pages">
@@ -1166,6 +1189,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/8.0.1/diff.min.js"></script>
   <script src="FileSaver.js"></script>
   <script src="dummyFiles.js"></script>
+  <script src="workspaceState.js"></script>
   <script src="helper.js"></script>
   <script src="statDescParser.js"></script>
   <script src="regexEngine.js"></script>

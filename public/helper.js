@@ -89,15 +89,17 @@ async function decodeZipTxtFile(zipObject, lang) {
   });
 }
 
-function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing } = {}) {
+function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing, derivedStatus = false } = {}) {
   // Detach flat string arrays from Vue proxies before they enter a storage snapshot.
   const english = Array.isArray(desc?.translations?.English) ? [...desc.translations.English] : [];
   const local = {
     filedir: desc?.filedir,
     filename: desc?.filename,
     filepath: desc?.filepath,
-    hasChanges: typeof hasChanges === "undefined" ? !!desc?.hasChanges : !!hasChanges,
-    isMissing: typeof isMissing === "undefined" ? !!desc?.isMissing : !!isMissing,
+    ...(derivedStatus ? {} : {
+      hasChanges: typeof hasChanges === "undefined" ? !!desc?.hasChanges : !!hasChanges,
+      isMissing: typeof isMissing === "undefined" ? !!desc?.isMissing : !!isMissing,
+    }),
     name: desc?.name,
     remarks: Array.isArray(desc?.remarks) ? [...desc.remarks] : desc?.remarks,
     stats: Array.isArray(desc?.stats) ? [...desc.stats] : desc?.stats,
@@ -106,12 +108,17 @@ function makeLocalDesc(desc, lang, lines, { hasChanges, isMissing } = {}) {
       English: english,
     }
   };
-  if (lang) local.translations[lang] = Array.isArray(lines) ? [...lines] : [];
+  if (lang) {
+    local.translations[lang] = Array.isArray(lines) ? [...lines] : [];
+    if (!derivedStatus) window.WorkspaceState.setDescriptionStatus(local, lang, { hasChanges: local.hasChanges, isMissing: local.isMissing });
+  }
   return local;
 }
 
-function updateLocalDesc(localDesc, desc, lang, lines, { hasChanges, isMissing } = {}) {
+function updateLocalDesc(localDesc, desc, lang, lines, { hasChanges, isMissing, derivedStatus = false } = {}) {
   if (!localDesc || typeof localDesc !== "object") return;
+  // Capture legacy flags before adding another language to this description.
+  if (!derivedStatus) window.WorkspaceState.descriptionStatus(localDesc, lang);
   localDesc.filedir = desc?.filedir;
   localDesc.filename = desc?.filename;
   localDesc.filepath = desc?.filepath;
@@ -119,9 +126,14 @@ function updateLocalDesc(localDesc, desc, lang, lines, { hasChanges, isMissing }
   localDesc.remarks = Array.isArray(desc?.remarks) ? [...desc.remarks] : desc?.remarks;
   localDesc.stats = Array.isArray(desc?.stats) ? [...desc.stats] : desc?.stats;
   localDesc.variables = Array.isArray(desc?.variables) ? [...desc.variables] : desc?.variables;
-  if (typeof hasChanges !== "undefined") localDesc.hasChanges = !!hasChanges;
-  if (typeof isMissing !== "undefined") localDesc.isMissing = !!isMissing;
+  if (!derivedStatus && typeof hasChanges !== "undefined") localDesc.hasChanges = !!hasChanges;
+  if (!derivedStatus && typeof isMissing !== "undefined") localDesc.isMissing = !!isMissing;
   if (!localDesc.translations || typeof localDesc.translations !== "object") localDesc.translations = {};
   if (Array.isArray(desc?.translations?.English)) localDesc.translations.English = [...desc.translations.English];
   if (lang) localDesc.translations[lang] = Array.isArray(lines) ? [...lines] : [];
+  if (lang && !derivedStatus) window.WorkspaceState.setDescriptionStatus(localDesc, lang, {
+    ...(typeof hasChanges !== "undefined" ? { hasChanges: !!hasChanges } : {}),
+    ...(typeof isMissing !== "undefined" ? { isMissing: !!isMissing } : {}),
+  });
+  if (derivedStatus) window.WorkspaceState.pruneWorkspaceStatus({ stagedVersion: 1, descs: [localDesc], status: {} });
 }

@@ -155,6 +155,7 @@ function storageFixture({ failRevision = false } = {}) {
   } };
   const indexedDB = { open() { const request = {}; queueMicrotask(() => { request.result = db; request.onsuccess(); }); return request; } };
   const context = vm.createContext({ window: {}, indexedDB, console: { log() {} } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/workspaceState.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/offlineStore.js'), 'utf8'), context);
   return { store: context.window.OfflineStore, kv, revisions, transactions };
 }

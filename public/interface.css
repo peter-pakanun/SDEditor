@@ -8,7 +8,10 @@
   --ui-shadow: 0 8px 28px rgba(24, 39, 75, .08);
   --ui-missing: #b53848;
   --ui-saved: #237448;
-  --ui-review: #926000;
+  --ui-dropped: #ad5510;
+  --ui-revised: #793bb6;
+  --ui-error: var(--ui-missing);
+  --ui-warning: var(--ui-dropped);
 }
 [data-theme="grey"] {
   --color-bg: #e3e5ea;
@@ -27,9 +30,10 @@
   --ui-accent-soft: var(--color-element-alt);
   --ui-on-accent: #fff;
   --ui-shadow: 0 8px 28px var(--color-shadow);
-  --ui-missing: var(--color-diagnostic-error-border);
+  --ui-missing: #ff8291;
   --ui-saved: #80d8aa;
-  --ui-review: var(--color-diagnostic-warning-border);
+  --ui-dropped: #ffb365;
+  --ui-revised: #c39bf6;
 }
 [data-theme="modern-dark"] {
   --ui-border: #3d495e;
@@ -40,7 +44,8 @@
   --ui-shadow: 0 8px 28px rgba(0, 0, 0, .2);
   --ui-missing: #ff9baa;
   --ui-saved: #80d8aa;
-  --ui-review: #f1cc77;
+  --ui-dropped: #ffb365;
+  --ui-revised: #c39bf6;
 }
 [data-theme="modern-dark"] {
   --color-bg: #181d27;
@@ -51,8 +56,8 @@
   --color-element-highlight: #677BC4;
   --color-accent: #FFB86B;
   --color-line-diff: rgba(255, 120, 120, .22);
-  --color-diagnostic-warning: rgba(255, 198, 41, .34);
-  --color-diagnostic-warning-border: #D69B16;
+  --color-diagnostic-warning: rgba(255, 151, 48, .25);
+  --color-diagnostic-warning-border: var(--ui-warning);
   --color-diagnostic-error: rgba(255, 72, 92, .34);
   --color-diagnostic-error-border: #FF6073;
   --color-shadow: rgba(0, 0, 0, .3);
@@ -183,6 +188,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .filterChip input { margin: 0; width: 14px; height: 14px; padding: 0; flex-shrink: 0; }
 .filterChip.selected { background: var(--ui-accent-soft); border-color: var(--ui-accent); }
 .filterChip:hover { border-color: var(--ui-accent); }
+.filterChip.missing { --filter-color: var(--ui-missing); }
+.filterChip.dropped { --filter-color: var(--ui-dropped); }
+.filterChip.revised { --filter-color: var(--ui-revised); }
+.filterChip.saved { --filter-color: var(--ui-saved); }
+.filterChip.error { --filter-color: var(--ui-error); }
+.filterChip.warning { --filter-color: var(--ui-warning); }
+.filterChip:where(.missing, .dropped, .revised, .saved, .error, .warning) { color: var(--filter-color); }
+.filterChip:where(.missing, .dropped, .revised, .saved, .error, .warning).selected { border-color: var(--filter-color); background: color-mix(in srgb, var(--filter-color) 10%, var(--color-element)); }
+.filterChip input { accent-color: var(--filter-color, var(--ui-accent)); }
 .filterSelectionActions { display: flex; gap: 6px; }
 .filterSelectionActions button { padding: 4px 7px; border: 0; background: transparent; color: var(--ui-accent); font-size: 12px; line-height: 1.6; }
 .fileTableScroll { overflow-x: auto; background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 10px; box-shadow: var(--ui-shadow); }
@@ -194,7 +208,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspace #table .tableSort { border: 0; padding: 0; border-radius: 2px; background: transparent; font-weight: 700; text-align: left; line-height: 1.4; }
 .workspace #table .fileOpenButton { max-width: 100%; padding: 0; border: 0; border-radius: 2px; background: transparent; color: var(--ui-accent); text-align: left; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
 .workspace #table .fileOpenButton:hover { text-decoration: underline; }
-.fileReviewLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-review); }
+.fileDroppedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-dropped); }
+.fileRevisedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-revised); }
+.droppedTranslationPanel details { padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--ui-dropped) 35%, transparent); border-top: 0; }
+.droppedTranslationPanel summary { cursor: pointer; }
+.droppedComparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.droppedComparison h4 { margin: 4px 0 8px; font-size: 13px; }
+.droppedComparison .englishDiff { max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
+.droppedTranslationPanel .droppedTranslationBanner { flex-wrap: wrap; }
 .workspaceEmpty { text-align: center; padding: 50px 16px; }
 .workspaceEmpty h2 { font-size: 18px; margin: 0 0 8px; }
 .workspaceEmpty p { color: var(--ui-muted); margin: 0 0 16px; }
@@ -229,9 +250,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .statusDot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .statusPill.missing .statusDot { color: var(--ui-missing); }
 .statusPill.saved .statusDot { color: var(--ui-saved); }
-.statusPill.review .statusDot { color: var(--ui-review); }
-.statusPill.error .statusDot { color: var(--color-diagnostic-error-border); }
-.statusPill.warning .statusDot { color: var(--color-diagnostic-warning-border); }
+.statusPill.revised .statusDot { color: var(--ui-revised); }
+.statusPill.dropped .statusDot { color: var(--ui-dropped); }
+.statusPill.error .statusDot { color: var(--ui-error); }
+.statusPill.warning .statusDot { color: var(--ui-warning); }
 .workspacePagination { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px; }
 .fileRange { font-size: 13px; color: var(--ui-muted); margin-right: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .workspacePagination .paginationArrow, .diagnosticScanResultPagination .paginationArrow {
@@ -366,7 +388,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .collaborationStatus button { padding: 4px 9px; min-height: 28px; font-size: 12px; }
 .collaborationConnection { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-muted); flex: none; }
 .collaborationConnection.connected { background: var(--ui-saved); }
-.collaborationConnection.warning { background: var(--ui-review); }
+.collaborationConnection.warning { background: var(--ui-warning); }
 .collaborationConnection.error { background: var(--ui-missing); }
 .collaborationVersion { color: var(--ui-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .collaborationHashing { display: inline-flex; align-items: center; gap: 6px; }

@@ -58,7 +58,9 @@ test('public workspace projection remains pure and preserves other languages and
   assert.deepEqual(result.descs[1].translations.English, ['Second']);
   assert.deepEqual(result.descs[1].translations.German, ['Another']);
   assert.equal(result.status['a.txt'].preserved, true);
-  assert.equal(result.status['b.txt'].needsReview, true);
+  assert.equal(result.status['b.txt']?.needsReview, undefined);
+  assert.deepEqual(result.dropped.Thai['b.txt'].snapshot.translations, ['new saved']);
+  assert.equal(result.staged.Thai?.['b.txt'], undefined);
   result.descs[0].translations.German[0] = 'result-only edit';
   result.descs[1].stats[0] = 'result-only metadata';
   result.descs[1].translations.Thai[0] = 'result-only translation';

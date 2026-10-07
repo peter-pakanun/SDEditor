@@ -9,9 +9,10 @@ SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings
 | Editor preferences and Regex rules | Saved for the current local/account profile | Personal to your Google account |
 | Dictionary, including Alternates and TL notes | Separate dictionary for each language and profile | Shared by language; assigned translators, managers, and admins can edit it |
 | Editor clipboard | Local to the profile | Not uploaded |
-| Immutable imported baseline, unsaved typing, carried Needs Review translations, and legacy history | Local only | Not uploaded |
+| Immutable imported baseline, unsaved typing, and legacy history | Local only | Not uploaded |
 | ZIP identity and accepted import decisions | Cached locally with the baseline | Hashes, size/counts, importer version, and duplicate-language-block choices; shared across language teams |
-| Edited translation files | Cached locally with pending changes and recovery state | Saved overrides shared by game, accepted baseline, and language |
+| Saved/staged translation files | Cached locally with pending changes and recovery state | Saved overrides shared by game, accepted baseline, and language |
+| Dropped translations | Separate recoverable copy with old source and metadata | Shared by game, language, and file across source versions; retained until promoted or discarded |
 | New shared translation history | Available alongside local history | Author, timestamp, origin, and before/after versions |
 | Selected/open file presence | Current browser session | Visible to participants in the same collaboration workspace; expires on disconnect |
 | File comments and read receipts | Loaded into the current tab; unsent text and audience choice stay in the tab | Comments shared by game and file path across hashes; assigned-language scope for translators, selected-language scope for manager/admin posts, or explicitly global; managers/admins can read every team; read receipts private to each account |
@@ -83,9 +84,11 @@ With a signed-in account and language access, loading a source workspace automat
 
 The first accepted import records hashes, ZIP size/file count, importer version, and duplicate-language-block choices. These decisions are shared across language teams and reproduced locally from each person's ZIP. The first accepted choices remain fixed for that archive. If an offline import used different choices, reconnecting applies the accepted configuration while preserving local work and history; an open editor draft stays intact until the editor closes.
 
-New rooms start without uploading baseline translation files. Only **Edited** files are shared as saved overrides, together with their change history. A first save includes the affected file's baseline proof; the server retains the original and current translation for that file and language. Other files remain solely in each translator's local baseline. Existing collaboration rooms retain their saved work and history. A legacy workspace without a cached ZIP identity can join an existing room, but creating a new room requires reimporting the original upstream ZIP.
+New rooms start without uploading baseline translation files. **Saved** files are shared as staged overrides, together with their change history, including an unchanged save or the first completed translation. **Revised** identifies staged corrections to a complete original ZIP translation for a file that has not been Dropped in this source version. Completing an originally Missing file or resolving a Dropped file does not become Revised after later edits in that version. A first save includes the affected file's baseline proof; the server retains the original and current translation for that file and language. Other files remain solely in each translator's local baseline. Existing collaboration rooms retain their saved work and history. A legacy workspace without a cached ZIP identity can join an existing room, but creating a new room requires reimporting the original upstream ZIP.
 
-Carried personal translations marked **Needs Review** stay local, so an upstream typo or dropped translation does not force you to repeat the work or publish an unchecked candidate. Review the source, then **Save** or **Confirm unchanged** to share the file. Preserved candidates remain available in local history if shared work arrives. Restoring a Needs Review candidate restores it privately for review; saving it afterward shares the reviewed result.
+Dropped translations synchronize separately from staged work. Each copy preserves its English source, translation, and entry metadata, so an upstream typo or removed translation can be reviewed without repeating the work. The **Dropped** filter and counter include every loaded file with an unresolved copy in the selected language, even if its current ZIP translation is complete. The editor compares that dropped version with the current source and committed translation. **Save** stages a replacement; **Confirm unchanged** stages the preserved translation. **Discard** resolves it without staging. Promotion checks the source version, candidate revision, and shared file revision, and resolves the copy atomically with the saved translation. Unresolved copies survive reloads, exports, language switches, and later source imports. Restoring an older history entry labelled Needs Review creates another dropped copy for review rather than an active translation. Older workspaces without recoverable source history show an unavailable-source message.
+
+Workspace status labels are recalculated from the immutable ZIP baseline, staged saves, dropped records, and scan results for the current game, source version, and selected language. They are not authoritative saved flags. The record that a file belonged to this version's Dropped workload must remain available after promotion or discard so it does not become Revised later. A resolved copy belonging only to an unrelated older version does not exclude a correction in the new version. See the [workspace status contract](workspace_statuses.md) for scope, colors, and examples. Existing history and older sync formats retain their compatibility fields and labels.
 
 Later browsers download shared overrides and reconcile differing edited local work without silently overwriting it. The status bar shows actionable collaboration warnings, errors, and translation conflicts. Healthy connections and routine pending saves do not add status messages or retry controls; reconnecting and queued work retry automatically. Signing out returns to local editing. Translators also return to local editing when selecting a language outside their assignment; managers and admins retain shared access in every language.
 
@@ -125,6 +128,12 @@ On upgrade, the old dictionary is placed under its previously selected language.
 
 ## Local Validation
 
+### Deploying the staged/dropped workspace upgrade
+
+Commit the frontend and API changes, including their new runtime files. Push the API changes and run its existing `redeploy.sh` first: it pulls a clean checkout, installs dependencies, runs syntax checks and tests, creates a database backup, restarts the API (which migrates to schema v12), and checks the new process's health. The script updates only the API. After the API is healthy, push/deploy the frontend to Pages, then reload older editor tabs. This order also applies when pushing the frontend automatically triggers Pages deployment. Frontend IndexedDB v5 preserves data and rejects older v4 writers; close other tabs if an upgrade is blocked. Do not clear browser storage.
+
+Keep the pre-upgrade backup. Rolling back to the old API requires restoring a compatible database as well as the old code; the old API cannot open schema v12, and restoring a backup loses changes made after that backup. This is a deployment order requirement, not evidence that either hosted service has already been updated.
+
 The frontend's `npm test` remains a stub. Run the focused merge checks and syntax checks from the SDEditor directory:
 
 ```sh
@@ -136,6 +145,10 @@ node scripts/test-history-ui.cjs
 node scripts/test-collaboration-ui.cjs
 node scripts/test-collaboration-sync.cjs
 node scripts/test-collaboration-storage.cjs
+node scripts/test-workspace-state.cjs
+node scripts/test-dropped-sync.cjs
+node scripts/test-storage-upgrade.cjs
+node scripts/test-save-worker.cjs
 node scripts/test-collaboration-api.cjs
 node scripts/test-collaboration-editor.cjs
 node scripts/test-collaboration-lifecycle.cjs
