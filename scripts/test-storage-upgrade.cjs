@@ -150,11 +150,11 @@ function openVersion(fixture, version) {
   });
 }
 
-test('v4 to v5 storage upgrade preserves every KV record and revision store without recreating stores', async () => {
+test('v4 to v6 storage upgrade preserves every KV record and revision store without recreating stores', async () => {
   const fixture = versionedStorage(), before = fixture.snapshot();
   const { store } = loadStore(fixture);
   assert.deepEqual(await store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
-  assert.equal(fixture.version, 5); assert.equal(fixture.requests[0].version, 5);
+  assert.equal(fixture.version, 6); assert.equal(fixture.requests[0].version, 6);
   assert.deepEqual(fixture.createdStores, []); assert.deepEqual(fixture.snapshot(), before);
 });
 
@@ -163,14 +163,23 @@ test('the existing v4 versionchange handler closes its connection and later lega
   let changed;
   legacy.onversionchange = event => { changed = event; legacy.close(); };
   const { store } = loadStore(fixture); await store.getSettings();
-  assert.deepEqual(changed, { oldVersion: 4, newVersion: 5 }); assert.equal(legacy.closed, true);
+  assert.deepEqual(changed, { oldVersion: 4, newVersion: 6 }); assert.equal(legacy.closed, true);
   const before = fixture.snapshot();
   assert.throws(() => legacy.transaction('kv', 'readwrite'), { name: 'InvalidStateError' });
   await assert.rejects(openVersion(fixture, 4), { name: 'VersionError' });
   assert.deepEqual(fixture.snapshot(), before);
 });
 
-test('a final pending v4 transaction commits before v5 workspace migration reads saved text', async () => {
+test('v5 editors close before the repair upgrade and cannot restage a reset through old storage', async () => {
+  const fixture = versionedStorage(5), older = await openVersion(fixture, 5), before = fixture.snapshot();
+  older.onversionchange = () => older.close();
+  await loadStore(fixture).store.getSettings();
+  assert.equal(fixture.version, 6); assert.equal(older.closed, true);
+  await assert.rejects(openVersion(fixture, 5), { name: 'VersionError' });
+  assert.deepEqual(fixture.snapshot(), before);
+});
+
+test('a final pending v4 transaction commits before v6 workspace migration reads saved text', async () => {
   const fixture = versionedStorage(), legacy = await openVersion(fixture, 4);
   legacy.onversionchange = () => legacy.close();
   const pending = legacy.transaction(['kv', 'revisions_poe1'], 'readwrite'); pending.held = true;
@@ -182,8 +191,8 @@ test('a final pending v4 transaction commits before v5 workspace migration reads
   assert.equal(fixture.version, 4); assert.equal(legacy.closed, false);
   assert.equal(fixture.tables.get('kv').get('workspace_poe1').value.stagedVersion, undefined);
   pending.release(); await queued(); await queued();
-  assert.equal(legacy.closed, true); assert.equal(fixture.version, 5);
-  assert.ok(fixture.events.indexOf('commit:4') < fixture.events.indexOf('upgrade:4:5'));
+  assert.equal(legacy.closed, true); assert.equal(fixture.version, 6);
+  assert.ok(fixture.events.indexOf('commit:4') < fixture.events.indexOf('upgrade:4:6'));
   const reloaded = loadStore(fixture), migrated = await reloaded.store.getWorkspace('poe1', 'Thai');
   assert.equal(migrated.stagedVersion, 1);
   assert.deepEqual(Array.from(migrated.staged.Thai['a.txt'].translations), ['Final v4 save']);
@@ -197,12 +206,12 @@ test('a blocked upgrade gives reload guidance and never clears saved data', asyn
     && /reload this tab/.test(error.message) && /storage upgrade/.test(error.message) && /saved translations have been kept/.test(error.message));
   assert.equal(fixture.version, 4); assert.deepEqual(fixture.snapshot(), before);
   blocker.close(); await queued();
-  assert.equal(fixture.version, 5); assert.deepEqual(fixture.snapshot(), before);
+  assert.equal(fixture.version, 6); assert.deepEqual(fixture.snapshot(), before);
   assert.deepEqual(await loadStore(fixture).store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
 });
 
 test('a cached frontend facing newer storage reports VersionError with upgrade guidance and performs no transaction', async () => {
-  const fixture = versionedStorage(6), before = fixture.snapshot();
+  const fixture = versionedStorage(7), before = fixture.snapshot();
   const { store } = loadStore(fixture);
   await assert.rejects(store.getSettings(), error => error.name === 'VersionError' && error.code === 'STORAGE_VERSION_OUTDATED'
     && error.cause.name === 'VersionError' && /latest editor/.test(error.message) && /reload this tab/.test(error.message)
@@ -210,7 +219,7 @@ test('a cached frontend facing newer storage reports VersionError with upgrade g
   assert.deepEqual(fixture.snapshot(), before); assert.equal(fixture.events.length, 0);
 });
 
-test('the save worker and page use the same v5 storage version and preserve existing work while saving', async () => {
+test('the save worker and page use the same v6 storage version and preserve existing work while saving', async () => {
   const fixture = versionedStorage();
   await loadStore(fixture).store.getSettings();
   const worker = loadStore(fixture, true);
@@ -220,8 +229,71 @@ test('the save worker and page use the same v5 storage version and preserve exis
     descriptions: copy(source), revisions: [{ filepath: 'a.txt', lang: 'Thai', savedAt: 2, translations: ['Worker translation'] }] } } });
   for (let attempt = 0; attempt < 10 && !worker.messages.some(message => message.type === 'saved'); attempt++) await queued();
   assert.equal(worker.messages.at(-1).type, 'saved');
-  assert.ok(fixture.requests.every(request => request.version === 5));
+  assert.ok(fixture.requests.every(request => request.version === 6));
   assert.deepEqual(fixture.tables.get('kv').get('workspace_poe1').value.staged.Thai['a.txt'].translations, ['Worker translation']);
   assert.deepEqual(fixture.tables.get('revisions_poe2').get(1).translations, ['German history']);
   assert.deepEqual(fixture.tables.get('kv').get('settings').value.dictionary, [{ find: 'one', replace: 'หนึ่ง' }]);
+});
+
+function storedPlaceholder({ shared = false } = {}) {
+  const fixture = versionedStorage(5), kv = fixture.tables.get('kv');
+  const original = { ...copy(source[0]), translations: { English: ['[DNT] Source'] } };
+  const file = { filepath: 'a.txt', translations: [''], revision: 0, needsReview: false, trackedForExport: true };
+  const saved = { sourceHash: 'current', game: 'poe1', collaborationAccountId: 'owner', stagedVersion: 1,
+    statusMetadataVersion: 1, sourceBaseline: { sourceHash: 'current' }, status: {},
+    descs: [{ ...copy(original), translations: { English: ['[DNT] Source'], Thai: [''] } }],
+    staged: { Thai: { 'a.txt': { sourceHash: 'current', translations: [''], before: [], savedAt: 5 } } } };
+  const identity = { game: 'poe1', sourceHash: 'current', language: 'Thai', accountId: 'owner' };
+  const room = { mode: 'sparse', identity, roomId: 'room', shared: shared ? { 'a.txt': { ...copy(file), revision: 1 } } : {},
+    local: { 'a.txt': copy(file) }, conflicts: [],
+    outbox: shared ? [] : [{ id: 'ghost-join', origin: 'merge', kind: 'join', status: 'pending',
+      files: [{ base: { ...copy(file), trackedForExport: false }, yours: copy(file) }] }],
+    recovery: [{ reason: 'Local edited translation before joining', files: [copy(file)] }] };
+  kv.set('source_poe1', { key: 'source_poe1', value: [original] });
+  kv.set('workspace_poe1', { key: 'workspace_poe1', value: saved });
+  kv.set('collaboration_v1', { key: 'collaboration_v1', value: { version: 1, rooms: { own: room } } });
+  kv.set('translation_save_receipts_poe1', { key: 'translation_save_receipts_poe1', value: [] });
+  fixture.tables.get('revisions_poe1').clear();
+  return { fixture, kv, saved, room };
+}
+
+test('loading repairs placeholders, retry state and recovery archive in the same durable transaction once', async () => {
+  const { fixture, kv } = storedPlaceholder();
+  const { store } = loadStore(fixture), loaded = await store.getWorkspace('poe1', 'Thai');
+  const room = kv.get('collaboration_v1').value.rooms.own;
+  assert.equal(loaded.staged.Thai['a.txt'], undefined); assert.equal(room.outbox.length, 0);
+  assert.equal(room.placeholderRepairs.length, 1); assert.equal(loaded.placeholderRepairVersion, 1);
+  assert.equal(Object.values(loaded.placeholderRepairArchive).length, 1);
+  const before = fixture.snapshot();
+  assert.deepEqual(copy(await store.getWorkspace('poe1', 'Thai')), copy(loaded));
+  assert.deepEqual(fixture.snapshot(), before, 'Reload must not queue another repair or rewrite settled records.');
+});
+
+test('loading leaves already shared placeholders staged until the guarded API repair completes', async () => {
+  const { fixture, kv } = storedPlaceholder({ shared: true });
+  const loaded = await loadStore(fixture).store.getWorkspace('poe1', 'Thai');
+  assert.deepEqual(Array.from(loaded.staged.Thai['a.txt'].translations), ['']);
+  assert.equal(kv.get('collaboration_v1').value.rooms.own.placeholderRepairs.length, 1);
+});
+
+test('authored blank save history and receipts prevent automatic placeholder cleanup on load', async () => {
+  for (const evidence of ['history', 'receipt']) {
+    const { fixture, kv } = storedPlaceholder({ shared: true });
+    if (evidence === 'history') fixture.tables.get('revisions_poe1').set(1, { id: 1, filepath: 'a.txt', lang: 'Thai', translations: [''] });
+    else kv.set('translation_save_receipts_poe1', { key: 'translation_save_receipts_poe1', value: [{
+      signature: JSON.stringify({ scope: ['poe1', 'Thai', 'current', 'owner'], files: [{ filepath: 'a.txt', translations: [''] }] }),
+    }] });
+    const loaded = await loadStore(fixture).store.getWorkspace('poe1', 'Thai');
+    assert.ok(loaded.staged.Thai['a.txt'], evidence);
+    assert.equal(kv.get('collaboration_v1').value.rooms.own.placeholderRepairs, undefined, evidence);
+    assert.equal(loaded.placeholderRepairArchive, undefined, evidence);
+  }
+});
+
+test('a failed placeholder repair transaction preserves both the saved record and its pending upload', async () => {
+  const { fixture } = storedPlaceholder(), before = fixture.snapshot();
+  const loaded = loadStore(fixture), repair = loaded.root.WorkspaceState.repairLegacyPlaceholders;
+  loaded.root.WorkspaceState.repairLegacyPlaceholders = (...args) => { repair(...args); throw new Error('Repair storage failed'); };
+  await assert.rejects(loaded.store.getWorkspace('poe1', 'Thai'), /Repair storage failed/);
+  assert.deepEqual(fixture.snapshot(), before);
 });

@@ -236,7 +236,113 @@ function browserControls(account, secret, settings) {
       typingDuringUpload: didTypeDuringUpload(), elapsedMs: Math.round(performance.now() - start) }, null, 2);
     status.textContent = 'Dictionary measurement completed. Requests contain no credentials or dictionary text.';
   });
+  const savedRepairKey = 'sdeditor-fixture-saved-status-repair';
+  const assertRepair = (condition, message) => { if (!condition) throw new Error('FAIL: ' + message); };
+  const settleRepair = async (vm, expectedSaved, filepath) => {
+    for (let index = 0; index < 160; index++) {
+      if (vm._collaboration?.room()) await vm._collaboration.retry();
+      const client = vm._collaboration;
+      if (client?.room()?.initialized && client.snapshot({ includeFiles: false }).pending === 0
+        && vm.descs.some(desc => desc.filepath === filepath)) {
+        vm.filterDesc(); await vm.$nextTick();
+        if (vm.statistic.hasChanges === expectedSaved) return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('FAIL: expected Saved ' + expectedSaved + ', found ' + vm.statistic.hasChanges
+      + '; pending ' + (vm._collaboration?.snapshot({ includeFiles: false }).pending ?? 'unavailable'));
+  };
+  button('Check saved status repair', async () => {
+    const vm = await ready();
+    assertRepair(vm.cloudSignedIn && vm.cloudUser?.id, 'Bootstrap this translator before checking repair.');
+    assertRepair(['127.0.0.1', 'localhost'].includes(new URL(vm._cloud.apiBase).hostname), 'Fixture API must use loopback.');
+    assertRepair(!offline, 'Restore the fixture connection first.');
+    if (vm._pendingSaves?.snapshot().jobs.length) assertRepair(await vm.waitForPendingSaves(), 'Existing local saves must finish.');
+    const details = [], slug = crypto.randomUUID(), prefix = 'fixture_repair_' + slug;
+    status.textContent = 'Recreating the old Saved placeholder bug in real browser storage…';
+    timing.textContent = 'Running Saved status repair checks…';
+    vm.resetVersionedState(); clearTimeout(vm._collabStartTimer);
+    const source = ['ordinary', 'dnt', 'complete'].map((kind, index) => ({
+      filepath: prefix + '/' + kind + '.txt', filedir: prefix, filename: kind + '.txt', name: '', stats: [prefix + '_' + kind],
+      variables: ['#'], remarks: [''], translations: { English: [(kind === 'dnt' ? '[DNT] ' : '') + 'Fixture repair ' + kind + ' ' + slug],
+        ...(kind === 'complete' ? { Thai: ['คำแปลทดสอบ'] } : {}) }, isDNT: kind === 'dnt',
+    }));
+    const zip = new JSZip();
+    for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
+    const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+    const tree = await CollaborationProtocol.buildBaselineTree(source);
+    const archive = await CollaborationProtocol.finalizeArchive({ version: 1, zipHash: await CollaborationProtocol.zipHash(bytes),
+      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)), tree };
+    await vm._cloud.request('/v1/collaboration/archives/resolve', { method: 'POST', body: { game: 'poe1', archive } });
+    const joined = await vm._cloud.request('/v1/collaboration/join', { method: 'POST', body: { game: 'poe1', language: 'Thai', sourceHash: archive.baselineId, archive } });
+    const ghostFiles = source.slice(0, 2).map(desc => ({ filepath: desc.filepath, baseRevision: 0, translations: [''],
+      trackedForExport: true, needsReview: false, baseline: CollaborationProtocol.witness(desc), proof: CollaborationProtocol.baselineProof(tree, desc.filepath) }));
+    const accepted = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/mutations',
+      { method: 'POST', body: { mutationId: crypto.randomUUID(), origin: 'merge', files: ghostFiles } });
+    assertRepair(accepted.files.length === 2 && accepted.files.every(file => file.revision === 1 && file.trackedForExport), 'Both accidental first merges must be acknowledged.');
+    const workspace = { stagedVersion: 1, statusMetadataVersion: 1, languageStatusVersion: 1, game: 'poe1', sourceHash: archive.baselineId,
+      sourceBaseline: { sourceHash: archive.baselineId }, importArchive: archive, collaborationAccountId: String(vm.cloudUser.id),
+      descs: source.map(desc => ({ ...JSON.parse(JSON.stringify(desc)), translations: { ...JSON.parse(JSON.stringify(desc.translations)),
+        Thai: desc.translations.Thai || [''] } })), status: {}, staged: { Thai: {} } };
+    for (const file of ghostFiles) workspace.staged.Thai[file.filepath] = { sourceHash: archive.baselineId, translations: [''], before: [], savedAt: Date.now() };
+    const identity = { accountId: String(vm.cloudUser.id), game: 'poe1', sourceHash: archive.baselineId, language: 'Thai' };
+    const shared = Object.fromEntries(accepted.files.map(file => [file.filepath, JSON.parse(JSON.stringify(file))]));
+    const recovery = ghostFiles.map(file => ({ id: crypto.randomUUID(), at: Date.now(), reason: 'Local edited translation before joining',
+      files: [{ filepath: file.filepath, translations: [''], needsReview: false, trackedForExport: true }] }));
+    const room = { mode: 'sparse', identity, archive, manifest: { version: 2, files: source.map(desc => ({ filepath: desc.filepath, entryCount: 1 })) },
+      roomId: joined.roomId, sequence: accepted.sequence, shared, local: JSON.parse(JSON.stringify(shared)), outbox: [], conflicts: [], recovery,
+      carries: {}, carryRevisions: {}, initialized: true };
+    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], 'poe1', baseline);
+    await OfflineStore.updateCollaborationState(state => {
+      state ||= { version: 1, rooms: {} }; state.rooms[CollaborationProtocol.scopeKey(identity)] = room; return state;
+    }, { version: 'poe1' });
+    await OfflineStore.setMigratedFromSingleVersion(true);
+    assertRepair(source.slice(0, 2).every(desc => WorkspaceState.workspaceFile(workspace, desc, 'Thai').hasChanges), 'The seeded v1 workspace reproduces two false Saved records.');
+    details.push('PASS: old v1 workspace and real API contain 2 accidental Saved blanks.');
+    vm.hideDNT = false; vm.searchText = ''; vm.showSetting = false; vm.needsInitialSettings = false;
+    await vm.activateGameVersion('poe1', { checkMigration: false }); await vm.initializeCollaboration();
+    await settleRepair(vm, 0, source[0].filepath);
+    const durable = await OfflineStore.getWorkspace('poe1', 'Thai');
+    const snapshot = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/snapshot');
+    assertRepair(source.slice(0, 2).every(desc => !WorkspaceState.workspaceFile(durable, desc, 'Thai').hasChanges), 'Durable placeholder staging must be removed.');
+    assertRepair(snapshot.files.filter(file => ghostFiles.some(ghost => ghost.filepath === file.filepath))
+      .every(file => file.revision === 2 && file.stagingReset && !file.trackedForExport), 'The API must publish revision-checked resets.');
+    assertRepair(Object.values(durable.placeholderRepairArchive || {}).filter(record => record.status === 'repaired').length === 2, 'Both recovery archives must be retained.');
+    details.push('PASS: normal app load repairs local staging and real API records.');
+    details.push('Counters after repair: Saved ' + vm.statistic.hasChanges + ', Revised ' + vm.statistic.isRevised + ', Missing ' + vm.statistic.isMissing + '.');
+    const ordinary = vm.descs.find(desc => desc.filepath === source[0].filepath);
+    await vm.persistTranslationBatch([{ desc: ordinary, lines: [''] }], 'save');
+    assertRepair(await vm.waitForPendingSaves(), 'The deliberate blank must reach durable storage.');
+    await settleRepair(vm, 1, source[0].filepath);
+    const blank = await OfflineStore.getWorkspace('poe1', 'Thai');
+    assertRepair(WorkspaceState.workspaceFile(blank, source[0], 'Thai').hasChanges, 'An intentional blank save must remain Saved.');
+    assertRepair(blank.staged.Thai[source[0].filepath].saveOrigin === 'save', 'Authored provenance must persist.');
+    details.push('PASS: deliberate blank through the normal Save pipeline is Saved.');
+    sessionStorage.setItem(savedRepairKey, JSON.stringify({ phase: 'reload', details, filepath: source[0].filepath, dntPath: source[1].filepath, sourceHash: archive.baselineId }));
+    status.textContent = 'Local/API checks passed. Reloading to verify the deliberate blank and repaired DNT file…';
+    timing.textContent = details.join('\n');
+    location.reload();
+  });
   document.body.append(panel);
+  const pendingRepairCheck = sessionStorage.getItem(savedRepairKey);
+  if (pendingRepairCheck) {
+    (async () => {
+      const check = JSON.parse(pendingRepairCheck);
+      sessionStorage.removeItem(savedRepairKey);
+      if (check.phase !== 'reload') return;
+      const vm = await ready(); vm.hideDNT = false;
+      await vm.activateGameVersion('poe1', { checkMigration: false }); await vm.initializeCollaboration();
+      await settleRepair(vm, 1, check.filepath);
+      const durable = await OfflineStore.getWorkspace('poe1', 'Thai');
+      assertRepair(vm.sourceIdentity === check.sourceHash, 'Reload must retain the accepted source identity.');
+      assertRepair(!!durable.staged.Thai?.[check.filepath] && !durable.staged.Thai?.[check.dntPath], 'Reload must keep the intentional blank and exclude the repaired DNT placeholder.');
+      check.details.push('PASS: full browser reload retains Saved 1; repaired DNT remains unsaved.');
+      check.details.push('Final counters: Saved ' + vm.statistic.hasChanges + ', Revised ' + vm.statistic.isRevised + ', Missing ' + vm.statistic.isMissing + '.');
+      timing.textContent = check.details.join('\n');
+      status.textContent = 'PASS · saved status repair, intentional blank Save, and reload verified with real IndexedDB + API.';
+    })().catch(error => { status.textContent = error.message; timing.textContent += '\nFAIL: ' + error.message; });
+  }
 }
 
 (async () => {

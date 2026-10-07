@@ -500,6 +500,8 @@
                 targetSourceHash: this.sourceIdentity, reason: 'Recovered dropped translation',
               });
             }
+          } else if (file.stagingReset && !file.trackedForExport) {
+            if (this.localDescs.staged?.[lang]) delete this.localDescs.staged[lang][file.filepath];
           } else if (file.trackedForExport || file.revision > 0) window.WorkspaceState.stageTranslation(this.localDescs, file, lang,
             { source: original, sourceHash: this.sourceIdentity, game: this.gameVersion });
           const state = window.WorkspaceState.workspaceFile(this.localDescs, original, lang);

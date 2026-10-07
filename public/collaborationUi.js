@@ -23,7 +23,7 @@
       return decode(shared[index]);
     });
   }
-  const originLabels = { save: 'Save', edit: 'Save', seed: 'Initial shared workspace', baseline: 'Initial shared workspace', imported_baseline: 'Original imported version', merge: 'Automatic merge', auto_merge: 'Automatic merge', conflict_resolution: 'Conflict resolved', history_restore: 'History restore', restore: 'History restore', import: 'Import translated', import_translated: 'Import translated', review: 'Confirmed unchanged', confirm: 'Confirmed unchanged', confirm_unchanged: 'Confirmed unchanged', consistency: 'Compare & resolve', consistency_resolution: 'Compare & resolve' };
+  const originLabels = { save: 'Save', edit: 'Save', seed: 'Initial shared workspace', baseline: 'Initial shared workspace', imported_baseline: 'Original imported version', merge: 'Automatic merge', auto_merge: 'Automatic merge', conflict_resolution: 'Conflict resolved', history_restore: 'History restore', restore: 'History restore', import: 'Import translated', import_translated: 'Import translated', review: 'Confirmed unchanged', confirm: 'Confirmed unchanged', confirm_unchanged: 'Confirmed unchanged', consistency: 'Compare & resolve', consistency_resolution: 'Compare & resolve', repair_placeholder: 'Corrected saved status' };
   const mixin = {
     data() { return {
       collaborationState: emptyState(), collaborationNotice: '',

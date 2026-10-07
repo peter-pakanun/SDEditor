@@ -133,6 +133,11 @@
   const equal = (left, right) => serialized(left) === serialized(right);
   const timestamp = value => typeof value === 'string' ? Date.parse(value) || Number(value) || 0 : Number(value) || 0;
   const lines = value => Array.isArray(value) ? value.map(text => String(text ?? '')) : [];
+  function displayedLines(value, count) {
+    const result = lines(value);
+    while (result.length < count) result.push('');
+    return result;
+  }
   const complete = (value, count) => Array.isArray(value) && value.length === count && value.every(text => String(text).trim());
   const snapshot = (desc, language, translations) => ({ english: lines(desc?.translations?.English),
     variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []), stats: copy(desc?.stats || []),
@@ -264,6 +269,9 @@
     const entry = { sourceHash: options.sourceHash || workspace.sourceHash || '', translations: lines(file.translations),
       before: lines(file.beforeTranslations ?? options.before ?? (current && equal(current.translations, file.translations) ? current.before : current?.translations)
         ?? source?.translations?.[language]), savedAt: options.savedAt || Date.now() };
+    const saveOrigin = options.saveOrigin || (current?.sourceHash === entry.sourceHash
+      && equal(current.translations, entry.translations) ? current.saveOrigin : null);
+    if (saveOrigin) entry.saveOrigin = saveOrigin;
     (workspace.staged[language] ||= {})[file.filepath] = entry;
     return entry;
   }
@@ -312,10 +320,16 @@
           dropTranslation(workspace, origin, language, { game: options.game, translations: old,
             originSourceHash, targetSourceHash: sourceHash, originSourceAvailable,
             reason: 'Preserved legacy review translation', createdAt: carried?.savedAt });
-        } else if (state.hasChanges || (original && !changedSource && !equal(lines(desc.translations[language]), lines(original.translations?.[language])))) {
+        // Legacy editors pad absent/short ZIP translations with blank entries.
+        // Only infer a save when the padded text differs; an explicit
+        // legacy save remains meaningful even when it is blank or unchanged.
+        } else if (state.hasChanges || (original && !changedSource && !equal(
+          displayedLines(desc.translations[language], original.translations?.English?.length || 0),
+          displayedLines(original.translations?.[language], original.translations?.English?.length || 0)))) {
           if (!workspace.staged[language]?.[desc.filepath]) stageTranslation(workspace,
             { filepath: desc.filepath, translations: desc.translations[language] }, language,
-            { source: original, sourceHash, savedAt: status.lastTranslatedAt || status.lastEditedAt });
+            { source: original, sourceHash, savedAt: status.lastTranslatedAt || status.lastEditedAt,
+              saveOrigin: state.hasChanges ? 'legacy_save' : 'legacy_inferred' });
         }
       }
     }
@@ -334,6 +348,93 @@
     }
     workspace.stagedVersion = 1;
     return pruneWorkspaceStatus(workspace);
+  }
+  // Only the old migration's empty padding is eligible. Authored timestamps,
+  // history, receipts and explicit operations take precedence over this repair.
+  function repairLegacyPlaceholders(workspace, options = {}) {
+    if (!object(workspace) || workspace.placeholderRepairVersion === 1 || workspace.stagedVersion < 1
+      || !options.evidenceComplete || !Array.isArray(options.source) || !options.source.length) return false;
+    const originals = new Map(options.source.map(desc => [desc.filepath, desc]));
+    const rooms = Object.values(options.collaboration?.rooms || {});
+    const authored = new Set((options.revisions || []).filter(rev => rev.lang && rev.lang !== 'English')
+      .map(rev => JSON.stringify([rev.filepath, rev.lang])));
+    for (const receipt of options.receipts || []) {
+      try {
+        const data = JSON.parse(receipt.signature);
+        if (data.scope?.[0] === (options.game || workspace.game)) for (const file of data.files || []) {
+          authored.add(JSON.stringify([file.filepath, data.scope[1]]));
+        }
+      }
+      catch (_) { if (receipt.result?.files?.length) return false; }
+    }
+    const roomIndexes = new Map(), canceledByRoom = new Map();
+    const indexRoom = room => {
+      if (!room) return { operations: new Map(), joins: new Map(), protected: new Set() };
+      if (roomIndexes.has(room)) return roomIndexes.get(room);
+      const index = { operations: new Map(), joins: new Map(), protected: new Set() };
+      for (const op of room.outbox || []) for (const item of op.files || []) {
+        const filepath = item.yours?.filepath;
+        if (!index.operations.has(filepath)) index.operations.set(filepath, []);
+        if (!index.operations.get(filepath).includes(op)) index.operations.get(filepath).push(op);
+      }
+      for (const record of room.recovery || []) for (const file of record.files || []) {
+        if (record.reason === 'Local edited translation before joining') {
+          if (!index.joins.has(file.filepath)) index.joins.set(file.filepath, []);
+          index.joins.get(file.filepath).push(file);
+        } else index.protected.add(file.filepath);
+      }
+      roomIndexes.set(room, index); return index;
+    };
+    let changed = false;
+    for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
+      const original = originals.get(filepath), count = original?.translations?.English?.length;
+      const empty = value => Array.isArray(value) && value.every(text => text === '');
+      if (!object(entry) || !count || lines(original.translations?.[language]).length || entry.sourceHash !== workspace.sourceHash
+        || !empty(entry.translations) || entry.translations.length !== count || !Array.isArray(entry.before) || entry.before.length
+        || (entry.saveOrigin && entry.saveOrigin !== 'legacy_inferred') || droppedForFile(workspace, filepath, language)
+        || wasDroppedInSource(workspace, filepath, language)) continue;
+      const metadata = workspace.status?.[filepath];
+      const status = metadata?.languageStatus?.[language] || (metadata?.statusLanguage === language ? metadata : {});
+      if (timestamp(status.lastTranslatedAt) || timestamp(status.lastEditedAt)
+        || authored.has(JSON.stringify([filepath, language]))) continue;
+      const room = rooms.find(room => room.mode === 'sparse' && room.identity?.game === (options.game || workspace.game)
+        && room.identity.sourceHash === workspace.sourceHash && room.identity.language === language
+        && workspace.collaborationAccountId && String(room.identity.accountId) === String(workspace.collaborationAccountId));
+      const index = indexRoom(room), operations = index.operations.get(filepath) || [];
+      const isJoin = op => op.kind === 'join' && op.origin === 'merge' && !op.promoteDropped && !op.restore
+        && op.files.length === 1 && op.files.every(item => item.yours.filepath === filepath && item.yours.trackedForExport && !item.yours.needsReview
+          && item.yours.translations.length === count && empty(item.yours.translations)
+          && item.base?.revision === 0 && !item.base.trackedForExport && !item.base.needsReview && empty(item.base.translations));
+      if (operations.some(op => !isJoin(op))) continue;
+      if (index.protected.has(filepath)) continue;
+      const joinedHere = operations.some(isJoin) || index.joins.get(filepath)?.some(file => file.trackedForExport && !file.needsReview
+        && empty(file.translations) && file.translations.length === count);
+      if (workspace.collaborationAccountId && (!room || !joinedHere)) continue;
+      const shared = room?.shared?.[filepath];
+      if (shared && (shared.revision !== 1 || !shared.trackedForExport || shared.needsReview || !empty(shared.translations))) continue;
+      const repairId = globalThis.crypto?.randomUUID?.() || ('placeholder-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      workspace.placeholderRepairArchive ||= {};
+      workspace.placeholderRepairArchive[repairId] = { filepath, language, sourceHash: workspace.sourceHash,
+        staged: copy(entry), repairedAt: Date.now(), reason: 'Recovered migration placeholder', status: room ? 'pending' : 'local' };
+      if (room) {
+        room.placeholderRepairs ||= [];
+        room.placeholderRepairs.push({ id: repairId, filepath, baseRevision: 1 });
+        if (!canceledByRoom.has(room)) canceledByRoom.set(room, new Set());
+        for (const op of operations) canceledByRoom.get(room).add(op);
+        if (!shared && room.local) delete room.local[filepath];
+      }
+      // Shared records stay staged until the server validates and publishes the
+      // reset. Local-only placeholders can immediately return to their ZIP state.
+      if (!shared) delete entries[filepath];
+      changed = true;
+    }
+    for (const [room, canceled] of canceledByRoom) {
+      const ids = new Set([...canceled].map(op => op.id));
+      room.outbox = (room.outbox || []).filter(op => !canceled.has(op));
+      room.conflicts = (room.conflicts || []).filter(conflict => !ids.has(conflict.mutationId));
+    }
+    workspace.placeholderRepairVersion = 1;
+    return changed;
   }
   function upgradeSource(workspace, options = {}) {
     initializeWorkspace(workspace, { ...options, source: options.previousSource, sourceHash: options.previousSourceHash || workspace.sourceHash });
@@ -485,6 +586,6 @@
     return choice === 'shared' ? shared : workspace.dropped[language][filepath];
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
-    initializeWorkspace, workspaceFile, stageTranslation, dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
+    initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict };
 });

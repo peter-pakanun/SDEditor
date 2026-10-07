@@ -129,6 +129,200 @@ test('legacy migration captures staged and dropped text before pruning every mod
   assert.equal(workspace.history[0].needsReview, true, 'History retains the meaning of its old snapshot.');
 });
 
+test('legacy migration does not stage absent ZIP translations padded for ordinary or DNT editor rows', () => {
+  for (const english of ['One', '[DNT] One']) for (const baseline of [{}, { Thai: [] }, { Thai: [''] }]) {
+    const source = sourceDesc(english, baseline);
+    const local = sourceDesc(english, { Thai: [''] });
+    local.hasChanges = false;
+    const workspace = { descs: [local], status: {} };
+    W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', game: 'poe1', language: 'Thai' });
+    assert.equal(workspace.staged.Thai?.['a.txt'], undefined, JSON.stringify([english, baseline]));
+    const state = W.workspaceFile(workspace, source, 'Thai');
+    assert.equal(state.hasChanges, false);
+    assert.equal(state.isMissing, true);
+    assert.deepEqual(state.translations, ['']);
+    assert.deepEqual(source.translations, { English: [english], ...baseline }, 'Migration leaves the immutable ZIP intact.');
+  }
+});
+
+test('legacy migration ignores display padding after a partial ZIP translation without truncating extra entries', () => {
+  const source = sourceDesc('One', { Thai: ['one'] });
+  source.translations.English.push('Two');
+  const local = structuredClone(source);
+  local.translations.Thai = ['one', ''];
+  local.hasChanges = false;
+  const workspace = { descs: [local], status: {} };
+  W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', language: 'Thai' });
+  assert.equal(workspace.staged.Thai?.['a.txt'], undefined);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isMissing, true);
+
+  const extra = structuredClone(local);
+  extra.translations.Thai = ['one', '', ''];
+  const mismatched = { descs: [extra], status: {} };
+  W.initializeWorkspace(mismatched, { source: [source], sourceHash: 'current', language: 'Thai' });
+  assert.deepEqual(mismatched.staged.Thai['a.txt'].translations, ['one', '', '']);
+  assert.equal(W.workspaceFile(mismatched, source, 'Thai').isMissing, true);
+});
+
+test('legacy migration preserves real translation differences and explicit blank or unchanged saves', () => {
+  for (const [baseline, saved, hasChanges] of [
+    [{}, ['authored'], false],
+    [{ Thai: ['one'] }, ['changed'], false],
+    [{ Thai: ['one'] }, [''], false],
+    [{}, [''], true],
+    [{ Thai: ['one'] }, ['one'], true],
+  ]) {
+    const source = sourceDesc('One', baseline);
+    const local = sourceDesc('One', { Thai: saved });
+    local.hasChanges = hasChanges;
+    const workspace = { descs: [local], status: {} };
+    W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', language: 'Thai' });
+    assert.deepEqual(workspace.staged.Thai['a.txt'].translations, saved);
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+  }
+});
+
+test('legacy padded translation comparison stays scoped to each language', () => {
+  const source = sourceDesc('One', { Thai: ['one'] });
+  const local = sourceDesc('One', { Thai: ['correction'], German: [''] });
+  local.statusLanguage = 'German'; local.hasChanges = false;
+  const workspace = { descs: [local], status: {} };
+  W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', language: 'German' });
+  assert.deepEqual(workspace.staged.Thai['a.txt'].translations, ['correction']);
+  assert.equal(workspace.staged.German?.['a.txt'], undefined);
+});
+
+function placeholderRepairFixture({ shared = false, account = true, pending = false } = {}) {
+  const source = sourceDesc('One', {}), workspace = modern(source, 'current');
+  workspace.descs = [sourceDesc('One', { Thai: [''] })];
+  workspace.staged.Thai = { 'a.txt': { sourceHash: 'current', translations: [''], before: [], savedAt: 7 } };
+  const identity = { accountId: 'account', game: 'poe1', sourceHash: 'current', language: 'Thai' };
+  const room = { mode: 'sparse', identity, local: {}, shared: {}, outbox: [], conflicts: [],
+    recovery: [{ id: 'join-recovery', at: 7, reason: 'Local edited translation before joining',
+      files: [{ filepath: 'a.txt', translations: [''], trackedForExport: true, needsReview: false }] }] };
+  room.local['a.txt'] = { filepath: 'a.txt', translations: [''], trackedForExport: true, needsReview: false, revision: shared ? 1 : 0 };
+  if (shared) room.shared['a.txt'] = structuredClone(room.local['a.txt']);
+  if (pending) {
+    room.outbox.push({ id: 'join-pending', origin: 'merge', kind: 'join', status: 'pending', files: [{
+      base: { filepath: 'a.txt', translations: [''], trackedForExport: false, needsReview: false, revision: 0 },
+      yours: structuredClone(room.local['a.txt']),
+    }] });
+    room.conflicts.push({ id: 'join-conflict', mutationId: 'join-pending', filepath: 'a.txt' });
+  }
+  if (account) workspace.collaborationAccountId = identity.accountId;
+  const collaboration = { rooms: account ? { [P.scopeKey(identity)]: room } : {} };
+  const options = { source: [source], collaboration, receipts: [], revisions: [], game: 'poe1', evidenceComplete: true };
+  return { source, workspace, room, options };
+}
+
+test('local migration placeholder repair preserves a recovery snapshot and is idempotent', () => {
+  const { source, workspace, options } = placeholderRepairFixture({ account: false });
+  const before = structuredClone(workspace.staged.Thai['a.txt']);
+  assert.equal(W.repairLegacyPlaceholders(workspace, options), true);
+  assert.equal(workspace.staged.Thai['a.txt'], undefined);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, false);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isMissing, true);
+  const archive = Object.values(workspace.placeholderRepairArchive);
+  assert.equal(archive.length, 1); assert.deepEqual(archive[0].staged, before);
+  assert.equal(archive[0].sourceHash, 'current'); assert.equal(archive[0].language, 'Thai');
+  assert.equal(archive[0].status, 'local');
+  const repaired = structuredClone(workspace);
+  assert.equal(W.repairLegacyPlaceholders(workspace, options), false);
+  assert.deepEqual(workspace, repaired);
+  assert.deepEqual(source.translations, { English: ['One'] });
+});
+
+test('own pending placeholder joins are canceled without removing unrelated queued work or recovery', () => {
+  const { workspace, room, options } = placeholderRepairFixture({ pending: true });
+  const unrelated = { id: 'actual-save', origin: 'save', files: [{ yours: { filepath: 'b.txt', translations: ['authored'] } }] };
+  room.outbox.push(unrelated);
+  const recovery = structuredClone(room.recovery), stage = structuredClone(workspace.staged.Thai['a.txt']);
+  assert.equal(W.repairLegacyPlaceholders(workspace, options), true);
+  assert.deepEqual(room.outbox, [unrelated]); assert.deepEqual(room.conflicts, []);
+  assert.deepEqual(room.recovery, recovery);
+  assert.equal(workspace.staged.Thai['a.txt'], undefined); assert.equal(room.local['a.txt'], undefined);
+  assert.deepEqual(Object.values(workspace.placeholderRepairArchive)[0].staged, stage);
+  assert.equal(room.placeholderRepairs.length, 1);
+  assert.equal(room.placeholderRepairs[0].filepath, 'a.txt');
+  const queued = structuredClone(room.placeholderRepairs);
+  assert.equal(W.repairLegacyPlaceholders(workspace, options), false);
+  assert.deepEqual(room.placeholderRepairs, queued);
+});
+
+test('already shared placeholder remains Saved until the server validates its queued repair', () => {
+  const { workspace, source, room, options } = placeholderRepairFixture({ shared: true });
+  const shared = structuredClone(room.shared['a.txt']), stage = structuredClone(workspace.staged.Thai['a.txt']);
+  assert.equal(W.repairLegacyPlaceholders(workspace, options), true);
+  assert.deepEqual(workspace.staged.Thai['a.txt'], stage);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+  assert.deepEqual(room.shared['a.txt'], shared);
+  assert.equal(room.placeholderRepairs.length, 1); assert.equal(room.placeholderRepairs[0].baseRevision, 1);
+  assert.equal(Object.values(workspace.placeholderRepairArchive)[0].status, 'pending');
+});
+
+test('placeholder repair protects authored work, dropped provenance and incompatible shared scopes', () => {
+  const protectors = [
+    ['explicit save', f => { f.workspace.staged.Thai['a.txt'].saveOrigin = 'save'; }],
+    ['explicit legacy save', f => { f.workspace.staged.Thai['a.txt'].saveOrigin = 'legacy_save'; }],
+    ['previous translation', f => { f.workspace.staged.Thai['a.txt'].before = ['old text']; }],
+    ['nonempty text', f => { f.workspace.staged.Thai['a.txt'].translations = ['authored']; }],
+    ['extra blank entry', f => { f.workspace.staged.Thai['a.txt'].translations = ['', '']; }],
+    ['different stage source', f => { f.workspace.staged.Thai['a.txt'].sourceHash = 'old'; }],
+    ['ZIP already has a blank translation', f => { f.source.translations.Thai = ['']; }],
+    ['authored timestamp', f => { f.workspace.status['a.txt'] = { statusLanguage: 'Thai', lastEditedAt: 9 }; }],
+    ['authored language timestamp', f => { f.workspace.status['a.txt'] = { languageStatus: { Thai: { lastTranslatedAt: 9 } } }; }],
+    ['translation history', f => { f.options.revisions.push({ filepath: 'a.txt', lang: 'Thai', translations: [''], savedAt: 9 }); }],
+    ['save receipt', f => { f.options.receipts.push({ signature: JSON.stringify({ scope: ['poe1', 'Thai', 'current', 'account'],
+      files: [{ filepath: 'a.txt', translations: [''] }] }) }); }],
+    ['active Dropped', f => { W.dropTranslation(f.workspace, f.source, 'Thai', { id: 'dropped', translations: ['old'] }); }],
+    ['resolved Dropped assignment', f => {
+      const candidate = W.dropTranslation(f.workspace, f.source, 'Thai', { id: 'dropped', translations: ['old'] });
+      W.discardDropped(f.workspace, 'a.txt', 'Thai', { id: candidate.id, revision: candidate.revision });
+    }],
+    ['explicit pending save', f => { f.room.outbox.push({ id: 'blank-save', origin: 'save', files: [{ yours: f.room.local['a.txt'] }] }); }],
+    ['unknown join provenance', f => { f.room.recovery = []; }],
+    ['another account room', f => { f.room.identity.accountId = 'other'; }],
+    ['another language room', f => { f.room.identity.language = 'German'; }],
+    ['another game room', f => { f.room.identity.game = 'poe2'; }],
+    ['another source room', f => { f.room.identity.sourceHash = 'future'; }],
+    ['later shared revision', f => { f.room.shared['a.txt'].revision = 2; }],
+    ['shared nonblank text', f => { f.room.shared['a.txt'].translations = ['authored']; }],
+    ['shared review text', f => { f.room.shared['a.txt'].needsReview = true; }],
+    ['shared untracked text', f => { f.room.shared['a.txt'].trackedForExport = false; }],
+  ];
+  for (const [name, protect] of protectors) {
+    const fixture = placeholderRepairFixture({ shared: true });
+    protect(fixture);
+    const before = structuredClone(fixture.workspace.staged), outbox = structuredClone(fixture.room.outbox);
+    assert.equal(W.repairLegacyPlaceholders(fixture.workspace, fixture.options), false, name);
+    assert.deepEqual(fixture.workspace.staged, before, name);
+    assert.deepEqual(fixture.room.outbox, outbox, name);
+    assert.equal(fixture.room.placeholderRepairs, undefined, name);
+    assert.equal(fixture.workspace.placeholderRepairArchive, undefined, name);
+  }
+});
+
+test('placeholder repair waits for complete evidence and preserves unrelated language text', () => {
+  const fixture = placeholderRepairFixture({ shared: true });
+  const stage = structuredClone(fixture.workspace.staged);
+  assert.equal(W.repairLegacyPlaceholders(fixture.workspace, { ...fixture.options, evidenceComplete: false }), false);
+  assert.deepEqual(fixture.workspace.staged, stage); assert.equal(fixture.workspace.placeholderRepairVersion, undefined);
+  assert.equal(W.repairLegacyPlaceholders(fixture.workspace, { ...fixture.options, source: [] }), false);
+  assert.equal(fixture.workspace.placeholderRepairVersion, undefined);
+  fixture.workspace.staged.German = { 'a.txt': { sourceHash: 'current', translations: [''], before: [], savedAt: 8 } };
+  const german = structuredClone(fixture.workspace.staged.German);
+  assert.equal(W.repairLegacyPlaceholders(fixture.workspace, fixture.options), true);
+  assert.deepEqual(fixture.workspace.staged.German, german, 'No German room evidence means no German repair.');
+  assert.equal(Object.values(fixture.workspace.placeholderRepairArchive).length, 1);
+});
+
+test('authored staged provenance survives unchanged server acknowledgments', () => {
+  const source = sourceDesc('One', {}), workspace = modern(source, 'current');
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source, saveOrigin: 'legacy_save' });
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''], beforeTranslations: [] }, 'Thai', { source });
+  assert.equal(workspace.staged.Thai['a.txt'].saveOrigin, 'legacy_save');
+});
+
 test('clean metadata readers and writes cannot regenerate persisted false status flags', () => {
   const local = sourceDesc(), status = { statusLanguage: 'Thai', lastEditedAt: 5, languageStatus: { Thai: { lastEditedAt: 5 } } };
   const before = structuredClone(local);

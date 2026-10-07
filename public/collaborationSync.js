@@ -45,7 +45,8 @@
     snapshot({ includeFiles = true } = {}) {
       const room = this.room();
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
-        connected: this.connected, disconnected: this.disconnected, hashing: this.hashing, pending: room?.outbox?.length || 0,
+        connected: this.connected, disconnected: this.disconnected, hashing: this.hashing,
+        pending: (room?.outbox?.length || 0) + (room?.placeholderRepairs?.length || 0),
         conflicts: copy(room?.conflicts || []), droppedConflicts: copy(this.droppedConflicts), ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
@@ -439,7 +440,7 @@
         for (const file of files) if (statuses[file.filepath]) latest.status[file.filepath] = W.setFileStatus(
           latest.status[file.filepath] || {}, identity.language, statuses[file.filepath]);
         const effective = files.filter(file => room.mode !== 'sparse' || !this.carryProtected(room, file))
-          .map(file => room.local[file.filepath]).filter(Boolean);
+          .map(file => room.local[file.filepath] || (file.stagingReset ? file : null)).filter(Boolean);
         const projected = this.projectWorkspace(latest, effective, identity.language, source, { mutate: true });
         projected.sourceHash = identity.sourceHash; projected.collaborationAccountId = identity.accountId;
         return projected;
@@ -450,6 +451,10 @@
       for (const operation of room.outbox) for (const entry of operation.files) {
         const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
         room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
+        if (shared?.stagingReset && operation.kind !== 'join') {
+          room.local[entry.yours.filepath].trackedForExport = true;
+          delete room.local[entry.yours.filepath].stagingReset;
+        }
       }
       for (const conflict of room.conflicts) {
         const shared = room.shared[conflict.filepath];
@@ -521,6 +526,7 @@
       const mutationIds = groups.map((group, index) => index === 0 ? mutationId : this.uuid());
       let projectedDropped;
       await this.update((state, current) => {
+        current.placeholderRepairs = (current.placeholderRepairs || []).filter(repair => !normalized.some(file => file.filepath === repair.filepath));
         const replaced = new Set(current.outbox.filter(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)
           && op.files.every(entry => normalized.some(file => file.filepath === entry.yours.filepath))).flatMap(op => op.files.map(entry => entry.yours.filepath)));
         for (const op of current.outbox.filter(op => op.files.some(entry => replaced.has(entry.yours.filepath)))) {
@@ -542,6 +548,10 @@
       }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
         collaborationAccountId: room.identity.accountId })), projectWorkspace: (stored, state) => {
           const projected = this.projection(normalized, epoch, workspace)(stored, state);
+          for (const file of normalized) {
+            const staged = projected?.staged?.[room.identity.language]?.[file.filepath];
+            if (staged) staged.saveOrigin = origin;
+          }
           for (const file of promoted) if (projected) W.stageTranslation(projected, file, room.identity.language,
             { sourceHash: room.identity.sourceHash, promoteDropped: promotions[file.filepath] });
           projectedDropped = projected;
@@ -558,8 +568,8 @@
       }
       await this.retry();
       if (!this.current(epoch)) throw staleError();
-      if (this.lastError && !transient(this.lastError)) throw this.lastError;
       const remaining = this.room()?.outbox.filter(op => mutationIds.includes(op.id)) || [];
+      if (this.lastError && !transient(this.lastError) && (this.lastError !== this.placeholderRepairError || remaining.length)) throw this.lastError;
       if (remaining.some(op => op.status === 'pending')) this.schedule();
       return { status: !remaining.length ? 'synced' : remaining.some(op => ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) || op.blockedByConflict) ? 'conflict' : 'pending', mutationId, mutationIds };
     }
@@ -587,14 +597,16 @@
           do {
             this.dirty = false;
             await this.catchUp(epoch);
+            await this.flushPlaceholderRepairs(epoch);
             await this.flush(epoch);
           } while (this.dirty && this.current(epoch));
           if (!this.current(epoch)) throw staleError();
           if (!this.presenceError && !this.disconnected) this.backoff = 1000;
-          this.lastError = null;
+          this.lastError = this.placeholderRepairError || null;
           // A completed pass clears an earlier failure. Enqueueing a save or
           // starting another request must never hide an outstanding problem.
-          if (this.presenceError) this.reportPresenceError();
+          if (this.placeholderRepairError) this.handleError(this.placeholderRepairError);
+          else if (this.presenceError) this.reportPresenceError();
           else if (Object.keys(this.droppedConflicts).length || this.room().outbox.some(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)))
             this.status('Conflicting dropped copies need review before this file can be shared.', true);
           else this.status('');
@@ -801,6 +813,68 @@
         if (more && !events.length) throw new Error('Collaboration change cursor did not advance.');
       } while (more);
     }
+    async finishPlaceholderRepair(repair, files, status, epoch) {
+      await this.update((state, room) => {
+        for (const file of files) if (file.revision > 0 && (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision)) {
+          room.shared[file.filepath] = fileState(file);
+        }
+        room.placeholderRepairs = (room.placeholderRepairs || []).filter(item => item.id !== repair.id);
+        this.rebuild(room);
+      }, { projectWorkspace: (workspace, state) => {
+        const projected = this.projection(files, epoch)(workspace, state);
+        if (projected?.placeholderRepairArchive?.[repair.id]) projected.placeholderRepairArchive[repair.id].status = status;
+        return projected;
+      } }, epoch);
+      await this.onRemote(files.map(file => copy(this.room().local[file.filepath] || file)));
+      if (!this.current(epoch)) throw staleError();
+    }
+    async flushPlaceholderRepairs(epoch) {
+      if (this.room().mode !== 'sparse') return;
+      this.placeholderRepairError = null;
+      const ids = (this.room().placeholderRepairs || []).map(item => item.id);
+      for (const id of ids) {
+        // Reload durable state after any worker save before touching its file.
+        await this.update(() => {}, {}, epoch);
+        const repair = this.room().placeholderRepairs?.find(item => item.id === id);
+        if (!repair) continue;
+        if (this.room().outbox.some(op => op.files.some(entry => entry.yours.filepath === repair.filepath))) continue;
+        const shared = this.room().shared[repair.filepath];
+        if (!shared) {
+          await this.finishPlaceholderRepair(repair, [{ ...this.baselineStates[repair.filepath], stagingReset: true }], 'local', epoch);
+          continue;
+        }
+        if (shared.stagingReset || shared.revision !== repair.baseRevision || shared.needsReview
+          || !shared.trackedForExport || !P.equal(shared.translations, this.baselineStates[repair.filepath]?.translations)) {
+          await this.finishPlaceholderRepair(repair, [shared], shared.stagingReset ? 'repaired' : 'superseded', epoch);
+          continue;
+        }
+        try {
+          this.onWork({ key: 'placeholder-repair', label: 'Correcting saved translation status', active: true });
+          const result = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/placeholder-repairs', {
+            method: 'POST', body: { mutationId: repair.id, files: [{ filepath: repair.filepath, baseRevision: repair.baseRevision,
+              baseline: P.witness(this.baselineFiles.get(repair.filepath)), proof: P.baselineProof(this.baselineTree, repair.filepath) }] },
+          }, epoch);
+          if (!Array.isArray(result.files) || !result.files.some(file => file.filepath === repair.filepath)) {
+            throw new Error('Saved status repair response has no committed file state.');
+          }
+          await this.finishPlaceholderRepair(repair, result.files, 'repaired', epoch);
+        } catch (error) {
+          if (error.stale || !this.current(epoch)) throw staleError();
+          if (error.code === 'PLACEHOLDER_REPAIR_CONFLICT') {
+            await this.acceptSnapshot(await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/snapshot', {}, epoch), epoch);
+            const current = this.room().shared[repair.filepath];
+            await this.finishPlaceholderRepair(repair, current ? [current] : [], 'protected', epoch);
+            continue;
+          }
+          if (error.status === 404) error.message = 'Saved status repair requires an updated collaboration API. Your translations are preserved.';
+          this.placeholderRepairError = error;
+          // Ordinary saves remain free to synchronize while this repair retries.
+          return;
+        } finally {
+          if (epoch === this.epoch) this.onWork({ key: 'placeholder-repair', active: false });
+        }
+      }
+    }
     async flush(epoch) {
       const blocked = new Set();
       // The snapshot of IDs bounds this pass; newly queued saves trigger a later pass.
@@ -877,6 +951,10 @@
         for (const entry of op.files) {
           const shared = room.shared[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
           const merged = mergeFile(entry.base, entry.yours, shared);
+          if (shared.stagingReset && op.kind !== 'join') {
+            merged.file.trackedForExport = true;
+            delete merged.file.stagingReset;
+          }
           if (entry.base && !P.equal(merged.file.translations, entry.yours.translations)) incorporatedRemoteEntries = true;
           // Confirm unchanged approves the exact translation the reviewer saw.
           // A fresh review is required even if an ordinary text merge is possible.
@@ -1109,7 +1187,8 @@
       this.epoch++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
       this.onWork({ key: 'upload', active: false });
-      this.disconnected = false; this.hashing = false; this.presenceError = null; this.lastError = null;
+      this.onWork({ key: 'placeholder-repair', active: false });
+      this.disconnected = false; this.hashing = false; this.presenceError = null; this.placeholderRepairError = null; this.lastError = null;
       this.closeSocket(); this.key = null; this.running = null; this.selected = null; this.editing = null; this.notify();
     }
     destroy() { this.disconnect(); this.destroyed = true; }

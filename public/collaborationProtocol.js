@@ -210,6 +210,7 @@
     }
     return { filepath: file.filepath, translations, needsReview: !!file.needsReview,
       trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
+      ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}),
       ...(Array.isArray(file.beforeTranslations) ? { beforeTranslations: copy(file.beforeTranslations) } : {}) };
   }
   function contentEqual(a, b) {
@@ -236,6 +237,7 @@
       else if (base && !!shared[key] === !!base[key]) result[key] = !!yours[key];
       else { result[key] = !!yours[key]; metadata.push(key); }
     }
+    if (result.trackedForExport) delete result.stagingReset;
     return { file: result, indexes, metadata, conflict: indexes.length > 0 || metadata.length > 0 };
   }
   function scopeKey(identity) {
@@ -266,6 +268,8 @@
             originSourceHash: '', originSourceAvailable: false, targetSourceHash: result.sourceHash,
             reason: 'Preserved legacy dropped translation' });
         }
+      } else if (file.stagingReset && !file.trackedForExport) {
+        if (result.staged[language]) delete result.staged[language][file.filepath];
       } else if (file.trackedForExport || file.revision > 0) {
         WorkspaceState.stageTranslation(result, file, language, { source: originals.get(file.filepath) });
       }

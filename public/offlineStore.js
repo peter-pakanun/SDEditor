@@ -1,9 +1,9 @@
 (() => {
   const WorkspaceState = (typeof window === 'object' ? window : self).WorkspaceState;
   const DB_NAME = 'sdeditor';
-  // Migrated workspaces use staged/dropped records that v4 editors cannot read.
-  // Keep the stores, but close older editors/workers and reject their later opens.
-  const DB_VERSION = 5;
+  // v4 cannot read staged records; v5 cannot retain a shared staging reset.
+  // Keep every store while excluding both older editors and save workers.
+  const DB_VERSION = 6;
 
   const STORE_KV = 'kv';
   const STORE_REVISIONS_LEGACY = 'revisions';
@@ -161,30 +161,35 @@
     req.onsuccess = () => {
       try {
         result = req.result?.value;
-        if (Number(result?.stagedVersion) >= 1) {
-          if (result.statusMetadataVersion !== 1) store.put({ key, value: pruneWorkspace(result) });
-        } else if (result && (result.languageStatusVersion !== 1 || result.stagedVersion !== 1)) {
-          let source, collaboration, waiting = 3;
+        if (result && (Number(result.stagedVersion) < 1 || result.statusMetadataVersion !== 1 || result.placeholderRepairVersion !== 1)) {
+          const beforeMigration = JSON.stringify(result);
+          let source, collaboration, receipts, waiting = 4;
           const revisions = [], originSources = {};
+          const history = tx.objectStore(revisionStoreName(version));
           const finish = () => {
             if (--waiting) return;
             try {
-              WorkspaceState.initializeWorkspace(result, { source: source || [], sourceHash: result.sourceHash,
+              if (!(Number(result.stagedVersion) >= 1)) WorkspaceState.initializeWorkspace(result, { source: source || [], sourceHash: result.sourceHash,
                 game: normalizeGameVersion(version), language, collaboration, revisions, originSources });
-              store.put({ key, value: pruneWorkspace(result) });
+              else pruneWorkspace(result);
+              const repaired = WorkspaceState.repairLegacyPlaceholders(result, { source, collaboration, receipts, revisions,
+                game: normalizeGameVersion(version), evidenceComplete: !!history.openCursor });
+              if (repaired && collaboration) store.put({ key: 'collaboration_v1', value: collaboration });
+              if (JSON.stringify(result) !== beforeMigration) store.put({ key, value: pruneWorkspace(result) });
             } catch (error) { failure = error; tx.abort(); }
           };
           const sourceRead = store.get(result.importArchive ? importedBaselineKey(result.importArchive.baselineId, version) : sourceKey(version));
           sourceRead.onsuccess = () => { source = result.importArchive ? sourceRead.result?.value?.source : sourceRead.result?.value; finish(); };
           const collaborationRead = store.get('collaboration_v1');
           collaborationRead.onsuccess = () => { collaboration = collaborationRead.result?.value; finish(); };
-          const history = tx.objectStore(revisionStoreName(version));
+          const receiptsRead = store.get('translation_save_receipts_' + normalizeGameVersion(version));
+          receiptsRead.onsuccess = () => { receipts = receiptsRead.result?.value || []; finish(); };
           if (history.openCursor) {
             const cursorRead = history.openCursor();
             cursorRead.onsuccess = () => {
               const cursor = cursorRead.result;
               if (!cursor) { finish(); return; }
-              if (cursor.value?.lang === 'English') revisions.push(cursor.value);
+              revisions.push(cursor.value);
               cursor.continue();
             };
           } else finish();
@@ -415,6 +420,7 @@
           if (collaboration.restore && (files.length !== 1 || !collaboration.restore.eventId
             || !['before', 'after'].includes(collaboration.restore.version))) throw new Error('Invalid shared history restore.');
           room.outbox ||= []; room.local ||= {};
+          room.placeholderRepairs = (room.placeholderRepairs || []).filter(repair => !paths.has(repair.filepath));
           const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
           const replaced = new Set(room.outbox.filter(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)
             && op.files.every(entry => paths.has(entry.yours.filepath))).flatMap(op => op.files.map(entry => entry.yours.filepath)));
@@ -460,7 +466,7 @@
             if (workspace.staged[batch.language]) delete workspace.staged[batch.language][file.filepath];
           } else {
             WorkspaceState.stageTranslation(workspace, file, batch.language, { source: desc, sourceHash: batch.sourceHash,
-              promoteDropped: promotions[file.filepath] });
+              promoteDropped: promotions[file.filepath], saveOrigin: collaboration?.origin || batch.origin || 'save' });
           }
           desc.translations[batch.language] = [...file.translations];
           const status = workspace.status[file.filepath] ||= {};
