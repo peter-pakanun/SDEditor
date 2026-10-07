@@ -36,6 +36,41 @@
     }; },
     computed: {
       collaborationConflicts() { return this.collaborationState.conflicts || []; },
+      collaborationDroppedReviewPaths() {
+        const state = this.collaborationState, workspace = this.localDescs || {};
+        const source = this.sourceIdentity || workspace.sourceHash || '';
+        const account = String(this.cloudUser?.id || '');
+        const paths = new Set();
+        if (source && workspace.sourceHash === source && (!workspace.game || workspace.game === this.gameVersion)
+          && String(workspace.collaborationAccountId || '') === account) {
+          for (const [filepath, conflict] of Object.entries(workspace.droppedConflicts?.[this.lang] || {})) {
+            if (conflict.targetSourceHash === source) paths.add(filepath);
+          }
+        }
+        const identity = state.identity;
+        if (source && identity?.sourceHash === source && identity.game === this.gameVersion && identity.language === this.lang
+          && String(identity.accountId || '') === account) {
+          for (const filepath of state.droppedReviewPaths || []) if (typeof filepath === 'string') paths.add(filepath);
+          for (const [filepath, conflict] of Object.entries(state.droppedConflicts || {})) {
+            if (conflict.targetSourceHash === source) paths.add(filepath);
+          }
+        }
+        return [...paths].sort();
+      },
+      collaborationDroppedReviewWarning() {
+        return !!this.collaborationDroppedReviewPaths.length && (!this.collaborationState.error
+          || /^Conflicting dropped copies need review/.test(this.collaborationState.error));
+      },
+      collaborationUnloadedDroppedConflicts() {
+        if (!this.selectedFileFilters?.includes('droppedConflict') || !this.collaborationDroppedReviewPaths.length) return [];
+        const loaded = new Set((this.descs || []).map(desc => desc.filepath));
+        const search = this.searchText?.toLocaleLowerCase().trim() || '';
+        return this.collaborationDroppedReviewPaths.filter(filepath => !loaded.has(filepath)).map(filepath => ({
+          ...this.localDescs?.droppedConflicts?.[this.lang]?.[filepath], filepath,
+        })).filter(conflict => conflict.yours && conflict.shared && conflict.targetSourceHash === this.sourceIdentity
+          && (!search || [conflict.filepath, ...(conflict.yours.snapshot?.english || []), ...(conflict.yours.snapshot?.translations || []),
+            ...(conflict.shared.snapshot?.english || []), ...(conflict.shared.snapshot?.translations || [])].join('\n').toLocaleLowerCase().includes(search)));
+      },
       collaborationConflict() { return this.collaborationConflicts.find(item => item.id === this.collaborationConflictId) || null; },
       collaborationConflictIndexes() { return [...new Set([...(this.collaborationConflict?.indexes || []), ...Object.keys(this.collaborationConflictEdited).filter(key => this.collaborationConflictEdited[key]).map(Number)])].sort((a, b) => a - b); },
       collaborationConflictMetadata() { return this.collaborationConflict?.metadata || []; },
@@ -50,7 +85,8 @@
         return '';
       },
       collaborationNeedsAttention() {
-        return !!(this.collaborationState.error || this.collaborationState.disconnected || this.collaborationConflicts.length);
+        return !!(this.collaborationState.error || this.collaborationState.disconnected || this.collaborationConflicts.length
+          || this.collaborationDroppedReviewPaths.length);
       },
       collaborationConnectionTone() {
         return this.collaborationState.error ? 'error' : this.collaborationNeedsAttention ? 'warning'
@@ -89,8 +125,29 @@
     watch: {
       collaborationContext() { this.collaborationResetViews(); },
       collaborationConflicts: { deep: true, handler() { this.collaborationRefreshConflict(); } },
+      collaborationDroppedReviewPaths(paths, previous) {
+        if (this.selectedFileFilters?.includes('droppedConflict') && JSON.stringify(paths) !== JSON.stringify(previous)) this.filterDesc();
+      },
     },
     methods: {
+      async collaborationOpenDroppedConflicts() {
+        if (this.editorSaving || this.navigationBusy || !this.collaborationDroppedReviewPaths.length) return;
+        const scope = () => [this.collaborationContext, this.cloudUser?.id || '', this.gameVersion, this.lang, this.sourceIdentity || ''].join('|');
+        const context = scope();
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+        if (context !== scope()) return;
+        if (this.editorVisible) await this.editorExit();
+        if (this.editorVisible || context !== scope()) return;
+        clearTimeout(this._fileSearchTimer);
+        this._fileSearchTimer = null;
+        this._fileSearchComposing = false;
+        this.searchText = '';
+        this.selectedFileFilters = ['droppedConflict'];
+        this.currentPage = 1;
+        this.filterDesc();
+        await this.$nextTick();
+        if (context === scope() && !this.editorVisible) this.$refs.searchInput?.focus();
+      },
       collabReceiveState(state) {
         const previous = this.collaborationState;
         const next = { ...emptyState(), ...state, pendingCount: state?.pendingCount ?? state?.pending ?? 0 };

@@ -442,6 +442,29 @@ test('status choices combine with OR and overlapping files appear once', () => {
   assert.deepEqual(names(editor.filteredDescs), ['saved', 'overlap']);
 });
 
+test('hidden dropped-conflict filter includes saved-only and DNT blockers and refreshes as conflicts resolve', () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('saved-blocker', { hasChanges: true }), description('dropped-blocker', { isDropped: true }),
+    description('ordinary-saved', { hasChanges: true }), description('dnt-blocker', { hasChanges: true, isDNT: true })];
+  editor.hideDNT = true;
+  editor.collaborationDroppedReviewPaths = ['test/saved-blocker.txt', 'test/dropped-blocker.txt', 'test/dnt-blocker.txt'];
+  assert.ok(!editor.fileFilterOptions.some(option => option.key === 'droppedConflict'), 'The special filter is absent from ordinary choices.');
+  editor.selectedFileFilters = ['droppedConflict']; editor.filterDesc();
+  assert.deepEqual(names(editor.filteredDescs), ['saved-blocker', 'dropped-blocker', 'dnt-blocker']);
+  assert.equal(editor.statistic.hasChanges, 2, 'DNT workload counts retain the normal Hide DNT boundary.');
+  assert.equal(editor.statistic.isDropped, 1);
+  editor.searchText = 'saved'; editor.applyFileSearch();
+  assert.deepEqual(names(editor.filteredDescs), ['saved-blocker']);
+  editor.collaborationDroppedReviewPaths = ['test/dropped-blocker.txt'];
+  editor.filterDesc({ searchOnly: true });
+  assert.deepEqual(names(editor.filteredDescs), [], 'Settled search snapshots cannot retain a resolved conflict.');
+  editor.clearFileSearch();
+  assert.deepEqual(names(editor.filteredDescs), ['dropped-blocker']);
+  editor.resetFileSearch();
+  assert.deepEqual(Array.from(editor.selectedFileFilters), defaultStatuses);
+  assert.deepEqual(names(editor.filteredDescs), ['saved-blocker', 'dropped-blocker', 'ordinary-saved']);
+});
+
 test('Unchanged excludes missing translations, saved work, and unresolved dropped copies', () => {
   const { editor } = loadEditor();
   statusFixtures(editor);

@@ -76,7 +76,7 @@ function droppedReviewFixture() {
 function droppedConflictFixture() {
   const h = droppedReviewFixture(), e = h.editor;
   const candidate = JSON.parse(JSON.stringify(h.window.WorkspaceState.droppedForFile(e.localDescs, h.desc.filepath, 'Thai')));
-  const conflict = { game: e.gameVersion, language: e.lang, filepath: h.desc.filepath, kind: 'put', yours: candidate,
+  const conflict = { game: e.gameVersion, language: e.lang, filepath: h.desc.filepath, targetSourceHash: e.sourceIdentity, kind: 'put', yours: candidate,
     shared: { ...candidate, id: 'shared-copy', revision: 2,
       snapshot: { ...candidate.snapshot, translations: ['Shared preserved translation', 'Second shared translation'] } } };
   h.window.WorkspaceState.recordDroppedConflict(e.localDescs, conflict);
@@ -90,6 +90,13 @@ function droppedConflictFixture() {
   } };
   e.openEditorFile = async filepath => { opened.push(filepath); e.seedEditorOpenSource({ desc: h.desc }); };
   return { ...h, candidate, conflict, calls, opened };
+}
+function removedDroppedConflictFixture() {
+  const h = droppedConflictFixture(), e = h.editor;
+  e.descs = []; e._workspaceSourceBaseline = [];
+  e.editorVisible = false; e.editorCurrentEditingDesc = null;
+  e.editorDroppedCandidate = null; e.editorBlocks = [];
+  return h;
 }
 function historyRecoveryFixture() {
   const h = saveFixture(), e = h.editor, desc = h.desc;
@@ -837,6 +844,67 @@ test('a source change or newer conflict while confirmation is open cannot resolv
     assert.equal(calls.length, 0); assert.equal(opened.length, 0);
     assert.ok(e.editorDroppedConflict);
     if (change === 'conflict') assert.match(e.collaborationNotice, /competing copies changed/);
+  }
+});
+
+test('a removed source file can resolve its preserved dropped copies without opening or staging an editor', async () => {
+  for (const choice of ['local', 'shared']) {
+    const { editor: e, window, desc, conflict, calls, opened, writes } = removedDroppedConflictFixture();
+    const stages = JSON.stringify(e.localDescs.staged);
+    e._collaboration.resolveDroppedConflict = async (filepath, decision, expected) => {
+      calls.push({ filepath, choice: decision, expected });
+      window.WorkspaceState.resolveDroppedConflict(e.localDescs, filepath, e.lang, decision, expected);
+    };
+    await e.resolveDroppedTranslationConflict(choice, desc.filepath);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ filepath: desc.filepath, choice,
+      expected: { id: conflict.shared.id, revision: conflict.shared.revision } }]);
+    assert.equal(e.localDescs.droppedConflicts.Thai[desc.filepath], undefined);
+    assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').id,
+      choice === 'local' ? conflict.yours.id : conflict.shared.id);
+    assert.equal(e.editorVisible, false); assert.equal(e.editorCurrentEditingDesc, null);
+    assert.equal(e.editorDroppedCandidate, null); assert.deepEqual(e.editorBlocks, []);
+    assert.equal(opened.length, 0); assert.equal(writes.length, 0);
+    assert.equal(JSON.stringify(e.localDescs.staged), stages);
+  }
+});
+
+test('removed-file decisions cannot cross account, game, language, source, or client changes during confirmation', async () => {
+  for (const change of ['account', 'game', 'language', 'source', 'client']) {
+    const { editor: e, desc, calls, opened } = removedDroppedConflictFixture();
+    let finish;
+    e.appConfirm = () => new Promise(resolve => { finish = resolve; });
+    const resolving = e.resolveDroppedTranslationConflict('shared', desc.filepath);
+    if (change === 'account') e.cloudUser = { id: 'other-account' };
+    if (change === 'game') e.gameVersion = 'poe2';
+    if (change === 'language') e.lang = 'German';
+    if (change === 'source') e.sourceIdentity = 'different-source';
+    if (change === 'client') e._collaboration = {};
+    finish(true); await resolving;
+    assert.equal(calls.length, 0, change); assert.equal(opened.length, 0, change);
+    assert.ok(e.localDescs.droppedConflicts.Thai[desc.filepath], change);
+    assert.equal(e.editorSaving, false); assert.equal(e.editorVisible, false);
+  }
+});
+
+test('removed-file decisions retain a changed comparison and pass the displayed shared revision to storage', async () => {
+  for (const phase of ['confirmation', 'durable read']) {
+    const { editor: e, window, desc, conflict, calls, opened } = removedDroppedConflictFixture();
+    const displayed = { id: conflict.shared.id, revision: conflict.shared.revision };
+    if (phase === 'confirmation') {
+      e.appConfirm = async () => { e.localDescs.droppedConflicts.Thai[desc.filepath].shared.revision++; return true; };
+    } else {
+      e._collaboration.resolveDroppedConflict = async (filepath, decision, expected) => {
+        calls.push({ filepath, decision, expected });
+        e.localDescs.droppedConflicts.Thai[desc.filepath].shared.revision++;
+        window.WorkspaceState.resolveDroppedConflict(e.localDescs, filepath, e.lang, decision, expected);
+      };
+    }
+    await e.resolveDroppedTranslationConflict('shared', desc.filepath);
+    assert.equal(calls.length, phase === 'confirmation' ? 0 : 1);
+    if (calls.length) assert.deepEqual(JSON.parse(JSON.stringify(calls[0].expected)), displayed);
+    assert.ok(e.localDescs.droppedConflicts.Thai[desc.filepath]);
+    assert.match(e.collaborationNotice, /changed/);
+    assert.equal(opened.length, 0); assert.equal(e.editorVisible, false);
   }
 });
 

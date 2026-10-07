@@ -46,6 +46,8 @@ The companion API persists `targetSourceHashes` for active candidates and resolu
 
 Save stages a replacement; **Confirm unchanged** stages the selected dropped translation. Both resolve that copy together with the staged write. **Discard** resolves it without staging. Validate the current source, candidate revision, and shared file revision before committing. A failed durable write or stale conflict decision must preserve recoverable content and the editor draft. None of these actions removes the version's Dropped assignment.
 
+Consolidate competing unresolved copies automatically only when game, language, filepath, original source hash and source availability agree, and their complete preserved snapshots match exactly. Keep assignment provenance, recovery receipts, and any already staged save. Consolidation alone does not stage or approve a dropped translation. An existing reviewed promotion may resume against the identical active shared candidate using its current ID/revision and the original shared-file revision guard. Different content, a resolved shared candidate, or a saved operation awaiting fresh review still needs an explicit decision.
+
 An explicit history recovery may create a new unresolved generation even when identical text was previously promoted or discarded. Capture one stable `recoveryId` for that user action, retain it through the initial queued upload and retries, and preserve the older resolved generation. Retrying the same action must return its original generation, even after resolution; it must never resurrect it. Another unresolved copy still requires revision-checked conflict resolution. Ordinary migration, imports, peer retargeting, and provenance uploads deduplicate resolved content and must not request a new recovery generation.
 
 ## Overlap, Counts, and Filters
@@ -55,6 +57,8 @@ Statuses overlap. Revised implies Saved. An intentionally blank save can be Save
 Workspace counters count **files**, not entries or actions. Missing, Dropped, Revised, Saved, Error, and Warning count eligible loaded files under **Hide DNT entries**, independent of the search and selected status filters. Loaded counts all loaded files. The pagination/result total counts files that match both the search and selected statuses. Adding overlapping counters does not give the number of distinct files.
 
 Status filters combine with **OR** and never duplicate a file. No selected statuses means no files. Unchanged is the final filter and starts off; the other status filters start selected. The footer order is **Loaded, Missing, Scan errors, Dropped, Scan warnings, Revised, Saved**. Scan counters appear only during a scan or while completed results remain available.
+
+The dropped-conflict warning links to a hidden filter for the selected account, game, source version, and language. Include competing dropped copies and queued promotions awaiting a decision or fresh review, including Saved files without an active Dropped copy. Clear text search on activation and include affected DNT files without changing the Hide DNT setting or workload counts. For files absent from the current source, offer comparison and guarded copy selection without staging or adding them to the loaded-file counts. Exiting this filter restores the normal defaults. Resolve matching files from live conflict and retry state; do not persist a conflict status flag.
 
 ## Diagnostic Lifecycle
 

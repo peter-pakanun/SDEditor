@@ -15,7 +15,7 @@ function deferred() {
 }
 function editor(wrappers = {}) {
   const focus = { isConnected: true, count: 0, focus() { this.count++; } };
-  const sandbox = { window: {}, document: { activeElement: focus } };
+  const sandbox = { window: {}, document: { activeElement: focus }, clearTimeout };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/collaborationUi.js'), 'utf8'), sandbox);
   const mixin = sandbox.window.CollaborationUI.mixin;
   const dialog = () => ({ open: false, showModal() { this.open = true; }, close() { this.open = false; } });
@@ -44,6 +44,75 @@ test('unchanged compact state retains reactive identity while presence updates p
   assert.notEqual(app.collaborationState, withConflicts);
   assert.equal(app.collaborationState.conflicts, withConflicts.conflicts);
   assert.equal(app.collaborationState.identity, withConflicts.identity);
+});
+
+test('dropped review paths include saved-only blockers and remain scoped to account, game, source, and language', () => {
+  const sourceHash = 'a'.repeat(64);
+  const { app } = editor({ sourceIdentity: sourceHash, localDescs: { sourceHash, game: 'poe1', collaborationAccountId: 'alice',
+    droppedConflicts: { Thai: { 'local.txt': { targetSourceHash: sourceHash }, 'old.txt': { targetSourceHash: 'b'.repeat(64) } },
+      German: { 'german.txt': { targetSourceHash: sourceHash } } } } });
+  app.collaborationState.droppedReviewPaths = ['saved.txt', 'local.txt'];
+  app.collaborationState.droppedConflicts = { 'shared.txt': { targetSourceHash: sourceHash } };
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), ['local.txt', 'saved.txt', 'shared.txt']);
+  app.collaborationState.error = 'Conflicting dropped copies need review before this file can be shared.';
+  assert.equal(app.collaborationDroppedReviewWarning, true);
+  assert.equal(app.collaborationNeedsAttention, true);
+  app.collaborationState.error = 'Access expired';
+  assert.equal(app.collaborationDroppedReviewWarning, false, 'A different actionable failure keeps its own message.');
+  app.lang = 'German';
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), ['german.txt']);
+  app.lang = 'Thai'; app.gameVersion = 'poe2';
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), []);
+  app.gameVersion = 'poe1'; app.sourceIdentity = 'c'.repeat(64);
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), []);
+  app.sourceIdentity = sourceHash; app.cloudUser = { id: 'bob' };
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), []);
+  app.cloudUser = null;
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), []);
+});
+
+test('dropped warning opens its hidden filter, cancels pending search, and preserves a draft when exit is declined', async () => {
+  const { app } = editor({ sourceIdentity: 'a'.repeat(64), searchText: 'unrelated', selectedFileFilters: ['missing'],
+    currentPage: 8, _fileSearchTimer: null, _fileSearchComposing: true, editorVisible: true });
+  app.collaborationState.droppedReviewPaths = ['stat.txt'];
+  let filtered = 0, focused = 0;
+  app.filterDesc = () => { filtered++; };
+  app.$refs.searchInput = { focus() { focused++; } };
+  app.editorExit = async () => {};
+  await app.collaborationOpenDroppedConflicts();
+  assert.equal(app.searchText, 'unrelated'); assert.equal(filtered, 0);
+  app.editorExit = async () => { app.editorVisible = false; };
+  await app.collaborationOpenDroppedConflicts();
+  assert.equal(app.searchText, ''); assert.equal(app._fileSearchComposing, false);
+  assert.deepEqual(Array.from(app.selectedFileFilters), ['droppedConflict']);
+  assert.equal(app.currentPage, 1); assert.equal(filtered, 1); assert.equal(focused, 1);
+});
+
+test('hidden dropped review displays preserved conflicts for files absent from the current source', () => {
+  const sourceHash = 'a'.repeat(64), preserved = { targetSourceHash: sourceHash,
+    yours: { snapshot: { english: ['Removed English'], translations: ['local preserved text'] } },
+    shared: { snapshot: { english: ['Removed English'], translations: ['shared preserved text'] } } };
+  const { app } = editor({ sourceIdentity: sourceHash, selectedFileFilters: ['saved'], searchText: '',
+    localDescs: { sourceHash, game: 'poe1', collaborationAccountId: 'alice',
+      droppedConflicts: { Thai: { 'stat.txt': copy(preserved), 'removed.txt': copy(preserved) } } } });
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
+  app.selectedFileFilters = ['droppedConflict'];
+  assert.deepEqual(Array.from(app.collaborationUnloadedDroppedConflicts, item => item.filepath), ['removed.txt']);
+  app.searchText = 'SHARED preserved';
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 1);
+  app.searchText = 'unrelated';
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
+  app.searchText = ''; app.cloudUser = { id: 'bob' };
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0, 'Preserved comparisons cannot leak into another account.');
+});
+
+test('dropped warning waits for local saves and does not navigate into a changed account scope', async () => {
+  const { app } = editor({ sourceIdentity: 'a'.repeat(64), searchText: 'keep', selectedFileFilters: ['saved'],
+    _pendingSaves: { snapshot: () => ({ jobs: ['pending'] }) }, filterDesc: () => assert.fail('Do not change the list after switching account') });
+  app.collaborationState.droppedReviewPaths = ['stat.txt'];
+  app.waitForPendingSaves = async () => { app.cloudUser = { id: 'bob' }; return true; };
+  await app.collaborationOpenDroppedConflicts();
+  assert.equal(app.searchText, 'keep'); assert.deepEqual(Array.from(app.selectedFileFilters), ['saved']);
 });
 
 test('file presence excludes this browser and clears stale presence when disconnected', () => {

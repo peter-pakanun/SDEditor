@@ -46,6 +46,8 @@ The main action header stays visible while you scroll, with labeled controls for
 
 Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Revised translations**, **Dropped translations**, **Diagnostic errors**, and **Diagnostic warnings** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together.
 
+Click **Conflicting dropped copies need review…** in the workspace or editor status bar to show only files whose dropped copies need a decision or whose saved result needs another review before sharing. This clears the text search and activates a special filter that is hidden from the ordinary status choices. It includes affected DNT files while preserving the **Hide DNT entries** setting. Files removed from the current source show their competing preserved copies below the list, where you can choose a copy without staging a translation. Click the **Conflicting dropped copies ×** chip to return to the default search and filters.
+
 Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Scan errors**, **Dropped**, **Scan warnings**, **Revised**, **Saved**. Scan counts show files with errors or warnings while a scan runs and after it completes; they disappear when results are cleared or a scan is stopped. **Missing**, **Dropped**, **Saved**, **Revised**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. **Export Version** shows the current export's short hash; hover to see the full hash. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
 
 ### File Status Indicators
@@ -398,6 +400,8 @@ If the English source was updated but your translation still fits (source typo, 
 3. Click **Confirm unchanged** to stage the preserved translation for this source version. If the entry layout changed or the draft needs corrections, edit it and **Save** the replacement instead.
 
 Dropped copies do not enter exports. They remain stored locally and in the cloud until you stage a translation or choose **Discard**. Reloading, exporting, and importing later versions do not remove unresolved copies. Older copies without preserved English identify that limitation in the viewer.
+
+Identical local and shared dropped copies are consolidated automatically when their preserved English, translations, entry metadata, and original source version match exactly. This does not confirm an ordinary dropped translation. An already reviewed save can continue sharing after consolidation, with revision checks still applied. Different copies appear under **Competing dropped translations**: choose **Keep this dropped copy** or **Use shared dropped copy**, review the chosen copy, then **Confirm unchanged** or **Save & close**. If a saved result was blocked by a differing copy, save again after resolving it.
 
 ### Exporting Your Work
 

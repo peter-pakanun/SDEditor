@@ -1467,11 +1467,12 @@ const config = Vue.defineComponent({
         return v;
       }).join('');
     },
-    async resolveDroppedTranslationConflict(choice) {
-      const desc = this.editorCurrentEditingDesc, conflict = this.editorDroppedConflict;
-      if (!desc || !conflict || this.editorSaving) return;
+    async resolveDroppedTranslationConflict(choice, filepath = this.editorCurrentEditingDesc?.filepath) {
+      const desc = this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath ? this.editorCurrentEditingDesc : null;
+      const conflict = this.localDescs?.droppedConflicts?.[this.lang]?.[filepath];
+      if (!filepath || !conflict || conflict.targetSourceHash !== this.sourceIdentity || this.editorSaving || this.navigationBusy) return;
       const context = this.captureCollaborationContext(), captured = JSON.stringify(conflict);
-      const hadChanges = this.editorHaveChanges();
+      const hadChanges = !!desc && this.editorHaveChanges();
       this.editorSaving = true;
       try {
         const local = choice === 'local';
@@ -1479,15 +1480,17 @@ const config = Vue.defineComponent({
           : 'Use the shared dropped copy for review? Your other copy remains in local recovery storage.', {
           title: 'Resolve dropped copies', confirmLabel: local ? 'Keep this dropped copy' : 'Use shared dropped copy',
         }) || !this.collaborationContextCurrent(context)) return;
-        if (JSON.stringify(this.editorDroppedConflict) !== captured) throw new Error('The competing copies changed. Review them again.');
+        if (JSON.stringify(this.localDescs?.droppedConflicts?.[context.language]?.[filepath]) !== captured) throw new Error('The competing copies changed. Review them again.');
         if (!context.client?.resolveDroppedConflict) throw new Error('Reconnect to resolve these dropped copies.');
-        await context.client.resolveDroppedConflict(desc.filepath, choice);
+        await context.client.resolveDroppedConflict(filepath, choice, { id: conflict.shared.id, revision: conflict.shared.revision });
         if (!this.collaborationContextCurrent(context)) return;
-        this.editorDroppedCandidate = this.toPlainForStorage(window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, this.lang));
-        this.editorShowEnglishDiff = false;
+        if (desc && this.editorCurrentEditingDesc === desc) {
+          this.editorDroppedCandidate = this.toPlainForStorage(window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang));
+          this.editorShowEnglishDiff = false;
+        }
         this.applyWorkspaceOverlay(); this.filterDesc();
-        if (!hadChanges && !this.editorHaveChanges()) await this.openEditorFile(desc.filepath);
-      } catch (error) { this.collaborationNotice = 'Could not resolve the dropped copies: ' + error.message; }
+        if (desc && this.editorVisible && this.editorCurrentEditingDesc === desc && !hadChanges && !this.editorHaveChanges()) await this.openEditorFile(filepath);
+      } catch (error) { if (this.collaborationContextCurrent(context)) this.collaborationNotice = 'Could not resolve the dropped copies: ' + error.message; }
       finally { this.editorSaving = false; }
     },
     async discardDroppedTranslation() {
@@ -5502,10 +5505,14 @@ const config = Vue.defineComponent({
       const descs = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
       const workspace = Vue.toRaw ? Vue.toRaw(this.localDescs) : this.localDescs;
       const filters = selectedFilters.join(',');
+      const droppedReviewPaths = new Set(this.collaborationDroppedReviewPaths || []);
+      const droppedReviewSignature = JSON.stringify([...droppedReviewPaths].sort());
+      const showDroppedConflicts = selectedFilters.includes('droppedConflict');
       let snapshot = this._fileSearchSnapshot;
       if (!searchOnly || !snapshot || snapshot.descs !== descs || snapshot.workspace !== workspace
         || snapshot.lang !== lang || snapshot.game !== this.gameVersion || snapshot.source !== this.sourceIdentity
-        || snapshot.hideDNT !== hideDNT || snapshot.filters !== filters || snapshot.diagnostics !== diagnosticResults) {
+        || snapshot.hideDNT !== hideDNT || snapshot.filters !== filters || snapshot.diagnostics !== diagnosticResults
+        || snapshot.droppedReviewSignature !== droppedReviewSignature) {
         this.invalidateEditorLookupIndex?.();
         const entries = [];
         const counts = { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
@@ -5513,13 +5520,16 @@ const config = Vue.defineComponent({
         // Typing then only searches strings, without recalculating statuses,
         // copying translation arrays, escaping HTML, or invalidating Lookup.
         for (const desc of descs) {
-          if (hideDNT && desc.isDNT) continue;
+          const hiddenDNT = hideDNT && desc.isDNT;
+          if (hiddenDNT && !(showDroppedConflicts && droppedReviewPaths.has(desc.filepath))) continue;
           const baseline = workspace?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
           const state = baseline ? window.WorkspaceState.workspaceFile(workspace, baseline, lang) : desc;
-          if (state.hasChanges) counts.hasChanges++;
-          if (state.isRevised) counts.isRevised++;
-          if (state.isMissing) counts.isMissing++;
-          if (state.isDropped) counts.isDropped++;
+          if (!hiddenDNT) {
+            if (state.hasChanges) counts.hasChanges++;
+            if (state.isRevised) counts.isRevised++;
+            if (state.isMissing) counts.isMissing++;
+            if (state.isDropped) counts.isDropped++;
+          }
 
           const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
           const statuses = {
@@ -5527,6 +5537,7 @@ const config = Vue.defineComponent({
             saved: !!state.hasChanges,
             revised: !!state.isRevised,
             dropped: !!state.isDropped,
+            droppedConflict: droppedReviewPaths.has(desc.filepath),
             unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
             diagnosticError: !!diagnosticResult?.hasDiagnosticError,
             diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
@@ -5558,7 +5569,7 @@ const config = Vue.defineComponent({
           });
         }
         snapshot = { descs, workspace, lang, game: this.gameVersion, source: this.sourceIdentity,
-          hideDNT, filters, diagnostics: diagnosticResults, entries };
+          hideDNT, filters, diagnostics: diagnosticResults, droppedReviewSignature, entries };
         this._fileSearchSnapshot = Vue.markRaw ? Vue.markRaw(snapshot) : snapshot;
         Object.assign(this.statistic, counts);
       }

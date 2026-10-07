@@ -135,6 +135,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 }
 .workspaceContent { max-width: 1800px; margin: 0 auto; padding: 16px 20px; }
 .workspaceSearch { min-width: 0; }
+.droppedConflictFilter { display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; padding: 4px 8px; min-height: 28px; color: var(--ui-dropped); font-size: 12px; }
 .searchToolbar { display: flex; align-items: stretch; }
 .searchToolbar .searchField { flex: 1; min-width: 0; }
 .filterToggle { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: none; padding: 7px 10px; background: transparent; border: 0; min-height: 34px; font-weight: 600; line-height: 1.4; }
@@ -415,6 +416,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .collaborationEditorPeers { margin: 9px 0; }
 .collaborationNotice { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }
 .collaborationError { color: var(--ui-missing); white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaborationDroppedReviewLink { text-decoration: underline; text-underline-offset: 2px; }
+.collaborationDroppedReviewLink:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; border-radius: 2px; }
 .collaborationLocalHistoryLabel { color: var(--ui-muted); font-size: 12px; margin: 5px 0 8px; }
 .collaborationHistoryButton { margin: 0 0 8px; }
 .collaborationDialog { box-sizing: border-box; width: min(1160px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); margin: auto; padding: 20px; overflow: auto; color: var(--color-font); background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 12px; box-shadow: 0 16px 60px rgba(0, 0, 0, .28); }

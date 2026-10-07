@@ -39,6 +39,7 @@
       this.lastStatus = null; this.lastNotification = null;
       this.lastDroppedSync = 0;
       this.droppedConflicts = {};
+      this.pendingDropped = false;
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
@@ -47,7 +48,11 @@
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
         connected: this.connected, disconnected: this.disconnected, hashing: this.hashing,
         pending: (room?.outbox?.length || 0) + (room?.placeholderRepairs?.length || 0),
-        conflicts: copy(room?.conflicts || []), droppedConflicts: copy(this.droppedConflicts), ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
+        conflicts: copy(room?.conflicts || []), droppedConflicts: copy(this.droppedConflicts),
+        droppedReviewPaths: [...new Set([...Object.keys(this.droppedConflicts), ...(room?.outbox || [])
+          .filter(operation => ['candidate_conflict', 'needs_candidate_review'].includes(operation.status))
+          .flatMap(operation => (operation.files || []).map(entry => entry.yours?.filepath).filter(Boolean))])],
+        ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
     notify() {
@@ -585,6 +590,7 @@
       // The room websocket announces committed translations. Idle timers only
       // retry disconnected rooms or saves that still need to be uploaded.
       if (background && this.connected && this.socket?.readyState === 1
+        && !this.pendingDropped
         && !this.room()?.outbox.some(operation => operation.status !== 'conflict' && !operation.blockedByConflict)) {
         return Promise.resolve();
       }
@@ -616,8 +622,9 @@
           if (this.placeholderRepairError) this.handleError(this.placeholderRepairError);
           else if (this.presenceError) this.reportPresenceError();
           else if (Object.keys(this.droppedConflicts).length || this.room().outbox.some(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)))
-            this.status('Conflicting dropped copies need review before this file can be shared.', true);
+            this.status('Conflicting dropped copies need review before these files can be shared.', true);
           else this.status('');
+          if (this.pendingDropped) this.schedule();
         } catch (error) {
           if (!error.stale && this.current(epoch)) this.handleError(error);
         }
@@ -648,18 +655,69 @@
     async deliverDropped(workspace, records, epoch) {
       if (!this.current(epoch)) throw staleError();
       this.droppedConflicts = copy(workspace.droppedConflicts?.[this.room().identity.language] || {});
+      this.pendingDropped = (workspace.droppedOutbox || []).some(operation => !operation.conflict
+        && operation.candidate?.game === this.room().identity.game && operation.candidate?.language === this.room().identity.language);
       await this.onRemoteDropped(copy(records), copy({ dropped: workspace.dropped, droppedArchive: workspace.droppedArchive,
         droppedOutbox: workspace.droppedOutbox, droppedAliases: workspace.droppedAliases, droppedConflicts: workspace.droppedConflicts }));
       if (!this.current(epoch)) throw staleError();
       this.notify();
     }
+    coalesceDroppedCopy(workspace, room, conflict, shared) {
+      if (!conflict || !shared || conflict.targetSourceHash !== room.identity.sourceHash
+        || shared.game !== room.identity.game || shared.language !== room.identity.language
+        || !W.sameDroppedCopy(conflict.yours, shared)) return false;
+      let pending;
+      if (conflict.kind === 'promotion') {
+        pending = room.outbox.find(operation => operation.id === conflict.operationId);
+        if (!pending || !['pending', 'candidate_conflict'].includes(pending.status) || pending.files.length !== 1
+          || pending.files[0].yours.filepath !== conflict.filepath) return false;
+        const reviewed = pending.wire?.promoteDropped || pending.promoteDropped;
+        const alias = workspace.droppedAliases?.[reviewed?.id];
+        const bound = alias && alias.fromRevision === Number(reviewed?.revision || 0) ? alias : reviewed;
+        if (!reviewed || reviewed.targetSourceHash !== room.identity.sourceHash || bound.id !== conflict.yours.id
+          || Number(bound.revision || 0) !== Number(conflict.yours.revision || 0)) return false;
+      } else if (conflict.kind !== 'upload') return false;
+      if (!W.coalesceDroppedConflict(workspace, conflict.filepath, room.identity.language, shared)) return false;
+      if (pending) {
+        // The user already reviewed precisely this content. Only its canonical
+        // candidate ID/revision changed; keep the original shared-file base.
+        pending.promoteDropped = { ...copy(pending.promoteDropped), id: shared.id,
+          revision: Number(shared.revision) || 0, targetSourceHash: room.identity.sourceHash };
+        pending.status = 'pending'; delete pending.wire; delete pending.upload;
+      }
+      return true;
+    }
+    async coalesceDroppedCopies(records, epoch) {
+      if (!Object.keys(this.droppedConflicts).length) return;
+      const identity = copy(this.room()?.identity);
+      let workspace, changed = false;
+      await this.update(() => {}, { projectWorkspace: (current, state) => {
+        if (!this.current(epoch) || current?.sourceHash !== identity.sourceHash
+          || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
+        const latest = new Map();
+        for (const record of records) if (record.game === identity.game && record.language === identity.language
+          && (!latest.has(record.filepath) || Number(record.revision) > Number(latest.get(record.filepath).revision)
+            || (Number(record.revision) === Number(latest.get(record.filepath).revision) && record.status === 'dropped'))) latest.set(record.filepath, record);
+        for (const conflict of Object.values(current.droppedConflicts?.[identity.language] || {})) {
+          if (this.coalesceDroppedCopy(current, state.rooms[this.key], conflict, latest.get(conflict.filepath))) changed = true;
+        }
+        workspace = current;
+        return current;
+      } }, epoch);
+      if (changed) await this.deliverDropped(workspace, records, epoch);
+      return workspace;
+    }
     async retainDroppedConflict(error, operation, kind, epoch) {
       const identity = copy(this.room().identity), shared = error.current?.candidate || error.current;
       if (!shared?.id || shared.game !== identity.game || shared.language !== identity.language) throw error;
       let updated;
-      const record = workspace => {
+      const record = (workspace, state) => {
         if (!this.current(epoch) || workspace?.sourceHash !== identity.sourceHash
           || (workspace.collaborationAccountId && String(workspace.collaborationAccountId) !== identity.accountId)) throw staleError();
+        const pending = state.rooms[this.key].outbox.find(item => item.id === operation.id);
+        // A failed request may return after another tab has made its review
+        // decision or replaced the save. That decision remains authoritative.
+        if (kind === 'promotion' && (!pending || !['pending', 'candidate_conflict'].includes(pending.status))) return (updated = workspace);
         const promotion = operation.wire?.promoteDropped || operation.promoteDropped;
         const yours = operation.candidate || workspace.droppedArchive?.[promotion?.id]
           || workspace.droppedArchive?.[operation.promoteDropped?.id];
@@ -667,13 +725,14 @@
         updated = W.recordDroppedConflict(workspace, { kind, filepath: shared.filepath, language: identity.language,
           targetSourceHash: identity.sourceHash, yours: copy(yours), shared: copy(shared),
           ...(kind === 'promotion' ? { operationId: operation.id } : {}) });
+        this.coalesceDroppedCopy(updated, state.rooms[this.key], updated.droppedConflicts[identity.language][shared.filepath], shared);
+        if (kind === 'promotion' && pending?.status === 'candidate_conflict') { delete pending.wire; delete pending.upload; }
         return updated;
       };
-      if (kind === 'promotion') await this.update((state, room) => {
+      await this.update((state, room) => {
         const pending = room.outbox.find(item => item.id === operation.id);
-        if (pending) { pending.status = 'candidate_conflict'; delete pending.wire; delete pending.upload; }
+        if (kind === 'promotion' && pending && ['pending', 'candidate_conflict'].includes(pending.status)) pending.status = 'candidate_conflict';
       }, { projectWorkspace: record }, epoch);
-      else updated = await this.store.updateWorkspace(record, identity.game);
       await this.deliverDropped(updated, [], epoch);
       return updated;
     }
@@ -688,7 +747,8 @@
       const result = await this.api('/dropped?' + params, {}, epoch);
       const candidates = result.candidates || result.items || result.records || [];
       const latest = candidates.filter(item => item.filepath === filepath)
-        .sort((left, right) => Number(right.revision) - Number(left.revision))[0];
+        .sort((left, right) => Number(right.revision) - Number(left.revision)
+          || Number(right.status === 'dropped') - Number(left.status === 'dropped'))[0];
       if (!latest || latest.id !== observed.shared.id || Number(latest.revision) !== Number(observed.shared.revision)) {
         if (latest) await this.retainDroppedConflict({ current: latest }, { ...copy(this.room().outbox.find(op => op.id === observed.operationId) || {}),
           ...(observed.operationId ? { id: observed.operationId } : {}), candidate: observed.yours }, observed.kind, epoch);
@@ -713,7 +773,7 @@
     }
     async syncDropped(epoch, { force = false } = {}) {
       if (!this.store.getWorkspace || !this.store.updateWorkspace) return;
-      if (!force && Date.now() - this.lastDroppedSync < 20000) return;
+      if (!force && !this.pendingDropped && !Object.keys(this.droppedConflicts).length && Date.now() - this.lastDroppedSync < 20000) return;
       const identity = copy(this.room()?.identity);
       if (!identity) return;
       let workspace = await this.store.getWorkspace(identity.game);
@@ -756,11 +816,18 @@
         if (!response?.candidate) throw new Error('Dropped translation response is incomplete.');
         await apply([response.candidate], { acknowledge: true, acknowledgeKind: operation.kind, acknowledgeId: operation.id });
       }
-      if (force || pending.length || Date.now() - this.lastDroppedSync >= 20000) {
+      if (force || pending.length || Object.keys(this.droppedConflicts).length || Date.now() - this.lastDroppedSync >= 20000) {
         const params = new URLSearchParams({ game: identity.game, language: identity.language, includeResolved: '1' });
         const result = await this.api('/dropped?' + params, {}, epoch);
-        await apply(result.candidates || result.items || result.records || []);
+        const records = result.candidates || result.items || result.records || [];
+        workspace = await this.coalesceDroppedCopies(records, epoch) || workspace;
+        await apply(records);
         this.lastDroppedSync = Date.now();
+      }
+      if (this.pendingDropped) {
+        // Consolidation can queue a canonical provenance upload after this
+        // pass captured its pending operations. Finish it even in an idle room.
+        this.lastDroppedSync = 0; this.schedule();
       }
     }
     startPresence(epoch) {
@@ -979,6 +1046,10 @@
           } catch (error) {
             if (error.code === 'CANDIDATE_CONFLICT' && current.promoteDropped && this.store.updateWorkspace) {
               await this.retainDroppedConflict(error, current, 'promotion', epoch);
+              if (this.room().outbox.find(item => item.id === id)?.status === 'pending') {
+                if (attempt === 3) this.schedule();
+                continue;
+              }
               paths.forEach(path => blocked.add(path)); break;
             }
             if (error.status !== 409 || (error.code && error.code !== 'REVISION_CONFLICT')) throw error;
@@ -1248,7 +1319,7 @@
       this.claims.clear(); this.connected = false; this.peers = []; this.sessionId = null; this.notify();
     }
     disconnect() {
-      this.droppedConflicts = {}; this.lastDroppedSync = 0;
+      this.droppedConflicts = {}; this.lastDroppedSync = 0; this.pendingDropped = false;
       this.epoch++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
       this.onWork({ key: 'upload', active: false });

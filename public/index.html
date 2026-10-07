@@ -338,6 +338,7 @@
               </button>
             </div>
           </div>
+          <button v-if="selectedFileFilters.includes('droppedConflict')" class="droppedConflictFilter" @click="resetFileSearch" title="Reset search and filters">Conflicting dropped copies <span aria-hidden="true">×</span></button>
         </section>
         <nav class="workspaceActions" aria-label="Workspace actions">
           <button @click="importZipClicked" aria-label="Import ZIP">Import ZIP</button>
@@ -403,7 +404,20 @@
         </tbody>
       </table>
       </div>
-      <div v-if="filteredDescs.length === 0" class="workspaceEmpty" role="status">
+      <section v-for="conflict in collaborationUnloadedDroppedConflicts" :key="conflict.filepath" class="droppedTranslationPanel" :aria-label="'Competing dropped translations for ' + conflict.filepath">
+        <h3>{{ conflict.filepath }}</h3>
+        <p>This file is absent from the current source. Choose which preserved copy to keep for later review.</p>
+        <div class="droppedTranslationBanner">
+          <strong>Competing dropped translations</strong>
+          <button @click="resolveDroppedTranslationConflict('local', conflict.filepath)" :disabled="editorSaving || navigationBusy">Keep this dropped copy</button>
+          <button @click="resolveDroppedTranslationConflict('shared', conflict.filepath)" :disabled="editorSaving || navigationBusy">Use shared dropped copy</button>
+        </div>
+        <div class="droppedComparison">
+          <section><h4>Your dropped copy</h4><p v-if="conflict.yours.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (conflict.yours.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (conflict.yours.snapshot?.translations || []).join('\n') }}</pre></section>
+          <section><h4>Shared dropped copy</h4><p v-if="!conflict.shared.snapshot">This copy has already been resolved.</p><template v-else><p v-if="conflict.shared.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (conflict.shared.snapshot.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (conflict.shared.snapshot.translations || []).join('\n') }}</pre></template></section>
+        </div>
+      </section>
+      <div v-if="filteredDescs.length === 0 && !collaborationUnloadedDroppedConflicts.length" class="workspaceEmpty" role="status">
         <h2>{{ selectedFileFilters.length ? 'No files match your search' : 'Choose a status to show files' }}</h2>
         <p>{{ selectedFileFilters.length ? 'Try another search or open Filters to select more statuses.' : 'Open Filters and tick one or more statuses to see matching stat files.' }}</p>
         <button @click="resetFileSearch">Reset search and filters</button>
@@ -424,7 +438,8 @@
           <span class="statusPill saved" title="Files with a staged translation for the selected language"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></span>
           <div class="collaborationStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
-            <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+            <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
+            <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
             <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
             <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
           </div>
@@ -557,7 +572,8 @@
           <div class="collaborationEditorStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <div class="collaborationStatus">
               <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
-              <span v-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+              <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
+              <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
               <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
               <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
             </div>
@@ -583,6 +599,7 @@
             </div>
             <p v-if="editorDroppedConflict.kind === 'promotion'">Your saved result remains local. Resolve these copies, then Save again to share it.</p>
           </div>
+          <p v-if="!editorDroppedConflict && collaborationDroppedReviewPaths.includes(editorCurrentEditingDesc.filepath)" class="collaborationNotice" role="status">Your saved result remains local. Review this translation, then Save &amp; close to share it.</p>
           <div v-if="editorDroppedCandidate" class="droppedTranslationPanel">
             <div class="droppedTranslationBanner">
               <span><strong>Dropped translation</strong> · {{ editorDroppedCandidate.reason || 'Source changed' }}</span>
