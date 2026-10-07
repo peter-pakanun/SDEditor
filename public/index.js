@@ -398,16 +398,12 @@ const config = Vue.defineComponent({
     clearTimeout(this._hlterRefreshTimer);
     for (const task of this._browserWorkPending?.values() || []) clearTimeout(task.timer);
     this._browserWorkPending?.clear();
-  },
-  beforeDestroy() {
-    document.removeEventListener('keydown', this.handleKeydown);
-    // Clean up multi-instance detection
-    if (this.multiInstanceCheckTimer) {
-      clearInterval(this.multiInstanceCheckTimer);
-    }
-    if (this._broadcastChannel) {
-      this._broadcastChannel.close();
-    }
+    document.removeEventListener?.('keydown', this.handleKeydown);
+    if (this.multiInstanceCheckTimer != null) clearInterval(this.multiInstanceCheckTimer);
+    this.multiInstanceCheckTimer = null;
+    this._broadcastChannel?.close();
+    this._broadcastChannel = null;
+    this._instancePeers?.clear();
   },
   watch: {
     settingsDialogVisible(visible) {
@@ -1664,13 +1660,16 @@ const config = Vue.defineComponent({
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
       if (x + maxWidth > viewportWidth - 8) x = Math.max(8, viewportWidth - maxWidth - 8);
       if (y + estimatedHeight > viewportHeight - 8) y = Math.max(8, Number(e?.clientY || 0) - estimatedHeight - 12);
-      this.tooltip = {
+      // Keep the object passed to AppTooltip stable. Replacing it schedules a
+      // render of the entire editor for every pointer movement; nested changes
+      // only update the tooltip component that reads these fields.
+      Object.assign(this.tooltip, {
         visible: true,
         text: safeText,
         x,
         y,
         maxWidth
-      };
+      });
     },
     showTooltip(e, text) {
       this.placeTooltip(e, text);
@@ -6659,32 +6658,43 @@ const config = Vue.defineComponent({
     },
     
     // Multi-instance detection methods
+    refreshMultiInstanceGate(currentTime = Date.now()) {
+      for (const [id, lastSeen] of this._instancePeers || []) {
+        if (currentTime - lastSeen > 5000) this._instancePeers.delete(id);
+      }
+      this.showMultiInstanceGate = !this.multiInstanceBypass && !!this._instancePeers?.size;
+    },
     checkMultipleInstances() {
       // Use localStorage with heartbeat pattern to detect multiple instances
       const storageKey = 'sdeditor_instance_heartbeat';
       const currentTime = Date.now();
-      const heartbeatInterval = 1000; // 1 second
       const timeoutThreshold = 5000; // 5 seconds - if no update, consider instance dead
       
       try {
         // Check if we can use BroadcastChannel (better option)
         if (typeof BroadcastChannel !== 'undefined') {
           try {
-            const channel = new BroadcastChannel('sdeditor-instances');
-            channel.onmessage = (event) => {
-              if (event.data.type === 'instance_check' && event.data.id !== this.instanceTabId) {
-                // Another instance detected
-                if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
-                  this.showMultiInstanceGate = true;
-                }
-              }
-            };
+            // Keep one subscription for this tab. Creating a new channel every
+            // heartbeat retains old listeners and fans out messages to them.
+            if (!this._broadcastChannel) {
+              const channel = new BroadcastChannel('sdeditor-instances');
+              this._instancePeers ||= new Map();
+              channel.onmessage = (event) => {
+                if (this._broadcastChannel !== channel || event.data?.type !== 'instance_check'
+                  || typeof event.data.id !== 'string' || !event.data.id || event.data.id === this.instanceTabId) return;
+                this._instancePeers.set(event.data.id, Date.now());
+                this.refreshMultiInstanceGate();
+              };
+              this._broadcastChannel = channel;
+            }
             // Announce this instance
-            channel.postMessage({ type: 'instance_check', id: this.instanceTabId });
-            this._broadcastChannel = channel;
+            this._broadcastChannel.postMessage({ type: 'instance_check', id: this.instanceTabId });
+            this.refreshMultiInstanceGate(currentTime);
             return;
           } catch (e) {
             // BroadcastChannel not available, fall back to localStorage
+            this._broadcastChannel?.close();
+            this._broadcastChannel = null;
           }
         }
         
@@ -6715,12 +6725,8 @@ const config = Vue.defineComponent({
           // localStorage write failed
         }
         
-        // Check if multiple instances exist (more than just this one)
-        if (Object.keys(instances).length > 1) {
-          if (!this.showMultiInstanceGate && !this.multiInstanceBypass) {
-            this.showMultiInstanceGate = true;
-          }
-        }
+        this._instancePeers = new Map(Object.entries(instances).filter(([id]) => id !== this.instanceTabId));
+        this.refreshMultiInstanceGate(currentTime);
       } catch (e) {
         // If all detection fails, silently continue
       }
@@ -6733,9 +6739,8 @@ const config = Vue.defineComponent({
       }
       
       this.multiInstanceCheckTimer = setInterval(() => {
-        if (!this.multiInstanceBypass) {
-          this.checkMultipleInstances();
-        }
+        // A bypassed tab is still an active writer that other tabs must see.
+        this.checkMultipleInstances();
       }, 2000); // Check every 2 seconds
     },
     

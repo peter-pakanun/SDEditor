@@ -1473,23 +1473,90 @@ test('a short completed task cannot reveal a stale delayed browser work indicato
   assert.equal(e.browserWorkTooltip, '');
 });
 
+test('tooltip pointer movement preserves its state object while updating only its contents and position', () => {
+  const { editor, context, directives } = loadEditor();
+  context.window.innerWidth = 1024; context.window.innerHeight = 768;
+  const state = editor.tooltip;
+  editor.placeTooltip({ clientX: 100, clientY: 200 }, 'First file');
+  assert.equal(editor.tooltip, state, 'Replacing tooltip state invalidates the file-list render on every pointer move.');
+  assert.equal(state.visible, true); assert.equal(state.text, 'First file');
+  assert.equal(state.x, 114); assert.equal(state.y, 218);
+  editor.showTooltip({ clientX: 150, clientY: 250 }, 'Second file');
+  assert.equal(editor.tooltip, state); assert.equal(state.text, 'Second file');
+  assert.equal(state.x, 164); assert.equal(state.y, 268);
+  const handlers = new Map();
+  const el = {
+    addEventListener(name, callback) { handlers.set(name, callback); },
+    removeEventListener(name) { handlers.delete(name); }, removeAttribute() {},
+  };
+  directives.tooltip.mounted(el, { value: 'File-list details', instance: editor });
+  handlers.get('mouseenter')({ clientX: 200, clientY: 300 });
+  for (let index = 0; index < 100; index++) {
+    handlers.get('mousemove')({ clientX: 200 + index, clientY: 300 + index });
+    assert.equal(editor.tooltip, state, 'Moving over the same file must preserve the tooltip reference.');
+  }
+  assert.equal(state.text, 'File-list details');
+  assert.equal(state.x, 313); assert.equal(state.y, 417);
+  handlers.get('mouseleave')();
+  assert.equal(editor.tooltip, state); assert.equal(state.visible, false); assert.equal(state.text, '');
+  directives.tooltip.unmounted(el);
+  assert.equal(handlers.size, 0);
+});
+
+test('hiding a tooltip and showing empty text preserve its state and clear stale details', () => {
+  const { editor, context } = loadEditor();
+  context.window.innerWidth = 1024; context.window.innerHeight = 768;
+  const state = editor.tooltip;
+  editor.showTooltip({ clientX: 100, clientY: 200 }, 'Visible details');
+  editor.hideTooltip(); editor.hideTooltip();
+  assert.equal(editor.tooltip, state); assert.equal(state.visible, false); assert.equal(state.text, '');
+  for (const empty of [null, undefined, '', ' \n\t ', [], { text: '' }]) {
+    editor.showTooltip({ clientX: 100, clientY: 200 }, 'Previous details');
+    editor.showTooltip({ clientX: 110, clientY: 210 }, empty);
+    assert.equal(editor.tooltip, state);
+    assert.equal(state.visible, false, 'Empty tooltip content must hide an earlier tooltip.');
+    assert.equal(state.text, '');
+  }
+});
+
+test('tooltip placement keeps long multiline details within desktop viewport edges', () => {
+  const { editor, context } = loadEditor();
+  context.window.innerWidth = 800; context.window.innerHeight = 600;
+  const state = editor.tooltip;
+  const text = ['A'.repeat(100), 'Second line', 'Third line'].join('\n');
+  editor.showTooltip({ clientX: 798, clientY: 598 }, text);
+  assert.equal(editor.tooltip, state); assert.equal(state.text, text);
+  assert.equal(state.maxWidth, 360);
+  assert.ok(state.x >= 8 && state.x + state.maxWidth <= 792, 'The tooltip must clear the right edge.');
+  assert.ok(state.y >= 8 && state.y + 72 < 598, 'Near the bottom edge, details must appear above the pointer.');
+  editor.placeTooltip({ clientX: 0, clientY: 0 }, 'Short details');
+  assert.equal(editor.tooltip, state); assert.equal(state.maxWidth, 180);
+  assert.equal(state.x, 14); assert.equal(state.y, 18);
+});
+
 test('work details appear beside a keyboard-focused indicator and disappear when it finishes', () => {
-  const { editor, directives } = loadEditor();
+  const { editor, context, directives } = loadEditor();
+  context.window.innerWidth = 1024; context.window.innerHeight = 768;
+  const state = editor.tooltip;
   const handlers = new Map();
   const el = {
     addEventListener(name, callback) { handlers.set(name, callback); },
     removeEventListener(name) { handlers.delete(name); }, removeAttribute() {},
     getBoundingClientRect() { return { left: 100, top: 200, width: 22, height: 22 }; },
   };
-  let shown, hidden = 0;
-  editor.showTooltip = (point, text) => { shown = { point, text }; };
-  editor.hideTooltip = () => hidden++;
   directives.tooltip.mounted(el, { value: 'Updating Dictionary entries', instance: editor });
   handlers.get('focus')();
-  assert.equal(shown.point.clientX, 111); assert.equal(shown.point.clientY, 211);
-  assert.equal(shown.text, 'Updating Dictionary entries');
+  assert.equal(editor.tooltip, state); assert.equal(state.visible, true);
+  assert.equal(state.x, 125); assert.equal(state.y, 229);
+  assert.equal(state.text, 'Updating Dictionary entries');
+  handlers.get('blur')();
+  assert.equal(state.visible, false); assert.equal(state.text, '');
+  directives.tooltip.updated(el, { value: 'Preparing collaboration data', instance: editor });
+  handlers.get('focus')();
+  assert.equal(editor.tooltip, state); assert.equal(state.visible, true);
+  assert.equal(state.text, 'Preparing collaboration data', 'Refocusing must use the latest work details.');
   directives.tooltip.unmounted(el);
-  assert.equal(hidden, 1); assert.equal(handlers.size, 0);
+  assert.equal(state.visible, false); assert.equal(state.text, ''); assert.equal(handlers.size, 0);
 });
 
 test('settings-only cloud updates preserve Dictionary rows and do not normalize them again', () => {
