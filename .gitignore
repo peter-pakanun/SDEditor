@@ -105,3 +105,6 @@ dist
 
 # Local Weblate compatibility research
 /.research-weblate/
+
+# Local Codex attachments
+/.codex-remote-attachments/
