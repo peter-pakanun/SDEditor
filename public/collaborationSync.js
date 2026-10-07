@@ -665,16 +665,17 @@
     coalesceDroppedCopy(workspace, room, conflict, shared) {
       if (!conflict || !shared || conflict.targetSourceHash !== room.identity.sourceHash
         || shared.game !== room.identity.game || shared.language !== room.identity.language
-        || !W.sameDroppedCopy(conflict.yours, shared)) return false;
+        || !W.sameDroppedContent(conflict.yours, shared)) return false;
       let pending;
       if (conflict.kind === 'promotion') {
+        if (!W.sameDroppedCopy(conflict.yours, shared)) return false;
         pending = room.outbox.find(operation => operation.id === conflict.operationId);
         if (!pending || !['pending', 'candidate_conflict'].includes(pending.status) || pending.files.length !== 1
           || pending.files[0].yours.filepath !== conflict.filepath) return false;
         const reviewed = pending.wire?.promoteDropped || pending.promoteDropped;
         const alias = workspace.droppedAliases?.[reviewed?.id];
         const bound = alias && alias.fromRevision === Number(reviewed?.revision || 0) ? alias : reviewed;
-        if (!reviewed || reviewed.targetSourceHash !== room.identity.sourceHash || bound.id !== conflict.yours.id
+        if (!reviewed || bound.requiresReview || reviewed.targetSourceHash !== room.identity.sourceHash || bound.id !== conflict.yours.id
           || Number(bound.revision || 0) !== Number(conflict.yours.revision || 0)) return false;
       } else if (conflict.kind !== 'upload') return false;
       if (!W.coalesceDroppedConflict(workspace, conflict.filepath, room.identity.language, shared)) return false;
@@ -1080,6 +1081,10 @@
         if (!op || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status)) return;
         const candidateConflict = op.promoteDropped && workspace?.droppedConflicts?.[room.identity.language]?.[op.files[0].yours.filepath];
         if (candidateConflict) { op.status = 'candidate_conflict'; delete op.wire; delete op.upload; return; }
+        const capturedAlias = workspace?.droppedAliases?.[op.promoteDropped?.id];
+        if (capturedAlias?.requiresReview && capturedAlias.fromRevision === Number(op.promoteDropped?.revision || 0)) {
+          op.status = 'needs_candidate_review'; delete op.wire; delete op.upload; return;
+        }
         if (op.wire) return;
         delete op.blockedByConflict;
         const files = []; const conflicts = [];
@@ -1123,6 +1128,9 @@
         const op = room.outbox.find(item => item.id === id);
         if (op?.wire?.promoteDropped) {
           const alias = latest.droppedAliases?.[op.promoteDropped.id];
+          if (alias?.requiresReview && alias.fromRevision === Number(op.promoteDropped.revision || 0)) {
+            op.status = 'needs_candidate_review'; delete op.wire; delete op.upload; return latest;
+          }
           op.wire.promoteDropped = alias && alias.fromRevision === Number(op.promoteDropped.revision || 0)
             ? { ...copy(op.promoteDropped), id: alias.id, revision: alias.revision, targetSourceHash: room.identity.sourceHash }
             : { ...copy(op.promoteDropped), targetSourceHash: room.identity.sourceHash };

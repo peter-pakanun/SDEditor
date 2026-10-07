@@ -61,7 +61,8 @@
         return this._workspaceBaselineIndex.files.get(filepath);
       },
       droppedCandidateMatches(candidate, current) {
-        if (!candidate || !current || candidate.originSourceHash !== current.originSourceHash) return false;
+        if (!candidate || !current || candidate.originSourceHash !== current.originSourceHash
+          || (candidate.originSourceAvailable !== false) !== (current.originSourceAvailable !== false)) return false;
         return ['english', 'variables', 'remarks', 'stats', 'name', 'translations'].every(field =>
           JSON.stringify(candidate.snapshot?.[field]) === JSON.stringify(current.snapshot?.[field]));
       },

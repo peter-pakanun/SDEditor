@@ -725,6 +725,23 @@ test('a dropped candidate updated while confirmation is open cannot promote the 
   assert.deepEqual(Array.from(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), replacement.snapshot.translations);
 });
 
+test('source availability changing during confirmation requires fresh dropped review without replacing the captured draft', async () => {
+  const { editor: e, window, writes, desc } = droppedReviewFixture();
+  const captured = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  e.editorDroppedCandidate = captured;
+  const blocks = e.editorBlocks;
+  let finish;
+  e.appConfirm = () => new Promise(resolve => { finish = resolve; });
+  const confirming = e.confirmTranslationUnchanged();
+  e.localDescs.dropped.Thai[desc.filepath] = { ...captured, revision: captured.revision + 1,
+    originSourceAvailable: false };
+  finish(true); await confirming;
+  assert.equal(writes.length, 0); assert.equal(e.editorDroppedCandidate, captured);
+  assert.equal(e.editorBlocks, blocks);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
+  assert.match(e.collaborationNotice, /dropped translation changed.*Reopen this file/);
+});
+
 test('saving a replacement resolves the dropped candidate while a failed save preserves it', async () => {
   const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
   const candidate = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
@@ -810,6 +827,43 @@ test('a competing dropped copy blocks Save and Confirm until the comparison is r
   await e.confirmTranslationUnchanged();
   assert.equal(writes.length, 0); assert.equal(calls.length, 0);
   assert.match(e.collaborationNotice, /competing dropped copies/);
+});
+
+test('dropped comparison explains matching text with different entry details without changing the captured review', () => {
+  for (const field of ['name', 'variables', 'remarks', 'stats']) {
+    const { editor: e } = droppedConflictFixture();
+    const conflict = e.editorDroppedConflict;
+    conflict.shared.snapshot = JSON.parse(JSON.stringify(conflict.yours.snapshot));
+    conflict.shared.snapshot[field] = field === 'name' ? 'Different entry name' : ['Different preserved detail'];
+    const captured = JSON.stringify(e.editorDroppedCandidate);
+    assert.match(e.droppedConflictExplanation(conflict), /text matches.*preserved entry details differ/);
+    assert.equal(JSON.stringify(e.editorDroppedCandidate), captured);
+  }
+});
+
+test('dropped comparison distinguishes whitespace differences and historical promotion review from differing translations', () => {
+  const { editor: e } = droppedConflictFixture();
+  const conflict = e.editorDroppedConflict;
+  assert.equal(e.droppedConflictExplanation(conflict), '', 'Different visible text already appears in the comparison.');
+  conflict.shared.snapshot = JSON.parse(JSON.stringify(conflict.yours.snapshot));
+  assert.equal(e.droppedConflictExplanation(conflict), '');
+  conflict.shared.snapshot.translations[0] += ' ';
+  assert.match(e.droppedConflictExplanation(conflict), /Spacing or line breaks differ/);
+  conflict.shared.snapshot.translations = [...conflict.yours.snapshot.translations];
+  conflict.shared.originSourceHash = 'different-source';
+  assert.equal(e.droppedConflictExplanation(conflict), '', 'Source-only upload differences can consolidate automatically.');
+  const sharedId = conflict.shared.id;
+  conflict.shared.id = conflict.yours.id;
+  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/,
+    'A same-generation source mismatch cannot silently replace historical information.');
+  conflict.shared.id = sharedId;
+  conflict.kind = 'promotion';
+  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/);
+  conflict.shared.originSourceHash = conflict.yours.originSourceHash;
+  conflict.shared.originSourceAvailable = false;
+  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/);
+  delete conflict.shared.snapshot;
+  assert.equal(e.droppedConflictExplanation(conflict), '', 'Resolved copy guidance is displayed separately.');
 });
 
 test('resolving competing dropped copies reopens a clean editor but preserves an existing dirty draft', async () => {

@@ -412,6 +412,7 @@
           <button @click="resolveDroppedTranslationConflict('local', conflict.filepath)" :disabled="editorSaving || navigationBusy">Keep this dropped copy</button>
           <button @click="resolveDroppedTranslationConflict('shared', conflict.filepath)" :disabled="editorSaving || navigationBusy">Use shared dropped copy</button>
         </div>
+        <p v-if="droppedConflictExplanation(conflict)">{{ droppedConflictExplanation(conflict) }}</p>
         <div class="droppedComparison">
           <section><h4>Your dropped copy</h4><p v-if="conflict.yours.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (conflict.yours.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (conflict.yours.snapshot?.translations || []).join('\n') }}</pre></section>
           <section><h4>Shared dropped copy</h4><p v-if="!conflict.shared.snapshot">This copy has already been resolved.</p><template v-else><p v-if="conflict.shared.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (conflict.shared.snapshot.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (conflict.shared.snapshot.translations || []).join('\n') }}</pre></template></section>
@@ -593,9 +594,10 @@
               <button @click="resolveDroppedTranslationConflict('local')" :disabled="editorSaving">Keep this dropped copy</button>
               <button @click="resolveDroppedTranslationConflict('shared')" :disabled="editorSaving">Use shared dropped copy</button>
             </div>
+            <p v-if="droppedConflictExplanation(editorDroppedConflict)">{{ droppedConflictExplanation(editorDroppedConflict) }}</p>
             <div class="droppedComparison">
-              <section><h4>Your dropped copy</h4><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.translations || []).join('\n') }}</pre></section>
-              <section><h4>Shared dropped copy</h4><p v-if="!editorDroppedConflict.shared?.snapshot">This copy has already been resolved.</p><template v-else><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.translations || []).join('\n') }}</pre></template></section>
+              <section><h4>Your dropped copy</h4><p v-if="editorDroppedConflict.yours?.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.translations || []).join('\n') }}</pre></section>
+              <section><h4>Shared dropped copy</h4><p v-if="!editorDroppedConflict.shared?.snapshot">This copy has already been resolved.</p><template v-else><p v-if="editorDroppedConflict.shared.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.shared.snapshot.translations || []).join('\n') }}</pre></template></section>
             </div>
             <p v-if="editorDroppedConflict.kind === 'promotion'">Your saved result remains local. Resolve these copies, then Save again to share it.</p>
           </div>

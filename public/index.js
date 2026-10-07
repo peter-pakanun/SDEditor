@@ -1467,6 +1467,27 @@ const config = Vue.defineComponent({
         return v;
       }).join('');
     },
+    droppedConflictExplanation(conflict) {
+      const yours = conflict?.yours, shared = conflict?.shared;
+      if (!yours?.snapshot || !shared?.snapshot) return '';
+      const sameText = normalize => ['english', 'translations'].every(field => {
+        const left = yours.snapshot[field], right = shared.snapshot[field];
+        return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+          && left.every((text, index) => normalize(text) === normalize(right[index]));
+      });
+      if (!sameText(text => text)) {
+        return sameText(text => String(text).replace(/\s/gu, ''))
+          ? 'Spacing or line breaks differ between these copies. Review the exact text before choosing one.' : '';
+      }
+      if (!window.WorkspaceState.sameDroppedContent(yours, shared)) {
+        return 'The text matches, but the preserved entry details differ. Review the copies before choosing one.';
+      }
+      if ((conflict.kind === 'promotion' || yours.id === shared.id) && (yours.originSourceHash !== shared.originSourceHash
+        || (yours.originSourceAvailable !== false) !== (shared.originSourceAvailable !== false))) {
+        return 'The text matches, but the original source information differs. Review the copies before choosing one.';
+      }
+      return '';
+    },
     async resolveDroppedTranslationConflict(choice, filepath = this.editorCurrentEditingDesc?.filepath) {
       const desc = this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath ? this.editorCurrentEditingDesc : null;
       const conflict = this.localDescs?.droppedConflicts?.[this.lang]?.[filepath];

@@ -208,9 +208,21 @@
     let candidate;
     if (recoveryId) {
       const alias = workspace.droppedAliases?.[options.id || recoveryId];
+      const originalAlias = alias?.requiresReview && own(alias, 'originSourceHash');
+      if (originalAlias && (alias.originSourceHash !== originSourceHash
+        || (own(alias, 'originSourceAvailable') && alias.originSourceAvailable !== (options.originSourceAvailable !== false))))
+        throw new Error('This recovery action belongs to a different translation.');
       candidate = workspace.droppedArchive[options.id || recoveryId] || workspace.droppedArchive[alias?.id]
         || Object.values(workspace.droppedArchive).find(record => record.recoveryId === recoveryId);
-      if (candidate && !sameContent(candidate)) throw new Error('This recovery action belongs to a different translation.');
+      if (candidate && !sameContent(candidate)) {
+        // Older receipts replaced the temporary recovery archive. An origin-
+        // changing alias binds that request's provenance to the same content.
+        if (!originalAlias || !sameDroppedContent(candidate, { game, language, filepath: desc.filepath, snapshot: content }))
+          throw new Error('This recovery action belongs to a different translation.');
+      }
+      const shared = workspace.droppedArchive[alias?.id];
+      if (candidate && (alias?.fromRevision === Number(candidate.revision || 0) || originalAlias) && shared
+        && inWorkspaceScope(workspace, shared) && sameDroppedContent(candidate, shared)) candidate = shared;
     } else candidate = sameContent(active) ? active : Object.values(workspace.droppedArchive).find(sameContent);
     if (candidate && candidate.status !== 'dropped') return candidate;
     if (candidate) {
@@ -522,7 +534,7 @@
       const pending = workspace.droppedOutbox.some(operation => operation.id === local?.id);
       if (pending && !options.acknowledge) continue;
       const locallyResolved = local && ['promoted', 'discarded'].includes(local.status);
-      const record = { ...copy(local || {}), ...copy(remote),
+      const record = { ...copy(options.preserveOriginal ? {} : local || {}), ...copy(remote),
         targetSourceHash: remote.targetSourceHash || local?.targetSourceHash || '',
         targetSourceHashes: candidateScopes(local, remote),
         ...(remote.snapshot == null && local?.snapshot ? { snapshot: copy(local.snapshot) } : {}),
@@ -530,7 +542,13 @@
       if (remote.status === 'dropped' || (active && (active.id === remote.id || active.id === local?.id))) rememberDroppedScope(record, workspace.sourceHash);
       workspace.droppedArchive[remote.id] = record;
       if (byFingerprint && record.snapshot != null) byFingerprint.set(fingerprint(record), record);
-      if (local?.id && local.id !== remote.id) delete workspace.droppedArchive[local.id];
+      if (local?.id && local.id !== remote.id) {
+        if (options.preserveOriginal || (local.recoveryId && local.id === local.recoveryId)) {
+          workspace.droppedArchive[local.id] = { ...copy(local), status: 'replaced' };
+          if (options.preserveOriginal) Object.assign(workspace.droppedAliases[local.id], { requiresReview: true,
+            originSourceHash: local.originSourceHash, originSourceAvailable: local.originSourceAvailable !== false });
+        } else delete workspace.droppedArchive[local.id];
+      }
       if (options.acknowledge && local) workspace.droppedOutbox = workspace.droppedOutbox.filter(operation => operation.id !== (options.acknowledgeId || local.id)
         || operation.kind !== (options.acknowledgeKind || 'put'));
       if (record.status === 'dropped') {
@@ -549,7 +567,7 @@
   function recordDroppedConflict(workspace, conflict) {
     maps(workspace);
     (workspace.droppedConflicts[conflict.language] ||= {})[conflict.filepath] = copy(conflict);
-    if (conflict.shared?.id) {
+    if (conflict.shared?.id && conflict.shared.id !== conflict.yours?.id) {
       const existing = workspace.droppedArchive[conflict.shared.id];
       workspace.droppedArchive[conflict.shared.id] = { ...copy(existing || {}), ...copy(conflict.shared),
         targetSourceHashes: candidateScopes(existing, conflict.shared),
@@ -560,39 +578,58 @@
     invalidateDroppedScopes(workspace);
     return workspace;
   }
-  function sameDroppedCopy(left, right) {
+  function sameDroppedContent(left, right) {
     if (!object(left?.snapshot) || !object(right?.snapshot)) return false;
     const fields = ['english', 'variables', 'remarks', 'stats', 'translations'];
     if (!fields.every(field => Array.isArray(left.snapshot[field]) && Array.isArray(right.snapshot[field]))
       || typeof left.snapshot.name !== 'string' || typeof right.snapshot.name !== 'string') return false;
-    return ['game', 'language', 'filepath', 'originSourceHash'].every(field => left[field] === right[field])
-      && (left.originSourceAvailable !== false) === (right.originSourceAvailable !== false)
-      && equal(left.snapshot, right.snapshot);
+    return ['game', 'language', 'filepath'].every(field => left[field] === right[field]) && equal(left.snapshot, right.snapshot);
+  }
+  function sameDroppedCopy(left, right) {
+    return sameDroppedContent(left, right) && left.originSourceHash === right.originSourceHash
+      && (left.originSourceAvailable !== false) === (right.originSourceAvailable !== false);
   }
   function coalesceDroppedConflict(workspace, filepath, language, shared) {
     const conflict = workspace?.droppedConflicts?.[language]?.[filepath];
     if (!conflict || !['upload', 'promotion'].includes(conflict.kind) || conflict.targetSourceHash !== workspace.sourceHash
-      || shared?.status !== 'dropped' || !shared.id || !sameDroppedCopy(conflict.yours, shared)
+      || shared?.status !== 'dropped' || !shared.id || !sameDroppedContent(conflict.yours, shared)
       || !inWorkspaceScope(workspace, conflict.yours) || !inWorkspaceScope(workspace, shared)) return null;
-    const local = workspace.droppedArchive?.[conflict.yours.id];
+    const differentOrigin = !sameDroppedCopy(conflict.yours, shared);
+    if (differentOrigin && (conflict.kind !== 'upload' || conflict.yours.id === shared.id)) return null;
+    const active = droppedForFile(workspace, filepath, language);
+    let local = workspace.droppedArchive?.[conflict.yours.id];
+    // Older clients stored a same-ID shared revision over the local archive.
+    // The still-active, unchanged local copy can establish the captured version.
+    if (conflict.kind === 'upload' && local?.id === shared.id && active?.id === local.id
+      && Number(active.revision || 0) === Number(conflict.yours.revision || 0) && sameDroppedCopy(active, conflict.yours)
+      && Number(local.revision || 0) === Number(conflict.shared?.revision || 0) && sameDroppedCopy(local, conflict.shared)) local = active;
     if (!local || !sameDroppedCopy(local, conflict.yours) || !['dropped', 'promoted'].includes(local.status)
+      || (differentOrigin && local.status !== 'dropped')
       || Number(local.revision || 0) !== Number(conflict.yours.revision || 0)
       || Number(shared.revision) < Number(local.revision || 0)
       || Number(shared.revision) < Number(conflict.shared?.revision || 0)) return null;
-    const active = droppedForFile(workspace, filepath, language);
     if (active && active.id !== local.id && !sameDroppedCopy(active, local)) return null;
     maps(workspace);
     // Adopt the receipt for the same preserved content. This does not review or
     // stage it, and acceptDropped retains an already reviewed local promotion.
     local.targetSourceHashes = candidateScopes(local, conflict.yours, conflict.shared);
+    workspace.droppedArchive[local.id] = copy(local);
     const aliases = Object.entries(workspace.droppedAliases || {}).filter(([, alias]) => alias.id === local.id
       && Number(alias.revision || 0) === Number(local.revision || 0));
     delete workspace.droppedConflicts[language][filepath];
-    acceptDropped(workspace, [shared], { game: shared.game, language, acknowledge: true, acknowledgeId: local.id });
+    acceptDropped(workspace, [shared], { game: shared.game, language, acknowledge: true, acknowledgeId: local.id,
+      preserveOriginal: differentOrigin });
     // Recovery retries and already captured saves may still name an earlier
     // temporary ID. Keep every proven alias directly bound to the new receipt.
-    for (const [id, alias] of aliases) workspace.droppedAliases[id] = { ...alias, id: shared.id,
-      revision: Number(shared.revision) || 0, targetSourceHash: shared.targetSourceHash };
+    for (const [id, alias] of aliases) {
+      const original = workspace.droppedArchive[id];
+      workspace.droppedAliases[id] = { ...alias, id: shared.id,
+        revision: Number(shared.revision) || 0, targetSourceHash: shared.targetSourceHash,
+        ...(differentOrigin ? { requiresReview: true,
+          originSourceHash: own(alias, 'originSourceHash') ? alias.originSourceHash : original?.originSourceHash ?? local.originSourceHash,
+          ...(own(alias, 'originSourceAvailable') ? { originSourceAvailable: alias.originSourceAvailable }
+            : original ? { originSourceAvailable: original.originSourceAvailable !== false } : {}) } : {}) };
+    }
     return workspace.droppedArchive[shared.id];
   }
   function resolveDroppedConflict(workspace, filepath, language, choice, expected) {
@@ -605,7 +642,13 @@
     workspace.droppedOutbox = workspace.droppedOutbox.filter(operation => operation.id !== local?.id);
     if (choice === 'shared') {
       if (local?.id && local.id !== shared.id) workspace.droppedArchive[local.id] = { ...rememberDroppedScope(copy(local), workspace.sourceHash), status: 'replaced' };
-      if (shared.status === 'dropped') (workspace.dropped[language] ||= {})[filepath] = copy(shared);
+      const existing = workspace.droppedArchive[shared.id];
+      const selected = { ...copy(shared.snapshot == null || sameDroppedCopy(existing, shared) ? existing || {} : {}), ...copy(shared),
+        targetSourceHashes: candidateScopes(existing, local, shared),
+        ...(shared.snapshot == null && existing?.snapshot ? { snapshot: copy(existing.snapshot) } : {}) };
+      rememberDroppedScope(selected, workspace.sourceHash);
+      workspace.droppedArchive[shared.id] = selected;
+      if (shared.status === 'dropped') (workspace.dropped[language] ||= {})[filepath] = copy(selected);
       else if (workspace.dropped[language]) delete workspace.dropped[language][filepath];
     } else {
       const kept = { ...copy(local), status: 'dropped', revision: Number(shared.revision) || 0 };
@@ -622,5 +665,5 @@
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
     initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
-    recordDroppedConflict, resolveDroppedConflict, sameDroppedCopy, coalesceDroppedConflict };
+    recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, coalesceDroppedConflict };
 });

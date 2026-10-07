@@ -33,6 +33,11 @@ function fixture() {
           return { candidate: copy(prior), deduplicated: true };
         }
         if (recoveryId && prior?.status === 'dropped') throw candidateConflict(prior);
+        if (!recoveryId && prior?.status === 'dropped' && prior?.originSourceHash === options.body.originSourceHash
+          && P.equal(prior.snapshot, options.body.snapshot)) {
+          prior.targetSourceHashes = [...new Set([...(prior.targetSourceHashes || []), ...(options.body.targetSourceHashes || [])])];
+          return { candidate: copy(prior), deduplicated: true };
+        }
         if (!recoveryId && prior?.status !== 'dropped' && prior?.originSourceHash === options.body.originSourceHash
           && P.equal(prior.snapshot, options.body.snapshot)) return { candidate: copy(prior), deduplicated: true };
         const candidate = { ...copy(options.body), id: recoveryId ? 'server-recovery-' + (++this.recoveryGenerations)
@@ -422,6 +427,116 @@ test('persisted identical dropped conflicts reconcile on retry without requestin
   assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
 });
 
+test('identical legacy file content consolidates across source histories while preserving both origins', async t => {
+  for (const difference of ['archive', 'availability', 'both']) await t.test(difference, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store, { originSourceAvailable: false, reason: 'Preserved legacy review translation',
+      targetSourceHashes: [hash, oldHash], baseline: { original: true }, proof: ['original'], originArchive: { original: true } });
+    const originalSnapshot = copy(yours);
+    const shared = { ...copy(yours), id: 'shared-id', revision: 2, targetSourceHash: 'c'.repeat(64), targetSourceHashes: ['c'.repeat(64)] };
+    delete shared.baseline; delete shared.proof; delete shared.originArchive;
+    if (difference !== 'availability') shared.originSourceHash = 'd'.repeat(64);
+    if (difference !== 'archive') shared.originSourceAvailable = true;
+    assert.equal(W.sameDroppedContent(yours, shared), true);
+    assert.equal(W.sameDroppedCopy(yours, shared), false);
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    server.records = [shared];
+    await client.retry();
+    const active = W.droppedForFile(store.workspace, 'a.txt', 'Thai'), preserved = store.workspace.droppedArchive[yours.id];
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(active.id, shared.id); assert.equal(active.originSourceHash, shared.originSourceHash);
+    assert.equal(active.originSourceAvailable, shared.originSourceAvailable);
+    assert.equal(active.baseline, undefined); assert.equal(active.proof, undefined); assert.equal(active.originArchive, undefined);
+    assert.equal(preserved.status, 'replaced'); assert.equal(preserved.originSourceHash, originalSnapshot.originSourceHash);
+    assert.equal(preserved.originSourceAvailable, false); assert.deepEqual(preserved.snapshot, originalSnapshot.snapshot);
+    assert.deepEqual(preserved.baseline, originalSnapshot.baseline);
+    assert.equal(store.workspace.droppedAliases[yours.id].requiresReview, true);
+    assert.deepEqual(new Set(active.targetSourceHashes), new Set([hash, oldHash, 'c'.repeat(64)]));
+    assert.deepEqual(store.workspace.staged, {}); assert.equal(client.room().outbox.length, 0);
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+    await client.discardDropped('a.txt', { ...active, targetSourceHash: hash });
+    assert.equal(store.workspace.droppedArchive[yours.id].status, 'replaced');
+    assert.ok(store.workspace.droppedArchive[yours.id].targetSourceHashes.includes(hash));
+  });
+});
+
+test('explicit recovery retries across source-history aliases stay attached to their resolved shared generation', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  const yours = drop(store, { id: 'legacy-recovery', recoveryId: 'legacy-recovery', originSourceAvailable: false });
+  const shared = { ...copy(yours), id: 'shared-id', revision: 2, recoveryId: 'shared-recovery', originSourceHash: 'c'.repeat(64) };
+  W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+  server.records = [shared]; await client.retry();
+  const desc = { ...source, translations: { English: ['Old English'], Thai: ['preserved'] } };
+  const replay = () => W.dropTranslation(store.workspace, desc, 'Thai', copy(yours));
+  assert.equal(replay().id, shared.id);
+  await client.discardDropped('a.txt', { ...shared, targetSourceHash: hash });
+  assert.equal(replay().id, shared.id); assert.equal(replay().status, 'discarded');
+  assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
+  assert.equal(store.workspace.droppedArchive[yours.id].originSourceHash, oldHash);
+  assert.equal(store.workspace.droppedArchive[yours.id].recoveryId, yours.recoveryId);
+  assert.equal(store.workspace.droppedOutbox.length, 0);
+});
+
+test('an original recovery keeps its request identity across successive receipts and a later source-history consolidation', async t => {
+  for (const legacyArchive of [false, true]) await t.test('older-deleted-archive:' + legacyArchive, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const recovered = recoveryCandidate('original-recovery');
+    recovered.originSourceAvailable = false;
+    await client.registerDroppedCandidate(recovered);
+    if (legacyArchive) delete store.workspace.droppedArchive[recovered.id];
+    const first = copy(W.droppedForFile(store.workspace, 'a.txt', 'Thai'));
+    // A prior API receipt can contain preserved English the local legacy copy
+    // did not have provenance for, without changing its deduplication fingerprint.
+    first.originSourceAvailable = true;
+    store.workspace.dropped.Thai['a.txt'] = copy(first); store.workspace.droppedArchive[first.id] = copy(first);
+    const shared = { ...copy(first), id: 'latest-shared', revision: 3, originSourceHash: 'c'.repeat(64), recoveryId: 'peer-recovery' };
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours: first, shared });
+    server.records = [shared]; client.lastDroppedSync = 0; await client.retry();
+    const replay = () => client.registerDroppedCandidate(copy(recovered));
+    assert.equal((await replay()).candidate.id, shared.id);
+    assert.throws(() => W.dropTranslation(store.workspace, source, 'Thai', { ...recovered, originSourceHash: shared.originSourceHash }), /different translation/);
+    await client.discardDropped('a.txt', { ...shared, targetSourceHash: hash });
+    const uploads = server.requests.filter(request => request.options.method === 'PUT').length;
+    const result = await replay();
+    assert.equal(result.candidate.id, shared.id); assert.equal(result.candidate.status, 'discarded');
+    assert.equal(server.requests.filter(request => request.options.method === 'PUT').length, uploads);
+    assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
+  });
+});
+
+test('same-ID exact copies reconcile newer candidate revisions including previously overwritten archives', async t => {
+  for (const overwritten of [false, true]) await t.test(String(overwritten), async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store, { id: 'shared-id', revision: 1 });
+    const shared = { ...copy(yours), revision: 2 };
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    if (overwritten) store.workspace.droppedArchive[shared.id] = copy(shared);
+    else assert.equal(store.workspace.droppedArchive[yours.id].revision, 1);
+    server.records = [shared]; await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').revision, 2);
+    assert.deepEqual(store.workspace.staged, {});
+  });
+});
+
+test('choosing a same-ID shared resolution preserves its durable receipt even before synchronization', async t => {
+  for (const status of ['promoted', 'discarded', 'dropped']) await t.test(status, async t => {
+    const { client, store } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store, { id: 'same-recovery', recoveryId: 'same-recovery', revision: 1 });
+    const shared = { ...copy(yours), revision: 2, status, targetSourceHashes: [oldHash], ...(status !== 'dropped' ? { snapshot: null } : {}) };
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    W.resolveDroppedConflict(store.workspace, 'a.txt', 'Thai', 'shared', shared);
+    assert.equal(store.workspace.droppedArchive[shared.id].status, status);
+    assert.equal(store.workspace.droppedArchive[shared.id].revision, 2);
+    assert.deepEqual(store.workspace.droppedArchive[shared.id].snapshot, yours.snapshot);
+    assert.deepEqual(new Set(store.workspace.droppedArchive[shared.id].targetSourceHashes), new Set([hash, oldHash]));
+    const desc = { ...source, translations: { English: ['Old English'], Thai: ['preserved'] } };
+    const replay = W.dropTranslation(store.workspace, desc, 'Thai', copy(yours));
+    assert.equal(replay.status, status);
+    assert.equal(!!W.droppedForFile(store.workspace, 'a.txt', 'Thai'), status === 'dropped');
+  });
+});
+
 test('automatic dropped equality checks every exact snapshot field and source scope', async t => {
   const mutations = {
     translation: record => { record.snapshot.translations[0] += ' '; },
@@ -430,8 +545,6 @@ test('automatic dropped equality checks every exact snapshot field and source sc
     stats: record => { record.snapshot.stats[0] = 'changed'; },
     remarks: record => { record.snapshot.remarks[0] = 'changed'; },
     name: record => { record.snapshot.name = 'changed'; },
-    origin: record => { record.originSourceHash = 'd'.repeat(64); },
-    available: record => { record.originSourceAvailable = false; },
     game: record => { record.game = 'poe2'; },
     language: record => { record.language = 'German'; },
     filepath: record => { record.filepath = 'other.txt'; },
@@ -447,6 +560,53 @@ test('automatic dropped equality checks every exact snapshot field and source sc
     assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
     assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, yours.id);
     assert.equal(server.requests.filter(request => request.options.method === 'PUT').length, 0);
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  });
+});
+
+test('same-ID source history changes and reviewed promotions still require a decision', async t => {
+  for (const kind of ['upload', 'promotion']) for (const difference of ['origin', 'availability']) await t.test(kind + ':' + difference, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    drop(store); await client.syncDropped(client.epoch, { force: true });
+    const yours = copy(store.workspace.droppedArchive['server-id']);
+    const shared = { ...copy(yours), id: kind === 'upload' ? yours.id : 'replacement', revision: 3 };
+    if (difference === 'origin') shared.originSourceHash = 'c'.repeat(64);
+    else shared.originSourceAvailable = false;
+    server.records = [shared];
+    if (kind === 'upload') {
+      W.recordDroppedConflict(store.workspace, { kind, filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+      client.lastDroppedSync = 0; await client.retry();
+    } else {
+      const request = server.request.bind(server);
+      client.request = async (path, options) => {
+        if (path.endsWith('/mutations')) { server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared); }
+        return request(path, options);
+      };
+      await client.save({ files: [{ filepath: 'a.txt', translations: ['reviewed'], trackedForExport: true }],
+        promoteDropped: { id: yours.id, revision: yours.revision, targetSourceHash: hash } });
+    }
+    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+    assert.equal(server.records[0].status, 'dropped');
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, kind === 'promotion' ? 1 : 0);
+  });
+});
+
+test('an alias across source histories cannot silently publish a queued reviewed save', async t => {
+  for (const wire of [false, true]) await t.test('prepared:' + wire, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store), shared = { ...copy(yours), id: 'shared-id', revision: 2, originSourceHash: 'c'.repeat(64) };
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    server.records = [shared]; await client.retry();
+    const base = copy(client.room().shared['a.txt']);
+    const saved = { ...copy(base), translations: ['reviewed'], trackedForExport: true };
+    const op = { id: 'old-reviewed-save', origin: 'save', status: 'pending', files: [{ base, yours: saved }],
+      promoteDropped: { id: yours.id, revision: yours.revision, targetSourceHash: hash } };
+    if (wire) op.wire = { mutationId: op.id, origin: 'save', promoteDropped: copy(op.promoteDropped),
+      files: [{ filepath: 'a.txt', baseRevision: base.revision, translations: ['reviewed'], needsReview: false }] };
+    store.state.rooms[client.key].outbox.push(op); client.state = copy(store.state);
+    await client.retry();
+    assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
+    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
     assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
   });
 });

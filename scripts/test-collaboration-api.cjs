@@ -299,3 +299,100 @@ test('real API and client recover identical resolved history as a new generation
   assert.equal(candidates.items.filter(candidate => candidate.status === 'discarded').length, 1);
   assert.equal(store.workspace.droppedOutbox.length, 0);
 });
+
+test('real API coalesces identical unavailable legacy copies across source hashes without staging or changing shared provenance', async t => {
+  const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }] = await Promise.all([
+    load('src/database.js'), load('src/config.js'), load('src/app.js'),
+  ]);
+  const config = loadConfig({ ADMIN_GOOGLE_SUB: 'admin' }), db = openDatabase(':memory:');
+  const cloud = new CloudStore(db, config);
+  cloud.registerIdentity({ sub: 'translator', email: 'translator@example.test', name: 'Translator' });
+  cloud.assignLanguage('admin', 'translator', 'Thai');
+  const user = cloud.createSession('translator');
+  const app = createApp({ config, store: cloud, logger: { warn() {}, error() {} } });
+  const server = createServer(app), realtime = app.locals.collaborationRealtime.attach(server);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const apiBase = 'http://127.0.0.1:' + server.address().port;
+  const source = [{ filepath: 'source/legacy.txt', name: '', stats: ['fixture'], variables: ['#'], remarks: [''],
+    translations: { English: ['One'], Thai: ['ZIP translation'] } }];
+  const tree = await P.buildBaselineTree(source);
+  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([7, 8, 9])), zipSize: 3,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const store = memoryStore(), requests = [];
+  store.getWorkspace = async () => copy(store.workspace);
+  store.updateWorkspace = async fn => { store.workspace = fn(copy(store.workspace)); return copy(store.workspace); };
+  const workspace = { game: 'poe1', sourceHash: archive.baselineId, descs: copy(source), status: {} };
+  W.initializeWorkspace(workspace, { source, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+  const client = new Client({ store, apiBase, WebSocket: null, request: async (pathname, options = {}) => {
+    const request = { pathname, options: copy(options) }; requests.push(request);
+    const response = await fetch(apiBase + pathname, { method: options.method || 'GET', headers: {
+      Origin: ORIGIN, Authorization: 'Bearer ' + user.token, ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
+    const body = response.status === 204 ? null : await response.json();
+    if (!response.ok) {
+      request.error = body.error?.code;
+      throw Object.assign(new Error(body.error?.message), { status: response.status, code: body.error?.code, current: body.current });
+    }
+    return body;
+  } });
+  t.after(async () => { client.destroy(); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
+  await client.connect({ accountId: user.user.id, game: 'poe1', language: 'Thai', source,
+    files: [{ filepath: source[0].filepath, translations: ['ZIP translation'], needsReview: false, trackedForExport: false }],
+    workspace, archive, baselineSource: source, baselineTree: tree });
+  const oldTarget = 'b'.repeat(64), localTarget = 'c'.repeat(64), legacyOrigin = 'a'.repeat(64);
+  const snapshot = { name: '', english: ['One'], stats: ['fixture'], variables: ['#'], remarks: [''], translations: ['Historical Thai'] };
+  const receipt = await client.api('/dropped', { method: 'PUT', body: {
+    game: 'poe1', language: 'Thai', filepath: source[0].filepath, originSourceHash: archive.baselineId,
+    originSourceAvailable: true, targetSourceHash: oldTarget, snapshot, baseRevision: 0, reason: 'Shared preserved copy',
+    baseline: P.witness(source[0]), proof: P.baselineProof(tree, source[0].filepath), originArchive: archive,
+  } }, client.epoch);
+  const shared = receipt.candidate;
+  assert.equal(shared.originVerified, true);
+  let local;
+  await store.updateWorkspace(current => {
+    local = W.dropTranslation(current, source[0], 'Thai', { id: 'legacy-local', game: 'poe1',
+      originSourceHash: legacyOrigin, originSourceAvailable: false, targetSourceHash: archive.baselineId,
+      targetSourceHashes: [archive.baselineId, localTarget], snapshot, reason: 'Preserved legacy review translation',
+      provenance: { legacy: true } });
+    return current;
+  });
+  client.lastDroppedSync = 0;
+  await client.retry();
+  await client.retry();
+  assert.equal(requests.filter(request => request.error === 'CANDIDATE_CONFLICT').length, 1);
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai').id, shared.id);
+  assert.deepEqual(store.workspace.staged, {});
+  assert.deepEqual(W.workspaceFile(store.workspace, source[0], 'Thai').translations, ['ZIP translation']);
+  assert.equal(store.workspace.droppedOutbox.length, 0);
+  const preserved = store.workspace.droppedArchive[local.id], canonical = store.workspace.droppedArchive[shared.id];
+  assert.equal(preserved.status, 'replaced');
+  assert.equal(preserved.originSourceHash, legacyOrigin);
+  assert.equal(preserved.originSourceAvailable, false);
+  assert.deepEqual(preserved.snapshot, snapshot);
+  assert.deepEqual(preserved.provenance, { legacy: true });
+  assert.equal(canonical.originSourceHash, archive.baselineId);
+  assert.equal(canonical.originSourceAvailable, true);
+  assert.equal(canonical.originVerified, true);
+  assert.equal(canonical.provenance, undefined);
+  assert.equal(store.workspace.droppedAliases[local.id].requiresReview, true);
+  const expectedTargets = new Set([archive.baselineId, oldTarget, localTarget]);
+  assert.deepEqual(new Set(canonical.targetSourceHashes), expectedTargets);
+  const current = await client.api('/dropped?' + new URLSearchParams({ game: 'poe1', language: 'Thai', includeResolved: '1' }), {}, client.epoch);
+  assert.equal(current.items.length, 1);
+  assert.equal(current.items[0].id, shared.id);
+  assert.equal(current.items[0].status, 'dropped');
+  assert.equal(current.items[0].originSourceHash, archive.baselineId);
+  assert.equal(current.items[0].originSourceAvailable, true);
+  assert.equal(current.items[0].originVerified, true);
+  assert.deepEqual(new Set(current.items[0].targetSourceHashes), expectedTargets);
+  const provenanceUpload = requests.find(request => request.pathname.endsWith('/dropped') && request.options.method === 'PUT'
+    && request.options.body.originSourceHash === archive.baselineId && !request.options.body.baseline);
+  assert.ok(provenanceUpload);
+  assert.equal(provenanceUpload.options.body.replace, undefined);
+  assert.equal(provenanceUpload.options.body.recoveryId, undefined);
+  assert.deepEqual(new Set(provenanceUpload.options.body.targetSourceHashes), expectedTargets);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_history').get().n, 0);
+  assert.equal(requests.filter(request => request.pathname.endsWith('/mutations')).length, 0);
+});
