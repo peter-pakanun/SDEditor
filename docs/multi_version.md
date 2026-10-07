@@ -13,7 +13,7 @@ The selected version controls:
 - Revision history
 - Browser tab title
 
-Both versions use the same Dictionary for a selected language. Dictionaries are separated by language and local/account profile. Regex rules, selected language, theme, and other preferences are shared between PoE1 and PoE2 within that profile. With Google backup enabled, Regex/preferences are personal and the assigned language's Dictionary is shared with its translators. See [Cloud Backup and Shared Dictionaries](cloud_backup.md).
+Both versions use the same Dictionary for a selected language. Dictionaries are separated by language and local/account profile. Regex rules, selected language, theme, and other preferences are shared between PoE1 and PoE2 within that profile. With Google backup enabled, Regex/preferences remain personal. Translators synchronize the shared Dictionary for their assigned language; other languages selected for local editing remain local. Managers and Admins synchronize the selected language's Dictionary with or without an assignment. Their assignment does not restrict access, and `all` is not an assigned language value. See [Cloud Backup and Shared Dictionaries](cloud_backup.md).
 
 ## Auto-Detection
 
@@ -30,18 +30,28 @@ If the ZIP looks like a different version from the one currently selected, SDEdi
 ## Storage Split
 
 Version-specific data is stored separately in IndexedDB:
-```
+
 | Data            | PoE1                | PoE2                |
 |-----------------|---------------------|---------------------|
-| Source ZIP data | `kv.source_poe1`    | `kv.source_poe2`    |
+| Parsed source   | `kv.source_poe1`    | `kv.source_poe2`    |
 | Workspace       | `kv.workspace_poe1` | `kv.workspace_poe2` |
 | History         | `revisions_poe1`    | `revisions_poe2`    |
-```
+
 The old single-version `kv.source`, `kv.workspace`, and `revisions` data are left intact as a backup.
 
-These stores retain the browser's current source, working translations and local history. Signed-in translators automatically join a shared workspace when the game, source SHA-256 hash and assigned language match. Shared source manifests and saved translations are stored by the API, with new server-authored history. Existing local history is never uploaded. IndexedDB also stores collaboration caches, recovery copies and pending saves scoped by account and workspace.
+These stores retain the browser's current parsed source, language-specific staged translations, Dropped snapshots and local history. Immutable imported baseline caches are also kept in `kv`, keyed by game and accepted baseline ID. Saving, restoring or importing translated work does not rewrite that original baseline. IndexedDB stores collaboration caches, recovery copies and pending saves scoped by account and workspace.
 
-Import Next Version activates a separate shared workspace after the new source and working copy are durably saved. Previous workspaces retain their shared history and pending operations under their original identity; loading a new version never publishes those operations into it. Return to the original source, game, account and language to retry its pending saves. Deploy the migrated API before updating the frontend; production authentication, tunnel connectivity and backup restoration require separate deployment checks.
+Signed-in users automatically join a shared room for the same **game + accepted source baseline + language** when their role permits it. A Translator joins only when the editor language matches their assignment. Managers and Admins join the selected language's room regardless of their assignment. The room's source identity differs between modern and legacy imports:
+
+- For an original ZIP import, `zipHash` is the SHA-256 hash of the archive bytes. Repacking the ZIP changes this hash even if its parsed text is identical.
+- The modern room's `sourceHash` is its `baselineId`, derived from `zipHash`, the accepted parser version and duplicate-language choices, and the parsed baseline tree's root hash. The ZIP hash alone is not the room identity. Collaborators use the accepted import configuration for that ZIP.
+- Legacy workspaces without a cached ZIP descriptor use a hash of the canonical parsed English/source metadata manifest. They can join an existing legacy room; creating a new room requires importing the original ZIP.
+
+Modern rooms use sparse synchronization: joining shares the small ZIP/import descriptor rather than the whole ZIP or every baseline file. A file's first save supplies its baseline witness and membership proof; the API retains that file's original translation for the room language, the saved override and authenticated change history. Untouched baseline files remain local. Older legacy rooms may retain uploaded source manifests and initial translation snapshots. Existing local revision history is never uploaded.
+
+Dropped copies synchronize separately by game, language and file and can survive later source imports. Each copy preserves its old translation, original English and entry metadata where available, plus source-version provenance. Missing old source text stays unavailable. Dropped is separate from current ZIP/staged text: **Save** or **Confirm unchanged** stages a translation and resolves the copy; **Discard** resolves it without staging. A dropped snapshot is never exported directly. See the [workspace status contract](workspace_statuses.md) for Saved, Missing, Dropped and Revised rules.
+
+Import Next Version activates a separate shared room after the new source and working copy are durably saved. Previous rooms retain their shared history and pending saved-translation operations under their original identity; loading a new version never publishes those operations into it. Return to the original source, game, account and language to retry its pending saves. Preserved Dropped copies can still be encountered and reviewed in the newer version. Deploy the compatible API before updating the frontend, then reload older editor tabs; IndexedDB's newer schema prevents older editors/workers from writing the migrated workspace. Production authentication, tunnel connectivity and backup restoration require separate deployment checks.
 
 ## Migration From Older SDEditor Builds
 
@@ -58,4 +68,4 @@ The migration:
 
 ## Dictionary Migration for Cloud Backup
 
-The hybrid-storage upgrade attaches the previous Dictionary to its saved language and keeps the original settings locally. If no language was saved, choose one in Settings before attaching that dictionary. Switching languages opens separate dictionaries; it does not copy the original into each language. This automatic settings migration is independent of the confirmed PoE1/PoE2 workspace migration above. First cloud attachment merges the assigned language's dictionary and presents incompatible edits for local/remote selection.
+The hybrid-storage upgrade attaches the previous Dictionary to its saved language and keeps the original settings locally. If no language was saved, choose one in Settings before attaching that dictionary. Switching languages opens separate dictionaries; it does not copy the original into each language. This automatic settings migration is independent of the confirmed PoE1/PoE2 workspace migration above. First cloud attachment merges the shared dictionary permitted by the account's role and presents incompatible edits for local/remote selection: the assigned language for Translators, or the selected language for Managers/Admins.

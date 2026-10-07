@@ -22,18 +22,19 @@ Example:
 ## Behavior
 
 - Loads a small built-in dummy dataset (no ZIP required).
-- Does not read or write `indexedDB`, so your real saved settings/local changes won’t be modified.
-- Disables Google login, cloud synchronization, and shared comments. Use a separate normal browser profile for persistent storage and API tests; see [Cloud Backup and Shared Dictionaries](cloud_backup.md#local-validation).
+- Bypasses normal IndexedDB startup and keeps dummy workspace edits in memory. It cannot validate durable saves, storage upgrades, or recovery after reloading.
+- Disables Google login, cloud synchronization, and shared comments. For persistence and collaboration checks, use normal mode without `testMode=1` on a disposable browser origin or profile; see [Cloud Backup and Shared Dictionaries](cloud_backup.md#local-validation).
 - Skips the launch version selector and uses PoE1 for the browser title/test state.
 
 ## Local server notes
 
-When running locally, [server.js](file:///d:/WorkDir/SDEditor/server.js) auto-opens a browser by default.
+When running locally, [server.js](../server.js) auto-opens a browser by default.
 
 Disable auto-open for automation runs with:
 
 - `node server.js --no-open`
-- or `NO_OPEN_BROWSER=1 node server.js`
+
+Enable request logging without opening a browser with `node server.js --no-open --log-requests`.
 
 ## Large Dictionary Opening Fixture
 

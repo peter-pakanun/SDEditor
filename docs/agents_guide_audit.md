@@ -1,10 +1,10 @@
-# AGENTS.md audit and proposed edit plan
+# AGENTS.md audit and applied edit plan
 
-Audit date: 2026-10-06; authorized implementation follow-ups updated 2026-10-07. Scope: the current frontend checkout and the companion `../SDEditor-API` checkout, with the work from this conversation still present. The proposed broader guide edits below remain unapplied. Separate product fixes are recorded at the end.
+Audit date: 2026-10-06; implementation follow-ups and the approved guide edits applied 2026-10-07. Scope: the frontend checkout and companion `../SDEditor-API` checkout. The findings below record the original guide before correction; the user approved the broader plan, which is now applied. Separate product fixes are recorded at the end.
 
-The guide still describes the desktop platform, development server, CDN dependencies and much of the intended sync UX correctly. Its architecture, testing, storage and theme descriptions have fallen behind. The most consequential omissions are the distinction between role and language assignment, the immutable ZIP versus staged/dropped data model, and the boundary between local source archives and data shared with the API.
+The original guide described the desktop platform, development server, CDN dependencies and much of the intended sync UX correctly. Its architecture, testing, storage and theme descriptions had fallen behind. The most consequential omissions were the distinction between role and language assignment, the immutable ZIP versus staged/dropped data model, and the boundary between local source archives and data shared with the API. These are now covered in [AGENTS.md](../AGENTS.md).
 
-The concise **Workspace status intent** section and its link to `workspace_statuses.md` have already been authorized separately in this conversation. They are not part of the broader changes awaiting review below. The Revised implementation and source-version provenance are being completed alongside this audit; the guide should describe the agreed contract, without claiming that a hosted build has been verified.
+The concise **Workspace status intent** section and its link to `workspace_statuses.md` were authorized separately and retained. The guide describes the implemented Revised/source-version contract without claiming that a hosted build has been verified.
 
 ## Statements to correct
 
@@ -141,27 +141,29 @@ AGENTS.md should not become a second product manual, but its pointers should lea
 4. `docs/cloud_backup.md` local-validation examples gained workspace-state, dropped-sync, storage-upgrade and worker suites on 2026-10-07. The API syntax check now includes the dropped module; both narrow tooling follow-ups are complete.
 5. The updated editor/import/cloud docs and the new status contract should consistently use **Dropped** for the status and **Review** only for the action; replace old Edited descriptions with the final Revised rule. These status updates are already authorized in this conversation.
 
-## Concrete edit plan for review
+The approved follow-up aligns README and multi-version descriptions with sparse sharing, Dropped snapshots and role-based access; corrects test-mode links/commands and validation limits; and replaces README's missing `docs/workflow.md` link with the existing editor guide. The cloud validation/rollout notes were already updated with the product fixes. No runtime code change was needed for the guide edit.
+
+## Approved edit plan — applied
 
 1. **Already authorized:** retain the concise Workspace status intent section and its dedicated document link. Finish the agreed Revised/provenance implementation and keep the contract consistent with it.
 2. **Correct factual claims:** replace the obsolete monolith/line-count, no-tests, two-theme and two-store descriptions. Keep verified command/CDN/encoding/type-check/platform facts.
 3. **Replace Testing with a short operational workflow:** frontend npm stub; direct relevant CJS tests; touched-file syntax/whitespace checks; test-mode UI scope; normal-mode disposable fixtures and companion API requirements. Avoid fixed suite/test counts.
 4. **Expand the file map by responsibility:** highlight workspace state, storage worker, pending saves, account/dictionary sync and collaboration protocol boundaries. Do not list every asset or repeat source implementation details.
 5. **Add compact data/access rules:** immutable local baseline; sparse per-file sharing and legacy caveat; durable atomic saves; account/game/source/language guards; role-versus-assignment access; comments audience; preservation of recovery/history and completed diagnostics. Link to detailed docs rather than copying their full workflows.
-6. **Refresh document pointers and linked drift:** add cloud/multi-version/status links and align the separate stale README/multi-version/test-mode statements. The broader guide/document changes remain a reviewable proposal until authorized.
+6. **Refresh document pointers and linked drift:** add cloud/multi-version/status links and align the separate stale README/multi-version/test-mode statements. The user approved these changes on 2026-10-07.
 7. **Validate the documentation edit:** check references against current files, search for contradictory no-tests/Edited/assigned-only/source-manifest language, and run `git diff --check`. A docs-only guide edit does not require rerunning unrelated product suites.
 
 ## Limits of this audit
 
 This audit inspected source, package scripts, test structure and documentation in the local dirty checkouts. It did not run a fresh comprehensive test pass, contact production, inspect credentials, verify the hosted Pages/API versions, or deploy anything. Local suite/browser acceptance results reported elsewhere in this conversation remain separate evidence. Source line numbers can move as the concurrent implementation finishes; the file/function pointers and proposed statements are the useful long-term references.
 
-No AGENTS.md changes were made by this audit. Existing code and other agents’ changes were preserved.
+The original audit made no broader AGENTS.md changes before approval. The approved documentation edits were then applied and checked against current source and file references; unrelated code was preserved. Documentation validation does not establish production deployment or repeat earlier product acceptance tests.
 
 ## Related implementation issue: explicit dropped-copy recovery after resolution
 
-This was a separate product issue discovered during the status integration review. The user authorized its fix separately on 2026-10-07; the broader AGENTS.md edit plan above still awaits approval.
+This was a separate product issue discovered during the status integration review. The user authorized its fix separately on 2026-10-07; the broader guide edit was subsequently approved and applied.
 
-**Reproduction:** recover a legacy history entry as a dropped copy, discard or promote that copy, then explicitly recover the same entry again. [`restoreReviewCandidate`](../public/collaborationIntegration.js) and [`Client.registerDroppedCandidate`](../public/collaborationSync.js) call [`WorkspaceState.dropTranslation`](../public/workspaceState.js) with the same game, language, file, original source hash, and snapshot. The helper finds the identical resolved archive record and returns it immediately instead of creating an unresolved copy. The recovery action reports success, but the Dropped status and comparison do not return.
+**Reproduction before the fix:** recover a legacy history entry as a dropped copy, discard or promote that copy, then explicitly recover the same entry again. [`restoreReviewCandidate`](../public/collaborationIntegration.js) and [`Client.registerDroppedCandidate`](../public/collaborationSync.js) called [`WorkspaceState.dropTranslation`](../public/workspaceState.js) with the same game, language, file, original source hash, and snapshot. The helper returned the identical resolved archive record instead of creating an unresolved copy. The recovery action reported success, but the Dropped status and comparison did not return.
 
 A direct local model check confirmed `drop → discard → drop` with the same recovered text returns the same ID with `status: "discarded"`, while `droppedForFile` remains `null`. The API also deduplicates an identical snapshot against resolution records in `DroppedStore.upsert`, so changing only the frontend's local ID would not fix connected recovery. Automatic migration/import/retry deduplication remains useful; this failure is specific to a new explicit user recovery decision after resolution.
 

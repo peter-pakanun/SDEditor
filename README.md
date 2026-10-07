@@ -17,8 +17,9 @@ Future UI design, bug fixes, and validation target desktop workflows, including 
 - Highlights and metadata to help catch mismatches (lines / `{}` variables / `[]` tags)
 - Saves your in-progress work to `indexedDB`
 - Optional Google account backup for personal settings and Regex rules
-- Shared dictionaries per assigned language, with local/remote conflict choices
-- Shared translation workspaces for the same game, source version and assigned language, with live presence, offline saves and audited history
+- Shared dictionaries per language, with local/remote conflict choices; Translators use their assignment, while Managers/Admins use the selected language
+- Shared translation workspaces for the same game, accepted source baseline and language, with live presence, offline saves and audited history
+- Preserve and synchronize Dropped translation copies separately for review and recovery
 - Export a translated ZIP (`StatDescriptions_Translated.zip`)
 
 ## Quick Start (Local)
@@ -35,14 +36,17 @@ Then open the printed URL (defaults to `http://127.0.0.1:3333/`), choose PoE1 or
 ## Usage Notes
 
 - Export:
-  - Click 💾 to export files you changed in this session
-  - Ctrl+Click 💾 to do a full export
+  - Click 💾 to export **Saved** files for the selected language, including unchanged or intentionally blank saves retained across sessions
+  - Ctrl+Click 💾 to export the current ZIP/staged translations; an incomplete ZIP translation with an unresolved Dropped copy is omitted unless you saved a staged translation
+  - Dropped snapshots and unsaved typing are never exported directly
 - Import:
   - After the table loads, click 📦 to import a ZIP file
   - You can import a previously exported `StatDescriptions_Translated.zip` to restore your edits
-- Translator workflow guide: see [docs/workflow.md](docs/workflow.md).
+- Translator workflow guide: see [docs/editor_guide.md](docs/editor_guide.md).
 - PoE1/PoE2 storage and migration details: see [docs/multi_version.md](docs/multi_version.md).
-- Google sign-in, language assignment, shared dictionaries, translation collaboration and recovery: see [docs/cloud_backup.md](docs/cloud_backup.md). Eligible translators share source manifests and saved translations through the separately deployed SDEditor API. Existing local history stays in the browser; new shared saves have authenticated history.
+- Workspace labels, counts and export scope: see [docs/workspace_statuses.md](docs/workspace_statuses.md).
+- Google sign-in, language assignment, shared dictionaries, translation collaboration and recovery: see [docs/cloud_backup.md](docs/cloud_backup.md). Managers and Admins can access every supported language without an assignment; Translators synchronize their assigned language. Personal settings and Regex rules remain per account.
+- New shared rooms keep the parsed original baseline in the browser; the original ZIP is not uploaded. The separately deployed API stores a small ZIP/import descriptor, affected-language originals, saved translations and their authenticated history. A file's first save supplies a baseline witness and membership proof for validation. Dropped snapshots synchronize separately with old source text and metadata where available. Legacy rooms may retain previously uploaded source manifests and initial translations; existing local history stays local. Deploy the compatible API before the frontend.
 - Public privacy policy: [https://sdeditor.pages.dev/policy](https://sdeditor.pages.dev/policy). The standalone `public/policy.html` page needs no login or JavaScript; Cloudflare Pages serves it at `/policy`, and the local server supports the same URL. After deploying, use that URL in Google Auth Platform's Branding privacy-policy field. Keep the policy, contact address, and update date aligned with the service's actual practices.
 
 ## Debug / Test Mode
