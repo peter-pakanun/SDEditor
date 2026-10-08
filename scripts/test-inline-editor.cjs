@@ -491,68 +491,175 @@ test('focusing and leaving unchanged inline text creates neither draft nor stage
   assert.equal(h.editor.inlineActive, false); assert.deepEqual(h.desc.translations.Thai, ['translation']);
 });
 
-test('inline stage link follows live edits, reverts and peer changes to the staged translation', async () => {
+test('inline stage link stays hidden for untouched ZIP text and follows live edits, reverts and clears', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  assert.equal(editor.inlineDraftHasChanges, false, 'opening a translated row is not an edit');
+  editor.editorBlocks[0].translation = 'new draft';
+  assert.equal(editor.inlineDraftHasChanges, true, 'show Stage draft before the draft debounce writes');
+  editor.editorBlocks[0].translation = 'translation';
+  assert.equal(editor.inlineDraftHasChanges, false, 'reverting to ZIP text removes the action');
+  editor.editorBlocks[0].translation = '';
+  assert.equal(editor.inlineDraftHasChanges, true, 'clearing an existing translation is a real edit');
+});
+
+test('inline stage link stays hidden when opening empty or incomplete ZIP translations', async t => {
+  for (const translations of [undefined, [], [''], ['kept first entry']]) {
+    await t.test(JSON.stringify(translations) || 'missing language', async () => {
+      const { editor, desc, calls, records } = harness();
+      desc.translations.English = ['First source', 'Second source', 'Third source'];
+      if (translations) desc.translations.Thai = translations;
+      else delete desc.translations.Thai;
+      editor._workspaceSourceBaseline = copy(editor.descs);
+      await editor.activateInlineRow(desc.filepath);
+      assert.equal(editor.editorBlocks.length, 3);
+      assert.equal(editor.inlineDraftHasChanges, false, 'missing entries display as blanks without becoming edits');
+      assert.equal(calls.writes.length, 0); assert.equal(records.size, 0);
+      editor.editorBlocks[2].translation = 'new last entry';
+      assert.equal(editor.inlineDraftHasChanges, true);
+      editor.editorBlocks[2].translation = '';
+      assert.equal(editor.inlineDraftHasChanges, false);
+    });
+  }
+});
+
+test('inline stage link follows live edits, reverts and peer changes to the current staged translation', async () => {
   const { editor, desc, window } = harness(); await editor.activateInlineRow(desc.filepath);
   const staged = window.WorkspaceState.stageTranslation(editor.localDescs,
     { filepath: desc.filepath, translations: ['translation'] }, 'Thai', { source: desc });
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+  assert.equal(editor.inlineDraftHasChanges, false);
   editor.editorBlocks[0].translation = 'new draft';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'new input must show Stage draft before the draft debounce writes');
+  assert.equal(editor.inlineDraftHasChanges, true, 'new input must show Stage draft before the draft debounce writes');
   editor.editorBlocks[0].translation = 'translation';
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+  assert.equal(editor.inlineDraftHasChanges, false);
   staged.translations[0] = 'peer saved text';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'compare with the current stage, not the session merge base');
+  assert.equal(editor.inlineDraftHasChanges, true, 'compare with the current stage, not the session merge base');
   editor.editorBlocks[0].translation = 'peer saved text';
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+  assert.equal(editor.inlineDraftHasChanges, false);
+  editor.editorBlocks[0].translation = '';
+  assert.equal(editor.inlineDraftHasChanges, true, 'clearing staged text can be staged');
 });
 
-test('inline stage link requires a staged save and treats an intentionally blank staged translation as equal', async () => {
+test('inline stage link treats intentionally blank stages as committed text and preserves whitespace and entry-count edits', async () => {
   const { editor, desc, window } = harness(); await editor.activateInlineRow(desc.filepath);
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'unchanged ZIP translation can still be staged');
   editor.editorBlocks[0].translation = '';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'blank input alone is not a staged save');
   window.WorkspaceState.stageTranslation(editor.localDescs,
     { filepath: desc.filepath, translations: [''] }, 'Thai', { source: desc });
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+  assert.equal(editor.inlineDraftHasChanges, false);
   editor.editorBlocks[0].translation = ' ';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'whitespace is part of the saved text');
+  assert.equal(editor.inlineDraftHasChanges, true, 'whitespace is part of the saved text');
   editor.editorBlocks[0].translation = '';
   editor.editorBlocks.push({ translation: '' });
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'entry counts must also match');
+  assert.equal(editor.inlineDraftHasChanges, true, 'an extra translation entry is a real edit');
 });
 
-test('inline stage equality uses the selected language and current workspace source', async () => {
+test('inline stage comparison uses the selected language and current workspace source', async () => {
   const { editor, desc, window } = harness();
-  desc.translations.German = ['translation']; editor.lang = 'German';
+  desc.translations.German = ['ZIP German']; editor.lang = 'German';
+  editor._workspaceSourceBaseline = copy(editor.descs);
   window.WorkspaceState.stageTranslation(editor.localDescs,
-    { filepath: desc.filepath, translations: ['translation'] }, 'Thai', { source: desc });
+    { filepath: desc.filepath, translations: ['German draft'] }, 'Thai', { source: desc });
   await editor.activateInlineRow(desc.filepath);
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'another language stage cannot hide the link');
+  assert.equal(editor.inlineDraftHasChanges, false, 'another language stage does not make untouched ZIP text dirty');
+  editor.editorBlocks[0].translation = 'German draft';
+  assert.equal(editor.inlineDraftHasChanges, true, 'matching another language stage does not hide the link');
   const staged = window.WorkspaceState.stageTranslation(editor.localDescs,
-    { filepath: desc.filepath, translations: ['translation'] }, 'German', { source: desc });
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+    { filepath: desc.filepath, translations: ['German draft'] }, 'German', { source: desc });
+  assert.equal(editor.inlineDraftHasChanges, false);
   staged.sourceHash = 'older-source';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'another source stage cannot hide the link');
+  assert.equal(editor.inlineDraftHasChanges, true, 'another source stage is ignored in favor of current ZIP text');
+  editor.editorBlocks[0].translation = 'ZIP German';
+  assert.equal(editor.inlineDraftHasChanges, false);
+  editor.editorBlocks[0].translation = 'outgoing draft';
   staged.sourceHash = 'source-a'; editor.sourceIdentity = 'source-b';
-  assert.equal(editor.inlineDraftMatchesStaged, false, 'an outgoing workspace stage cannot hide the link after a source switch');
+  assert.equal(editor.inlineDraftHasChanges, false, 'do not offer staging outgoing text during a source switch');
+  editor.sourceIdentity = 'source-a'; editor.localDescs.sourceHash = 'another-workspace';
+  assert.equal(editor.inlineDraftHasChanges, false, 'do not offer staging against an outgoing workspace');
+  editor.localDescs.sourceHash = 'source-a'; editor.inlineActive = false;
+  assert.equal(editor.inlineDraftHasChanges, false, 'an inactive inline session cannot offer staging');
 });
 
-test('inline stage equality compares serialized table columns and escaped multiline text', async () => {
-  const { editor, desc, window } = harness(); await editor.activateInlineRow(desc.filepath);
+test('inline stage comparison serializes table columns, placeholders and multiline text against ZIP and staged content', async () => {
+  const { editor, desc, window } = harness();
+  desc.translations.English = ['First@Second@{0}', 'Source\\nline'];
+  desc.translations.Thai = ['first@second@{0}', 'line one\\nline two'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  await editor.activateInlineRow(desc.filepath);
+  assert.equal(editor.inlineDraftHasChanges, false, 'opening serialized ZIP entries does not create an edit');
   editor.editorBlocks = [
     { isTable: true, translation: 'stale table cache', tableColumns: [
       { translation: 'first', englishExists: true }, { translation: 'second', englishExists: true },
+      { translation: '{0}', englishExists: true },
       { translation: '', englishExists: false } ] },
     { isMultiline: true, translation: 'line one\r\nline two' },
   ];
+  assert.equal(editor.inlineDraftHasChanges, false, 'use serialized columns and normalize displayed newlines');
   window.WorkspaceState.stageTranslation(editor.localDescs,
-    { filepath: desc.filepath, translations: ['first@second', 'line one\\nline two'] }, 'Thai', { source: desc });
-  assert.equal(editor.inlineDraftMatchesStaged, true);
+    { filepath: desc.filepath, translations: ['first@second@{0}', 'line one\\nline two'] }, 'Thai', { source: desc });
+  assert.equal(editor.inlineDraftHasChanges, false);
   editor.editorBlocks[0].tableColumns[1].translation = 'changed column';
-  assert.equal(editor.inlineDraftMatchesStaged, false);
+  assert.equal(editor.inlineDraftHasChanges, true);
   editor.editorBlocks[0].tableColumns[1].translation = 'second';
   editor.editorBlocks[1].translation = 'line one\\nline two';
-  assert.equal(editor.inlineDraftMatchesStaged, true, 'literal escaped and displayed multiline values serialize identically');
+  assert.equal(editor.inlineDraftHasChanges, false, 'literal escaped and displayed multiline values serialize identically');
+  editor.editorBlocks[0].tableColumns[2].translation = '{1}';
+  assert.equal(editor.inlineDraftHasChanges, true, 'a changed placeholder is still an edit');
+});
+
+test('inline stage link stays hidden for untouched table padding, empty separators and displayed newlines', async t => {
+  const fixtures = [
+    { name: 'partial table', english: 'First@Second', translation: 'first', serialized: 'first@' },
+    { name: 'empty table separators', english: 'First@Second', translation: '@', serialized: '' },
+    { name: 'literal escaped newlines', english: 'Source\\nline', translation: 'one\\ntwo', serialized: 'one\\ntwo' },
+    { name: 'CRLF newlines', english: 'Source\\nline', translation: 'one\r\ntwo', serialized: 'one\\ntwo' },
+  ];
+  for (const fixture of fixtures) await t.test(fixture.name, async () => {
+    const { editor, desc, window } = harness();
+    desc.translations.English = [fixture.english]; desc.translations.Thai = [fixture.translation];
+    editor._workspaceSourceBaseline = copy(editor.descs);
+    await editor.activateInlineRow(desc.filepath);
+    assert.deepEqual(copy(editor.serializeEditorTranslations()), [fixture.serialized]);
+    assert.equal(editor.inlineDraftHasChanges, false, 'editor display normalization does not make a ZIP translation dirty');
+    window.WorkspaceState.stageTranslation(editor.localDescs,
+      { filepath: desc.filepath, translations: [fixture.translation] }, 'Thai', { source: desc });
+    assert.equal(editor.inlineDraftHasChanges, false, 'the same normalization applies to staged translations');
+    const field = editor.editorBlocks[0].isTable ? editor.editorBlocks[0].tableColumns[0] : editor.editorBlocks[0];
+    const before = field.translation;
+    field.translation = 'actual edit';
+    assert.equal(editor.inlineDraftHasChanges, true);
+    field.translation = before;
+    assert.equal(editor.inlineDraftHasChanges, false);
+  });
+});
+
+test('inline stage link does not appear for loading, failed or outgoing scoped editor sessions', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'edited text';
+  assert.equal(editor.inlineDraftHasChanges, true);
+  editor.editorLoading = true;
+  assert.equal(editor.inlineDraftHasChanges, false);
+  editor.editorLoading = false; editor.editorLoadError = 'Draft storage unavailable';
+  assert.equal(editor.inlineDraftHasChanges, false);
+  editor.editorLoadError = ''; editor.cloudProfileId = 'another-account';
+  assert.equal(editor.inlineDraftHasChanges, false, 'do not offer staging under another account');
+  editor.cloudProfileId = 'guest'; editor.lang = 'German';
+  assert.equal(editor.inlineDraftHasChanges, false, 'do not compare outgoing Thai text with German committed text');
+});
+
+test('a resumed durable inline draft is compared with current committed text rather than its saved merge base', async () => {
+  const h = harness(); await h.editor.activateInlineRow(h.desc.filepath);
+  h.editor.editorBlocks[0].translation = 'resumed draft'; await h.editor.flushEditorDraft();
+  await h.editor.finishInlineSession({ promote: false });
+  const { editor, desc, window } = harness({ records: h.records });
+  await editor.loadEditorDrafts(); await editor.activateInlineRow(desc.filepath);
+  assert.equal(editor.editorBlocks[0].translation, 'resumed draft');
+  assert.equal(editor.inlineDraftHasChanges, true);
+  const staged = window.WorkspaceState.stageTranslation(editor.localDescs,
+    { filepath: desc.filepath, translations: ['resumed draft'] }, 'Thai', { source: desc });
+  assert.equal(editor.inlineDraftHasChanges, false, 'a peer stage matching the resumed draft removes the action');
+  staged.translations[0] = 'peer changed again';
+  assert.equal(editor.inlineDraftHasChanges, true);
+  editor.editorBlocks[0].translation = 'peer changed again';
+  assert.equal(editor.inlineDraftHasChanges, false);
 });
 
 test('inline and full editors share one durable draft; closing full editor keeps it without staging', async () => {

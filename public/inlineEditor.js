@@ -18,11 +18,22 @@
         const source = desc && this.workspaceSourceFile?.(desc.filepath);
         return !!source && !!root.WorkspaceState?.workspaceFile(this.localDescs, source, this.lang)?.staged;
       },
-      inlineDraftMatchesStaged() {
+      inlineCommittedTranslations() {
+        const desc = this.editorCurrentEditingDesc;
+        if (!desc?.filepath) return [];
+        const source = this.workspaceSourceFile?.(desc.filepath) || desc;
+        const committed = root.WorkspaceState?.workspaceFile(this.localDescs, source, this.lang)?.translations || desc.translations?.[this.lang] || [];
+        const english = desc.translations?.English || [];
+        const blocks = Array.from({ length: Math.max(english.length, committed.length) }, (_, index) =>
+          this.makeEditorBlock(english[index] || '', committed[index] || ''));
+        return this.serializeEditorTranslations(blocks);
+      },
+      inlineDraftHasChanges() {
         const desc = this.editorCurrentEditingDesc, workspace = this.localDescs;
-        if (!this.inlineActive || !desc?.filepath || (workspace?.sourceHash && workspace.sourceHash !== this.sourceIdentity)) return false;
-        const staged = root.WorkspaceState?.workspaceFile(workspace, desc, this.lang)?.staged;
-        return !!staged && equal(this.serializeEditorTranslations(), staged.translations);
+        if (!this.inlineActive || !desc?.filepath || this.editorLoading || this.editorLoadError
+          || (workspace?.sourceHash && workspace.sourceHash !== this.sourceIdentity)
+          || (this._draftSession && !this.draftScopeCurrent(this._draftSession.scope))) return false;
+        return !equal(this.serializeEditorTranslations(), this.inlineCommittedTranslations);
       },
       draftRecoveryItems() {
         return this.draftRecords.flatMap(record => [record, ...(record.conflicts || [])].filter(item => item.state === 'active')
@@ -89,8 +100,8 @@
         return root.OfflineStore?.translationDraftKey?.(scope)
           || 'translation_draft_' + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]);
       },
-      serializeEditorTranslations() {
-        return (this.editorBlocks || []).map(block => {
+      serializeEditorTranslations(blocks = this.editorBlocks || []) {
+        return blocks.map(block => {
           const translation = block.isTable ? this.joinTableColumns(this.getSerializableTableColumns(block).map(column => column.translation || '')) : block.translation || '';
           return this.encodeNewlines(block.isMultiline ? this.decodeEscapedNewlines(translation) : translation);
         });
