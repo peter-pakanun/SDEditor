@@ -248,6 +248,14 @@
               job.context.client.retry().catch(error => this.collaborationFailure(error));
             }
           },
+          onError: async (job, error) => {
+            if (!job.onRejected || job.durable || error.durableUnknown
+              || !['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(error.code)) return;
+            await job.onRejected(error);
+            // A rejected transaction left its private draft intact. Release it
+            // for a fresh review without blocking saves of other files.
+            this._pendingSaves.discardRejectedDraft(job.id);
+          },
         });
         return this._pendingSaves;
       },
@@ -295,6 +303,12 @@
       },
       pendingSaveScope() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
+      },
+      pendingDraftSaveFor(filepath) {
+        if (!this._pendingSaves || !window.PendingSaves) return null;
+        const scope = window.PendingSaves.scopeKey(this.pendingSaveScope());
+        return this._pendingSaves.snapshot().jobs.find(job => job.batch.draft && job.batch.deferDisplay
+          && window.PendingSaves.scopeKey(job.batch) === scope && job.batch.files.some(file => file.filepath === filepath)) || null;
       },
       markCollaborationActivity(now = Date.now()) {
         this._collabActivityAt = now;
@@ -705,7 +719,7 @@
                 { lastEditedAt: now, lastTranslatedAt: now })]));
             const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
-              ...(options.draft ? { draft: copy(options.draft) } : {}), ...(options.awaitDurable ? { deferDisplay: true } : {}),
+              ...(options.draft ? { draft: copy(options.draft) } : {}), ...(options.awaitDurable || options.deferCommit ? { deferDisplay: true } : {}),
               descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
                 { derivedStatus: true })),
               revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
@@ -717,6 +731,13 @@
                 ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}) } } : {}),
             };
             const job = this._pendingSaves.enqueue(batch, { context: ctx });
+            if (options.deferCommit) {
+              job.onCommitted = options.onCommitted;
+              job.onRejected = options.onRejected;
+              // The retained draft is already durable. Navigation may continue,
+              // while committed text and draft consumption wait for this job.
+              return { status: 'queued', jobId: batch.jobId };
+            }
             if (options.awaitDurable) {
               // Inline drafts remain private until the complete save transaction
               // acknowledges staging and exact draft consumption together.

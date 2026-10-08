@@ -13,6 +13,10 @@
     },
     computed: {
       inlineDraftCount() { return Object.keys(this.inlineDraftRows).length; },
+      deferredDraftSaveError() {
+        return Object.values(this.inlineDraftFindings).flat().filter(finding => finding.deferredSave)
+          .map(finding => finding.message).join('\n');
+      },
       editorHasStagedTranslation() {
         const desc = this.editorCurrentEditingDesc;
         const source = desc && this.workspaceSourceFile?.(desc.filepath);
@@ -574,7 +578,7 @@
         this._nextEditorSurface = 'inline';
         try { return await this.openEditorFile(filepath, true); } finally { this._nextEditorSurface = null; }
       },
-      saveInlineDraft() { return this.editorSave({ close: false }); },
+      saveInlineDraft() { return this.editorSave({ close: false, defer: true }); },
       async deleteEditorStagedTranslation() {
         if (this.editorLoading || this.editorLoadError || this.editorSaving || this.navigationBusy || this.editorTranslationReadOnly
           || this._importingSource || this._resetConfirming || this.versionStorageLoading || !this.editorHasStagedTranslation) return false;

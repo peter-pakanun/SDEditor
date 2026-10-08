@@ -174,10 +174,15 @@ for (const inline of [false, true]) {
     let settled = false;
     const saving = editor.editorSave({ close: !inline }).then(result => { settled = true; return result; });
     const queuedSave = await waitForDeletionWrite(h);
-    assert.equal(settled, false); assert.equal(queuedSave.batch.deferDisplay, true);
+    assert.equal(settled, !inline, 'Full Save & close releases navigation; inline Save waits for durable staging.');
+    assert.equal(queuedSave.batch.deferDisplay, true);
+    assert.equal(editor.localDescs.staged[editor.lang]?.[desc.filepath], undefined);
+    assert.equal(desc.translations[editor.lang][0], 'translation');
+    if (!inline) assert.equal(editor.editorVisible, false);
     assertUntouched();
     h.acknowledge(queuedSave);
     assert.equal(await saving, true);
+    await editor._pendingSaves.drain();
     assertUntouched();
     assert.deepEqual(copy(editor.localDescs.staged[editor.lang][desc.filepath].translations), ['Completed translation']);
     assert.equal(editor.inlineDraftRows[desc.filepath], undefined);

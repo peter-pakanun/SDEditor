@@ -176,6 +176,75 @@ function enablePending(h) {
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 
+async function pendingDraftFixture() {
+  const h = enablePending(saveFixture()), { editor: e, window, context } = h;
+  const plain = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const records = new Map(), draftWrites = [], opened = [];
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/inlineEditor.js'), 'utf8'), context);
+  const mixin = window.InlineEditor.mixin;
+  Object.assign(e, mixin.data(), mixin.methods);
+  for (const [name, getter] of Object.entries(mixin.computed)) {
+    if (!Object.hasOwn(e, name)) Object.defineProperty(e, name, { get: () => getter.call(e) });
+  }
+  window.crypto = context.crypto;
+  window.OfflineStore.getTranslationDraft = async key => plain(records.get(key) || null);
+  window.OfflineStore.listTranslationDrafts = async scope => [...records.values()]
+    .filter(record => record.profile === scope.profile && record.game === scope.game && record.language === scope.language
+      && (record.branchId || 'default') === scope.branchId && (record.state === 'active' || record.conflicts?.length)).map(plain);
+  window.OfflineStore.putTranslationDraft = async (record, options) => {
+    assert.equal(records.get(record.key)?.revision || null, options.expectedRevision);
+    draftWrites.push(plain(record)); records.set(record.key, plain(record));
+    return { status: 'saved', record: plain(record) };
+  };
+  e.descs = [h.desc, description(2), description(3)];
+  for (const desc of e.descs) desc.hasChanges = false;
+  e._workspaceSourceBaseline = plain(e.descs);
+  e.localDescs = { descs: [], status: {}, sourceHash: e.sourceIdentity };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, {
+    source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+  });
+  e.selectedFileFilters = ['unchanged', 'saved', 'localDraft']; e.filterDesc();
+  e.refreshGamePreview = () => {};
+  e.observeInlineBlocks = () => {};
+  e.openEditorFile = async filepath => {
+    const desc = e.getDescByFilepath(filepath);
+    opened.push(filepath); e.inlineActive = e._nextEditorSurface === 'inline'; e.editorVisible = !e.inlineActive; e.editorLoading = false;
+    e._editorOpenRun = (e._editorOpenRun || 0) + 1;
+    e.editorCurrentEditingDesc = desc; e.editorBlocks = []; e._editorCollabBase = undefined;
+    await e.hydrateEditorDraft({ desc, isCurrent: () => e.editorCurrentEditingDesc === desc });
+    return true;
+  };
+  await e.editFile(h.desc.filepath);
+  e.editorBlocks[0].translation = 'Submitted first draft';
+  const acknowledge = (call, extra = {}) => {
+    const draft = call.batch.draft, record = draft && records.get(draft.key);
+    const draftConsumed = !!draft && record?.revision === draft.revision;
+    if (draftConsumed) records.set(record.key, {
+      ...record, state: 'promoted', consumedRevision: record.revision,
+      revision: record.revision + ':promoted:' + call.batch.jobId,
+      translations: [], base: null, source: null,
+    });
+    h.acknowledge(call, { draftConsumed, ...extra });
+  };
+  return { ...h, records, draftWrites, opened, acknowledge };
+}
+
+async function assertSaveReleased(h, action) {
+  let finished = false;
+  const saving = action().then(result => { finished = true; return result; });
+  await pendingTick();
+  if (!finished) {
+    // Finish the held request before failing so a regression leaves no hanging test queue.
+    const released = new Set();
+    for (let attempt = 0; attempt < 4 && !finished; attempt++) {
+      for (const call of h.calls) if (!released.has(call)) { released.add(call); h.acknowledge(call); }
+      await pendingTick();
+    }
+    assert.fail('Editor navigation waited for the held durable save.');
+  }
+  assert.equal(await saving, true);
+}
+
 function pendingStagedDeletionFixture() {
   const h = enablePending(saveFixture()), { editor: e, window, desc } = h;
   const baseline = JSON.parse(JSON.stringify(desc));
@@ -1834,6 +1903,300 @@ test('shared-history restore advances a clean editor base but retains a dirty dr
     assert.equal(e._editorCollabBase.translations[0], dirty ? 'เดิม' : 'ประวัติ');
     if (dirty) assert.equal(e.editorBlocks[0].translation, 'ใหม่');
   }
+});
+
+test('draft-backed full saves close or navigate before acknowledgment without publishing Saved work', async t => {
+  for (const navigate of [false, true]) await t.test(navigate ? 'save-and-next' : 'Save & close', async () => {
+    const h = await pendingDraftFixture(), { editor: e, desc, calls, records, acknowledge, window } = h;
+    const before = [...desc.translations.Thai], session = e._draftSession;
+    await assertSaveReleased(h, () => navigate ? e.saveAndSkipFile() : e.editorSave());
+    assert.equal(e.editorSaving, false); assert.equal(e.navigationBusy, false); assert.equal(e.pendingLocalSaves, 1);
+    assert.equal(calls.length, 1); assert.equal(calls[0].batch.deferDisplay, true);
+    assert.equal(calls[0].batch.draft.id, session.record.id);
+    assert.deepEqual(Array.from(desc.translations.Thai), before);
+    assert.equal(window.WorkspaceState.workspaceFile(e.localDescs, e.workspaceSourceFile(desc.filepath), e.lang).staged, null);
+    assert.equal(records.get(session.key).state, 'active');
+    assert.equal(e.inlineDraftRows[desc.filepath].translations[0], 'Submitted first draft');
+    assert.equal(h.warnsBeforeUnload(), true);
+    if (navigate) {
+      assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt'); assert.equal(e.editorVisible, true);
+    } else assert.equal(e.editorVisible, false);
+    acknowledge(calls[0]); await e._pendingSaves.drain();
+    assert.equal(e.pendingLocalSaves, 0); assert.equal(desc.translations.Thai[0], 'Submitted first draft');
+    assert.equal(records.get(session.key).state, 'promoted'); assert.equal(e.inlineDraftRows[desc.filepath], undefined);
+    assert.equal(window.WorkspaceState.workspaceFile(e.localDescs, e.workspaceSourceFile(desc.filepath), e.lang).hasChanges, true);
+    if (navigate) assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt');
+    else assert.equal(e.editorVisible, false);
+  });
+});
+
+test('another draft save can queue before acknowledgment while callbacks preserve the next editing session', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, records, acknowledge } = h;
+  const firstSession = e._draftSession;
+  await assertSaveReleased(h, () => e.saveAndSkipFile());
+  const second = e.editorCurrentEditingDesc, secondSession = e._draftSession;
+  e.editorBlocks[0].translation = 'Submitted second draft';
+  await assertSaveReleased(h, () => e.editorSave());
+  assert.equal(e.pendingLocalSaves, 2); assert.equal(calls.length, 1);
+  assert.equal(await e.editFile('source/003.txt'), true);
+  const third = e.editorCurrentEditingDesc, thirdSession = e._draftSession, thirdBlocks = e.editorBlocks;
+  e.editorBlocks[0].translation = 'Typing in the third file';
+  assert.equal(await e.flushEditorDraft(), true);
+  const thirdRecord = JSON.stringify(records.get(thirdSession.key));
+  acknowledge(calls[0]); await pendingTick();
+  assert.equal(calls.length, 2); assert.equal(desc.translations.Thai[0], 'Submitted first draft');
+  assert.equal(second.translations.Thai[0], 'เดิม');
+  assert.equal(e.editorCurrentEditingDesc, third); assert.equal(e._draftSession, thirdSession);
+  assert.equal(e.editorBlocks, thirdBlocks); assert.equal(e.editorBlocks[0].translation, 'Typing in the third file');
+  assert.equal(JSON.stringify(records.get(thirdSession.key)), thirdRecord);
+  acknowledge(calls[1]); await e._pendingSaves.drain();
+  assert.equal(second.translations.Thai[0], 'Submitted second draft');
+  assert.equal(records.get(firstSession.key).state, 'promoted'); assert.equal(records.get(secondSession.key).state, 'promoted');
+  assert.equal(e.editorCurrentEditingDesc, third); assert.equal(e._draftSession, thirdSession);
+  assert.equal(e.editorBlocks, thirdBlocks); assert.equal(e.editorBlocks[0].translation, 'Typing in the third file');
+  assert.equal(e.editorVisible, true); assert.equal(e.editorHaveChanges(), true);
+  assert.equal(JSON.stringify(records.get(thirdSession.key)), thirdRecord);
+});
+
+test('explicit inline Stage draft releases navigation and preserves newer typing through acknowledgment', async t => {
+  for (const leaveBeforeAck of [false, true]) await t.test(leaveBeforeAck ? 'leave the row before acknowledgment' : 'keep typing in the staged row', async () => {
+    const h = await pendingDraftFixture(), { editor: e, desc, calls, records, acknowledge } = h;
+    e.editorVisible = false; e.inlineActive = true; e._inlineHeldRows = e.descsDisplay.slice();
+    const session = e._draftSession, blocks = e.editorBlocks, before = [...desc.translations.Thai];
+    await assertSaveReleased(h, () => e.saveInlineDraft());
+    assert.equal(e.editorSaving, false); assert.equal(e.inlineActive, true); assert.equal(e.pendingLocalSaves, 1);
+    assert.equal(calls[0].batch.deferDisplay, true); assert.deepEqual(Array.from(desc.translations.Thai), before);
+    assert.equal(e.localDescs.staged[e.lang]?.[desc.filepath], undefined);
+    assert.equal(await e.saveInlineDraft(), false, 'A pending stage cannot resubmit the same draft.');
+    e.editorBlocks[0].translation = 'Newer typing after Stage draft';
+    assert.equal(await e.flushEditorDraft(), true);
+    let nextSession, nextBlocks;
+    if (leaveBeforeAck) {
+      assert.equal(await e.activateInlineRow('source/002.txt'), true);
+      nextSession = e._draftSession; nextBlocks = e.editorBlocks;
+      e.editorBlocks[0].translation = 'Typing in the next inline row';
+      assert.equal(e.editorSaving, false); assert.equal(e.pendingLocalSaves, 1); assert.equal(calls.length, 1);
+    }
+    acknowledge(calls[0]); await e._pendingSaves.drain();
+    assert.equal(desc.translations.Thai[0], 'Submitted first draft'); assert.equal(e.pendingLocalSaves, 0);
+    assert.equal(records.get(session.key).state, 'active');
+    assert.equal(records.get(session.key).translations[0], 'Newer typing after Stage draft');
+    assert.equal(records.get(session.key).base.translations[0], 'Submitted first draft');
+    assert.equal(e.inlineDraftRows[desc.filepath].translations[0], 'Newer typing after Stage draft');
+    if (leaveBeforeAck) {
+      assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt'); assert.equal(e._draftSession, nextSession);
+      assert.equal(e.editorBlocks, nextBlocks); assert.equal(e.editorBlocks[0].translation, 'Typing in the next inline row');
+    } else {
+      assert.equal(e._draftSession, session); assert.equal(e.editorBlocks, blocks);
+      assert.equal(e.editorBlocks[0].translation, 'Newer typing after Stage draft');
+      assert.equal(e.editorOriginalTranslations[0], 'Submitted first draft'); assert.equal(e.editorHaveChanges(), true);
+    }
+    assert.equal(e.inlineActive, true); assert.equal(e.editorVisible, false);
+  });
+});
+
+test('a failed deferred draft save retains its durable draft and retries the original transaction', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, records, acknowledge } = h;
+  const session = e._draftSession, before = [...desc.translations.Thai];
+  await assertSaveReleased(h, () => e.editorSave());
+  const original = JSON.stringify(calls[0].batch), draftBefore = JSON.stringify(records.get(session.key));
+  assert.equal(await e.editFile('source/002.txt'), true);
+  const nextSession = e._draftSession, blocks = e.editorBlocks;
+  e.editorBlocks[0].translation = 'Continue working after the failed save';
+  const rejected = assert.rejects(e._pendingSaves.drain(), /Disk full/);
+  calls[0].reject(new Error('Disk full')); await rejected;
+  assert.equal(e.pendingLocalSaves, 1); assert.match(e.localSaveError, /Disk full/);
+  assert.deepEqual(Array.from(desc.translations.Thai), before);
+  assert.equal(JSON.stringify(records.get(session.key)), draftBefore);
+  assert.equal(e.inlineDraftRows[desc.filepath].translations[0], 'Submitted first draft');
+  const retrying = e.retryPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 2); assert.equal(JSON.stringify(calls[1].batch), original);
+  assert.match(e.localSaveError, /Disk full/);
+  acknowledge(calls[1]); await retrying;
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(e.localSaveError, '');
+  assert.equal(records.get(session.key).state, 'promoted'); assert.equal(desc.translations.Thai[0], 'Submitted first draft');
+  assert.equal(e._draftSession, nextSession); assert.equal(e.editorBlocks, blocks);
+  assert.equal(e.editorBlocks[0].translation, 'Continue working after the failed save'); assert.equal(e.editorVisible, true);
+});
+
+test('a stale deferred draft is retained for scoped review and releases later queued file saves', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, records, acknowledge } = h;
+  const firstSession = e._draftSession, before = [...desc.translations.Thai];
+  await assertSaveReleased(h, () => e.saveAndSkipFile());
+  const second = e.editorCurrentEditingDesc;
+  e.editorBlocks[0].translation = 'An independent second save';
+  await assertSaveReleased(h, () => e.editorSave());
+  assert.equal(e.pendingLocalSaves, 2);
+  assert.equal(await e.editFile('source/003.txt'), true);
+  const thirdSession = e._draftSession, blocks = e.editorBlocks;
+  e.editorBlocks[0].translation = 'Keep typing while the first draft needs review';
+  calls[0].reject(Object.assign(new Error('The committed translation changed. Review this draft.'), { code: 'DRAFT_BASE_CHANGED' }));
+  await pendingTick(); await pendingTick();
+  assert.equal(calls.length, 2, 'A rejected draft must not block an unrelated queued file.');
+  assert.equal(e._pendingSaves.snapshot().jobs.length, 1); assert.equal(e.pendingLocalSaves, 1);
+  assert.equal(e.localSaveError, '');
+  assert.equal(e.inlineDraftError, '', 'A former file rejection must not become a global draft-write failure.');
+  assert.deepEqual(Array.from(desc.translations.Thai), before);
+  assert.equal(records.get(firstSession.key).state, 'active');
+  assert.equal(e.inlineDraftRows[desc.filepath].translations[0], 'Submitted first draft');
+  assert.ok(e.inlineDraftFindings[desc.filepath].some(item => item.level === 'error' && /changed|review/i.test(item.message)));
+  assert.ok(e.inlineDraftFindings[desc.filepath].some(item => item.deferredSave));
+  assert.ok(e.deferredDraftSaveError.includes(desc.filepath));
+  assert.equal(e._draftSession, thirdSession); assert.equal(e.editorBlocks, blocks);
+  assert.equal(e.editorBlocks[0].translation, 'Keep typing while the first draft needs review');
+  acknowledge(calls[1]); await e._pendingSaves.drain();
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(second.translations.Thai[0], 'An independent second save');
+  assert.equal(records.get(firstSession.key).state, 'active'); assert.equal(e._draftSession, thirdSession);
+});
+
+test('reopening a pending draft file waits for acknowledgment while another file opens immediately', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, acknowledge } = h;
+  await assertSaveReleased(h, () => e.editorSave());
+  assert.equal(await e.editFile('source/002.txt'), true);
+  const nextSession = e._draftSession;
+  let reopened = false;
+  const opening = e.editFile(desc.filepath).then(result => { reopened = true; return result; });
+  await pendingTick();
+  assert.equal(reopened, false); assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt');
+  assert.equal(e._draftSession, nextSession);
+  acknowledge(calls[0]); assert.equal(await opening, true);
+  assert.equal(e.editorCurrentEditingDesc, desc); assert.equal(e.editorBlocks[0].translation, 'Submitted first draft');
+  assert.equal(e._draftSession.record, null); assert.equal(e.inlineDraftRows[desc.filepath], undefined);
+});
+
+test('a failed pending-file reopen preserves the current editor until the original save is retried', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, acknowledge, records } = h;
+  const submittedSession = e._draftSession;
+  await assertSaveReleased(h, () => e.editorSave());
+  assert.equal(await e.editFile('source/002.txt'), true);
+  const nextSession = e._draftSession, blocks = e.editorBlocks;
+  e.editorBlocks[0].translation = 'Typing while a reopen is waiting';
+  const opening = e.editFile(desc.filepath);
+  await pendingTick(); calls[0].reject(new Error('Cannot write locally'));
+  assert.equal(await opening, false);
+  assert.equal(e._draftSession, nextSession); assert.equal(e.editorBlocks, blocks);
+  assert.equal(e.editorBlocks[0].translation, 'Typing while a reopen is waiting');
+  assert.equal(records.get(submittedSession.key).state, 'active');
+  const retrying = e.retryPendingSaves(); await pendingTick(); acknowledge(calls[1]); await retrying;
+  assert.equal(await e.editFile(desc.filepath), true);
+  assert.equal(e.editorBlocks[0].translation, 'Submitted first draft'); assert.equal(e._draftSession.record, null);
+  assert.equal(records.get(nextSession.key).state, 'active');
+  assert.equal(records.get(nextSession.key).translations[0], 'Typing while a reopen is waiting');
+});
+
+test('opening another file supersedes a pending-file revisit without later stealing its editor', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, acknowledge } = h;
+  await assertSaveReleased(h, () => e.editorSave());
+  const reopening = e.editFile(desc.filepath);
+  await pendingTick();
+  assert.equal(await e.editFile('source/002.txt'), true);
+  const nextSession = e._draftSession, blocks = e.editorBlocks;
+  e.editorBlocks[0].translation = 'Keep the newer file selection';
+  acknowledge(calls[0]); assert.equal(await reopening, false);
+  assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt'); assert.equal(e._draftSession, nextSession);
+  assert.equal(e.editorBlocks, blocks); assert.equal(e.editorBlocks[0].translation, 'Keep the newer file selection');
+  assert.equal(e.editorVisible, true);
+});
+
+test('a former deferred rejection lets an untouched inline row finish and its preserved draft open for recovery', async () => {
+  const h = await pendingDraftFixture(), { editor: e, desc, calls, records } = h;
+  const submittedSession = e._draftSession;
+  await assertSaveReleased(h, () => e.editorSave());
+  assert.equal(await e.activateInlineRow('source/002.txt'), true);
+  assert.equal(e.inlineActive, true); assert.equal(e.editorHaveChanges(), false);
+  calls[0].reject(Object.assign(new Error('Former file base changed'), { code: 'DRAFT_BASE_CHANGED' }));
+  await pendingTick(); await pendingTick();
+  assert.equal(e.inlineDraftError, ''); assert.ok(e.deferredDraftSaveError.includes(desc.filepath));
+  assert.equal(await e.finishInlineSession(), true);
+  assert.equal(e.inlineActive, false); assert.equal(records.get(submittedSession.key).state, 'active');
+  assert.equal(await e.activateInlineRow('source/003.txt'), true);
+  let opened = false; e.$refs.draftRecoveryDialog = { showModal() { opened = true; } };
+  await e.openDraftRecovery();
+  assert.equal(e.inlineActive, false); assert.equal(e.draftRecoveryVisible, true); assert.equal(opened, true);
+  assert.ok(e.draftRecords.some(record => record.key === submittedSession.key && record.state === 'active'));
+  assert.ok(e.deferredDraftSaveError.includes(desc.filepath), 'Review remains actionable while recovery opens.');
+  assert.equal(calls.length, 1, 'Untouched inline rows must not create additional saved translations.');
+});
+
+test('a pending-file reopen does not cross a scope change or a cancelled navigation', async t => {
+  for (const cancelled of [false, true]) await t.test(cancelled ? 'cancelled navigation' : 'source changed', async () => {
+    const h = await pendingDraftFixture(), { editor: e, desc, calls, acknowledge } = h;
+    await assertSaveReleased(h, () => e.editorSave());
+    const opening = e.editFile(desc.filepath);
+    await pendingTick();
+    if (cancelled) e._editorOpenCancelRevision = (e._editorOpenCancelRevision || 0) + 1;
+    else e.sourceIdentity = 'replacement-source';
+    acknowledge(calls[0]); assert.equal(await opening, false);
+    assert.equal(e.editorVisible, false);
+  });
+});
+
+test('late deferred acknowledgments and rejected drafts cannot mutate another workspace scope', async t => {
+  for (const [scope, change] of [
+    ['account', e => { e.cloudUser = { id: 'another-account', language: 'Thai' }; }],
+    ['game', e => { e.gameVersion = 'poe2'; }],
+    ['branch', e => { e.branchId = 'another-branch'; }],
+    ['language', e => { e.lang = 'German'; }],
+    ['source', e => { e.sourceIdentity = 'another-source'; }],
+  ]) for (const rejected of [false, true]) await t.test(`${scope}: ${rejected ? 'rejected' : 'committed'}`, async () => {
+    const h = await pendingDraftFixture(), { editor: e, calls, acknowledge, window } = h;
+    await assertSaveReleased(h, () => e.editorSave());
+    change(e);
+    const replacement = description(99, ['Current scope text', 'Second']);
+    replacement.hasChanges = false; replacement.translations.German = ['German text', 'German second'];
+    e.descs = [replacement]; e._workspaceSourceBaseline = JSON.parse(JSON.stringify(e.descs));
+    e.localDescs = { descs: [], status: {}, sourceHash: e.sourceIdentity };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, {
+      source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+    });
+    e.editorCurrentEditingDesc = replacement; e.editorVisible = true;
+    const blocks = e.editorBlocks = [{ english: 'Original', translation: 'New scope typing' }, { english: 'Second', translation: 'Second' }];
+    const session = e._draftSession = { scope: e.editorDraftScope(replacement.filepath), record: null };
+    const candidate = e.editorDroppedCandidate = { id: 'new-scope-candidate' };
+    e.inlineDraftRows = { [replacement.filepath]: { translations: ['New scope local draft'] } };
+    e.inlineDraftFindings = { [replacement.filepath]: [{ level: 'warning', message: 'Current scope warning' }] };
+    e.inlineDraftError = 'Current scope draft notice';
+    const workspaceBefore = JSON.stringify(e.localDescs), rowsBefore = JSON.stringify(e.inlineDraftRows);
+    const findingsBefore = JSON.stringify(e.inlineDraftFindings), descBefore = JSON.stringify(replacement);
+    if (rejected) {
+      calls[0].reject(Object.assign(new Error('Old scope draft changed'), { code: 'DRAFT_BASE_CHANGED' }));
+      await pendingTick(); await pendingTick();
+      assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+    } else { acknowledge(calls[0]); await e._pendingSaves.drain(); }
+    assert.equal(JSON.stringify(e.localDescs), workspaceBefore); assert.equal(JSON.stringify(replacement), descBefore);
+    assert.equal(JSON.stringify(e.inlineDraftRows), rowsBefore); assert.equal(JSON.stringify(e.inlineDraftFindings), findingsBefore);
+    assert.equal(e.inlineDraftError, 'Current scope draft notice');
+    assert.equal(e.editorBlocks, blocks); assert.equal(e._draftSession, session); assert.equal(e.editorDroppedCandidate, candidate);
+    assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks[0].translation, 'New scope typing');
+  });
+});
+
+test('scope change during deferred draft readback leaves the replacement draft and findings intact', async () => {
+  const h = await pendingDraftFixture(), { editor: e, calls, acknowledge, window, records } = h;
+  const submittedSession = e._draftSession;
+  await assertSaveReleased(h, () => e.editorSave());
+  const originalRead = window.OfflineStore.getTranslationDraft;
+  let releaseRead, readStarted;
+  const started = new Promise(resolve => { readStarted = resolve; });
+  const gate = new Promise(resolve => { releaseRead = resolve; });
+  window.OfflineStore.getTranslationDraft = async key => {
+    if (key === submittedSession.key) { readStarted(); await gate; }
+    return originalRead(key);
+  };
+  acknowledge(calls[0]); await started;
+  e.lang = 'German';
+  const next = description(2); next.translations.German = ['German committed text', 'Second'];
+  e.editorCurrentEditingDesc = next; e.editorVisible = true;
+  const blocks = e.editorBlocks = [{ english: 'Original', translation: 'German typing' }];
+  const session = e._draftSession = { scope: e.editorDraftScope(next.filepath), record: null };
+  e.inlineDraftRows = { [next.filepath]: { translations: ['German draft'] } };
+  e.inlineDraftFindings = { [next.filepath]: [{ level: 'warning', message: 'German warning' }] };
+  const rowsBefore = JSON.stringify(e.inlineDraftRows), findingsBefore = JSON.stringify(e.inlineDraftFindings);
+  releaseRead(); await e._pendingSaves.drain();
+  assert.equal(records.get(submittedSession.key).state, 'promoted');
+  assert.equal(e.editorBlocks, blocks); assert.equal(e._draftSession, session); assert.equal(e.editorCurrentEditingDesc, next);
+  assert.equal(e.editorBlocks[0].translation, 'German typing'); assert.equal(e.editorVisible, true);
+  assert.equal(JSON.stringify(e.inlineDraftRows), rowsBefore); assert.equal(JSON.stringify(e.inlineDraftFindings), findingsBefore);
 });
 
 test('worker saves close the editor and navigate before the local transaction acknowledges', async t => {

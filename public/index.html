@@ -44,6 +44,7 @@
     <div v-if="localSaveError" class="cloudStorageError" role="alert">Could not finish saving your translations. Your edits remain in this tab. {{ localSaveError }} <button @click="retryPendingSaves">Retry saving</button> <button @click="downloadPendingSaves">Download pending edits</button></div>
     <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
     <div v-if="inlineDraftError" class="cloudStorageError" role="alert">{{ inlineDraftError }} <button @click="openDraftRecovery">View local drafts</button></div>
+    <div v-if="deferredDraftSaveError" class="cloudStorageError" role="alert">{{ deferredDraftSaveError }} <button @click="openDraftRecovery">View local drafts</button></div>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">

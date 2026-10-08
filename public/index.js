@@ -4916,7 +4916,7 @@ const config = Vue.defineComponent({
       for (let i = hadEditor ? anchor + direction : anchor; i >= 0 && i < ordered.length; i += direction) candidates.push(ordered[i].filepath);
       try {
         if (hadEditor && (!noSaveIfNotChanged || this.editorHaveChanges() || this._draftSession?.record)
-          && !await this.editorSave({ close: false })) return false;
+          && !await this.editorSave({ close: false, defer: true })) return false;
         if (ctx && !this.collaborationContextCurrent(ctx)) return false;
         for (const filepath of candidates) {
           if (this._collaboration?.isEditing(filepath)) continue;
@@ -6011,6 +6011,17 @@ const config = Vue.defineComponent({
       } finally { this.navigationBusy = false; }
     },
     editFile(filepath, returnToFileList = false, options = {}) {
+      if (this.pendingDraftSaveFor?.(filepath)) {
+        const context = this.captureCollaborationContext();
+        const cancelRevision = this._editorOpenCancelRevision || 0;
+        const openRun = this._editorOpenRun;
+        // Only revisiting the queued file needs its committed base and consumed
+        // draft. Opening another file can proceed while its transaction runs.
+        return this.waitForPendingSaves().then(ok => ok && this.collaborationContextCurrent(context)
+          && cancelRevision === (this._editorOpenCancelRevision || 0)
+          && openRun === this._editorOpenRun
+          ? this.editFile(filepath, returnToFileList, options) : false);
+      }
       if (!options.endedAcknowledged && this.managedWarnBeforeEdit && (this.managedActiveTeam?.ended || this.managedActiveVersion?.status === 'withdrawn')) {
         const context = this.captureCollaborationContext();
         return this.managedWarnBeforeEdit().then(ok => ok && this.collaborationContextCurrent(context)
@@ -6409,11 +6420,12 @@ const config = Vue.defineComponent({
       }
       return { errors, warnings, confirmations };
     },
-    async editorSave({ close = true, automatic = false } = {}) {
+    async editorSave({ close = true, automatic = false, defer = close || automatic } = {}) {
       if (this.editorLoading || this.editorLoadError || this.editorSaving || this._importingSource || this._resetConfirming || this.versionStorageLoading) return false;
       if (this.editorTranslationReadOnly) return false;
       const desc = this.editorCurrentEditingDesc;
       if (!desc) return false;
+      if (this.pendingDraftSaveFor?.(desc.filepath)) return false;
       const dropped = window.WorkspaceState?.droppedForFile(this.localDescs, desc.filepath, this.lang);
       if ((this.inlineActive && dropped) || this.editorDroppedConflict) {
         const message = 'Open the full editor to review the dropped translation before saving this file.';
@@ -6445,6 +6457,7 @@ const config = Vue.defineComponent({
         }
         const findings = this.editorSaveFindings(newTranslations);
         if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [
+          ...(this.inlineDraftFindings[desc.filepath] || []).filter(finding => finding.deferredSave),
           ...findings.errors.map(item => ({ ...item, level: 'error' })),
           ...findings.warnings.map(item => ({ ...item, level: 'warning' })),
           ...findings.confirmations.slice(findings.warnings.length ? 1 : 0).map(message => ({ level: 'warning', message })),
@@ -6474,14 +6487,43 @@ const config = Vue.defineComponent({
           return false;
         }
         const record = session?.record;
+        const deferCommit = !!record && !this.testMode && defer && !!this.initializePendingSaves?.();
+        const completeDeferredSave = async ack => {
+          if (!this.collaborationContextCurrent(context)) return;
+          const accepted = context.client?.fileBase(desc.filepath) || this.collaborationFile(desc);
+          const active = this._draftSession === session && this.editorBlocks === blocksAtSave && this.editorCurrentEditingDesc === desc;
+          if (active) {
+            this.rebaseEditorAfterCommit(accepted, { draftBefore: draftAtSave, submittedTranslations: newTranslations });
+            this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
+          }
+          // Bookkeeping uses the captured session even after a new file opens.
+          // It must never clear or rebase the next file's typing.
+          await this.editorDraftCommitted?.(session, newTranslations, ack, accepted);
+        };
+        const rejectDeferredSave = error => {
+          if (!this.collaborationContextCurrent(context)) return;
+          const message = desc.filepath + ': ' + (error.draftReview ? error.message
+            : 'The committed translation or local draft changed. Open Local drafts to compare and review before saving.');
+          if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings,
+            [desc.filepath]: [{ level: 'error', message, deferredSave: true }] };
+        };
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
           context, close, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
           promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,
           inline: !!this.inlineActive,
           ...(record && !this.testMode ? { draft: { key: record.key, id: record.id, revision: record.revision, base: record.base }, awaitDurable: true } : {}),
+          ...(deferCommit ? { deferCommit: true, onCommitted: completeDeferredSave, onRejected: rejectDeferredSave } : {}),
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
+        if (deferCommit && result.status === 'queued') {
+          this.closeHlPopup();
+          if (close) {
+            this.editorVisible = false; this.inlineActive = false; this._draftSession = null;
+            this._collaboration?.leaveEdit(); this.restoreFileTableFocusAfterEditor();
+          }
+          return true;
+        }
         const accepted = this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc);
         const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
           draftBefore: draftAtSave, submittedTranslations: newTranslations, refresh: !close,
