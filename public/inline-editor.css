@@ -1,13 +1,9 @@
 /* The inline workspace keeps a native row per file, including narrow desktop windows. */
 .workspaceMain { min-width: 0; }
-.workspaceContent.inlineWorkspaceLayout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 18px; max-width: none; }
+.workspace.inlineEditorMode { --inline-workspace-gap: 16px; box-sizing: border-box; padding-bottom: var(--workspace-footer-height, 64px); }
+.workspaceContent.inlineWorkspaceLayout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 18px; max-width: none; box-sizing: border-box; min-height: calc(100dvh - var(--workspace-header-height, 68px) - var(--workspace-footer-height, 64px)); }
 .workspaceContent.inlineSidebarOpen { grid-template-columns: minmax(0, 1fr) clamp(360px, 29vw, 460px); }
-.inlineEditorSidebar { position: sticky; top: var(--workspace-header-height, 84px); height: calc(100dvh - var(--workspace-header-height, 84px) - var(--workspace-footer-height, 100px) - 24px); min-height: 240px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--color-element); box-shadow: var(--ui-shadow); }
-.inlineSidebarHeading { display: flex; align-items: start; gap: 12px; padding: 12px; border-bottom: 1px solid var(--ui-border); }
-.inlineSidebarHeading > div { flex: 1; min-width: 0; }
-.inlineSidebarHeading strong, .inlineSidebarHeading span { display: block; }
-.inlineSidebarHeading span { margin-top: 3px; color: var(--ui-muted); font-size: 11px; overflow-wrap: anywhere; }
-.inlineSidebarHeading button { flex: none; padding: 4px 8px; }
+.inlineEditorSidebar { position: sticky; top: calc(var(--workspace-header-height, 68px) + var(--inline-workspace-gap)); height: calc(100dvh - var(--workspace-header-height, 68px) - var(--workspace-footer-height, 64px) - 2 * var(--inline-workspace-gap)); box-sizing: border-box; min-height: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--color-element); box-shadow: var(--ui-shadow); }
 .inlineSidebarEmpty { padding: 18px; color: var(--ui-muted); line-height: 1.6; }
 #inlineEditorSidebarHost { min-height: 0; flex: 1; overflow: hidden; }
 .inlineEditorSidebar .sharedEditorSidebar { height: 100%; display: flex; flex-direction: column; overflow: auto; }
@@ -55,11 +51,9 @@
 .inlinePreviewHost .gamePreviewStrip { position: static; height: auto; margin: 0; overflow: visible; }
 .inlinePreviewHost .gamePreviewMainRow { height: auto; flex-direction: column; align-items: stretch; }
 .inlinePreviewHost .gamePreviewFrameWrap, .inlinePreviewHost .gamePreviewFramesColumn { height: auto; min-width: 0; width: 100%; }
-.inlinePreviewHost .gamePreviewWindow { box-sizing: border-box; max-width: 100%; }
+.inlinePreviewHost .gamePreviewWindow { box-sizing: border-box; flex: 1; min-width: 0; width: 100%; max-width: none; }
 .inlinePreviewHost .gamePreviewVarsColumn { flex: none; height: auto; width: 100%; min-width: 0; max-width: none; }
 .inlinePreviewHost .gamePreviewVarsPanel { max-height: none; }
-.inlinePreviewHost .gamePreviewToolbar { position: static; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.inlinePreviewHost .gamePreviewLabel { font-size: 13px; }
 .inlineEditorSidebar .lookupResult { display: block; box-sizing: border-box; width: 100%; margin: 0 0 6px; padding: 9px 10px; text-align: left; border: 1px solid var(--ui-border); border-radius: 6px; line-height: 1.5; }
 .inlineEditorSidebar .lookupReference h3 { margin: 0 0 5px; font: 600 13px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .draftRecoveryDialog { width: min(1080px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); padding: 0; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--color-element); color: var(--color-font); }
@@ -78,6 +72,7 @@
 .draftRecoveryComparison pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--color-bg); font-size: 12px; }
 .draftRecoveryActions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 @media (max-width: 700px) {
+  .workspace.inlineEditorMode { --inline-workspace-gap: 12px; }
   .workspace.inlineEditorMode #table { display: table; table-layout: fixed; min-width: 750px; }
   .workspace.inlineEditorMode #table thead { position: static; display: table-header-group; width: auto; height: auto; overflow: visible; clip-path: none; }
   .workspace.inlineEditorMode #table tbody { display: table-row-group; }

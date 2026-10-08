@@ -348,8 +348,8 @@
           <button class="primaryAction" @click.exact="exportZip(false)" @click.ctrl="exportZip(true)" v-tooltip="'Export saved translations. Ctrl + click exports all files.'" aria-label="Export ZIP">Export ZIP</button>
           <button ref="diagnosticScanButton" class="diagnosticScanButton" @click="openDiagnosticScanDialog">Scan diagnostics</button>
           <button v-if="cloudConflicts.length" class="cloudConflictButton" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
-          <button ref="settingsButton" @click="openSettings()">Settings</button>
-          <button v-if="inlineEditor" type="button" class="inlineSidebarToggle" @click="inlineSidebarVisible = !inlineSidebarVisible" :aria-expanded="inlineSidebarVisible" aria-controls="inlineEditorSidebar">{{ inlineSidebarVisible ? 'Hide file tools' : 'Show file tools' }}</button>
+          <button ref="settingsButton" type="button" class="workspaceIconButton" @click="openSettings()" aria-label="Settings" title="Settings"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.5 3-.6 2.4-1.8 1-2.4-.7-2.5 4.3 1.8 1.7v2l-1.8 1.7 2.5 4.3 2.4-.7 1.8 1 .6 2.4h5l.6-2.4 1.8-1 2.4.7 2.5-4.3-1.8-1.7v-2l1.8-1.7-2.5-4.3-2.4.7-1.8-1-.6-2.4Z"></path><circle cx="12" cy="13" r="3"></circle></svg></button>
+          <button v-if="inlineEditor" type="button" class="workspaceIconButton inlineSidebarToggle" @click="inlineSidebarVisible = !inlineSidebarVisible" :aria-expanded="inlineSidebarVisible" :aria-label="inlineSidebarVisible ? 'Hide file tools' : 'Show file tools'" :title="inlineSidebarVisible ? 'Hide file tools' : 'Show file tools'" aria-controls="inlineEditorSidebar"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="17" rx="2"></rect><path d="M15 3.5v17M18 8h.01M18 12h.01M18 16h.01"></path></svg></button>
         </nav>
         <fieldset id="fileFilterPanel" class="fileFilters" aria-label="File status filters" v-show="fileFiltersVisible" @keydown.esc.stop.prevent="closeFileFilters">
           <div class="fileFilterChoices">
@@ -382,24 +382,21 @@
         </div>
       </div>
 
-      <p id="fileTableKeyboardHelp" class="srOnly">Arrow Up and Down return to the current selection or move between files while the list is focused. Arrow Down from search selects the first file. Home and End select the first and last files on the current page. Page Up and Page Down move ten files. Arrow Left and Right change page; the next page selects its first file and the previous page selects its last file. {{ inlineEditor ? 'Click a row to edit in place; press Enter on the row to open the full editor. Text fields retain their normal keyboard behavior.' : 'Click a row or press Enter to open it.' }}</p>
+      <p id="fileTableKeyboardHelp" class="srOnly">Arrow Up and Down return to the current selection or move between files while the list is focused. Arrow Down from search selects the first file. Home and End select the first and last files on the current page. Page Up and Page Down move ten files. Arrow Left and Right change page; the next page selects its first file and the previous page selects its last file. {{ inlineEditor ? 'Click a row to edit in place; click its filename, double-click the row, or press Enter on the row to open the full editor. Text fields retain their normal keyboard behavior.' : 'Click a row or press Enter to open it.' }}</p>
       <div ref="fileTableRegion" class="fileTableScroll" role="region" aria-label="Stat files" aria-describedby="fileTableKeyboardHelp" :tabindex="selectedFilepath ? -1 : 0" @focus.self="fileTableFocused" @keydown="fileTableKeydown">
       <table id="table" class="display compact cell-border" role="grid" aria-label="Stat files" aria-multiselectable="false">
         <caption class="srOnly">Stat descriptions in {{ lang }}. Open a filename to edit its translations.</caption>
         <thead>
           <tr>
-            <th scope="col" style="width: 10%;" :aria-sort="currentSort === 'filedir' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('filedir')">Directory <span aria-hidden="true">{{ currentSort === 'filedir' ? currentSortIcon : '' }}</span></button></th>
-            <th scope="col" style="width: 15%;" :aria-sort="currentSort === 'filename' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('filename')">Filename <span aria-hidden="true">{{ currentSort === 'filename' ? currentSortIcon : '' }}</span></button></th>
+            <th scope="col" style="width: 20%;" :aria-sort="currentSort === 'filename' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('filename')">Filename <span aria-hidden="true">{{ currentSort === 'filename' ? currentSortIcon : '' }}</span></button></th>
             <th scope="col" :aria-sort="currentSort === 'english' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('english')">English <span aria-hidden="true">{{ currentSort === 'english' ? currentSortIcon : '' }}</span></button></th>
             <th scope="col" :aria-sort="currentSort === 'translation' ? (currentSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="sort('translation')">{{ lang }} translation <span aria-hidden="true">{{ currentSort === 'translation' ? currentSortIcon : '' }}</span></button></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" :class="{ selectedFileRow: selectedFilepath === desc.filepath, inlineFocusedRow: inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, isRevised: desc.isRevised, isDropped: desc.isDropped, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath); inlineEditor && activateInlineRow(desc.filepath)" @click="inlineRowClick($event, desc.filepath)" @focusout="inlineRowFocusOut">
-            <td v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filedir + '\n' + desc.diagnosticScanTitle) : desc.filedir">{{ (desc.hasDiagnosticError ? '[ERROR] ' : (desc.hasDiagnosticWarning ? '[WARNING] ' : '')) + elipsisRenderer(desc.filedir) }}</td>
-            <td class="fileIdentityCell"><button class="fileOpenButton" tabindex="-1" @click.stop="inlineRowClick($event, desc.filepath)" :aria-label="(inlineEditor ? 'Select ' : 'Edit ') + desc.filename" v-tooltip="desc.filepath">{{ desc.filename }}</button><span v-if="desc.isDropped" class="fileDroppedLabel">Dropped</span><span v-if="desc.isRevised" class="fileRevisedLabel">Revised</span><span v-if="inlineDraftFor(desc.filepath)" class="fileDraftLabel">Local draft</span>
-              <div v-if="inlineEditor" class="inlineFileActions" @click.stop>
-                <button type="button" @click="openInlineFullEditor(desc.filepath)" :aria-label="'Open full editor for ' + desc.filename" title="Open the full editor for Regex rules, History, comparisons and dropped-copy review">Open editor</button>
+          <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" :class="{ selectedFileRow: selectedFilepath === desc.filepath, inlineFocusedRow: inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, isRevised: desc.isRevised, isDropped: desc.isDropped, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath); inlineEditor && activateInlineRow(desc.filepath)" @click="inlineRowClick($event, desc.filepath)" @dblclick="inlineRowDoubleClick($event, desc.filepath)" @focusout="inlineRowFocusOut">
+            <td class="fileIdentityCell"><button class="fileOpenButton" tabindex="-1" @click.stop="openInlineFullEditor(desc.filepath)" :aria-label="'Open full editor for ' + desc.filename" v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filepath + '\n' + desc.diagnosticScanTitle) : desc.filepath">{{ desc.filename }}</button><span v-if="desc.hasDiagnosticError || desc.hasDiagnosticWarning" class="fileDiagnosticLabel" :class="desc.hasDiagnosticError ? 'error' : 'warning'">{{ desc.hasDiagnosticError ? 'Error' : 'Warning' }}</span><span v-if="desc.isDropped" class="fileDroppedLabel">Dropped</span><span v-if="desc.isRevised" class="fileRevisedLabel">Revised</span><span v-if="inlineDraftFor(desc.filepath)" class="fileDraftLabel">Local draft</span>
+              <div v-if="inlineEditor && ((inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath) || desc.isDropped)" class="inlineFileActions" @click.stop>
                 <template v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath"><button type="button" @click="saveInlineDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Stage draft</button><button v-if="inlineDraftFor(desc.filepath)" type="button" @click="discardEditorDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Discard draft</button><button v-if="editorConsistencyDiagnostics.some(Boolean)" type="button" @click="openInlineFullEditor(desc.filepath, 'consistency')">Compare inconsistencies in editor</button></template>
                 <button v-if="desc.isDropped" type="button" class="inlineReviewLink" @click="openInlineFullEditor(desc.filepath, 'dropped')">Review dropped copy in editor</button>
               </div>
@@ -413,7 +410,6 @@
                   <template v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath">
                     <div v-if="block.isTable" class="inlineTableColumns" :style="{ '--table-columns': editorTableColumnCount(block) }"><editor-text-field v-for="(column, columnIndex) in block.tableColumns" :key="columnIndex" :controller="$root" :block="block" :block-index="blockIndex" :column-index="columnIndex" kind="english"></editor-text-field></div>
                     <editor-text-field v-else :controller="$root" :block="block" :block-index="blockIndex" kind="english"></editor-text-field>
-                    <div class="inlineFileActions"><button type="button" @click.stop="useRegex(block)" :disabled="editorTranslationReadOnly" :aria-label="'Apply Regex rules to block ' + (blockIndex + 1)">Apply regex</button></div>
                   </template>
                   <div v-else class="inlineReadText" lang="en">{{ block.english || '\u00a0' }}</div>
                 </div></div>
@@ -461,8 +457,7 @@
         <button @click="resetFileSearch">Reset search and filters</button>
       </div>
       </div>
-      <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="inlineEditorSidebar" data-inline-focus-surface @focusout="inlineRowFocusOut" aria-label="Selected file tools">
-        <header class="inlineSidebarHeading"><div><strong>Selected file</strong><span>{{ editorSessionActive ? editorCurrentEditingDesc?.filepath : 'Choose a row to start editing' }}</span></div><button type="button" @click="inlineSidebarVisible = false" aria-label="Hide selected file tools" title="Hide selected file tools">Hide</button></header>
+      <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="inlineEditorSidebar" tabindex="-1" data-inline-focus-surface @pointerdown="inlineFocusSurfacePointerDown" @focusout="inlineRowFocusOut" aria-label="Selected file tools">
         <div id="inlineEditorSidebarHost"></div>
         <p v-if="!editorSessionActive" class="inlineSidebarEmpty">Select a file to use its Dictionary, Lookup, Preview and Comments.</p>
       </aside>
@@ -843,7 +838,7 @@
     </editor-assistance>
     <editor-preview v-if="editorSessionActive" :target="editorVisible ? '#fullEditorPreviewHost' : '#inlineEditorPreviewHost'">
         <div class="gamePreviewStrip">
-          <div class="gamePreviewToolbar twoSided">
+          <div v-if="editorVisible" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">
               <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" :aria-pressed="gamePreviewFrame === 's'" title="Use a small preview frame" @click="setGamePreviewFrame('s')">Small</button>

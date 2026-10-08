@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const copy = value => JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const settleFocus = () => new Promise(resolve => setTimeout(resolve, 10));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
 function description(name = 'first', translation = 'translation') {
@@ -158,6 +159,85 @@ test('row Enter opens the full surface, while Enter inside a translation input s
   assert.equal(h.calls.promotions.length, 0);
 });
 
+test('row double-click opens the same draft in the full editor and interactive descendants retain their own behavior', async () => {
+  const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'continue this draft';
+  const session = editor._draftSession;
+  for (const control of ['input', 'textarea', 'button', 'a', 'select', '[contenteditable="true"]', '.HLter']) {
+    await editor.inlineRowDoubleClick({ target: { closest: selector => selector.split(', ').includes(control) ? { control } : null } }, desc.filepath);
+    assert.equal(editor.editorVisible, false, control);
+  }
+  assert.equal(await editor.inlineRowDoubleClick({ target: { closest: () => null } }, desc.filepath), true);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(editor._draftSession, session); assert.equal(editor.editorBlocks[0].translation, 'continue this draft');
+  assert.equal(h.records.get(session.key).translations[0], 'continue this draft');
+  assert.equal(h.calls.promotions.length, 0);
+});
+
+test('double-click during inline hydration switches the pending session to the full editor without restarting it', async () => {
+  const h = harness(), { editor, desc } = h, gate = deferred();
+  let reads = 0;
+  h.store.getTranslationDraft = async () => { reads++; await gate.promise; return null; };
+  const opening = editor.activateInlineRow(desc.filepath); await tick();
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorLoading, true);
+  assert.equal(await editor.inlineRowDoubleClick({ target: { closest: () => null } }, desc.filepath), true);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  gate.resolve(); assert.equal(await opening, true);
+  assert.equal(reads, 1); assert.equal(editor.editorLoading, false); assert.equal(editor.editorVisible, true);
+  assert.equal(h.calls.promotions.length, 0);
+});
+
+test('double-clicking another row while the outgoing draft is saving leaves the requested full editor open', async () => {
+  const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'preserve the outgoing draft';
+  const gate = deferred(), put = h.store.putTranslationDraft;
+  h.store.putTranslationDraft = async (...args) => { await gate.promise; return put(...args); };
+  const filepath = editor.descs[1].filepath;
+  const selection = editor.inlineRowClick({ target: { closest: () => null } }, filepath); await tick();
+  const opening = editor.inlineRowDoubleClick({ target: { closest: () => null } }, filepath); await tick();
+  gate.resolve(); await selection;
+  assert.equal(await opening, true);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, filepath);
+  assert.equal(desc.translations.Thai[0], 'preserve the outgoing draft');
+});
+
+test('a different-row full-editor request waits for a pending collaboration claim and keeps its full intent', async () => {
+  const h = harness(), { editor, desc } = h, gate = deferred(), claims = [];
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; } };
+  editor.claimCollaborationFile = async filepath => { claims.push(filepath); if (filepath === desc.filepath) await gate.promise; return true; };
+  const selecting = editor.activateInlineRow(desc.filepath); await tick();
+  assert.equal(editor.editorLoading, true); assert.equal(editor.inlineTransitionBusy, true);
+  const filepath = editor.descs[1].filepath;
+  await editor.inlineRowClick({ target: { closest: () => null } }, filepath);
+  const opening = editor.inlineRowDoubleClick({ target: { closest: () => null } }, filepath); await tick();
+  gate.resolve(); await selecting;
+  assert.equal(await opening, true);
+  assert.deepEqual(claims, [desc.filepath, filepath]);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, filepath);
+});
+
+test('a queued full-editor request cannot open after its account, source, language, game or access context changes', async () => {
+  const changes = [editor => { editor.cloudProfileId = 'other-profile'; }, editor => { editor.sourceIdentity = 'other-source'; },
+    editor => { editor.lang = 'German'; }, editor => { editor.gameVersion = 'poe2'; },
+    editor => { editor.cloudUser = { id: 'other-account', role: 'translator', assignmentVersion: 2 }; },
+    editor => { editor.cloudUser.role = 'manager'; }, editor => { editor.cloudUser.assignmentVersion++; },
+    editor => { editor._collaboration = null; }];
+  for (const change of changes) {
+    const h = harness(), { editor, desc } = h, gate = deferred(), claims = [];
+    editor.cloudUser = { id: 'first-account', role: 'translator', assignmentVersion: 1 };
+    editor._collaboration = { leaveEdit() {}, fileBase() { return null; } };
+    editor.claimCollaborationFile = async filepath => { claims.push(filepath); await gate.promise; return true; };
+    const selecting = editor.activateInlineRow(desc.filepath); await tick();
+    const opening = editor.openInlineFullEditor(editor.descs[1].filepath); await tick();
+    change(editor); await editor.draftScopeChanged();
+    gate.resolve(); await selecting;
+    assert.equal(await opening, false); assert.equal(editor.editorVisible, false);
+    assert.deepEqual(claims, [desc.filepath]);
+  }
+});
+
 test('focusing and leaving unchanged inline text creates neither draft nor staged save', async () => {
   const h = harness(); await h.editor.activateInlineRow(h.desc.filepath);
   assert.equal(await h.editor.finishInlineSession(), true);
@@ -258,6 +338,84 @@ test('focus within the active row, sidebar or confirmation belongs to the same s
   } });
   for (const kind of ['same', 'side', 'dialog']) assert.equal(editor.inlineFocusContains(target(kind)), true);
   assert.equal(editor.inlineFocusContains(target('other')), false);
+});
+
+test('clicking nonfocusable sidebar content focuses its surface and retains inline editing', async () => {
+  const h = harness(), { editor, desc, document } = h;
+  h.window.InlineEditor.mixin.mounted.call(editor); await tick(); await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'keep editing while using the sidebar';
+  document.body = { closest: () => null }; document.activeElement = document.body;
+  let focused = 0;
+  const surface = { closest: selector => selector.includes('data-inline-focus-surface') ? surface : null,
+    focus(options) { focused++; assert.equal(options.preventScroll, true); document.activeElement = surface; } };
+  const background = { closest: selector => selector.includes('[tabindex]') ? surface : null };
+  editor.inlineFocusSurfacePointerDown({ button: 0, target: background, currentTarget: surface });
+  editor.inlineRowFocusOut({ relatedTarget: null });
+  editor._inlineFocusIn({ target: surface });
+  await settleFocus();
+  assert.equal(editor.inlineActive, true); assert.equal(h.calls.promotions.length, 0);
+  assert.equal(editor.editorBlocks[0].translation, 'keep editing while using the sidebar');
+  assert.equal(focused, 1);
+  const control = { closest: () => control };
+  editor.inlineFocusSurfacePointerDown({ button: 0, target: control, currentTarget: surface });
+  assert.equal(focused, 1, 'Inputs and buttons must retain their native focus behavior.');
+  const disabled = { closest: () => disabled, matches: selector => selector === ':disabled' };
+  editor.inlineFocusSurfacePointerDown({ button: 0, target: disabled, currentTarget: surface });
+  assert.equal(focused, 2, 'A disabled sidebar control still belongs to the current file.');
+  document.activeElement = document.body;
+  editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+  assert.equal(editor.inlineActive, false); assert.equal(h.calls.promotions.length, 1);
+  assert.equal(desc.translations.Thai[0], 'keep editing while using the sidebar');
+});
+
+test('sidebar background retention does not suppress an outside focus or another file selection', async () => {
+  const h = harness(), { editor, desc, document } = h;
+  h.window.InlineEditor.mixin.mounted.call(editor); await tick(); await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'stage when leaving';
+  document.body = { closest: () => null }; document.activeElement = document.body;
+  const surface = { closest: selector => selector.includes('data-inline-focus-surface') ? surface : null,
+    focus() { document.activeElement = surface; } };
+  editor.inlineFocusSurfacePointerDown({ button: 0, target: { closest: () => null }, currentTarget: surface });
+  editor.inlineRowFocusOut({ relatedTarget: null });
+  const outside = { closest: () => null }; document.activeElement = outside;
+  editor._inlineFocusIn({ target: outside }); await settleFocus();
+  assert.equal(editor.inlineActive, false); assert.equal(h.calls.promotions.length, 1);
+  await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'stage before switching rows';
+  await editor.inlineRowClick({ target: { closest: () => null } }, editor.descs[1].filepath);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, editor.descs[1].filepath);
+  assert.equal(editor.inlineActive, true); assert.equal(h.calls.promotions.length, 2);
+});
+
+test('workspace chrome measurements follow header/footer resize and workspace recreation', () => {
+  const h = harness(), { editor, context, document } = h;
+  let observed = [], disconnected = 0, observer;
+  context.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe(target) { observed.push(target); }
+    disconnect() { disconnected++; observed = []; }
+  };
+  let headerHeight = 61.2, footerHeight = 47.1;
+  const header = { getBoundingClientRect: () => ({ height: headerHeight }) };
+  const footer = { getBoundingClientRect: () => ({ height: footerHeight }) };
+  const block = {};
+  const workspace = () => { const values = new Map(); return { values, style: {
+    getPropertyValue: name => values.get(name), setProperty: (name, value) => values.set(name, value),
+  } }; };
+  let currentWorkspace = workspace();
+  document.querySelector = selector => selector === '.workspace' ? currentWorkspace : selector === '.workspaceHeader' ? header : selector === '.workspaceFooter' ? footer : null;
+  document.querySelectorAll = () => [block, header, footer];
+  editor.observeInlineBlocks();
+  assert.equal(currentWorkspace.values.get('--workspace-header-height'), '62px');
+  assert.equal(currentWorkspace.values.get('--workspace-footer-height'), '48px');
+  assert.deepEqual(observed, [block, header, footer]);
+  headerHeight = 90; footerHeight = 66; observer.callback();
+  assert.equal(currentWorkspace.values.get('--workspace-header-height'), '90px');
+  assert.equal(currentWorkspace.values.get('--workspace-footer-height'), '66px');
+  currentWorkspace = workspace(); editor.observeInlineBlocks();
+  assert.equal(currentWorkspace.values.get('--workspace-header-height'), '90px');
+  assert.equal(currentWorkspace.values.get('--workspace-footer-height'), '66px');
+  assert.equal(disconnected, 2); assert.deepEqual(observed, [block, header, footer]);
 });
 
 test('a clean automatic promotion submits the durable draft identity and consumes only after save', async () => {

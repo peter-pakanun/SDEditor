@@ -98,6 +98,7 @@
 .settingsFieldGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
 .settingsFieldGrid .settingsField { margin-top: 2px; }
 .settingsToggle { display: flex; align-items: center; gap: 13px; padding: 14px 0; border-bottom: 1px solid var(--color-element-alt); cursor: pointer; }
+.settingsPanel > .settingsToggle:last-child { border-bottom: 0; }
 .settingsToggle input { width: 18px; height: 18px; flex: none; margin: 0; padding: 0; accent-color: var(--color-element-highlight); }
 .settingsToggle span { display: flex; flex-direction: column; gap: 3px; }
 .settingsToggle strong { font-weight: 600; }

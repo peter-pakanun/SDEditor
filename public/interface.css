@@ -121,6 +121,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceContextLink:focus-visible { color: var(--ui-accent); outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .workspaceActions { display: flex; align-items: center; justify-self: end; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .workspaceActions button { flex: none; white-space: nowrap; }
+.workspaceActions .workspaceIconButton { display: inline-flex; align-items: center; justify-content: center; padding: 9px; }
+.workspaceIconButton svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.inlineSidebarToggle[aria-expanded="true"] { color: var(--ui-accent); }
 .workspaceActions button, .workspacePagination button, .workspaceEmpty button {
   background: var(--color-element);
   line-height: 1.4;
@@ -211,6 +214,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspace #table .fileOpenButton:hover { text-decoration: underline; }
 .fileDroppedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-dropped); }
 .fileRevisedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-revised); }
+.fileDiagnosticLabel { display: block; margin-top: 4px; font-size: 11px; }
+.fileDiagnosticLabel.error { color: var(--ui-missing); }
+.fileDiagnosticLabel.warning { color: var(--ui-warning); }
 .droppedTranslationPanel details { padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--ui-dropped) 35%, transparent); border-top: 0; }
 .droppedTranslationPanel summary { cursor: pointer; }
 .droppedComparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
@@ -306,10 +312,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .workspace #table { display: block; min-width: 0; }
   .workspace #table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .workspace #table tbody { display: block; }
-  .workspace #table tbody tr { display: grid; grid-template-columns: 90px minmax(0, 1fr); border-bottom: 1px solid var(--ui-border); }
+  .workspace #table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--ui-border); }
   .workspace #table tbody tr:last-child { border-bottom: 0; }
   .workspace #table td { border-bottom: 0; padding: 9px 12px; }
-  .workspace #table td:nth-child(n+3) { grid-column: 1 / -1; }
   .workspace #table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: var(--ui-muted); }
   .workspace #table td.translationTr > span:empty::after { content: 'No translation yet'; font-style: italic; color: var(--ui-muted); }
   .workspaceFooter { padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)); flex-direction: column; align-items: stretch; gap: 8px; }

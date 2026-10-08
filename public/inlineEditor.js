@@ -24,14 +24,15 @@
       inlineEditor() {
         this.saveSettings();
         if (!this.inlineEditor && this.inlineActive) this.finishInlineSession({ promote: false });
-        this.scheduleInlineAlignment();
+        this.$nextTick(() => this.observeInlineBlocks());
       },
       editorBlocks: { deep: true, handler() { this.scheduleEditorDraft(); } },
       sourceIdentity() { this.draftScopeChanged(); },
       lang() { this.draftScopeChanged(); },
       gameVersion() { this.draftScopeChanged(); },
+      editorVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
       descsDisplay() { this.$nextTick(() => this.observeInlineBlocks()); },
-      inlineSidebarVisible() { this.$nextTick(() => this.scheduleInlineAlignment()); },
+      inlineSidebarVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
     },
     mounted() {
       this._draftBeforeUnload = event => {
@@ -42,6 +43,7 @@
       };
       this._draftWindowBlur = () => { this.flushEditorDraft(); };
       this._draftVisibility = () => { if (document.hidden) this.flushEditorDraft(); };
+      this._inlineLayoutResize = () => { this.measureWorkspaceChrome(); this.scheduleInlineAlignment(); };
       this._inlineFocusIn = event => {
         if (!this.inlineActive || this.inlineTransitionBusy || this.editorSaving || document.hidden || root.AppDialogs?.isOpen) return;
         if (!this.inlineFocusContains(event.target)) {
@@ -52,14 +54,17 @@
       };
       root.addEventListener('beforeunload', this._draftBeforeUnload);
       root.addEventListener('blur', this._draftWindowBlur);
+      root.addEventListener('resize', this._inlineLayoutResize);
       document.addEventListener('visibilitychange', this._draftVisibility);
       document.addEventListener('focusin', this._inlineFocusIn);
       this.loadEditorDrafts();
+      this.$nextTick(() => this.observeInlineBlocks());
     },
     beforeUnmount() {
       clearTimeout(this._draftTimer); this._inlineObserver?.disconnect();
       root.removeEventListener('beforeunload', this._draftBeforeUnload);
       root.removeEventListener('blur', this._draftWindowBlur);
+      root.removeEventListener('resize', this._inlineLayoutResize);
       document.removeEventListener('visibilitychange', this._draftVisibility);
       document.removeEventListener('focusin', this._inlineFocusIn);
       if (this._inlineAlignmentFrame) cancelAnimationFrame(this._inlineAlignmentFrame);
@@ -270,6 +275,15 @@
         return target.closest('tr[data-filepath]')?.dataset.filepath === this.editorCurrentEditingDesc?.filepath
           || !!target.closest('[data-inline-focus-surface], .appDialogOverlay, .appDialog');
       },
+      inlineFocusSurfacePointerDown(event) {
+        if (!this.inlineActive || event.button != null && event.button !== 0) return;
+        const surface = event.currentTarget;
+        const control = event.target?.closest?.('button, a[href], input, textarea, select, [contenteditable="true"], [tabindex]');
+        if (control && control !== surface && !control.matches?.(':disabled')) return;
+        // A tabindex=-1 surface gives background clicks a real focus target.
+        // Keep native selection and pointer behavior while retaining the file.
+        surface?.focus?.({ preventScroll: true });
+      },
       inlineRowFocusOut(event) {
         if (!this.inlineActive || this.inlineTransitionBusy || this.editorSaving || this.inlineFocusContains(event.relatedTarget)) return;
         setTimeout(() => {
@@ -284,6 +298,10 @@
         }
         return this.activateInlineRow(filepath);
       },
+      inlineRowDoubleClick(event, filepath) {
+        if (event?.target?.closest?.('button, a, input, textarea, select, [contenteditable="true"], .HLter')) return;
+        return this.openInlineFullEditor(filepath);
+      },
       async activateInlineRow(filepath) {
         if (!this.inlineEditor || this.editorVisible || !this.getDescByFilepath(filepath) || this._importingSource) return false;
         this._inlineRequestedPath = filepath;
@@ -291,9 +309,16 @@
         if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) return true;
         this.inlineTransitionBusy = true;
         const scope = this.editorDraftScope(filepath);
+        const opening = this.runInlineRowActivation(filepath, scope, this.captureCollaborationContext?.());
+        this._inlineActivationPromise = opening;
+        try { return await opening; }
+        finally { if (this._inlineActivationPromise === opening) this._inlineActivationPromise = null; }
+      },
+      async runInlineRowActivation(filepath, scope, context) {
+        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context));
         try {
           if (this.inlineActive && !await this.finishInlineSession({ promote: true, ownedTransition: true })) return false;
-          if (!this.draftScopeCurrent(scope)) return false;
+          if (!current() || this.editorVisible) return false;
           filepath = this._inlineRequestedPath;
           if (!this.descsDisplay.some(row => row.filepath === filepath)) {
             if (!this.filteredDescs.some(row => row.filepath === filepath)) {
@@ -314,7 +339,7 @@
           return opened;
         } finally {
           this._nextEditorSurface = null; this.inlineTransitionBusy = false;
-          if (this._inlineRequestedPath && this._inlineRequestedPath !== filepath) this.activateInlineRow(this._inlineRequestedPath);
+          if (current() && this._inlineRequestedPath && this._inlineRequestedPath !== filepath) this.activateInlineRow(this._inlineRequestedPath);
         }
       },
       async finishInlineSession({ promote = true, ownedTransition = false } = {}) {
@@ -344,16 +369,27 @@
       async openInlineFullEditor(filepath = this.editorCurrentEditingDesc?.filepath, action = '') {
         if (!filepath) return false;
         const scope = this.editorDraftScope(filepath);
+        const context = this.captureCollaborationContext?.();
+        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context));
+        if (this.inlineTransitionBusy && this.editorCurrentEditingDesc?.filepath !== filepath) {
+          // Preserve the full-surface intent while serialized row claims finish.
+          this._inlineRequestedPath = filepath;
+          let pending;
+          while (this.inlineTransitionBusy && (pending = this._inlineActivationPromise || this._inlineFinishing)) {
+            await pending;
+            if (!current() || this._inlineRequestedPath !== filepath) return false;
+          }
+        }
         if (!await this.flushEditorDraft()) return false;
-        if (!this.draftScopeCurrent(scope)) return false;
-        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoading) {
+        if (!current()) return false;
+        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) {
           this.inlineActive = false; this.editorVisible = true; this._fileTableReturnFocus = true;
           if (this.sideTab === 'preview') this.sideTab = 'dictionary';
           const candidate = root.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
           this.editorDroppedCandidate = candidate ? copy(candidate) : null;
           this.$nextTick(() => this.getEditorRef('translation', this.editorFocusedIndex || 0, this.editorBlocks[this.editorFocusedIndex || 0]?.isTable ? 0 : null)?.focus());
         } else if (await this.editFile(filepath, true) === false) return false;
-        if (!this.draftScopeCurrent(scope) || this.editorCurrentEditingDesc?.filepath !== filepath) return false;
+        if (!current() || this.editorCurrentEditingDesc?.filepath !== filepath) return false;
         if (action === 'regex' || action === 'history') this.sideTab = action;
         if (action === 'consistency') this.openConsistencyResolver(this.editorFocusedIndex || 0);
         return true;
@@ -468,11 +504,21 @@
         this._draftSession.writeError = new Error('Reviewed recovery needs a fresh draft revision');
         await this.flushEditorDraft({ force: true }); this.refreshGamePreview();
       },
+      measureWorkspaceChrome() {
+        const workspace = document.querySelector('.workspace');
+        if (!workspace?.style) return;
+        for (const [selector, property] of [['.workspaceHeader', '--workspace-header-height'], ['.workspaceFooter', '--workspace-footer-height']]) {
+          const height = Math.ceil(document.querySelector(selector)?.getBoundingClientRect().height || 0);
+          if (height > 0 && workspace.style.getPropertyValue(property) !== height + 'px') workspace.style.setProperty(property, height + 'px');
+        }
+      },
       observeInlineBlocks() {
-        if (typeof ResizeObserver === 'undefined') return;
-        this._inlineObserver ||= new ResizeObserver(() => this.scheduleInlineAlignment());
-        this._inlineObserver.disconnect();
-        for (const inner of document.querySelectorAll('.inlineBlockNatural')) this._inlineObserver.observe(inner);
+        this.measureWorkspaceChrome();
+        if (typeof ResizeObserver !== 'undefined') {
+          this._inlineObserver ||= new ResizeObserver(() => { this.measureWorkspaceChrome(); this.scheduleInlineAlignment(); });
+          this._inlineObserver.disconnect();
+          for (const inner of document.querySelectorAll('.inlineBlockNatural, .workspaceHeader, .workspaceFooter')) this._inlineObserver.observe(inner);
+        }
         this.scheduleInlineAlignment();
       },
       scheduleInlineAlignment() {

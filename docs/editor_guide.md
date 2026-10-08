@@ -44,7 +44,7 @@ For more details, see the [**Import Workflow**](import_workflow.md).
 
 ### Finding Files and Navigating Pages
 
-The main action header stays visible while you scroll, with labeled controls for exporting, settings, importing, and diagnostic scans. Search the file list by name, English source, or translation using the search field in this sticky navigation bar. Results update after typing pauses for 250 ms; press **Enter** to apply the search immediately. Clearing the field or pressing **Esc** restores the list immediately, keeping the selected status filters.
+The main action header stays visible while you scroll, with controls for exporting, importing, diagnostic scans, a Settings cog, and a right-sidebar icon for file tools. Search the file list by name, English source, or translation using the search field in this sticky navigation bar. Results update after typing pauses for 250 ms; press **Enter** to apply the search immediately. Clearing the field or pressing **Esc** restores the list immediately, keeping the selected status filters.
 
 Status filters are hidden by default. Use the filter icon beside search to show or hide them. **Missing translation**, **Saved changes**, **Revised translations**, **Dropped translations**, **Diagnostic errors**, **Diagnostic warnings**, and **Local drafts** start selected; **Unchanged** is the final option and starts off. Selecting multiple statuses includes files matching **any** selected status. **Clear filters** leaves no statuses selected and shows no files; **Select all** includes every status. Search and the selected status filters work together. Local drafts appear without changing the file's committed status.
 
@@ -87,7 +87,7 @@ So it is “missing translation content”, not “missing file”.
 
 ### Opening a File
 
-**Inline editor** is enabled by default in **Settings → Editor & shortcuts**. Click a row or its filename to edit its translation in the file list. Press **Enter** on the focused row, or choose **Open editor**, to enter the full editor. Disable Inline editor to restore clicking a row directly into the full editor. A blue indicator on the left marks the selected file.
+**Inline editor** is enabled by default in **Settings → Editor & shortcuts**. Click a row to edit its translation in the file list. Click its filename, double-click the row's background, or press **Enter** on the focused row to enter the full editor. Double-clicking a text field retains normal text selection. Hover over a filename to see its full directory path and any diagnostic details. Disable Inline editor to restore clicking a row directly into the full editor. A blue indicator on the left marks the selected file.
 
 Source and translation fields appear immediately in the normal editor layout, including tables, multiline text and the preview. The fields stay read-only while highlights and checks are prepared, then become editable in place. **Close** or **Escape** cancels the open while it is loading.
 
@@ -99,13 +99,13 @@ In the list, **Up/Down Arrow** selects the previous/next row without leaving the
 
 Only the focused file has live translation fields. Its source and translation share the full editor's highlights, autocomplete and block separators, with matching blocks aligned across the columns. Moving between its fields, autocomplete popup and file tools keeps that file active. Leaving the file returns its cells to normal display.
 
-The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **Lookup**, **Preview**, and **Comments** for the selected file. Dictionary matches remain first, Lookup reads committed references, and Preview follows the active draft. **Hide file tools** gives the table more room. File selection and editing indicators continue to show other online collaborators.
+The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **Lookup**, **Preview**, and **Comments** for the selected file. It fills the space between the header and bottom status bar and stays in view while the main scrollbar moves the table. Dictionary matches remain first, Lookup reads committed references, and Preview follows the active draft with frames filling the available width. Clicking anywhere inside the sidebar keeps inline editing active. The right-sidebar icon in the header hides or shows file tools to give the table more room. File selection and editing indicators continue to show other online collaborators.
 
 Typing is retained as a **Local draft** in this browser, separately from staged translations. Drafts keep their account/profile, game, source version, language and file identity. They do not enter translated ZIPs, change Saved/Missing/Revised counts or synchronize to other translators. Closing the full editor also keeps its draft. Use **Drafts** to review preserved drafts, including copies from other source versions, or explicitly discard a draft.
 
 Leaving an inline file attempts to promote its draft through the same save checks as the full editor. Errors keep it as a draft; warnings require confirmation, and declining keeps the draft. Findings appear below the filepath. Promotion changes committed text only after the local save transaction succeeds; online synchronization then runs normally. Returning to a draft resumes its text.
 
-Use **Open editor** for Dropped approval/comparison, competing dropped copies, history restoration, Regex tools and **Compare & resolve**. Inline editing never approves a Dropped copy automatically. Shared translation conflicts, competing local draft copies, and drafts whose committed base changed need explicit comparison and resolution before promotion. Opening shared-conflict review from an inline row first carries its draft into the full editor, then opens the conflict comparison.
+Click the filename to open the full editor for Dropped approval/comparison, competing dropped copies, history restoration, Regex tools and **Compare & resolve**. Inline editing never approves a Dropped copy automatically. Shared translation conflicts, competing local draft copies, and drafts whose committed base changed need explicit comparison and resolution before promotion. Opening shared-conflict review from an inline row first carries its draft into the full editor, then opens the conflict comparison.
 
 ### Scanning Diagnostics
 
