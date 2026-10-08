@@ -625,7 +625,7 @@
       },
       managedProgressTooltip(team) {
         const progress = this.managedProgress(team);
-        return `${team.language} progress\nSaved: ${progress.saved} / ${progress.total} (${progress.percent}%)\nMissing: ${progress.missing}\nRevised: ${progress.revised} (included in Saved)\nDropped: ${team.counts?.dropped || 0}\nWorkload denominator: Missing + Saved. Status counts can overlap.\nOnly server-accepted work is counted; unsaved drafts and pending offline saves are excluded.`;
+        return `${team.language} progress\nSaved: ${progress.saved} / ${progress.total} (${progress.percent}%)\nMissing: ${progress.missing}\nRevised: ${progress.revised} (included in Saved)\nWorkload denominator: Missing + Saved. Status counts can overlap.\nOnly server-accepted work is counted; unsaved drafts and pending offline saves are excluded.`;
       },
       managedExistingTeamTooltip(team) {
         const online = (team.presence || []).map(peer => peer.name || peer.displayName || peer.userName || 'Translator');

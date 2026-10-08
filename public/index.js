@@ -269,6 +269,7 @@ const config = Vue.defineComponent({
       rawFileMode: 'original',
       editorDictionaryRevision: 0,
       editorCurrentEditingDesc: null,
+      editorFilePathCopied: false,
       editorFocusedIndex: 0,
       editorFocusedColumnIndex: 0,
       editorOriginalTranslations: [],
@@ -437,6 +438,7 @@ const config = Vue.defineComponent({
   },
   beforeUnmount() {
     clearTimeout(this._fileSearchTimer);
+    this.resetEditorFilePathCopy();
     this._fileSearchTimer = null;
     this._fileSearchSnapshot = null;
     this._settingsSaveDisposed = true;
@@ -537,11 +539,13 @@ const config = Vue.defineComponent({
     },
     editorVisible(visible) {
       if (!visible) {
+        this.resetEditorFilePathCopy();
         this.endDictionaryEdit();
         this.closeRawFileDialog();
       }
     },
     rawFileScope(scope) {
+      this.resetEditorFilePathCopy();
       if (this.rawFilePreview && scope !== this._rawFileScope) this.closeRawFileDialog();
     },
     theme(newTheme) {
@@ -6217,6 +6221,7 @@ const config = Vue.defineComponent({
     },
     beginEditorOpen(filepath, returnToFileList = false) {
       if (this._reconcilingImport || this._importingSource) return null;
+      this.resetEditorFilePathCopy();
       this.closeRawFileDialog();
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
@@ -6328,13 +6333,30 @@ const config = Vue.defineComponent({
       this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null)?.focus?.();
       this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: Number.isInteger(caretOffset) ? caretOffset : undefined });
     },
-    async copyEditorFilename() {
-      const filename = this.editorCurrentEditingDesc?.filename;
-      if (!filename) return;
+    resetEditorFilePathCopy() {
+      clearTimeout(this._editorFilePathCopyTimer);
+      this._editorFilePathCopyTimer = null;
+      this._editorFilePathCopyRun = (this._editorFilePathCopyRun || 0) + 1;
+      this.editorFilePathCopied = false;
+    },
+    async copyEditorFilePath() {
+      const desc = this.editorCurrentEditingDesc;
+      const filepath = desc?.filepath;
+      if (!filepath || !this.editorVisible) return;
+      this.resetEditorFilePathCopy();
+      const run = this._editorFilePathCopyRun;
+      const scope = this.rawFileScope;
+      const isCurrent = () => this._editorFilePathCopyRun === run && this.editorVisible
+        && this.editorCurrentEditingDesc === desc && this.rawFileScope === scope;
       try {
-        await navigator.clipboard.writeText(filename);
+        await navigator.clipboard.writeText(filepath);
+        if (!isCurrent()) return;
+        this.editorFilePathCopied = true;
+        this._editorFilePathCopyTimer = setTimeout(() => {
+          if (isCurrent()) this.resetEditorFilePathCopy();
+        }, 1400);
       } catch (error) {
-        this.appAlert('Could not copy the filename. Select the filename in the file path and copy it manually.');
+        if (isCurrent()) this.appAlert('Could not copy the file path. Select the path and copy it manually.');
       }
     },
     copySpanToClipboard(e) {

@@ -302,9 +302,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .editor .editButtons button { line-height: 1.6; }
 .editor .editorFileIdentity { display: flex; align-items: center; gap: 6px; }
 .editorFileIdentity > span { min-width: 0; overflow-wrap: anywhere; }
-.editor .editorCopyFilename { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 4px; border: 0; background: transparent; color: var(--ui-muted); line-height: 1; }
-.editor .editorCopyFilename:hover { background: var(--color-bg2); color: var(--ui-accent); }
-.editorCopyFilename svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.editor .editorCopyFilePath { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 4px; border: 0; background: transparent; color: var(--ui-muted); line-height: 1; }
+.editor .editorCopyFilePath:hover { background: var(--color-bg2); color: var(--ui-accent); }
+.editorCopyFilePath svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.editor .editorCopyFilePath.copied { color: var(--ui-saved); background: color-mix(in srgb, var(--ui-saved) 12%, transparent); }
+.editorCopyFilePath.copied svg { animation: editorCopyConfirm .25s ease-out; }
+@keyframes editorCopyConfirm { 0% { transform: scale(.65); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .editorCopyFilePath.copied svg { animation: none; } }
 .editor .editorActions { position: sticky; top: calc(200px * var(--density)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
 .editor .editorActions button, .editor .applyRegexButton { flex-shrink: 0; white-space: nowrap; }
 @media (max-width: 1200px) {
