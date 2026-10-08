@@ -287,12 +287,13 @@
       <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
       <div class="versionChooserColumns">
         <section class="versionPanel onlineVersions" aria-label="Online versions">
-          <header class="versionPanelHeading"><h2>Online</h2><label v-if="cloudCanAccessAllLanguages"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
+          <header class="versionPanelHeading"><h2>Online</h2><label v-if="managedManagerAccess"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
           <template v-if="!cloudSignedIn">
             <p class="versionMuted">Sign in to select manager-published versions. Your offline workspace remains available.</p>
             <button class="primaryAction" @click="cloudLogin" :disabled="cloudBusy">Sign in with Google</button>
           </template>
-          <p v-else-if="!managedOnlineAvailable" class="versionMuted">Your account needs a team language assignment before online versions are available.</p>
+          <p v-else-if="!managedCatalogAccess" class="versionMuted">Your account needs a team language assignment before online versions are available.</p>
+          <template v-if="managedCatalogAccess">
           <p v-if="managedVersionsUnavailable && managedVersions.length" class="versionMuted">Showing versions cached in this browser. Downloaded versions remain available offline.</p>
           <div v-if="managedVisibleVersions.length" class="versionTableScroll">
             <table class="versionTable onlineVersionTable"><thead><tr><th>Version</th><th>Import deadline</th><th>Published</th><th>Actions</th></tr></thead>
@@ -323,6 +324,7 @@
           </div>
           <p v-if="managedCatalogLoading && !managedCatalogLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading online versions…</p>
           <p v-else-if="managedOnlineAvailable && managedCatalogLoaded && !managedVisibleVersions.length" class="versionMuted">No source versions have been published for this game.</p>
+          </template>
         </section>
         <section class="versionPanel offlineVersion" aria-label="Offline workspace">
           <h2>Offline</h2><p class="versionMuted">Your local import workflow. Start with the previous ZIP, then import the next update as usual.</p>
@@ -332,11 +334,11 @@
           <div class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">{{ managedOfflineVersion ? 'Import next/update' : 'Import previous version' }}</button><button v-if="managedOfflineVersion" @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
         </section>
       </div>
-      <section v-if="managedSelectedVersion" class="versionPanel versionDetails" aria-label="Selected version">
+      <section v-if="managedCatalogAccess && managedSelectedVersion" class="versionPanel versionDetails" aria-label="Selected version">
         <header class="versionPanelHeading"><div><h2 class="versionTitleLine">{{ managedSelectedVersion.name }} <span v-if="managedSelectedVersion.isHead" class="versionBadge">HEAD</span></h2><p tabindex="0" v-tooltip="managedDeadlineTooltip(managedSelectedVersion.deadlineAt)" :aria-label="managedDeadlineTooltip(managedSelectedVersion.deadlineAt)">{{ managedFormatDeadline(managedSelectedVersion.deadlineAt) }}</p><p class="versionHash" tabindex="0" v-tooltip="'ZIP SHA-256: ' + managedSelectedVersion.zipHash" :aria-label="'ZIP SHA-256: ' + managedSelectedVersion.zipHash">ZIP {{ managedSelectedVersion.zipHash?.slice(0, 16) }}</p></div></header>
         <p v-if="managedSelectedVersion.status === 'withdrawn'" class="versionNotice">This version was withdrawn. Its work and history remain available for reference and recovery.</p>
-        <div v-if="managedVersionDetails?.teams?.length" class="versionTableScroll"><table class="versionTable teamVersionTable"><thead><tr><th>Language team</th><th>Progress</th><th>Online</th><th>Actions</th></tr></thead><tbody>
-          <tr v-for="team in managedVersionDetails.teams" :key="team.language" :data-language="team.language" @dblclick="managedOpenTeam(managedSelectedVersion, team, $event)"><td><span class="versionNameLine"><a class="teamEditorLink" href="#table" @click.prevent.stop="managedOpenTeam(managedSelectedVersion, team)" @dblclick.stop :aria-disabled="managedVersionBusy ? 'true' : undefined"><strong>{{ team.language }}</strong></a><span v-if="team.ended" class="versionBadge ended">Ended</span></span><small>{{ team.counts.loaded }} files</small><small v-if="team.changesAfterCollection" class="versionDropped">Changes since collection</small></td>
+        <div v-if="managedSelectedDetails?.teams?.length" class="versionTableScroll"><table class="versionTable teamVersionTable"><thead><tr><th>Language team</th><th>Progress</th><th>Online</th><th>Actions</th></tr></thead><tbody>
+          <tr v-for="team in managedSelectedDetails.teams" :key="team.language" :data-language="team.language" @dblclick="managedOpenTeam(managedSelectedVersion, team, $event)"><td><span class="versionNameLine"><a class="teamEditorLink" href="#table" @click.prevent.stop="managedOpenTeam(managedSelectedVersion, team)" @dblclick.stop :aria-disabled="managedVersionBusy ? 'true' : undefined"><strong>{{ team.language }}</strong></a><span v-if="team.ended" class="versionBadge ended">Ended</span></span><small>{{ team.counts.loaded }} files</small><small v-if="team.changesAfterCollection" class="versionDropped">Changes since collection</small></td>
             <td><div class="versionProgress" :class="{ empty: !managedProgress(team).total }" tabindex="0" role="meter" v-tooltip="managedProgressTooltip(team)" :aria-label="managedProgressTooltip(team)" :aria-valuenow="managedProgress(team).saved" :aria-valuemax="Math.max(1, managedProgress(team).total)" aria-valuemin="0">
               <div class="versionProgressSummary"><strong>{{ managedProgress(team).total ? managedProgress(team).saved + ' / ' + managedProgress(team).total : '—' }}</strong><span v-if="managedProgress(team).total">{{ managedProgress(team).percent }}%</span></div>
               <div class="versionProgressTrack" aria-hidden="true"><span class="saved" :style="{ width: managedProgress(team).savedWidth }"></span><span class="revised" :style="{ width: managedProgress(team).revisedWidth }"></span><span class="missing" :style="{ width: managedProgress(team).missingWidth }"></span></div>
@@ -346,10 +348,10 @@
           </tr></tbody></table></div>
         <p v-else-if="managedDetailsLoading && !managedDetailsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading team details…</p>
         <p v-else-if="managedDetailsLoaded" class="versionMuted">Team details are unavailable.</p>
-        <p v-if="managedVersionDetails?.teams?.length" class="versionMuted">Progress shows Saved / (Missing + Saved). Revised is included in Saved; intentionally blank saves can also be Missing. Collections contain server-accepted Saved files; unsaved drafts and pending offline uploads remain outside the collected ZIP.</p>
+        <p v-if="managedSelectedDetails?.teams?.length" class="versionMuted">Progress shows Saved / (Missing + Saved). Revised is included in Saved; intentionally blank saves can also be Missing. Collections contain server-accepted Saved files; unsaved drafts and pending offline uploads remain outside the collected ZIP.</p>
       </section>
     </section>
-    <div v-if="managedUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!managedVersionBusy && (managedUploadVisible = false)">
+    <div v-if="managedManagerAccess && managedUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!managedVersionBusy && (managedUploadVisible = false)">
       <section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="managerUploadTitle">
         <h2 id="managerUploadTitle">Upload next {{ gameVersionLabel }} version</h2>
         <label for="managerUploadName">Version name</label><input id="managerUploadName" v-model="managedUploadName" :disabled="!!managedUpload || managedVersionBusy">
@@ -391,7 +393,7 @@
         </div>
       </section>
     </div>
-    <div v-if="managedMetadataVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionMetadataTitle">
+    <div v-if="managedManagerAccess && managedMetadataVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionMetadataTitle">
       <h2 id="versionMetadataTitle">Edit version details</h2>
       <label for="versionMetadataName">Version name</label><input id="versionMetadataName" v-model="managedMetadataName">
       <label for="versionMetadataDeadline">Import deadline · New Zealand time</label>
@@ -404,7 +406,7 @@
       <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
       <div class="versionActions"><button @click="saveManagedMetadata" :disabled="managedVersionBusy">Save details</button><button @click="managedMetadataVisible = false" :disabled="managedVersionBusy">Cancel</button></div>
     </section></div>
-    <div v-if="managedRecoveryVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedRecoveryTeam?.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies include removed files and alternatives to existing room or Dropped work. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedRecoveryTeam?.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy">Open current file and history</button></article></section></div>
+    <div v-if="managedRecoveryVisible && managedVisibleRecoveryTeam" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedVisibleRecoveryTeam.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies include removed files and alternatives to existing room or Dropped work. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedVisibleRecoveryTeam.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy">Open current file and history</button></article></section></div>
     <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && !versionChooserVisible && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">

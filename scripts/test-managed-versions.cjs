@@ -206,7 +206,7 @@ test('explicit offline selection lazily reads scoped cached team details without
     async getVersionMetadata(scope) { reads.push(copy(scope)); return { ...scope, details: saved }; },
     async getVersionSource() { throw new Error('Selection must not load source text.'); },
   } });
-  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.cloudSignedIn = false;
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app._cloud = null;
   app.versionChooserVisible = true; app.managedVersionDetails = null;
   app.localVersions = [{ ...storageScope(), catalogVersionId: 'weekly-1', hasSource: true }];
   await app.managedReadDetails('weekly-1');
@@ -216,7 +216,7 @@ test('explicit offline selection lazily reads scoped cached team details without
 
 test('a cached team-details payload with a mismatched source cannot become the selected version facts', async () => {
   const { app } = harness({ storage: { async getVersionMetadata() { return { details: { version: version({ sourceHash: hash('c') }), teams: [team({ ended: true })] } }; } } });
-  app.cloudSignedIn = false; app.managedVersionDetails = null;
+  app._cloud = null; app.managedVersionDetails = null;
   await app.managedReadDetails('weekly-1');
   assert.equal(app.managedVersionDetails, null);
 });
@@ -326,6 +326,123 @@ test('an Offline entry failure from an old account cannot appear in the new scop
   const opening = app.continueOfflineVersion(); await settle();
   app.cloudProfileId = 'bob'; gate.reject(new Error('Old account IndexedDB failed.'));
   assert.equal(await opening, false); assert.equal(app.managedVisibleError, ''); assert.equal(app.versionChooserVisible, true);
+});
+
+test('guest and unassigned translator catalog entry never reads cached managed data while owned local work stays available', async () => {
+  for (const guest of [false, true]) {
+    const forbidden = [], local = [{ ...storageScope({ accountId: guest ? 'guest' : 'alice' }), name: 'My local work', hasSource: true,
+      catalogVersionId: 'weekly-1', details: { version: version(), teams: [team({ recoveries: [{ snapshot: { translations: ['private history'] } }] })] } }];
+    const { app, requests } = harness({ storage: {
+      async listLocalVersions() { return copy(local); },
+      async getVersionCatalog() { forbidden.push('catalog'); return [version()]; },
+      async getVersionUpload() { forbidden.push('upload'); return { id: 'manager-job' }; },
+      async getVersionMetadata() { forbidden.push('details'); return local[0]; },
+    } });
+    app.cloudCanAccessAllLanguages = false; app.cloudUser = { ...app.cloudUser, role: 'translator', language: null };
+    app.cloudSignedIn = !guest; app.cloudProfileId = guest ? 'guest' : 'alice'; app.versionChooserVisible = true;
+    app.managedRecoveryTeam = team({ recoveries: [{ snapshot: { translations: ['hidden'] } }] }); app.managedRecoveryVisible = true;
+    assert.equal(app.managedCatalogAccess, false); assert.equal(app.managedOnlineAvailable, false);
+    assert.equal(app.managedVisibleVersions.length, 0); assert.equal(app.managedSelectedVersion, null);
+    assert.equal(app.managedSelectedDetails, null); assert.equal(app.managedActiveVersion, null); assert.equal(app.managedVisibleRecoveryTeam, null);
+    await app.managedScopeChanged({ deferWorkspace: true });
+    await app.managedReadDetails('weekly-1');
+    assert.deepEqual(forbidden, []); assert.equal(requests.length, 0);
+    assert.equal(app.managedOfflineVersion.name, 'My local work'); assert.equal(app.managedOfflineVersion.hasSource, true);
+    assert.equal(app.localVersions[0].details.teams[0].recoveries[0].snapshot.translations[0], 'private history', 'Owned local evidence is preserved.');
+  }
+});
+
+test('unassigned direct managed handlers cannot read, open, recover, download, mutate or publish cached versions', async () => {
+  const forbidden = [], { app, requests, events } = harness({ storage: {
+    async getVersionMetadata() { forbidden.push('metadata-read'); }, async getVersionSource() { forbidden.push('source-read'); },
+    async getVersionUpload() { forbidden.push('upload-read'); }, async setVersionUpload() { forbidden.push('upload-write'); },
+  }, window: { WebSocket: function () { forbidden.push('socket'); } } });
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.cloudUser.language = null;
+  app.managedUpload = { id: 'old-job', status: 'prepared' }; app.managedDuplicateVersion = version();
+  app.managedMetadataVersion = version(); app.managedRecoveryTeam = team();
+  for (const action of [
+    () => app.managedReadDetails('weekly-1'), () => app.continueManagedVersion(version(), 'Thai'),
+    () => app.managedOpenVersion(version()), () => app.managedOpenTeam(version(), team()),
+    () => app.managedOpenDropped(team()), () => app.managedShowRecoveries(team()), () => app.managedOpenRecoveryFile({ filepath: 'a.txt' }),
+    () => app.managedDownloadOriginal(version()), () => app.managedDownload('/v1/collections/old/archive', 'old.zip'),
+    () => app.managedCollect(team()), () => app.managedDownloadCollection(team({ latestCollection: { id: 'old' } })),
+    () => app.managedDownloadPrevious(team({ collections: [{ id: 'old', downloadReady: true }] }), { target: { value: 'old' } }),
+    () => app.managedReopen(team()), () => app.managedAction('/old/action', {}), () => app.managedWithdraw(version()),
+    () => app.managedRestore(version()), () => app.openManagedMetadata(version()), () => app.saveManagedMetadata(),
+    () => app.openManagedUpload(), () => app.managedOpenDuplicateVersion(), () => app.managedRememberUpload(),
+    () => app.discardManagedUpload(), () => app.prepareManagedUpload(), () => app.publishManagedUpload(), () => app.openManagedPresence('weekly-1'),
+  ]) await action();
+  assert.deepEqual(forbidden, []); assert.equal(requests.length, 0);
+  assert.equal(events.some(event => ['activate', 'import', 'metadata', 'download'].includes(event.type)), false);
+  assert.equal(app.managedUploadVisible, false); assert.equal(app.managedMetadataVisible, false); assert.equal(app.managedRecoveryVisible, false);
+});
+
+test('assignment removal hides cached content immediately, closes presence and rejects late cache and detail responses', async () => {
+  const cache = deferred(), details = deferred(); let closed = 0;
+  const { app, events } = harness({ storage: { getVersionCatalog: () => cache.promise }, request: () => details.promise });
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.versionChooserVisible = true;
+  const initial = app.managedScopeChanged(); await settle();
+  const selection = app.managedReadDetails('weekly-1'); await settle();
+  app._managedPresenceSocket = { close() { closed++; } };
+  app.managedRecoveryTeam = team(); app.managedRecoveryVisible = true;
+  app.cloudUser.language = null;
+  assert.equal(app.managedSelectedVersion, null); assert.equal(app.managedSelectedDetails, null); assert.equal(app.managedVisibleRecoveryTeam, null);
+  app.managedClearCatalogAccess(); assert.equal(closed, 1);
+  cache.resolve([version()]); details.resolve({ versions: [version()], version: version(), teams: [team()] });
+  await Promise.all([initial, selection]);
+  assert.equal(app.managedVersions.length, 0); assert.equal(app.managedVersionDetails, null);
+  assert.equal(app.managedCatalogLoading, false); assert.equal(app.managedDetailsLoading, false);
+  assert.equal(events.some(event => event.type === 'metadata'), false);
+});
+
+test('assignment removal prevents a pending managed download or presence ticket from producing output', async () => {
+  for (const action of ['download', 'presence']) {
+    const gate = deferred(); let sockets = 0;
+    const { app, events } = harness({ request: () => gate.promise, window: { WebSocket: function () { sockets++; } } });
+    app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator';
+    const pending = action === 'download' ? app.managedDownloadOriginal(version()) : app.openManagedPresence('weekly-1');
+    await settle(); app.cloudUser.language = null;
+    gate.resolve(action === 'download' ? { blob: 'private archive' } : { url: 'https://api.example.test/presence' }); await pending;
+    assert.equal(events.some(event => event.type === 'download'), false); assert.equal(sockets, 0);
+  }
+});
+
+test('a revoked translator can continue owned cached work locally without managed metadata, room adoption or source deletion', async () => {
+  const local = { ...storageScope(), name: 'Local alias', hasSource: true, catalogVersionId: 'weekly-1' };
+  const { app, requests, events } = harness();
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.cloudUser.language = null;
+  app.localVersions = [local]; app.versionChooserVisible = true;
+  assert.equal(app.managedImportZipDisabled, false); assert.equal(await app.continueOfflineVersion(), true);
+  assert.equal(app.versionChooserVisible, false); assert.equal(app.sourceIdentity, hash('a'));
+  assert.equal(events.filter(event => event.type === 'activate').length, 1);
+  assert.equal(events.some(event => ['metadata', 'import'].includes(event.type)), false); assert.equal(requests.length, 0);
+  assert.equal(app.localVersions[0].catalogVersionId, 'weekly-1', 'Association stays retained for later authorized access.');
+});
+
+test('an assigned signed profile retains downloaded Online access during network failure, while managers and admins need no assignment', async () => {
+  const saved = { version: version(), teams: [team({ ended: true }), team({ language: 'German' })] };
+  const { app } = harness({ storage: { async getVersionMetadata() { return { ...storageScope(), details: saved }; } } });
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app._cloud = null;
+  app.managedVersionDetails = null; app.versionChooserVisible = true;
+  assert.equal(app.managedCatalogAccess, true); assert.equal(app.managedOnlineAvailable, false); assert.equal(app.managedVisibleVersions.length, 1);
+  await app.managedReadDetails('weekly-1'); assert.equal(app.managedSelectedDetails.teams.length, 1);
+  assert.equal(await app.continueManagedVersion(version(), 'Thai'), true);
+  for (const role of ['manager', 'admin']) {
+    const current = harness(); current.app.cloudUser.role = role; current.app.cloudUser.language = null;
+    assert.equal(current.app.managedCatalogAccess, true); assert.equal(current.app.managedManagerAccess, true);
+    await current.app.managedReadDetails('weekly-1'); assert.equal(current.app.managedSelectedDetails.teams.length, 1);
+    current.app.openManagedMetadata(version()); assert.equal(current.app.managedMetadataVisible, true);
+  }
+});
+
+test('managed chooser templates gate cached tables, team details and recovery dialogs by current catalog access', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  assert.match(html, /<template v-if="managedCatalogAccess">[\s\S]*?onlineVersionTable/);
+  assert.match(html, /v-else-if="!managedCatalogAccess"[^>]*>Your account needs a team language assignment/);
+  assert.match(html, /v-if="managedCatalogAccess && managedSelectedVersion"/);
+  assert.match(html, /v-for="team in managedSelectedDetails\.teams"/);
+  assert.match(html, /v-if="managedManagerAccess && managedUploadVisible"/);
+  assert.match(html, /v-if="managedRecoveryVisible && managedVisibleRecoveryTeam"/);
 });
 
 test('weekly defaults use the New Zealand upload date and strictly following Monday at 09:00', () => {

@@ -4,7 +4,7 @@ SDEditor separates PoE1 and PoE2, and retains named source versions within each 
 
 ## Selecting A Version
 
-When the app opens, choose **PoE1** or **PoE2**, then use **Versions** to choose a source workspace. **Online** lists manager-published versions with HEAD first. Selecting a row shows the authorized language teams' Missing, Saved, Revised and Dropped counts, translation-window state and online participants. Managers/Admins see all 12 teams and can open any team's editor. Translators see their assigned team.
+When the app opens, choose **PoE1** or **PoE2**, then use **Versions** to choose a source workspace. **Online** lists manager-published versions with HEAD first for assigned Translators and Managers/Admins. Unassigned Translators cannot see the managed list or cached managed details; their local Offline workflow remains available. Selecting a row shows the authorized language teams' Missing, Saved, Revised and Dropped counts, translation-window state and online participants. Managers/Admins see all 12 teams and can open any team's editor without an assignment. Translators see their assigned team.
 
 **Offline** retains the existing local workflow: import the previous ZIP, import the next/update ZIP, or import translated work. Give the standalone workspace a local name with **Save name**. A published version already downloaded into this browser can also be opened while disconnected; details may reflect the last cached server state. An uncached online version must be downloaded while connected first.
 

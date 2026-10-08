@@ -30,7 +30,7 @@ async function run() {
   const config = loadConfig({ ADMIN_GOOGLE_SUB: 'fixture-admin', FRONTEND_ORIGIN: origin,
     API_PUBLIC_URL: 'http://127.0.0.1:1', DATA_DIR: directory, DATABASE_PATH: ':memory:' });
   const database = openDatabase(':memory:'), store = new CloudStore(database, config);
-  for (const account of ['admin', 'manager', 'thai']) store.registerIdentity({ sub: 'fixture-' + account,
+  for (const account of ['admin', 'manager', 'thai', 'unassigned']) store.registerIdentity({ sub: 'fixture-' + account,
     email: account + '@fixture.example', name: 'Fixture ' + account });
   store.assignRole('fixture-admin', 'fixture-manager', 'manager');
   store.assignLanguage('fixture-admin', 'fixture-thai', 'Thai');
@@ -48,7 +48,7 @@ async function run() {
   const apiOrigin = 'http://127.0.0.1:' + apiServer.address().port;
   frontend.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   frontend.post('/fixture/session/:account', (req, res) => {
-    if (req.get('X-Fixture-Key') !== secret || !['manager', 'thai'].includes(req.params.account)) return res.sendStatus(403);
+    if (req.get('X-Fixture-Key') !== secret || !['admin', 'manager', 'thai', 'unassigned'].includes(req.params.account)) return res.sendStatus(403);
     res.json(store.createSession('fixture-' + req.params.account));
   });
   frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8')
@@ -205,6 +205,47 @@ async function run() {
       return vm.sourceLoaded && vm.sourceIdentity === sourceHash && vm.lang === language
         && !vm.managedVersionBusy && !vm.versionStorageLoading && !vm.versionChooserVisible;
     }, { sourceHash: version.sourceHash, language });
+    const managedApiProbes = (page, versionId, collectionId) => page.evaluate(async ({ versionId, collectionId }) => {
+      const vm = window.__managedFixtureApp, token = vm._cloud.context().token;
+      const routes = [
+        ['GET', '/v1/versions?game=poe2&branchId=default'],
+        ['GET', '/v1/versions/' + versionId],
+        ['GET', '/v1/versions/' + versionId + '/original'],
+        ['GET', '/v1/versions/' + versionId + '/presence'],
+        ['POST', '/v1/versions/' + versionId + '/ticket'],
+        ...(collectionId ? [['GET', '/v1/collections/' + collectionId], ['GET', '/v1/collections/' + collectionId + '/archive']] : []),
+      ];
+      return Promise.all(routes.map(async ([method, path]) => {
+        // Raw authenticated requests prove the server gate without refreshing the SDK's cached permissions.
+        const response = await fetch(vm._cloud.apiBase + path, { method, headers: { Authorization: 'Bearer ' + token,
+          ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body: '{}' } : {}) });
+        const data = response.headers.get('Content-Type')?.includes('json') ? await response.json() : (await response.arrayBuffer(), null);
+        return { method, path, status: response.status, code: data?.error?.code || null };
+      }));
+    }, { versionId, collectionId });
+    const checkManagedDenied = async (page, phase) => {
+      await page.getByRole('region', { name: 'Source versions' }).waitFor();
+      await page.waitForFunction(() => {
+        const vm = window.__managedFixtureApp;
+        return vm.cloudSignedIn && !vm.cloudUser?.language && !vm.managedCatalogAccess && !vm.managedOnlineAvailable
+          && vm.managedLocalVersionsLoaded && !vm.managedLocalVersionsLoading;
+      });
+      assert.equal(await page.locator('.onlineVersionTable tbody tr').count(), 0, phase + ': cached Online rows are hidden');
+      assert.equal(await page.locator('.versionDetails').count(), 0, phase + ': no team details or metadata');
+      assert.equal(await page.locator('.onlineVersions').getByRole('button', { name: 'Download original ZIP', exact: true }).count(), 0,
+        phase + ': no archive actions');
+      assert.match(await page.locator('.onlineVersions').textContent(), /needs a team language assignment/);
+      assert.equal(await page.getByRole('region', { name: 'Offline workspace' }).count(), 1, phase + ': Offline work remains available');
+      const access = await page.evaluate(() => {
+        const vm = window.__managedFixtureApp;
+        return { visible: vm.managedVisibleVersions.length, selected: vm.managedSelectedVersion, active: vm.managedActiveVersion,
+          presenceOpen: !!vm._managedPresenceSocket, profile: vm.cloudProfileId, role: vm.cloudUser?.role };
+      });
+      assert.equal(access.visible, 0); assert.equal(access.selected, null); assert.equal(access.active, null);
+      assert.equal(access.presenceOpen, false, phase + ': aggregate presence is disconnected');
+      assert.equal(access.role, 'translator');
+      return access;
+    };
     const checkPrimary = async target => {
       const style = await target.evaluate(element => {
         const probe = document.createElement('i'); probe.style.backgroundColor = 'var(--ui-accent)'; document.body.append(probe);
@@ -696,6 +737,102 @@ async function run() {
     await olderRow.locator('td').first().locator('small').first().dblclick(); await acceptEntryWarning(translator);
     await waitWorkspace(translator, version, 'Thai');
     results.push('Online single-select and translator double-click/name/primary entry, exact-language team links and double-click, manager no-language assumption, compact keyboard/pointer actions, and canceled non-HEAD/ended warnings');
+    const collectionId = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai').latestCollection.id;
+    const privilegedState = await manager.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      return { role: vm.cloudUser.role, language: vm.cloudUser.language, access: vm.managedOnlineAvailable };
+    });
+    assert.equal(privilegedState.role, 'manager'); assert.equal(privilegedState.language, null); assert.equal(privilegedState.access, true);
+    for (const probe of await managedApiProbes(manager, version.id, collectionId)) assert.equal(probe.status, 200, 'Unassigned manager: ' + probe.path);
+    const adminContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
+    const admin = await adminContext.newPage(); admin.on('pageerror', error => failures.push(error.message));
+    await bootstrap(admin, 'admin');
+    await admin.waitForFunction(() => window.__managedFixtureApp.managedVisibleVersions.length === 2);
+    const adminState = await admin.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      return { role: vm.cloudUser.role, language: vm.cloudUser.language, access: vm.managedOnlineAvailable };
+    });
+    assert.equal(adminState.role, 'admin'); assert.equal(adminState.language, null); assert.equal(adminState.access, true);
+    for (const probe of await managedApiProbes(admin, version.id, collectionId)) assert.equal(probe.status, 200, 'Unassigned admin: ' + probe.path);
+    const unassignedContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
+    const unassigned = await unassignedContext.newPage(); unassigned.on('pageerror', error => failures.push(error.message));
+    await bootstrap(unassigned, 'unassigned');
+    await checkManagedDenied(unassigned, 'Fresh authenticated unassigned translator');
+    for (const probe of await managedApiProbes(unassigned, version.id, collectionId)) {
+      assert.equal(probe.status, 403, 'Unassigned translator: ' + probe.path); assert.equal(probe.code, 'LANGUAGE_UNASSIGNED');
+    }
+    const existingCatalog = await manager.evaluate(() => JSON.parse(JSON.stringify(window.__managedFixtureApp.managedVersions)));
+    await unassigned.evaluate(async catalog => {
+      const vm = window.__managedFixtureApp;
+      // Recovery caches must remain stored even when their owner no longer has catalog permission.
+      await OfflineStore.setVersionCatalog(vm.managedWorkspaceScope(''), catalog);
+      await vm.managedScopeChanged({ deferWorkspace: true });
+    }, existingCatalog);
+    await checkManagedDenied(unassigned, 'Unassigned translator with retained catalog cache');
+    assert.equal(await unassigned.evaluate(async () => (await OfflineStore.getVersionCatalog(window.__managedFixtureApp.managedWorkspaceScope(''))).length), 2);
+    await unassigned.screenshot({ path: join(directory, 'unassigned-translator.png'), fullPage: true });
+    await importOffline(unassigned);
+    const unassignedLocal = await unassigned.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      return { hash: vm.collaborationExportHash.slice(0, 12), managed: vm.managedActiveVersion,
+        catalogId: vm.managedStatusLocalVersion?.catalogVersionId, signedIn: vm.cloudSignedIn, role: vm.cloudUser.role };
+    });
+    assert.equal(unassignedLocal.signedIn, true); assert.equal(unassignedLocal.role, 'translator');
+    assert.equal(unassignedLocal.managed, null); assert.equal(unassignedLocal.catalogId || '', '');
+    await checkStatusVersion(unassigned, unassignedLocal.hash);
+    results.push('Unassigned Manager/Admin retain catalog, original, collection and presence access; authenticated unassigned translators receive LANGUAGE_UNASSIGNED for all raw managed API probes and cannot adopt a matching Offline import');
+    await openStatusChooser(translator);
+    await translator.waitForFunction(() => window.__managedFixtureApp._managedPresenceSocket?.readyState === WebSocket.OPEN);
+    const retainedBefore = await translator.evaluate(async sourceHash => {
+      const vm = window.__managedFixtureApp, scope = vm.managedWorkspaceScope(sourceHash);
+      window.__managedRevokedPresence = vm._managedPresenceSocket;
+      const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+      return { catalogIds: (await OfflineStore.getVersionCatalog(scope)).map(version => version.id).sort(),
+        saved: workspace.staged.Thai['fixture/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
+        metadataCatalogId: (await OfflineStore.getVersionMetadata(scope)).catalogVersionId };
+    }, version.sourceHash);
+    const removed = await admin.evaluate(async () => {
+      const user = await window.__managedFixtureApp._cloud.assignLanguage('fixture-thai', null);
+      return { id: user.id, language: user.language };
+    });
+    assert.deepEqual(removed, { id: 'fixture-thai', language: null });
+    for (const probe of await managedApiProbes(translator, version.id, collectionId)) {
+      assert.equal(probe.status, 403, 'Removed assignment with same session: ' + probe.path); assert.equal(probe.code, 'LANGUAGE_UNASSIGNED');
+    }
+    const revokedRequest = await translator.evaluate(async () => {
+      const vm = window.__managedFixtureApp;
+      let rejected;
+      try { await vm._cloud.request('/v1/versions?game=poe2&branchId=default'); }
+      catch (error) { rejected = { status: error.status, code: error.code }; }
+      await vm._cloudApplyPending;
+      return rejected;
+    });
+    assert.deepEqual(revokedRequest, { status: 403, code: 'LANGUAGE_UNASSIGNED' }, 'Real CloudSync 403 path learns revoked access');
+    await translator.waitForFunction(() => {
+      const vm = window.__managedFixtureApp;
+      return vm.cloudSignedIn && vm.cloudUser?.language === null && !vm.managedCatalogAccess;
+    });
+    await translator.evaluate(() => window.__managedFixtureApp.showVersionChooser());
+    await checkManagedDenied(translator, 'Known assignment removal in the existing cached profile');
+    await translator.waitForFunction(() => window.__managedRevokedPresence?.readyState === WebSocket.CLOSED);
+    const retainedAfter = await translator.evaluate(async sourceHash => {
+      const scope = window.__managedFixtureApp.managedWorkspaceScope(sourceHash), workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+      return { catalogIds: (await OfflineStore.getVersionCatalog(scope)).map(version => version.id).sort(),
+        saved: workspace.staged.Thai['fixture/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
+        metadataCatalogId: (await OfflineStore.getVersionMetadata(scope)).catalogVersionId };
+    }, version.sourceHash);
+    assert.deepEqual(retainedAfter, retainedBefore, 'Revocation hides shared data without deleting local recovery caches, baseline or Saved work');
+    await translator.route(apiOrigin + '/**', route => route.abort());
+    await translator.reload(); await translator.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady);
+    await installCatalogCounters(translator);
+    await translator.getByRole('button', { name: 'PoE2 Path of Exile 2', exact: true }).click();
+    const revokedAccess = await checkManagedDenied(translator, 'API-offline reload after known assignment removal');
+    assert.equal(revokedAccess.profile, 'fixture-thai', 'Revocation retains the authenticated account profile');
+    assert.equal(await translator.evaluate(async () => (await OfflineStore.getVersionCatalog(window.__managedFixtureApp.managedWorkspaceScope(''))).length), 2,
+      'The same profile still holds its catalog cache, which remains inaccessible');
+    await assertMetadataOnly(translator, 'Unassigned translator catalog entry after offline reload');
+    await translator.screenshot({ path: join(directory, 'assignment-removed-cached.png'), fullPage: true });
+    results.push('Real Admin assignment removal denies the same translator token, closes aggregate presence, hides cached catalog/team details, preserves local work, and keeps the known denial after API-offline reload');
     assert.deepEqual(failures, [], 'Browser script errors');
     console.log(JSON.stringify({ status: 'PASS', normalMode: true, browser: executablePath, results }, null, 2));
   } finally {

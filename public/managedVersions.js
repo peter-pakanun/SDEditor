@@ -70,15 +70,25 @@
       managedRecoveryVisible: false, managedRecoveryTeam: null }; },
     computed: {
       managedDeadlineWeekdays() { return ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']; },
-      managedOnlineAvailable() { return !this.testMode && this.cloudSignedIn && !!this._cloud && !!(this.cloudCanAccessAllLanguages || this.cloudUser?.language); },
+      managedCatalogAccess() {
+        const profile = this.cloudProfileId || this.cloudUser?.id;
+        return !this.testMode && this.cloudSignedIn && !!profile && profile !== 'guest'
+          && !!(this.cloudCanAccessAllLanguages || ['manager', 'admin'].includes(this.cloudUser?.role)
+            || this.cloudUser?.role === 'translator' && this.cloudUser.language && this.cloudUser.language !== 'all');
+      },
+      managedManagerAccess() { return this.managedCatalogAccess && !!this.cloudCanAccessAllLanguages; },
+      managedOnlineAvailable() { return this.managedCatalogAccess && !!this._cloud; },
       managedSingleLanguage() {
         return !this.cloudCanAccessAllLanguages && !['manager', 'admin'].includes(this.cloudUser?.role) ? this.cloudUser?.language || '' : '';
       },
-      managedSingleLanguageAccess() { return !!this.managedSingleLanguage; },
-      managedCatalogScope() { return JSON.stringify([this.cloudProfileId || 'guest', this.cloudSignedIn, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudUser?.language, this.gameVersion, this.branchId]); },
-      managedVisibleVersions() { return this.managedVersions.filter(v => this.managedShowWithdrawn || v.status !== 'withdrawn').slice().sort((a, b) => Number(b.isHead) - Number(a.isHead) || String(b.createdAt).localeCompare(String(a.createdAt))); },
-      managedSelectedVersion() { return (this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedVersionDetails.version : null) || this.managedVersions.find(v => v.id === this.selectedManagedVersionId) || null; },
+      managedSingleLanguageAccess() { return this.managedCatalogAccess && !!this.managedSingleLanguage; },
+      managedCatalogScope() { return JSON.stringify([this.cloudProfileId || 'guest', this.cloudSignedIn, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudUser?.language, this.cloudUser?.isAdmin, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId]); },
+      managedVisibleVersions() { return this.managedCatalogAccess ? this.managedVersions.filter(v => this.managedShowWithdrawn || v.status !== 'withdrawn').slice().sort((a, b) => Number(b.isHead) - Number(a.isHead) || String(b.createdAt).localeCompare(String(a.createdAt))) : []; },
+      managedSelectedVersion() { return this.managedCatalogAccess ? (this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedVersionDetails.version : null) || this.managedVersions.find(v => v.id === this.selectedManagedVersionId) || null : null; },
+      managedSelectedDetails() { return this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedScopedDetails(this.managedVersionDetails) : null; },
+      managedVisibleRecoveryTeam() { return this.managedCatalogAccess && (this.cloudCanAccessAllLanguages || this.managedRecoveryTeam?.language === this.managedSingleLanguage) ? this.managedRecoveryTeam : null; },
       managedActiveVersion() {
+        if (!this.managedCatalogAccess) return null;
         const matches = v => v?.sourceHash === this.sourceIdentity && v.branchId === this.branchId;
         return this.managedVersions.find(matches) || (matches(this.managedActiveDetails?.version) ? this.managedActiveDetails.version : null)
           || (() => { const local = this.localVersions.find(v => matches(v) && v.catalogVersionId); return local?.catalogVersion || local?.details?.version; })() || null;
@@ -90,7 +100,7 @@
         const details = this.managedActiveDetails?.version?.id === version.id ? this.managedActiveDetails
           : this.managedVersionDetails?.version?.id === version.id ? this.managedVersionDetails
           : this.localVersions.find(v => v.sourceHash === version.sourceHash && v.branchId === version.branchId)?.details;
-        return details?.teams?.find(team => team.language === this.lang) || null;
+        return this.managedScopedDetails(details)?.teams?.find(team => team.language === this.lang) || null;
       },
       managedStatusLocalVersion() {
         if (!this.sourceIdentity) return null;
@@ -100,7 +110,7 @@
           && (!version.accountId || version.accountId === accountId)) || null;
       },
       managedImportZipDisabled() {
-        return !!(this.managedActiveVersion || this.managedStatusLocalVersion?.catalogVersionId);
+        return this.managedCatalogAccess && !!(this.managedActiveVersion || this.managedStatusLocalVersion?.catalogVersionId);
       },
       managedStatusName() {
         const currentLocalName = this.localDescs?.sourceHash === this.sourceIdentity ? this.localDescs.versionName : '';
@@ -127,11 +137,14 @@
         lines.push('Open source versions.');
         return lines.filter(Boolean).join('\n');
       },
-      managedOfflineVersion() { return this.localVersions.filter(v => !v.catalogVersionId && !this.managedVersions.some(m => m.sourceHash === v.sourceHash)).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null; },
+      managedOfflineVersion() { return this.localVersions.filter(v => this.managedCatalogAccess
+        ? !v.catalogVersionId && !this.managedVersions.some(m => m.sourceHash === v.sourceHash)
+        : !v.catalogVersionId || v.hasSource).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null; },
       managedUploadGroups() { return this.managedUpload?.duplicateGroups || []; },
       managedVisibleError() { return [this.managedVersionError, ...Object.values(this.managedOperationErrors)].filter(Boolean).join('\n'); },
     },
     watch: {
+      managedCatalogAccess(access) { if (!access) this.managedClearCatalogAccess(); },
       managedCatalogScope() { this.managedScopeChanged(); },
       sourceIdentity() {
         this.syncManagedWorkspaceScope();
@@ -167,6 +180,18 @@
       document.removeEventListener('scroll', this._managedMenuMove, true); root.removeEventListener('resize', this._managedMenuMove);
     },
     methods: {
+      managedClearCatalogAccess() {
+        this.closeManagedPresence(); this._managedDetailRun = (this._managedDetailRun || 0) + 1;
+        this._managedOperation = null; this._managedActivation = null; this.managedVersionBusy = false; this.clearBrowserWork?.('versions');
+        this.managedVersions = []; this.managedBranch = null; this.selectedManagedVersionId = ''; this.activeManagedVersionId = '';
+        this.managedVersionDetails = null; this.managedActiveDetails = null; this.managedDuplicateVersion = null;
+        this.managedUploadVisible = false; this.managedMetadataVisible = false; this.managedRecoveryVisible = false;
+        this.managedRecoveryTeam = null; this.managedMetadataVersion = null; this.managedUpload = null;
+        this.managedUploadFile = null; this.managedUploadError = ''; this._managedCreateId = null; this._managedPublishId = null;
+        this.managedCatalogLoading = false; this.managedDetailsLoading = false;
+        this.managedVersionError = ''; this.managedOperationErrors = Object.fromEntries(Object.entries(this.managedOperationErrors)
+          .filter(([operation]) => ['offline-entry', 'local-versions'].includes(operation)));
+      },
       managedDeadlineWeekday: deadlineWeekday,
       managedNextWeekDeadline: nextWeekDeadline,
       managedCloseVersionMenus(except, returnFocus) {
@@ -224,7 +249,7 @@
         this._managedOperation = null; this._managedActivation = null; this.managedVersionBusy = false; this.clearBrowserWork?.('versions');
       },
       managedScopedDetails(details) {
-        if (!details) return details;
+        if (!this.managedCatalogAccess || !details) return null;
         return { ...details, teams: (details.teams || []).filter(team => this.cloudCanAccessAllLanguages || team.language === this.cloudUser?.language) };
       },
       managedWorkspaceScope(sourceHash = this.sourceIdentity) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || DEFAULT_BRANCH, sourceHash: sourceHash || '' }; },
@@ -277,16 +302,18 @@
         this._managedCatalogOwner = owner;
         const revision = this._managedCatalogRevision || 0;
         const cache = (async () => {
+          if (!this.managedCatalogAccess) return;
           try {
             const cached = await root.OfflineStore.getVersionCatalog(this.managedWorkspaceScope(''));
-            if (run === this._managedScopeRun && key === this.managedCatalogScope && revision === (this._managedCatalogRevision || 0) && cached?.length) {
+            if (this.managedCatalogAccess && run === this._managedScopeRun && key === this.managedCatalogScope && revision === (this._managedCatalogRevision || 0) && cached?.length) {
               this.managedVersions = cached; this.managedCatalogLoaded = true; this.managedCatalogLoading = false;
             }
           } catch (_) { /* A missing cache does not prevent local editing. */ }
         })();
         const upload = (async () => {
+          if (!this.managedManagerAccess) return;
           const savedUpload = await root.OfflineStore.getVersionUpload?.(this.managedWorkspaceScope(''));
-          if (run !== this._managedScopeRun || key !== this.managedCatalogScope || !savedUpload || !this.cloudCanAccessAllLanguages) return;
+          if (run !== this._managedScopeRun || key !== this.managedCatalogScope || !savedUpload || !this.managedManagerAccess) return;
           this._managedCreateId = savedUpload.createRequestId; this._managedPublishId = savedUpload.publishRequestId;
           this.managedUpload = savedUpload.id ? savedUpload : null; this.managedUploadName = savedUpload.name; this.managedUploadDeadline = deadlineInput(savedUpload.deadlineAt);
         })();
@@ -319,7 +346,7 @@
         this.managedCatalogLoading = !this.managedCatalogLoaded;
         try {
           const result = await cloud.request('/v1/versions?' + new URLSearchParams({ game: this.gameVersion, branchId: this.branchId, ...(this.cloudCanAccessAllLanguages ? { includeWithdrawn: '1' } : {}) }));
-          if (key !== this.managedCatalogScope || cloud !== this._cloud) return;
+          if (!this.managedCatalogAccess || key !== this.managedCatalogScope || cloud !== this._cloud) return;
           this.managedBranch = result.branch; this.managedVersions = result.versions || []; this.managedVersionsUnavailable = false;
           this._managedCatalogRevision = (this._managedCatalogRevision || 0) + 1;
           this.managedCatalogLoaded = true; this.managedCatalogLoading = false;
@@ -341,7 +368,7 @@
         } finally { if (this._managedRefreshPending === refresh) { this._managedRefreshPending = null; if (key === this.managedCatalogScope) this.managedCatalogLoading = false; } }
       },
       async managedAssociateActive() {
-        if (this.versionChooserVisible || !this.sourceIdentity || !this.gameVersion || !root.OfflineStore?.setVersionMetadata) return;
+        if (!this.managedCatalogAccess || this.versionChooserVisible || !this.sourceIdentity || !this.gameVersion || !root.OfflineStore?.setVersionMetadata) return;
         const version = this.managedActiveVersion;
         if (!version) { this.activeManagedVersionId = ''; this.managedActiveDetails = null; return; }
         const scope = this.managedWorkspaceScope(), key = this.managedCatalogScope;
@@ -349,13 +376,14 @@
         if (key === this.managedCatalogScope && scope.sourceHash === this.sourceIdentity) this.activeManagedVersionId = version.id;
       },
       async managedReadDetails(versionId, explicit = true) {
+        if (!this.managedCatalogAccess) { this.managedClearCatalogAccess(); return false; }
         const key = this.managedCatalogScope;
         if (!explicit && this._managedDetailPending?.key === key && this._managedDetailPending.id === versionId) return;
         const generation = this._managedDetailRun = (this._managedDetailRun || 0) + 1;
         if (explicit) this.selectedManagedVersionId = versionId;
         if (this.selectedManagedVersionId !== versionId) return;
         const request = this._managedDetailPending = { key, id: versionId };
-        const current = () => key === this.managedCatalogScope && generation === this._managedDetailRun
+        const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && generation === this._managedDetailRun
           && this.selectedManagedVersionId === versionId && request === this._managedDetailPending;
         if (this.managedVersionDetails?.version?.id !== versionId) {
           const scope = this.managedWorkspaceScope('');
@@ -429,6 +457,7 @@
         return this.continueManagedVersion(version, team.language);
       },
       managedDetailsForVersion(version) {
+        if (!this.managedCatalogAccess) return null;
         const matches = details => this.managedDetailsMatchVersion(details, version);
         if (matches(this.managedVersionDetails)) return this.managedScopedDetails(this.managedVersionDetails);
         if (matches(this.managedActiveDetails)) return this.managedScopedDetails(this.managedActiveDetails);
@@ -499,7 +528,7 @@
         await this.managedAssociateActive(); await this.managedRefreshActive(); return true;
       },
       async continueManagedVersion(version = this.managedSelectedVersion, language) {
-        if (!version || this.managedVersionBusy) return;
+        if (!this.managedCatalogAccess || !version || this.managedVersionBusy) return false;
         if (version.game !== this.gameVersion || (version.branchId || DEFAULT_BRANCH) !== this.branchId) {
           this.managedSetOperationError('open', 'Select a source version in the current game and branch.'); return false;
         }
@@ -509,7 +538,7 @@
         }
         const scope = this.managedWorkspaceScope(version.sourceHash), key = this.managedCatalogScope;
         const operation = this.managedBeginOperation({ key: 'open', label: 'Preparing selected source version' });
-        const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
+        const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && operation === this._managedOperation;
         try {
           if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
           if (!current()) return;
@@ -586,14 +615,19 @@
         finally { this.managedFinishOperation(operation); }
       },
       async managedOpenDropped(team) {
+        if (!this.managedCatalogAccess || !team) return false;
         const version = this.managedSelectedVersion, key = this.managedCatalogScope;
         if (await this.continueManagedVersion(version, team.language) && key === this.managedCatalogScope
           && this.sourceIdentity === version.sourceHash && this.lang === team.language) {
           this.selectedFileFilters = ['dropped']; this.searchText = ''; this.applyFileSearch();
         }
       },
-      managedShowRecoveries(team) { this.managedRecoveryTeam = team; this.managedRecoveryVisible = true; },
+      managedShowRecoveries(team) {
+        if (!this.managedCatalogAccess || !team || !this.cloudCanAccessAllLanguages && team.language !== this.managedSingleLanguage) return false;
+        this.managedRecoveryTeam = team; this.managedRecoveryVisible = true;
+      },
       async managedOpenRecoveryFile(reference) {
+        if (!this.managedCatalogAccess) return false;
         const key = this.managedCatalogScope, version = this.managedSelectedVersion, team = this.managedRecoveryTeam;
         if (!version || !team || !await this.continueManagedVersion(version, team.language)) return;
         if (key !== this.managedCatalogScope || this.sourceIdentity !== version.sourceHash || this.lang !== team.language) return;
@@ -670,15 +704,16 @@
         return this._managedWarnPending;
       },
       async managedDownload(path, name) {
+        if (!this.managedOnlineAvailable) return false;
         const key = this.managedCatalogScope;
-        try { const blob = await this._cloud.request(path, { responseType: 'blob', timeout: 120000 }); if (key === this.managedCatalogScope) { root.saveAs(blob, name); this.managedSetOperationError(path, ''); return true; } }
+        try { const blob = await this._cloud.request(path, { responseType: 'blob', timeout: 120000 }); if (this.managedCatalogAccess && key === this.managedCatalogScope) { root.saveAs(blob, name); this.managedSetOperationError(path, ''); return true; } }
         catch (error) { if (!error.stale && key === this.managedCatalogScope) this.managedSetOperationError(path, error); }
         return false;
       },
       managedDownloadOriginal(version = this.managedSelectedVersion) { if (version) return this.managedDownload('/v1/versions/' + encodeURIComponent(version.id) + '/original', filename(version.name) + '_StatDescriptions.zip'); },
       async managedCollect(team, endWindow = true) {
         const version = this.managedSelectedVersion, key = this.managedCatalogScope;
-        if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         const action = endWindow ? (team.counts.saved ? 'Download and mark ended' : 'Mark ended — no saved files') : 'Download only';
         const errorKey = endWindow ? 'collect' : 'downloadOnly';
         const operation = this.managedBeginOperation();
@@ -718,15 +753,16 @@
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); }
         finally { this.managedFinishOperation(operation); }
       },
-      managedDownloadCollection(team) { if (team.latestCollection?.id) return this.managedDownload('/v1/collections/' + encodeURIComponent(team.latestCollection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip'); },
+      managedDownloadCollection(team) { if (this.managedManagerAccess && this.managedSelectedVersion && team.latestCollection?.id) return this.managedDownload('/v1/collections/' + encodeURIComponent(team.latestCollection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip'); },
       managedDownloadPrevious(team, event) {
+        if (!this.managedManagerAccess || !this.managedSelectedVersion) return false;
         const collection = team.collections?.find(c => c.id === event.target.value);
         event.target.value = '';
         if (collection?.downloadReady) return this.managedDownload('/v1/collections/' + encodeURIComponent(collection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip');
       },
-      async managedReopen(team) { await this.managedAction('/v1/versions/' + encodeURIComponent(this.managedSelectedVersion.id) + '/teams/' + encodeURIComponent(team.language) + '/reopen', {}); },
+      async managedReopen(team) { if (this.managedManagerAccess && this.managedSelectedVersion) await this.managedAction('/v1/versions/' + encodeURIComponent(this.managedSelectedVersion.id) + '/teams/' + encodeURIComponent(team.language) + '/reopen', {}); },
       async managedAction(path, body) {
-        if (this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (this.managedVersionBusy || !this.managedManagerAccess) return;
         const key = this.managedCatalogScope, operation = this.managedBeginOperation();
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try { await this._cloud.request(path, { method: 'POST', body: { ...body, idempotencyKey: id() } }); if (current()) { this.managedSetOperationError(path, ''); await this.refreshManagedVersions(); } }
@@ -734,7 +770,7 @@
         finally { this.managedFinishOperation(operation); }
       },
       async managedWithdraw(version = this.managedSelectedVersion) {
-        if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         const key = this.managedCatalogScope, requestId = id(), path = '/v1/versions/' + encodeURIComponent(version.id) + '/withdraw';
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try {
@@ -751,23 +787,24 @@
         finally { this.managedFinishOperation(operation); }
       },
       managedRestore(version) {
+        if (!this.managedManagerAccess || !version) return false;
         const head = this.managedBranch?.headVersionId ?? null;
         return this.managedAction('/v1/versions/' + encodeURIComponent(version.id) + '/restore', { setHead: head === null, expectedHeadId: head });
       },
       openManagedMetadata(version = this.managedSelectedVersion) {
-        if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         this.managedMetadataVersion = copy(version); this.managedMetadataName = version.name;
         this.managedMetadataDeadline = deadlineInput(version.deadlineAt); this.managedMetadataVisible = true;
       },
       async saveManagedMetadata() {
-        const version = this.managedMetadataVersion || this.managedSelectedVersion, key = this.managedCatalogScope; if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        const version = this.managedMetadataVersion || this.managedSelectedVersion, key = this.managedCatalogScope; if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try { await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id), { method: 'PATCH', body: { name: this.managedMetadataName.trim(), deadlineAt: parseDeadline(this.managedMetadataDeadline), expectedRevision: version.revision, idempotencyKey: id() } }); if (current()) { this.managedSetOperationError('metadata', ''); this.managedMetadataVisible = false; await this.refreshManagedVersions(); } }
         catch (error) { if (!error.stale && current()) this.managedSetOperationError('metadata', error); }
         finally { this.managedFinishOperation(operation); }
       },
       async openManagedUpload() {
-        if (this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (this.managedVersionBusy || !this.managedManagerAccess) return;
         if (!this.managedUpload && !this._managedCreateId) { const d = defaults(this.gameVersion); this.managedUploadName = d.name; this.managedUploadDeadline = deadlineInput(d.deadlineAt); this.managedUploadFile = null; this.managedUploadBytes = 0; this.managedDuplicateChoices = {}; }
         this.managedUploadVisible = true; this.managedUploadError = ''; this.managedDuplicateVersion = null;
         if (!this.managedUpload?.id || !this.managedOnlineAvailable) return;
@@ -785,6 +822,7 @@
         finally { this.managedFinishOperation(operation); }
       },
       async managedCompletePublication(scope, result, key = this.managedCatalogScope, stillCurrent = () => true) {
+        if (!this.managedManagerAccess || key !== this.managedCatalogScope || !stillCurrent()) return false;
         const versionId = result.version?.id || result.upload?.publishedVersionId;
         if (!versionId) throw new Error('The published version acknowledgement is incomplete. Retry the same upload.');
         await root.OfflineStore.setVersionUpload?.(scope, null);
@@ -795,6 +833,7 @@
         return true;
       },
       async managedOpenDuplicateVersion() {
+        if (!this.managedManagerAccess) return false;
         const version = this.managedDuplicateVersion;
         if (!version) return;
         this.managedUploadVisible = false; this.versionChooserVisible = true;
@@ -802,6 +841,7 @@
         await this.managedReadDetails(version.id);
       },
       managedRememberUpload(scope = this.managedWorkspaceScope('')) {
+        if (!this.managedManagerAccess) return;
         const upload = this.managedUpload;
         return root.OfflineStore.setVersionUpload?.(scope, { id: upload?.id || null, game: scope.game, branchId: scope.branchId,
           name: upload?.name || this.managedUploadName, deadlineAt: upload?.deadlineAt || parseDeadline(this.managedUploadDeadline),
@@ -809,16 +849,16 @@
           createRequestId: this._managedCreateId, publishRequestId: this._managedPublishId });
       },
       async discardManagedUpload() {
-        if (this.managedVersionBusy) return;
+        if (this.managedVersionBusy || !this.managedManagerAccess) return;
         const key = this.managedCatalogScope;
         await root.OfflineStore.setVersionUpload?.(this.managedWorkspaceScope(''), null);
         if (key !== this.managedCatalogScope) return;
         this.managedUpload = null; this.managedUploadFile = null; this._managedCreateId = null; this._managedPublishId = null; this.managedUploadBytes = 0; this.managedDuplicateVersion = null;
         this.openManagedUpload();
       },
-      managedChooseUpload(event) { this.managedUploadFile = event.target.files?.[0] || null; },
+      managedChooseUpload(event) { if (this.managedManagerAccess) this.managedUploadFile = event.target.files?.[0] || null; },
       async prepareManagedUpload() {
-        if (this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        if (this.managedVersionBusy || !this.managedManagerAccess) return;
         const key = this.managedCatalogScope, scope = this.managedWorkspaceScope('');
         const operation = this.managedBeginOperation({ key: 'upload', label: 'Preparing manager upload' });
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
@@ -875,7 +915,7 @@
         finally { this.managedFinishOperation(operation); }
       },
       async publishManagedUpload() {
-        if (this.managedVersionBusy || !this.cloudCanAccessAllLanguages || !['prepared', 'published'].includes(this.managedUpload?.status)) return;
+        if (this.managedVersionBusy || !this.managedManagerAccess || !['prepared', 'published'].includes(this.managedUpload?.status)) return;
         const key = this.managedCatalogScope, scope = this.managedWorkspaceScope(''), requestId = this._managedPublishId ||= id();
         const operation = this.managedBeginOperation({ key: 'publish', label: 'Publishing source version and team rooms' });
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
@@ -909,16 +949,16 @@
         const key = this.managedCatalogScope;
         try {
           const result = await this._cloud.request('/v1/versions/' + encodeURIComponent(versionId) + '/ticket', { method: 'POST' });
-          if (key !== this.managedCatalogScope || this._managedPresenceId !== versionId) return;
+          if (!this.managedCatalogAccess || key !== this.managedCatalogScope || this._managedPresenceId !== versionId) return;
           const url = new URL(result.url || result.websocketUrl, this._cloud.apiBase); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
           const socket = new root.WebSocket(url.href); this._managedPresenceSocket = socket;
           socket.onmessage = event => {
-            if (this._managedPresenceSocket !== socket || key !== this.managedCatalogScope || this.selectedManagedVersionId !== versionId) return;
+            if (!this.managedCatalogAccess || this._managedPresenceSocket !== socket || key !== this.managedCatalogScope || this.selectedManagedVersionId !== versionId) return;
             try { const data = JSON.parse(event.data); if (data.type === 'version_changed' || data.type === 'versions_changed') this.refreshManagedVersions(); if (data.teams && this.managedVersionDetails?.version?.id === versionId) this.managedVersionDetails = { ...this.managedVersionDetails, teams: this.managedVersionDetails.teams.map(team => ({ ...team, presence: data.teams.find(t => t.language === team.language)?.presence || [] })) }; }
             catch (_) { /* Ignore malformed ephemeral presence messages. */ }
           };
           socket.onclose = () => { if (this._managedPresenceSocket === socket) { this._managedPresenceSocket = null; this._managedPresenceId = ''; } };
-        } catch (_) { this._managedPresenceId = ''; /* Polling retains status without joining team rooms. */ }
+        } catch (_) { if (key === this.managedCatalogScope && this._managedPresenceId === versionId) this._managedPresenceId = ''; /* Polling retains status without joining team rooms. */ }
       },
     },
   };
