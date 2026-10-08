@@ -281,7 +281,7 @@
 
     <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" class="versionCatalog" :inert="showSetting" aria-label="Source versions">
       <header class="versionCatalogHeader">
-        <div><h1>{{ cloudCanAccessAllLanguages ? 'Version dashboard' : 'Choose a source version' }}</h1><p>{{ gameVersionLabel }} · {{ cloudCanAccessAllLanguages ? 'All language teams' : (cloudUser?.language || lang) }}</p></div>
+        <div><h1>{{ cloudCanAccessAllLanguages ? 'Version dashboard' : 'Choose a source version' }}</h1><p><a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#select-game-version" @click.prevent="showGameVersionSelector" :aria-disabled="managedVersionBusy ? 'true' : undefined" title="Return to game version selection" :aria-label="'Return to game version selection from ' + gameVersionLabel">{{ gameVersionLabel }}</a><span v-else>{{ gameVersionLabel }}</span> · {{ cloudCanAccessAllLanguages ? 'All language teams' : (cloudUser?.language || lang) }}</p></div>
         <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="openManagedUpload" :disabled="managedVersionBusy">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
       </header>
       <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>

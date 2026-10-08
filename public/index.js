@@ -1034,6 +1034,12 @@ const config = Vue.defineComponent({
     async selectGameVersion(version) {
       await this.activateGameVersion(version, { checkMigration: true });
     },
+    showGameVersionSelector() {
+      if (this.managedVersionBusy || this.versionStorageLoading || this.pendingSingleVersionMigration) return false;
+      this.gameVersionSelected = false;
+      this.updateDocumentTitle();
+      return true;
+    },
     async activateGameVersion(version, { checkMigration = true } = {}) {
       const selection = this._gameSelectionGeneration = (this._gameSelectionGeneration || 0) + 1;
       const owner = this.cloudProfileId || 'guest';
