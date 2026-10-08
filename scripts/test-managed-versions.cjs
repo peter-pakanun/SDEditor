@@ -348,6 +348,20 @@ test('weekly deadlines cross both Auckland daylight saving transitions without c
   }
 });
 
+test('weekday selection uses next Monday-based New Zealand week and preserves the deadline time', () => {
+  const now = new Date('2026-10-08T00:00:00Z');
+  for (let day = 0; day < 7; day++) {
+    const deadline = Managed.nextWeekDeadline('2026-11-02T18:45', String(day), now);
+    assert.equal(deadline, `2026-10-${12 + day}T18:45`);
+    assert.equal(Managed.deadlineWeekday(deadline), day);
+  }
+  assert.equal(Managed.nextWeekDeadline('2026-10-05T18:45', 0, new Date('2026-10-04T12:00:00Z')), '2026-10-12T18:45');
+  assert.equal(Managed.nextWeekDeadline('2026-10-04T18:45', 6, new Date('2026-10-03T12:00:00Z')), '2026-10-11T18:45');
+  assert.equal(Managed.nextWeekDeadline('2026-12-27T18:45', 6, new Date('2026-12-26T12:00:00Z')), '2027-01-03T18:45');
+  assert.equal(Managed.nextWeekDeadline('', 0, now), '2026-10-12T09:00');
+  assert.equal(Managed.deadlineWeekday(''), '');
+});
+
 test('invalid deadline dates are rejected instead of silently moving the deadline', () => {
   for (const input of ['', '2026-02-30T09:00', '2026-13-01T09:00', '2026-10-05T25:00', '2026-10-05T09:61']) {
     assert.throws(() => Managed.parseDeadline(input), /deadline|valid/i, input);

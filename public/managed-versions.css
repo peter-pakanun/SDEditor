@@ -68,6 +68,9 @@
 .versionModal { width: min(650px, 100%); max-height: calc(100vh - 80px); overflow-y: auto; border-radius: 10px; padding: 24px; background: var(--color-element); color: var(--color-font); box-shadow: var(--ui-shadow); }
 .versionModal label { display: block; margin: 16px 0 6px; }
 .versionModal input:not([type=checkbox]), .versionModal select { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element-alt); color: var(--color-font); }
+.versionDeadlineFields { display: flex; align-items: center; gap: 8px; }
+.versionDeadlineFields select { flex: 0 0 140px; }
+.versionDeadlineFields input { flex: 1; min-width: 0; }
 .versionDuplicate { margin: 14px 0; border-top: 1px solid var(--ui-border); padding-top: 14px; }
 .versionDuplicate pre { white-space: pre-wrap; max-height: 200px; overflow: auto; }
 .versionExistingWork { margin: 18px 0; padding: 14px; border: 1px solid var(--ui-border); border-radius: 6px; }

@@ -27,6 +27,18 @@
     return { name: `${p.year}-${p.month}-${p.day}_${game === 'poe2' ? 'POE2' : 'POE1'}`, deadlineAt: nzInstant(date) };
   }
   function deadlineInput(instant) { const p = parts(new Date(instant)); return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`; }
+  function deadlineWeekday(value) {
+    const date = new Date(`${String(value || '').split('T')[0]}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) ? (date.getUTCDay() + 6) % 7 : '';
+  }
+  function nextWeekDeadline(value, weekday, now = new Date()) {
+    const day = Number(weekday);
+    if (weekday === '' || !Number.isInteger(day) || day < 0 || day > 6) return value;
+    const p = parts(now), date = new Date(Date.UTC(+p.year, +p.month - 1, +p.day));
+    // The next calendar week starts on Monday, even when today is Monday.
+    date.setUTCDate(date.getUTCDate() + 7 - (date.getUTCDay() + 6) % 7 + day);
+    return date.toISOString().slice(0, 10) + 'T' + (String(value || '').split('T')[1] || '09:00');
+  }
   function parseDeadline(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value || '');
     if (!match) throw new Error('Choose the import deadline in New Zealand time.');
@@ -57,6 +69,7 @@
       managedUploadError: '', managedDuplicateChoices: {}, managedDuplicateVersion: null, managedMetadataVisible: false, managedMetadataVersion: null, managedMetadataName: '', managedMetadataDeadline: '',
       managedRecoveryVisible: false, managedRecoveryTeam: null }; },
     computed: {
+      managedDeadlineWeekdays() { return ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']; },
       managedOnlineAvailable() { return !this.testMode && this.cloudSignedIn && !!this._cloud && !!(this.cloudCanAccessAllLanguages || this.cloudUser?.language); },
       managedSingleLanguage() {
         return !this.cloudCanAccessAllLanguages && !['manager', 'admin'].includes(this.cloudUser?.role) ? this.cloudUser?.language || '' : '';
@@ -154,6 +167,8 @@
       document.removeEventListener('scroll', this._managedMenuMove, true); root.removeEventListener('resize', this._managedMenuMove);
     },
     methods: {
+      managedDeadlineWeekday: deadlineWeekday,
+      managedNextWeekDeadline: nextWeekDeadline,
       managedCloseVersionMenus(except, returnFocus) {
         for (const menu of document.querySelectorAll('.versionActionMenu[open]')) {
           if (menu === except) continue;
@@ -907,5 +922,5 @@
       },
     },
   };
-  return { mixin, defaults, deadlineInput, parseDeadline, reminder, filename, DEFAULT_BRANCH };
+  return { mixin, defaults, deadlineInput, deadlineWeekday, nextWeekDeadline, parseDeadline, reminder, filename, DEFAULT_BRANCH };
 });

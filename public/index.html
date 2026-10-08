@@ -350,7 +350,13 @@
       <section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="managerUploadTitle">
         <h2 id="managerUploadTitle">Upload next {{ gameVersionLabel }} version</h2>
         <label for="managerUploadName">Version name</label><input id="managerUploadName" v-model="managedUploadName" :disabled="!!managedUpload || managedVersionBusy">
-        <label for="managerUploadDeadline">Import deadline · New Zealand time</label><input id="managerUploadDeadline" type="datetime-local" v-model="managedUploadDeadline" :disabled="!!managedUpload || managedVersionBusy">
+        <label for="managerUploadDeadline">Import deadline · New Zealand time</label>
+        <div class="versionDeadlineFields">
+          <select aria-label="Import deadline weekday" :value="managedDeadlineWeekday(managedUploadDeadline)" @change="managedUploadDeadline = managedNextWeekDeadline(managedUploadDeadline, $event.target.value)" :disabled="!!managedUpload || managedVersionBusy" v-tooltip="'Choose this day in next week, in New Zealand time.'">
+            <option v-for="(day, index) in managedDeadlineWeekdays" :key="day" :value="index">{{ day }}</option>
+          </select>
+          <input id="managerUploadDeadline" type="datetime-local" v-model="managedUploadDeadline" :disabled="!!managedUpload || managedVersionBusy">
+        </div>
         <label for="managerUploadArchive">Original StatDescriptions.zip</label><input id="managerUploadArchive" type="file" accept=".zip,application/zip" @change="managedChooseUpload" :disabled="(!!managedUpload && managedUpload.status !== 'awaiting_archive') || managedVersionBusy">
         <p>One original ZIP is published to all 12 teams. Import decisions are shared; translation work remains separated by language.</p>
         <p v-if="managedUpload" role="status">{{ managedUpload.status.replaceAll('_', ' ') }}<template v-if="managedUpload.completedTeams != null"> · {{ managedUpload.completedTeams }} / 12 teams</template></p>
@@ -382,7 +388,19 @@
         </div>
       </section>
     </div>
-    <div v-if="managedMetadataVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionMetadataTitle"><h2 id="versionMetadataTitle">Edit version details</h2><label for="versionMetadataName">Version name</label><input id="versionMetadataName" v-model="managedMetadataName"><label for="versionMetadataDeadline">Import deadline · New Zealand time</label><input id="versionMetadataDeadline" type="datetime-local" v-model="managedMetadataDeadline"><p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p><div class="versionActions"><button @click="saveManagedMetadata" :disabled="managedVersionBusy">Save details</button><button @click="managedMetadataVisible = false" :disabled="managedVersionBusy">Cancel</button></div></section></div>
+    <div v-if="managedMetadataVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionMetadataTitle">
+      <h2 id="versionMetadataTitle">Edit version details</h2>
+      <label for="versionMetadataName">Version name</label><input id="versionMetadataName" v-model="managedMetadataName">
+      <label for="versionMetadataDeadline">Import deadline · New Zealand time</label>
+      <div class="versionDeadlineFields">
+        <select aria-label="Import deadline weekday" :value="managedDeadlineWeekday(managedMetadataDeadline)" @change="managedMetadataDeadline = managedNextWeekDeadline(managedMetadataDeadline, $event.target.value)" :disabled="managedVersionBusy" v-tooltip="'Choose this day in next week, in New Zealand time.'">
+          <option v-for="(day, index) in managedDeadlineWeekdays" :key="day" :value="index">{{ day }}</option>
+        </select>
+        <input id="versionMetadataDeadline" type="datetime-local" v-model="managedMetadataDeadline">
+      </div>
+      <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
+      <div class="versionActions"><button @click="saveManagedMetadata" :disabled="managedVersionBusy">Save details</button><button @click="managedMetadataVisible = false" :disabled="managedVersionBusy">Cancel</button></div>
+    </section></div>
     <div v-if="managedRecoveryVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedRecoveryTeam?.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies include removed files and alternatives to existing room or Dropped work. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedRecoveryTeam?.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy">Open current file and history</button></article></section></div>
     <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && !versionChooserVisible && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
       <div class="box">
