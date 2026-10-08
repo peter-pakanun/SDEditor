@@ -201,7 +201,7 @@ Thai:      สร้างความเสียหาย [Fire|ไฟ] {0} �
 You can translate `Hits` to your language, but `HitDamage` must stay unchanged.
 Sometime the source text use the same display as the tag name, e.g. `[Fire]`, you can translate it to your language by adding the display part yourself, e.g. `[Fire|ไฟ]`.
 
-Some keyword references use the special `TagName::Parameter` form, including a numeric variable parameter such as `[TentacleSmash::{0}|Tentacle Whip]`. Preserve the complete reference `TentacleSmash::{0}` and translate only the display text. The `::{0}` parameter form is allowed by tag validation; arbitrary nested tags remain errors.
+Some keyword references use the special `TagName::Parameter` form, such as `[TentacleSmash::{0}|Tentacle Whip]`. Preserve the complete keyword ID `TentacleSmash::{0}` and translate only the display text. Its `{0}` is part of that ID and is not counted or suggested as a separate variable tag. Variables in display text and ordinary text still count and must match English. The `::{0}` form is allowed by tag validation; arbitrary nested tags remain errors.
 
 > 💡 It is recommended to use the **Autocomplete Popup (Ctrl + Space by default, matching VS Code's primary binding)** to insert these tags to speed up your work and ensure consistency.
 

@@ -120,12 +120,42 @@ function checkTextDecorationTag(str, replacer = '') {
 }
 
 /**
+ * Find variable tags without treating braces in a keyword ID as separate tags.
+ * Variables in a keyword's display text still count, and source offsets stay intact.
+ * @param {string} str
+ * @returns {{full: string, start: number, end: number}[]}
+ */
+function extractGGGVarTags(str) {
+  const source = String(str ?? "");
+  const keywordRegex = new RegExp(keywordPopupTagRegex, 'gim');
+  const keywordIds = [];
+  let match;
+  while ((match = keywordRegex.exec(source))) {
+    const start = match.index + 1;
+    keywordIds.push({ start, end: start + match[2].length });
+  }
+
+  const variableRegex = new RegExp(gggVarTagRegex, 'gim');
+  const tags = [];
+  let keywordIndex = 0;
+  while ((match = variableRegex.exec(source))) {
+    const full = match[1] || match[0];
+    const start = match.index;
+    const end = start + full.length;
+    while (keywordIndex < keywordIds.length && keywordIds[keywordIndex].end <= start) keywordIndex++;
+    const keywordId = keywordIds[keywordIndex];
+    if (keywordId && keywordId.start <= start && end <= keywordId.end) continue;
+    tags.push({ full, start, end });
+  }
+  return tags;
+}
+
+/**
  * @param {string} str
  * @returns {number}
  */
 function countGGGVarTag(str) {
-  let m = str?.match(new RegExp(gggVarTagRegex, 'gi'));
-  return m?.length || 0;
+  return extractGGGVarTags(str).length;
 }
 
 /**

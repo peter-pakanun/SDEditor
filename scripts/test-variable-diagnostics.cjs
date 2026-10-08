@@ -56,7 +56,7 @@ function variableErrors(editor, english, translation) {
     .filter(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch');
 }
 
-test('keyword reference parameters accept numeric variables without allowing arbitrary nesting', () => {
+test('numeric keyword ID suffixes are allowed without allowing arbitrary nesting', () => {
   const { context } = loadEditor();
   const analyze = text => context.window.TranslationDiagnostics.analyze(text);
   for (const text of [
@@ -96,15 +96,123 @@ test('keyword reference parameters accept numeric variables without allowing arb
   }
 });
 
-test('keyword reference parameters retain variable and keyword identity checks', () => {
+test('numeric keyword ID suffixes retain keyword identity without creating variable requirements', () => {
   const { editor } = loadEditor();
   const english = '[TentacleSmash::{0}|Tentacle Whip]';
   assert.equal(editor.analyzeTranslationDiagnostics('[TentacleSmash::{0}|หนวดอสูร]', english).errorCount, 0);
-  const changedVariable = editor.analyzeTranslationDiagnostics('[TentacleSmash::{1}|หนวดอสูร]', english);
-  assert.ok(changedVariable.diagnostics.some(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch'));
-  assert.ok(changedVariable.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
+  const changedId = editor.analyzeTranslationDiagnostics('[TentacleSmash::{1}|หนวดอสูร]', english);
+  assert.equal(changedId.diagnostics.some(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch'), false);
+  assert.ok(changedId.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
   const changedKeyword = editor.analyzeTranslationDiagnostics('[OtherSkill::{0}|หนวดอสูร]', english);
   assert.ok(changedKeyword.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
+});
+
+test('keyword IDs are excluded from variable counts while ordinary and display variables remain counted', () => {
+  const { editor, context } = loadEditor();
+  for (const [text, vars, keywords] of [
+    ['[TentacleSmash::{1}|Tentacle Whip]', 0, 1],
+    ['{2}% chance to use [TentacleSmash::{1}|Tentacle Whip]', 1, 1],
+    ['[TentacleSmash::{12}|Tentacle Whip {2}%]', 1, 1],
+    ['[TentacleSmash::{12}]', 0, 1],
+    ['[TentacleSmash::{1}] and [OtherSkill::{12}|{3}]', 1, 2],
+  ]) {
+    assert.equal(context.countGGGVarTag(text), vars, text);
+    assert.equal(editor.computeTextStats(text).vars, vars, text);
+    assert.equal(editor.computeTextStats(text).kw, keywords, text);
+    assert.equal(editor.extractGggVarIdentityTags(text).length, vars, text);
+  }
+});
+
+test('excluding keyword IDs preserves exact external and display variable offsets and formatting', () => {
+  const { editor, context } = loadEditor();
+  const text = 'Start [TentacleSmash::{12}|Whip {4}%] +{2:d}% and -{3:+d}';
+  const expected = ['{4}%', '+{2:d}%', '-{3:+d}'].map(full => ({
+    full, start: text.indexOf(full), end: text.indexOf(full) + full.length,
+  }));
+  assert.deepEqual(Array.from(context.extractGGGVarTags(text), tag => ({ ...tag })), expected);
+  const offset = 37;
+  assert.deepEqual(Array.from(editor.extractGggVarIdentityTags(text, offset), tag => ({ ...tag })),
+    expected.map((tag, index) => ({
+      ...tag, key: ['{4}%', '{2:d}%', '{3:+d}'][index], start: tag.start + offset, end: tag.end + offset,
+    })));
+
+  const english = 'EN [TentacleSmash::{12}|Whip] +{2:d}% and -{3:+d}';
+  const translation = 'TH [TentacleSmash::{12}|Whip] +{2:d}% and -{3:+d}%';
+  const errors = variableErrors(editor, english, translation);
+  assert.equal(errors.length, 1);
+  assert.equal(translation.slice(errors[0].start, errors[0].end), '-{3:+d}%');
+  assert.match(errors[0].message, /\{3:\+d\}%/);
+  assert.doesNotMatch(errors[0].message, /\{12\}/);
+
+  const display = '[TentacleSmash::{12}|ความเสียหาย {2}]';
+  const displayErrors = variableErrors(editor, '[TentacleSmash::{12}|Damage {2}%]', display);
+  assert.equal(displayErrors.length, 1);
+  assert.equal(display.slice(displayErrors[0].start, displayErrors[0].end), '{2}');
+});
+
+test('keyword ID braces cannot substitute for missing ordinary variables or hide extra variables', () => {
+  const { editor } = loadEditor();
+  const keyword = '[TentacleSmash::{1}|Tentacle Whip]';
+  for (const [english, translation] of [
+    [`{1} ${keyword}`, keyword],
+    [keyword, `${keyword} {1}`],
+    ['[TentacleSmash::{1}|Damage {2}]', '[TentacleSmash::{1}|Damage]'],
+    ['[TentacleSmash::{1}|Damage]', '[TentacleSmash::{1}|Damage {2}]'],
+  ]) {
+    const errors = variableErrors(editor, english, translation);
+    assert.equal(errors.length, 1, `${english} -> ${translation}`);
+    assert.equal(errors[0].level, 'error');
+  }
+});
+
+test('autocomplete, preview and generated Regex preserve the complete numeric keyword ID', () => {
+  const { editor, context } = loadEditor();
+  for (const index of [1, 12]) {
+    const keyword = `[TentacleSmash::{${index}}|Tentacle Whip]`;
+    const english = `Trigger ${keyword}`;
+    const { HLs } = editor.buildEnglishHLter(english);
+    assert.equal(HLs.length, 1);
+    assert.equal(HLs[0].isKeywordPopup, true);
+    assert.equal(HLs[0].tagName, `TentacleSmash::{${index}}`);
+    assert.equal(HLs[0].find, keyword);
+    editor.editorBlocks = [{ english, translation: '', HLs }];
+    const items = editor.buildHlPopupItems(0);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].value, keyword);
+    assert.equal(items[0].kwTagName, `TentacleSmash::{${index}}`);
+    assert.equal(items.some(item => item.value === `{${index}}`), false);
+    assert.deepEqual(Array.from(editor.buildGamePreviewSegments(english).keysOrder), []);
+    assert.deepEqual(Array.from(editor.buildGamePreviewSegments(`[TentacleSmash::{${index}}]`).keysOrder), []);
+    assert.deepEqual(Array.from(editor.buildGamePreviewSegments(`{2}% ${keyword}`).keysOrder), ['2']);
+    const generated = context.regexEngineCreate(english, []);
+    assert.equal(generated.find, 'Trigger (.+)');
+    assert.equal(generated.replace, 'Trigger $1');
+    const lookedUp = context.regexEngineLookup(english, [generated]);
+    assert.equal(lookedUp.failed, false);
+    assert.equal(lookedUp.replace, `Trigger [TentacleSmash::{${index}}|🔖]`);
+    assert.deepEqual(Array.from(lookedUp.words), ['Tentacle Whip']);
+  }
+});
+
+test('editorSave accepts numeric keyword IDs without a variable count confirmation', async () => {
+  for (const index of [1, 12]) {
+    const { editor, alerts, confirmations } = loadEditor();
+    const english = `Trigger [TentacleSmash::{${index}}|Tentacle Whip]`;
+    const translation = `ทริกเกอร์ [TentacleSmash::{${index}}|หนวดอสูร]`;
+    const desc = fixtureDescription(`keyword-${index}`, english, `[TentacleSmash::{${index}}|เดิม]`);
+    editor.descs = [desc];
+    editor.editorCurrentEditingDesc = desc;
+    editor.editorVisible = true;
+    editor.editorOriginalTranslations = [...desc.translations.Thai];
+    editor.editorBlocks = [{ english, translation }];
+    assert.equal(editor.computeTextStats(english).vars, 0);
+    assert.equal(editor.computeTextStats(translation).vars, 0);
+    assert.equal(await editor.editorSave(), true);
+    assert.equal(desc.translations.Thai[0], translation);
+    assert.equal(editor.localDescs.descs[0].translations.Thai[0], translation);
+    assert.deepEqual(alerts, []);
+    assert.deepEqual(confirmations, []);
+  }
 });
 
 test('reported two-entry Tentacle Whip translation saves and retains unrelated scan errors', async () => {
@@ -117,6 +225,8 @@ test('reported two-entry Tentacle Whip translation saves and retains unrelated s
     'มีโอกาสทริกเกอร์ [TentacleSmash::{0}|หนวดอสูรร่ายฟาด (Tentacle Whip)] เลเวล 20 {0}% เมื่อสังหาร',
     'ทริกเกอร์ [TentacleSmash::{0}|หนวดอสูรร่ายฟาด (Tentacle Whip)] เลเวล 20 เมื่อสังหาร',
   ];
+  assert.deepEqual(english.map(text => editor.computeTextStats(text).vars), [1, 0]);
+  assert.deepEqual(translation.map(text => editor.computeTextStats(text).vars), [1, 0]);
   const desc = fixtureDescription('tentacle-whip', english[0], '[TentacleSmash::{0}|เดิม] {0}%');
   desc.translations.English = english;
   desc.translations.Thai.push('[TentacleSmash::{0}|เดิม]');
@@ -145,7 +255,7 @@ test('reported two-entry Tentacle Whip translation saves and retains unrelated s
   assert.equal(editor.diagnosticScanErrorFileCount, 1);
 });
 
-test('editorSave still blocks genuine nested tags after a keyword reference parameter', async () => {
+test('editorSave still blocks genuine nested tags after a numeric keyword ID suffix', async () => {
   const { editor, alerts } = loadEditor();
   const english = '[TentacleSmash::{0}|Tentacle Whip]';
   const original = '[TentacleSmash::{0}|หนวดอสูร]';

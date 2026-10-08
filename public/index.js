@@ -2484,18 +2484,15 @@ const config = Vue.defineComponent({
     },
     extractGggVarIdentityTags(text, offset = 0) {
       const source = String(text ?? "");
-      const regex = new RegExp(gggVarTagRegex, "igm");
       const tags = [];
-      let m;
-      while (m = regex.exec(source)) {
-        const full = m[1] || m[0];
+      for (const { full, start, end } of extractGGGVarTags(source)) {
         const key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
         tags.push({
           full,
           // Diagnostics distinguish percent values; preview inputs still share the bare identity.
           key: `{${key}}${full.endsWith("%") ? "%" : ""}`,
-          start: offset + m.index,
-          end: offset + m.index + full.length
+          start: offset + start,
+          end: offset + end
         });
       }
       return tags;
