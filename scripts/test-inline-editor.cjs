@@ -16,7 +16,7 @@ function description(name = 'first', translation = 'translation') {
 
 function harness({ records = new Map() } = {}) {
   let config, nextId = 0;
-  const calls = { writes: [], promotions: [], confirms: [], alerts: [], focused: 0 };
+  const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };
   const store = {
     translationDraftKey(scope) { return 'draft:' + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]); },
     async listTranslationDrafts(scope) { return [...records.values()].filter(r => r.profile === scope.profile && r.game === scope.game && r.language === scope.language && (r.state === 'active' || r.conflicts?.length)).map(copy); },
@@ -26,6 +26,16 @@ function harness({ records = new Map() } = {}) {
       const old = records.get(record.key);
       if ((old?.revision || null) !== options.expectedRevision) throw new Error('Unexpected test draft revision');
       records.set(record.key, copy(record)); return { status: 'saved', record: copy(record) };
+    },
+    async discardTranslationDraft(key, expectedRevision) {
+      calls.discards.push({ key, expectedRevision });
+      const old = records.get(key);
+      if (old?.state === 'discarded' && old.consumedRevision === expectedRevision)
+        return { status: 'discarded', record: copy(old), duplicate: true };
+      if (!old || old.revision !== expectedRevision) return { status: 'conflict', record: old ? copy(old) : null };
+      const record = { ...old, state: 'discarded', consumedRevision: expectedRevision,
+        revision: expectedRevision + ':discarded', translations: [], base: null, source: null, conflicts: [] };
+      records.set(key, record); return { status: 'discarded', record: copy(record) };
     },
   };
   const window = { location: { search: '?lang=Thai' }, CloudUI: { mixin: {} }, OfflineStore: store,
@@ -65,7 +75,11 @@ function harness({ records = new Map() } = {}) {
     sourceHash: 'source-a', game: 'poe1', language: 'Thai' });
   editor.persistTranslationBatch = async (updates, origin, options) => {
     calls.promotions.push({ updates: copy(updates), origin, options });
-    for (const { desc, lines } of updates) desc.translations[editor.lang] = [...lines];
+    for (const { desc, lines } of updates) {
+      window.WorkspaceState.stageTranslation(editor.localDescs, { filepath: desc.filepath, translations: [...lines] }, editor.lang,
+        { source: editor.workspaceSourceFile(desc.filepath), sourceHash: editor.sourceIdentity, game: editor.gameVersion });
+      desc.translations[editor.lang] = [...lines];
+    }
     if (options.draft) {
       const record = records.get(options.draft.key);
       if (record?.revision === options.draft.revision) records.set(record.key, { ...record, state: 'promoted', revision: record.revision + ':promoted', translations: [] });
@@ -660,6 +674,296 @@ test('a resumed durable inline draft is compared with current committed text rat
   assert.equal(editor.inlineDraftHasChanges, true);
   editor.editorBlocks[0].translation = 'peer changed again';
   assert.equal(editor.inlineDraftHasChanges, false);
+});
+
+function assertNoActiveEditorDraft(h, session) {
+  const { editor, records, desc } = h;
+  assert.notEqual(records.get(session.key)?.state, 'active', 'reverting must not retain an active durable draft');
+  assert.equal(editor.inlineDraftFor(desc.filepath), null, 'the row must not display Local draft');
+  assert.equal(editor.draftRecords.some(record => record.key === session.key && record.state === 'active'), false);
+  assert.equal(editor.draftRecoveryItems.some(record => record.key === session.key), false);
+  assert.equal(session.record, null); assert.equal(session.pendingRecord, null);
+  assert.equal(!!session.writeError, false); assert.equal(editor.inlineDraftError, '');
+}
+
+for (const inline of [true, false]) for (const original of ['', 'translation']) {
+  const surface = inline ? 'inline' : 'full', originalName = original ? 'nonempty' : 'empty';
+  test(`${surface} editing and reverting ${originalName} text before debounce creates no draft or stage`, async () => {
+    const h = harness(), { editor, desc, calls } = h;
+    desc.translations.Thai = [original]; editor._workspaceSourceBaseline = copy(editor.descs);
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    const session = editor._draftSession;
+    editor.editorBlocks[0].translation = 'temporary typing'; editor.scheduleEditorDraft();
+    editor.editorBlocks[0].translation = original; editor.scheduleEditorDraft();
+    assert.equal(await editor.flushEditorDraft(), true);
+    assertNoActiveEditorDraft(h, session);
+    assert.equal(calls.writes.length, 0); assert.equal(calls.discards.length, 0);
+    if (inline) assert.equal(await editor.finishInlineSession(), true);
+    else await editor.editorExit();
+    assert.equal(calls.promotions.length, 0); assert.deepEqual(desc.translations.Thai, [original]);
+  });
+
+  test(`${surface} reverting ${originalName} text removes a durable draft and leaves without staging`, async () => {
+    const h = harness(), { editor, desc, calls, records } = h;
+    desc.translations.Thai = [original]; editor._workspaceSourceBaseline = copy(editor.descs);
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    const session = editor._draftSession;
+    editor.editorBlocks[0].translation = 'durable temporary text'; editor.scheduleEditorDraft();
+    assert.equal(await editor.flushEditorDraft(), true);
+    const revision = records.get(session.key).revision;
+    assert.equal(records.get(session.key).state, 'active');
+    editor.editorBlocks[0].translation = original; editor.scheduleEditorDraft();
+    assert.equal(await editor.flushEditorDraft(), true);
+    assertNoActiveEditorDraft(h, session);
+    assert.deepEqual(calls.discards, [{ key: session.key, expectedRevision: revision }]);
+    assert.equal(session.expectedRevision, records.get(session.key).revision);
+    if (inline) assert.equal(await editor.finishInlineSession(), true);
+    else await editor.editorExit();
+    assert.equal(calls.promotions.length, 0); assert.deepEqual(desc.translations.Thai, [original]);
+    editor.editorBlocks = [];
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    assert.equal(editor.editorBlocks[0].translation, original);
+    assert.equal(editor._draftSession.record, null);
+  });
+}
+
+test('reverting while the earlier draft write is in flight discards its acknowledged revision', async () => {
+  const h = harness(), { editor, desc, calls, store, records } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession, gate = deferred(), put = store.putTranslationDraft;
+  store.putTranslationDraft = async (...args) => { await gate.promise; return put(...args); };
+  editor.editorBlocks[0].translation = 'pending temporary text';
+  const writing = editor.flushEditorDraft(); await tick();
+  assert.equal(editor.draftWritePending, 1);
+  editor.editorBlocks[0].translation = 'translation';
+  const reverting = editor.flushEditorDraft(); await tick();
+  gate.resolve(); assert.equal(await writing, true); assert.equal(await reverting, true);
+  assertNoActiveEditorDraft(h, session);
+  assert.equal(calls.writes.length, 1, 'the revert should discard, not write another active draft');
+  assert.equal(calls.discards[0].expectedRevision, calls.writes[0].record.revision);
+  assert.equal(session.expectedRevision, records.get(session.key).revision);
+  assert.equal(await editor.finishInlineSession(), true); assert.equal(calls.promotions.length, 0);
+});
+
+test('reverting a resumed draft to the committed text removes its saved copy and permits a fresh edit', async () => {
+  const previous = harness(); await previous.editor.activateInlineRow(previous.desc.filepath);
+  previous.editor.editorBlocks[0].translation = 'resumed local draft'; await previous.editor.flushEditorDraft();
+  await previous.editor.finishInlineSession({ promote: false });
+  const h = harness({ records: previous.records }), { editor, desc, calls } = h;
+  await editor.loadEditorDrafts(); await editor.editFile(desc.filepath);
+  const session = editor._draftSession;
+  assert.equal(editor.editorBlocks[0].translation, 'resumed local draft');
+  editor.editorBlocks[0].translation = 'translation'; assert.equal(await editor.flushEditorDraft(), true);
+  assertNoActiveEditorDraft(h, session);
+  const discardedRevision = session.expectedRevision;
+  editor.editorBlocks[0].translation = 'new edit after revert'; assert.equal(await editor.flushEditorDraft(), true);
+  assert.equal(calls.writes[0].options.expectedRevision, discardedRevision);
+  assert.equal(h.records.get(session.key).translations[0], 'new edit after revert');
+  assert.equal(editor.inlineDraftFor(desc.filepath).translations[0], 'new edit after revert');
+});
+
+test('reverting to the current staged translation clears the draft even when ZIP text differs', async t => {
+  for (const stagedText of ['', 'current staged text']) await t.test(stagedText || 'intentionally blank stage', async () => {
+    const h = harness(), { editor, desc, window, calls } = h;
+    window.WorkspaceState.stageTranslation(editor.localDescs,
+      { filepath: desc.filepath, translations: [stagedText] }, 'Thai', { source: desc });
+    editor.applyWorkspaceOverlay(); await editor.activateInlineRow(desc.filepath);
+    const session = editor._draftSession;
+    editor.editorBlocks[0].translation = 'temporary staged correction'; await editor.flushEditorDraft();
+    editor.editorBlocks[0].translation = stagedText; assert.equal(await editor.flushEditorDraft(), true);
+    assertNoActiveEditorDraft(h, session);
+    assert.equal(editor.editorHasStagedTranslation, true, 'draft cleanup must retain the existing stage');
+    assert.equal(await editor.finishInlineSession(), true); assert.equal(calls.promotions.length, 0);
+    assert.deepEqual(copy(desc.translations.Thai), [stagedText]);
+  });
+});
+
+test('typing while reverted draft cleanup is in flight preserves the newer edit behind its discarded revision', async () => {
+  const h = harness(), { editor, desc, store, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'first durable edit'; await editor.flushEditorDraft();
+  const gate = deferred(), discard = store.discardTranslationDraft;
+  store.discardTranslationDraft = async (...args) => { await gate.promise; return discard(...args); };
+  editor.editorBlocks[0].translation = 'translation'; const reverting = editor.flushEditorDraft(); await tick();
+  editor.editorBlocks[0].translation = 'new typing during cleanup'; const writing = editor.flushEditorDraft(); await tick();
+  gate.resolve(); assert.equal(await reverting, true); assert.equal(await writing, true);
+  assert.equal(calls.discards.length, 1);
+  assert.equal(calls.writes.length, 2);
+  assert.equal(calls.writes[1].options.expectedRevision, calls.discards[0].expectedRevision + ':discarded');
+  assert.equal(h.records.get(session.key).translations[0], 'new typing during cleanup');
+  assert.equal(session.record.translations[0], 'new typing during cleanup');
+  assert.equal(editor.inlineDraftFor(desc.filepath).translations[0], 'new typing during cleanup');
+  assert.equal(editor.editorBlocks[0].translation, 'new typing during cleanup');
+});
+
+for (const phase of ['read', 'discard']) test(`a peer commit during reverted draft ${phase} preserves the visible text as a new draft`, async () => {
+  const h = harness(), { editor, desc, store, window, calls, records } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'first local draft'; await editor.flushEditorDraft();
+  const gate = deferred(); let reachedGate = false;
+  if (phase === 'read') {
+    const get = store.getTranslationDraft;
+    store.getTranslationDraft = async key => {
+      const record = await get(key); reachedGate = true; await gate.promise; return record;
+    };
+  } else {
+    const discard = store.discardTranslationDraft;
+    store.discardTranslationDraft = async (...args) => { reachedGate = true; await gate.promise; return discard(...args); };
+  }
+  editor.editorBlocks[0].translation = 'translation'; const reverting = editor.flushEditorDraft(); await tick();
+  assert.equal(reachedGate, true);
+  window.WorkspaceState.stageTranslation(editor.localDescs,
+    { filepath: desc.filepath, translations: ['peer committed change'] }, 'Thai', { source: desc });
+  editor.applyWorkspaceOverlay();
+  gate.resolve(); assert.equal(await reverting, true);
+  assert.equal(records.get(session.key).state, 'active');
+  assert.deepEqual(records.get(session.key).translations, ['translation'], 'reverted text now differs from the peer commit and must remain recoverable');
+  assert.equal(session.record.translations[0], 'translation'); assert.equal(editor.editorBlocks[0].translation, 'translation');
+  assert.equal(editor.inlineDraftFor(desc.filepath).translations[0], 'translation');
+  assert.equal(editor.inlineDraftHasChanges, true); assert.equal(calls.promotions.length, 0);
+  assert.equal(calls.discards.length, phase === 'read' ? 0 : 1);
+});
+
+test('reopening a detached session during reverted draft cleanup retains its queue and newer typing', async () => {
+  const h = harness(), { editor, desc, store, calls, records } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'durable before revert'; await editor.flushEditorDraft();
+  const gate = deferred(), discard = store.discardTranslationDraft;
+  store.discardTranslationDraft = async (...args) => { await gate.promise; return discard(...args); };
+  editor.editorBlocks[0].translation = 'translation'; const reverting = editor.flushEditorDraft(); await tick();
+  const detached = editor.detachEditorSessionForScopeChange();
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  assert.equal(editor._draftSession, session); assert.equal(session.detached, false);
+  assert.equal(editor.editorBlocks[0].translation, 'translation');
+  editor.editorBlocks[0].translation = 'new edit after reopening'; const writing = editor.flushEditorDraft();
+  gate.resolve(); assert.equal(await reverting, true); assert.equal(await detached, true); assert.equal(await writing, true);
+  assert.equal(calls.discards.length, 1); assert.equal(calls.writes.length, 2);
+  assert.equal(calls.writes[1].options.expectedRevision, calls.writes[0].record.revision + ':discarded');
+  assert.equal(records.get(session.key).translations[0], 'new edit after reopening');
+  assert.equal(editor._draftSession, session); assert.equal(editor.inlineDraftFor(desc.filepath).translations[0], 'new edit after reopening');
+});
+
+test('reverted draft cleanup preserves a different revision written by another tab during discard', async () => {
+  const h = harness(), { editor, desc, store, records, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'this tab draft'; await editor.flushEditorDraft();
+  const authored = copy(records.get(session.key)), peer = { ...authored, id: 'peer-tab', revision: 'peer-revision', translations: ['peer draft'] };
+  const discard = store.discardTranslationDraft;
+  store.discardTranslationDraft = async (...args) => { records.set(session.key, copy(peer)); return discard(...args); };
+  editor.editorBlocks[0].translation = 'translation'; await editor.flushEditorDraft();
+  assert.deepEqual(records.get(session.key), peer, 'cleanup must not delete a newer peer draft');
+  assert.equal(calls.discards.length, 1); assert.equal(calls.discards[0].expectedRevision, authored.revision);
+  assert.equal(calls.writes.length, 1, 'do not overwrite the conflicting draft with reverted local text');
+  assert.equal(calls.promotions.length, 0); assert.equal(session.conflict, true);
+  assert.equal(editor.editorBlocks[0].translation, 'translation');
+  assert.equal(editor.inlineFindingsFor(desc.filepath).some(finding => finding.level === 'error'), true);
+});
+
+test('reverted draft cleanup does not discard an already-known conflict aggregate', async () => {
+  const h = harness(), { editor, desc, records, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'authored local draft'; await editor.flushEditorDraft();
+  const authored = copy(records.get(session.key)), preserved = { ...authored, id: 'other-tab', revision: 'other-tab-revision', translations: ['other preserved draft'] };
+  const aggregate = { ...authored, revision: 'known-conflict', conflicts: [preserved] };
+  records.set(session.key, copy(aggregate)); session.expectedRevision = aggregate.revision; session.conflict = true;
+  editor.editorBlocks[0].translation = 'translation'; await editor.flushEditorDraft();
+  assert.deepEqual(records.get(session.key), aggregate);
+  assert.equal(calls.discards.length, 0, 'resolving a conflict requires explicit review');
+  assert.equal(calls.writes.length, 1); assert.equal(calls.promotions.length, 0);
+  assert.equal(session.conflict, true);
+  await editor.loadEditorDrafts();
+  assert.deepEqual(copy(editor.draftRecoveryItems.map(record => record.translations[0])), ['authored local draft', 'other preserved draft']);
+});
+
+test('failed reverted draft cleanup stays actionable and retries the same stored revision', async () => {
+  const h = harness(), { editor, desc, store, records, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'persisted temporary edit'; await editor.flushEditorDraft();
+  const authored = copy(records.get(session.key)), discard = store.discardTranslationDraft;
+  store.discardTranslationDraft = async () => { throw new Error('draft cleanup unavailable'); };
+  editor.editorBlocks[0].translation = 'translation'; assert.equal(await editor.flushEditorDraft(), false);
+  assert.deepEqual(records.get(session.key), authored); assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorBlocks[0].translation, 'translation'); assert.match(editor.inlineDraftError, /draft cleanup unavailable/);
+  assert.equal(calls.promotions.length, 0);
+  store.discardTranslationDraft = discard; assert.equal(await editor.flushEditorDraft(), true);
+  assertNoActiveEditorDraft(h, session);
+  assert.deepEqual(calls.discards, [{ key: session.key, expectedRevision: authored.revision }]);
+});
+
+test('fresh typing after an uncertain cleanup acknowledgement adopts its tombstone revision without a false conflict', async () => {
+  const h = harness(), { editor, desc, store, records, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession;
+  editor.editorBlocks[0].translation = 'durable temporary edit'; await editor.flushEditorDraft();
+  const authored = copy(records.get(session.key)), discard = store.discardTranslationDraft;
+  store.discardTranslationDraft = async (...args) => { await discard(...args); throw new Error('cleanup acknowledgement was lost'); };
+  editor.editorBlocks[0].translation = 'translation'; assert.equal(await editor.flushEditorDraft(), false);
+  const tombstone = copy(records.get(session.key));
+  assert.equal(tombstone.state, 'discarded'); assert.equal(tombstone.consumedRevision, authored.revision);
+  assert.equal(session.expectedRevision, authored.revision);
+  assert.match(editor.inlineDraftError, /cleanup acknowledgement was lost/);
+  editor.editorBlocks[0].translation = 'fresh typing after uncertain cleanup';
+  assert.equal(await editor.flushEditorDraft(), true);
+  assert.equal(calls.discards.length, 1); assert.equal(calls.writes.length, 2);
+  assert.equal(calls.writes[1].options.expectedRevision, tombstone.revision);
+  assert.equal(records.get(session.key).state, 'active');
+  assert.deepEqual(records.get(session.key).translations, ['fresh typing after uncertain cleanup']);
+  assert.equal(session.record.translations[0], 'fresh typing after uncertain cleanup');
+  assert.equal(!!session.conflict, false); assert.equal(session.pendingRecord, null); assert.equal(session.writeError, null);
+  assert.equal(editor.inlineDraftFor(desc.filepath).translations[0], 'fresh typing after uncertain cleanup');
+  assert.equal(editor.inlineDraftError, ''); assert.deepEqual(copy(editor.inlineFindingsFor(desc.filepath)), []);
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('reverting after an uncertain draft-write acknowledgement removes the authored durable revision without replaying it', async () => {
+  const h = harness(), { editor, desc, store, records, calls } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession, put = store.putTranslationDraft;
+  store.putTranslationDraft = async (...args) => { await put(...args); throw new Error('draft acknowledgement was lost'); };
+  editor.editorBlocks[0].translation = 'durable but unacknowledged edit'; assert.equal(await editor.flushEditorDraft(), false);
+  const authored = copy(records.get(session.key));
+  assert.equal(session.expectedRevision, null); assert.equal(session.pendingRecord.revision, authored.revision);
+  editor.editorBlocks[0].translation = 'translation'; assert.equal(await editor.flushEditorDraft(), true);
+  assertNoActiveEditorDraft(h, session);
+  assert.equal(calls.writes.length, 1, 'reverting should inspect the uncertain revision instead of replaying a new draft');
+  assert.deepEqual(calls.discards, [{ key: session.key, expectedRevision: authored.revision }]);
+  assert.equal(await editor.finishInlineSession(), true); assert.equal(calls.promotions.length, 0);
+});
+
+test('reverting canonical table, newline and missing-entry display values removes the durable draft', async t => {
+  const fixtures = [
+    { name: 'partial table', english: ['First@Second'], translations: ['first'] },
+    { name: 'empty table separators', english: ['First@Second'], translations: ['@'] },
+    { name: 'CRLF text', english: ['Source\\nline'], translations: ['one\r\ntwo'] },
+    { name: 'missing entries', english: ['First', 'Second', 'Third'], translations: ['kept first'] },
+    { name: 'missing language', english: ['First', 'Second'] },
+  ];
+  for (const fixture of fixtures) await t.test(fixture.name, async () => {
+    const h = harness(), { editor, desc, calls } = h;
+    desc.translations.English = fixture.english;
+    if (fixture.translations) desc.translations.Thai = fixture.translations;
+    else delete desc.translations.Thai;
+    editor._workspaceSourceBaseline = copy(editor.descs);
+    await editor.activateInlineRow(desc.filepath);
+    const session = editor._draftSession, block = editor.editorBlocks.at(-1);
+    const field = block.isTable ? block.tableColumns[0] : block, original = field.translation;
+    field.translation = 'not yet persisted'; editor.scheduleEditorDraft();
+    field.translation = original; editor.scheduleEditorDraft();
+    assert.equal(await editor.flushEditorDraft(), true);
+    assertNoActiveEditorDraft(h, session);
+    assert.equal(calls.writes.length, 0, 'canonical display values must not create a draft when returned before debounce');
+    field.translation = 'temporary text'; assert.equal(await editor.flushEditorDraft(), true);
+    field.translation = original; assert.equal(await editor.flushEditorDraft(), true);
+    assertNoActiveEditorDraft(h, session);
+    assert.equal(await editor.finishInlineSession(), true); assert.equal(calls.promotions.length, 0);
+    assert.deepEqual(desc.translations.Thai, fixture.translations);
+  });
 });
 
 test('inline and full editors share one durable draft; closing full editor keeps it without staging', async () => {

@@ -23,10 +23,7 @@
         if (!desc?.filepath) return [];
         const source = this.workspaceSourceFile?.(desc.filepath) || desc;
         const committed = root.WorkspaceState?.workspaceFile(this.localDescs, source, this.lang)?.translations || desc.translations?.[this.lang] || [];
-        const english = desc.translations?.English || [];
-        const blocks = Array.from({ length: Math.max(english.length, committed.length) }, (_, index) =>
-          this.makeEditorBlock(english[index] || '', committed[index] || ''));
-        return this.serializeEditorTranslations(blocks);
+        return this.canonicalEditorTranslations(desc, committed);
       },
       inlineDraftHasChanges() {
         const desc = this.editorCurrentEditingDesc, workspace = this.localDescs;
@@ -105,6 +102,17 @@
           const translation = block.isTable ? this.joinTableColumns(this.getSerializableTableColumns(block).map(column => column.translation || '')) : block.translation || '';
           return this.encodeNewlines(block.isMultiline ? this.decodeEscapedNewlines(translation) : translation);
         });
+      },
+      canonicalEditorTranslations(source, translations = []) {
+        const english = source?.translations?.English || [];
+        const blocks = Array.from({ length: Math.max(english.length, translations.length) }, (_, index) =>
+          this.makeEditorBlock(english[index] || '', translations[index] || ''));
+        return this.serializeEditorTranslations(blocks);
+      },
+      committedEditorDraftTranslations(session) {
+        return this._draftSession === session && this.draftScopeCurrent(session.scope)
+          && this.editorCurrentEditingDesc?.filepath === session.scope.filepath
+          ? this.inlineCommittedTranslations : this.canonicalEditorTranslations(session.source, session.base.translations);
       },
       draftScopeCurrent(scope) {
         const now = this.editorDraftScope(scope.filepath);
@@ -205,10 +213,10 @@
         this.scheduleInlineAlignment();
       },
       async writeEditorDraft(session, lines, force = false) {
-        const paddedBase = Array.from({ length: Math.max(session.source?.translations?.English?.length || 0, session.base.translations?.length || 0) }, (_, i) => session.base.translations?.[i] || '');
-        if (!force && !session.record && !session.pendingRecord && equal(lines, paddedBase)) return true;
+        const unchanged = !force && equal(lines, this.committedEditorDraftTranslations(session));
+        if (unchanged && !session.record && !session.pendingRecord && !session.writeError && !session.resolveConflicts) return true;
         const previousRecord = session.pendingRecord || session.record;
-        if (equal(lines, previousRecord?.translations) && equal(session.base, previousRecord?.base)
+        if (!unchanged && equal(lines, previousRecord?.translations) && equal(session.base, previousRecord?.base)
           && (session.declined || '') === (previousRecord?.declined || '') && !session.writeError && !session.resolveConflicts) {
           await session.write; return !session.writeError;
         }
@@ -222,19 +230,48 @@
         session.write = previous.catch(() => {}).then(async () => {
           try {
             let result;
-            if (this.testMode || !root.OfflineStore?.putTranslationDraft) {
-              this._draftMemory ||= new Map(); this._draftMemory.set(record.key, copy(record)); result = { status: 'saved', record };
-            } else result = await root.OfflineStore.putTranslationDraft(record, { expectedRevision: session.expectedRevision, resolveConflicts: !!session.resolveConflicts });
-            session.expectedRevision = result.record.revision;
+            if (unchanged && !session.resolveConflicts) {
+              // Use the same queue as writes: an earlier acknowledgement must
+              // finish before consuming the reverted draft's revision.
+              result = await this.discardUnchangedEditorDraft(session, previousRecord, lines);
+              if (result?.status === 'discarded' && !equal(lines, this.committedEditorDraftTranslations(session))) {
+                // A peer save during cleanup can make the reverted text a real
+                // local edit again. Retain it against the captured merge base.
+                session.expectedRevision = result.record?.revision || session.expectedRevision;
+                result = null;
+              }
+            }
+            if (!result) {
+              if (session.writeError && session.discardAttempt) {
+                const stored = await root.OfflineStore.getTranslationDraft(session.key);
+                if (stored?.state === 'discarded' && !stored.conflicts?.length
+                  && stored.id === session.discardAttempt.id && stored.consumedRevision === session.discardAttempt.revision) {
+                  // An uncertain cleanup may already have committed. Fresh
+                  // typing continues from that receipt, not its old revision.
+                  session.expectedRevision = stored.revision;
+                  session.record = null;
+                }
+              }
+              if (this.testMode || !root.OfflineStore?.putTranslationDraft) {
+                this._draftMemory ||= new Map(); this._draftMemory.set(record.key, copy(record)); result = { status: 'saved', record };
+              } else result = await root.OfflineStore.putTranslationDraft(record, { expectedRevision: session.expectedRevision, resolveConflicts: !!session.resolveConflicts });
+            }
+            session.expectedRevision = result.record?.revision || session.expectedRevision;
             // The primary record can belong to another tab. Keep this session's
             // authored variant paired with its visible text until explicit review.
-            session.record = copy(result.status === 'conflict' ? result.preserved || record : result.record);
+            session.record = result.status === 'discarded' ? null : copy(result.status === 'conflict' ? result.preserved || record : result.record);
+            if (result.status === 'discarded') {
+              session.declined = '';
+              if (session.pendingRecord?.revision === record.revision && this.draftScopeCurrent(session.scope))
+                this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: [] };
+            }
             if (session.resolveConflicts && result.status === 'saved') { session.conflict = false; session.resolveConflicts = false; }
             if (result.status === 'conflict') {
               session.conflict = true;
               if (this.draftScopeCurrent(session.scope)) this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: [{ level: 'error', message: 'Another tab changed this draft. Open the full editor to review both copies.' }] };
             }
             session.writeError = null;
+            session.discardAttempt = null;
             if (session.pendingRecord?.revision === record.revision) session.pendingRecord = null;
             if (this._draftSession === session) this.inlineDraftError = '';
             await this.loadEditorDrafts();
@@ -246,6 +283,26 @@
           } finally { this.draftWritePending--; }
         });
         return session.write;
+      },
+      async discardUnchangedEditorDraft(session, previousRecord, lines) {
+        if (!equal(lines, this.committedEditorDraftTranslations(session))) return null;
+        const memory = this.testMode || !root.OfflineStore?.getTranslationDraft;
+        const stored = memory ? this._draftMemory?.get(session.key) : await root.OfflineStore.getTranslationDraft(session.key);
+        if (!equal(lines, this.committedEditorDraftTranslations(session))) return null;
+        // Automatic cleanup cannot resolve another tab's work or its conflicts.
+        if (session.conflict || stored?.conflicts?.length || session.record?.conflicts?.length
+          || (stored?.state === 'active' && stored.revision !== session.expectedRevision && stored.revision !== previousRecord?.revision))
+          return { status: 'conflict', record: stored, preserved: session.record || previousRecord };
+        if (stored?.state !== 'active') return { status: 'discarded', record: stored };
+        if (!memory) {
+          session.discardAttempt = { id: stored.id, revision: stored.revision };
+          const result = await root.OfflineStore.discardTranslationDraft(session.key, stored.revision);
+          return { ...result, ...(result.status === 'conflict' ? { preserved: session.record || previousRecord } : {}) };
+        }
+        const record = { ...stored, state: 'discarded', consumedRevision: stored.revision,
+          revision: stored.revision + ':discarded', translations: [], base: null, source: null };
+        this._draftMemory.set(session.key, record);
+        return { status: 'discarded', record };
       },
       async flushEditorDraft({ force = false } = {}) {
         clearTimeout(this._draftTimer); this._draftTimer = null;
