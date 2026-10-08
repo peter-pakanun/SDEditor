@@ -1,30 +1,22 @@
 # Local-first baselines and incremental server storage
 
-Date: 2026-10-08
+Design recorded: 2026-10-08. Implementation updated: 2026-10-09.
 
-Status: Recorded design direction; implementation pending. This document records the database-size investigation and the proposed storage boundary. It does not describe a completed migration or authorize deleting existing data. The current runtime behavior remains documented in [Cloud Backup](cloud_backup.md), [Multi-Version Support](multi_version.md), and [Import Workflow](import_workflow.md).
+Status: Implemented in the frontend and companion API source; production deployment and production compaction remain pending. API schema v16 must deploy before the frontend. This document records the storage decision, implementation, migration safeguards, and local validation. It does not establish that either hosted service has been updated.
 
-Read this document before changing managed-version baseline retention, collection/export generation, shared history storage, or database compaction. The [Workspace Status Contract](workspace_statuses.md) remains authoritative for statuses, assignment provenance, diagnostics, and export eligibility.
+Read this document before changing managed-version baseline retention, collection/export generation, shared history storage, or database compaction. The [Workspace Status Contract](workspace_statuses.md) remains authoritative for statuses, assignment provenance, diagnostics, and export eligibility. Operational rollout instructions are in [Cloud Backup](cloud_backup.md).
 
-## Architectural direction
+## Architectural decision
 
-Keep the immutable complete parsed baseline in the browser. The server persists shared work and the information needed to authenticate, recover, coordinate, and reproduce that work. Manager publication does not inherently require a permanent second representation of the complete original ZIP inside SQLite.
+Keep the immutable complete parsed baseline in the browser. Manager publication retains the exact original ZIP as a separate content-addressed artifact, accepted import decisions, and compact verified metadata in SQLite. It no longer keeps a permanent complete multilingual parsed baseline or a duplicate full baseline in a completed upload job.
 
-Generate translated downloads in the browser from the verified original ZIP and an immutable snapshot of server-accepted Saved translations. When server processing needs original content, it can parse the retained original ZIP temporarily rather than persist the complete parsed archive indefinitely.
+The browser generates managed translated downloads from the verified original ZIP and an immutable snapshot of server-accepted Saved translations. When publication preparation or a compatibility download needs original text, the API parses the retained ZIP temporarily. Parsing is coalesced across concurrent requests and uses a bounded two-baseline memory cache; cached parses still require matching retained ZIP bytes.
 
-Retaining the original ZIP as an external artifact for explicit manager publication and authorized team downloads remains compatible with this direction. Ordinary translator saves and standalone room creation must not acquire full-ZIP uploads. Unsaved drafts and existing browser-local revision history remain local.
+Ordinary translator saves and standalone room creation do not upload full ZIPs. Unsaved drafts and existing browser-local revision history stay local. "Incremental" means sharing affected files and authored operations, rather than uploading every original file. The API still holds real Saved text, scoped per-file baseline witnesses, Dropped recovery content, and authenticated history. Saves are not character-level patches.
 
-"Incremental" means sharing affected files and authored operations. It does not mean the API holds only hashes, or that every save is a character-level patch. Saved translation content, per-file baseline witnesses, Dropped recovery content, and shared history are real server data. Any future delta encoding must retain independent recovery and conflict validation.
+## Why the downloaded database was large
 
-## Current implementation and why it is large
-
-Standalone sparse collaboration already creates empty rooms and sends baseline witnesses/proofs on first saves. It retains the selected language's original translation for touched files, saved overrides, and authenticated history. Untouched originals come from the client baseline.
-
-Legacy room initialization instead stored a complete source manifest and created a current translation row and seed history record for every file. A replay event also embedded the complete seeded translation set. Switching new rooms to sparse synchronization did not remove these older records.
-
-Manager publication currently stores the complete multilingual parsed baseline in `version_baselines.files`. The same file array remains in `version_uploads.prepared` after publication. The parsed baseline also supports server-side team counts, predecessor comparison, carry-forward/Dropped preparation, and ZIP collection generation. These are present implementation dependencies, not proof that permanent parsed-baseline storage is essential.
-
-The downloaded backup `2026-10-08T14-11-45-782Z-7a571b29` provided the following evidence. It was a schema-v13 snapshot, not a measurement of every future deployment. Sizes include each table's indexes and use MiB (1,048,576 bytes).
+The downloaded backup `2026-10-08T14-11-45-782Z-7a571b29` was a schema-v13 snapshot. Sizes below include each table's indexes and use MiB (1,048,576 bytes).
 
 | Storage in that snapshot | MiB |
 | --- | ---: |
@@ -40,85 +32,81 @@ The downloaded backup `2026-10-08T14-11-45-782Z-7a571b29` provided the following
 
 Five legacy rooms accounted for 101,558 initial seed history records out of 102,563 history records. Non-seed before/after JSON totaled approximately 0.61 MiB. The newer sparse rooms contained 752 shared files. The completed upload's parsed file array exactly matched the published baseline's file array. Across legacy versions, identical filepath/source payload pairs repeated approximately 23.6 MiB of source JSON.
 
-Original and collected ZIP files were excluded from this backup; parsed text inside SQLite was not. The WAL was empty. These findings explain duplication and retained free space, rather than establishing that normal recent saves alone caused the database size.
+Legacy room initialization stored a complete source manifest, a current translation row and seed history for every file, plus a replay event containing the seeded translations. Switching new rooms to sparse synchronization did not remove those records. Original and collected ZIP files were excluded from this backup, but parsed text inside SQLite was included. Its WAL was empty. Duplication and retained free space explain most of this snapshot's size.
 
-## Intended persistence boundary
+## Persistence boundary
 
 | Data | Browser | Server |
 | --- | --- | --- |
-| Complete immutable parsed baseline | Retained with the accepted source identity | No permanent full parsed copy in the intended design; temporary parsing/cache is allowed |
-| Original ZIP | Local import or cached authorized download | Explicit manager publication may retain one external artifact and its reference/checksum |
-| Accepted archive descriptor | Retained with the baseline | ZIP hash, parser version, duplicate-block decisions, configuration hash, Merkle root, and baseline identity |
-| Version catalog and team state | Account-scoped cache | Names, HEAD, deadlines, access, advisory ended state, and collection references |
-| Drafts and pending local saves | Durable account/workspace-scoped data | Not included in shared state or collections before acceptance |
-| Saved translations | Durable local work and sync cache | Affected-file content, revisions, author/time, conflicts, and idempotency receipts |
-| Per-file original content/proofs | Available from the local baseline | Scoped witnesses and recovery content needed for touched work; deduplicate immutable payloads where possible |
-| Dropped copies | Separate preserved snapshots and provenance | Preserved text/old source metadata where available, recovery generations, conflicts, and assignment/resolution provenance |
-| History | Local history remains local; shared history cached as needed | Authenticated shared history with retrievable before/after content |
-| Collections | ZIP generation from the verified baseline and frozen shared work | Durable immutable manifest identifying the baseline and exact accepted file revisions/content |
-| Dictionaries, settings, comments | Existing local/cache behavior | Existing language/account/audience contracts; unaffected by translation-baseline reduction |
+| Complete immutable parsed baseline | Retained with accepted source identity | Temporary verified ZIP parsing only for modern managed versions |
+| Original ZIP | Local import or cached authorized download | Explicit manager publication retains an external artifact and reference/checksum |
+| Accepted archive descriptor | Retained with baseline | ZIP hash/size, parser version, duplicate decisions, configuration hash, Merkle root and baseline identity |
+| Baseline metadata | Complete local baseline | Filepath, English entry count, DNT eligibility and hashes of complete original team translations |
+| Version catalog and team state | Account-scoped cache | Names, HEAD, deadlines, access, advisory ended state and collection references |
+| Drafts and pending local saves | Durable account/workspace-scoped data | Excluded from shared state and collections before acceptance |
+| Saved translations | Durable work and sync cache | Affected-file content, revisions, attribution, conflicts and idempotency receipts |
+| Per-file originals/proofs | Local baseline | Scoped witnesses and recovery content needed for touched work |
+| Dropped copies | Separate snapshots and provenance | Preserved text/source metadata, recovery generations, conflicts and assignment/resolution provenance |
+| History | Local history remains local | Authenticated shared history with retrievable before/after content |
+| Modern managed collections | ZIP generated locally | Immutable Saved snapshot and verified reconstructible manifest |
+| Legacy collections and rooms | Existing compatibility behavior | Existing ZIP artifacts, source manifests and seed history retained |
+| Dictionaries, settings, comments | Existing local/cache behavior | Existing language/account/audience contracts |
 
-Compact metadata is still server data. It must be bounded and derived from verified content, not a renamed full multilingual baseline or client-supplied status booleans. Preserve account, game, branch, baseline, selected language, role/access, and comment audience guards across requests, asynchronous callbacks, and retries.
+Do not persist UI status booleans. Preserve account, game, branch, baseline, selected language, role/access, and comment audience guards across asynchronous work and retries. Activating an existing version does not advance its source, create Dropped assignments, or rewrite baseline/history. Publication continues to reuse matching rooms and shared history.
 
-## Client-side downloads and collections
+## Managed collections and client ZIP generation
 
-The browser already parses downloaded published ZIPs and generates local translation ZIPs. A managed collection can use the same codec and archive validation, with a separate immutable input snapshot:
+The modern frontend requests `format: 'manifest'` on collection/download creation. The API captures the authorized team's current server-accepted Saved files, room sequence and immutable content in one transaction. `GET /v1/collections/:id/manifest` returns that frozen text with the accepted archive descriptor, parser/encoder versions, language and download name. Later edits, drafts, pending uploads and Dropped copies cannot enter the captured collection.
 
-1. The server atomically captures a collection manifest for the authorized game, branch, accepted baseline, language, and room sequence. It includes exactly the server-accepted Saved files and pins their revisions or immutable content references, including staged/deleted presence at that cutoff.
-2. The browser obtains the matching original ZIP from its cache or the authorized artifact endpoint. It replays the accepted parser/duplicate decisions and verifies the resulting baseline identity.
-3. The browser fetches the collection's pinned translation content. It must not substitute current editor text, unsaved drafts, pending uploads, later room revisions, or a Dropped snapshot.
-4. The browser reconstructs and encodes each Saved file using the original English, entry metadata and other language blocks plus the captured selected-language translation. It generates the translated ZIP locally.
-5. A later download of the same collection uses the same manifest and retained inputs. Recollecting explicitly creates a new cutoff. Download-only must keep the team's ended state and latest ending collection unchanged.
+Before the collection becomes ready, the API verifies the retained original ZIP, accepted baseline identity and captured export shape. The ending contract is now **durable reconstructible inputs**: a verified immutable manifest plus the retained verified original. The API marks an ending team ended after that readiness check, without waiting for a browser to finish downloading or generating its ZIP. A browser export failure retains the collection ID and snapshot for retry. Collection completion is revision-guarded so an older job cannot override a later collection or explicit reopen.
 
-Current collections contain Saved files only, including unchanged or intentionally blank saves. They are not full-original-ZIP exports. Preserve that behavior unless a separate product change is requested. Dropped snapshots never enter an export directly.
+The browser uses its matching verified local baseline when available. Otherwise it downloads the original ZIP and replays the accepted parser and duplicate-block decisions without activating another workspace. It verifies ZIP SHA-256, configuration hash, Merkle root and baseline identity. It then replaces only the selected-language text in the captured Saved files, preserving original English, entry metadata and other language blocks. Account/source/access changes cancel stale results; explicit preparation uses the existing work spinner.
 
-Pinned references must remain resolvable. A room sequence alone is insufficient if records needed to reconstruct that sequence can be overwritten or removed. Reproducibility also requires retaining a compatible parser/encoder version and canonical decisions. Logical file-content reproducibility and byte-identical ZIP artifacts are different guarantees; entry order, timestamps and compression must be specified if byte identity is required.
+Collections remain Saved-only, including unchanged or intentionally blank saves. They are not full-original-ZIP exports. Empty teams can end without a browser download. Download-only preserves open/ended state and the latest ending collection; recollection creates a later cutoff. Entry order, UTF-16LE encoding, fixed ZIP timestamp (2000-01-01), and DEFLATE level 5 match the API exporter. Byte equality is covered by local validation.
 
-The existing ending workflow marks a team ended only after the translated artifact is durable. Client-side ZIP generation must address that guarantee explicitly: either preserve a verified durable artifact completion path, or deliberately define completion around a durable reconstructible manifest. This document does not silently change the current ending contract. A failed or interrupted browser export must leave a retrievable collection and safe retry path.
+Compatibility is deliberate: older requests that omit `format` retain server-rendered archive collections and existing artifact downloads. The new frontend can fall back for an older API or replay a previously persisted request ID with its original request shape. Retrying uses the same durable ID. A manifest collection's legacy archive endpoint can reconstruct bytes temporarily without retaining another translated ZIP artifact. Existing archive collections are not converted or deleted.
 
-## Counts, source advancement, and validation
+## Counts and source advancement
 
-Moving ZIP generation alone does not remove all current baseline dependencies.
+`version_baselines.files` contains compact parser-derived metadata. Original completeness is represented by language-specific hashes only when every original line is nonblank and its count matches English. Hashes cover the original raw translation arrays, preserving Revised comparisons; English count and DNT eligibility preserve Missing/eligible counts. Saved, Missing, Revised and Dropped still follow the Workspace Status Contract and version-specific assignment provenance.
 
-Team counts can use compact verified per-file metadata: filepath, DNT/eligibility information, English entry count, original completeness for each team, source-shape fingerprints, and canonical original translation fingerprints. Saved/Missing/Revised/Dropped still derive from committed content and version-specific assignment provenance under the Workspace Status Contract. Exact normalization, metadata format, and proof validation must be specified before implementation.
+Source advancement transiently parses the verified predecessor and incoming ZIPs for carry-forward and Dropped preparation. Hashes alone cannot recreate old translations. Pending preparation retains compact metadata and witnesses only for inherited touched paths, plus necessary staged/Dropped work and revision checks. Completed publication replaces those preparation files/teams with the accepted archive and a bounded summary. Withdrawal, recovery evidence, and source-version identities remain intact.
 
-Source advancement needs both predecessor and new source shapes to decide carry-forward versus Dropped work. It must also preserve old original translations that become Dropped, including files with no shared save. Hashes can identify a change but cannot recreate that text. Obtain the required content from retained old/new ZIPs through temporary parsing, or through an explicitly validated client preparation protocol. Keep canonical choices, source availability reporting, and revision checks intact.
+## Immutable payload storage
 
-Selecting an existing version is activation, not source advancement. Storage reduction must not create new Dropped assignments, rewrite immutable baselines, or move work/history between source identities. Publishing an already accepted baseline must continue reusing matching rooms and shared history.
+Schema v15 introduces `immutable_payloads`: canonical JSON addressed by SHA-256, losslessly deflated, checksum/size checked and protected from update/deletion. Large translation arrays and file snapshots are shared through nested references. Current state, source manifests, history, replay events, Dropped snapshots, parent captures, recovery payloads and collections can reference the same content. Decoding returns detached values; callers receive the existing wire format. Legacy inline JSON is still readable.
 
-Server authority over permissions, accepted writes, immutable collection cutoffs, proof verification, and authenticated history remains necessary even when parsing and ZIP generation happen on clients.
+The v15 migration preserves row IDs, history ordering, authors, receipts, recovery IDs, resolved archives and conflict/provenance metadata. It verifies each converted payload round trip, restores immutable history/event triggers and checks foreign keys. Invalid data rolls back the migration. Reference verification traverses durable payloads, including nested frozen Dropped content. Limits bound decoding and the decoded cache. Logical room quota accounting uses original payload sizes, so compressed references do not bypass quotas.
 
-## Storage reduction and migration constraints
+Schema v16 replaces permanent managed parsed baselines and preparation duplication with compact metadata and adds manifest collections. **Before either new migration runs**, startup checks every existing managed baseline/prepared archive's accepted decisions and original ZIP reference, size and SHA-256. Missing or corrupt original artifacts block migration and preserve the old database schema and full parsed content. Restore the separately retained originals, then retry. Server startup supplies its configured artifact directory; library callers can pass `openDatabase(path, { artifactDir })`.
 
-Prefer lossless structural reductions:
+No history retention/deletion policy was introduced. Legacy full source manifests and seed records remain retrievable through deduplicated references. Immutable payloads are retained; reference garbage collection would require a separate recovery policy.
 
-- Store identical immutable source/revision payloads once and reference them from current state, history, events, and collections. Preserve room/version identity and ordering even when content is shared.
-- Replace completed publication preparation payloads with baseline references and bounded summaries while retaining upload status, conflict details needed by the UI, and idempotent replay information. The current status APIs still read `prepared`; clearing the column without changing those consumers would break the workflow.
-- Migrate legacy full seeds to retrievable immutable references. Do not delete old rooms, seed histories, original source text, or recovery evidence merely because new rooms are sparse.
-- Reclaim reusable free pages through deliberate database/backup compaction. This is separate from logical deduplication and does not prevent repeated payload growth.
-- Compress downloadable backups to reduce transfer and retained backup size. Compression does not shrink the live database or change persistence boundaries. See SQLite's [VACUUM documentation](https://sqlite.org/lang_vacuum.html) for database compaction behavior.
+## Backups, compaction and rollout
 
-Do not introduce automatic history retention/deletion as an assumed part of this direction. Retention changes recovery guarantees and requires a separate explicit policy. Preserve save receipts, durable mutation/request IDs, recovery generations, resolved archives, source-version assignment evidence, and conflict checks through migrations. Existing collection artifacts and all content referenced by their snapshots must remain retrievable.
+Backup manifest format 4 contains a compacted SQLite snapshot compressed as `sdeditor.sqlite.gz`, checksums for compressed and expanded bytes, the exact expanded size, configuration when present, and external artifact references. Snapshot compaction never vacuums the running source database. ZIP files remain excluded. Restore supports formats 1–4, verifies expansion bounds/checksums, database integrity and immutable references, and verifies separately retained ZIPs before replacing the database. `--uncompressed` creates a compact raw format-3 snapshot for compatibility.
 
-Any implementation needs a coordinated API/schema/frontend rollout, a recoverable backup, reference-aware artifact restoration, and compatible client handling. Keep raw ZIP artifacts separately because the current operational backup excludes them. Never clear browser storage or lose recoverable data to complete a migration. The database investigation and this document authorize no cleanup, schema migration, deployment, or code change.
+To reclaim pages in the live database after migration, stop the API and run `node scripts/compact.js --stopped` in the API checkout. This command checks the process lock, creates a compressed safety backup, obtains an exclusive database lock, checkpoints the WAL and vacuums deliberately. It does not run automatically at startup. Retain `DATA_DIR/artifacts` separately, including existing collected archives. Deploy schema v16 and reference-aware restore before the frontend; rolling back requires old code plus a compatible database/artifact backup and loses post-backup writes.
 
-## Implementation choices still open
+## Validation and remaining operational work
 
-- Whether an ending collection retains a generated ZIP artifact, a reconstructible manifest, or both; completion and retry semantics must preserve the chosen durability contract.
-- Whether carry-forward preparation runs on the server using temporary ZIP parsing or uses a validated client preparation protocol.
-- Compact metadata/proof formats, payload reference layout, temporary cache limits, and parser/encoder compatibility retention.
-- Legacy migration, verification, rollback, and compatibility handling for existing clients and backup formats.
+Local API validation passed 217 tests, including migration rollback, missing/corrupt-original preflight, old client/archive compatibility, frozen manifests, wrong-ZIP rejection, counts/provenance, retrievable history, gzip verification, restore and stopped compaction. Frontend checks passed 9 collection-export and 85 managed-version tests. A normal-mode desktop browser fixture exercised IndexedDB, save workers, authenticated collaboration, manifest exports, byte-equivalent ZIP generation, offline activation, language isolation and access revocation.
 
-Before declaring the direction implemented, verify client/server export equivalence, Saved-only scope, wrong-baseline rejection, frozen collections across later edits, interrupted/repeated collection requests, draft/upload exclusion, counts and Dropped provenance across versions, and retrievability of all migrated shared history. Measure database growth and size on representative data separately from backup compression. Local checks do not prove hosted deployment or production restore readiness.
+The follow-up audit on 2026-10-09 compared old/new counts for all 12 teams and 20,547 baseline files in the downloaded backup; counts matched and its checksum stayed unchanged. A disposable fixture preloaded all 12 teams on the same accepted HEAD, then verified room IDs, sequences, history, Saved text, pending preparation and frozen collections through publication and v14→v16 migration. Matching verified local baselines are reused for client exports without reimporting the ZIP. Another 2,000 generated JSON cases checked lossless payload round trips. The audit corrected duplicate-summary language/occurrence labels and added regression assertions; accepted parser decisions and translation content were unaffected. No translation/history loss was reproduced. Server originals are still required for every managed baseline/prepared archive, including older versions, even when all browsers have the current HEAD loaded.
+
+A disposable copy of the downloaded schema-v13 database was migrated and vacuumed during development: **332.1 MiB → 158.2 MiB** (52.4% smaller); its compressed output was **62.2 MiB** (81.3% smaller than the original raw file). Canonically decoded contents of 20 durable tables were compared, all 102,563 history rows remained, compact metadata was checked against the original baseline, and the downloaded file's checksum remained unchanged. This benchmark exercised the reduction before the final artifact preflight was added. The downloaded folder lacks ZIPs, so current startup intentionally refuses to migrate it without its separately retained originals. Production size may differ.
+
+Pending: coordinated API/frontend deployment, separate artifact retention/transfer, and deliberate production compaction after a recoverable backup. The live database, deployment and original downloaded backup remain unchanged; browser checks used disposable profile/storage. Local fixtures do not establish hosted OAuth/CORS or production restore readiness.
 
 ## Code entry points
 
-| Area | Current implementation |
+| Area | Implementation |
 | --- | --- |
-| Browser published ZIP parsing and managed downloads | [public/managedVersions.js](../public/managedVersions.js) |
-| Browser ZIP generation | [public/index.js](../public/index.js), [public/statDescCodec.js](../public/statDescCodec.js) |
+| Managed collection verification and browser encoding | [public/managedCollectionExports.js](../public/managedCollectionExports.js) |
+| Managed download requests, scope guards and retries | [public/managedVersions.js](../public/managedVersions.js) |
 | Immutable workspace/status rules | [public/workspaceState.js](../public/workspaceState.js) |
-| API sparse/legacy initialization, saves, history, events | Sibling `SDEditor-API/src/collaboration-store.js` |
-| API baseline lookup, counts, preparation, publication, collections | Sibling `SDEditor-API/src/versions-store.js` |
-| API original ZIP parsing and collection encoding | Sibling `SDEditor-API/src/version-codec.js` |
-| Operational backup and reference-aware restore | Sibling `SDEditor-API/scripts/backup.js` and `scripts/restore.js` |
+| API payload codec and migration/reference checks | Sibling `SDEditor-API/src/payload-store.js`, `src/payload-schema.js` |
+| API metadata, preparation, counts and collection jobs | Sibling `SDEditor-API/src/version-metadata.js`, `src/versions-store.js`, `src/versions-schema.js` |
+| API original ZIP parsing and compatibility encoding | Sibling `SDEditor-API/src/version-codec.js` |
+| API migration preflight | Sibling `SDEditor-API/src/database.js` |
+| Backup, reference-aware restore and stopped compaction | Sibling `SDEditor-API/scripts/backup.js`, `scripts/restore.js`, `scripts/compact.js` |

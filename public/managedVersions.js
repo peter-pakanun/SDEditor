@@ -710,21 +710,72 @@
         })().finally(() => { this._managedWarnPending = null; });
         return this._managedWarnPending;
       },
-      async managedDownload(path, name) {
+      async managedDownload(path, name, isCurrent) {
         if (!this.managedOnlineAvailable) return false;
         const key = this.managedCatalogScope;
-        try { const blob = await this._cloud.request(path, { responseType: 'blob', timeout: 120000 }); if (this.managedCatalogAccess && key === this.managedCatalogScope) { root.saveAs(blob, name); this.managedSetOperationError(path, ''); return true; } }
-        catch (error) { if (!error.stale && key === this.managedCatalogScope) this.managedSetOperationError(path, error); }
+        const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && (!isCurrent || isCurrent());
+        try { const blob = await this._cloud.request(path, { responseType: 'blob', timeout: 120000 }); if (current()) { root.saveAs(blob, name); this.managedSetOperationError(path, ''); return true; } }
+        catch (error) { if (!error.stale && current()) this.managedSetOperationError(path, error); }
         return false;
       },
       managedDownloadOriginal(version = this.managedSelectedVersion) { if (version) return this.managedDownload('/v1/versions/' + encodeURIComponent(version.id) + '/original', filename(version.name) + '_StatDescriptions.zip'); },
+      managedCollectionCurrent(version, operation) {
+        const catalog = this.managedCatalogScope, source = this.sourceIdentity, language = this.lang;
+        return () => this.managedManagerAccess && catalog === this.managedCatalogScope && source === this.sourceIdentity
+          && language === this.lang && this.selectedManagedVersionId === version.id && operation === this._managedOperation;
+      },
+      async managedExportCollection(collection, version, language, isCurrent) {
+        if (!this.managedManagerAccess || !this.managedOnlineAvailable || !collection?.id || !version
+          || version.game !== this.gameVersion || (version.branchId || DEFAULT_BRANCH) !== this.branchId) return false;
+        if (!isCurrent && this.managedVersionBusy) return false;
+        version = copy(version); collection = copy(collection);
+        const operation = isCurrent ? null : this.managedBeginOperation({ key: 'collection', label: 'Preparing translated ZIP' });
+        const current = isCurrent || this.managedCollectionCurrent(version, operation);
+        const errorKey = '/v1/collections/' + encodeURIComponent(collection.id) + '/archive';
+        const name = filename(version.name) + '_Translated_' + filename(language) + '.zip';
+        try {
+          if (!current()) return false;
+          // Old collections keep their durable archive endpoint and older APIs
+          // may return archive collections even when manifest format is requested.
+          if (collection.format !== 'manifest') return await this.managedDownload(errorKey, name, current);
+          const response = await this._cloud.request('/v1/collections/' + encodeURIComponent(collection.id) + '/manifest', { timeout: 120000 });
+          if (!current()) return false;
+          const exporter = root.ManagedCollectionExports;
+          const manifest = await exporter.validateManifest(response, { collectionId: collection.id, versionId: version.id,
+            game: version.game, branchId: version.branchId || DEFAULT_BRANCH, sourceHash: version.sourceHash,
+            zipHash: version.zipHash, language }, { current });
+          if (!current()) return false;
+          let baseline = this.importBaseline?.archive?.baselineId === manifest.archive.baselineId ? this.importBaseline : null;
+          if (!baseline) baseline = await root.OfflineStore.getImportedBaseline?.(manifest.archive.baselineId, version.game);
+          if (!current()) return false;
+          let files;
+          if (baseline) {
+            try { files = await exporter.cachedBaseline(baseline, manifest.archive, { current }); }
+            catch (error) { if (error.stale) throw error; /* Rebuild an invalid cache from the verified ZIP. */ }
+          }
+          if (!current()) return false;
+          if (!files) {
+            const blob = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000 });
+            if (!current()) return false;
+            files = await exporter.parseOriginal(blob, manifest.archive, language, root.JSZip, { current });
+          }
+          if (!current()) return false;
+          const blob = await exporter.generate(manifest, files, root.JSZip, { current });
+          if (!current()) return false;
+          root.saveAs(blob, name);
+          this.managedSetOperationError(errorKey, '');
+          return true;
+        } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); return false; }
+        finally { if (operation) this.managedFinishOperation(operation); }
+      },
       async managedCollect(team, endWindow = true) {
-        const version = this.managedSelectedVersion, key = this.managedCatalogScope;
+        const version = copy(this.managedSelectedVersion);
         if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
+        team = copy(team);
         const action = endWindow ? (team.counts.saved ? 'Download and mark ended' : 'Mark ended — no saved files') : 'Download only';
         const errorKey = endWindow ? 'collect' : 'downloadOnly';
         const operation = this.managedBeginOperation();
-        const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
+        const current = this.managedCollectionCurrent(version, operation);
         try {
           if (endWindow && !await this.appConfirm(`Collect ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
           if (!current()) return;
@@ -737,7 +788,20 @@
           this._managedCollectionIds.set(requestKey, requestId);
           await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, requestId, endWindow);
           if (!current()) return;
-          let result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/teams/' + encodeURIComponent(team.language) + (endWindow ? '/collections' : '/downloads'), { method: 'POST', body: { idempotencyKey: requestId, ...(!endWindow ? { endWindow: false } : {}) }, timeout: 120000 });
+          const path = '/v1/versions/' + encodeURIComponent(version.id) + '/teams/' + encodeURIComponent(team.language) + (endWindow ? '/collections' : '/downloads');
+          const body = { idempotencyKey: requestId, format: 'manifest', ...(!endWindow ? { endWindow: false } : {}) };
+          let result;
+          try { result = await this._cloud.request(path, { method: 'POST', body, timeout: 120000 }); }
+          catch (error) {
+            if (!current()) return;
+            // Old durable requests used this same ID without a format field.
+            // Explicit rejection means no new collection was captured; replay
+            // the old contract to recover its cutoff or use an older API.
+            if (error.code !== 'IDEMPOTENCY_REUSED' && !(error.status === 400 && error.code === 'INVALID_REQUEST'
+              && /unsupported fields/i.test(error.message))) throw error;
+            const { format, ...legacyBody } = body;
+            result = await this._cloud.request(path, { method: 'POST', body: legacyBody, timeout: 120000 });
+          }
           if (!current()) return;
           let collection = result.collection || result;
           while (['preparing', 'pending', 'building'].includes(collection.status)) {
@@ -748,7 +812,7 @@
           if (collection.status === 'failed') throw new Error(collection.error?.message || 'Could not prepare the collection. Retry the same request.');
           if (!current()) return;
           if (collection.downloadReady !== false && (collection.fileCount ?? team.counts.saved) > 0) {
-            const downloaded = await this.managedDownload('/v1/collections/' + encodeURIComponent(collection.id) + '/archive', filename(version.name) + '_Translated_' + filename(team.language) + '.zip');
+            const downloaded = await this.managedExportCollection(collection, version, team.language, current);
             if (downloaded === false) return;
           }
           if (!current()) return;
@@ -760,12 +824,12 @@
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); }
         finally { this.managedFinishOperation(operation); }
       },
-      managedDownloadCollection(team) { if (this.managedManagerAccess && this.managedSelectedVersion && team.latestCollection?.id) return this.managedDownload('/v1/collections/' + encodeURIComponent(team.latestCollection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip'); },
+      managedDownloadCollection(team) { if (this.managedManagerAccess && this.managedSelectedVersion && team.latestCollection?.id) return this.managedExportCollection(team.latestCollection, this.managedSelectedVersion, team.language); },
       managedDownloadPrevious(team, event) {
         if (!this.managedManagerAccess || !this.managedSelectedVersion) return false;
         const collection = team.collections?.find(c => c.id === event.target.value);
         event.target.value = '';
-        if (collection?.downloadReady) return this.managedDownload('/v1/collections/' + encodeURIComponent(collection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip');
+        if (collection?.downloadReady) return this.managedExportCollection(collection, this.managedSelectedVersion, team.language);
       },
       async managedReopen(team) { if (this.managedManagerAccess && this.managedSelectedVersion) await this.managedAction('/v1/versions/' + encodeURIComponent(this.managedSelectedVersion.id) + '/teams/' + encodeURIComponent(team.language) + '/reopen', {}); },
       async managedAction(path, body) {
@@ -870,8 +934,23 @@
         const operation = this.managedBeginOperation({ key: 'upload', label: 'Preparing manager upload' });
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try {
+          const uploadFile = this.managedUploadFile;
+          if (!this.managedUpload || this.managedUpload.status === 'awaiting_archive') {
+            if (!uploadFile) throw new Error(this.managedUpload ? 'Select the original ZIP again to resume this upload.' : 'Select StatDescriptions.zip.');
+            this.setBrowserWork?.('versions', { key: 'upload', label: 'Checking ZIP game version', active: true, immediate: true });
+            let zip;
+            try { zip = await root.JSZip.loadAsync(uploadFile); }
+            catch (_) { throw new Error('Cannot open this ZIP. Select the original StatDescriptions.zip.'); }
+            if (!current()) return;
+            const paths = Object.values(zip.files).filter(file => !file.dir && /\.txt$/i.test(file.name)).map(file => file.name);
+            if (!paths.length) throw new Error('No .txt files found in this ZIP.');
+            const detectedGame = root.StatDescCodec.detectGameVersionFromFilepaths(paths);
+            if (detectedGame !== scope.game) {
+              const detectedLabel = detectedGame === 'poe2' ? 'PoE2' : 'PoE1', expectedLabel = scope.game === 'poe2' ? 'PoE2' : 'PoE1';
+              throw new Error(`This ZIP is for ${detectedLabel}, but this upload is for ${expectedLabel}. Select a ${expectedLabel} StatDescriptions.zip.`);
+            }
+          }
           if (!this.managedUpload) {
-            if (!this.managedUploadFile) throw new Error('Select StatDescriptions.zip.');
             this._managedCreateId ||= id(); await this.managedRememberUpload(scope);
             if (!current()) return;
             const result = await this._cloud.request('/v1/version-uploads', { method: 'POST', body: { game: scope.game, branchId: scope.branchId, name: this.managedUploadName.trim(), deadlineAt: parseDeadline(this.managedUploadDeadline), idempotencyKey: this._managedCreateId } });
@@ -885,8 +964,7 @@
             return;
           }
           if (this.managedUpload.status === 'awaiting_archive') {
-            if (!this.managedUploadFile) throw new Error('Select the original ZIP again to resume this upload.');
-            const result = await this._cloud.request('/v1/version-uploads/' + encodeURIComponent(uploadId) + '/archive', { method: 'PUT', rawBody: this.managedUploadFile, timeout: 180000, onUploadProgress: (loaded, total) => { if (current()) { this.managedUploadBytes = loaded; this.setBrowserWork?.('versions', { key: 'upload', label: total ? `Uploading original ZIP · ${Math.round(loaded * 100 / total)}%` : 'Uploading original ZIP', active: true, immediate: true }); } } });
+            const result = await this._cloud.request('/v1/version-uploads/' + encodeURIComponent(uploadId) + '/archive', { method: 'PUT', rawBody: uploadFile, timeout: 180000, onUploadProgress: (loaded, total) => { if (current()) { this.managedUploadBytes = loaded; this.setBrowserWork?.('versions', { key: 'upload', label: total ? `Uploading original ZIP · ${Math.round(loaded * 100 / total)}%` : 'Uploading original ZIP', active: true, immediate: true }); } } });
             if (!current()) return; this.managedUpload = result.upload;
             await this.managedRememberUpload(scope);
             if (!current()) return;

@@ -992,24 +992,7 @@ const config = Vue.defineComponent({
         : 'SDEditor';
     },
     detectGameVersionFromFilepaths(filepaths) {
-      const paths = (Array.isArray(filepaths) ? filepaths : [])
-        .map(p => String(p || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase())
-        .filter(Boolean);
-
-      for (const path of paths) {
-        if (path.includes('specific_skill_stat_descriptions/explosive_grenade')) return 'poe2';
-      }
-
-      for (const path of paths) {
-        const marker = 'specific_skill_stat_descriptions/';
-        const idx = path.indexOf(marker);
-        if (idx < 0) continue;
-        const rest = path.slice(idx + marker.length);
-        const parts = rest.split('/').filter(Boolean);
-        if (parts.length >= 2) return 'poe2';
-      }
-
-      return 'poe1';
+      return window.StatDescCodec.detectGameVersionFromFilepaths(filepaths);
     },
     detectGameVersionFromDescs(descs) {
       const paths = [];

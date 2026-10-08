@@ -31,6 +31,17 @@ test('browser and independently deployed API vendor use byte-identical parser ve
   }
 });
 
+test('browser and API detect the same game from normalized archive paths', () => {
+  for (const parser of [codec, browser(), require(vendorPath)]) {
+    for (const [paths, game] of [
+      [['stat_descriptions/fire.txt', 'specific_skill_stat_descriptions/fireball.txt'], 'poe1'],
+      [['specific_skill_stat_descriptions/explosive_grenade.txt'], 'poe2'],
+      [['Metadata/StatDescriptions/specific_skill_stat_descriptions/grenade/damage.txt'], 'poe2'],
+      [['\\SPECIFIC_SKILL_STAT_DESCRIPTIONS\\EXPLOSIVE_GRENADE\\damage.txt'], 'poe2'],
+    ]) assert.equal(parser.detectGameVersionFromFilepaths(paths), game);
+  }
+});
+
 test('UTF-16LE encoding retains BOM, all baseline languages, remarks and intentional blanks', () => {
   const parsed = codec.parseText('source/test.txt', source, 'Thai', { strict: true });
   parsed.translations.Thai = [''];

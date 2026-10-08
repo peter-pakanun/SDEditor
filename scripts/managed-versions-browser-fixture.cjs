@@ -19,9 +19,12 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 if (!executablePath) throw new Error('No installed Edge/Chrome found. Set FIXTURE_BROWSER_PATH; no browser download is needed.');
 
 async function run() {
-  const apiRoot = resolve(__dirname, '../../SDEditor-API'), fromApi = createRequire(join(apiRoot, 'package.json'));
+  const apiRoot = process.env.SDEDITOR_FIXTURE_API_ROOT ? resolve(process.env.SDEDITOR_FIXTURE_API_ROOT)
+    : resolve(__dirname, '../../SDEditor-API');
+  const fromApi = createRequire(join(apiRoot, 'package.json'));
   const load = name => import(pathToFileURL(join(apiRoot, 'src', name)).href);
   const [{ loadConfig }, { openDatabase, CloudStore }, { createApp }] = await Promise.all([load('config.js'), load('database.js'), load('app.js')]);
+  const [{ readPayload }, { exportCollection }] = await Promise.all([load('payload-store.js'), load('version-codec.js')]);
   const express = fromApi('express'), JSZip = fromApi('jszip');
   const directory = mkdtempSync(join(tmpdir(), 'sdeditor-managed-browser-'));
   const secret = randomUUID(), frontend = express(), frontendServer = createServer(frontend);
@@ -57,7 +60,7 @@ async function run() {
   frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8')
     .replace("app.mount('#app');", "window.__managedFixtureApp = app.mount('#app');")));
   frontend.use(express.static(join(__dirname, '../public')));
-  const source = { filepath: 'fixture/fire.txt', filedir: 'fixture', filename: 'fire.txt', name: 'fire',
+  const source = { filepath: 'specific_skill_stat_descriptions/explosive_grenade/fire.txt', filedir: 'specific_skill_stat_descriptions/explosive_grenade', filename: 'fire.txt', name: 'fire',
     stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], Thai: ['ความเสียหายไฟ'], German: ['Feuerschaden'] } };
   const zip = new JSZip(); zip.file(source.filepath, codec.descEncode(source), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
   const missingSource = { ...source, filepath: 'fixture/cold.txt', filename: 'cold.txt', name: 'cold', stats: ['cold_damage'],
@@ -213,7 +216,8 @@ async function run() {
         ['GET', '/v1/versions/' + versionId + '/original'],
         ['GET', '/v1/versions/' + versionId + '/presence'],
         ['POST', '/v1/versions/' + versionId + '/ticket'],
-        ...(collectionId ? [['GET', '/v1/collections/' + collectionId], ['GET', '/v1/collections/' + collectionId + '/archive']] : []),
+        ...(collectionId ? [['GET', '/v1/collections/' + collectionId], ['GET', '/v1/collections/' + collectionId + '/manifest'],
+          ['GET', '/v1/collections/' + collectionId + '/archive']] : []),
       ];
       return Promise.all(routes.map(async ([method, path]) => {
         // Raw authenticated requests prove the server gate without refreshing the SDK's cached permissions.
@@ -274,15 +278,31 @@ async function run() {
     };
     const checkTranslatedDownload = async download => {
       assert.equal(download.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
-      const collectedZip = await JSZip.loadAsync(readFileSync(await download.path()));
-      assert.deepEqual(Object.values(collectedZip.files).filter(file => !file.dir).map(file => file.name), [source.filepath]);
+      const downloadBytes = readFileSync(await download.path()), collectedZip = await JSZip.loadAsync(downloadBytes);
+      assert.deepEqual(Object.keys(collectedZip.files), [source.filepath], 'Nested Saved files do not create directory entries with current timestamps');
       const collectedFile = await collectedZip.file(source.filepath).async('uint8array');
       assert.deepEqual(Array.from(collectedFile.slice(0, 2)), [255, 254]);
       const collectedDesc = codec.parseText(source.filepath, codec.decodeUTF16(collectedFile), 'Thai', { strict: true });
       assert.deepEqual(collectedDesc.translations.Thai, ['ความเสียหายไฟที่แก้ไข']);
       assert.deepEqual(collectedDesc.translations.English, source.translations.English);
+      assert.deepEqual(collectedDesc.translations.German, source.translations.German);
+      assert.equal(collectedZip.file(source.filepath).date.toISOString(), '2000-01-01T00:00:00.000Z');
+      return downloadBytes;
     };
     const [manager, translator] = pages;
+    const collectionTraffic = [];
+    manager.on('request', request => { const pathname = new URL(request.url()).pathname; if (pathname.startsWith('/v1/collections/')) collectionTraffic.push(pathname); });
+    const checkManifestDownload = async (collection, downloadBytes, trafficStart) => {
+      assert.equal(collection.format, 'manifest'); assert.equal(collection.status, 'ready');
+      const row = database.prepare('SELECT * FROM version_collections WHERE id=?').get(collection.id);
+      assert.equal(row.artifact_hash, null, 'Manifest collections retain immutable inputs without a generated server ZIP artifact');
+      const original = await api.locals.versions.parsedBaseline(api.locals.versions.version(collection.versionId, 'fixture-manager'));
+      const expected = await exportCollection(readPayload(database, row.snapshot), original.files, collection.language);
+      assert.deepEqual(downloadBytes, expected, 'Browser ZIP matches the shared codec export from the exact frozen cutoff');
+      const traffic = collectionTraffic.slice(trafficStart);
+      assert.ok(traffic.includes('/v1/collections/' + collection.id + '/manifest'), 'Browser requests the frozen manifest');
+      assert.equal(traffic.includes('/v1/collections/' + collection.id + '/archive'), false, 'Browser produces its own translated ZIP');
+    };
     await bootstrap(manager, 'manager');
     await bootstrap(translator, 'thai'); await importOffline(translator);
     await translator.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
@@ -299,9 +319,21 @@ async function run() {
     await translator.evaluate(async () => { const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry(); });
     await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
     await manager.locator('#managerUploadName').fill('2026-10-05_POE2');
+    const wrongGameZip = new JSZip(), uploadCount = database.prepare('SELECT COUNT(*) AS n FROM version_uploads').get().n;
+    wrongGameZip.file('stat_descriptions/fire.txt', codec.descEncode({ ...source, filepath: 'stat_descriptions/fire.txt' }), { createFolders: false });
+    await manager.locator('#managerUploadArchive').setInputFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: await wrongGameZip.generateAsync({ type: 'nodebuffer' }) });
+    await manager.getByRole('button', { name: 'Upload and prepare', exact: true }).click();
+    await manager.locator('.versionModal .versionError[role="alert"]').waitFor();
+    assert.equal(await manager.locator('.versionModal .versionError[role="alert"]').textContent(), 'This ZIP is for PoE1, but this upload is for PoE2. Select a PoE2 StatDescriptions.zip.');
+    assert.equal(database.prepare('SELECT COUNT(*) AS n FROM version_uploads').get().n, uploadCount, 'Wrong-game ZIP does not create a server upload');
+    assert.equal(await manager.evaluate(() => window.__managedFixtureApp.gameVersion), 'poe2');
+    assert.equal(await manager.getByRole('button', { name: 'Publish to all teams', exact: true }).count(), 0);
+    assert.equal(await manager.getByRole('button', { name: 'Upload and prepare', exact: true }).isEnabled(), true);
+    results.push('Manager wrong-game ZIP is rejected visibly before upload creation, without a switch or publication override; matching ZIP can be selected next');
     await manager.locator('#managerUploadArchive').setInputFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
     await manager.getByRole('button', { name: 'Upload and prepare', exact: true }).click();
-    await manager.waitForFunction(() => window.__managedFixtureApp.managedUpload?.status === 'prepared' || window.__managedFixtureApp.managedUploadError);
+    await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy
+      && (window.__managedFixtureApp.managedUpload?.status === 'prepared' || window.__managedFixtureApp.managedUploadError));
     const uploadError = await manager.evaluate(() => window.__managedFixtureApp.managedUploadError);
     assert.equal(uploadError, '', 'Manager upload preparation');
     const existingTeam = await manager.evaluate(() => window.__managedFixtureApp.managedUpload.existingTeams.find(team => team.language === 'Thai'));
@@ -456,6 +488,8 @@ async function run() {
     assert.deepEqual(await entryScope(manager), managerBeforeRowOpen, 'Manager version name is a keyboard-selectable details control');
     assert.equal(await manager.locator('.versionDetails > .versionPanelHeading button').count(), 0, 'Source actions reside in the upper table');
     await manager.setViewportSize({ width: 1100, height: 820 });
+    // Resize closes floating menus; settle that event before the keyboard opens one.
+    await manager.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const actionMenu = managerVersionRow.locator('.versionActionMenu'), menuSummary = actionMenu.locator('summary');
     const closedRowHeight = await managerVersionRow.evaluate(element => element.getBoundingClientRect().height);
     const checkFloatingMenu = async () => {
@@ -566,22 +600,33 @@ async function run() {
     assert.equal(await manager.evaluate(() => !!window.__managedFixtureApp._collaboration), false, 'Dashboard does not join team editing rooms');
     results.push('Translator language isolation, original download/open, keyboard translation save, real worker/API synchronization');
     const beforeDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
+    const onlyTrafficStart = collectionTraffic.length;
     const onlyDownload = manager.waitForEvent('download');
     await thaiRow.getByRole('button', { name: 'Download only', exact: true }).click();
-    await checkTranslatedDownload(await onlyDownload);
+    const onlyBytes = await checkTranslatedDownload(await onlyDownload);
     await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
     const afterDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
     assert.equal(afterDownloadOnly.ended, beforeDownloadOnly.ended);
     assert.deepEqual(afterDownloadOnly.latestCollection, beforeDownloadOnly.latestCollection, 'Download only preserves ending collection/cutoff');
     const downloadSnapshot = afterDownloadOnly.collections.find(collection => collection.kind === 'download_only');
     assert.ok(downloadSnapshot?.downloadReady); assert.equal(downloadSnapshot.endWindow, false);
+    await checkManifestDownload(downloadSnapshot, onlyBytes, onlyTrafficStart);
     assert.equal(await thaiRow.locator('td').first().locator('.versionBadge.ended').count(), 0);
-    results.push('Download only retains a Saved-only ZIP snapshot without changing the window or latest ending collection');
+    results.push('Client-side Download only uses an immutable Saved-only manifest, preserves original language blocks, matches the server codec bytes and keeps window/latest ending collection unchanged');
+    const endingTrafficStart = collectionTraffic.length;
     const download = manager.waitForEvent('download');
     await thaiRow.getByRole('button', { name: 'Download and mark ended', exact: true }).click();
     await manager.locator('.appDialogConfirm').click();
-    await checkTranslatedDownload(await download);
+    const endingBytes = await checkTranslatedDownload(await download);
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').ended);
+    const endingCollection = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai').latestCollection;
+    await checkManifestDownload(endingCollection, endingBytes, endingTrafficStart);
+    const repeatedDownload = manager.waitForEvent('download');
+    await manager.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      return vm.managedDownloadCollection(vm.managedVersionDetails.teams.find(team => team.language === 'Thai'));
+    });
+    assert.deepEqual(await checkTranslatedDownload(await repeatedDownload), endingBytes, 'Repeated manifest downloads are byte-identical');
     assert.equal(await thaiRow.locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
     assert.equal(await manager.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').count(), 0,
       'Manager version badge waits until every team ends');
@@ -655,7 +700,7 @@ async function run() {
     const stored = await translator.evaluate(async () => {
       const vm = window.__managedFixtureApp; const scope = vm.managedWorkspaceScope();
       const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
-      return { version: vm.sourceIdentity, saved: workspace.staged?.Thai?.['fixture/fire.txt']?.translations,
+      return { version: vm.sourceIdentity, saved: workspace.staged?.Thai?.['specific_skill_stat_descriptions/explosive_grenade/fire.txt']?.translations,
         baseline: workspace.importArchive.baselineId, testMode: vm.testMode, versions: (await OfflineStore.listLocalVersions(scope)).length };
     });
     assert.equal(stored.testMode, false); assert.equal(stored.version, version.sourceHash);
@@ -788,7 +833,7 @@ async function run() {
       window.__managedRevokedPresence = vm._managedPresenceSocket;
       const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
       return { catalogIds: (await OfflineStore.getVersionCatalog(scope)).map(version => version.id).sort(),
-        saved: workspace.staged.Thai['fixture/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
+        saved: workspace.staged.Thai['specific_skill_stat_descriptions/explosive_grenade/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
         metadataCatalogId: (await OfflineStore.getVersionMetadata(scope)).catalogVersionId };
     }, version.sourceHash);
     const removed = await admin.evaluate(async () => {
@@ -818,7 +863,7 @@ async function run() {
     const retainedAfter = await translator.evaluate(async sourceHash => {
       const scope = window.__managedFixtureApp.managedWorkspaceScope(sourceHash), workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
       return { catalogIds: (await OfflineStore.getVersionCatalog(scope)).map(version => version.id).sort(),
-        saved: workspace.staged.Thai['fixture/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
+        saved: workspace.staged.Thai['specific_skill_stat_descriptions/explosive_grenade/fire.txt'].translations, baseline: workspace.importArchive.baselineId,
         metadataCatalogId: (await OfflineStore.getVersionMetadata(scope)).catalogVersionId };
     }, version.sourceHash);
     assert.deepEqual(retainedAfter, retainedBefore, 'Revocation hides shared data without deleting local recovery caches, baseline or Saved work');

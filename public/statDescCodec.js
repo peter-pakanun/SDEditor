@@ -5,6 +5,18 @@
   else root.StatDescCodec = api;
 })(typeof window === 'object' ? window : globalThis, function () {
   'use strict';
+  function detectGameVersionFromFilepaths(filepaths) {
+    const paths = (Array.isArray(filepaths) ? filepaths : [])
+      .map(path => String(path || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase())
+      .filter(Boolean);
+    for (const path of paths) {
+      if (path.includes('specific_skill_stat_descriptions/explosive_grenade')) return 'poe2';
+      const marker = 'specific_skill_stat_descriptions/';
+      const index = path.indexOf(marker);
+      if (index >= 0 && path.slice(index + marker.length).split('/').filter(Boolean).length >= 2) return 'poe2';
+    }
+    return 'poe1';
+  }
   function computeIsMissing(engLen, lines) {
     if (!Number.isFinite(engLen) || engLen < 0) engLen = 0;
     if (!Array.isArray(lines)) return engLen > 0;
@@ -402,6 +414,6 @@ function strEncodeUTF16(str) {
     }
     return source.filter(Boolean);
   }
-  return { parserVersion: 1, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
+  return { parserVersion: 1, detectGameVersionFromFilepaths, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
     decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash };
 });

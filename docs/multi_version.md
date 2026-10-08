@@ -35,9 +35,11 @@ specific_skill_stat_descriptions/explosive_grenade
 
 If the ZIP looks like a different version from the one currently selected, SDEditor asks before switching versions and importing there.
 
+The manager's **Upload next version → Upload and prepare** uses the same path detection and rejects a ZIP for the other game. It does not offer a switch or override during upload. The API enforces the check before preparation and again at publication, including uploads prepared before this check was introduced.
+
 ## Storage Split
 
-For the recorded direction on reducing server baseline duplication and generating managed collections on clients, read [Local-first baselines and incremental server storage](local_first_server_storage.md). That design is pending implementation; this section describes the current storage and version behavior.
+For implemented server storage reductions, client-generated managed collections, migration safeguards and pending deployment work, read [Local-first baselines and incremental server storage](local_first_server_storage.md).
 
 IndexedDB v8 retains source/workspace snapshots and active pointers separately:
 
@@ -60,7 +62,7 @@ Signed-in users automatically join a shared room for the same **game + branch + 
 - The modern room's `sourceHash` is its `baselineId`, derived from `zipHash`, the accepted parser version and duplicate-language choices, and the parsed baseline tree's root hash. The ZIP hash alone is not the room identity. Collaborators use the accepted import configuration for that ZIP.
 - Legacy workspaces without a cached ZIP descriptor use a hash of the canonical parsed English/source metadata manifest. They can join an existing legacy room; creating a new room requires importing the original ZIP.
 
-Standalone imports use sparse synchronization: joining shares the small ZIP/import descriptor. A file's first save supplies its baseline witness and membership proof; the API retains that file's original translation for the room language, the saved override and authenticated change history. Manager publication explicitly uploads and retains the original ZIP and complete parsed baseline on the API so teams can download the same source and the manager can collect translated ZIPs. Older legacy rooms may retain uploaded source manifests and initial translation snapshots. Existing local revision history is never uploaded.
+Standalone imports use sparse synchronization: joining shares the small ZIP/import descriptor. A file's first save supplies its baseline witness and membership proof; the API retains that file's original translation for the room language, the saved override and authenticated change history. Manager publication retains the original ZIP externally and compact verified metadata in SQLite. Complete parsed baselines stay in the browser; preparation transiently parses retained ZIPs. Managed downloads combine a verified original with a frozen server-accepted Saved manifest in the browser. Older legacy rooms retain uploaded source manifests and initial translation snapshots through immutable payload references. Existing local revision history is never uploaded.
 
 Publishing an identical accepted baseline associates existing local work and matching collaboration rooms with the catalog entry. It keeps the room ID, staged work, active draft and shared history; offline/online is a catalog association, not a second translation history. A published entry with the same raw ZIP hash is rejected within its game and branch. Different parser or duplicate-block decisions must not be silently treated as the same baseline.
 

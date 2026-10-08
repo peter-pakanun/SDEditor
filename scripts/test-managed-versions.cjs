@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const Managed = require('../public/managedVersions.js');
+const codec = require('../public/statDescCodec.js');
+const JSZip = require('../../SDEditor-API/node_modules/jszip');
 
 const hash = character => character.repeat(64);
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -36,6 +38,7 @@ function harness(options = {}) {
     ...options.storage,
   };
   const window = { OfflineStore: storage, crypto: { randomUUID: () => 'request-' + (++counter) },
+    StatDescCodec: codec, JSZip: { async loadAsync() { return { files: { source: { name: 'specific_skill_stat_descriptions/explosive_grenade.txt', dir: false } } }; } },
     addEventListener() {}, removeEventListener() {}, saveAs(blob, name) { events.push({ type: 'download', blob, name }); },
     ...options.window };
   const context = vm.createContext({ window, URL, URLSearchParams, console, TextEncoder, TextDecoder,
@@ -936,6 +939,70 @@ test('a healthy catalog refresh does not clear an unresolved collection failure'
   assert.equal(app.managedVisibleError, 'ZIP generation failed');
 });
 
+async function gameArchive(game) {
+  const zip = new JSZip();
+  zip.file(game === 'poe2' ? 'specific_skill_stat_descriptions/explosive_grenade/damage.txt' : 'stat_descriptions/damage.txt', 'description damage');
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+test('manager uploads reject either other game before creating or sending an upload', async t => {
+  for (const game of ['poe1', 'poe2']) for (const resume of [false, true]) await t.test(game + (resume ? ' resumed' : ' new'), async () => {
+    const writes = [], { app, events, requests } = harness({ window: { JSZip }, storage: {
+      async setVersionUpload(scope, value) { writes.push({ scope, value }); },
+    } });
+    app.gameVersion = game;
+    app.managedUploadFile = await gameArchive(game === 'poe1' ? 'poe2' : 'poe1');
+    if (resume) app.managedUpload = { id: 'existing-upload', status: 'awaiting_archive', game };
+    const upload = app.managedUpload, source = app.localDescs;
+    await app.prepareManagedUpload();
+    const expectedLabel = game === 'poe1' ? 'PoE1' : 'PoE2', otherLabel = game === 'poe1' ? 'PoE2' : 'PoE1';
+    assert.equal(app.managedUploadError, `This ZIP is for ${otherLabel}, but this upload is for ${expectedLabel}. Select a ${expectedLabel} StatDescriptions.zip.`);
+    assert.equal(requests.length, 0); assert.equal(writes.length, 0);
+    assert.equal(app.managedUpload, upload); assert.equal(app.localDescs, source); assert.equal(app.gameVersion, game);
+    assert.equal(events.some(event => event.type === 'confirm'), false);
+    assert.equal(app.managedVersionBusy, false); assert.equal(events.at(-1).type, 'clearWork');
+  });
+});
+
+test('matching game uploads proceed through creation, archive transfer and preparation', async t => {
+  for (const game of ['poe1', 'poe2']) await t.test(game, async () => {
+    const { app, requests } = harness({ window: { JSZip }, request: async route => {
+      if (route === '/v1/version-uploads') return { upload: { id: 'matching-upload', status: 'awaiting_archive' } };
+      if (route.endsWith('/archive')) return { upload: { id: 'matching-upload', status: 'uploaded' } };
+      if (route.endsWith('/prepare')) return { upload: { id: 'matching-upload', status: 'prepared' } };
+      throw new Error('Unexpected request: ' + route);
+    } });
+    app.gameVersion = game; app.managedUploadFile = await gameArchive(game);
+    app.managedUploadName = 'Weekly release'; app.managedUploadDeadline = '2026-10-12T09:00';
+    await app.prepareManagedUpload();
+    assert.equal(app.managedUploadError, ''); assert.equal(app.managedUpload.status, 'prepared');
+    assert.equal(requests.length, 3); assert.equal(requests[0].options.body.game, game);
+    assert.equal(app.gameVersion, game); assert.equal(app.managedVersionBusy, false);
+  });
+});
+
+test('invalid ZIPs and directory-only text markers cannot start a manager upload', async t => {
+  const directories = new JSZip(); directories.folder('specific_skill_stat_descriptions/explosive_grenade.txt');
+  for (const file of [Buffer.from('invalid zip'), await directories.generateAsync({ type: 'nodebuffer' })]) await t.test('invalid input', async () => {
+    const { app, requests } = harness({ window: { JSZip } }); app.managedUploadFile = file;
+    await app.prepareManagedUpload();
+    assert.match(app.managedUploadError, /Cannot open this ZIP|No \.txt files/);
+    assert.equal(requests.length, 0); assert.equal(app.managedUpload, null); assert.equal(app.managedVersionBusy, false);
+  });
+});
+
+test('switching account or game during ZIP inspection cancels the upload before persistence', async t => {
+  for (const change of [app => { app.cloudProfileId = 'bob'; }, app => { app.gameVersion = 'poe1'; }]) await t.test('scope switch', async () => {
+    const gate = deferred(), writes = [], { app, requests } = harness({ window: { JSZip: { loadAsync: () => gate.promise } }, storage: {
+      async setVersionUpload(scope, value) { writes.push({ scope, value }); },
+    } });
+    app.managedUploadFile = {};
+    const pending = app.prepareManagedUpload(); await settle(); change(app);
+    gate.resolve(await JSZip.loadAsync(await gameArchive('poe2'))); await pending;
+    assert.equal(requests.length, 0); assert.equal(writes.length, 0); assert.equal(app.managedUploadError, '');
+  });
+});
+
 test('uncertain upload creation retries the same durable creation request', async () => {
   let creates = 0;
   const { app, requests } = harness({ request: async route => {
@@ -1065,6 +1132,37 @@ test('a failed collected ZIP download retains the request ID so retry downloads 
   await app.managedCollect(team());
   assert.equal(requests[0].options.body.idempotencyKey, requests[1].options.body.idempotencyKey);
   assert.equal(writes.at(-1), null);
+});
+
+test('pre-upgrade durable collection IDs recover their original archive cutoff without changing the operation', async () => {
+  for (const endWindow of [true, false]) {
+    const { app, requests, events } = harness({ storage: { async getVersionCollectionRequest() { return 'old-committed-request'; } },
+      request: async (route, options) => {
+        if (options.body.format) throw Object.assign(new Error('The request identifier was already used for different data.'), { status: 409, code: 'IDEMPOTENCY_REUSED' });
+        return { collection: { id: 'old-cutoff', status: 'ready', downloadReady: true, fileCount: 1, format: 'archive' } };
+      } });
+    app.managedDownload = async route => { events.push({ type: 'legacyDownload', route }); return true; };
+    app.managedReadDetails = async () => {}; app.refreshManagedVersions = async () => {};
+    await app.managedCollect(team(), endWindow);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].options.body.idempotencyKey, 'old-committed-request');
+    assert.equal(requests[1].options.body.idempotencyKey, 'old-committed-request');
+    assert.equal(requests[1].options.body.format, undefined);
+    assert.equal(requests[1].route, requests[0].route);
+    assert.equal(requests[1].options.body.endWindow, endWindow ? undefined : false);
+    assert.equal(events.find(event => event.type === 'legacyDownload').route, '/v1/collections/old-cutoff/archive');
+  }
+});
+
+test('older APIs reject manifest format before mutation and safely receive the same archive request ID', async () => {
+  const { app, requests } = harness({ request: async (route, options) => {
+    if (options.body.format) throw Object.assign(new Error('The request contains unsupported fields.'), { status: 400, code: 'INVALID_REQUEST' });
+    return { collection: { id: 'older-api-cutoff', status: 'ready', downloadReady: false, fileCount: 0 } };
+  } });
+  app.managedReadDetails = async () => {}; app.refreshManagedVersions = async () => {};
+  await app.managedCollect(team({ counts: { saved: 0 } }));
+  assert.equal(requests.length, 2); assert.equal(requests[0].options.body.idempotencyKey, requests[1].options.body.idempotencyKey);
+  assert.equal(requests[1].options.body.format, undefined); assert.equal(app.managedVisibleError, '');
 });
 
 test('cached ended teams warn offline and a downgraded translator cannot inspect another cached team', async () => {
