@@ -63,6 +63,69 @@ test('unchanged data creates no writes', () => {
   assert.deepEqual(result.conflicts, []);
 });
 
+test('scope normalization preserves explicit selectors and rejects unsupported imported scope', () => {
+  const legacy = entry();
+  assert.deepEqual(Sync.normalizeEntries([legacy]), [legacy]);
+  for (const gameScope of ['all', 'poe1', 'poe2']) {
+    const scoped = entry('fire', { gameScope });
+    assert.deepEqual(Sync.normalizeEntries([scoped]), [scoped]);
+    assert.deepEqual(Sync.merge(snapshot([scoped]), [scoped], snapshot([scoped], 2)).upserts, []);
+  }
+  for (const gameScope of ['PoE2', 'poe3', '', null, 2]) {
+    assert.throws(() => Sync.normalizeEntries([entry('fire', { gameScope })]), /game scope/i);
+  }
+});
+
+test('legacy absence and explicit All are equal and never create migration uploads', () => {
+  const legacy = entry(), all = entry('fire', { gameScope: 'all' });
+  for (const [local, remote] of [[legacy, all], [all, legacy]]) {
+    const result = Sync.merge(snapshot([legacy]), [local], snapshot([remote], 2));
+    assert.deepEqual(result.upserts, []);
+    assert.deepEqual(result.conflicts, []);
+    assert.deepEqual(Sync.changesSince(snapshot([remote]), [local]).upserts, []);
+  }
+});
+
+test('initial matching aligns each game variant independently and keeps other versions separate', () => {
+  const local = ['poe1', 'poe2', 'all'].map(gameScope => entry('local-' + gameScope, { gameScope, alts: [alt('local-alt-' + gameScope, 'Flame', 'same')] }));
+  const remote = ['all', 'poe2', 'poe1'].map(gameScope => entry('cloud-' + gameScope, { gameScope, alts: [alt('cloud-alt-' + gameScope, 'Flame', 'same')] }));
+  const result = Sync.merge(null, local, snapshot(remote));
+  assert.deepEqual(result.conflicts, []);
+  assert.deepEqual(result.upserts, []);
+  assert.deepEqual(result.entries.map(row => [row._id, row.alts[0]._id]), remote.map(row => [row._id, row.alts[0]._id]));
+  const separate = Sync.merge(null, [entry('local', { gameScope: 'poe1' })], snapshot([entry('cloud', { gameScope: 'poe2' })]));
+  assert.deepEqual(separate.entries.map(row => row._id), ['cloud', 'local']);
+  assert.deepEqual(separate.upserts.map(row => row._id), ['local']);
+});
+
+test('game selector merges independently and scope disagreements use the definitions choice', () => {
+  const base = entry(), local = entry('fire', { gameScope: 'poe1' }), remote = entry('fire', { replace: 'remote', tlnote: 'shared note' });
+  const merged = Sync.merge(snapshot([base]), [local], snapshot([remote], 2));
+  assert.deepEqual(merged.conflicts, []);
+  assert.equal(merged.entries[0].gameScope, 'poe1');
+  assert.equal(merged.entries[0].replace, 'remote');
+  const conflict = Sync.merge(snapshot([base]), [local], snapshot(entryArray('poe2'), 2)).conflicts[0];
+  assert.equal(conflict.definitionsConflict, true);
+  assert.equal(conflict.noteConflict, false);
+  assert.equal(keep(conflict, 'local').gameScope, 'poe1');
+  assert.equal(keep(conflict, 'remote').gameScope, 'poe2');
+  function entryArray(gameScope) { return [entry('fire', { gameScope, tlnote: 'shared note' })]; }
+});
+
+test('clearing a scope sends explicit All in normal, cached, and conflict-resolution writes', () => {
+  const base = snapshot([entry('fire', { gameScope: 'poe1' })]);
+  for (const local of [[entry()], [entry('fire', { gameScope: 'all' })]]) {
+    const merged = Sync.merge(base, local, base), cached = Sync.changesSince(base, local);
+    assert.deepEqual(cached, merged);
+    assert.equal(merged.upserts[0].gameScope, 'all');
+    const conflict = Sync.merge(base, local, snapshot([entry('fire', { gameScope: 'poe2' })], 2)).conflicts[0];
+    assert.equal(keep(conflict, 'local').gameScope, 'all');
+    assert.equal(keep(conflict, 'remote').gameScope, 'poe2');
+    const deleted = Sync.merge(base, [entry('fire', { tlnote: 'keep locally' })], snapshot([], 2, ['fire'])).conflicts[0];
+    assert.equal(keep(deleted, 'local').gameScope, 'all');
+  }
+});
+
 test('independent settings within one entry and separate row fields merge', () => {
   const original = entry('fire', { alts: [alt('a', 'Flame', 'old')] });
   const local = entry('fire', { ...clone(original), find: 'FireDamage', alts: [alt('a', 'Flames', 'old')] });
@@ -277,6 +340,15 @@ test('numeric and missing IDs normalize to deterministic string identities', () 
   assert.equal(result.entries[0].alts[0]._id, '2');
   assert.equal(typeof result.entries[1]._id, 'string');
   assert.deepEqual(result, Sync.merge(null, local, snapshot([])));
+});
+
+test('duplicate ID repair reserves all existing entry and alternate identities', () => {
+  const input = [entry('same'), entry('same', { gameScope: 'poe2' }), entry('same~2', { gameScope: 'poe1', alts: [alt('row', 'One', '1'), alt('row', 'Two', '2'), alt('row~2', 'Three', '3')] })];
+  const before = clone(input), normalized = Sync.normalizeEntries(input);
+  assert.deepEqual(normalized.map(entry => entry._id), ['same', 'same~3', 'same~2']);
+  assert.deepEqual(normalized[2].alts.map(row => row._id), ['row', 'row~3', 'row~2']);
+  assert.deepEqual(input, before);
+  assert.deepEqual(Sync.normalizeEntries(normalized), normalized);
 });
 
 test('rebase compares against newer remote and does not silently apply an old resolution', () => {

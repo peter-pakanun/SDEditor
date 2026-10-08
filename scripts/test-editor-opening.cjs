@@ -69,7 +69,7 @@ function loadEditor(options = {}) {
       markRaw(value) { return value; }, toRaw(value) { return value; },
     },
   });
-  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [method, counter] of [['create', 'syncIndexes'], ['createAsync', 'asyncIndexes']]) {
@@ -907,4 +907,124 @@ test('Dictionary refresh yields between blocks, reads newer translation input, a
   assert.equal(last.translation, 'Typed during match refresh');
   assert.match(last.translationHLter, /Typed during match refresh/);
   assert.equal(editor.editorTranslationReadOnly, false);
+});
+
+test('game-scoped entries and All fallback control indexed and fallback highlights, autocomplete and ranking', () => {
+  const entries = [
+    { _id: 'foreign', find: 'Fire', replace: 'PoE1 fire', gameScope: 'poe1', alts: [] },
+    { _id: 'fallback', find: ' Fire ', replace: 'All fire', alts: [{ find: 'SharedFlame', replace: 'All alternate' }] },
+    { _id: 'cold', find: 'Cold', replace: 'All cold', alts: [] },
+    { _id: 'specific', find: 'Fire', replace: 'PoE2 fire', gameScope: 'poe2', alts: [{ find: 'Burning', replace: 'PoE2 alternate' }] },
+    { _id: 'foreign-only', find: 'PoE1Only', replace: 'Foreign', gameScope: 'poe1', alts: [] },
+  ];
+  const { editor, window } = loadEditor({ dictionary: entries });
+  editor.gameVersion = 'poe2'; editor.editorVisible = true;
+  for (const indexed of [true, false]) {
+    if (!indexed) window.EditorDictionaryIndex = null;
+    const plain = editor.buildEnglishHLter('Fire SharedFlame Burning PoE1Only Cold');
+    assert.deepEqual(Array.from(plain.HLs, hl => [hl.dictId, hl.replace]), [
+      ['specific', 'PoE2 fire'], ['specific', 'PoE2 alternate'], ['cold', 'All cold'],
+    ], indexed ? 'Indexed' : 'Fallback');
+    const keyword = editor.buildEnglishHLter('[Fire]');
+    assert.equal(keyword.HLs[0].replace, '[Fire|PoE2 fire]');
+    assert.deepEqual(Array.from(keyword.HLs[0].dictIds), ['specific']);
+    editor.editorBlocks = [{ HLs: plain.HLs.concat(keyword.HLs) }];
+    assert.deepEqual(Array.from(new Set(editor.buildHlPopupItems(0).map(item => item.dictEntryId))), ['specific', 'cold']);
+    assert.deepEqual(dictionaryIds(editor.visibleDictionary), ['cold', 'specific', 'foreign', 'fallback', 'foreign-only']);
+    assert.equal(editor.isDictionaryEntryFound(entries[0]), false);
+    assert.equal(editor.isDictionaryEntryFound(entries[1]), false);
+    assert.match(editor.dictionaryEntryScopeWarning(entries[0]), /PoE1.*Excluded from PoE2/);
+    assert.equal(editor.dictionaryEntryScopeWarning(entries[1]), '');
+    editor.dictionaryFilter = 'PoE1Only';
+    assert.deepEqual(dictionaryIds(editor.filteredDictionary), ['foreign-only'], 'Other-game entries remain searchable.');
+    editor.dictionaryFilter = '';
+  }
+});
+
+test('changing games rebuilds a cached index and cancels an asynchronously built old-game index', async () => {
+  const entries = [
+    { _id: 'one', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
+    { _id: 'two', find: 'Fire', replace: 'two', gameScope: 'poe2', alts: [] },
+    ...dictionary(30),
+  ];
+  const { editor, calls, config } = loadEditor({ dictionary: entries, controlledClock: true });
+  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'one');
+  const firstIndex = editor._editorDictionaryIndex;
+  editor.gameVersion = 'poe2';
+  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'two');
+  assert.notEqual(editor._editorDictionaryIndex, firstIndex, 'The game belongs in cache identity even if no watcher ran.');
+  editor.gameVersion = 'poe1'; config.watch.gameVersion.call(editor);
+  let switched = false;
+  editor.yieldEditorWork = async () => {
+    if (!switched) { switched = true; editor.gameVersion = 'poe2'; }
+  };
+  assert.equal(await editor.prepareEditorDictionaryIndex(() => true), true);
+  assert.ok(calls.asyncIndexes >= 2, 'Discard the old game snapshot after a yield.');
+  assert.equal(editor._editorDictionaryGame, 'poe2');
+  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'two');
+});
+
+test('changing an entry scope holds its row and excludes stale suggestions and paste actions immediately', () => {
+  const { editor, document } = loadEditor({ dictionary: [
+    { _id: 'cold', find: 'Cold', replace: 'cold', alts: [] },
+    { _id: 'fire', find: 'Fire', replace: 'fire', alts: [] },
+  ] });
+  editor.editorVisible = true;
+  const result = editor.buildEnglishHLter('Fire');
+  editor.editorBlocks = [{ HLs: result.HLs }];
+  const entry = editor.dictionary[1];
+  document.activeElement = dictionaryField(entry._id);
+  editor.dictionaryEntryFocusIn({ target: document.activeElement });
+  const order = dictionaryIds(editor.filteredDictionary);
+  const oldSuggestion = editor.buildHlPopupItems(0)[0];
+  editor.setDictionaryEntryScope(entry, 'poe2');
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), order, 'A selector change keeps the current editing order.');
+  assert.equal(editor.isDictionaryEntryFound(entry), false);
+  assert.equal(editor.buildHlPopupItems(0).length, 0, 'Old highlights cannot reintroduce a foreign suggestion.');
+  let inserts = 0;
+  editor.insertTranslationText = () => { inserts++; };
+  editor.insertHlPopupItem(oldSuggestion);
+  editor.copySpanToTranslation({ target: { getAttribute(name) { return name === 'data-hl-id' ? result.HLs[0]._hlId : 'fire'; } } }, editor.editorBlocks[0], 0);
+  editor.hotkeyPasteHL({ code: 'Digit1' }, editor.editorBlocks[0], 0);
+  assert.equal(inserts, 0);
+  editor.endDictionaryEdit();
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), ['cold', 'fire']);
+  editor.setDictionaryEntryScope(entry, 'all');
+  assert.equal(editor.dictionaryEntryScope(entry), 'all');
+  assert.equal(Object.hasOwn(entry, 'gameScope'), false, 'All remains compatible with the legacy representation.');
+});
+
+test('new entries use the current game and keyword creation does not modify the other game entry', () => {
+  const { editor } = loadEditor({ dictionary: [
+    { _id: 'foreign', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
+  ] });
+  editor.gameVersion = 'poe2';
+  editor.syncEditorHlterWithDictionaryNow = () => {};
+  editor.focusDictionaryEntryReplaceInput = () => {};
+  const item = { kwTagName: 'Fire', kwDynamicContent: 'Burning', value: '[Fire|Burning]' };
+  assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), true);
+  assert.equal(editor.hlPopupCtrlEnterPillText(item), 'Ctrl+Enter Add');
+  const created = editor.ensureDictionaryKeywordTag('Fire', 'Burning', 'two');
+  assert.equal(created.created, true);
+  assert.equal(editor.dictionary[0].gameScope, 'poe2');
+  assert.notEqual(created.dictId, 'foreign');
+  assert.equal(editor.dictionary[1].alts.length, 0);
+  assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
+  editor.addVocab();
+  assert.equal(editor.dictionary[0].gameScope, 'poe2');
+});
+
+test('imported duplicate IDs are repaired without losing either Find or overwriting a reserved identity', () => {
+  const { editor } = loadEditor({ dictionary: [
+    { _id: 'shared', find: 'Fire', replace: 'one', gameScope: 'poe1' },
+    { _id: 'shared', find: 'Fire', replace: 'two', gameScope: 'poe2' },
+    { _id: 'shared~2', find: 'Cold', replace: 'cold' },
+  ] });
+  editor.ensureDictionaryIds();
+  assert.deepEqual(dictionaryIds(editor.dictionary), ['shared', 'shared~3', 'shared~2']);
+  editor.ensureDictionaryIds();
+  assert.deepEqual(dictionaryIds(editor.dictionary), ['shared', 'shared~3', 'shared~2'], 'Assigned IDs stay stable on repeated normalization.');
+  assert.equal(editor.dictionary[2].gameScope, undefined, 'Legacy entries retain their All representation.');
+  editor.beginDictionaryEdit('shared~3');
+  assert.equal(editor.visibleDictionary.length, 3);
 });

@@ -18,6 +18,7 @@ const context = vm.createContext({
   },
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'workspaceState.js'), 'utf8'), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'dictionaryScope.js'), 'utf8'), context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'index.js'), 'utf8'), context);
 const getPairs = component.methods.getDictionaryDefinitionPairs;
 

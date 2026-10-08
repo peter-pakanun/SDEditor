@@ -107,7 +107,10 @@ class MemoryAPI {
         if (this.mutations.has(mutationKey)) response = { ...clone(current), appliedRevision: this.mutations.get(mutationKey) };
         else {
           if (request.body.baseRevision !== current.revision) return reply({ error: { code: 'REVISION_CONFLICT', message: 'Newer dictionary' }, current }, 409);
-          const changed = Cloud.acceptedSnapshot(current, request.body.upserts, request.body.deletedIds, current.revision + 1);
+          const prior = new Map(current.entries.map(entry => [entry._id, entry]));
+          const upserts = request.body.upserts.map(entry => !Object.hasOwn(entry, 'gameScope') && prior.get(entry._id)?.gameScope
+            ? { ...entry, gameScope: prior.get(entry._id).gameScope } : entry);
+          const changed = Cloud.acceptedSnapshot(current, upserts, request.body.deletedIds, current.revision + 1);
           this.dictionaries.set(language, clone(changed));
           this.mutations.set(mutationKey, changed.revision);
           response = { ...clone(changed), appliedRevision: changed.revision };
@@ -200,6 +203,91 @@ test('local dictionary is durable before a concurrent sync may upload it', async
   await saving;
   await syncing;
   assert.equal(h.api.dictionaries.get('Thai').entries[0].replace, 'saved first');
+});
+
+test('scope-only saves are durable, compact acknowledgements retain scope, and All clears a restriction', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true;
+  await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { gameScope: 'poe2' })]));
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.entries[0].gameScope, 'poe2');
+  await h.client.sync();
+  let patch = h.api.writes('/v1/dictionaries/Thai').at(-1);
+  assert.equal(patch.body.upserts[0].gameScope, 'poe2');
+  assert.equal(patch.query, '?return=ack');
+  assert.equal(h.client.snapshot().dictionary[0].gameScope, 'poe2');
+  assert.equal(h.store.state.profiles.alice.dictionaries.Thai.base.entries[0].gameScope, 'poe2');
+  await h.client.saveLocal(payload([word('fire', { gameScope: 'all' })]));
+  await h.client.sync();
+  patch = h.api.writes('/v1/dictionaries/Thai').at(-1);
+  assert.equal(patch.body.upserts[0].gameScope, 'all');
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].gameScope, 'all');
+  assert.equal(h.client.snapshot().dictionary[0].gameScope, 'all');
+  assert.equal(h.api.calls.filter(call => call.path.startsWith('/v1/dictionaries/')).every(call => call.options.headers['X-SDEditor-Dictionary-Version'] === '2'), true);
+});
+
+test('a scope mutation retries its exact lost receipt after restart and preserves later notes', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api); h.api.hints = true; h.api.acks = true;
+  await h.client.sync();
+  await h.client.saveLocal(payload([word('fire', { gameScope: 'poe1' })]));
+  let lose = true;
+  h.api.after = request => { if (request.method === 'PATCH' && lose) { lose = false; throw new Error('Scope receipt lost'); } };
+  await h.client.sync();
+  const pending = clone(h.store.state.profiles.alice.dictionaries.Thai.pendingWrite);
+  assert.equal(pending.request.upserts[0].gameScope, 'poe1');
+  await h.client.saveLocal(payload([word('fire', { gameScope: 'poe1', tlnote: 'later note' })]));
+  const reloaded = await harness(t, { store: h.store, api: h.api });
+  await reloaded.client.sync();
+  const writes = h.api.writes('/v1/dictionaries/Thai');
+  assert.deepEqual(writes[1].body, pending.request);
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].gameScope, 'poe1');
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].tlnote, 'later note');
+  assert.equal(reloaded.store.state.profiles.alice.dictionaries.Thai.pendingWrite, null);
+});
+
+test('resolving a conflicting scope to All sends an explicit reset and keeps the independent shared note', async t => {
+  const base = word('fire', { gameScope: 'poe1' });
+  const h = await harness(t, { state: authenticatedState({ base: dictionary([base]), local: [word('fire', { gameScope: 'all' })] }) });
+  seedAPI(h.api, { remote: dictionary([word('fire', { gameScope: 'poe2', tlnote: 'shared note' })], 2) });
+  await h.client.sync();
+  assert.equal(h.client.snapshot().conflicts.length, 1);
+  await h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2);
+  assert.equal(h.api.writes('/v1/dictionaries/Thai')[0].body.upserts[0].gameScope, 'all');
+  assert.equal(h.api.dictionaries.get('Thai').entries[0].gameScope, 'all');
+  assert.equal(h.client.snapshot().dictionary[0].tlnote, 'shared note');
+  assert.deepEqual(h.client.snapshot().conflicts, []);
+});
+
+test('same Find variants align within scope and automatic origins detect merged scope changes', async t => {
+  const local = [word('local-poe1', { gameScope: 'poe1' }), word('local-poe2', { gameScope: 'poe2' })];
+  const remote = [word('remote-poe2', { gameScope: 'poe2' }), word('remote-poe1', { gameScope: 'poe1' })];
+  const h = await harness(t, { state: authenticatedState({ local, base: null }) });
+  seedAPI(h.api, { remote: dictionary(remote) });
+  await h.client.sync();
+  assert.deepEqual(h.api.writes('/v1/dictionaries/Thai'), []);
+  assert.deepEqual(h.client.snapshot().dictionary.map(entry => entry._id), ['remote-poe2', 'remote-poe1']);
+
+  const changing = await harness(t, { state: authenticatedState({ local: [word('fire', { tlnote: 'local note' })] }) });
+  seedAPI(changing.api, { remote: dictionary([word('fire', { gameScope: 'poe2' })], 2) });
+  await changing.client.sync();
+  const patch = changing.api.writes('/v1/dictionaries/Thai')[0];
+  assert.equal(patch.body.upserts[0].gameScope, 'poe2');
+  assert.deepEqual(patch.body.origins, { fire: 'auto_merge' });
+});
+
+test('imported scope roundtrips into recovery and bad scope fails before persistence', async t => {
+  const h = await harness(t);
+  const before = clone(h.store.state);
+  for (const gameScope of ['PoE1', 'other', null, 1]) {
+    await assert.rejects(h.client.importLocal(payload([word('fire', { gameScope })])), /game scope/i);
+    assert.deepEqual(h.store.state, before);
+  }
+  const scoped = word('fire', { gameScope: 'poe2' });
+  await h.client.importLocal(payload([scoped]));
+  assert.deepEqual(h.client.snapshot().dictionary, [scoped]);
+  await h.client.importLocal(payload([word()]));
+  assert.deepEqual(h.client.recoveryExport().copies.at(-1).dictionaries.Thai, [scoped]);
 });
 
 test('first login restores cloud settings and keeps local recovery and clipboard', async t => {

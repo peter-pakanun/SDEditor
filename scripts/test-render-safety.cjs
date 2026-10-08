@@ -26,7 +26,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
@@ -130,4 +130,23 @@ test('inline and history diffs render hostile translation text as text', () => {
   assert.equal(inline, '<span class="diffInlineAdd">&lt;img src=x onerror=&quot;window.diffAttack=1&quot;&gt;</span>');
   const history = context.renderUnifiedLineDiff([{ type: 'insert', line: attack }]);
   assert.equal(history, '<div class="diffLine add"><span class="diffPrefix">+</span>&lt;img src=x onerror=&quot;window.diffAttack=1&quot;&gt;</div>');
+});
+
+test('regex application respects the current game and game-specific overrides including parent alternates', () => {
+  const { editor } = loadEditor();
+  editor.gameVersion = 'poe2';
+  editor.dictionary = [
+    { _id: 'specific', find: 'Fire', replace: 'PoE2 fire', gameScope: 'poe2', alts: [] },
+    { _id: 'all', find: 'Fire', replace: 'All fire', alts: [{ find: 'Flame', replace: 'All flame' }] },
+    { _id: 'foreign', find: 'Fire', replace: 'PoE1 fire', gameScope: 'poe1', alts: [] },
+    { _id: 'cold', find: 'Cold', replace: 'All cold', alts: [] },
+  ];
+  const block = { translationReplace: '🔖 / 🔖 / 🔖', translation: '', words: [
+    { captured: 'Fire', replace: 'Fire' }, { captured: 'Flame', replace: 'Flame' }, { captured: 'Cold', replace: 'Cold' },
+  ] };
+  editor.doTranslationReplace(block, false);
+  assert.equal(block.translation, 'PoE2 fire / Flame / All cold');
+  editor.gameVersion = 'poe1';
+  editor.doTranslationReplace(block, false);
+  assert.equal(block.translation, 'PoE1 fire / Flame / All cold');
 });

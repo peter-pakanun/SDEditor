@@ -477,6 +477,12 @@ const config = Vue.defineComponent({
       }
       if (this.sideTab === 'history') this.refreshHistory();
     },
+    gameVersion() {
+      this.endDictionaryEdit();
+      this.invalidateEditorDictionaryIndex();
+      this.closeHlPopup();
+      this.scheduleEditorHLterRefresh();
+    },
     sideTab() {
       if (this.sideTab !== 'dictionary') this.endDictionaryEdit();
       if (this.sideTab === 'history') this.refreshHistory();
@@ -592,7 +598,10 @@ const config = Vue.defineComponent({
       return !this.editorLoading && !this.editorLoadError;
     },
     terminologyDictionary() {
-      return window.TerminologyDiagnostics.compileDictionary(this.dictionary);
+      return window.TerminologyDiagnostics.compileDictionary(this.getActiveDictionaryEntries());
+    },
+    activeDictionaryIds() {
+      return new Set(this.getActiveDictionaryEntries().map(entry => String(entry?._id || '')));
     },
     editorConsistencyDiagnostics() {
       return (this.editorBlocks || []).map((block, blockIndex) =>
@@ -759,8 +768,9 @@ const config = Vue.defineComponent({
       }
       const foundSet = this.foundDictionarySet;
       if (!foundSet || foundSet.size <= 0) return dictionary;
+      const activeIds = this.activeDictionaryIds;
       const found = [], rest = [];
-      for (const entry of dictionary) (foundSet.has(entry?._id) ? found : rest).push(entry);
+      for (const entry of dictionary) (activeIds.has(String(entry?._id || '')) && foundSet.has(entry?._id) ? found : rest).push(entry);
       return found.concat(rest);
     },
     filteredDictionary() {
@@ -3084,11 +3094,23 @@ const config = Vue.defineComponent({
     },
     ensureDictionaryIds() {
       if (!Array.isArray(this.dictionary)) return;
+      const reservedIds = new Set(this.dictionary.map(entry => String(entry?._id || '')).filter(Boolean));
+      const usedIds = new Set();
       for (const entry of this.dictionary) {
-        if (entry && !entry._id) {
-          entry._id = `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-        }
         if (!entry) continue;
+        let id = String(entry._id || `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`);
+        if (usedIds.has(id)) {
+          const base = id;
+          let suffix = 2;
+          while (reservedIds.has(id = `${base}~${suffix++}`) || usedIds.has(id)) {}
+        }
+        entry._id = id;
+        usedIds.add(id);
+        if (Object.prototype.hasOwnProperty.call(entry, 'gameScope')) {
+          const scope = window.DictionaryScope.normalize(entry);
+          if (scope === 'all') delete entry.gameScope;
+          else entry.gameScope = scope;
+        }
         if (typeof entry.tlnote !== "string") entry.tlnote = entry.tlnote == null ? "" : String(entry.tlnote);
         if (!Array.isArray(entry.alts)) entry.alts = [];
         entry.alts = entry.alts.map(a => {
@@ -3099,13 +3121,45 @@ const config = Vue.defineComponent({
         }).filter(Boolean);
       }
     },
+    getActiveDictionaryEntries() {
+      return window.DictionaryScope.activeEntries(this.dictionary, this.gameVersion);
+    },
+    isDictionaryEntryActive(word) {
+      if (!word) return false;
+      return this.activeDictionaryIds
+        ? this.activeDictionaryIds.has(String(word._id || ''))
+        : this.getActiveDictionaryEntries().includes(word);
+    },
+    dictionaryEntryScope(word) {
+      return window.DictionaryScope.normalize(word);
+    },
+    setDictionaryEntryScope(word, scope) {
+      if (!word || !this.dictionary.includes(word)) return;
+      this.beginDictionaryEdit(word._id);
+      const normalized = window.DictionaryScope.normalize(scope);
+      if (normalized === 'all') delete word.gameScope;
+      else word.gameScope = normalized;
+    },
+    dictionaryEntryScopeWarning(word) {
+      if (window.DictionaryScope.available(word, this.gameVersion)) return '';
+      const entryGame = this.dictionaryEntryScope(word) === 'poe2' ? 'PoE2' : 'PoE1';
+      const currentGame = this.gameVersion === 'poe2' ? 'PoE2' : 'PoE1';
+      return `${entryGame} entry. Excluded from ${currentGame} matches, autocomplete, and regex.`;
+    },
+    findActiveDictionaryKeywordEntry(tagName) {
+      const key = String(tagName || '').trim().toLowerCase();
+      return this.getActiveDictionaryEntries().find(entry => window.DictionaryScope.findKey(entry) === key);
+    },
+    isDictionaryHighlightActive(highlight) {
+      return !highlight?.dictId || this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(highlight.dictId)));
+    },
     isDictionaryEntryFound(word) {
-      return this.foundDictionarySet?.has?.(word?._id) || false;
+      return this.isDictionaryEntryActive(word) && (this.foundDictionarySet?.has?.(word?._id) || false);
     },
     isDictionaryEntryFindMatched(word) {
       let id = word?._id;
       let find = String(word?.find ?? "").trim();
-      if (!id || !find) return false;
+      if (!id || !find || !this.isDictionaryEntryActive(word)) return false;
       let set = this.foundDictionaryDefMap?.get?.(String(id));
       if (!set) return false;
       return set.has(find.toLowerCase());
@@ -3113,7 +3167,7 @@ const config = Vue.defineComponent({
     isDictionaryAltFindMatched(word, alt) {
       let id = word?._id;
       let find = String(alt?.find ?? "").trim();
-      if (!id || !find) return false;
+      if (!id || !find || !this.isDictionaryEntryActive(word)) return false;
       let set = this.foundDictionaryDefMap?.get?.(String(id));
       if (!set) return false;
       return set.has(find.toLowerCase());
@@ -3166,28 +3220,33 @@ const config = Vue.defineComponent({
     },
     getEditorDictionaryIndex() {
       if (!window.EditorDictionaryIndex) return null;
-      if (!this._editorDictionaryIndex || this._editorDictionarySource !== this.dictionary) {
-        const dictionary = Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
+      if (!this._editorDictionaryIndex || this._editorDictionarySource !== this.dictionary || this._editorDictionaryGame !== this.gameVersion) {
+        const active = this.getActiveDictionaryEntries();
+        const dictionary = Vue.toRaw ? Vue.toRaw(active) : active;
         const index = window.EditorDictionaryIndex.create(dictionary, entry => this.getDictionaryDefinitionPairs(entry));
         this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
         this._editorDictionarySource = this.dictionary;
+        this._editorDictionaryGame = this.gameVersion;
       }
       return this._editorDictionaryIndex;
     },
     async prepareEditorDictionaryIndex(isCurrent) {
       if (!window.EditorDictionaryIndex) return true;
       while (isCurrent()) {
-        if (this._editorDictionaryIndex && this._editorDictionarySource === this.dictionary) return true;
+        if (this._editorDictionaryIndex && this._editorDictionarySource === this.dictionary && this._editorDictionaryGame === this.gameVersion) return true;
         const source = this.dictionary;
+        const game = this.gameVersion;
         const revision = this._editorDictionaryRevision || 0;
-        const dictionary = Vue.toRaw ? Vue.toRaw(source) : source;
-        const stale = () => !isCurrent() || source !== this.dictionary || revision !== (this._editorDictionaryRevision || 0);
+        const active = this.getActiveDictionaryEntries();
+        const dictionary = Vue.toRaw ? Vue.toRaw(active) : active;
+        const stale = () => !isCurrent() || source !== this.dictionary || game !== this.gameVersion || revision !== (this._editorDictionaryRevision || 0);
         const index = await window.EditorDictionaryIndex.createAsync(dictionary, entry => this.getDictionaryDefinitionPairs(entry), {
           yieldTask: () => this.yieldEditorWork(), isCancelled: stale,
         });
         if (stale() || !index) continue;
         this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
         this._editorDictionarySource = source;
+        this._editorDictionaryGame = game;
         return true;
       }
       return false;
@@ -3203,6 +3262,7 @@ const config = Vue.defineComponent({
     },
     buildEnglishHLter(english) {
       const dictionaryIndex = this.getEditorDictionaryIndex();
+      const activeDictionary = dictionaryIndex ? null : this.getActiveDictionaryEntries();
       let escapedEnglish = escapeHtml(english);
       let englishHLter = escapedEnglish;
       let modifiedEnglish = escapedEnglish;
@@ -3221,7 +3281,7 @@ const config = Vue.defineComponent({
       let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
         if (!text) return;
         const entries = dictionaryIndex && restrictMainFindLower
-          ? dictionaryIndex.keywordEntries(restrictMainFindLower) : this.dictionary || [];
+          ? dictionaryIndex.keywordEntries(restrictMainFindLower) : activeDictionary || this.getActiveDictionaryEntries();
         for (const dictEntry of entries) {
           if (!dictEntry?._id) continue;
           if (restrictMainFindLower && String(dictEntry?.find || "").trim().toLowerCase() !== restrictMainFindLower) continue;
@@ -3271,7 +3331,7 @@ const config = Vue.defineComponent({
         addMatchingDictIds(dictIdSet, rawTagName, tagLower);
         addMatchingDictIds(dictIdSet, staticDynamicContent, tagLower);
         let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent,
-          dictionaryIndex && tagLower ? dictionaryIndex.keywordEntries(tagLower) : this.dictionary);
+          dictionaryIndex && tagLower ? dictionaryIndex.keywordEntries(tagLower) : activeDictionary || this.getActiveDictionaryEntries());
         addHL({
           index: m.index,
           find: m[0],
@@ -3299,7 +3359,7 @@ const config = Vue.defineComponent({
       // highlight word from dictionary
       if (this.highlightDict) {
         let defs = dictionaryIndex ? dictionaryIndex.definitionsFor(modifiedEnglish) : [];
-        if (!dictionaryIndex) for (const dictEntry of (this.dictionary || [])) {
+        if (!dictionaryIndex) for (const dictEntry of activeDictionary) {
           if (!dictEntry?._id) continue;
           for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
             if (!pair?.find) continue;
@@ -3677,7 +3737,7 @@ const config = Vue.defineComponent({
           let exactMatchItem = null;
           for (const dictId of uniqueDictIds) {
             let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(dictId));
-            if (!dictEntry) continue;
+            if (!dictEntry || !this.isDictionaryEntryActive(dictEntry)) continue;
             if (keywordTagNameLower && String(dictEntry?.find || "").trim().toLowerCase() !== keywordTagNameLower) continue;
             let pairs = this.getDictionaryDefinitionPairs(dictEntry);
             for (const p of pairs) {
@@ -3729,6 +3789,9 @@ const config = Vue.defineComponent({
             }
           }
           
+          // A scope change can leave old highlights visible until their refresh.
+          // Do not turn a now-inactive definition into a create-alternative item.
+          if (!exactMatchItem && itemToAdds.length === 0) continue;
           // Check if we got any exact matches
           if (!exactMatchItem) {
             // We have a dictionary entry that does not match the context exactly
@@ -3959,7 +4022,7 @@ const config = Vue.defineComponent({
       this.sideTab = "dictionary";
       this.dictionaryFilter = "";
 
-      let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === tn.toLowerCase());
+      let existing = this.findActiveDictionaryKeywordEntry(tn);
       if (existing) {
         let addedAlt = false;
         let createdAltId = "";
@@ -3985,6 +4048,7 @@ const config = Vue.defineComponent({
       let entry = {
         _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
         find: tn,
+        gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1',
         replace: replace || tn,
         alts: alt ? [{ _id: (createdAltId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`), find: alt, replace: replace || tn }] : [],
         tlnote: ""
@@ -4011,7 +4075,7 @@ const config = Vue.defineComponent({
       this.hlPopupReturnInfo = item;
       let alt = String(info.dynamicContent ?? "").trim();
 
-      let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === tagNameLower);
+      let existing = this.findActiveDictionaryKeywordEntry(tagNameLower);
       if (!existing) return true;
       if (!alt) return false;
 
@@ -4021,13 +4085,13 @@ const config = Vue.defineComponent({
     },
     canJumpToDictionaryFromHlPopupItem(item) {
       if (!item) return false;
-      return !!item.dictEntryId;
+      return this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(item.dictEntryId)));
     },
     jumpToDictionaryFromHlPopupItem(item) {
       let dictId = String(item?.dictEntryId || "");
       if (!dictId) return false;
       let entry = (this.dictionary || []).find(d => String(d?._id) === dictId);
-      if (!entry) return false;
+      if (!entry || !this.isDictionaryEntryActive(entry)) return false;
       let altId = String(item?.dictAltId || "");
       let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
       if (selectedText) {
@@ -4068,7 +4132,7 @@ const config = Vue.defineComponent({
       if (this.canCreateDictionaryEntryFromHlPopupItem(item)) {
         let info = this.getHlPopupKeywordInfo(item);
         if (!info) return "";
-        let existing = (this.dictionary || []).find(d => String(d?.find || "").trim().toLowerCase() === info.tagName.toLowerCase());
+        let existing = this.findActiveDictionaryKeywordEntry(info.tagName);
         return existing ? "Ctrl+Enter Add alt" : "Ctrl+Enter Add";
       }
       if (this.canJumpToDictionaryFromHlPopupItem(item)) {
@@ -4324,6 +4388,10 @@ const config = Vue.defineComponent({
       });
     },
     insertHlPopupItem(item) {
+      if (item.dictEntryId && !this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(item.dictEntryId)))) {
+        this.closeHlPopup({ refocus: true });
+        return;
+      }
       this.scrollDictionaryEntryIntoView(this.getHlPopupDictionaryRow(item));
       let editorIndex = this.hlPopup.editorIndex;
       let deleteOpeningBracket = this.hlPopup.openedByBracket;
@@ -4339,6 +4407,8 @@ const config = Vue.defineComponent({
     onDictionaryReplaceEnter(e) {
       if (this.isImeComposingEvent(e)) return;
       if (!this.hlPopupReturnInfo) return;
+      const entryId = e.target?.closest?.('[data-dict-id]')?.getAttribute?.('data-dict-id');
+      if (entryId && !this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === entryId))) return;
       let returnInfo = this.hlPopupReturnInfo;
       this.hlPopupReturnInfo = null;
       this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });
@@ -5940,6 +6010,9 @@ const config = Vue.defineComponent({
       }
     },
     copySpanToTranslation(e, editorBlock, editorIndex, columnIndex = 0) {
+      const hlId = e.target.getAttribute('data-hl-id');
+      const highlight = (editorBlock?.HLs || []).find(hl => String(hl?._hlId) === String(hlId));
+      if (!this.isDictionaryHighlightActive(highlight)) return;
       let text = e.target.getAttribute('datavalue') || "";
       let caretOffsetRaw = e.target.getAttribute('data-caret-offset');
       let caretOffset = caretOffsetRaw == null ? null : Number(caretOffsetRaw);
@@ -5971,6 +6044,7 @@ const config = Vue.defineComponent({
       if (id < 0) return;
       let source = this.getEditorColumn(editorBlock, columnIndex);
       if (!source?.HLs?.[id]) return;
+      if (!this.isDictionaryHighlightActive(source.HLs[id])) return;
       let text = source.HLs[id].replace || source.HLs[id].find;
       this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: source.HLs[id].caretOffset });
     },
@@ -6556,12 +6630,13 @@ const config = Vue.defineComponent({
       this.doTranslationReplace(editorBlock);
       const regexes = this.editorRegexes;
       const dictionary = this.dictionary;
+      const game = this.gameVersion, language = this.lang;
       
       if (regexEngineResult.failed) {
         if (await this.appConfirm("No match for:\n" + regexEngineResult.failStr + "\n\nCreate new regex for it?", {
           title: 'Create a regex rule?', confirmLabel: 'Create rule', danger: false,
-        }) && this.editorRegexes === regexes && this.dictionary === dictionary) {
-          let r = regexEngineCreate(regexEngineResult.failStr, this.dictionary);
+        }) && this.editorRegexes === regexes && this.dictionary === dictionary && this.gameVersion === game && this.lang === language) {
+          let r = regexEngineCreate(regexEngineResult.failStr, this.getActiveDictionaryEntries());
           this.addRegex(r.find, r.replace);
         }
       }
@@ -6577,9 +6652,10 @@ const config = Vue.defineComponent({
       } else if (typeof editorIndex === "number") {
         this.normalizeMultilineEditorBlock(editorBlock, editorIndex);
       }
+      const activeDictionary = this.getActiveDictionaryEntries();
       for (let i = 0; i < editorBlock.words.length; i++) {
         const word = editorBlock.words[i];
-        for (const replacerObj of this.dictionary) {
+        for (const replacerObj of activeDictionary) {
           let mainRegex = this.safeExactRegex(replacerObj.find, "igm");
           let m = mainRegex.exec(word.captured);
           if (m) {
@@ -6639,7 +6715,7 @@ const config = Vue.defineComponent({
       }
     },
     addVocab() {
-      const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: "", replace: "", alts: [], tlnote: "" };
+      const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1', find: "", replace: "", alts: [], tlnote: "" };
       this.dictionary.unshift(entry);
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.focusDictionaryEntryReplaceInput(entry._id);

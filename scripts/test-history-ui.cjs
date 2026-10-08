@@ -63,6 +63,18 @@ test('entry shortcut sets the stable ID filter and settings history clears it', 
   assert.deepEqual(calls[1], { limit: 30 });
 });
 
+test('history scope-only changes remain restorable and legacy All compares equal', () => {
+  const app = editor();
+  app.cloudHistoryEvent = event({ after: word({ gameScope: 'poe1' }), current: word({ gameScope: 'poe2' }) });
+  assert.equal(app.cloudHistoryVersionCurrent('after'), false);
+  assert.equal(app.cloudHistoryChanges({ changes: ['gameScope'] }), 'Game');
+  assert.match(app.cloudHistorySnapshotText(app.cloudHistoryEvent.after), /^Game: PoE1\n/);
+  assert.match(app.cloudHistorySnapshotText(app.cloudHistoryEvent.current), /^Game: PoE2\n/);
+  app.cloudHistoryEvent = event({ after: word(), current: word({ gameScope: 'all' }) });
+  assert.equal(app.cloudHistoryVersionCurrent('after'), true);
+  assert.match(app.cloudHistorySnapshotText(word()), /^Game: All\n/);
+});
+
 test('shared history is available for the assigned language while local-only entries cannot jump', async () => {
   const calls = [];
   const app = editor({ getDictionaryHistory: async filters => { calls.push(filters); return page(); } });

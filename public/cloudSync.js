@@ -36,6 +36,7 @@
         assert(object(entry) && string(entry.find) && string(entry.replace), 'dictionary entries must have text Find/Replace fields.');
         assert(entry.tlnote == null || string(entry.tlnote), 'TL notes must be text.');
         assert(entry._id == null || string(entry._id), 'entry IDs must be text.');
+        assert(!Object.hasOwn(entry, 'gameScope') || ['all', 'poe1', 'poe2'].includes(entry.gameScope), 'Dictionary game scope must be PoE1, PoE2, or All.');
         assert(entry.alts == null || (Array.isArray(entry.alts) && entry.alts.every(a => object(a) && string(a.find) && (a.replace == null || string(a.replace)) && (a._id == null || string(a._id)))), 'alternates must be Find/Replace rows.');
       }
     }
@@ -87,8 +88,8 @@
   }
   function autoMergedIds(merge, localEntries, remote, result, previous = []) {
     const local = merge.normalizeEntries(localEntries);
-    const content = entry => entry && ({ find: entry.find, replace: entry.replace, tlnote: entry.tlnote, alts: entry.alts.map(a => ({ find: a.find, replace: a.replace })) });
-    const findKey = entry => entry.find.trim().toLowerCase();
+    const content = entry => entry && ({ find: entry.find, replace: entry.replace, gameScope: entry.gameScope || 'all', tlnote: entry.tlnote, alts: entry.alts.map(a => ({ find: a.find, replace: a.replace })) });
+    const findKey = entry => entry.find.trim().toLowerCase() + '\u0000' + (entry.gameScope || 'all');
     return result.upserts.filter(entry => {
       if (previous.includes(entry._id)) return true;
       let own = local.find(row => row._id === entry._id);
@@ -276,7 +277,8 @@
       const timeout = setTimeout(() => controller.abort(), 20000);
       try {
         const response = await this.fetcher(this.apiBase + path, { method: options.method || 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal,
-          headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}) },
+          headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}),
+            ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}) },
           ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
         const data = response.status === 204 ? null : await response.json();
         if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });

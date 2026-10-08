@@ -272,7 +272,8 @@
       },
       cloudDefinitionText(entry) {
         if (!entry) return 'Entry deleted';
-        return [[entry.find, entry.replace], ...(entry.alts || []).map(a => [a.find, a.replace])].map(([find, replace]) => find + ' → ' + replace).join('\n');
+        const scope = entry.gameScope === 'poe1' ? 'PoE1' : entry.gameScope === 'poe2' ? 'PoE2' : 'All';
+        return 'Game: ' + scope + '\n' + [[entry.find, entry.replace], ...(entry.alts || []).map(a => [a.find, a.replace])].map(([find, replace]) => find + ' → ' + replace).join('\n');
       },
       async cloudSaveResolution() {
         if (!this.cloudResolutionReady || this.cloudBusy) return;

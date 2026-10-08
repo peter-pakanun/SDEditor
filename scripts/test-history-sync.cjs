@@ -47,7 +47,7 @@ class MemoryAPI {
   }
   async fetch(url, options) {
     const parsed = new URL(url);
-    const request = { path: parsed.pathname, query: Object.fromEntries(parsed.searchParams), method: options.method, token: options.headers.Authorization?.replace(/^Bearer /, ''), body: options.body ? JSON.parse(options.body) : null };
+    const request = { path: parsed.pathname, query: Object.fromEntries(parsed.searchParams), method: options.method, headers: clone(options.headers), token: options.headers.Authorization?.replace(/^Bearer /, ''), body: options.body ? JSON.parse(options.body) : null };
     this.calls.push(request);
     if (this.before) await this.before(request);
     const identity = this.users[request.token];
@@ -143,6 +143,19 @@ test('restoring a deleted entry preserves its ID and clears only that tombstone'
   assert.deepEqual(h.api.remote.tombstones, ['ice']);
   assert.deepEqual(h.client.snapshot().dictionary, [word()]);
   assert.equal(h.api.historyWrites, 1);
+});
+
+test('history restores game restrictions and an earlier legacy All while keeping other game variants', async t => {
+  const scoped = word('fire', { gameScope: 'poe2' });
+  const other = word('fire-poe1', { gameScope: 'poe1' });
+  const h = await harness(t, { local: [scoped, other], base: dictionary([scoped, other], 3) });
+  h.api.event(1, 'fire', word(), scoped);
+  await h.client.restoreDictionaryHistory(1, 'before', 3);
+  assert.equal(h.client.snapshot().dictionary.find(entry => entry._id === 'fire').gameScope, 'all');
+  assert.equal(h.client.snapshot().dictionary.find(entry => entry._id === 'fire-poe1').gameScope, 'poe1');
+  await h.client.restoreDictionaryHistory(1, 'after', 4);
+  assert.equal(h.client.snapshot().dictionary.find(entry => entry._id === 'fire').gameScope, 'poe2');
+  assert.equal(h.api.calls.filter(call => call.path.startsWith('/v1/dictionaries/')).every(call => call.headers['X-SDEditor-Dictionary-Version'] === '2'), true);
 });
 
 test('restoring a deletion version keeps other dictionary entries', async t => {

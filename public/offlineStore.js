@@ -2,8 +2,9 @@
   const WorkspaceState = (typeof window === 'object' ? window : self).WorkspaceState;
   const DB_NAME = 'sdeditor';
   // v4 cannot read staged records; v5 cannot retain a shared staging reset.
-  // Keep every store while excluding both older editors and save workers.
-  const DB_VERSION = 6;
+  // v6 dictionary writers cannot preserve per-entry game scope. Keep every
+  // store and durable retry receipt while excluding older editors/workers.
+  const DB_VERSION = 7;
 
   const STORE_KV = 'kv';
   const STORE_REVISIONS_LEGACY = 'revisions';

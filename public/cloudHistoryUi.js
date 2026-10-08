@@ -3,8 +3,8 @@
   const emptyFilters = () => ({ entryId: '', q: '', actor: '', action: '', origin: '', from: '', to: '' });
   const actionLabels = { add: 'Added', update: 'Changed', delete: 'Deleted', restore: 'Restored', baseline: 'Existing entry' };
   const originLabels = { edit: 'Edit', auto_merge: 'Automatic merge', conflict_resolution: 'Conflict resolved', restore: 'History restore', baseline: 'History baseline' };
-  const fieldLabels = { find: 'Find', replace: 'Replace', alts: 'Alternates', tlnote: 'TL note', entry: 'Entry', order: 'Order' };
-  const snapshot = entry => entry ? { _id: entry._id, find: entry.find, replace: entry.replace, alts: (entry.alts || []).map(alt => ({ _id: alt._id, find: alt.find, replace: alt.replace })), tlnote: entry.tlnote || '' } : null;
+  const fieldLabels = { find: 'Find', replace: 'Replace', gameScope: 'Game', alts: 'Alternates', tlnote: 'TL note', entry: 'Entry', order: 'Order' };
+  const snapshot = entry => entry ? { _id: entry._id, find: entry.find, replace: entry.replace, gameScope: entry.gameScope || 'all', alts: (entry.alts || []).map(alt => ({ _id: alt._id, find: alt.find, replace: alt.replace })), tlnote: entry.tlnote || '' } : null;
   const mixin = {
     data() { return {
       cloudHistoryVisible: false, cloudHistoryLoading: false, cloudHistoryDetailLoading: false,
@@ -127,7 +127,8 @@
       cloudHistoryChanges(event) { return (event.changes || []).map(field => fieldLabels[field] || field).join(', ') || 'No content change'; },
       cloudHistorySnapshotText(entry) {
         if (!entry) return 'Entry does not exist';
-        return 'Find: ' + entry.find + '\nReplace: ' + entry.replace + '\n\nAlternates:\n' +
+        const scope = entry.gameScope === 'poe1' ? 'PoE1' : entry.gameScope === 'poe2' ? 'PoE2' : 'All';
+        return 'Game: ' + scope + '\nFind: ' + entry.find + '\nReplace: ' + entry.replace + '\n\nAlternates:\n' +
           ((entry.alts || []).map(alt => alt.find + ' → ' + alt.replace).join('\n') || 'None') + '\n\nTL note:\n' + (entry.tlnote || 'None');
       },
       cloudHistoryVersionCurrent(version) {

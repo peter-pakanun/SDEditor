@@ -6,11 +6,23 @@
   'use strict';
 
   const copy = value => value == null ? null : JSON.parse(JSON.stringify(value));
-  const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const comparable = (name, value) => name === 'gameScope' && value === 'all' ? undefined : value;
+  const equal = (left, right) => JSON.stringify(left, comparable) === JSON.stringify(right, comparable);
   const key = value => String(value ?? '').trim().toLowerCase();
   const string = value => String(value ?? '');
   const ids = rows => rows.map(row => row._id);
   const index = rows => new Map(rows.map(row => [row._id, row]));
+
+  function gameScope(entry) {
+    if (!Object.hasOwn(entry, 'gameScope')) return 'all';
+    if (!['all', 'poe1', 'poe2'].includes(entry.gameScope)) throw new Error('Invalid Dictionary game scope. Choose PoE1, PoE2, or All.');
+    return entry.gameScope;
+  }
+
+  // Legacy absence remains absent. An explicit All is a deliberate reset of
+  // a saved game restriction, and must survive into the outgoing request.
+  const scopeField = (scope, explicit = false) => scope === 'all' && !explicit ? {} : { gameScope: scope };
+  const entryKey = entry => key(entry.find) + '\u0000' + gameScope(entry);
 
   function hash(value) {
     let result = 2166136261;
@@ -21,35 +33,43 @@
     return (result >>> 0).toString(36);
   }
 
-  function uniqueId(raw, fallback, used) {
-    const requested = raw == null || string(raw) === '' ? fallback : string(raw);
+  const reservedIds = values => new Set(values.filter(value => value && typeof value === 'object' && value._id != null && string(value._id) !== '').map(value => string(value._id)));
+
+  function uniqueId(raw, fallback, used, reserved) {
+    const existing = raw != null && string(raw) !== '';
+    const requested = existing ? string(raw) : fallback;
     let value = requested;
     let suffix = 2;
-    while (used.has(value)) value = requested + '~' + suffix++;
+    while (used.has(value) || ((!existing || value !== requested) && reserved.has(value))) value = requested + '~' + suffix++;
     used.add(value);
     return value;
   }
 
-  function normalizedId(raw, value, prefix, position, used) {
+  function normalizedId(raw, value, prefix, position, used, reserved) {
     const fallback = raw == null || string(raw) === '' ? prefix + hash(JSON.stringify(value)) + '_' + position : '';
-    return uniqueId(raw, fallback, used);
+    return uniqueId(raw, fallback, used, reserved);
   }
 
   // Keep the editor's schema and raw text. Normalized Find is for initial
   // identity matching only, never a replacement for the user's stored wording.
   function normalizeEntries(values) {
+    const sourceEntries = Array.isArray(values) ? values : [];
     const usedEntries = new Set();
-    return (Array.isArray(values) ? values : []).filter(value => value && typeof value === 'object').map((value, position) => {
+    const reservedEntries = reservedIds(sourceEntries);
+    return sourceEntries.filter(value => value && typeof value === 'object').map((value, position) => {
       const entry = {
-        _id: normalizedId(value._id, value, 'd_sync_', position, usedEntries),
+        _id: normalizedId(value._id, value, 'd_sync_', position, usedEntries, reservedEntries),
         find: string(value.find),
         replace: string(value.replace),
         alts: [],
+        ...scopeField(gameScope(value), Object.hasOwn(value, 'gameScope')),
         tlnote: string(value.tlnote)
       };
+      const sourceRows = Array.isArray(value.alts) ? value.alts : [];
       const usedRows = new Set();
-      entry.alts = (Array.isArray(value.alts) ? value.alts : []).filter(row => row && typeof row === 'object').map((row, rowPosition) => ({
-        _id: normalizedId(row._id, row, 'a_sync_', rowPosition, usedRows),
+      const reservedRows = reservedIds(sourceRows);
+      entry.alts = sourceRows.filter(row => row && typeof row === 'object').map((row, rowPosition) => ({
+        _id: normalizedId(row._id, row, 'a_sync_', rowPosition, usedRows, reservedRows),
         find: string(row.find),
         replace: row.replace == null ? entry.replace : string(row.replace)
       }));
@@ -57,33 +77,33 @@
     });
   }
 
-  function findCounts(rows) {
+  function findCounts(rows, identityKey = row => key(row.find)) {
     const counts = new Map();
     for (const row of rows) {
-      const name = key(row.find);
+      const name = identityKey(row);
       if (name) counts.set(name, (counts.get(name) || 0) + 1);
     }
     return counts;
   }
 
-  function alignInitialRows(local, remote) {
+  function alignInitialRows(local, remote, identityKey = row => key(row.find)) {
     const remoteById = index(remote);
-    const localCounts = findCounts(local);
-    const remoteCounts = findCounts(remote);
-    const remoteByFind = new Map(remote.map(row => [key(row.find), row]));
+    const localCounts = findCounts(local, identityKey);
+    const remoteCounts = findCounts(remote, identityKey);
+    const remoteByFind = new Map(remote.map(row => [identityKey(row), row]));
     const claimed = new Set(local.filter(row => remoteById.has(row._id)).map(row => row._id));
     return local.map(row => {
       if (remoteById.has(row._id)) return row;
-      const name = key(row.find);
+      const name = identityKey(row);
       const match = remoteByFind.get(name);
-      if (!name || localCounts.get(name) !== 1 || remoteCounts.get(name) !== 1 || !match || claimed.has(match._id)) return row;
+      if (!key(row.find) || localCounts.get(name) !== 1 || remoteCounts.get(name) !== 1 || !match || claimed.has(match._id)) return row;
       claimed.add(match._id);
       return { ...row, _id: match._id };
     });
   }
 
   function alignInitialEntries(local, remote) {
-    const aligned = alignInitialRows(local, remote);
+    const aligned = alignInitialRows(local, remote, entryKey);
     const remoteById = index(remote);
     return aligned.map(entry => {
       const match = remoteById.get(entry._id);
@@ -166,17 +186,18 @@
     };
   }
 
-  function definitions(entry) {
+  function definitions(entry, explicitScope = false) {
     if (!entry) return null;
-    return { _id: entry._id, find: entry.find, replace: entry.replace, alts: copy(entry.alts) };
+    return { _id: entry._id, find: entry.find, replace: entry.replace, alts: copy(entry.alts), ...scopeField(gameScope(entry), explicitScope || Object.hasOwn(entry, 'gameScope')) };
   }
 
   function deleteConflict(id, base, local, remote, reason) {
     const note = (local || remote)?.tlnote || '';
+    const explicitScope = [base, local, remote].some(entry => entry && Object.hasOwn(entry, 'gameScope'));
     return {
       id, base: copy(base), local: copy(local), remote: copy(remote),
       definitionsConflict: true, noteConflict: false,
-      localDefinitions: definitions(local), remoteDefinitions: definitions(remote),
+      localDefinitions: definitions(local, explicitScope), remoteDefinitions: definitions(remote, explicitScope),
       localNote: note, remoteNote: note, reason
     };
   }
@@ -193,6 +214,8 @@
     const find = scalar(base?.find, local.find, remote.find, !!base, true);
     const replace = scalar(base?.replace, local.replace, remote.replace, !!base);
     const note = scalar(base?.tlnote, local.tlnote, remote.tlnote, !!base);
+    const scope = scalar(base ? gameScope(base) : undefined, gameScope(local), gameScope(remote), !!base);
+    const explicitScope = [base, local, remote].some(entry => entry && Object.hasOwn(entry, 'gameScope'));
     const baseRows = index(base?.alts || []);
     const localRows = index(local.alts);
     const remoteRows = index(remote.alts);
@@ -216,10 +239,10 @@
     }
     const conflict = {
       id: local._id, base: copy(base), local: copy(local), remote: copy(remote),
-      definitionsConflict: find.conflict || replace.conflict || rowConflict || order.conflict,
+      definitionsConflict: find.conflict || replace.conflict || scope.conflict || rowConflict || order.conflict,
       noteConflict: note.conflict,
-      localDefinitions: { _id: local._id, find: find.local, replace: replace.local, alts: arranged(localMergedRows, 'local') },
-      remoteDefinitions: { _id: local._id, find: find.remote, replace: replace.remote, alts: arranged(remoteMergedRows, 'remote') },
+      localDefinitions: { _id: local._id, find: find.local, replace: replace.local, alts: arranged(localMergedRows, 'local'), ...scopeField(scope.local, explicitScope) },
+      remoteDefinitions: { _id: local._id, find: find.remote, replace: replace.remote, alts: arranged(remoteMergedRows, 'remote'), ...scopeField(scope.remote, explicitScope) },
       localNote: note.local, remoteNote: note.remote,
       reason: order.conflict ? 'row-order' : 'content'
     };
@@ -290,8 +313,9 @@
   // only local changes need comparison; there are no remote edits to reconcile.
   function changesSince(baseSnapshot, localEntries) {
     const base = normalizeEntries(baseSnapshot?.entries);
-    const local = normalizeEntries(localEntries);
     const baseById = index(base);
+    const local = normalizeEntries(localEntries).map(entry => !Object.hasOwn(entry, 'gameScope') && Object.hasOwn(baseById.get(entry._id) || {}, 'gameScope')
+      ? { ...entry, gameScope: 'all' } : entry);
     const localById = index(local);
     const entries = combineOrder(ids(base), ids(local), new Set(localById.keys())).map(id => localById.get(id));
     const upserts = entries.filter(entry => key(entry.find) && !equal(entry, baseById.get(entry._id))).map(copy);

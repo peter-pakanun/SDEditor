@@ -719,6 +719,10 @@
                 </div>
                 <div class="dictAltHeader">
                   <span>Alternates</span>
+                  <select class="dictScopeSelect" :value="dictionaryEntryScope(word)" @change="setDictionaryEntryScope(word, $event.target.value)" :aria-label="'Game for ' + (word.find || 'this Dictionary entry')" title="Dictionary entry game">
+                    <option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All</option>
+                  </select>
+                  <span v-if="dictionaryEntryScopeWarning(word)" class="dictScopeWarning" role="img" :aria-label="dictionaryEntryScopeWarning(word)" :title="dictionaryEntryScopeWarning(word)">⚠</span>
                   <button class="dictHistoryBtn" @click="cloudOpenHistory(word._id)" :disabled="!cloudEntryHistoryAvailable" :aria-label="'View shared history for ' + (word.find || 'this dictionary entry')" :title="cloudEntryHistoryHint"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
                   <button @click="addDictionaryAltRow(word)" title="Add an alternate translation" :aria-label="'Add an alternate for ' + (word.find || 'this Dictionary entry')">➕</button>
                 </div>
@@ -1209,6 +1213,7 @@
   <script src="FileSaver.js"></script>
   <script src="dummyFiles.js"></script>
   <script src="workspaceState.js"></script>
+  <script src="dictionaryScope.js"></script>
   <script src="helper.js"></script>
   <script src="statDescParser.js"></script>
   <script src="regexEngine.js"></script>

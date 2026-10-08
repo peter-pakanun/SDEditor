@@ -17,6 +17,8 @@ When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Sou
 
 Click the **PoE1/PoE2** label in the navbar to open **Settings → General → Game version**. Choose the other game and save and close Settings to switch; pending local translation saves finish first.
 
+Use each Dictionary entry's **PoE1 / PoE2 / All** selector to choose where it applies. Existing entries are **All**; new entries start in your selected game. You can repeat a Find or keyword identifier in separate game entries. The current game's entry takes priority over an All entry with the same Find, including its alternates; All is the fallback when that game has no specific entry. Other-game entries stay visible and editable with a yellow warning, but do not appear in autocomplete or move to the top when matched. They also do not supply highlights, keyword/Regex replacements or terminology rules.
+
 ### Google Backup and Language Assignment
 
 Open **Settings → Cloud backup → Back up with Google** to connect personal settings backup and shared language work. New accounts have the **Translator** role and show **Not configured** until an administrator assigns a language through **Manage users**. Local editing remains available while waiting. Translators can still select other languages in Settings; their dictionaries and translations in those languages stay local.

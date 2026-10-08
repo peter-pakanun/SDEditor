@@ -15,6 +15,10 @@ The selected version controls:
 
 Both versions use the same Dictionary for a selected language. Dictionaries are separated by language and local/account profile. Regex rules, selected language, theme, and other preferences are shared between PoE1 and PoE2 within that profile. With Google backup enabled, Regex/preferences remain personal. Translators synchronize the shared Dictionary for their assigned language; other languages selected for local editing remain local. Managers and Admins synchronize the selected language's Dictionary with or without an assignment. Their assignment does not restrict access, and `all` is not an assigned language value. See [Cloud Backup and Shared Dictionaries](cloud_backup.md).
 
+Each Dictionary entry has a **PoE1 / PoE2 / All** selector. Existing entries are **All**; new entries start in the selected game. The same Find or keyword identifier can have separate entries for each game, each with its own internal ID, translation, alternates and TL note. A game-specific entry overrides the **All** entry with the same Find (ignoring case and surrounding whitespace), including that All entry's alternates. All remains the fallback in the other game.
+
+Entries for the other game stay visible and editable with a yellow warning. They are excluded from autocomplete, highlighting, keyword replacement, Regex Dictionary use, terminology diagnostics and automatic matching that moves relevant entries to the top. Changing an entry's selector keeps its row in place while you edit it. All rows remain part of the language's Dictionary, settings exports and shared history.
+
 ## Auto-Detection
 
 When you use **Import Next Version** with a full `StatDescriptions.zip`, SDEditor checks the ZIP paths to detect the game version.

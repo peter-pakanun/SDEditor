@@ -1778,6 +1778,19 @@ button, label, th, td, input[type="checkbox"] {
 
 /* The history action shares the existing Alternates row; it adds no row or height. */
 .side .dictAltHeader > button.dictHistoryBtn { margin-left: auto; flex: 0 0 auto; }
+.side .dictScopeSelect {
+  width: auto;
+  min-width: 4.5em;
+  padding: calc(0.1em * var(--density)) calc(0.3em * var(--density));
+  font-size: calc(0.85em * var(--density));
+}
+.side .dictAltHeader > .dictScopeWarning {
+  color: #b88400;
+  cursor: help;
+  flex: 0 0 auto;
+}
+[data-theme="dark"] .side .dictScopeWarning,
+[data-theme="modern-dark"] .side .dictScopeWarning { color: #f2c94c; }
 .dictHistoryBtn svg { display: inline-block; vertical-align: -3px; }
 .dictHistoryBtn:disabled { opacity: 0.45; }
 

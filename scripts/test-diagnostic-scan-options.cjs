@@ -25,7 +25,7 @@ function loadEditor() {
       nextTick() { return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [api, name, counter] of [

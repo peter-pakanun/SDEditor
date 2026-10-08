@@ -1,4 +1,6 @@
 (function (global) {
+  const DictionaryScope = typeof module !== 'undefined' && module.exports
+    ? require('./dictionaryScope.js') : global.DictionaryScope;
   const WORD_CHARACTER = /[\p{L}\p{M}\p{N}_]/u;
   const UNSEGMENTED_CHARACTER = /[\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
@@ -121,9 +123,10 @@
     return false;
   }
 
-  function compileDictionary(dictionary) {
+  function compileDictionary(dictionary, options = {}) {
     const groups = new Map();
-    for (const entry of (Array.isArray(dictionary) ? dictionary : [])) {
+    const entries = Object.hasOwn(options, 'game') ? DictionaryScope.activeEntries(dictionary, options.game) : dictionary;
+    for (const entry of (Array.isArray(entries) ? entries : [])) {
       const mainFind = String(entry?.find ?? "").trim();
       const key = normalize(mainFind);
       if (!key) continue;

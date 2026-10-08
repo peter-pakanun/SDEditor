@@ -17,7 +17,7 @@ SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings
 | Selected/open file presence | Current browser session | Visible to participants in the same collaboration workspace; expires on disconnect |
 | File comments and read receipts | Loaded into the current tab; unsent text and audience choice stay in the tab | Comments shared by game and file path across hashes; assigned-language scope for translators, selected-language scope for manager/admin posts, or explicitly global; managers/admins can read every team; read receipts private to each account |
 
-PoE1 and PoE2 use the same dictionary for a given language. Settings and Regex rules are personal to each account. Manager access covers shared language work; it does not expose another account's personal preferences or Regex rules. Translation collaboration separates each game, source version, and language. Account changes detach the current collaboration session; pending work retains the account and version that created it. Continue exporting translated ZIPs as portable copies of your work.
+PoE1 and PoE2 use the same dictionary for a given language, with a **PoE1 / PoE2 / All** selector on each entry. Existing entries apply to All. The current game's entry overrides an All entry with the same normalized main Find, including its alternates. Other-game entries remain visible with a yellow warning but do not supply autocomplete, highlights, keyword/Regex replacements, terminology checks or matches-first ordering. Find/keyword identifiers may repeat across games; internal entry IDs remain unique. Scope travels with the entry through synchronization, settings import/export, conflict resolution and history restoration. Settings and Regex rules are personal to each account. Manager access covers shared language work; it does not expose another account's personal preferences or Regex rules. Translation collaboration separates each game, source version, and language. Account changes detach the current collaboration session; pending work retains the account and version that created it. Continue exporting translated ZIPs as portable copies of your work.
 
 ## Sign In and Get Assigned
 
@@ -130,14 +130,18 @@ On upgrade, the old dictionary is placed under its previously selected language.
 
 ### Deploying the staged/dropped workspace upgrade
 
-Commit the frontend and API changes, including their new runtime files. Push the API changes and run its existing `redeploy.sh` first: it pulls a clean checkout, installs dependencies, runs syntax checks and tests, creates a database backup, restarts the API (which migrates to schema v12), and checks the new process's health. The script updates only the API. After the API is healthy, push/deploy the frontend to Pages, then reload older editor tabs. This order also applies when pushing the frontend automatically triggers Pages deployment. Frontend IndexedDB v6 preserves data and rejects older v4/v5 writers; close other tabs if an upgrade is blocked. Do not clear browser storage.
+Commit the frontend and API changes, including their new runtime files. Push the API changes and run its existing `redeploy.sh` first: it pulls a clean checkout, installs dependencies, runs syntax checks and tests, creates a database backup, restarts the API (which migrates to schema v12), and checks the new process's health. The script updates only the API. After the API is healthy, push/deploy the frontend to Pages, then reload older editor tabs. This order also applies when pushing the frontend automatically triggers Pages deployment. Frontend IndexedDB v7 preserves data and rejects older v4/v5/v6 writers; close other tabs if an upgrade is blocked. Do not clear browser storage.
+
+Dictionary requests use `X-SDEditor-Dictionary-Version: 2`. Once a language has contained a game-specific entry, older clients receive `DICTIONARY_CLIENT_OUTDATED` with reload guidance instead of reading or writing data they cannot interpret; the protection remains after widening or deleting those entries. All-only legacy dictionaries remain compatible. Scope remains entry JSON, so no additional API table migration is needed. Existing pending mutation bodies and receipt hashes remain unchanged. Deploy the API before the frontend, and do not roll back to an older frontend against scoped dictionaries or v7 browser storage.
 
 Keep the pre-upgrade backup. Rolling back to the old API requires restoring a compatible database as well as the old code; the old API cannot open schema v12, and restoring a backup loses changes made after that backup. This is a deployment order requirement, not evidence that either hosted service has already been updated.
 
 The frontend's `npm test` remains a stub. Run the focused merge checks and syntax checks from the SDEditor directory:
 
 ```sh
+node scripts/test-dictionary-scope.cjs
 node scripts/test-dictionary-sync.cjs
+node scripts/test-dictionary-scope-api.cjs
 node scripts/test-cloud-sync.cjs
 node scripts/test-settings-save.cjs
 node scripts/test-history-sync.cjs
@@ -154,6 +158,7 @@ node scripts/test-collaboration-editor.cjs
 node scripts/test-collaboration-lifecycle.cjs
 node scripts/test-collaboration-source.cjs
 node scripts/test-render-safety.cjs
+node --check public/dictionaryScope.js
 node --check public/dictionarySync.js
 node --check public/cloudSync.js
 node --check public/cloudUi.js
