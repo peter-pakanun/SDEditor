@@ -68,6 +68,140 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
   return { store: root.OfflineStore, kv, revisions, transactions };
 }
 async function commit(f, request) { await queued(); f.transactions.at(-1).complete(); return request; }
+function deletionFixture(options = {}) {
+  const f = fixture(options), workspace = f.kv.get('workspace_poe1');
+  const source = copy(workspace.descs);
+  source[0].translations.Thai = ['ZIP translation'];
+  f.kv.set('source_poe1', source);
+  W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  return f;
+}
+const deletionBatch = (options = {}) => batch({ jobId: 'delete-1', origin: 'delete_staged', resetStaging: true,
+  bases: { 'stat.txt': file() },
+  files: [{ ...file('ZIP translation'), trackedForExport: false, stagingReset: true }],
+  revisions: [{ filepath: 'stat.txt', lang: 'Thai', savedAt: 20, note: 'Before delete staged translation', translations: ['old'] },
+    { filepath: 'stat.txt', lang: 'Thai', savedAt: 21, note: 'Delete staged translation', translations: ['ZIP translation'] }],
+  ...options });
+
+test('staged deletion durably restores immutable ZIP text and preserves other languages, dropped copies and drafts', async () => {
+  const f = deletionFixture({ worker: true }), workspace = f.kv.get('workspace_poe1');
+  const source = copy(f.kv.get('source_poe1'));
+  W.stageTranslation(workspace, { filepath: 'stat.txt', translations: ['eins'] }, 'German', { source: source[0], sourceHash: 'source' });
+  W.dropTranslation(workspace, source[0], 'Thai', { id: 'preserved-copy', originSourceHash: 'old-source', targetSourceHash: 'source',
+    translations: ['recoverable'] });
+  const dropped = copy(workspace.dropped), archive = copy(workspace.droppedArchive), outbox = copy(workspace.droppedOutbox);
+  const draft = { state: 'active', translations: ['unsaved typing'], revision: 'draft-revision' };
+  f.kv.set('private-draft', draft);
+  let settled = false;
+  const saving = f.store.saveTranslationBatch(deletionBatch()).then(value => { settled = true; return value; });
+  await queued(); assert.equal(settled, false);
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['old']);
+  f.transactions.at(-1).complete(); const ack = await saving;
+  const saved = f.kv.get('workspace_poe1'), derived = W.workspaceFile(saved, source[0], 'Thai');
+  assert.equal(saved.staged.Thai['stat.txt'], undefined); assert.equal(derived.hasChanges, false);
+  assert.deepEqual(derived.translations, ['ZIP translation']);
+  assert.deepEqual(saved.descs[0].translations.Thai, ['ZIP translation']);
+  assert.deepEqual(saved.descs[0].translations.French, ['bonjour']);
+  assert.deepEqual(saved.staged.German['stat.txt'].translations, ['eins']);
+  assert.deepEqual(saved.descs[1].translations.Thai, ['untouched']);
+  assert.deepEqual(saved.dropped, dropped); assert.deepEqual(saved.droppedArchive, archive); assert.deepEqual(saved.droppedOutbox, outbox);
+  assert.ok(saved.droppedArchive['preserved-copy'].targetSourceHashes.includes('source'));
+  assert.deepEqual(f.kv.get('source_poe1'), source); assert.deepEqual(f.kv.get('private-draft'), draft);
+  assert.equal(ack.files[0].trackedForExport, false); assert.equal(ack.files[0].stagingReset, true);
+  assert.equal(ack.draftConsumed, undefined); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(f.revisions.map(revision => revision.translations), [['old'], ['ZIP translation']]);
+  assertNoStatusFlags(saved);
+});
+
+test('shared staged deletion queues its captured revision and reset marker without consuming sparse carries', async () => {
+  const f = deletionFixture({ collaboration: true }), room = f.kv.get('collaboration_v1').rooms[key];
+  room.mode = 'sparse'; room.carries = { 'stat.txt': { filepath: 'stat.txt', translations: ['separate copy'] } };
+  room.carryRevisions = { 'stat.txt': 4 };
+  const saved = await commit(f, f.store.saveTranslationBatch(deletionBatch({ collaboration: { key, identity, origin: 'delete_staged',
+    bases: { 'stat.txt': file() } } })));
+  const committed = f.kv.get('collaboration_v1').rooms[key];
+  assert.equal(saved.status, 'pending'); assert.equal(committed.outbox.length, 1);
+  assert.equal(committed.outbox[0].resetStaging, true); assert.equal(committed.outbox[0].origin, 'delete_staged');
+  assert.deepEqual(committed.outbox[0].files[0].base, file());
+  assert.equal(committed.local['stat.txt'].trackedForExport, false); assert.equal(committed.local['stat.txt'].stagingReset, true);
+  assert.deepEqual(committed.carries, room.carries); assert.deepEqual(committed.carryRevisions, room.carryRevisions);
+  assert.equal(f.kv.get('workspace_poe1').staged.Thai['stat.txt'], undefined);
+});
+
+test('staged deletion restores blank and short source text with placeholders while preserving excess original entries', async () => {
+  for (const original of [[], [''], ['ZIP translation', 'extra original entry']]) {
+    const f = deletionFixture(); f.kv.get('source_poe1')[0].translations.Thai = original;
+    const restored = original.length ? original : [''];
+    const result = await commit(f, f.store.saveTranslationBatch(deletionBatch({
+      files: [{ ...file(), translations: restored, trackedForExport: false, stagingReset: true }], revisions: [] })));
+    assert.deepEqual(copy(result.files[0].translations), restored);
+    assert.deepEqual(f.kv.get('workspace_poe1').descs[0].translations.Thai, restored);
+    assert.equal(f.kv.get('workspace_poe1').staged.Thai['stat.txt'], undefined);
+    assert.deepEqual(f.kv.get('source_poe1')[0].translations.Thai, original);
+  }
+});
+
+test('changed or removed staged text rejects deletion transactionally and retains recovery data', async () => {
+  for (const remove of [false, true]) {
+    const f = deletionFixture();
+    if (remove) delete f.kv.get('workspace_poe1').staged.Thai['stat.txt'];
+    else f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations = ['newer save'];
+    const before = copy(Object.fromEntries(f.kv));
+    await assert.rejects(f.store.saveTranslationBatch(deletionBatch()), error => error.code === (remove ? 'DELETE_STAGED_NOT_FOUND' : 'DELETE_STAGED_BASE_CHANGED'));
+    assert.deepEqual(Object.fromEntries(f.kv), before); assert.equal(f.revisions.length, 0);
+  }
+});
+
+test('changed shared revision or an unresolved conflict rejects deletion without rewriting the outbox', async () => {
+  for (const conflict of [false, true]) {
+    const f = deletionFixture({ collaboration: true }), room = f.kv.get('collaboration_v1').rooms[key];
+    if (conflict) room.conflicts.push({ filepath: 'stat.txt', id: 'conflict' });
+    else room.local['stat.txt'].revision++;
+    const before = copy(Object.fromEntries(f.kv));
+    await assert.rejects(f.store.saveTranslationBatch(deletionBatch({ collaboration: { key, identity, origin: 'delete_staged',
+      bases: { 'stat.txt': file() } } })), error => error.code === (conflict ? 'DELETE_STAGED_CONFLICT' : 'DELETE_STAGED_BASE_CHANGED'));
+    assert.deepEqual(Object.fromEntries(f.kv), before); assert.equal(f.revisions.length, 0);
+  }
+});
+
+test('deletion receipt replays once after uncertain completion and refuses reuse as an ordinary save', async () => {
+  const f = deletionFixture({ collaboration: true });
+  const request = deletionBatch({ collaboration: { key, identity, origin: 'delete_staged', bases: { 'stat.txt': file() } } });
+  await commit(f, f.store.saveTranslationBatch(request));
+  const duplicate = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(duplicate.duplicate, true); assert.equal(f.revisions.length, 2);
+  assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox.length, 1);
+  await assert.rejects(f.store.saveTranslationBatch(batch({ jobId: 'delete-1' })), /identifier was reused/);
+});
+
+test('local deletion receipt replay preserves a newer stage written by another tab', async () => {
+  const f = deletionFixture(), request = deletionBatch();
+  await commit(f, f.store.saveTranslationBatch(request));
+  const workspace = f.kv.get('workspace_poe1'), source = f.kv.get('source_poe1')[0];
+  W.stageTranslation(workspace, { filepath: 'stat.txt', translations: ['newer tab save'] }, 'Thai', { source, sourceHash: 'source' });
+  workspace.descs[0].translations.Thai = ['newer tab save'];
+  const duplicate = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(duplicate.duplicate, true); assert.equal(duplicate.files[0].trackedForExport, true);
+  assert.equal(duplicate.files[0].stagingReset, undefined);
+  assert.deepEqual(copy(duplicate.files[0].translations), ['newer tab save']);
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['newer tab save']);
+  assert.equal(f.revisions.length, 2); assert.equal(f.kv.get('translation_save_receipts_poe1').length, 1);
+});
+
+test('history failure rolls back a staged deletion, shared outbox and receipt together', async () => {
+  const f = deletionFixture({ collaboration: true, failRevision: true }), before = copy(Object.fromEntries(f.kv));
+  await assert.rejects(f.store.saveTranslationBatch(deletionBatch({ collaboration: { key, identity, origin: 'delete_staged',
+    bases: { 'stat.txt': file() } } })), /Cannot store history/);
+  assert.deepEqual(Object.fromEntries(f.kv), before); assert.equal(f.revisions.length, 0);
+});
+
+test('deletion refuses arbitrary replacement text, missing source and draft consumption', async () => {
+  const f = deletionFixture();
+  await assert.rejects(f.store.saveTranslationBatch(deletionBatch({ files: [{ ...file('arbitrary replacement'), trackedForExport: false, stagingReset: true }] })), /original ZIP/);
+  await assert.rejects(f.store.saveTranslationBatch(deletionBatch({ draft: {} })), /Invalid staged translation deletion/);
+  f.kv.delete('source_poe1');
+  await assert.rejects(f.store.saveTranslationBatch(deletionBatch()), /original ZIP translation is unavailable/);
+});
 
 test('worker-compatible store commits a touched language and history only after transaction completion', async () => {
   const f = fixture({ worker: true });

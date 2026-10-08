@@ -79,6 +79,252 @@ function harness({ records = new Map() } = {}) {
   return { editor, config, calls, window, store, records, desc, document, context };
 }
 
+async function stagedDeletionFixture({ inline = false } = {}) {
+  const h = harness(), { editor, desc, window, calls } = h;
+  window.WorkspaceState.stageTranslation(editor.localDescs,
+    { filepath: desc.filepath, translations: ['staged translation'] }, 'Thai',
+    { source: editor.workspaceSourceFile(desc.filepath), sourceHash: editor.sourceIdentity, game: editor.gameVersion });
+  editor.applyWorkspaceOverlay();
+  assert.equal(await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath)), true);
+  calls.deletions = [];
+  editor.persistStagedDeletion = async (selected, base, context) => {
+    calls.deletions.push({ filepath: selected.filepath, base: copy(base), context });
+    delete editor.localDescs.staged[context.language][selected.filepath];
+    editor.applyWorkspaceOverlay();
+    return { status: 'local', durable: true };
+  };
+  editor.rebaseEditorAfterCommit = window.CollaborationIntegration.mixin.methods.rebaseEditorAfterCommit;
+  return h;
+}
+
+function enableDeletionWorker(h) {
+  const { editor, window, context, calls, records } = h;
+  calls.storage = [];
+  context.crypto = require('node:crypto').webcrypto;
+  window.PendingSaves = require('../public/pendingSaves.js');
+  window.SaveWorkerClient = { create: () => ({
+    save: batch => new Promise((resolve, reject) => calls.storage.push({ batch, resolve, reject })),
+  }) };
+  editor.persistStagedDeletion = window.CollaborationIntegration.mixin.methods.persistStagedDeletion;
+  editor.persistTranslationBatch = window.CollaborationIntegration.mixin.methods.persistTranslationBatch;
+  h.acknowledge = call => {
+    if (call.batch.draft) {
+      const record = records.get(call.batch.draft.key);
+      if (record?.revision === call.batch.draft.revision) records.set(record.key,
+        { ...record, revision: record.revision + ':promoted', state: 'promoted', translations: [] });
+    }
+    call.resolve({ jobId: call.batch.jobId, status: 'local', files: call.batch.files, draftConsumed: !!call.batch.draft });
+  };
+  return h;
+}
+
+async function waitForDeletionWrite(h, count = 1) {
+  for (let attempt = 0; attempt < 25 && h.calls.storage.length < count; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(h.calls.storage.length, count);
+  return h.calls.storage[count - 1];
+}
+
+test('staged deletion is available only for the current language and source, including intentionally blank staged saves', async () => {
+  const h = harness(), { editor, desc, window } = h;
+  await editor.editFile(desc.filepath);
+  assert.equal(editor.editorHasStagedTranslation, false);
+  window.WorkspaceState.stageTranslation(editor.localDescs,
+    { filepath: desc.filepath, translations: ['other language'] }, 'German', { source: desc });
+  assert.equal(editor.editorHasStagedTranslation, false);
+  const staged = window.WorkspaceState.stageTranslation(editor.localDescs,
+    { filepath: desc.filepath, translations: [''] }, 'Thai', { source: desc });
+  assert.equal(editor.editorHasStagedTranslation, true);
+  staged.sourceHash = 'older-source';
+  assert.equal(editor.editorHasStagedTranslation, false);
+  staged.sourceHash = editor.sourceIdentity;
+  editor.localDescs.sourceHash = 'another-workspace';
+  assert.equal(editor.editorHasStagedTranslation, false);
+});
+
+test('staged deletion requires a danger confirmation and declining retains staged text and local drafts', async () => {
+  const { editor, calls, desc, records } = await stagedDeletionFixture();
+  editor.editorBlocks[0].translation = 'keep my unsaved draft';
+  await editor.flushEditorDraft();
+  const before = copy(editor.localDescs), drafts = copy([...records.entries()]), writes = calls.writes.length;
+  let options;
+  editor.appConfirm = async (message, config) => { calls.confirms.push(message); options = config; return false; };
+  assert.equal(await editor.deleteEditorStagedTranslation(), false);
+  assert.equal(options.danger, true);
+  assert.match(options.title, /Delete staged translation/);
+  assert.equal(options.confirmLabel, 'Delete staged translation');
+  assert.equal(calls.confirms.length, 1); assert.equal(calls.deletions.length, 0);
+  assert.equal(calls.writes.length, writes);
+  assert.deepEqual(copy(editor.localDescs), before); assert.deepEqual(copy([...records.entries()]), drafts);
+  assert.equal(desc.translations.Thai[0], 'staged translation');
+  assert.equal(editor.editorBlocks[0].translation, 'keep my unsaved draft');
+  assert.equal(editor.editorVisible, true);
+});
+
+test('confirmed staged deletion bypasses translation validation and resets a clean editor to its ZIP translation', async t => {
+  for (const inline of [false, true]) await t.test(inline ? 'inline editor' : 'full editor', async () => {
+    const { editor, calls, desc } = await stagedDeletionFixture({ inline });
+    editor.appConfirm = async () => true;
+    editor.validateEditor = () => assert.fail('Deleting a stage must not validate the translation');
+    editor.editorSaveFindings = () => assert.fail('Deleting a stage must not run ordinary Save diagnostics');
+    assert.equal(await editor.deleteEditorStagedTranslation(), true);
+    assert.equal(calls.deletions.length, 1); assert.equal(calls.promotions.length, 0);
+    assert.equal(editor.editorHasStagedTranslation, false);
+    assert.equal(desc.translations.Thai[0], 'translation'); assert.equal(desc.hasChanges, false);
+    assert.equal(editor.editorBlocks[0].translation, 'translation');
+    assert.equal(editor.editorOriginalTranslations[0], 'translation');
+    assert.equal(editor.editorSessionActive, true);
+    assert.equal(editor.inlineActive, inline); assert.equal(editor.editorVisible, !inline);
+    assert.equal(editor.editorCurrentEditingDesc.filepath, desc.filepath);
+  });
+});
+
+test('clean staged deletion rebuilds every original ZIP entry including extra translation entries', async t => {
+  for (const inline of [false, true]) await t.test(inline ? 'inline editor' : 'full editor', async () => {
+    const h = await stagedDeletionFixture({ inline }), { editor, desc } = h;
+    const baseline = editor.workspaceSourceFile(desc.filepath);
+    baseline.translations.Thai = ['ZIP first', 'ZIP extra\\nline', 'ZIP third'];
+    assert.equal(editor.editorBlocks.length, 1);
+    editor.appConfirm = async () => true;
+    assert.equal(await editor.deleteEditorStagedTranslation(), true);
+    assert.deepEqual(copy(desc.translations.Thai), baseline.translations.Thai);
+    assert.equal(editor.editorBlocks.length, 3);
+    assert.deepEqual(copy(editor.serializeEditorTranslations()), baseline.translations.Thai);
+    assert.deepEqual(copy(editor.editorOriginalTranslations), ['ZIP first', 'ZIP extra\nline', 'ZIP third']);
+    assert.equal(editor.editorBlocks[1].english, ''); assert.equal(editor.editorBlocks[1].isMultiline, true);
+    assert.equal(editor.editorHaveChanges(), false); assert.equal(editor.editorSessionActive, true);
+    assert.deepEqual(copy(editor._draftSession.base.translations), baseline.translations.Thai);
+  });
+});
+
+test('retrying an uncertain staged deletion rebases the retained same-editor draft before its next save', async () => {
+  const h = enableDeletionWorker(await stagedDeletionFixture()), { editor, desc, calls, records, acknowledge } = h;
+  editor.editorBlocks[0].translation = 'retained local draft'; await editor.flushEditorDraft();
+  const session = editor._draftSession;
+  editor.appConfirm = async () => true;
+  const deleting = editor.deleteEditorStagedTranslation(), original = await waitForDeletionWrite(h);
+  const payload = JSON.stringify(original.batch);
+  original.reject(Object.assign(new Error('Worker acknowledgement was lost'), { durableUnknown: true }));
+  assert.equal(await deleting, false);
+  assert.equal(editor.editorBlocks[0].translation, 'retained local draft');
+  assert.equal(editor.editorOriginalTranslations[0], 'staged translation');
+  assert.equal(editor.pendingLocalSaves, 1); assert.equal(editor.editorHasStagedTranslation, true);
+  const retrying = editor.retryPendingSaves(), retried = await waitForDeletionWrite(h, 2);
+  assert.equal(JSON.stringify(retried.batch), payload);
+  acknowledge(retried); await retrying;
+  assert.equal(editor.pendingLocalSaves, 0); assert.equal(editor.editorHasStagedTranslation, false);
+  assert.equal(editor._draftSession, session); assert.equal(editor.editorVisible, true);
+  assert.equal(editor.editorBlocks[0].translation, 'retained local draft');
+  assert.deepEqual(copy(editor.editorOriginalTranslations), ['translation']);
+  assert.deepEqual(copy(session.base.translations), ['translation']);
+  assert.deepEqual(records.get(session.key).base.translations, ['translation']);
+  assert.equal(records.get(session.key).translations[0], 'retained local draft');
+  assert.equal(desc.translations.Thai[0], 'translation');
+  const saving = editor.editorSave({ close: false }), nextSave = await waitForDeletionWrite(h, 3);
+  assert.deepEqual(copy(nextSave.batch.draft.base.translations), ['translation']);
+  assert.deepEqual(copy(nextSave.batch.files[0].translations), ['retained local draft']);
+  acknowledge(nextSave); assert.equal(await saving, true);
+  assert.equal(desc.translations.Thai[0], 'retained local draft'); assert.equal(editor.editorVisible, true);
+  assert.equal(calls.storage.length, 3);
+});
+
+test('a retried staged deletion cannot rebase another editor after its session or scope changes', async t => {
+  const changes = {
+    session: editor => { editor._draftSession = { ...editor._draftSession }; },
+    openRun: editor => { editor._editorOpenRun++; },
+    profile: editor => { editor.cloudProfileId = 'other-profile'; },
+    language: editor => { editor.lang = 'German'; },
+    source: editor => { editor.sourceIdentity = 'other-source'; },
+    file: editor => { editor.editorCurrentEditingDesc = editor.descs[1]; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const h = enableDeletionWorker(await stagedDeletionFixture()), { editor, acknowledge, records } = h;
+    editor.editorBlocks[0].translation = 'retained first draft'; await editor.flushEditorDraft();
+    editor.appConfirm = async () => true;
+    const deleting = editor.deleteEditorStagedTranslation(), original = await waitForDeletionWrite(h);
+    original.reject(Object.assign(new Error('Uncertain worker completion'), { durableUnknown: true }));
+    assert.equal(await deleting, false);
+    change(editor);
+    editor.editorBlocks[0].translation = 'new editor draft';
+    editor.editorOriginalTranslations = ['new editor committed'];
+    const blocks = editor.editorBlocks, session = editor._draftSession, stored = copy([...records.entries()]);
+    const retrying = editor.retryPendingSaves(), retried = await waitForDeletionWrite(h, 2);
+    acknowledge(retried); await retrying;
+    assert.equal(editor.editorBlocks, blocks); assert.equal(editor._draftSession, session);
+    assert.equal(editor.editorBlocks[0].translation, 'new editor draft');
+    assert.deepEqual(copy(editor.editorOriginalTranslations), ['new editor committed']);
+    assert.deepEqual(copy([...records.entries()]), stored);
+    assert.equal(editor.editorVisible, true);
+  });
+});
+
+test('confirmed staged deletion preserves a durable local draft and new typing during the storage acknowledgement', async () => {
+  const { editor, calls, desc, records } = await stagedDeletionFixture();
+  editor.editorBlocks[0].translation = 'preserved draft'; await editor.flushEditorDraft();
+  const session = editor._draftSession, record = copy(records.get(session.key)), gate = deferred(), persist = editor.persistStagedDeletion;
+  editor.persistStagedDeletion = async (...args) => { await gate.promise; return persist(...args); };
+  editor.appConfirm = async () => true;
+  const deleting = editor.deleteEditorStagedTranslation(); await tick();
+  assert.equal(editor.editorHasStagedTranslation, true); assert.equal(desc.translations.Thai[0], 'staged translation');
+  assert.equal(editor.editorBlocks[0].translation, 'preserved draft');
+  editor.editorBlocks[0].translation = 'typed while deleting'; gate.resolve();
+  assert.equal(await deleting, true);
+  assert.equal(calls.deletions.length, 1); assert.equal(editor._draftSession, session);
+  assert.equal(editor.editorBlocks[0].translation, 'typed while deleting'); assert.equal(editor.editorVisible, true);
+  assert.equal(desc.translations.Thai[0], 'translation'); assert.equal(editor.editorHasStagedTranslation, false);
+  const retained = records.get(session.key);
+  assert.equal(retained.state, 'active');
+  assert.ok([record.translations[0], 'typed while deleting'].includes(retained.translations[0]));
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('a failed staged deletion retains the stage, draft and open editor without reporting success', async () => {
+  const { editor, calls, desc, records } = await stagedDeletionFixture();
+  editor.editorBlocks[0].translation = 'keep this draft'; await editor.flushEditorDraft();
+  const workspace = copy(editor.localDescs), before = copy([...records.entries()]);
+  editor.appConfirm = async () => true;
+  editor.persistStagedDeletion = async () => { throw new Error('Storage quota exhausted'); };
+  assert.equal(await editor.deleteEditorStagedTranslation(), false);
+  assert.deepEqual(copy(editor.localDescs), workspace);
+  assert.deepEqual(copy([...records.entries()]), before);
+  assert.equal(desc.translations.Thai[0], 'staged translation'); assert.equal(editor.editorHasStagedTranslation, true);
+  assert.equal(editor.editorBlocks[0].translation, 'keep this draft'); assert.equal(editor.editorVisible, true);
+  assert.match(editor.collaborationNotice || editor.inlineDraftError || calls.alerts.join(' '), /Storage quota exhausted/);
+  assert.equal(calls.promotions.length, 0); assert.equal(editor.editorSaving, false);
+});
+
+test('staged deletion confirmations expire after any editor, access, scope or committed-stage change', async t => {
+  const changes = {
+    profile: h => { h.editor.cloudProfileId = 'other-profile'; },
+    game: h => { h.editor.gameVersion = 'poe2'; },
+    language: h => { h.editor.lang = 'German'; },
+    source: h => { h.editor.sourceIdentity = 'other-source'; },
+    account: h => { h.editor.cloudUser.id = 'other-account'; },
+    role: h => { h.editor.cloudUser.role = 'manager'; },
+    assignment: h => { h.editor.cloudUser.assignmentVersion++; },
+    access: h => { h.editor.cloudCanAccessAllLanguages = true; },
+    session: h => { h.editor._draftSession = { ...h.editor._draftSession }; },
+    openRun: h => { h.editor._editorOpenRun++; },
+    file: h => { h.editor.editorCurrentEditingDesc = h.editor.descs[1]; },
+    stage: h => { h.editor.localDescs.staged.Thai[h.desc.filepath].translations[0] = 'new peer stage'; },
+    base: h => { h.currentBase.revision++; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const h = await stagedDeletionFixture(), { editor, calls, desc } = h, gate = deferred();
+    editor.cloudUser = { id: 'first-account', role: 'translator', assignmentVersion: 1 };
+    editor.cloudCanAccessAllLanguages = false;
+    if (name === 'base') {
+      h.currentBase = { ...copy(editor.collaborationFile(desc)), revision: 1 };
+      editor._collaboration = { fileBase: () => copy(h.currentBase) };
+    }
+    editor.appConfirm = () => gate.promise;
+    const deleting = editor.deleteEditorStagedTranslation(); await tick();
+    change(h); gate.resolve(true);
+    assert.equal(await deleting, false);
+    assert.equal(calls.deletions.length, 0); assert.equal(calls.promotions.length, 0);
+    assert.equal(editor.localDescs.staged.Thai[desc.filepath] != null, true);
+  });
+});
+
 test('row lookups index the raw corpus and only read the selected reactive description', () => {
   const { editor, context } = harness();
   const source = Array.from({ length: 20520 }, (_, index) => description(String(index)));

@@ -58,9 +58,30 @@ function serverFixture(archive) {
         if (this.loseRepairReply) { this.loseRepairReply--; throw new Error('Repair reply was lost'); }
         return copy(result);
       }
+      if (path.endsWith('/staged-deletions')) {
+        if (this.receipts.has(body.mutationId)) return copy(this.receipts.get(body.mutationId));
+        if (this.raceDeletion) { this.raceDeletion = false; this.change(body.files[0].filepath, ['raced peer edit', 'two']); }
+        if (body.files.some(file => file.baseRevision !== (this.files.find(row => row.filepath === file.filepath)?.revision || 0))) {
+          throw Object.assign(new Error('Delete conflict'), { status: 409, code: 'REVISION_CONFLICT', current: this.snapshot() });
+        }
+        const files = [];
+        for (const file of body.files) {
+          assert.ok(await P.verifyBaselineProof(file.baseline, file.proof, this.archive.treeRoot, this.archive.descriptionCount));
+          const translations = [...(file.baseline.translations.Thai || [])];
+          while (translations.length < file.baseline.translations.English.length) translations.push('');
+          assert.deepEqual(file.translations, translations);
+          files.push(P.fileState({ filepath: file.filepath, translations, trackedForExport: false, stagingReset: true, revision: file.baseRevision + 1 }));
+        }
+        for (const file of files) this.files = this.files.filter(row => row.filepath !== file.filepath).concat(copy(file));
+        const result = { roomId: 'sparse', sequence: ++this.sequence, files };
+        this.events.push(copy(result)); this.receipts.set(body.mutationId, result);
+        if (this.loseDeletionReply) { this.loseDeletionReply--; throw new Error('Delete reply was lost'); }
+        return copy(result);
+      }
       if (path.endsWith('/mutations')) {
         if (this.failMutations) { this.failMutations--; throw new Error('Mutation connection interrupted'); }
-        if (this.receipts.has(body.mutationId)) return copy(this.receipts.get(body.mutationId));
+        if (this.receipts.has(body.mutationId)) return { ...copy(this.receipts.get(body.mutationId)),
+          files: body.files.map(file => copy(this.files.find(row => row.filepath === file.filepath))) };
         if (body.files.some(file => file.baseRevision !== (this.files.find(row => row.filepath === file.filepath)?.revision || 0))) throw Object.assign(new Error('Conflict'), { status: 409, current: this.snapshot() });
         for (const file of body.files) if (!file.baseRevision) {
           assert.ok(await P.verifyBaselineProof(file.baseline, file.proof, this.archive.treeRoot, this.archive.descriptionCount));
@@ -68,7 +89,9 @@ function serverFixture(archive) {
         const files = body.files.map(file => P.fileState({ ...file, revision: file.baseRevision + 1 }));
         for (const file of files) this.files = this.files.filter(row => row.filepath !== file.filepath).concat(copy(file));
         const result = { roomId: 'sparse', sequence: ++this.sequence, files };
-        this.events.push(copy(result)); this.receipts.set(body.mutationId, result); return copy(result);
+        this.events.push(copy(result)); this.receipts.set(body.mutationId, result);
+        if (this.loseMutationReply) { this.loseMutationReply--; throw new Error('Mutation reply was lost'); }
+        return copy(result);
       }
       throw new Error('Unexpected sparse endpoint: ' + path);
     },
@@ -83,14 +106,157 @@ async function fixture(options = {}) {
   const store = options.store || storeFixture(baselineSource), server = options.server || serverFixture(archive), remote = [];
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null, uuid: () => 'sparse-' + ++id,
     onRemote: files => { options.onRemote?.(files, store); remote.push(copy(files)); } });
-  const baselineInitial = options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
-    translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial;
-  const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: options.files || baselineInitial,
+  const baselineInitial = options.files || (options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
+    translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
+  const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: baselineInitial,
     workspace: store.workspace, archive, baselineSource, baselineTree: tree };
   await options.beforeConnect?.({ client, store, server, remote, connection, archive, tree });
   await client.connect(connection);
   return { client, store, server, remote, connection, archive, tree };
 }
+async function queueDeletion(value, filepath = 'a.txt') {
+  const { client } = value, base = client.fileBase(filepath), original = client.baselineFiles.get(filepath);
+  const translations = [...(original.translations.Thai || [])];
+  while (translations.length < original.translations.English.length) translations.push('');
+  const yours = P.fileState({ filepath, translations, trackedForExport: false, stagingReset: true, revision: base?.revision || 0 });
+  const id = 'delete-' + ++idSequence;
+  await client.update((state, room) => {
+    room.outbox.push({ id, origin: 'delete_staged', resetStaging: true, status: 'pending', files: [{ base: copy(base), yours: copy(yours) }] });
+    room.local[filepath] = copy(yours);
+  }, { projectWorkspace: client.projection([yours], client.epoch) });
+  return id;
+}
+let idSequence = 0;
+
+test('explicit staged deletion queues a verified reset, propagates to peers and keeps other languages staged', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['authored edit', 'two'], trackedForExport: true }] });
+  const peerStore = storeFixture(), peer = await fixture({ server, store: peerStore, accountId: 'peer' }); t.after(() => peer.client.destroy());
+  W.stageTranslation(store.workspace, { filepath: 'a.txt', translations: ['French edit', 'deux'] }, 'French');
+  const deletionId = await queueDeletion(value);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+  await client.retry(); await peer.client.retry();
+  const request = server.requests.find(request => request.path.endsWith('/staged-deletions'));
+  assert.equal(request.options.body.mutationId, deletionId); assert.equal(request.options.body.files[0].baseRevision, 1);
+  assert.deepEqual(request.options.body.files[0].translations, ['one', 'two']);
+  assert.equal(request.options.body.files[0].trackedForExport, undefined);
+  assert.equal(server.files[0].trackedForExport, false); assert.equal(server.files[0].stagingReset, true);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined); assert.equal(peerStore.workspace.staged.Thai['a.txt'], undefined);
+  assert.deepEqual(store.workspace.staged.French['a.txt'].translations, ['French edit', 'deux']);
+  assert.deepEqual(client.fileBase('a.txt').translations, ['one', 'two']);
+  assert.deepEqual(peer.client.fileBase('a.txt').translations, ['one', 'two']);
+});
+
+test('staged deletion conflicts on any concurrent change and choosing shared cancels the deletion', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['local', 'two'], trackedForExport: true }] });
+  await queueDeletion(value);
+  server.change('a.txt', ['local', 'peer second entry']);
+  await client.retry();
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.kind, 'delete_staged'); assert.deepEqual(conflict.yours.translations, ['one', 'two']);
+  assert.deepEqual(conflict.metadata, ['trackedForExport']);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/staged-deletions')).length, 0);
+  assert.equal((await client.resolve(conflict.id, conflict.shared, { sharedRevision: conflict.shared.revision })).status, 'synced');
+  assert.deepEqual(client.fileBase('a.txt').translations, ['local', 'peer second entry']);
+  assert.equal(store.workspace.staged.Thai['a.txt'].translations[1], 'peer second entry');
+  assert.equal(server.requests.filter(request => request.path.endsWith('/staged-deletions')).length, 0);
+});
+
+test('fresh deletion approval removes the entire staged file after a CAS race without partially merging peer text', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['local', 'two'], trackedForExport: true }] });
+  await queueDeletion(value); server.raceDeletion = true;
+  await client.retry();
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.kind, 'delete_staged'); assert.equal(conflict.shared.translations[0], 'raced peer edit');
+  assert.deepEqual(conflict.yours.translations, ['one', 'two']);
+  assert.equal((await client.resolve(conflict.id, conflict.yours, { sharedRevision: conflict.shared.revision })).status, 'synced');
+  const requests = server.requests.filter(request => request.path.endsWith('/staged-deletions'));
+  assert.equal(requests.length, 2); assert.equal(requests[1].options.body.files[0].baseRevision, conflict.shared.revision);
+  assert.deepEqual(server.files[0].translations, ['one', 'two']); assert.equal(server.files[0].trackedForExport, false);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+});
+
+test('lost deletion replies retry the original mutation and retain the durable reset', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['local', 'two'], trackedForExport: true }] });
+  const deletionId = await queueDeletion(value); server.loseDeletionReply = 1;
+  await client.retry(); assert.equal(client.snapshot().pending, 1);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+  await client.retry(); assert.equal(client.snapshot().pending, 0);
+  const requests = server.requests.filter(request => request.path.endsWith('/staged-deletions'));
+  assert.deepEqual(requests.map(request => request.options.body.mutationId), [deletionId, deletionId]);
+  assert.deepEqual(requests[0].options.body, requests[1].options.body);
+  assert.equal(server.sequence, 2); assert.equal(server.events.length, 2);
+});
+
+test('deletion queued behind a known local save follows that save without a false conflict', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  server.offline = true;
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['offline edit', 'two'], trackedForExport: true }], waitForSync: false });
+  await queueDeletion(value); server.offline = false;
+  await client.retry();
+  assert.equal(client.snapshot().pending, 0); assert.equal(client.snapshot().conflicts.length, 0);
+  assert.equal(server.files[0].trackedForExport, false); assert.equal(server.files[0].stagingReset, true);
+  assert.deepEqual(server.files[0].translations, ['one', 'two']);
+});
+
+test('a replayed predecessor save cannot authorize deletion of a newer matching peer revision', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  server.offline = true;
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['offline edit', 'two'], trackedForExport: true }], waitForSync: false });
+  await queueDeletion(value); server.offline = false; server.loseMutationReply = 1;
+  await client.retry(); assert.equal(client.snapshot().pending, 2);
+  server.change('a.txt', ['new peer work', 'two']); server.change('a.txt', ['offline edit', 'two']);
+  await client.retry();
+  assert.equal(client.snapshot().pending, 1);
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.kind, 'delete_staged'); assert.equal(conflict.shared.revision, 3);
+  assert.equal(server.files[0].trackedForExport, true);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/staged-deletions')).length, 0);
+});
+
+test('a newer shared revision requires deletion review even when translation text is unchanged', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['local', 'two'], trackedForExport: true }] });
+  await queueDeletion(value); server.change('a.txt', ['local', 'two']);
+  await client.retry();
+  const conflict = client.snapshot().conflicts[0];
+  assert.equal(conflict.kind, 'delete_staged'); assert.deepEqual(conflict.metadata, ['trackedForExport']);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/staged-deletions')).length, 0);
+});
+
+test('choosing a stale shared copy refreshes the deletion comparison without losing its original target', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['local', 'two'], trackedForExport: true }] });
+  await queueDeletion(value); server.change('a.txt', ['first peer', 'two']); await client.retry();
+  const observed = client.snapshot().conflicts[0];
+  server.change('a.txt', ['newer peer', 'two']);
+  assert.equal((await client.resolve(observed.id, observed.shared, { sharedRevision: observed.shared.revision })).status, 'conflict');
+  const current = client.snapshot().conflicts[0];
+  assert.deepEqual(current.yours.translations, ['one', 'two']); assert.deepEqual(current.shared.translations, ['newer peer', 'two']);
+  assert.equal((await client.resolve(current.id, current.shared, { sharedRevision: current.shared.revision })).status, 'synced');
+  assert.deepEqual(client.fileBase('a.txt').translations, ['newer peer', 'two']);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/staged-deletions')).length, 0);
+});
+
+test('staged deletion preserves extra original ZIP entries across sync and reconnect', async t => {
+  const baselineSource = [copy(source[0])]; baselineSource[0].translations.Thai.push('extra original ZIP entry');
+  const validStaged = P.fileState({ filepath: 'a.txt', translations: ['authored', 'two'], trackedForExport: true });
+  const value = await fixture({ source: baselineSource, files: [validStaged], beforeConnect({ store, archive }) {
+    W.initializeWorkspace(store.workspace, { source: baselineSource, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+    W.stageTranslation(store.workspace, validStaged, 'Thai');
+  } }), { client, store, server } = value; t.after(() => client.destroy());
+  await queueDeletion(value); await client.retry();
+  assert.deepEqual(server.files[0].translations, ['one', 'two', 'extra original ZIP entry']);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+  const reset = P.fileState({ filepath: 'a.txt', translations: ['one', 'two', 'extra original ZIP entry'], trackedForExport: false, stagingReset: true });
+  client.destroy();
+  const reconnected = await fixture({ source: baselineSource, files: [reset], store, server }); t.after(() => reconnected.client.destroy());
+  assert.deepEqual(reconnected.client.fileBase('a.txt').translations, reset.translations);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+});
 
 test('sparse join shares only the cached descriptor and retains immutable local bases without full-room storage', async t => {
   const { client, server, store, remote } = await fixture(); t.after(() => client.destroy());

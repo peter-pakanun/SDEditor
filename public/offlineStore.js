@@ -460,8 +460,21 @@
       }
       paths.add(file.filepath);
       return { filepath: file.filepath, translations: [...file.translations], needsReview: !!file.needsReview,
-        trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0 };
+        trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
+        ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}) };
     });
+    const resetStaging = batch.resetStaging === true;
+    if (resetStaging && (files.length !== 1 || batch.origin !== 'delete_staged' || batch.draft
+      || batch.promoteDropped || Object.keys(batch.promoteDroppedByPath || {}).length
+      || batch.collaboration?.promoteDropped || Object.keys(batch.collaboration?.promoteDroppedByPath || {}).length
+      || files[0].needsReview || files[0].trackedForExport || !files[0].stagingReset)) {
+      throw new TypeError('Invalid staged translation deletion.');
+    }
+    const resetBase = resetStaging ? batch.bases?.[files[0].filepath] : null;
+    if (resetStaging && (!resetBase || !resetBase.trackedForExport || !Array.isArray(resetBase.translations)
+      || resetBase.translations.some(line => typeof line !== 'string'))) {
+      throw new TypeError('A staged translation deletion requires its captured saved translation.');
+    }
     const draft = batch.draft;
     if (draft) {
       const scope = translationDraftScopeFromKey(draft.key);
@@ -475,6 +488,7 @@
     const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || '')];
     const signature = JSON.stringify({ scope, files, descriptions: batch.descriptions || [], statuses: batch.statuses || {}, revisions: batch.revisions || [],
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
+      ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
       ...(draft ? { draft } : {}) });
     const receiptKey = 'translation_save_receipts_' + batch.game;
     const db = await openDb();
@@ -510,6 +524,21 @@
               result.files = files.map(file => room.local?.[file.filepath] || file);
               result.status = result.operation ? result.operation.status === 'conflict' ? 'conflict' : 'pending' : 'synced';
             }
+          } else if (resetStaging) {
+            const workspace = values[workspaceKey(batch.game)], source = values[sourceKey(batch.game)];
+            if (workspace && (!workspace.sourceHash || workspace.sourceHash === batch.sourceHash)
+              && (!batch.accountId || !workspace.collaborationAccountId || String(workspace.collaborationAccountId) === String(batch.accountId))) {
+              result.files = files.map(file => {
+                const original = source?.find(desc => desc.filepath === file.filepath);
+                if (!original) return file;
+                const current = WorkspaceState.workspaceFile(workspace, original, batch.language);
+                // Another tab may have staged a new translation after this
+                // deletion committed but before its lost response was retried.
+                return { filepath: file.filepath, translations: current.translations, needsReview: false,
+                  trackedForExport: current.hasChanges, revision: file.revision,
+                  ...(!current.hasChanges ? { stagingReset: true } : {}) };
+              });
+            }
           }
           return;
         }
@@ -528,6 +557,23 @@
         const legacyWorkspace = Number(workspace.stagedVersion || 0) < 1;
         WorkspaceState.initializeWorkspace(workspace, { source: values[sourceKey(batch.game)] || batch.descriptions || [],
           sourceHash: batch.sourceHash, game: batch.game, language: batch.language, collaboration: values.collaboration_v1 });
+        if (resetStaging) {
+          const file = files[0], original = values[sourceKey(batch.game)]?.find(desc => desc.filepath === file.filepath);
+          if (!original) throw new Error('The original ZIP translation is unavailable. Reimport the source archive before deleting its staged translation.');
+          const current = WorkspaceState.workspaceFile(workspace, original, batch.language);
+          if (!current.hasChanges) {
+            throw Object.assign(new Error('This file no longer has a staged translation to delete.'), { code: 'DELETE_STAGED_NOT_FOUND', stale: true });
+          }
+          if (JSON.stringify(current.translations) !== JSON.stringify(resetBase.translations)) {
+            throw Object.assign(new Error('The staged translation changed before it could be deleted. Review it again before deleting.'),
+              { code: 'DELETE_STAGED_BASE_CHANGED', stale: true, filepath: file.filepath, currentTranslations: [...current.translations] });
+          }
+          const restored = [...(original.translations?.[batch.language] || [])];
+          while (restored.length < (original.translations?.English?.length || 0)) restored.push('');
+          if (JSON.stringify(file.translations) !== JSON.stringify(restored)) {
+            throw new Error('A staged translation deletion must restore the original ZIP translation.');
+          }
+        }
         if (draft) {
           const current = values[draft.key];
           if (!current || current.state !== 'active' || current.id !== draft.id) {
@@ -547,10 +593,11 @@
               { code: 'DRAFT_BASE_CHANGED', filepath, currentTranslations: [...current] });
           }
         }
-        for (const file of files) if (!legacyWorkspace || !file.needsReview) {
+        for (const file of files) if (!resetStaging && (!legacyWorkspace || !file.needsReview)) {
           // An editor save stages translations. Legacy wire booleans cannot
           // turn a modern save into a dropped record or suppress its presence.
           file.needsReview = false; file.trackedForExport = true;
+          delete file.stagingReset;
         }
         const descriptions = new Map(workspace.descs.map(desc => [desc.filepath, desc]));
         const templates = new Map((batch.descriptions || []).map(desc => [desc.filepath, desc]));
@@ -581,11 +628,28 @@
             throw Object.assign(new Error('This file has an unresolved shared translation conflict. Review it in the editor before saving the draft.'),
               { code: 'DRAFT_CONFLICT', filepath: files[0].filepath });
           }
+          if (resetStaging) {
+            const filepath = files[0].filepath;
+            if ((room.conflicts || []).some(conflict => conflict.filepath === filepath)
+              || (room.outbox || []).some(operation => (operation.blockedByConflict
+                || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(operation.status))
+                && operation.files?.some(entry => entry.yours?.filepath === filepath))) {
+              throw Object.assign(new Error('Resolve this file\'s shared translation conflict before deleting its staged translation.'),
+                { code: 'DELETE_STAGED_CONFLICT', stale: true, filepath });
+            }
+            const captured = collaboration.bases?.[filepath], current = room.local?.[filepath];
+            if (!captured || !current || Number(captured.revision || 0) !== Number(current.revision || 0)
+              || !current.trackedForExport || JSON.stringify(current.translations) !== JSON.stringify(resetBase.translations)
+              || JSON.stringify(captured.translations) !== JSON.stringify(resetBase.translations)) {
+              throw Object.assign(new Error('The shared staged translation changed before it could be deleted. Review it again before deleting.'),
+                { code: 'DELETE_STAGED_BASE_CHANGED', stale: true, filepath });
+            }
+          }
           const originals = new Map((room.manifest?.files || []).map(file => [file.filepath, file]));
           for (const file of files) {
             const original = originals.get(file.filepath);
             const entryCount = original?.entryCount ?? original?.english?.length;
-            if (!original || !Number.isSafeInteger(entryCount) || file.translations.length > entryCount) {
+            if (!original || !Number.isSafeInteger(entryCount) || (!resetStaging && file.translations.length > entryCount)) {
               throw new Error('Saved file does not match the source: ' + file.filepath);
             }
             while (file.translations.length < entryCount) file.translations.push('');
@@ -605,6 +669,7 @@
           const promoted = files.filter(file => promotions[file.filepath]), ordinary = files.filter(file => !promotions[file.filepath]);
           const groups = [...promoted.map(file => [file]), ...(ordinary.length ? [ordinary] : [])];
           operations = groups.map((group, index) => ({ id: index ? batch.jobId + ':' + index : batch.jobId, origin: collaboration.origin || 'save', status: 'pending',
+            ...(resetStaging ? { resetStaging: true } : {}),
             ...(promotions[group[0].filepath] ? { promoteDropped: clone(promotions[group[0].filepath]) } : {}),
             ...(collaboration.restore ? { restore: { ...collaboration.restore, translations: [...files[0].translations] } } : {}),
             files: group.map(yours => ({ base: clone(replaced.has(yours.filepath) ? room.shared?.[yours.filepath] || null : Object.hasOwn(collaboration.bases || {}, yours.filepath)
@@ -612,7 +677,7 @@
           operation = operations[0]; room.outbox.push(...operations);
           for (const file of files) {
             room.local[file.filepath] = clone(file);
-            if (room.mode === 'sparse' && !file.needsReview) {
+            if (!resetStaging && room.mode === 'sparse' && !file.needsReview) {
               if (room.carries) delete room.carries[file.filepath];
               if (room.carryRevisions) delete room.carryRevisions[file.filepath];
             }
@@ -632,8 +697,10 @@
           }
           desc.translations ||= {};
           const count = desc.translations.English?.length ?? template?.translations?.English?.length;
-          if (count != null && file.translations.length > count) throw new Error('Translation count exceeds source entry count: ' + file.filepath);
-          if (legacyWorkspace && file.needsReview) {
+          if (!resetStaging && count != null && file.translations.length > count) throw new Error('Translation count exceeds source entry count: ' + file.filepath);
+          if (resetStaging) {
+            delete workspace.staged[batch.language][file.filepath];
+          } else if (legacyWorkspace && file.needsReview) {
             WorkspaceState.dropTranslation(workspace, desc, batch.language, { game: batch.game, translations: file.translations,
               originSourceHash: batch.sourceHash, reason: 'Recovered translation' });
             if (workspace.staged[batch.language]) delete workspace.staged[batch.language][file.filepath];

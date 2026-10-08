@@ -129,6 +129,17 @@
       notify(); settle(); schedule();
       return true;
     }
+    function discardRejectedReset(id) {
+      const index = jobs.findIndex(job => job.id === id);
+      const job = jobs[index];
+      if (!job || job.durable || job.status !== 'failed' || !job.batch.resetStaging || job.error?.durableUnknown
+        || !['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT'].includes(job.error?.code)) return false;
+      // A stale deletion was rejected before the storage transaction committed.
+      // A new explicit confirmation must capture the file's current saved text.
+      jobs.splice(index, 1);
+      notify(); settle(); schedule();
+      return true;
+    }
     function overlay(scope, filepath) {
       for (let index = jobs.length - 1; index >= 0; index--) {
         const job = jobs[index];
@@ -146,7 +157,7 @@
       const error = new Error('The local save queue is closed.');
       for (const waiter of waiters.splice(0)) waiter.reject(error);
     }
-    return { enqueue, retry, drain, discardRejectedDraft, overlay, pendingFor: overlay, snapshot, dispose };
+    return { enqueue, retry, drain, discardRejectedDraft, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
   }
 
   return { create, scopeKey };

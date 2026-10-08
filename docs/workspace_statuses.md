@@ -92,6 +92,8 @@ The API's `placeholder-repairs` operation requires a verified blank baseline and
 
 Normal export includes staged **Saved** translations, including intentional blanks and unchanged saves. Full export uses current ZIP/staged data and leaves out an incomplete ZIP translation with an unresolved dropped copy when no staged save exists. Staged saves remain exportable, including intentional blanks; a complete current ZIP translation remains exportable alongside an unresolved dropped copy. Never encode a dropped snapshot as fallback current translation. Exporting does not resolve a copy, clear its assignment, or turn an unsaved draft into Saved.
 
+**Delete staged translation** explicitly removes a staged record for the selected language after confirmation, restoring the immutable ZIP translation without applying draft save checks. Commit the deletion, before/after history, any shared retry operation, and durable receipt atomically. Preserve other languages, local drafts, dropped copies and their assignment provenance. Shared deletion uses a revision-checked reset; concurrent shared edits require a fresh decision, never a partial text merge. A later explicit save stages the file again.
+
 ## Examples and Common Misinterpretations
 
 These examples omit independent diagnostic findings:

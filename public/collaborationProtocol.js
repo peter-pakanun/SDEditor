@@ -219,6 +219,15 @@
   }
   function mergeFile(base, yours, shared) {
     if (!shared) throw new Error('Shared file is missing: ' + yours.filepath);
+    if (yours.stagingReset && !yours.trackedForExport) {
+      // Removing a staged save is a decision about the complete file. Never
+      // combine its original ZIP text with a concurrent translator's changes.
+      if (shared.stagingReset && contentEqual(yours, shared)) return { file: fileState(shared), indexes: [], metadata: [], conflict: false };
+      const unchanged = !!base && base.revision === shared.revision && contentEqual(base, shared);
+      const indexes = unchanged ? [] : Array.from({ length: Math.max(yours.translations.length, shared.translations.length) }, (_, index) => index)
+        .filter(index => (yours.translations[index] ?? '') !== (shared.translations[index] ?? ''));
+      return { file: fileState(yours), indexes, metadata: unchanged ? [] : ['trackedForExport'], conflict: !unchanged };
+    }
     const result = fileState(shared);
     const indexes = [];
     const metadata = [];

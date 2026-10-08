@@ -160,6 +160,7 @@
     preserveCarried(room, files) {
       if (room.mode !== 'sparse') return;
       for (const file of files) {
+        if (file.stagingReset && !file.trackedForExport) continue;
         const carried = room.carries?.[file.filepath];
         if (!carried || this.carryProtected(room, file)) continue;
         if (!P.equal(carried.translations, file.translations)) room.recovery.push({ id: this.uuid(), at: Date.now(),
@@ -325,7 +326,10 @@
       const incoming = files.map(file => {
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
-        return fileState(file, original.english.length);
+        // Unstaged original ZIP blocks can have a structural error themselves.
+        // A deletion restores those exact blocks instead of truncating them.
+        return fileState(file, file.stagingReset || (workspace?.stagedVersion >= 1 && !workspace.staged?.[language]?.[file.filepath])
+          ? undefined : original.english.length);
       });
       let legacyCarries = {};
       const modernWorkspace = workspace?.stagedVersion >= 1;
@@ -464,7 +468,7 @@
       for (const operation of room.outbox) for (const entry of operation.files) {
         const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
         room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
-        if (shared?.stagingReset && operation.kind !== 'join') {
+        if (shared?.stagingReset && operation.kind !== 'join' && !operation.resetStaging) {
           room.local[entry.yours.filepath].trackedForExport = true;
           delete room.local[entry.yours.filepath].stagingReset;
         }
@@ -1032,8 +1036,16 @@
             const accepted = result.files || result.snapshot?.files;
             if (!Array.isArray(accepted)) throw new Error('Mutation response has no committed file states.');
             await this.update((state, room) => {
-              this.preserveCarried(room, accepted);
+              if (!current.resetStaging) this.preserveCarried(room, accepted);
               for (const file of accepted) if (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision) room.shared[file.filepath] = fileState(file);
+              // A deletion queued behind our own save can retain the revision
+              // guard after that known save commits exactly the text it saw.
+              for (const operation of room.outbox) if (operation.resetStaging && operation.id !== id) for (const entry of operation.files) {
+                const file = accepted.find(file => file.filepath === entry.yours.filepath);
+                const predecessor = current.wire?.files.find(saved => saved.filepath === file?.filepath);
+                if (file && predecessor && file.revision >= predecessor.baseRevision && file.revision <= predecessor.baseRevision + 1
+                  && entry.base && contentEqual(entry.base, file)) entry.base = copy(file);
+              }
               room.outbox = room.outbox.filter(item => item.id !== id);
               room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id);
               // A mutation reply may skip commits by other users, so do not advance
@@ -1092,7 +1104,7 @@
         for (const entry of op.files) {
           const shared = room.shared[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
           const merged = mergeFile(entry.base, entry.yours, shared);
-          if (shared.stagingReset && op.kind !== 'join') {
+          if (shared.stagingReset && op.kind !== 'join' && !op.resetStaging) {
             merged.file.trackedForExport = true;
             delete merged.file.stagingReset;
           }
@@ -1105,10 +1117,10 @@
             merged.indexes = shared.translations.map((text, index) => text !== entry.base.translations[index] ? index : -1).filter(index => index >= 0);
           }
           if (merged.conflict) conflicts.push({ id: id + ':' + shared.filepath, mutationId: id, filepath: shared.filepath,
-            kind: op.kind || 'edit', base: copy(entry.base), yours: copy(entry.yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
+            kind: op.resetStaging ? 'delete_staged' : op.kind || 'edit', base: copy(entry.base), yours: copy(entry.yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
-            ...(room.mode === 'sparse' && shared.revision === 0 ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
+            ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging) ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
               proof: P.baselineProof(this.baselineTree, shared.filepath) } : {}) });
         }
         room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id).concat(conflicts);
@@ -1140,6 +1152,9 @@
     }
     async sendMutation(op, epoch) {
       const path = '/rooms/' + encodeURIComponent(this.room().roomId);
+      if (op.resetStaging) return this.api(path + '/staged-deletions', { method: 'POST', body: { mutationId: op.id,
+        files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: file.baseRevision, translations: copy(file.translations),
+          ...(this.room().mode === 'sparse' ? { baseline: copy(file.baseline), proof: copy(file.proof) } : {}) })) } }, epoch);
       if (op.restore) return this.api(path + '/history/' + encodeURIComponent(op.restore.eventId) + '/restore', {
         method: 'POST', body: { mutationId: op.id, baseRevision: op.wire.files[0].baseRevision, version: op.restore.version,
           ...(op.wire.promoteDropped ? { promoteDropped: copy(op.wire.promoteDropped) } : {}) },
@@ -1170,8 +1185,12 @@
       if (options.sharedRevision != null && options.sharedRevision !== observed.shared.revision) return { status: 'conflict', mutationId: observed.mutationId };
       try { await this.catchUp(epoch); } catch (error) { if (!transient(error)) throw error; }
       const chosen = fileState(Array.isArray(resolution) ? { ...observed.yours, translations: resolution } : { ...observed.yours, ...resolution });
+      const deletion = !!this.room()?.outbox.find(item => item.id === observed.mutationId)?.resetStaging;
+      const keepShared = deletion && contentEqual(chosen, observed.shared);
+      const deleteStaged = deletion && !chosen.trackedForExport && P.equal(chosen.translations, observed.yours.translations);
+      if (deletion && !keepShared && !deleteStaged) { chosen.trackedForExport = true; delete chosen.stagingReset; }
       const source = this.sourceFiles.get(chosen.filepath);
-      if (chosen.translations.length !== source.english.length) throw new Error('Resolve every translation entry before saving.');
+      if (!keepShared && !deleteStaged && chosen.translations.length !== source.english.length) throw new Error('Resolve every translation entry before saving.');
       let renewed = false;
       await this.update((state, room) => {
         const conflict = room.conflicts.find(item => item.id === conflictId);
@@ -1179,7 +1198,28 @@
         const op = room.outbox.find(item => item.id === conflict.mutationId);
         const entry = op.files.find(item => item.yours.filepath === conflict.filepath);
         const shared = room.shared[conflict.filepath] || (room.mode === 'sparse' && this.baselineStates[conflict.filepath]);
+        if (op.resetStaging && keepShared && shared.revision === observed.shared.revision && contentEqual(shared, observed.shared)) {
+          room.outbox = room.outbox.filter(item => item.id !== op.id);
+          room.conflicts = room.conflicts.filter(item => item.mutationId !== op.id);
+          this.rebuild(room);
+          return;
+        }
+        if (op.resetStaging && keepShared) {
+          const refreshed = mergeFile(entry.base, entry.yours, shared);
+          renewed = true;
+          Object.assign(conflict, { shared: copy(shared), yours: copy(entry.yours), indexes: refreshed.indexes, metadata: ['trackedForExport'] });
+          delete op.wire; delete op.upload; op.status = 'conflict';
+          this.rebuild(room);
+          return;
+        }
+        if (op.resetStaging && !deleteStaged && !keepShared) {
+          delete op.resetStaging; op.origin = 'conflict_resolution';
+        }
         const merged = mergeFile(observed.shared, chosen, shared);
+        if (op.resetStaging && shared.revision !== observed.shared.revision) {
+          merged.conflict = true;
+          merged.metadata = ['trackedForExport'];
+        }
         if (!merged.conflict && op.kind === 'join' && op.files.length === 1 && contentEqual(merged.file, shared)) {
           room.outbox = room.outbox.filter(item => item.id !== op.id);
           room.conflicts = room.conflicts.filter(item => item.mutationId !== op.id);
@@ -1192,7 +1232,7 @@
         if (op.restore && !P.equal(merged.file.translations, op.restore.translations)) { delete op.restore; op.origin = 'conflict_resolution'; }
         // Keep the initiating operation for review/restore validation, while
         // recording that a translator explicitly resolved this saved result.
-        if (!op.restore) op.historyOrigin = 'conflict_resolution';
+        if (!op.restore && !op.resetStaging) op.historyOrigin = 'conflict_resolution';
         if (merged.conflict) {
           renewed = true;
           Object.assign(conflict, { base: observed.shared, yours: chosen, shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });

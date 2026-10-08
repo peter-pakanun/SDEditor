@@ -13,6 +13,11 @@
     },
     computed: {
       inlineDraftCount() { return Object.keys(this.inlineDraftRows).length; },
+      editorHasStagedTranslation() {
+        const desc = this.editorCurrentEditingDesc;
+        const source = desc && this.workspaceSourceFile?.(desc.filepath);
+        return !!source && !!root.WorkspaceState?.workspaceFile(this.localDescs, source, this.lang)?.staged;
+      },
       inlineDraftMatchesStaged() {
         const desc = this.editorCurrentEditingDesc, workspace = this.localDescs;
         if (!this.inlineActive || !desc?.filepath || (workspace?.sourceHash && workspace.sourceHash !== this.sourceIdentity)) return false;
@@ -406,6 +411,78 @@
         try { return await this.openEditorFile(filepath, true); } finally { this._nextEditorSurface = null; }
       },
       saveInlineDraft() { return this.editorSave({ close: false }); },
+      async deleteEditorStagedTranslation() {
+        if (this.editorLoading || this.editorLoadError || this.editorSaving || this.navigationBusy || this.editorTranslationReadOnly
+          || this._importingSource || this._resetConfirming || this.versionStorageLoading || !this.editorHasStagedTranslation) return false;
+        const desc = this.editorCurrentEditingDesc, session = this._draftSession, blocks = this.editorBlocks;
+        const context = this.captureCollaborationContext();
+        const scope = this.editorDraftScope(desc.filepath), openRun = this._editorOpenRun;
+        const base = copy(context.client?.fileBase(desc.filepath) || this.collaborationFile(desc));
+        const current = () => this.editorCurrentEditingDesc === desc && this.editorBlocks === blocks && this._draftSession === session
+          && this._editorOpenRun === openRun && this.draftScopeCurrent(scope)
+          && this.collaborationContextCurrent(context) && !this.editorTranslationReadOnly && this.editorHasStagedTranslation
+          && equal(base, context.client?.fileBase(desc.filepath) || this.collaborationFile(desc));
+        const token = this._editorSaveToken = {};
+        this.editorSaving = true;
+        try {
+          if (!await this.flushEditorDraft() || !current()) return false;
+          const shared = context.client ? '\n\nThis deletion will also be shared with your language team.' : '';
+          if (!await this.appConfirm('Delete the staged ' + context.language + ' translation for ' + desc.filepath
+            + '?\n\nThe committed translation will return to the original ZIP text and will no longer be included in staged export. Local drafts and translation history will be kept.' + shared,
+            { title: 'Delete staged translation?', confirmLabel: 'Delete staged translation', danger: true })) return false;
+          if (!current() || !await this.flushEditorDraft() || !current()) return false;
+          const draftBefore = blocks.map(block => block.translation ?? '');
+          const hadDraft = !!session?.record || this.editorHaveChanges();
+          let finalized = false;
+          const finish = async () => {
+            if (finalized) return true;
+            if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocks || this._draftSession !== session
+              || this._editorOpenRun !== openRun || !this.draftScopeCurrent(scope) || !this.collaborationContextCurrent(context)) return false;
+            const accepted = context.client?.fileBase(desc.filepath) || this.collaborationFile(desc);
+            if (hadDraft || !equal(draftBefore, blocks.map(block => block.translation ?? ''))) {
+              // Deleting committed work leaves private typing available for an
+              // explicit later save, including typing during the storage write.
+              this.editorOriginalTranslations = accepted.translations.map(text => this.decodeEscapedNewlines(text));
+              this._editorCollabBase = context.client ? copy(accepted) : undefined;
+              if (session && !session.conflict && !session.record?.conflicts?.length) {
+                session.base = copy(accepted); session.original = [...accepted.translations]; session.declined = '';
+                await this.writeEditorDraft(session, this.serializeEditorTranslations(), true);
+              }
+            } else {
+              const restored = Array.from({ length: Math.max(desc.translations.English.length, accepted.translations.length) }, (_, index) =>
+                this.makeEditorBlock(desc.translations.English[index] || '', accepted.translations[index] || '', true));
+              this.applyPreparedEditorBlocks(restored);
+              this.editorOriginalTranslations = restored.map(block => block.translation);
+              this._editorCollabBase = context.client ? copy(accepted) : undefined;
+              if (session) { session.base = copy(accepted); session.original = [...accepted.translations]; }
+              this.refreshGamePreview();
+            }
+            const failure = this._stagedDeletionFailure;
+            if (failure && equal(failure.scope, scope)) {
+              if (this.collaborationNotice === failure.message) this.collaborationNotice = '';
+              if (this.cloudStorageError === failure.message) this.cloudStorageError = '';
+              this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: this.inlineFindingsFor(desc.filepath).filter(item => item.message !== failure.message) };
+              this._stagedDeletionFailure = null;
+            }
+            finalized = true;
+            return true;
+          };
+          // Keep this hook on the queued job so an uncertain worker completion
+          // followed by Retry advances the same editor's base exactly once.
+          const result = await this.persistStagedDeletion(desc, base, context, finish);
+          if (result.stale || !result.durable || !await finish()) return false;
+          if (this.sideTab === 'history') await this.refreshHistory();
+          return true;
+        } catch (error) {
+          if (this.collaborationContextCurrent(context) && this._editorSaveToken === token) {
+            this.collaborationNotice = 'Could not delete the staged translation. ' + error.message;
+            this._stagedDeletionFailure = { scope: copy(scope), message: this.collaborationNotice };
+            if (!error.code?.startsWith('DELETE_STAGED_')) this.cloudStorageError = this.collaborationNotice;
+            if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'error', message: this.collaborationNotice }] };
+          }
+          return false;
+        } finally { if (this._editorSaveToken === token) this.editorSaving = false; }
+      },
       async discardEditorDraft() {
         const session = this._draftSession;
         if (!session || !await this.flushEditorDraft()) return false;

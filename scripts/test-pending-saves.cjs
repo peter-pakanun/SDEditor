@@ -209,6 +209,38 @@ test('storage failures and uncertain completion cannot be discarded as rejected 
   queue.dispose();
 });
 
+test('a rejected staged deletion releases the queue for a newly confirmed decision and unrelated saves', async () => {
+  for (const code of ['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']) {
+    const calls = [], queue = PendingSaves.create({ save: async payload => {
+      calls.push(payload.jobId);
+      if (payload.resetStaging) throw Object.assign(new Error('Delete rejected'), { code });
+      return {};
+    } });
+    queue.enqueue(batch('delete', 'old decision', { resetStaging: true, deferDisplay: true }));
+    queue.enqueue(batch('next'));
+    await assert.rejects(queue.drain(), /Delete rejected/);
+    assert.equal(queue.discardRejectedReset('delete'), true);
+    await queue.drain();
+    assert.deepEqual(calls, ['delete', 'next']); assert.equal(queue.snapshot().pending, 0);
+    queue.dispose();
+  }
+});
+
+test('staged deletion storage failures, uncertain completion and durable acknowledgements remain recoverable', async () => {
+  for (const options of [
+    { save: async () => { throw new Error('Quota exceeded'); } },
+    { save: async () => { throw Object.assign(new Error('Worker stopped'), { code: 'DELETE_STAGED_BASE_CHANGED', durableUnknown: true }); } },
+    { save: async () => ({}), onCommit: () => { throw Object.assign(new Error('UI failed'), { code: 'DELETE_STAGED_BASE_CHANGED' }); } },
+  ]) {
+    const queue = PendingSaves.create(options);
+    queue.enqueue(batch('delete', 'captured', { resetStaging: true }));
+    await assert.rejects(queue.drain());
+    assert.equal(queue.discardRejectedReset('delete'), false);
+    assert.equal(queue.snapshot().jobs.length, 1);
+    queue.dispose();
+  }
+});
+
 test('disposing a queue cancels deferred intake without erasing recovery records', async () => {
   let writes = 0;
   const queue = PendingSaves.create({ save: async () => { writes++; return {}; } });

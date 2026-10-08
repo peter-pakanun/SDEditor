@@ -175,6 +175,190 @@ function enablePending(h) {
   return { ...h, calls, downloads, acknowledge, warnsBeforeUnload };
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
+
+function pendingStagedDeletionFixture() {
+  const h = enablePending(saveFixture()), { editor: e, window, desc } = h;
+  const baseline = JSON.parse(JSON.stringify(desc));
+  baseline.hasChanges = false; baseline.translations.Thai = ['ZIP original', 'ZIP second'];
+  baseline.translations.German = ['ZIP German', 'ZIP German second'];
+  e._workspaceSourceBaseline = [baseline];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs,
+    { source: [baseline], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  window.WorkspaceState.dropTranslation(e.localDescs, baseline, 'Thai',
+    { translations: ['Preserved dropped', 'Preserved second'], originSourceHash: 'older-source', targetSourceHash: e.sourceIdentity });
+  window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: desc.filepath, translations: ['Staged first', 'Staged second'] }, 'Thai', { source: baseline });
+  window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: desc.filepath, translations: ['Staged German', 'Staged German second'] }, 'German', { source: baseline });
+  e.applyWorkspaceOverlay();
+  e.editorBlocks = [{ english: 'Original', translation: 'Keep local typing' }, { english: 'Second', translation: 'Staged second' }];
+  return { ...h, baseline, base: JSON.parse(JSON.stringify(e.collaborationFile(desc))) };
+}
+
+test('staged deletion waits for its durable transaction and records both sides without promoting dropped copies or consuming drafts', async () => {
+  const { editor: e, desc, calls, acknowledge, window, baseline, base } = pendingStagedDeletionFixture();
+  const candidate = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
+  const german = JSON.parse(JSON.stringify(e.localDescs.staged.German[desc.filepath]));
+  let finished = false;
+  const deleting = e.persistStagedDeletion(desc, base).then(result => { finished = true; return result; });
+  await pendingTick();
+  assert.equal(calls.length, 1); assert.equal(finished, false);
+  const batch = calls[0].batch;
+  assert.equal(batch.resetStaging, true); assert.equal(batch.origin, 'delete_staged'); assert.equal(batch.deferDisplay, true);
+  assert.equal(batch.language, 'Thai'); assert.equal(batch.sourceHash, e.sourceIdentity); assert.equal(batch.game, e.gameVersion);
+  assert.deepEqual(JSON.parse(JSON.stringify(batch.bases[desc.filepath])), base);
+  assert.equal(batch.draft, undefined); assert.equal(batch.promoteDropped, undefined); assert.equal(batch.promoteDroppedByPath, undefined);
+  assert.equal(batch.files[0].stagingReset, true); assert.equal(batch.files[0].trackedForExport, false);
+  assert.deepEqual(Array.from(batch.files[0].translations), baseline.translations.Thai);
+  assert.deepEqual(Array.from(batch.revisions[0].translations), base.translations);
+  assert.deepEqual(Array.from(batch.revisions[1].translations), baseline.translations.Thai);
+  assert.match(batch.revisions[0].note, /Before delete staged translation/); assert.equal(batch.revisions[1].note, 'Delete staged translation');
+  assert.equal(e._pendingSaves.overlay(e.pendingSaveScope(), desc.filepath), null);
+  assert.deepEqual(Array.from(desc.translations.Thai), base.translations);
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.equal(e.editorBlocks[0].translation, 'Keep local typing');
+  acknowledge(calls[0]);
+  const result = await deleting;
+  assert.equal(result.durable, true); assert.equal(e.pendingLocalSaves, 0);
+  assert.equal(e.localDescs.staged.Thai[desc.filepath], undefined); assert.equal(desc.hasChanges, false);
+  assert.deepEqual(Array.from(desc.translations.Thai), baseline.translations.Thai);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs.staged.German[desc.filepath])), german);
+  assert.deepEqual(JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'))), candidate);
+  assert.equal(e.editorBlocks[0].translation, 'Keep local typing'); assert.equal(e.editorVisible, true);
+});
+
+test('staged deletion storage failure keeps the visible stage and retains the identical deletion for an explicit retry', async () => {
+  const { editor: e, desc, calls, acknowledge, base } = pendingStagedDeletionFixture();
+  const deleting = e.persistStagedDeletion(desc, base);
+  const rejected = assert.rejects(deleting, /Disk full/);
+  await pendingTick(); const original = JSON.stringify(calls[0].batch);
+  calls[0].reject(new Error('Disk full')); await rejected;
+  assert.deepEqual(Array.from(desc.translations.Thai), base.translations);
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.equal(e.pendingLocalSaves, 1);
+  assert.match(e.localSaveError, /Disk full/); assert.equal(e.editorBlocks[0].translation, 'Keep local typing');
+  const retrying = e.retryPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 2); assert.equal(JSON.stringify(calls[1].batch), original);
+  assert.match(e.localSaveError, /Disk full/);
+  acknowledge(calls[1]); await retrying;
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(e.localSaveError, '');
+  assert.equal(e.localDescs.staged.Thai[desc.filepath], undefined);
+});
+
+test('a staged deletion acknowledgement awaits its captured editor hook before the queue finishes', async () => {
+  const { editor: e, desc, calls, acknowledge, base } = pendingStagedDeletionFixture();
+  let release, hookCalls = 0, finished = false;
+  const hookGate = new Promise(resolve => { release = resolve; });
+  const deleting = e.persistStagedDeletion(desc, base, e.captureCollaborationContext(), async () => {
+    hookCalls++;
+    assert.equal(e.localDescs.staged.Thai[desc.filepath], undefined);
+    assert.equal(desc.translations.Thai[0], 'ZIP original');
+    await hookGate;
+  }).then(result => { finished = true; return result; });
+  await pendingTick(); acknowledge(calls[0]); await pendingTick();
+  assert.equal(hookCalls, 1); assert.equal(finished, false);
+  assert.equal(e._pendingSaves.snapshot().jobs.length, 1);
+  release(); assert.equal((await deleting).durable, true);
+  assert.equal(hookCalls, 1); assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+});
+
+test('a transactionally rejected staged deletion leaves the stage intact and removes only that stale reset from the queue', async () => {
+  const { editor: e, desc, calls, base } = pendingStagedDeletionFixture();
+  const deleting = e.persistStagedDeletion(desc, base);
+  const rejected = assert.rejects(deleting, error => error.code === 'DELETE_STAGED_BASE_CHANGED');
+  await pendingTick();
+  calls[0].reject(Object.assign(new Error('The saved translation changed'), { code: 'DELETE_STAGED_BASE_CHANGED' }));
+  await rejected;
+  assert.deepEqual(Array.from(desc.translations.Thai), base.translations);
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+});
+
+test('a late staged deletion acknowledgement cannot update a replacement editor scope', async () => {
+  const { editor: e, desc, calls, acknowledge, base } = pendingStagedDeletionFixture();
+  const deleting = e.persistStagedDeletion(desc, base); await pendingTick();
+  e.lang = 'German'; desc.translations.German = ['Current German typing', 'Second'];
+  acknowledge(calls[0]);
+  assert.equal((await deleting).stale, true);
+  assert.deepEqual(Array.from(desc.translations.German), ['Current German typing', 'Second']);
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.ok(e.localDescs.staged.German[desc.filepath]);
+  assert.equal(e.editorBlocks[0].translation, 'Keep local typing');
+});
+
+test('staged deletion refreshes its completed diagnostic findings and preserves unrelated results', async () => {
+  const { editor: e, desc, remaining, clean, calls, acknowledge, window } = enablePending(diagnosticSaveFixture());
+  const baseline = JSON.parse(JSON.stringify(e.descs));
+  baseline.forEach(file => { file.hasChanges = false; });
+  baseline[0].translations.Thai = ['ZIP translation {0}', 'สอง'];
+  e._workspaceSourceBaseline = baseline;
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs,
+    { source: baseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: desc.filepath, translations: ['Missing variable', 'สอง'] }, 'Thai', { source: baseline[0] });
+  e.applyWorkspaceOverlay(); await e.scanAllDiagnostics();
+  assert.equal(e.diagnosticScanErrorFileCount, 2);
+  const prior = e.diagnosticScanResults[desc.filepath], unrelated = e.diagnosticScanResults[remaining.filepath], cleanResult = e.diagnosticScanResults[clean.filepath];
+  const scanId = e.diagnosticScanRunId, checks = e.diagnosticScanAppliedChecks;
+  const deleting = e.persistStagedDeletion(desc, e.collaborationFile(desc)); await pendingTick();
+  assert.equal(e.diagnosticScanResults[desc.filepath], prior);
+  acknowledge(calls[0]); await deleting;
+  assert.equal(e.diagnosticScanCompleted, true); assert.equal(e.diagnosticScanRunId, scanId); assert.equal(e.diagnosticScanAppliedChecks, checks);
+  assert.notEqual(e.diagnosticScanResults[desc.filepath], prior); assert.equal(e.diagnosticScanResults[desc.filepath].hasDiagnosticError, false);
+  assert.equal(e.diagnosticScanResults[remaining.filepath], unrelated); assert.equal(e.diagnosticScanResults[clean.filepath], cleanResult);
+  assert.equal(e.diagnosticScanErrorFileCount, 1);
+  assert.deepEqual(Array.from(e.filteredDescs, file => file.filepath), [remaining.filepath]);
+});
+
+function deletionConflictFixture() {
+  const h = saveFixture(), { editor: e, desc } = h;
+  desc.translations.English = ['Left {0}@Right', 'Second'];
+  const conflict = { id: 'delete-conflict', kind: 'delete_staged', filepath: desc.filepath,
+    yours: { filepath: desc.filepath, translations: ['Malformed original ZIP translation'], needsReview: false, trackedForExport: false, stagingReset: true },
+    shared: { filepath: desc.filepath, translations: ['Malformed existing shared translation'], needsReview: false, trackedForExport: true, revision: 3 } };
+  const resolved = [], confirms = [];
+  e.editorVisible = false;
+  e._collaboration = { snapshot: () => ({ conflicts: [conflict] }),
+    resolve: async (id, file) => { resolved.push({ id, file }); return { status: 'synced' }; } };
+  e.appConfirm = async (message, options) => { confirms.push({ message, options }); return true; };
+  return { ...h, conflict, resolved, confirms };
+}
+
+test('deletion conflicts preserve exact existing choices despite invalid ZIP text and reconfirm deletion as a danger action', async t => {
+  for (const choice of ['yours', 'shared']) await t.test(choice === 'yours' ? 'confirm deletion' : 'keep shared translation', async () => {
+    const { editor: e, conflict, resolved, confirms } = deletionConflictFixture();
+    e.analyzeTranslationDiagnostics = () => assert.fail('Existing deletion-conflict choices must not run Save validation');
+    assert.equal((await e.collabResolve(conflict.id, conflict[choice])).status, 'synced');
+    assert.equal(resolved.length, 1); assert.equal(resolved[0].id, conflict.id); assert.equal(resolved[0].file, conflict[choice]);
+    assert.equal(confirms.length, choice === 'yours' ? 1 : 0);
+    if (choice === 'yours') {
+      assert.equal(confirms[0].options.danger, true); assert.equal(confirms[0].options.confirmLabel, 'Delete staged translation');
+    }
+  });
+});
+
+test('declining or invalidating a deletion-conflict confirmation leaves both shared choices intact', async t => {
+  for (const invalidate of [false, true]) await t.test(invalidate ? 'source changed' : 'declined', async () => {
+    const { editor: e, conflict, resolved } = deletionConflictFixture();
+    const before = JSON.parse(JSON.stringify(conflict));
+    let answer;
+    e.appConfirm = () => new Promise(resolve => { answer = resolve; });
+    const resolving = e.collabResolve(conflict.id, conflict.yours); await pendingTick();
+    if (invalidate) e.sourceIdentity = 'other-source';
+    answer(invalidate);
+    const result = await resolving;
+    assert.equal(result.status, 'conflict'); assert.equal(!!result.stale, invalidate); assert.equal(resolved.length, 0);
+    assert.deepEqual(conflict, before);
+  });
+});
+
+test('arbitrary deletion-conflict edits still require normal translation validation', async () => {
+  const { editor: e, conflict, resolved } = deletionConflictFixture();
+  const edited = { ...conflict.yours, translations: ['Arbitrary edited translation', 'Second'] };
+  await assert.rejects(e.collabResolve(conflict.id, edited), /table column count/);
+  assert.equal(resolved.length, 0);
+  await assert.rejects(e.collabResolve(conflict.id, conflict.yours.translations), /comparison no longer matches/);
+  assert.equal(resolved.length, 0);
+});
+
 test('draft promotion publishes committed translations only after its durable acknowledgement', async () => {
   const { editor: e, desc, calls, acknowledge } = enablePending(saveFixture());
   const before = [...desc.translations.Thai];

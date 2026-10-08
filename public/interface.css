@@ -70,6 +70,8 @@ input, button, select, textarea {
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
 button:hover:not(:disabled) { border-color: var(--ui-accent); }
+.deleteStagedTranslation { color: var(--ui-error); border-color: var(--ui-error); }
+.deleteStagedTranslation:hover:not(:disabled) { border-color: var(--ui-error); background: var(--color-diagnostic-error); }
 input:focus-visible, button:focus-visible, select:focus-visible, textarea:focus-visible,
 .fileTableScroll:focus-visible, .filterChip:focus-within {
   outline: 2px solid var(--ui-accent);

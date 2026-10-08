@@ -224,7 +224,7 @@
             return client ? client.withLocalWrite(write) : write();
           },
           onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
-          onCommit: (job, ack) => {
+          onCommit: async (job, ack) => {
             if (this.collaborationContextCurrent(job.context)) {
               if (job.batch.deferDisplay) {
                 for (const [filepath, status] of Object.entries(job.batch.statuses || {})) {
@@ -240,6 +240,7 @@
               });
               if (changed) this.applyCollaborationFiles(files, job.batch.language);
             }
+            await job.onCommitted?.(ack);
             // Synchronization starts only after workspace, history and outbox commit.
             if (job.context.client && job.context.client === this._collaboration && job.context.client.key === job.batch.collaboration?.key) {
               job.context.client.retry().catch(error => this.collaborationFailure(error));
@@ -604,6 +605,56 @@
           if (this._collaborationClaimPending === pending) this._collaborationClaimPending = null;
         }
       },
+      async persistStagedDeletion(desc, base, ctx = this.captureCollaborationContext(), onCommitted) {
+        if (this._reconcilingImport || this._importingSource || !this.collaborationContextCurrent(ctx)) return { stale: true };
+        this._translationWrites = (this._translationWrites || 0) + 1;
+        try {
+          if (!await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before deleting this staged translation.');
+          if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          const source = this.workspaceSourceFile(desc.filepath);
+          if (!source) throw new Error('The original ZIP translation is unavailable. Reimport the original ZIP before deleting this staged translation.');
+          const translations = [...(source.translations?.[ctx.language] || [])];
+          while (translations.length < source.translations.English.length) translations.push('');
+          const file = { filepath: desc.filepath, translations, needsReview: false, trackedForExport: false, stagingReset: true, revision: Number(base.revision) || 0 };
+          const now = Date.now();
+          const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: ctx.language, sourceHash: ctx.source };
+          const bases = { [desc.filepath]: copy(base) };
+          const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+            resetStaging: true, origin: 'delete_staged', deferDisplay: true, bases, files: [file],
+            descriptions: [makeLocalDesc(source, ctx.language, translations, { derivedStatus: true })],
+            statuses: { [desc.filepath]: window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language, { lastEditedAt: now }) },
+            revisions: [
+              { ...metadata, savedAt: now - 1, note: 'Before delete staged translation', translations: [...base.translations], isMissing: computeIsMissing(source.translations.English.length, base.translations) },
+              { ...metadata, savedAt: now, note: 'Delete staged translation', translations, isMissing: computeIsMissing(source.translations.English.length, translations) },
+            ],
+            ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity), bases, origin: 'delete_staged' } } : {}),
+          };
+          if (this.testMode) {
+            const current = this.collaborationFile(desc, ctx.language);
+            if (!current.trackedForExport || !arrayEquals(current.translations, base.translations)) {
+              throw Object.assign(new Error('The staged translation changed. Review it before deleting again.'), { code: 'DELETE_STAGED_BASE_CHANGED' });
+            }
+            delete this.localDescs.staged[ctx.language][desc.filepath];
+            this.applyCollaborationFiles([file], ctx.language);
+            return { status: 'local', durable: true };
+          }
+          const queue = this.initializePendingSaves();
+          if (queue) {
+            const job = queue.enqueue(batch, { context: ctx });
+            job.onCommitted = onCommitted;
+            try { await queue.drain(); }
+            catch (error) { queue.discardRejectedReset?.(job.id); throw error; }
+            return { status: 'local', durable: job.durable, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
+          }
+          const write = () => window.OfflineStore.saveTranslationBatch(batch);
+          const ack = ctx.client ? await ctx.client.withLocalWrite(write) : await write();
+          ctx.client?.acceptLocalSave(batch, ack);
+          if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          this.applyCollaborationFiles(ack.files || [file], ctx.language);
+          ctx.client?.retry().catch(error => this.collaborationFailure(error));
+          return { status: 'local', durable: true };
+        } finally { this._translationWrites--; }
+      },
       async persistTranslationBatch(updates, origin, options = {}) {
         if (this._reconcilingImport) return { stale: true };
         this._translationWrites = (this._translationWrites || 0) + 1;
@@ -752,9 +803,14 @@
         const conflict = client.snapshot().conflicts.find(item => item.id === id);
         const lines = Array.isArray(translations) ? translations : translations?.translations;
         const desc = conflict && this.getDescByFilepath(conflict.filepath);
-        if (!desc || !Array.isArray(lines) || lines.length !== desc.translations.English.length) throw new Error('The comparison no longer matches the current source.');
+        const resetChoice = conflict?.kind === 'delete_staged' && !Array.isArray(translations) && translations?.trackedForExport === false
+          && arrayEquals(lines, conflict.yours.translations);
+        const sharedChoice = conflict?.kind === 'delete_staged' && !Array.isArray(translations)
+          && !!translations?.trackedForExport === !!conflict.shared.trackedForExport && arrayEquals(lines, conflict.shared.translations);
+        const retainedChoice = resetChoice || sharedChoice;
+        if (!desc || !Array.isArray(lines) || (!retainedChoice && lines.length !== desc.translations.English.length)) throw new Error('The comparison no longer matches the current source.');
         const diagnostics = [];
-        for (let index = 0; index < lines.length; index++) {
+        for (let index = 0; !retainedChoice && index < lines.length; index++) {
           const english = this.decodeEscapedNewlines(desc.translations.English[index]);
           const value = this.decodeEscapedNewlines(lines[index]);
           const sourceColumns = this.splitTableColumns(english), translatedColumns = this.splitTableColumns(value);
@@ -768,6 +824,13 @@
         const warnings = diagnostics.filter(item => item.level === 'warning');
         const blocksAtResolution = this.editorBlocks;
         const draftAtResolution = this._draftSession;
+        if (resetChoice) {
+          const confirmed = await this.appConfirm('Delete the staged translation despite the newer shared changes? The committed translation will return to the original ZIP text. History and local drafts will be kept.', {
+            title: 'Delete staged translation?', confirmLabel: 'Delete staged translation', danger: true,
+          });
+          if (!this.collaborationContextCurrent(context)) return { status: 'conflict', stale: true };
+          if (!confirmed) return { status: 'conflict' };
+        }
         if (warnings.length) {
           const confirmed = await this.appConfirm('Translation warnings: ' + warnings.map(item => item.message).join('\n') + '\nSave the result anyway?', {
             title: 'Save with translation warnings?', confirmLabel: 'Save anyway', danger: true,

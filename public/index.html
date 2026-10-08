@@ -429,11 +429,12 @@
                   </template>
                   <div v-else class="inlineReadText" :lang="translationEditorBcp47">{{ block.translation || '\u00a0' }}</div>
                 </div></div>
-                <div v-if="inlineDraftFor(desc.filepath) || (inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && !inlineDraftMatchesStaged)" class="inlineDraftTools">
+                <div v-if="inlineDraftFor(desc.filepath) || (inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (!inlineDraftMatchesStaged || editorHasStagedTranslation))" class="inlineDraftTools">
                   <span v-if="inlineDraftFor(desc.filepath)" class="fileDraftLabel">Local draft</span>
-                  <div v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (!inlineDraftMatchesStaged || inlineDraftFor(desc.filepath))" class="inlineFileActions" @click.stop>
+                  <div v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (!inlineDraftMatchesStaged || inlineDraftFor(desc.filepath) || editorHasStagedTranslation)" class="inlineFileActions" @click.stop>
                     <button v-if="!inlineDraftMatchesStaged" type="button" @click="saveInlineDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Stage draft</button>
                     <button v-if="inlineDraftFor(desc.filepath)" type="button" @click="discardEditorDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Discard draft</button>
+                    <button v-if="editorHasStagedTranslation" type="button" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Delete staged translation</button>
                   </div>
                 </div>
               </template>
@@ -553,6 +554,7 @@
           <span v-if="editorDiagnosticErrorCount > 0" class="editorDiagPill error" v-tooltip="editorDiagnosticErrorTitle">Error: {{ editorDiagnosticErrorCount }}</span>
           <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy" title="Save this translation and close the file">{{ editorSaving ? 'Saving…' : 'Save & close' }}</button>
           <button @click="discardEditorDraft" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Discard the local draft and restore committed text">Discard draft</button>
+          <button v-if="editorHasStagedTranslation" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Delete the staged save and restore the original ZIP translation">Delete staged translation</button>
           <button @click="editorExit" title="Close the file (Esc); keep its local draft">Close</button>
         </div>
         <div>
