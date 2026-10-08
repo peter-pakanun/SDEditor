@@ -3966,10 +3966,17 @@ const config = Vue.defineComponent({
       let popupHeight = Math.ceil(list ? Math.min(list.scrollHeight, viewportHeight * 0.4) + filterHeight + 24 : Math.min(360, Math.max(180, viewportHeight * 0.48)));
       let width = Math.min(Math.max(rect.width, 260), 640, Math.max(0, viewportWidth - margin * 2));
       let left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
+      let hasNote = !!this.hlPopupTlnote;
+      if (hasNote && this.inlineActive) {
+        // Keep inline notes over the source column, reserving room to the left.
+        let noteWidth = Math.min(320, Math.max(0, viewportWidth - margin * 2 - width - gap));
+        if (noteWidth >= 220) left = Math.max(left, margin + noteWidth + gap);
+      }
       let rightSpace = viewportWidth - left - width - gap - margin;
       let leftSpace = left - gap - margin;
-      let hasNote = !!this.hlPopupTlnote;
-      let stackNote = hasNote && Math.max(rightSpace, leftSpace) < 220;
+      let noteOnLeft = this.inlineActive || rightSpace < 220;
+      let noteSideSpace = noteOnLeft ? leftSpace : rightSpace;
+      let stackNote = hasNote && noteSideSpace < 220;
       let noteMaxHeight = Math.min(stackNote ? 144 : 240, Math.max(0, viewportHeight - margin * 2) * 0.3);
       let noteSpace = stackNote ? noteMaxHeight + gap : 0;
       let groupHeight = popupHeight + noteSpace;
@@ -3993,8 +4000,8 @@ const config = Vue.defineComponent({
       this.hlPopup.y = Math.round(top);
       this.hlPopup.width = Math.round(width);
       this.hlPopup.maxHeight = Math.round(maxHeight);
-      this.hlPopup.noteWidth = Math.round(stackNote ? width : Math.min(320, Math.max(0, rightSpace >= 220 ? rightSpace : leftSpace)));
-      this.hlPopup.noteX = Math.round(stackNote ? left : rightSpace >= 220 ? left + width + gap : left - gap - this.hlPopup.noteWidth);
+      this.hlPopup.noteWidth = Math.round(stackNote ? width : Math.min(320, Math.max(0, noteSideSpace)));
+      this.hlPopup.noteX = Math.round(stackNote ? left : noteOnLeft ? left - gap - this.hlPopup.noteWidth : left + width + gap);
       this.hlPopup.noteY = Math.round(stackNote ? top + maxHeight + gap : Math.max(margin, Math.min(top + filterHeight + 12, viewportHeight - margin - noteMaxHeight)));
       this.hlPopup.noteMaxHeight = Math.floor(noteMaxHeight);
     },

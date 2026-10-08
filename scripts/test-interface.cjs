@@ -1356,6 +1356,96 @@ test('autocomplete hides TL notes for missing entries, create-new items, blank n
   assert.equal(editor.hlPopupTlnote, '');
 });
 
+function attachAutocompleteGeometry(harness, options = {}) {
+  const { editor, context } = harness;
+  const viewportWidth = options.viewportWidth ?? 1600;
+  const viewportHeight = options.viewportHeight ?? 800;
+  const translationLeft = options.translationLeft ?? 820;
+  const translationWidth = options.translationWidth ?? 420;
+  const top = options.top ?? 300;
+  const height = options.height ?? 70;
+  const rectangle = (left, width) => ({ left, right: left + width, width, top, bottom: top + height, height });
+  const translation = { getBoundingClientRect() { return rectangle(translationLeft, translationWidth); } };
+  const sourceContainer = { getBoundingClientRect() { return rectangle(options.sourceLeft ?? 380, translationWidth); } };
+  const source = { closest(selector) { return selector === '.textHL' ? sourceContainer : null; } };
+  context.window.innerWidth = viewportWidth;
+  context.window.innerHeight = viewportHeight;
+  editor.inlineActive = options.inline !== false;
+  editor.editorVisible = options.inline === false;
+  editor.editorBlocks = [{ isTable: false }];
+  editor.getEditorRef = name => name === 'translation' ? translation : name === 'english' ? source : null;
+  editor.$refs.hlPopupPanel = { querySelector(selector) { return selector === '.hlPopupList' ? { scrollHeight: 220 } : null; } };
+  editor.$refs.hlPopupFilter = { getBoundingClientRect() { return { height: 42 }; } };
+  editor.dictionary = [{ _id: 'note-entry', tlnote: options.note === false ? '' : 'Keep this term consistent.' }];
+  editor.hlPopup.filtered = [{ dictEntryId: 'note-entry' }];
+  editor.hlPopup.visible = true;
+  editor.hlPopup.selectedIndex = 0;
+  return { viewportWidth, viewportHeight, translationLeft };
+}
+
+function assertAutocompleteWithinViewport(popup, viewport) {
+  for (const [label, x, y, width, height] of [
+    ['Autocomplete', popup.x, popup.y, popup.width, popup.maxHeight],
+    ['TL note', popup.noteX, popup.noteY, popup.noteWidth, popup.noteMaxHeight],
+  ]) {
+    assert.ok(x >= 8, `${label} must clear the left viewport margin.`);
+    assert.ok(x + width <= viewport.viewportWidth - 8, `${label} must clear the right viewport margin.`);
+    assert.ok(y >= 8, `${label} must clear the top viewport margin.`);
+    assert.ok(y + height <= viewport.viewportHeight - 8, `${label} must clear the bottom viewport margin.`);
+  }
+}
+
+test('inline autocomplete places the TL note left of the suggestion list while full editor retains right placement', () => {
+  for (const inline of [true, false]) {
+    const harness = loadEditor();
+    const viewport = attachAutocompleteGeometry(harness, { inline });
+    harness.editor.positionHlPopup(0);
+    const popup = harness.editor.hlPopup;
+    if (inline) {
+      assert.equal(popup.noteX + popup.noteWidth + 6, popup.x, 'Inline TL notes belong immediately left of autocomplete.');
+    } else {
+      assert.equal(popup.noteX, popup.x + popup.width + 6, 'Full-editor TL notes retain their right-side placement.');
+    }
+    assertAutocompleteWithinViewport(popup, viewport);
+  }
+});
+
+test('inline autocomplete shifts the suggestion list near viewport edges to keep its TL note on the left', () => {
+  for (const translationLeft of [80, 1360]) {
+    const harness = loadEditor();
+    const viewport = attachAutocompleteGeometry(harness, { viewportWidth: 1440, translationLeft });
+    harness.editor.positionHlPopup(0);
+    const popup = harness.editor.hlPopup;
+    assert.notEqual(popup.x, translationLeft, 'The popup should move when its anchor would clip the note or suggestion list.');
+    assert.equal(popup.noteX + popup.noteWidth + 6, popup.x);
+    assert.ok(popup.noteWidth >= 220, 'A side note should retain a readable minimum width.');
+    assertAutocompleteWithinViewport(popup, viewport);
+  }
+});
+
+test('inline autocomplete stacks its TL note below in a compact desktop window without clipping', () => {
+  const harness = loadEditor();
+  const viewport = attachAutocompleteGeometry(harness, { viewportWidth: 600, translationLeft: 80 });
+  harness.editor.positionHlPopup(0);
+  const popup = harness.editor.hlPopup;
+  assert.equal(popup.noteX, popup.x);
+  assert.equal(popup.noteWidth, popup.width);
+  assert.equal(popup.noteY, popup.y + popup.maxHeight + 6, 'Insufficient horizontal space moves the note below autocomplete.');
+  assertAutocompleteWithinViewport(popup, viewport);
+});
+
+test('inline autocomplete reserves no horizontal or stacked space when the selected entry has no TL note', () => {
+  for (const viewportWidth of [600, 1440]) {
+    const harness = loadEditor();
+    attachAutocompleteGeometry(harness, { viewportWidth, translationLeft: 80, note: false });
+    harness.editor.positionHlPopup(0);
+    const popup = harness.editor.hlPopup;
+    assert.equal(harness.editor.hlPopupTlnote, '');
+    assert.equal(popup.x, 80, 'A hidden note must not move the suggestion list away from its translation field.');
+    assert.equal(popup.maxHeight, 286, 'A hidden note must not shorten autocomplete to reserve stacked note space.');
+  }
+});
+
 function attachDictionaryGeometry(harness, options = {}) {
   const { context } = harness;
   const nativeScrolls = [];
