@@ -33,6 +33,10 @@ function loadEditor() {
     lang: 'Thai', hideDNT: false, selectedFileFilters: ['missing', 'saved', 'review', 'unchanged'], searchText: '',
     currentPage: 1, pageCount: 1, refreshGamePreview() {},
   });
+  // Vue exposes computed properties alongside data and methods on the instance.
+  for (const [name, getter] of Object.entries(config.computed)) {
+    Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+  }
   return { editor, context, window };
 }
 
