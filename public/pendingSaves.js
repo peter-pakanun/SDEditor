@@ -31,6 +31,7 @@
     if (typeof save !== 'function') throw new TypeError('A local save function is required.');
     const jobs = [];
     const waiters = [];
+    const holds = new Set();
     let timer = null;
     let running = false;
     let disposed = false;
@@ -52,7 +53,7 @@
       }
     }
     function schedule() {
-      if (disposed || running || timer !== null || !jobs.length || jobs[0].status === 'failed') return;
+      if (disposed || running || holds.size || timer !== null || !jobs.length || jobs[0].status === 'failed') return;
       // Yield to the browser so closing the editor can paint before storage work.
       timer = setTimeout(() => { timer = null; pump(); }, 0);
     }
@@ -60,7 +61,7 @@
       if (disposed || running) return;
       running = true;
       try {
-        while (!disposed && jobs.length && jobs[0].status !== 'failed') {
+        while (!disposed && !holds.size && jobs.length && jobs[0].status !== 'failed') {
           const job = jobs[0];
           job.status = 'saving';
           notify();
@@ -124,6 +125,15 @@
       schedule();
       return drain();
     }
+    function hold() {
+      const token = {};
+      holds.add(token);
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      // Foreground draft reads and editor preparation get priority over starting
+      // another write to the same IndexedDB store. Active writes still finish.
+      return () => { if (holds.delete(token)) schedule(); };
+    }
     function discardRejectedDraft(id) {
       const index = jobs.findIndex(job => job.id === id);
       const job = jobs[index];
@@ -163,7 +173,7 @@
       const error = new Error('The local save queue is closed.');
       for (const waiter of waiters.splice(0)) waiter.reject(error);
     }
-    return { enqueue, retry, drain, discardRejectedDraft, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
+    return { enqueue, retry, drain, hold, discardRejectedDraft, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
   }
 
   return { create, scopeKey };

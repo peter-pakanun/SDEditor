@@ -4914,26 +4914,35 @@ const config = Vue.defineComponent({
         : (this.currentPage - 1) * this.pageSize + (reverse ? this.descsDisplay.length - 1 : 0);
       const candidates = [];
       for (let i = hadEditor ? anchor + direction : anchor; i >= 0 && i < ordered.length; i += direction) candidates.push(ordered[i].filepath);
+      const willSave = hadEditor && (!noSaveIfNotChanged || this.editorHaveChanges() || this._draftSession?.record);
+      // Starting the old file's worker transaction first can lock IndexedDB's
+      // draft store while the next file is claiming/preparing its editor.
+      const releaseLocalSaves = willSave
+        ? (!this.testMode ? this.initializePendingSaves?.() : this._pendingSaves)?.hold?.() : null;
       try {
-        if (hadEditor && (!noSaveIfNotChanged || this.editorHaveChanges() || this._draftSession?.record)
-          && !await this.editorSave({ close: false, defer: true })) return false;
+        if (willSave && !await this.editorSave({ close: false, defer: true })) return false;
         if (ctx && !this.collaborationContextCurrent(ctx)) return false;
         for (const filepath of candidates) {
           if (this._collaboration?.isEditing(filepath)) continue;
           // Saving can remove the current row from the filter; keep its original anchor.
           const position = sortRows().findIndex(d => d.filepath === filepath);
           if (position < 0) continue;
+          // Revisiting already queued work deliberately awaits that save; it
+          // must be allowed to run before editFile enters its pending barrier.
+          if (this.pendingDraftSaveFor?.(filepath)) releaseLocalSaves?.();
           const opened = await this.editFile(filepath, true, { automatic: true });
           if (cancelRevision !== (this._editorOpenCancelRevision || 0)) return false;
           if (opened === false) continue;
           this.currentPage = Math.floor(position / this.pageSize) + 1;
           this.selectedFilepath = filepath;
           this.collaborationNotice = '';
+          if (releaseLocalSaves) await this.yieldEditorPaint();
+          if ((ctx && !this.collaborationContextCurrent(ctx)) || cancelRevision !== (this._editorOpenCancelRevision || 0)) return false;
           return true;
         }
         this.collaborationNotice = 'No available files in this direction.';
         return false;
-      } finally { this.navigationBusy = false; }
+      } finally { releaseLocalSaves?.(); this.navigationBusy = false; }
     },
     showImportUpdateZipDialog() {
       this.$refs.importUpdateZipFile?.click?.();

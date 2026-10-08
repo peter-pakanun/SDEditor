@@ -59,6 +59,49 @@ test('storage and asynchronous acknowledgement callbacks finish in queue order',
   assert.deepEqual(writes, ['first', 'second']); assert.deepEqual(commits, ['first', 'second']);
 });
 
+test('navigation holds cancel scheduled intake and require every idempotent release before dispatch', async () => {
+  const calls = [];
+  const queue = PendingSaves.create({ save: async value => { calls.push(value.jobId); return {}; } });
+  queue.enqueue(batch('first'));
+  const releaseFirst = queue.hold(), releaseSecond = queue.hold();
+  let drained = false;
+  const waiting = queue.drain().then(() => { drained = true; });
+  await tick();
+  assert.deepEqual(calls, []); assert.equal(drained, false);
+  releaseFirst(); releaseFirst();
+  await tick();
+  assert.deepEqual(calls, [], 'An already released hold cannot release another navigation.');
+  releaseSecond(); await waiting;
+  assert.deepEqual(calls, ['first']); assert.equal(drained, true);
+  releaseSecond(); await tick(); assert.deepEqual(calls, ['first']);
+  queue.dispose();
+});
+
+test('a navigation hold lets an active transaction acknowledge but blocks the next queued write', async () => {
+  const calls = [], committed = [], active = deferred();
+  const queue = PendingSaves.create({ save: async value => {
+    calls.push(value.jobId); if (value.jobId === 'first') await active.promise; return {};
+  }, onCommit: job => { committed.push(job.id); } });
+  queue.enqueue(batch('first')); queue.enqueue(batch('second'));
+  const waiting = queue.drain(); await tick();
+  assert.deepEqual(calls, ['first']);
+  const release = queue.hold();
+  active.resolve({}); await tick();
+  assert.deepEqual(committed, ['first']); assert.deepEqual(calls, ['first']);
+  assert.equal(queue.snapshot().pending, 1);
+  release(); await waiting;
+  assert.deepEqual(calls, ['first', 'second']); assert.deepEqual(committed, ['first', 'second']);
+  queue.dispose();
+});
+
+test('releasing a navigation hold after disposal never starts its retained save', async () => {
+  let writes = 0;
+  const queue = PendingSaves.create({ save: async () => { writes++; return {}; } });
+  const release = queue.hold(), job = queue.enqueue(batch('first'));
+  queue.dispose(); release(); release(); await tick();
+  assert.equal(writes, 0); assert.equal(queue.snapshot().jobs[0], job);
+});
+
 test('latest pending save overlays older acknowledgements while a durable job stops overlaying', async () => {
   const commit = deferred(), write = deferred();
   const queue = PendingSaves.create({ save: async payload => {
