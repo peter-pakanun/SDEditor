@@ -370,8 +370,25 @@
         return new Intl.DateTimeFormat(undefined, { timeZone: NZ, dateStyle: 'medium', timeStyle: 'short' }).format(date) + ' New Zealand · ' + new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date) + ' local';
       },
       managedFormatDate(instant) { return new Date(instant).toLocaleString(); },
+      managedDeadlineTooltip(instant) { return this.managedFormatDeadline(instant); },
+      managedTimestampTooltip(instant) { return instant ? this.managedFormatDate(instant) + ' local' : ''; },
       managedReminder(instant) { return reminder(instant, this.managedNow); },
-      managedBarWidth(team, statistic) { return `${Math.min(100, 100 * (team.counts?.[statistic] || 0) / Math.max(1, team.counts?.loaded || 0))}%`; },
+      managedProgress(team) {
+        const count = value => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+        const missing = count(team.counts?.missing), saved = count(team.counts?.saved);
+        const revised = Math.min(saved, count(team.counts?.revised)), total = missing + saved;
+        const ordinarySaved = saved - revised, width = value => total ? `${100 * value / total}%` : '0%';
+        return { missing, saved, revised, ordinarySaved, total, percent: total ? Math.round(100 * saved / total) : 0,
+          missingWidth: width(missing), savedWidth: width(ordinarySaved), revisedWidth: width(revised) };
+      },
+      managedProgressTooltip(team) {
+        const progress = this.managedProgress(team);
+        return `${team.language} progress\nSaved: ${progress.saved} / ${progress.total} (${progress.percent}%)\nMissing: ${progress.missing}\nRevised: ${progress.revised} (included in Saved)\nDropped: ${team.counts?.dropped || 0}\nWorkload denominator: Missing + Saved. Status counts can overlap.\nOnly server-accepted work is counted; unsaved drafts and pending offline saves are excluded.`;
+      },
+      managedExistingTeamTooltip(team) {
+        const online = (team.presence || []).map(peer => peer.name || peer.displayName || peer.userName || 'Translator');
+        return `${team.language} · ${team.isManaged ? 'Published room' : 'Standalone / Offline import'}\nSaved: ${team.counts?.saved ?? team.savedFileCount ?? 0} · Missing: ${team.counts?.missing || 0} · Revised: ${team.counts?.revised || 0}\nDropped: ${team.counts?.dropped || 0} · Shared history: ${team.historyCount || 0} changes\n${online.length ? 'Online: ' + online.join(', ') : 'No translators currently online.'}\nThis existing room and its work will be reused. Unuploaded offline work and local drafts are not visible here.`;
+      },
       async managedWarnBeforeEdit() {
         const version = this.managedActiveVersion, team = this.managedActiveTeam;
         if (!version || (!team?.ended && version.status !== 'withdrawn')) return true;
@@ -392,25 +409,26 @@
         return false;
       },
       managedDownloadOriginal(version = this.managedSelectedVersion) { if (version) return this.managedDownload('/v1/versions/' + encodeURIComponent(version.id) + '/original', filename(version.name) + '_StatDescriptions.zip'); },
-      async managedCollect(team) {
+      async managedCollect(team, endWindow = true) {
         const version = this.managedSelectedVersion, key = this.managedCatalogScope;
         if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
-        const action = team.counts.saved ? 'Download and mark ended' : 'Mark ended — no saved files';
+        const action = endWindow ? (team.counts.saved ? 'Download and mark ended' : 'Mark ended — no saved files') : 'Download only';
+        const errorKey = endWindow ? 'collect' : 'downloadOnly';
         const operation = this.managedBeginOperation();
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try {
-          if (!await this.appConfirm(`Collect ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
+          if (endWindow && !await this.appConfirm(`Collect ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
           if (!current()) return;
           this.setBrowserWork?.('versions', { key: 'collection', label: 'Preparing translated ZIP', active: true, immediate: true });
           this._managedCollectionIds ||= new Map();
           const requestScope = this.managedWorkspaceScope('');
-          const requestKey = JSON.stringify([requestScope.accountId, requestScope.game, requestScope.branchId, version.id, team.language]);
-          const requestId = this._managedCollectionIds.get(requestKey) || await root.OfflineStore.getVersionCollectionRequest?.(requestScope, version.id, team.language) || id();
+          const requestKey = JSON.stringify([requestScope.accountId, requestScope.game, requestScope.branchId, version.id, team.language, endWindow]);
+          const requestId = this._managedCollectionIds.get(requestKey) || await root.OfflineStore.getVersionCollectionRequest?.(requestScope, version.id, team.language, endWindow) || id();
           if (!current()) return;
           this._managedCollectionIds.set(requestKey, requestId);
-          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, requestId);
+          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, requestId, endWindow);
           if (!current()) return;
-          let result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/teams/' + encodeURIComponent(team.language) + '/collections', { method: 'POST', body: { idempotencyKey: requestId }, timeout: 120000 });
+          let result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/teams/' + encodeURIComponent(team.language) + (endWindow ? '/collections' : '/downloads'), { method: 'POST', body: { idempotencyKey: requestId, ...(!endWindow ? { endWindow: false } : {}) }, timeout: 120000 });
           if (!current()) return;
           let collection = result.collection || result;
           while (['preparing', 'pending', 'building'].includes(collection.status)) {
@@ -426,11 +444,11 @@
           }
           if (!current()) return;
           this._managedCollectionIds.delete(requestKey);
-          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, null);
+          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, null, endWindow);
           if (!current()) return;
-          this.managedSetOperationError('collect', '');
+          this.managedSetOperationError(errorKey, '');
           await this.managedReadDetails(version.id, false); await this.refreshManagedVersions();
-        } catch (error) { if (!error.stale && current()) this.managedSetOperationError('collect', error); }
+        } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); }
         finally { this.managedFinishOperation(operation); }
       },
       managedDownloadCollection(team) { if (team.latestCollection?.id) return this.managedDownload('/v1/collections/' + encodeURIComponent(team.latestCollection.id) + '/archive', filename(this.managedSelectedVersion.name) + '_Translated_' + filename(team.language) + '.zip'); },

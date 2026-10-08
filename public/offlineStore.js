@@ -599,13 +599,13 @@
     if (text.length > 65536) throw new TypeError('Upload recovery metadata is too large.');
     return kvSet(key, JSON.parse(text));
   }
-  function collectionRequestKey(scope, versionId, language) {
+  function collectionRequestKey(scope, versionId, language, endWindow = true) {
     if (typeof versionId !== 'string' || !versionId || typeof language !== 'string' || !language) throw new TypeError('A collection requires its version and team.');
-    return 'version_collection_v1:' + catalogKey(scope) + ':' + JSON.stringify([versionId, language]);
+    return 'version_collection_v1:' + catalogKey(scope) + ':' + JSON.stringify(endWindow ? [versionId, language] : [versionId, language, 'download_only']);
   }
-  function getVersionCollectionRequest(scope, versionId, language) { return kvGet(collectionRequestKey(scope, versionId, language)); }
-  function setVersionCollectionRequest(scope, versionId, language, requestId) {
-    const key = collectionRequestKey(scope, versionId, language);
+  function getVersionCollectionRequest(scope, versionId, language, endWindow = true) { return kvGet(collectionRequestKey(scope, versionId, language, endWindow)); }
+  function setVersionCollectionRequest(scope, versionId, language, requestId, endWindow = true) {
+    const key = collectionRequestKey(scope, versionId, language, endWindow);
     if (requestId == null) return kvDel(key);
     if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('Invalid collection recovery identifier.');
     return kvSet(key, requestId);

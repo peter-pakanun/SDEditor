@@ -1,7 +1,10 @@
 .versionCatalog { max-width: 1600px; margin: 0 auto; padding: 28px; color: var(--color-font); }
-.versionCatalogHeader, .versionPanelHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.versionCatalogHeader, .versionPanelHeading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .versionCatalog h1 { margin: 0; font-size: 25px; }
 .versionCatalog h2 { margin: 0 0 12px; font-size: 18px; }
+.versionCatalog .versionPanelHeading h2 { margin: 0; }
+.versionPanelHeading { margin-bottom: 14px; }
+.versionTitleLine, .versionNameLine { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .versionCatalogHeader p, .versionPanelHeading p { margin: 8px 0; color: var(--ui-muted); }
 .versionChooserColumns { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; margin: 20px 0; }
 .versionPanel { background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 10px; padding: 20px; min-width: 0; }
@@ -11,16 +14,16 @@
 .versionPanel .primaryAction, .versionCatalogHeader .primaryAction, .versionModal .primaryAction { background: var(--ui-accent); color: var(--ui-on-accent); }
 .versionTableScroll { overflow-x: auto; }
 .versionTable { width: 100%; border-collapse: collapse; text-align: left; }
-.versionTable th { padding: 10px; color: var(--ui-muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--ui-border); }
-.versionTable td { padding: 12px 10px; border-bottom: 1px solid var(--ui-border); vertical-align: top; font-size: 13px; }
+.versionTable th { padding: 10px; color: var(--ui-muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--ui-border); vertical-align: middle; }
+.versionTable td { padding: 12px 10px; border-bottom: 1px solid var(--ui-border); vertical-align: middle; font-size: 13px; line-height: 1.4; }
 .versionTable tr.selected { background: var(--ui-accent-soft); }
 .versionCatalog table.versionTable:not(#table) tbody > tr:hover { background: var(--ui-accent-soft); }
 .versionCatalog table.versionTable:not(#table) th:hover { background: var(--color-bg2); }
 .versionTable small, .versionSelect small { display: block; color: var(--ui-muted); margin-top: 5px; }
 .versionTable .versionSelect { border: 0; padding: 0; background: transparent; text-align: left; width: 100%; }
 .versionSelect strong { overflow-wrap: anywhere; }
-.versionBadge { display: inline-block; border-radius: 4px; padding: 2px 6px; font-size: 11px; background: var(--ui-accent-soft); color: var(--ui-accent); margin-left: 5px; }
-.versionBadge.ended, .versionBadge.withdrawn { color: var(--ui-dropped); }
+.versionCatalog .versionBadge, .versionModal .versionBadge { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 4px; padding: 2px 6px; font-size: 11px; line-height: 1.35; font-weight: 600; vertical-align: middle; white-space: nowrap; background: var(--ui-accent-soft); color: var(--ui-accent); margin: 0; }
+.versionCatalog .versionBadge.ended, .versionCatalog .versionBadge.withdrawn { color: var(--ui-dropped); }
 .versionMuted { color: var(--ui-muted); font-size: 13px; line-height: 1.6; }
 .versionHash { color: var(--ui-muted); font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
 .versionError { color: var(--ui-error); padding: 12px; border: 1px solid var(--ui-error); border-radius: 6px; white-space: pre-wrap; }
@@ -28,20 +31,32 @@
 .versionNameField { display: flex; gap: 8px; margin: 8px 0; }
 .versionNameField input { min-width: 0; flex: 1; }
 .offlineVersion .versionActions { margin-top: 15px; }
-.versionStat { min-width: 85px; color: var(--ui-muted); }
-.versionStat.missing { color: var(--ui-missing); }.versionStat.saved { color: var(--ui-saved); }.versionStat.revised { color: var(--ui-revised); }
-.versionStatTrack { height: 6px; margin-top: 7px; background: var(--color-element-alt); border-radius: 4px; overflow: hidden; }
-.versionStatTrack span { display: block; height: 100%; background: currentColor; }
-.versionTeamActions { display: flex; gap: 6px; flex-wrap: wrap; max-width: 330px; }
+.versionProgress { width: 210px; max-width: 100%; padding: 3px 0; border-radius: 3px; }
+.versionProgressSummary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--ui-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.versionProgressSummary strong { color: var(--color-font); font-weight: 600; }
+.versionProgressTrack { display: flex; height: 8px; margin-top: 7px; background: var(--color-element-alt); border: 1px solid var(--ui-border); border-radius: 5px; overflow: hidden; }
+.versionProgressTrack > span { display: block; height: 100%; flex: none; }
+.versionProgressTrack .saved { background: var(--ui-saved); }.versionProgressTrack .revised { background: var(--ui-revised); }.versionProgressTrack .missing { background: var(--ui-missing); }
+.versionProgress.empty .versionProgressSummary strong { color: var(--ui-muted); }
+.versionProgress:focus-visible, .versionCatalog [tabindex="0"]:focus-visible, .versionModal .versionTeamChip:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+.teamVersionTable td:first-child { min-width: 125px; }
+.versionTeamActions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: 430px; }
 .versionTeamActions select { max-width: 250px; padding: 7px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); }
 .versionPanel .versionDropped { color: var(--ui-dropped); font-size: 12px; margin-top: 5px; }
-.versionPresence { display: flex; gap: 4px; flex-wrap: wrap; }
+.versionPresence { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; min-width: 44px; }
+.versionPresence small { margin: 0; }
 .versionModalBackdrop { z-index: 1400; overflow: auto; padding: 30px; }
 .versionModal { width: min(650px, 100%); max-height: calc(100vh - 80px); overflow-y: auto; border-radius: 10px; padding: 24px; background: var(--color-element); color: var(--color-font); box-shadow: var(--ui-shadow); }
 .versionModal label { display: block; margin: 16px 0 6px; }
 .versionModal input:not([type=checkbox]), .versionModal select { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element-alt); color: var(--color-font); }
 .versionDuplicate { margin: 14px 0; border-top: 1px solid var(--ui-border); padding-top: 14px; }
 .versionDuplicate pre { white-space: pre-wrap; max-height: 200px; overflow: auto; }
+.versionExistingWork { margin: 18px 0; padding: 14px; border: 1px solid var(--ui-border); border-radius: 6px; }
+.versionExistingWork h3 { margin: 0 0 8px; font-size: 14px; }
+.versionExistingWork p { margin: 8px 0 0; }
+.versionTeamChips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 10px; }
+.versionTeamChip { display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element-alt); font-size: 12px; line-height: 1.3; }
+.versionTeamChip small { color: var(--ui-muted); font-size: 11px; }
 .managedVersionBanner { display: flex; gap: 16px; align-items: center; padding: 9px 20px; background: var(--color-element); border-bottom: 1px solid var(--ui-border); font-size: 12px; }
 .managedVersionBanner span { flex: 1; color: var(--ui-muted); }.managedVersionBanner.ended span { color: var(--ui-warning); }
 @media (max-width: 1050px) { .versionChooserColumns { grid-template-columns: minmax(0, 1fr); } .versionCatalog { padding: 18px; } .versionCatalogHeader, .versionPanelHeading { flex-wrap: wrap; } }

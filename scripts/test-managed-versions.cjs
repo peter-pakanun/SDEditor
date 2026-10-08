@@ -103,7 +103,7 @@ test('filename sanitation preserves version identity and removes filesystem sepa
   assert.equal(Managed.filename('week\u0000name'), 'week_name');
 });
 
-test('deadline reminders are passive even after expiry and statistics remain independent', () => {
+test('deadline reminders stay passive and progress uses Missing plus Saved with Revised inside Saved', () => {
   const { app, events, requests } = harness();
   const before = copy(app.managedVersionDetails), deadline = '2026-10-11T20:00:00Z';
   app.managedNow = Date.parse(deadline) - 3 * 86400000;
@@ -114,10 +114,66 @@ test('deadline reminders are passive even after expiry and statistics remain ind
   assert.match(app.managedReminder(deadline), /deadline passed/);
   assert.deepEqual(app.managedVersionDetails, before);
   assert.equal(events.length, 0); assert.equal(requests.length, 0);
-  assert.equal(app.managedBarWidth(team(), 'missing'), '30%');
-  assert.equal(app.managedBarWidth(team(), 'saved'), '20%');
-  assert.equal(app.managedBarWidth(team(), 'revised'), '10%');
-  assert.equal(app.managedBarWidth(team({ counts: { loaded: 0, missing: 0 } }), 'missing'), '0%');
+  assert.deepEqual(copy(app.managedProgress(team())), { missing: 30, saved: 20, revised: 10, ordinarySaved: 10,
+    total: 50, percent: 40, missingWidth: '60%', savedWidth: '20%', revisedWidth: '20%' });
+  const noWork = app.managedProgress(team({ counts: { loaded: 100, missing: 0, saved: 0, revised: 0 } }));
+  assert.equal(noWork.total, 0); assert.equal(noWork.savedWidth, '0%'); assert.equal(noWork.revisedWidth, '0%'); assert.equal(noWork.missingWidth, '0%');
+  assert.match(app.managedProgressTooltip(team()), /Saved: 20 \/ 50 \(40%\)/);
+  assert.match(app.managedProgressTooltip(team()), /Revised: 10 \(included in Saved\)/);
+  assert.match(app.managedProgressTooltip(team()), /counts can overlap/);
+});
+
+test('pre-check tooltips describe existing standalone accepted work and disclose unavailable offline drafts', () => {
+  const { app } = harness();
+  const preview = { ...team(), isManaged: false, historyCount: 3, savedFileCount: 20, presence: [{ name: 'Fixture translator' }] };
+  const tooltip = app.managedExistingTeamTooltip(preview);
+  assert.match(tooltip, /Standalone \/ Offline import/); assert.match(tooltip, /Saved: 20/);
+  assert.match(tooltip, /Shared history: 3 changes/); assert.match(tooltip, /Online: Fixture translator/);
+  assert.match(tooltip, /Unuploaded offline work and local drafts are not visible/);
+  assert.match(app.managedExistingTeamTooltip({ ...preview, isManaged: true, presence: [] }), /Published room/);
+});
+
+test('Download only skips ending confirmation and sends the explicit non-ending snapshot request', async () => {
+  const before = team(), { app, events, requests } = harness({ request: async () => ({ collection: {
+    id: 'download-1', status: 'ready', downloadReady: true, fileCount: 20, endWindow: false, kind: 'download_only' } }) });
+  app.managedDownload = async (route, name) => { events.push({ type: 'collectionDownload', route, name }); return true; };
+  app.managedReadDetails = async () => {}; app.refreshManagedVersions = async () => {};
+  await app.managedCollect(before, false);
+  assert.equal(requests[0].route, '/v1/versions/weekly-1/teams/Thai/downloads');
+  assert.equal(requests[0].options.body.endWindow, false);
+  assert.equal(events.some(event => event.type === 'confirm'), false);
+  assert.equal(events.filter(event => event.type === 'collectionDownload').length, 1);
+  assert.equal(before.ended, false); assert.equal(before.latestCollection, null);
+});
+
+test('Download only fails safely on an older API without falling back to an ending collection', async () => {
+  const { app, requests } = harness({ request: async () => { throw Object.assign(new Error('Download-only is unavailable on this API.'), { status: 404 }); } });
+  await app.managedCollect(team(), false);
+  assert.equal(requests.length, 1); assert.match(requests[0].route, /\/downloads$/);
+  assert.match(app.managedVisibleError, /unavailable/); assert.equal(app.managedVersionDetails.teams[0].ended, false);
+});
+
+test('Download only retries use their own durable identifier across reloads without consuming an ending collection request', async () => {
+  const durable = new Map();
+  const key = (scope, versionId, language, endWindow = true) => JSON.stringify([scope.accountId, scope.game, scope.branchId, versionId, language, endWindow]);
+  const storage = {
+    async getVersionCollectionRequest(scope, versionId, language, endWindow) { return durable.get(key(scope, versionId, language, endWindow)); },
+    async setVersionCollectionRequest(scope, versionId, language, requestId, endWindow) {
+      const selected = key(scope, versionId, language, endWindow);
+      if (requestId == null) durable.delete(selected); else durable.set(selected, requestId);
+    },
+  };
+  const first = harness({ storage, request: async () => { throw new Error('Download snapshot acknowledgement lost'); } });
+  await first.app.managedCollect(team(), false);
+  const firstRequest = first.requests[0].options.body.idempotencyKey;
+  const endingKey = key(first.app.managedWorkspaceScope(''), 'weekly-1', 'Thai', true);
+  durable.set(endingKey, 'existing-ending-request');
+  const reloaded = harness({ storage, request: async () => ({ collection: { id: 'download-retry', status: 'ready', downloadReady: true, fileCount: 20, endWindow: false } }) });
+  reloaded.app.managedDownload = async () => true; reloaded.app.managedReadDetails = async () => {}; reloaded.app.refreshManagedVersions = async () => {};
+  await reloaded.app.managedCollect(team(), false);
+  assert.equal(reloaded.requests[0].options.body.idempotencyKey, firstRequest);
+  assert.equal(reloaded.requests[0].options.body.endWindow, false);
+  assert.equal(durable.size, 1); assert.equal(durable.get(endingKey), 'existing-ending-request');
 });
 
 test('matching published baseline adopts only metadata while retaining active drafts and local alias', async () => {

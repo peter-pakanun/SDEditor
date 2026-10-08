@@ -60,6 +60,9 @@ async function run() {
   const source = { filepath: 'fixture/fire.txt', filedir: 'fixture', filename: 'fire.txt', name: 'fire',
     stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], Thai: ['ความเสียหายไฟ'], German: ['Feuerschaden'] } };
   const zip = new JSZip(); zip.file(source.filepath, codec.descEncode(source), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+  const missingSource = { ...source, filepath: 'fixture/cold.txt', filename: 'cold.txt', name: 'cold', stats: ['cold_damage'],
+    translations: { English: ['Cold damage'], German: ['Kälteschaden'] } };
+  zip.file(missingSource.filepath, codec.descEncode(missingSource), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
   const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   let browser;
   const failures = [], results = [];
@@ -87,8 +90,42 @@ async function run() {
       }, { account, secret });
       await page.getByRole('region', { name: 'Source versions' }).waitFor();
     };
+    const importOffline = async page => {
+      const chooser = page.waitForEvent('filechooser');
+      await page.getByRole('button', { name: 'Import previous version', exact: true }).click();
+      await (await chooser).setFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
+      await page.locator('#appDialogInput').fill('YES');
+      await page.locator('.appDialogConfirm').click();
+      await page.locator('.appDialogConfirm').filter({ hasText: 'Proceed' }).click();
+      await page.waitForFunction(() => window.__managedFixtureApp.sourceLoaded && !window.__managedFixtureApp._importingSource);
+    };
+    const checkTooltip = async (page, target, expected) => {
+      assert.equal(await target.getAttribute('title'), null, 'Uses the shared tooltip, without a native title');
+      await target.hover(); await page.getByRole('tooltip').waitFor();
+      assert.match(await page.getByRole('tooltip').textContent(), expected);
+      await target.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
+      assert.equal(await target.evaluate(element => element === document.activeElement), true, 'Tooltip target is keyboard reachable');
+      await page.getByRole('tooltip').waitFor(); assert.match(await page.getByRole('tooltip').textContent(), expected);
+    };
+    const checkTranslatedDownload = async download => {
+      assert.equal(download.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
+      const collectedZip = await JSZip.loadAsync(readFileSync(await download.path()));
+      assert.deepEqual(Object.values(collectedZip.files).filter(file => !file.dir).map(file => file.name), [source.filepath]);
+      const collectedFile = await collectedZip.file(source.filepath).async('uint8array');
+      assert.deepEqual(Array.from(collectedFile.slice(0, 2)), [255, 254]);
+      const collectedDesc = codec.parseText(source.filepath, codec.decodeUTF16(collectedFile), 'Thai', { strict: true });
+      assert.deepEqual(collectedDesc.translations.Thai, ['ความเสียหายไฟที่แก้ไข']);
+      assert.deepEqual(collectedDesc.translations.English, source.translations.English);
+    };
     const [manager, translator] = pages;
     await bootstrap(manager, 'manager');
+    await bootstrap(translator, 'thai'); await importOffline(translator);
+    await translator.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
+    const standaloneRoomId = await translator.evaluate(() => window.__managedFixtureApp._collaboration.snapshot().roomId);
+    await translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), source.filepath);
+    await translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first().fill('ความเสียหายไฟที่แก้ไข');
+    await translator.getByRole('button', { name: 'Save & close', exact: true }).click();
+    await translator.evaluate(async () => { const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry(); });
     await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
     await manager.locator('#managerUploadName').fill('2026-10-05_POE2');
     await manager.locator('#managerUploadArchive').setInputFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
@@ -96,17 +133,44 @@ async function run() {
     await manager.waitForFunction(() => window.__managedFixtureApp.managedUpload?.status === 'prepared' || window.__managedFixtureApp.managedUploadError);
     const uploadError = await manager.evaluate(() => window.__managedFixtureApp.managedUploadError);
     assert.equal(uploadError, '', 'Manager upload preparation');
+    const existingTeam = await manager.evaluate(() => window.__managedFixtureApp.managedUpload.existingTeams.find(team => team.language === 'Thai'));
+    assert.equal(existingTeam.roomId, standaloneRoomId); assert.equal(existingTeam.isManaged, false);
+    assert.equal(existingTeam.workStarted, true); assert.equal(existingTeam.savedFileCount, 1);
+    assert.ok(existingTeam.historyCount > 0); assert.ok(existingTeam.presence.length > 0);
+    await checkTooltip(manager, manager.locator('.versionTeamChip').filter({ hasText: 'Thai' }), /Standalone \/ Offline import/);
+    assert.match(await manager.getByRole('tooltip').textContent(), /Shared history: [1-9]/);
+    await manager.screenshot({ path: join(directory, 'prepared-existing-work.png'), fullPage: true });
     await manager.getByRole('button', { name: 'Publish to all teams', exact: true }).waitFor({ timeout: 30000 });
     await manager.getByRole('button', { name: 'Publish to all teams', exact: true }).click();
     await manager.locator('.teamVersionTable tbody tr').first().waitFor();
     assert.equal(await manager.locator('.teamVersionTable tbody tr').count(), 12);
     const version = await manager.evaluate(() => JSON.parse(JSON.stringify(window.__managedFixtureApp.managedSelectedVersion)));
     assert.equal(version.name, '2026-10-05_POE2'); assert.equal(version.isHead, true);
+    const thaiRow = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: /^Thai$/ }) });
+    await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails?.teams.find(team => team.language === 'Thai')?.counts.saved === 1);
+    assert.equal(await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').roomId), standaloneRoomId);
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await manager.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await manager.keyboard.press('Tab');
       assert.equal(await manager.locator('html').getAttribute('data-theme'), theme);
-      assert.equal(await manager.locator('.versionStatTrack').count(), 36);
+      assert.equal(await manager.locator('.versionProgressTrack').count(), 12);
+      assert.equal(await manager.locator('.teamVersionTable thead th').count(), 5);
+      const progress = await thaiRow.locator('.versionProgress').evaluate(element => ({
+        saved: element.getAttribute('aria-valuenow'), total: element.getAttribute('aria-valuemax'),
+        widths: Array.from(element.querySelectorAll('.versionProgressTrack > span')).map(segment => parseFloat(segment.style.width)),
+      }));
+      assert.deepEqual(progress, { saved: '1', total: '2', widths: [0, 50, 50] }, 'Revised remains part of Saved, using Missing + Saved denominator');
+      const layout = await manager.evaluate(() => ({
+        alignment: Array.from(document.querySelectorAll('.versionTable th, .versionTable td')).map(cell => getComputedStyle(cell).verticalAlign),
+        badges: Array.from(document.querySelectorAll('.versionCatalog .versionBadge')).map(badge => ({ height: badge.getBoundingClientRect().height,
+          minWidth: getComputedStyle(badge).minWidth, fontSize: parseFloat(getComputedStyle(badge).fontSize) })),
+        nativeTitles: document.querySelectorAll('.versionCatalog [title]').length,
+      }));
+      assert.ok(layout.alignment.every(alignment => alignment === 'middle'), 'Headers and data cells center vertically in ' + theme);
+      assert.ok(layout.badges.every(badge => badge.height <= 22 && badge.minWidth === '0px' && badge.fontSize <= 11), 'Compact badges in ' + theme);
+      assert.equal(layout.nativeTitles, 0, 'Dashboard uses shared tooltips only in ' + theme);
+      await checkTooltip(manager, manager.locator('.onlineVersions time').first(), /New Zealand.*local/);
+      await checkTooltip(manager, thaiRow.locator('.versionProgress'), /Revised: 1 \(included in Saved\)/);
       assert.equal(await manager.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'No page overflow in ' + theme);
       await manager.locator('.teamVersionTable tbody tr').nth(2).hover();
       const hoverColors = await manager.evaluate(() => {
@@ -117,12 +181,15 @@ async function run() {
       assert.equal(hoverColors.actual, hoverColors.expected, 'Hovered row uses soft theme background in ' + theme);
       await manager.screenshot({ path: join(directory, 'dashboard-' + theme + '.png'), fullPage: true });
     }
-    results.push('Manager upload/publish, 12 teams, independent progress bars, all four desktop themes, keyboard focus');
-    await bootstrap(translator, 'thai');
+    results.push('Prepared upload discovers matching standalone Saved work/history/presence and reuses its room; 12-team combined progress, compact aligned badges, hover/keyboard tooltips in four themes');
+    await translator.evaluate(() => window.__managedFixtureApp.showVersionChooser());
     assert.equal(await translator.locator('.teamVersionTable tbody tr').count(), 1);
     assert.equal(await translator.getByRole('button', { name: 'Upload next version', exact: true }).count(), 0);
     await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
-    await translator.waitForFunction(() => window.__managedFixtureApp.sourceLoaded && window.__managedFixtureApp.sourceIdentity);
+    await translator.waitForFunction(() => {
+      const vm = window.__managedFixtureApp;
+      return vm.sourceLoaded && vm.sourceIdentity && !vm.managedVersionBusy && !vm.versionStorageLoading && !vm.versionChooserVisible;
+    });
     await translator.evaluate(async filepath => { const vm = window.__managedFixtureApp; vm.inlineEditor = false; await vm.editFile(filepath); }, source.filepath);
     const field = translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first();
     await field.fill('ความเสียหายไฟที่แก้ไข');
@@ -141,19 +208,22 @@ async function run() {
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails?.teams.find(team => team.language === 'Thai')?.presence.length > 0);
     assert.equal(await manager.evaluate(() => !!window.__managedFixtureApp._collaboration), false, 'Dashboard does not join team editing rooms');
     results.push('Translator language isolation, original download/open, keyboard translation save, real worker/API synchronization');
-    const thaiRow = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: /^Thai$/ }) });
+    const beforeDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
+    const onlyDownload = manager.waitForEvent('download');
+    await thaiRow.getByRole('button', { name: 'Download only', exact: true }).click();
+    await checkTranslatedDownload(await onlyDownload);
+    await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
+    const afterDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
+    assert.equal(afterDownloadOnly.ended, beforeDownloadOnly.ended);
+    assert.deepEqual(afterDownloadOnly.latestCollection, beforeDownloadOnly.latestCollection, 'Download only preserves ending collection/cutoff');
+    const downloadSnapshot = afterDownloadOnly.collections.find(collection => collection.kind === 'download_only');
+    assert.ok(downloadSnapshot?.downloadReady); assert.equal(downloadSnapshot.endWindow, false);
+    assert.equal(await thaiRow.locator('.versionBadge').textContent(), 'Open');
+    results.push('Download only retains a Saved-only ZIP snapshot without changing the window or latest ending collection');
     const download = manager.waitForEvent('download');
     await thaiRow.getByRole('button', { name: 'Download and mark ended', exact: true }).click();
     await manager.locator('.appDialogConfirm').click();
-    const collected = await download;
-    assert.equal(collected.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
-    const collectedZip = await JSZip.loadAsync(readFileSync(await collected.path()));
-    assert.deepEqual(Object.values(collectedZip.files).filter(file => !file.dir).map(file => file.name), [source.filepath]);
-    const collectedFile = await collectedZip.file(source.filepath).async('uint8array');
-    assert.deepEqual(Array.from(collectedFile.slice(0, 2)), [255, 254]);
-    const collectedDesc = codec.parseText(source.filepath, codec.decodeUTF16(collectedFile), 'Thai', { strict: true });
-    assert.deepEqual(collectedDesc.translations.Thai, ['ความเสียหายไฟที่แก้ไข']);
-    assert.deepEqual(collectedDesc.translations.English, source.translations.English);
+    await checkTranslatedDownload(await download);
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').ended);
     await translator.evaluate(async () => { await window.__managedFixtureApp.managedRefreshActive(); });
     await translator.locator('.managedVersionBanner').filter({ hasText: 'Ended' }).waitFor();
@@ -212,13 +282,7 @@ async function run() {
       await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
       await vm.activateGameVersion('poe2', { checkMigration: false });
     });
-    const chooser = offline.waitForEvent('filechooser');
-    await offline.getByRole('button', { name: 'Import previous version', exact: true }).click();
-    await (await chooser).setFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
-    await offline.locator('#appDialogInput').fill('YES');
-    await offline.locator('.appDialogConfirm').click();
-    await offline.locator('.appDialogConfirm').filter({ hasText: 'Proceed' }).click();
-    await offline.waitForFunction(() => window.__managedFixtureApp.sourceLoaded && !window.__managedFixtureApp._importingSource);
+    await importOffline(offline);
     await offline.evaluate(() => window.__managedFixtureApp.showVersionChooser());
     await offline.locator('#offlineVersionName').fill('Local reference export');
     await offline.locator('#offlineVersionName').press('Enter');

@@ -457,9 +457,11 @@ test('upload and collection recovery identifiers survive a new store instance an
   const scope = localScope('', 'manager'), upload = { id: 'durable-upload', name: 'Weekly version', state: 'preparing' };
   await loaded.store.setVersionUpload(scope, upload);
   await loaded.store.setVersionCollectionRequest(scope, 'version-one', 'Thai', 'collect-one');
+  await loaded.store.setVersionCollectionRequest(scope, 'version-one', 'Thai', 'download-one', false);
   const reloaded = loadStore(fixture);
   assert.deepEqual(copy(await reloaded.store.getVersionUpload(scope)), upload);
   assert.equal(await reloaded.store.getVersionCollectionRequest(scope, 'version-one', 'Thai'), 'collect-one');
+  assert.equal(await reloaded.store.getVersionCollectionRequest(scope, 'version-one', 'Thai', false), 'download-one');
   assert.equal(await reloaded.store.getVersionUpload(localScope('', 'other-manager')), undefined);
   assert.equal(await reloaded.store.getVersionUpload(localScope('', 'manager', 'release')), undefined);
   assert.equal(await reloaded.store.getVersionCollectionRequest(scope, 'version-one', 'German'), undefined);
@@ -468,6 +470,9 @@ test('upload and collection recovery identifiers survive a new store instance an
   await reloaded.store.setVersionCollectionRequest(scope, 'version-one', 'Thai', null);
   assert.equal(await loaded.store.getVersionUpload(scope), undefined);
   assert.equal(await loaded.store.getVersionCollectionRequest(scope, 'version-one', 'Thai'), undefined);
+  assert.equal(await loaded.store.getVersionCollectionRequest(scope, 'version-one', 'Thai', false), 'download-one');
+  await reloaded.store.setVersionCollectionRequest(scope, 'version-one', 'Thai', null, false);
+  assert.equal(await loaded.store.getVersionCollectionRequest(scope, 'version-one', 'Thai', false), undefined);
 });
 
 test('v7 single-slot writers close for v8 and cannot overwrite indexed version state afterward', async () => {
