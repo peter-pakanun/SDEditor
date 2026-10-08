@@ -265,6 +265,8 @@ const config = Vue.defineComponent({
       editorVisible: false,
       editorLoading: false,
       editorLoadError: '',
+      rawFilePreview: null,
+      rawFileMode: 'original',
       editorDictionaryRevision: 0,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
@@ -534,7 +536,13 @@ const config = Vue.defineComponent({
       if (this.sideTab === 'history') this.refreshHistory();
     },
     editorVisible(visible) {
-      if (!visible) this.endDictionaryEdit();
+      if (!visible) {
+        this.endDictionaryEdit();
+        this.closeRawFileDialog();
+      }
+    },
+    rawFileScope(scope) {
+      if (this.rawFilePreview && scope !== this._rawFileScope) this.closeRawFileDialog();
     },
     theme(newTheme) {
       // Legacy settings can differ from the active local profile during startup.
@@ -578,6 +586,13 @@ const config = Vue.defineComponent({
   },
   computed: {
     editorSessionActive() { return this.editorVisible || !!this.inlineActive; },
+    rawFileText() {
+      return this.rawFilePreview?.[this.rawFileMode] || '';
+    },
+    rawFileScope() {
+      return JSON.stringify([this.cloudProfileId || this.cloudUser?.id || 'guest', this.gameVersion,
+        this.branchId || 'default', this.sourceIdentity, this.lang, this.editorCurrentEditingDesc?.filepath]);
+    },
     editorDroppedConflict() {
       return this.localDescs?.droppedConflicts?.[this.lang]?.[this.editorCurrentEditingDesc?.filepath] || null;
     },
@@ -2398,6 +2413,53 @@ const config = Vue.defineComponent({
         this.diagnosticScanWarningFileCount += Number(next.hasDiagnosticWarning) - Number(previous.hasDiagnosticWarning);
       }
       return refreshed;
+    },
+    openRawFileDialog() {
+      if (!this.editorVisible || this.editorLoading || this.editorLoadError || this.editorSaving || this.navigationBusy) return;
+      const dialog = this.$refs.rawFileDialog;
+      const desc = this.editorCurrentEditingDesc;
+      const original = desc && this.workspaceSourceFile(desc.filepath);
+      if (!dialog || dialog.open || !original) return;
+      const translations = this.serializeEditorTranslations();
+      const applied = { ...original, translations: { ...original.translations, [this.lang]: translations } };
+      // Render both views through the export encoder without changing source or saved text.
+      const originalBytes = descEncode(original), translatedBytes = descEncode(applied);
+      this._rawFileDownloadBuffers = { original: originalBytes, translated: translatedBytes };
+      this.rawFilePreview = {
+        filepath: desc.filepath,
+        filename: desc.filename || desc.filepath.split('/').pop(),
+        language: this.lang,
+        original: window.StatDescCodec.decodeUTF16(originalBytes),
+        translated: window.StatDescCodec.decodeUTF16(translatedBytes),
+      };
+      this.rawFileMode = 'original';
+      this._rawFileScope = this.rawFileScope;
+      this._rawFileReturnFocus = document.activeElement;
+      this.closeHlPopup();
+      this.hideTooltip();
+      dialog.showModal();
+      this.$nextTick(() => this.$refs.rawFileMode?.focus());
+    },
+    closeRawFileDialog() {
+      const dialog = this.$refs.rawFileDialog;
+      if (dialog?.open) dialog.close();
+    },
+    rawFileDialogClosed() {
+      const target = this._rawFileReturnFocus;
+      const restoreFocus = this.editorVisible && this._rawFileScope === this.rawFileScope;
+      this._rawFileReturnFocus = null;
+      this._rawFileScope = null;
+      this._rawFileDownloadBuffers = null;
+      this.rawFilePreview = null;
+      if (restoreFocus && target?.isConnected && typeof target.focus === 'function') target.focus({ preventScroll: true });
+    },
+    rawFileDialogKeydown(event) {
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyS') event.preventDefault();
+    },
+    downloadRawFile() {
+      const bytes = this._rawFileDownloadBuffers?.[this.rawFileMode];
+      if (!this.rawFilePreview || !bytes || this._rawFileScope !== this.rawFileScope) return;
+      saveAs(new Blob([bytes], { type: 'text/plain;charset=utf-16le' }), this.rawFilePreview.filename);
     },
     openDiagnosticScanDialog() {
       if ((this.inlineActive || this._inlineFinishing) && this.finishInlineSession) {
@@ -4668,6 +4730,10 @@ const config = Vue.defineComponent({
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
       if (window.AppDialogs?.isOpen) return;
+      if (this.$refs.rawFileDialog?.open) {
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
+        return;
+      }
       if (this.editorSessionActive && (this.editorLoading || this.editorLoadError)) {
         if (e.key === 'Escape') { e.preventDefault(); this.editorExit(); }
         else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
@@ -6122,6 +6188,7 @@ const config = Vue.defineComponent({
     },
     beginEditorOpen(filepath, returnToFileList = false) {
       if (this._reconcilingImport || this._importingSource) return null;
+      this.closeRawFileDialog();
       this.consistencyResolutionNotice = '';
       let desc = this.getDescByFilepath(filepath);
       if (!desc) {
@@ -6231,6 +6298,15 @@ const config = Vue.defineComponent({
       let caretOffset = caretOffsetRaw == null ? null : Number(caretOffsetRaw);
       this.getEditorRef("translation", editorIndex, editorBlock?.isTable ? columnIndex : null)?.focus?.();
       this.insertTranslationText(editorIndex, text, { columnIndex, caretOffset: Number.isInteger(caretOffset) ? caretOffset : undefined });
+    },
+    async copyEditorFilename() {
+      const filename = this.editorCurrentEditingDesc?.filename;
+      if (!filename) return;
+      try {
+        await navigator.clipboard.writeText(filename);
+      } catch (error) {
+        this.appAlert('Could not copy the filename. Select the filename in the file path and copy it manually.');
+      }
     },
     copySpanToClipboard(e) {
       navigator.clipboard.writeText(e.target.getAttribute('datavalue'))

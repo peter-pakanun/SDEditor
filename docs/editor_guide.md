@@ -115,6 +115,8 @@ Leaving an inline file attempts to promote its draft through the same save check
 
 Click the filename to open the full editor for Dropped approval/comparison, competing dropped copies, history restoration, Regex tools and **Compare & resolve**. Inline editing never approves a Dropped copy automatically. Shared translation conflicts, competing local draft copies, and drafts whose committed base changed need explicit comparison and resolution before promotion. Opening shared-conflict review from an inline row first carries its draft into the full editor, then opens the conflict comparison.
 
+In the full editor, **Show raw file** beside **Close** opens a read-only text area. Choose **Original zipped txt** to render the original parsed baseline or **With translation applied** to render the current language's editor text, including unsaved changes. Both views use the ZIP export format. **Download .txt** downloads the selected view with the original filename in UTF-16LE with a BOM. Viewing or downloading does not stage the draft. **Escape** closes the modal and returns to the editor.
+
 ### Scanning Diagnostics
 
 If a **Resolve conflicts** button appears in the main action header, it opens shared Dictionary conflicts. Choose local content on the left or remote content on the right for **Alternates** and **TL note**, review the center result, and save it. Independent changes merge automatically. See [Resolve Dictionary Conflicts](cloud_backup.md#resolve-dictionary-conflicts).

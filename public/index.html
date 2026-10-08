@@ -333,7 +333,7 @@
         <div v-if="managedVersionDetails?.teams?.length" class="versionTableScroll"><table class="versionTable teamVersionTable"><thead><tr><th>Language team</th><th>Progress</th><th>Online</th><th>Actions</th></tr></thead><tbody>
           <tr v-for="team in managedVersionDetails.teams" :key="team.language" :data-language="team.language" @dblclick="managedOpenTeam(managedSelectedVersion, team, $event)"><td><span class="versionNameLine"><a class="teamEditorLink" href="#table" @click.prevent.stop="managedOpenTeam(managedSelectedVersion, team)" @dblclick.stop :aria-disabled="managedVersionBusy ? 'true' : undefined"><strong>{{ team.language }}</strong></a><span v-if="team.ended" class="versionBadge ended">Ended</span></span><small>{{ team.counts.loaded }} files</small><small v-if="team.changesAfterCollection" class="versionDropped">Changes since collection</small><button v-if="team.counts.dropped" class="versionDropped" @click.stop="managedOpenDropped(team)" @dblclick.stop>{{ team.counts.dropped }} Dropped</button><button v-if="team.recoveries?.length" class="versionDropped" @click.stop="managedShowRecoveries(team)" @dblclick.stop>{{ team.recoveries.length }} preserved copies</button></td>
             <td><div class="versionProgress" :class="{ empty: !managedProgress(team).total }" tabindex="0" role="meter" v-tooltip="managedProgressTooltip(team)" :aria-label="managedProgressTooltip(team)" :aria-valuenow="managedProgress(team).saved" :aria-valuemax="Math.max(1, managedProgress(team).total)" aria-valuemin="0">
-              <div class="versionProgressSummary"><strong>{{ managedProgress(team).total ? managedProgress(team).saved + ' / ' + managedProgress(team).total + ' Saved' : '—' }}</strong><span v-if="managedProgress(team).total">{{ managedProgress(team).percent }}%</span></div>
+              <div class="versionProgressSummary"><strong>{{ managedProgress(team).total ? managedProgress(team).saved + ' / ' + managedProgress(team).total : '—' }}</strong><span v-if="managedProgress(team).total">{{ managedProgress(team).percent }}%</span></div>
               <div class="versionProgressTrack" aria-hidden="true"><span class="saved" :style="{ width: managedProgress(team).savedWidth }"></span><span class="revised" :style="{ width: managedProgress(team).revisedWidth }"></span><span class="missing" :style="{ width: managedProgress(team).missingWidth }"></span></div>
             </div></td>
             <td><div class="versionPresence"><span v-for="peer in team.presence" :key="peer.sessionId || peer.id" class="collaborationAvatar" :style="{ '--collaboration-color': collaborationPeerColor(peer) }" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(peer)" v-tooltip="collaborationParticipantLabel(peer)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(peer) }}</span></span><small v-if="!team.presence?.length">—</small></div></td>
@@ -658,10 +658,16 @@
           <button class="btnPrimary" @click="editorSave" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy" title="Save this translation and close the file">{{ editorSaving ? 'Saving…' : 'Save & close' }}</button>
           <button @click="discardEditorDraft" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Discard the local draft and restore committed text">Discard draft</button>
           <button v-if="editorHasStagedTranslation" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Delete the staged save and restore the original ZIP translation">Delete staged translation</button>
+          <button type="button" @click="openRawFileDialog" :disabled="editorLoading || !!editorLoadError || editorSaving || navigationBusy" title="View and download this file as text">Show raw file</button>
           <button @click="editorExit" title="Close the file (Esc); keep its local draft">Close</button>
         </div>
         <div>
-          <h3>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</h3>
+          <h3 class="editorFileIdentity">
+            <span>📁 Filepath: {{ editorCurrentEditingDesc.filepath }}</span>
+            <button type="button" class="editorCopyFilename" @click="copyEditorFilename" aria-label="Copy filename" title="Copy filename">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path></svg>
+            </button>
+          </h3>
           <p v-if="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</p>
           <div class="collaborationEditorStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
             <div class="collaborationStatus">
@@ -1029,6 +1035,25 @@
           <div class="hlPopupTlnoteText" :lang="translationEditorBcp47">{{ hlPopupTlnote }}</div>
         </aside>
       </div>
+
+    <dialog ref="rawFileDialog" class="rawFileDialog" aria-labelledby="rawFileDialogTitle" aria-describedby="rawFileDialogDescription" @cancel.prevent="closeRawFileDialog" @close="rawFileDialogClosed" @keydown.stop="rawFileDialogKeydown">
+      <template v-if="rawFilePreview">
+        <header class="rawFileHeading">
+          <div><h2 id="rawFileDialogTitle">Raw file</h2><p class="rawFilePath">{{ rawFilePreview.filepath }}</p></div>
+          <button type="button" @click="closeRawFileDialog" aria-label="Close raw file (Esc)">Close</button>
+        </header>
+        <div class="rawFileControls">
+          <label for="rawFileMode">Text version</label>
+          <select id="rawFileMode" ref="rawFileMode" v-model="rawFileMode">
+            <option value="original">Original zipped txt</option>
+            <option value="translated">With translation applied</option>
+          </select>
+          <button type="button" @click="downloadRawFile">Download .txt</button>
+        </div>
+        <p id="rawFileDialogDescription">{{ rawFileMode === 'original' ? 'Rendered from the original parsed source.' : 'Rendered with the current ' + rawFilePreview.language + ' editor translation, including unsaved changes.' }}</p>
+        <textarea class="rawFileText" :value="rawFileText" readonly spellcheck="false" wrap="off" aria-label="Raw file text"></textarea>
+      </template>
+    </dialog>
 
     <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @close="diagnosticScanDialogClosed" @keydown.stop="diagnosticScanDialogKeydown">
       <form class="diagnosticScanForm" @submit.prevent="startDiagnosticScan">
