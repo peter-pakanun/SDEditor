@@ -42,6 +42,9 @@
 .inlineFileActions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
 .inlineFileActions button { padding: 0; border: 0; background: transparent; color: var(--ui-accent); font-size: 11px; text-align: left; line-height: 1.5; text-decoration: underline; text-underline-offset: 2px; }
 .inlineFileActions .inlineReviewLink { color: var(--ui-dropped); }
+.inlineDraftTools { display: flex; align-items: baseline; gap: 12px; margin-top: 8px; white-space: nowrap; }
+.inlineDraftTools > .fileDraftLabel { margin-top: 0; flex: none; }
+.inlineDraftTools > .inlineFileActions { flex-direction: row; align-items: baseline; gap: 12px; margin-top: 0; flex: none; }
 .inlineFileFindings { list-style: none; margin: 8px 0 0; padding: 0; font-size: 11px; }
 .inlineFileFindings li + li { margin-top: 5px; }
 .inlineFileFindings .error, .inlineFileFinding.error { color: var(--ui-missing); }

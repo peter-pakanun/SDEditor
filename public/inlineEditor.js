@@ -13,6 +13,12 @@
     },
     computed: {
       inlineDraftCount() { return Object.keys(this.inlineDraftRows).length; },
+      inlineDraftMatchesStaged() {
+        const desc = this.editorCurrentEditingDesc, workspace = this.localDescs;
+        if (!this.inlineActive || !desc?.filepath || (workspace?.sourceHash && workspace.sourceHash !== this.sourceIdentity)) return false;
+        const staged = root.WorkspaceState?.workspaceFile(workspace, desc, this.lang)?.staged;
+        return !!staged && equal(this.serializeEditorTranslations(), staged.translations);
+      },
       draftRecoveryItems() {
         return this.draftRecords.flatMap(record => [record, ...(record.conflicts || [])].filter(item => item.state === 'active')
           .map(item => ({ ...item, key: record.key, conflict: item !== record,
