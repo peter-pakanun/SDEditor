@@ -85,7 +85,14 @@
       managedCatalogScope() { return JSON.stringify([this.cloudProfileId || 'guest', this.cloudSignedIn, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudUser?.language, this.cloudUser?.isAdmin, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId]); },
       managedVisibleVersions() { return this.managedCatalogAccess ? this.managedVersions.filter(v => this.managedShowWithdrawn || v.status !== 'withdrawn').slice().sort((a, b) => Number(b.isHead) - Number(a.isHead) || String(b.createdAt).localeCompare(String(a.createdAt))) : []; },
       managedSelectedVersion() { return this.managedCatalogAccess ? (this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedVersionDetails.version : null) || this.managedVersions.find(v => v.id === this.selectedManagedVersionId) || null : null; },
-      managedSelectedDetails() { return this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedScopedDetails(this.managedVersionDetails) : null; },
+      managedSelectedDetails() {
+        const details = this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedScopedDetails(this.managedVersionDetails) : null;
+        details?.teams.sort((a, b) => {
+          const first = this.managedProgress(a), second = this.managedProgress(b);
+          return (second.total ? second.saved / second.total : 0) - (first.total ? first.saved / first.total : 0);
+        });
+        return details;
+      },
       managedVisibleRecoveryTeam() { return this.managedCatalogAccess && (this.cloudCanAccessAllLanguages || this.managedRecoveryTeam?.language === this.managedSingleLanguage) ? this.managedRecoveryTeam : null; },
       managedActiveVersion() {
         if (!this.managedCatalogAccess) return null;
