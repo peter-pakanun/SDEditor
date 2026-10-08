@@ -129,6 +129,7 @@
         const scope = this.editorDraftScope('');
         if (!scope.game || !scope.language) { this.inlineDraftRows = {}; this.draftRecords = []; return; }
         const run = this._draftLoadRun = (this._draftLoadRun || 0) + 1;
+        this._draftListingPending = run;
         const inScope = record => record.profile === scope.profile && record.game === scope.game && (record.branchId || 'default') === scope.branchId && record.language === scope.language;
         let records, readError;
         try {
@@ -139,6 +140,7 @@
           readError = error;
           records = this.draftRecords.filter(inScope);
         }
+        if (this._draftListingPending === run) this._draftListingPending = null;
         if (run !== this._draftLoadRun || !this.draftScopeCurrent(scope)) return;
         records = records.slice();
         for (const [key, session] of this._retainedDraftSessions || []) {
@@ -159,6 +161,30 @@
         this._fileSearchSnapshot = null;
         this.filterDesc?.();
         if (readError) this.inlineDraftError = 'Could not load local drafts. ' + readError.message;
+      },
+      publishEditorDraftRecord(session, record) {
+        if (!this.draftScopeCurrent(session.scope)) return;
+        // The write/read acknowledgement already contains this key's current
+        // record. Listing every draft again duplicates storage and list work.
+        const inScope = value => value.profile === session.scope.profile && value.game === session.scope.game
+          && (value.branchId || 'default') === session.scope.branchId && value.language === session.scope.language;
+        const records = (this.draftRecords || []).filter(value => inScope(value) && value.key !== session.key);
+        const visible = session.pendingRecord || record;
+        if (visible && (visible.state === 'active' || visible.conflicts?.length)) records.push(copy(visible));
+        this.draftRecords = records;
+        const rows = { ...this.inlineDraftRows };
+        if (visible?.state === 'active' && visible.sourceHash === session.scope.sourceHash) rows[session.scope.filepath] = copy(visible);
+        else delete rows[session.scope.filepath];
+        this.inlineDraftRows = rows;
+        for (const [key, retained] of this._retainedDraftSessions || []) {
+          if (retained !== this._draftSession && !retained.pendingRecord && !retained.writeError) this._retainedDraftSessions.delete(key);
+        }
+        if (this._draftListingPending) {
+          // A listing started before this commit may contain its old revision.
+          // Read it afresh in the background instead of publishing stale data.
+          this.loadEditorDrafts();
+        }
+        this.filterDesc?.({ changedFilepaths: [session.scope.filepath], draftOnly: true });
       },
       beginEditorDraftSession(request) {
         const scope = this.editorDraftScope(request.desc.filepath);
@@ -259,6 +285,7 @@
               } else result = await root.OfflineStore.putTranslationDraft(record, { expectedRevision: session.expectedRevision, resolveConflicts: !!session.resolveConflicts });
             }
             session.expectedRevision = result.record?.revision || session.expectedRevision;
+            session.acknowledgedRecord = result.record || null;
             // The primary record can belong to another tab. Keep this session's
             // authored variant paired with its visible text until explicit review.
             session.record = result.status === 'discarded' ? null : copy(result.status === 'conflict' ? result.preserved || record : result.record);
@@ -276,7 +303,7 @@
             session.discardAttempt = null;
             if (session.pendingRecord?.revision === record.revision) session.pendingRecord = null;
             if (this._draftSession === session) this.inlineDraftError = '';
-            await this.loadEditorDrafts();
+            this.publishEditorDraftRecord(session, result.record);
             return true;
           } catch (error) {
             session.writeError = error;
@@ -504,7 +531,7 @@
             if (this.inlineDraftError) return false;
             this.inlineActive = false; this.closeHlPopup(); this._collaboration?.leaveEdit(); this.endDictionaryEdit();
             this._draftSession = null; this._inlineHeldRows = null;
-            this.filterDesc(); return true;
+            this.filterDesc({ changedFilepaths: [path], draftOnly: true }); return true;
           } finally { if (!ownedTransition) this.inlineTransitionBusy = false; }
         })();
         try { return await this._inlineFinishing; }
@@ -654,16 +681,24 @@
         session.base = committedBase;
         session.base.translations = copy(submitted);
         session.original = copy(submitted);
+        let stored = null;
         if (this.testMode) this._draftMemory?.delete(session.key);
         else {
-          const stored = await root.OfflineStore.getTranslationDraft(session.key);
+          stored = await root.OfflineStore.getTranslationDraft(session.key);
           session.expectedRevision = stored?.revision || null;
           if (stored?.state === 'active') session.record = copy(stored);
         }
         const current = this._draftSession === session ? this.serializeEditorTranslations() : session.pendingRecord?.translations || session.record?.translations || submitted;
-        if (!equal(current, submitted)) await this.writeEditorDraft(session, current, true);
-        if (this.draftScopeCurrent(session.scope)) this.inlineDraftFindings = { ...this.inlineDraftFindings, [session.scope.filepath]: [] };
-        await this.loadEditorDrafts();
+        if (!equal(current, submitted)) {
+          if (!await this.writeEditorDraft(session, current, true)) return;
+          // A conflict keeps our authored variant in session.record. Publish
+          // the acknowledgement's aggregate so both copies remain reviewable.
+          stored = session.acknowledgedRecord;
+        }
+        if (this.draftScopeCurrent(session.scope) && !session.conflict && !session.writeError && !stored?.conflicts?.length) {
+          this.inlineDraftFindings = { ...this.inlineDraftFindings, [session.scope.filepath]: [] };
+        }
+        this.publishEditorDraftRecord(session, stored);
       },
       async openDraftRecovery() {
         if ((this.inlineActive || this._inlineFinishing) && !await this.finishInlineSession({ promote: true })) return;

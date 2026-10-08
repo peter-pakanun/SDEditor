@@ -1853,6 +1853,8 @@ button, label, th, td, input[type="checkbox"] {
 
 .appTooltip {
   position: fixed;
+  box-sizing: border-box;
+  width: max-content;
   z-index: 10002;
   pointer-events: none;
   padding: calc(0.45em * var(--density)) calc(0.65em * var(--density));

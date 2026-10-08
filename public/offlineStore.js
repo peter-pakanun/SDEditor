@@ -771,7 +771,7 @@
     const kv = tx.objectStore(STORE_KV);
     let failure, result;
     const values = {};
-    const keys = [batchWorkspaceKey, batchSourceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
+    const keys = [batchWorkspaceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
     let remaining = keys.length;
     const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
     const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
@@ -779,6 +779,20 @@
       try {
         const receipts = values[receiptKey] || [];
         const receipt = receipts.find(item => item.jobId === batch.jobId);
+        const savedWorkspace = values[batchWorkspaceKey];
+        const stagedDraftBase = draft && savedWorkspace?.staged?.[batch.language]?.[files[0].filepath];
+        const hasStagedDraftBase = stagedDraftBase && (!stagedDraftBase.sourceHash
+          || stagedDraftBase.sourceHash === savedWorkspace?.sourceHash);
+        // Modern ordinary saves use staged text and captured descriptions. Read
+        // the full immutable ZIP only for an original draft base, migration or
+        // deletion, keeping that read inside the same atomic save transaction.
+        const needsSource = receipt ? resetStaging && !batch.collaboration
+          : resetStaging || Number(savedWorkspace?.stagedVersion || 0) < 1 || (draft && !hasStagedDraftBase);
+        if (needsSource && !Object.hasOwn(values, batchSourceKey)) {
+          const read = kv.get(batchSourceKey);
+          read.onsuccess = () => { values[batchSourceKey] = read.result?.value; apply(); };
+          return;
+        }
         if (receipt) {
           if (receipt.signature !== signature) throw new Error('A local save identifier was reused with different content.');
           result = { ...receipt.result, duplicate: true };

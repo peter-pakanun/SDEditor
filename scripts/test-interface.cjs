@@ -33,6 +33,7 @@ function fakeTimers() {
 function loadEditor() {
   let config;
   const directives = {};
+  const components = {};
   let searchFocusCount = 0;
   const timers = fakeTimers();
   const context = vm.createContext({
@@ -41,7 +42,7 @@ function loadEditor() {
     document: { activeElement: null, body: { tagName: 'BODY' } },
     Vue: {
       defineComponent(value) { config = value; return value; },
-      createApp() { return { component() {}, directive(name, value) { directives[name] = value; }, mount() {} }; },
+      createApp() { return { component(name, value) { components[name] = value; }, directive(name, value) { directives[name] = value; }, mount() {} }; },
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
@@ -57,7 +58,7 @@ function loadEditor() {
   for (const [name, getter] of Object.entries(config.computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
-  return { editor, config, context, directives, timers, searchFocusCount: () => searchFocusCount };
+  return { editor, config, context, directives, components, timers, searchFocusCount: () => searchFocusCount };
 }
 
 function description(name, flags = {}, english = `English ${name}`, thai = `ภาษาไทย ${name}`) {
@@ -68,6 +69,91 @@ function description(name, flags = {}, english = `English ${name}`, thai = `ภ�
     ...flags,
   };
 }
+
+test('one-file save and draft refreshes preserve unrelated rows and match a full status rebuild', () => {
+  const { editor, context } = loadEditor();
+  const state = context.window.WorkspaceState;
+  const baseline = Array.from({ length: 1000 }, (_, index) => description(String(index), {}, 'English ' + index, index ? 'ZIP translation' : ''));
+  editor.descs = JSON.parse(JSON.stringify(baseline));
+  const source = new Map(baseline.map(desc => [desc.filepath, desc]));
+  editor.workspaceSourceFile = filepath => source.get(filepath);
+  editor.localDescs = { sourceHash: 'source', stagedVersion: 1, staged: {}, dropped: {}, droppedArchive: {} };
+  editor.sourceIdentity = 'source';
+  editor.inlineDraftRows = {};
+  const save = (index, text) => {
+    const desc = editor.descs[index];
+    state.stageTranslation(editor.localDescs, { filepath: desc.filepath, translations: [text] }, 'Thai',
+      { source: baseline[index], sourceHash: 'source' });
+    desc.translations.Thai = [text];
+  };
+  save(999, 'Earlier save'); editor.filterDesc();
+  const untouchedRow = editor.filteredDescs.find(row => row.filepath === baseline[999].filepath);
+  const workspaceFile = state.workspaceFile;
+  let reads = 0;
+  state.workspaceFile = (...args) => { reads++; return workspaceFile(...args); };
+  save(0, 'Completed translation'); save(500, '');
+  editor.inlineDraftRows[baseline[20].filepath] = { translations: ['Private draft'] };
+  editor.filterDesc({ changedFilepaths: [baseline[0].filepath, baseline[500].filepath, baseline[20].filepath] });
+  assert.equal(reads, 3, 'Status derivation is limited to the changed files.');
+  assert.equal(editor.filteredDescs.find(row => row.filepath === baseline[999].filepath), untouchedRow);
+  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [0, 20, 500, 999].map(index => baseline[index].filepath));
+  assert.equal(editor.statistic.hasChanges, 3); assert.equal(editor.statistic.isMissing, 1); assert.equal(editor.statistic.isRevised, 2);
+  const incremental = JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic });
+  editor.filterDesc();
+  assert.equal(JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic }), incremental);
+});
+
+test('incremental row refresh removes filtered rows and updates search without invalidating committed lookup for drafts', () => {
+  const { editor } = loadEditor();
+  const first = description('first', { hasChanges: true }), second = description('second', { hasChanges: true });
+  editor.descs = [first, second]; editor.inlineDraftRows = {};
+  editor.selectedFileFilters = ['saved', 'localDraft']; editor.filterDesc();
+  let lookupInvalidations = 0; editor.invalidateEditorLookupIndex = () => { lookupInvalidations++; };
+  first.hasChanges = false; editor.filterDesc({ changedFilepaths: [first.filepath] });
+  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [second.filepath]);
+  editor.searchText = 'private searchable'; editor.inlineDraftRows[first.filepath] = { translations: ['Private searchable text'] };
+  editor.filterDesc({ changedFilepaths: [first.filepath], draftOnly: true });
+  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [first.filepath]);
+  assert.equal(lookupInvalidations, 1);
+  delete editor.inlineDraftRows[first.filepath]; editor.filterDesc({ changedFilepaths: [first.filepath], draftOnly: true });
+  assert.equal(editor.filteredDescs.length, 0);
+});
+
+test('incremental row refresh falls back when language, source descriptors or filters change', () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('first', { hasChanges: true }), description('second', { hasChanges: true })];
+  editor.inlineDraftRows = {}; editor.filterDesc();
+  editor.lang = 'German'; editor.descs[1].hasChanges = false;
+  editor.selectedFileFilters = ['saved']; editor.filterDesc({ changedFilepaths: [editor.descs[0].filepath] });
+  assert.equal(editor.filteredDescs.length, 1);
+  editor.descs[1] = description('replacement', { hasChanges: true });
+  editor.filterDesc({ changedFilepaths: [editor.descs[1].filepath] });
+  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), editor.descs.map(desc => desc.filepath));
+});
+
+test('incremental row refresh rebuilds diagnostic labels after the result collection is replaced', () => {
+  const { editor } = loadEditor();
+  editor.descs = [description('first'), description('second')];
+  editor.selectedFileFilters = ['diagnosticWarning'];
+  editor.diagnosticScanResults = Object.fromEntries(editor.descs.map(desc => [desc.filepath, { hasDiagnosticWarning: true, warningCount: 1 }]));
+  editor.filterDesc();
+  assert.equal(editor.filteredDescs.length, 2);
+  editor.diagnosticScanResults = {};
+  editor.filterDesc({ changedFilepaths: [editor.descs[0].filepath], draftOnly: true });
+  assert.equal(editor.filteredDescs.length, 0, 'Every row must leave the warning filter after completed results are cleared.');
+});
+
+test('incremental row refresh rebuilds when account or branch changes', () => {
+  for (const change of [editor => { editor.cloudProfileId = 'another-account'; }, editor => { editor.branchId = 'another-branch'; }]) {
+    const { editor } = loadEditor();
+    editor.descs = [description('first', { hasChanges: true }), description('second', { hasChanges: true })];
+    editor.selectedFileFilters = ['saved']; editor.filterDesc();
+    change(editor); editor.descs[1].hasChanges = false;
+    editor.filterDesc({ changedFilepaths: [editor.descs[0].filepath], draftOnly: true });
+    assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [editor.descs[0].filepath]);
+    assert.equal(editor.statistic.hasChanges, 1);
+  }
+});
 
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
 const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning', 'localDraft'];
@@ -1632,7 +1718,7 @@ test('hiding a tooltip and showing empty text preserve its state and clear stale
   }
 });
 
-test('tooltip placement keeps long multiline details within desktop viewport edges', () => {
+test('tooltip pointer placement preserves the anchor and caps its width to available viewport space', () => {
   const { editor, context } = loadEditor();
   context.window.innerWidth = 800; context.window.innerHeight = 600;
   const state = editor.tooltip;
@@ -1640,11 +1726,74 @@ test('tooltip placement keeps long multiline details within desktop viewport edg
   editor.showTooltip({ clientX: 798, clientY: 598 }, text);
   assert.equal(editor.tooltip, state); assert.equal(state.text, text);
   assert.equal(state.maxWidth, 360);
-  assert.ok(state.x >= 8 && state.x + state.maxWidth <= 792, 'The tooltip must clear the right edge.');
-  assert.ok(state.y >= 8 && state.y + 72 < 598, 'Near the bottom edge, details must appear above the pointer.');
+  assert.equal(state.x, 812);
+  assert.equal(state.y, 616, 'The rendered tooltip must position itself using measured height rather than a newline estimate.');
   editor.placeTooltip({ clientX: 0, clientY: 0 }, 'Short details');
   assert.equal(editor.tooltip, state); assert.equal(state.maxWidth, 180);
   assert.equal(state.x, 14); assert.equal(state.y, 18);
+  context.window.innerWidth = 160;
+  editor.placeTooltip({ clientX: 150, clientY: 300 }, text);
+  assert.equal(editor.tooltip, state); assert.equal(state.maxWidth, 144);
+});
+
+test('rendered tooltip placement clears the footer using the full wrapped content height', () => {
+  const { editor, context, components } = loadEditor();
+  context.window.innerWidth = 800; context.window.innerHeight = 600;
+  const text = ['2026-10-05_POE2', 'PoE2 · Thai · default branch',
+    'ZIP SHA-256: ' + 'a'.repeat(64), 'Source baseline: ' + 'b'.repeat(64),
+    'Import deadline: Oct 12, 2026, 9:00 AM New Zealand · Oct 12, 2026, 3:00 AM local',
+    'Open source versions.'].join('\n');
+  editor.showTooltip({ clientX: 100, clientY: 550 }, text);
+  const state = editor.tooltip;
+  const measured = { state, width: 360, height: 350, viewportWidth: 800, viewportHeight: 600 };
+  const style = components['app-tooltip'].computed.tooltipStyle.call(measured);
+  assert.equal(editor.tooltip, state);
+  assert.equal(style.left, '114px');
+  assert.ok(parseFloat(style.top) >= 8);
+  assert.ok(parseFloat(style.top) + measured.height <= 538,
+    'Wrapped hashes, deadlines and density-scaled text must remain completely above the footer pointer.');
+  assert.ok(measured.height > text.split('\n').length * 18 + 18,
+    'The regression must exercise content taller than the former newline-based estimate.');
+});
+
+test('rendered tooltip placement keeps its measured border box within every viewport edge', () => {
+  const { components } = loadEditor();
+  const tooltipStyle = components['app-tooltip'].computed.tooltipStyle;
+  const width = 360, height = 250, viewportWidth = 800, viewportHeight = 600;
+  for (const [x, y] of [[-4, -4], [812, 18], [14, 616], [812, 616]]) {
+    const style = tooltipStyle.call({ state: { x, y, maxWidth: width }, width, height, viewportWidth, viewportHeight });
+    const left = parseFloat(style.left), top = parseFloat(style.top);
+    assert.ok(left >= 8 && left + width <= viewportWidth - 8, `Horizontal bounds at ${x}, ${y}`);
+    assert.ok(top >= 8 && top + height <= viewportHeight - 8, `Vertical bounds at ${x}, ${y}`);
+  }
+  const shortStyle = tooltipStyle.call({ state: { x: 114, y: 218, maxWidth: 180 },
+    width: 120, height: 34, viewportWidth, viewportHeight });
+  assert.equal(shortStyle.left, '114px');
+  assert.equal(shortStyle.top, '218px', 'Details with sufficient room should retain their position beside the pointer.');
+  const shortAtRight = tooltipStyle.call({ state: { x: 798, y: 218, maxWidth: 360 },
+    width: 120, height: 34, viewportWidth, viewportHeight });
+  assert.equal(shortAtRight.left, '672px', 'Right-edge placement must use the rendered width rather than its larger width limit.');
+});
+
+test('rendered tooltip placement remains inside a resized viewport without replacing its pointer state', () => {
+  const { components } = loadEditor();
+  const state = { visible: true, text: 'Version metadata', x: 950, y: 780, maxWidth: 360 };
+  const measured = { state, width: 360, height: 300, viewportWidth: 1440, viewportHeight: 1000 };
+  const tooltipStyle = components['app-tooltip'].computed.tooltipStyle;
+  const original = tooltipStyle.call(measured);
+  assert.ok(parseFloat(original.left) + measured.width <= 1432);
+  assert.ok(parseFloat(original.top) + measured.height <= 992);
+  measured.viewportWidth = 800; measured.viewportHeight = 600;
+  const resized = tooltipStyle.call(measured);
+  assert.equal(measured.state, state);
+  assert.equal(state.x, 950); assert.equal(state.y, 780);
+  assert.ok(parseFloat(resized.left) >= 8 && parseFloat(resized.left) + measured.width <= 792);
+  assert.ok(parseFloat(resized.top) >= 8 && parseFloat(resized.top) + measured.height <= 592,
+    'A stationary tooltip must remain visible when the window shrinks past its old pointer anchor.');
+  measured.viewportWidth = 320; measured.width = 304;
+  const narrow = tooltipStyle.call(measured);
+  assert.equal(narrow.maxWidth, '304px', 'Resize must also constrain the old width limit before text reflows.');
+  assert.ok(parseFloat(narrow.left) >= 8 && parseFloat(narrow.left) + measured.width <= 312);
 });
 
 test('work details appear beside a keyboard-focused indicator and disappear when it finishes', () => {

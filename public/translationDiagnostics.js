@@ -401,6 +401,54 @@
     return index;
   }
 
+  function updateConsistencyIndex(index, descs, lang, previousResults) {
+    const changed = Array.isArray(descs) ? descs : [];
+    const changedPaths = new Set(changed.map(desc => desc.filepath));
+    const affectedPaths = new Set(changedPaths);
+    const sources = new Set();
+    for (const desc of changed) {
+      const previous = previousResults[desc.filepath];
+      const english = desc.translations?.English || [];
+      const translations = desc.translations?.[lang] || [];
+      for (let i = 0; i < Math.max(english.length, previous?.englishLines?.length || 0); i++) {
+        const source = normalizeConsistencyText(english[i]);
+        const oldSource = normalizeConsistencyText(previous?.englishLines?.[i]);
+        if (source === oldSource && normalizeConsistencyText(translations[i])
+          === normalizeConsistencyText(previous?.translationLines?.[i])) continue;
+        if (source) sources.add(source);
+        if (oldSource) sources.add(oldSource);
+      }
+    }
+    // Replace this batch's entries only in the groups whose source/text changed.
+    // Other groups and unrelated cached file results remain untouched.
+    for (const source of sources) {
+      const group = index.get(source);
+      if (!group) continue;
+      for (const [translation, locations] of group.variants) {
+        const peers = locations.filter(location => {
+          affectedPaths.add(location.filepath);
+          return !changedPaths.has(location.filepath);
+        });
+        group.entryCount -= locations.length - peers.length;
+        if (peers.length) group.variants.set(translation, peers);
+        else group.variants.delete(translation);
+      }
+      if (!group.entryCount) index.delete(source);
+    }
+    for (const desc of changed) {
+      const english = desc.translations?.English || [];
+      const translations = desc.translations?.[lang] || [];
+      for (let blockIndex = 0; blockIndex < english.length; blockIndex++) {
+        if (!sources.has(normalizeConsistencyText(english[blockIndex]))) continue;
+        addConsistencyEntry(index, english[blockIndex], translations[blockIndex], { filepath: desc.filepath, blockIndex });
+      }
+    }
+    for (const source of sources) for (const locations of index.get(source)?.variants.values() || []) {
+      for (const location of locations) affectedPaths.add(location.filepath);
+    }
+    return affectedPaths;
+  }
+
   function createEditedConsistencyIndex(index, filepath, entries) {
     const edited = new Map();
     const draftEntries = Array.isArray(entries) ? entries : [];
@@ -473,6 +521,7 @@
     analyze,
     normalizeConsistencyText,
     createConsistencyIndex,
+    updateConsistencyIndex,
     createEditedConsistencyIndex,
     getConsistencyDiagnostic
   };

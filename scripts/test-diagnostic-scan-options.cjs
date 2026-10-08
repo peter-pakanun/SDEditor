@@ -384,6 +384,100 @@ test('saving refreshes normalized English peers when consistency resolves or new
   assert.equal(editor.diagnosticScanResults[unrelated.filepath], unrelatedResult);
 });
 
+test('saved consistency updates reuse the index and analyze only changed files and affected peers', async () => {
+  const { editor, calls } = loadEditor();
+  const first = description('first', 'Fire damage', 'หนึ่ง');
+  const peer = description('peer', 'Fire damage', 'สอง');
+  const unrelated = Array.from({ length: 250 }, (_, i) => description(`other-${i}`, `Other ${i}`, `อื่น ${i}`));
+  editor.descs = [first, peer, ...unrelated];
+  editor.diagnosticScanChecks = only('consistency');
+  await editor.scanAllDiagnostics();
+  const index = editor._diagnosticScanCache.consistencyIndex;
+  const results = editor.diagnosticScanResults;
+  const untouched = results[unrelated[0].filepath];
+  const analyzed = calls.consistency;
+  first.translations.Thai[0] = 'สอง';
+  const refreshed = editor.updateScannedDescDiagnostics(first);
+  assert.deepEqual(Array.from(refreshed).sort(), [first.filepath, peer.filepath].sort());
+  assert.equal(editor._diagnosticScanCache.consistencyIndex, index);
+  assert.equal(calls.consistencyIndex, 1, 'A save must reuse the index created by the manual scan.');
+  assert.equal(calls.consistency - analyzed, 2, 'Unrelated files must not be analyzed again.');
+  assert.equal(editor.diagnosticScanResults, results, 'A one-file update must not copy the entire results map.');
+  assert.equal(results[unrelated[0].filepath], untouched);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0);
+  first.translations.Thai[0] = 'สาม';
+  editor.updateScannedDescDiagnostics(first);
+  assert.equal(calls.consistencyIndex, 1);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+});
+
+test('incremental consistency updates refresh peers of removed and newly joined source groups', async () => {
+  const { editor, calls } = loadEditor();
+  const first = description('first', 'Fire damage', 'หนึ่ง');
+  const oldPeer = description('old-peer', 'Fire damage', 'สอง');
+  const newPeer = description('new-peer', 'Cold damage', 'เย็น');
+  editor.descs = [first, oldPeer, newPeer];
+  editor.diagnosticScanChecks = only('consistency');
+  await editor.scanAllDiagnostics();
+  first.translations.English[0] = 'Cold damage';
+  const refreshed = editor.updateScannedDescDiagnostics(first);
+  assert.deepEqual(Array.from(refreshed).sort(), [first.filepath, oldPeer.filepath, newPeer.filepath].sort());
+  assert.equal(editor.diagnosticScanResults[oldPeer.filepath].consistencyDiagnostics.length, 0);
+  assert.equal(editor.diagnosticScanResults[first.filepath].consistencyDiagnostics[0].entryCount, 2);
+  assert.equal(editor.diagnosticScanResults[newPeer.filepath].consistencyDiagnostics[0].entryCount, 2);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(calls.consistencyIndex, 1);
+});
+
+test('batched consistency updates match a fresh index for repeated, removed, empty and added entries', () => {
+  const diagnostics = require('../public/translationDiagnostics.js');
+  const first = description('first', 'Fire damage', 'ไฟ');
+  first.translations.English.push('Fire damage', 'Removed');
+  first.translations.Thai.push('ผิด', 'เก่า');
+  const second = description('second', 'Fire damage', 'ไฟ');
+  const peer = description('peer', 'Cold damage', 'เย็น');
+  const descs = [first, second, peer];
+  const previous = Object.fromEntries(descs.map(desc => [desc.filepath, {
+    englishLines: [...desc.translations.English], translationLines: [...desc.translations.Thai],
+  }]));
+  const index = diagnostics.createConsistencyIndex(descs, 'Thai');
+  first.translations.English = ['Fire damage', 'Cold damage'];
+  first.translations.Thai = ['', 'ใหม่'];
+  second.translations.Thai = ['ต่าง'];
+  const affected = diagnostics.updateConsistencyIndex(index, [first, second], 'Thai', previous);
+  const canonical = map => [...map].map(([source, group]) => [source, group.entryCount,
+    [...group.variants].map(([translation, locations]) => [translation,
+      locations.map(location => JSON.stringify(location)).sort()]).sort((a, b) => a[0].localeCompare(b[0])),
+  ]).sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(canonical(index), canonical(diagnostics.createConsistencyIndex(descs, 'Thai')));
+  assert.deepEqual([...affected].sort(), descs.map(desc => desc.filepath).sort());
+  assert.equal(index.has('Removed'), false);
+});
+
+test('completed diagnostic caches cannot survive changed workspace, language, game, source, account, branch or DNT scope', async () => {
+  for (const change of [
+    editor => { editor.descs = editor.descs.slice(); },
+    editor => { editor.lang = 'German'; },
+    editor => { editor.gameVersion = 'poe2'; },
+    editor => { editor.sourceIdentity = 'new-source'; },
+    editor => { editor.cloudUser = { id: 'another-account' }; },
+    editor => { editor.branchId = 'another-branch'; },
+    editor => { editor.hideDNT = !editor.hideDNT; },
+  ]) {
+    const { editor, calls } = loadEditor();
+    const { first } = conflictingEntries(editor);
+    editor.diagnosticScanChecks = only('consistency');
+    await editor.scanAllDiagnostics();
+    const before = { ...calls };
+    change(editor);
+    assert.equal(editor.updateScannedDescDiagnostics(first), null);
+    assert.equal(editor.diagnosticScanCompleted, false);
+    assert.equal(editor._diagnosticScanCache, null);
+    assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
+    assert.deepEqual(calls, before, 'Invalidating stale diagnostics must not start another scan.');
+  }
+});
+
 test('saved-file updates retain Hide DNT exclusions from results and consistency groups', async () => {
   const { editor } = loadEditor();
   const first = description('first', 'Fire damage', 'ไฟ');

@@ -149,6 +149,98 @@ async function waitForDeletionWrite(h, count = 1) {
   return h.calls.storage[count - 1];
 }
 
+for (const inline of [false, true]) {
+  test(`${inline ? 'inline' : 'full'} worker-backed save keeps unrelated large-workspace rows through acknowledgement and editor close`, async () => {
+    const h = enableDeletionWorker(harness()), { editor, desc, config, window } = h;
+    editor.descs = [desc, ...Array.from({ length: 999 }, (_, index) => description('large_' + String(index).padStart(4, '0')))];
+    editor._workspaceSourceBaseline = copy(editor.descs);
+    editor.localDescs = { sourceHash: editor.sourceIdentity, descs: [], status: {} };
+    window.WorkspaceState.initializeWorkspace(editor.localDescs, { source: editor._workspaceSourceBaseline,
+      sourceHash: editor.sourceIdentity, game: editor.gameVersion, language: editor.lang });
+    editor.selectedFileFilters = ['saved', 'localDraft', 'unchanged'];
+    editor.filterDesc = config.methods.filterDesc;
+    editor.rebaseEditorAfterCommit = window.CollaborationIntegration.mixin.methods.rebaseEditorAfterCommit;
+    editor.filterDesc();
+    assert.equal(await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath)), true);
+    const untouched = editor.descs.at(-1), snapshot = editor._fileSearchSnapshot;
+    const untouchedRecord = snapshot.files.get(untouched.filepath), untouchedRow = untouchedRecord.entry.row;
+    const assertUntouched = () => {
+      assert.equal(editor._fileSearchSnapshot.files.get(untouched.filepath), untouchedRecord,
+        'An unrelated source record must survive the composed Save path.');
+      assert.equal(editor.filteredDescs.find(row => row.filepath === untouched.filepath), untouchedRow,
+        'An unrelated displayed row must retain its identity rather than being rebuilt.');
+    };
+    editor.editorBlocks[0].translation = 'Completed translation';
+    let settled = false;
+    const saving = editor.editorSave({ close: !inline }).then(result => { settled = true; return result; });
+    const queuedSave = await waitForDeletionWrite(h);
+    assert.equal(settled, false); assert.equal(queuedSave.batch.deferDisplay, true);
+    assertUntouched();
+    h.acknowledge(queuedSave);
+    assert.equal(await saving, true);
+    assertUntouched();
+    assert.deepEqual(copy(editor.localDescs.staged[editor.lang][desc.filepath].translations), ['Completed translation']);
+    assert.equal(editor.inlineDraftRows[desc.filepath], undefined);
+    assert.equal(editor._pendingSaves.snapshot().jobs.length, 0);
+    if (inline) {
+      assert.equal(editor.inlineActive, true);
+      assert.equal(await editor.finishInlineSession(), true, 'Leaving the saved inline row must complete normally.');
+      assert.equal(editor.inlineActive, false);
+      assertUntouched();
+    } else assert.equal(editor.editorVisible, false);
+    const incremental = JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic });
+    editor.filterDesc();
+    assert.equal(JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic }), incremental,
+      'The completed incremental path must remain equivalent to a full rebuild.');
+  });
+}
+
+for (const inline of [false, true]) {
+  test(`${inline ? 'inline' : 'full'} save refreshes its acknowledged draft without listing unrelated drafts`, async () => {
+    const h = harness(), { editor, desc, store, calls } = h;
+    let listings = 0;
+    const list = store.listTranslationDrafts;
+    store.listTranslationDrafts = async (...args) => { listings++; return list(...args); };
+    const refreshes = [];
+    editor.filterDesc = options => { refreshes.push(options); editor.filteredDescs = editor.descs; };
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    const otherScope = editor.editorDraftScope(editor.descs[1].filepath);
+    const other = { ...otherScope, key: editor.editorDraftKey(otherScope), id: 'other-draft', revision: 'other-revision',
+      state: 'active', translations: ['Unrelated local text'], conflicts: [] };
+    h.records.set(other.key, copy(other)); editor.draftRecords = [copy(other)];
+    editor.inlineDraftRows[other.filepath] = copy(other);
+    editor.editorBlocks[0].translation = 'Completed translation';
+    assert.equal(await editor.editorSave({ close: !inline }), true);
+    assert.equal(listings, 0, 'Single-key acknowledgements must not read the whole draft collection.');
+    assert.equal(editor.inlineDraftRows[desc.filepath], undefined);
+    assert.equal(editor.inlineDraftRows[other.filepath].translations[0], 'Unrelated local text');
+    assert.equal(editor.draftRecords.length, 1); assert.equal(editor.draftRecords[0].id, other.id);
+    assert.equal(calls.promotions[0].options.awaitDurable, true);
+    assert.ok(refreshes.some(options => options?.changedFilepaths?.[0] === desc.filepath && options.draftOnly));
+  });
+}
+
+test('a draft acknowledgement supersedes a stale pending listing without losing unrelated persisted drafts', async () => {
+  const h = harness(), { editor, desc, store } = h;
+  await editor.activateInlineRow(desc.filepath);
+  const otherScope = editor.editorDraftScope(editor.descs[1].filepath);
+  const other = { ...otherScope, key: editor.editorDraftKey(otherScope), id: 'other-draft', revision: 'other-revision',
+    state: 'active', translations: ['Unrelated local text'], conflicts: [] };
+  h.records.set(other.key, copy(other));
+  const pending = deferred(), list = store.listTranslationDrafts;
+  let listings = 0;
+  store.listTranslationDrafts = (...args) => ++listings === 1 ? pending.promise : list(...args);
+  const loading = editor.loadEditorDrafts();
+  editor.editorBlocks[0].translation = 'New durable draft';
+  assert.equal(await editor.flushEditorDraft(), true);
+  pending.resolve([]); await loading; await tick();
+  assert.equal(listings, 2, 'Only an overlapping stale listing requires a fresh background read.');
+  assert.equal(editor.inlineDraftRows[desc.filepath].translations[0], 'New durable draft');
+  assert.equal(editor.inlineDraftRows[other.filepath].translations[0], 'Unrelated local text');
+  assert.equal(editor.draftRecords.find(record => record.key === editor._draftSession.key).translations[0], 'New durable draft');
+  assert.equal(editor.draftRecords.length, 2);
+});
+
 test('staged deletion is available only for the current language and source, including intentionally blank staged saves', async () => {
   const h = harness(), { editor, desc, window } = h;
   await editor.editFile(desc.filepath);
@@ -1211,6 +1303,48 @@ test('typing already persisted during an older save rebases the durable draft fo
   assert.equal(stored.translations[0], 'typing continues');
   assert.deepEqual(copy(stored.base.translations), ['submitted text']);
   assert.equal(editor.editorBlocks[0].translation, 'typing continues');
+});
+
+for (const inline of [false, true]) {
+  test(`${inline ? 'inline' : 'full'} save retains the conflict aggregate and findings when newer typing competes with another tab`, async () => {
+    const h = harness(), { editor, desc, store, records } = h;
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    editor.editorBlocks[0].translation = 'submitted text'; await editor.flushEditorDraft();
+    const session = editor._draftSession, submittedDraft = records.get(session.key);
+    records.set(session.key, { ...submittedDraft, state: 'promoted', revision: submittedDraft.revision + ':promoted', translations: [] });
+    desc.translations.Thai = ['submitted text']; editor.editorBlocks[0].translation = 'typing continues';
+    store.putTranslationDraft = async record => {
+      const aggregate = { ...copy(record), id: 'other-tab', revision: 'peer-revision', translations: ['peer text'], conflicts: [copy(record)] };
+      records.set(record.key, aggregate);
+      return { status: 'conflict', record: copy(aggregate), preserved: copy(record) };
+    };
+    await editor.editorDraftCommitted(session, ['submitted text'], { draftConsumed: true }, { translations: ['submitted text'] });
+    const visible = editor.draftRecords.find(record => record.key === session.key);
+    assert.equal(visible.id, 'other-tab'); assert.equal(visible.translations[0], 'peer text');
+    assert.equal(visible.conflicts.length, 1); assert.equal(visible.conflicts[0].translations[0], 'typing continues');
+    assert.deepEqual(copy(visible), records.get(session.key));
+    assert.equal(session.record.translations[0], 'typing continues', 'The editor retains its authored variant.');
+    assert.equal(session.conflict, true); assert.equal(editor.editorBlocks[0].translation, 'typing continues');
+    assert.match(editor.inlineFindingsFor(desc.filepath)[0].message, /Another tab changed this draft/);
+  });
+}
+
+test('a failed post-save write of newer typing preserves its pending draft and error findings', async () => {
+  const h = harness(), { editor, desc, store, records } = h;
+  await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'submitted text'; await editor.flushEditorDraft();
+  const session = editor._draftSession, submittedDraft = records.get(session.key);
+  records.set(session.key, { ...submittedDraft, state: 'promoted', revision: submittedDraft.revision + ':promoted', translations: [] });
+  desc.translations.Thai = ['submitted text']; editor.editorBlocks[0].translation = 'typing continues';
+  const findings = [{ level: 'error', message: 'Retained draft finding' }]; editor.inlineDraftFindings[desc.filepath] = findings;
+  store.putTranslationDraft = async () => { throw new Error('Storage unavailable'); };
+  await editor.editorDraftCommitted(session, ['submitted text'], { draftConsumed: true }, { translations: ['submitted text'] });
+  assert.equal(session.pendingRecord.translations[0], 'typing continues');
+  assert.equal(editor.inlineDraftRows[desc.filepath].translations[0], 'typing continues');
+  assert.equal(editor.inlineFindingsFor(desc.filepath), findings);
+  assert.match(editor.inlineDraftError, /Storage unavailable/);
+  assert.equal(session.writeError.message, 'Storage unavailable');
+  assert.equal(records.get(session.key).state, 'promoted');
 });
 
 for (const change of [

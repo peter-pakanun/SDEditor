@@ -568,9 +568,10 @@
         }
         indexes.localLength = this.localDescs.descs.length;
         if (batchState) { batchState.displayChanged ||= displayChanged; return; }
-        if (changedFilepaths.length) this.updateScannedDescDiagnostics?.(changedFilepaths);
+        const refreshedDiagnostics = changedFilepaths.length ? this.updateScannedDescDiagnostics?.(changedFilepaths) : [];
         // editorBlocks and its captured base remain untouched until explicit save/reopen.
-        if (displayChanged) this.filterDesc();
+        if (displayChanged) this.filterDesc({ changedFilepaths: Array.isArray(refreshedDiagnostics)
+          ? [...(files || []).map(file => file.filepath), ...refreshedDiagnostics] : null });
       },
       async claimCollaborationFile(filepath, automatic = false, isCurrent = () => true) {
         const context = this.captureCollaborationContext();

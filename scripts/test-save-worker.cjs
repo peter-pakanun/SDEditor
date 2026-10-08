@@ -31,7 +31,7 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
     manifest: { files: [{ filepath: 'stat.txt', english: ['source text'] }] },
     local: { 'stat.txt': file() }, shared: { 'stat.txt': file() }, outbox: [], conflicts: [], recovery: [] },
     unrelated: { local: { untouched: true } } } });
-  const revisions = []; const transactions = [];
+  const revisions = []; const transactions = []; const reads = [];
   const db = { transaction(names) {
     const pending = []; let finished = false;
     const tx = {
@@ -39,6 +39,7 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
         assert.ok(names.includes(name));
         return {
           get(kvKey) {
+            reads.push(kvKey);
             const req = {};
             queueMicrotask(() => {
               const written = pending.filter(item => item.store === 'kv' && item.row.key === kvKey).at(-1);
@@ -65,7 +66,7 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
   for (const file of ['workspaceState.js', 'offlineStore.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), context);
   }
-  return { store: root.OfflineStore, kv, revisions, transactions };
+  return { store: root.OfflineStore, kv, revisions, transactions, reads };
 }
 async function commit(f, request) { await queued(); f.transactions.at(-1).complete(); return request; }
 function deletionFixture(options = {}) {
@@ -82,6 +83,60 @@ const deletionBatch = (options = {}) => batch({ jobId: 'delete-1', origin: 'dele
   revisions: [{ filepath: 'stat.txt', lang: 'Thai', savedAt: 20, note: 'Before delete staged translation', translations: ['old'] },
     { filepath: 'stat.txt', lang: 'Thai', savedAt: 21, note: 'Delete staged translation', translations: ['ZIP translation'] }],
   ...options });
+
+test('repeat draft saves use durable staged bases without cloning the full immutable source again', async () => {
+  const f = fixture({ worker: true }), workspace = f.kv.get('workspace_poe1');
+  const source = copy(workspace.descs);
+  f.kv.set('source_poe1', source);
+  W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const draftScope = { profile: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai', filepath: 'stat.txt' };
+  const draftKey = f.store.translationDraftKey(draftScope);
+  function draft(revision, base, translations) {
+    f.kv.set(draftKey, { ...draftScope, key: draftKey, id: 'draft', revision, state: 'active', source: copy(source[0]), translations, base: { translations: base } });
+    return { key: draftKey, id: 'draft', revision, base: { translations: base } };
+  }
+  const first = await commit(f, f.store.saveTranslationBatch(batch({ draft: draft('first', ['old'], ['new']) })));
+  assert.equal(first.draftConsumed, true);
+  assert.equal(f.reads.filter(key => key === 'source_poe1').length, 1, 'An unstaged draft still checks its immutable ZIP base.');
+  const request = batch({ jobId: 'save-2', files: [file('next')], draft: draft('second', ['new'], ['next']) });
+  let settled = false;
+  const pending = f.store.saveTranslationBatch(request).then(ack => { settled = true; return ack; });
+  await queued();
+  assert.equal(settled, false, 'Fast repeat saves must still await the complete durable transaction.');
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['new']);
+  assert.equal(f.kv.get(draftKey).state, 'active');
+  f.transactions.at(-1).complete();
+  const second = await pending;
+  assert.equal(second.draftConsumed, true);
+  assert.equal(f.reads.filter(key => key === 'source_poe1').length, 1);
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['next']);
+  assert.equal(f.kv.get(draftKey).state, 'promoted');
+  assert.equal(f.revisions.length, 2);
+  assert.deepEqual(f.kv.get('source_poe1'), source);
+  const retry = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(retry.duplicate, true);
+  assert.equal(f.revisions.length, 2);
+  assert.equal(f.reads.filter(key => key === 'source_poe1').length, 1);
+  const changed = batch({ jobId: 'save-3', files: [file('latest')], draft: draft('third', ['new'], ['latest']) });
+  await assert.rejects(f.store.saveTranslationBatch(changed), error => error.code === 'DRAFT_BASE_CHANGED');
+  assert.equal(f.kv.get(draftKey).state, 'active');
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['next']);
+  assert.equal(f.revisions.length, 2);
+});
+
+test('modern ordinary saves skip unused source reads while migration and staged deletion retain them', async () => {
+  const f = fixture({ worker: true }), workspace = f.kv.get('workspace_poe1');
+  W.initializeWorkspace(workspace, { source: copy(workspace.descs), sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  await commit(f, f.store.saveTranslationBatch(batch()));
+  assert.equal(f.reads.includes('source_poe1'), false);
+  const legacy = fixture({ worker: true });
+  await commit(legacy, legacy.store.saveTranslationBatch(batch()));
+  assert.equal(legacy.reads.filter(key => key === 'source_poe1').length, 1);
+  const deletion = deletionFixture({ worker: true });
+  await commit(deletion, deletion.store.saveTranslationBatch(deletionBatch()));
+  assert.equal(deletion.reads.filter(key => key === 'source_poe1').length, 1);
+  assert.deepEqual(deletion.kv.get('source_poe1')[0].translations.Thai, ['ZIP translation']);
+});
 
 test('staged deletion durably restores immutable ZIP text and preserves other languages, dropped copies and drafts', async () => {
   const f = deletionFixture({ worker: true }), workspace = f.kv.get('workspace_poe1');

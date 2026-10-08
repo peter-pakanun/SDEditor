@@ -67,20 +67,64 @@ const AppTooltip = {
       required: true
     }
   },
+  data() {
+    return { width: 0, height: 0, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+  },
   computed: {
     lines() {
       return String(this.state?.text || "").split(/\r?\n/);
     },
     tooltipStyle() {
+      const maxWidth = Math.min(this.state?.maxWidth || 360, Math.max(1, this.viewportWidth - 16));
+      const width = Math.min(this.width || maxWidth, maxWidth);
+      const height = this.height;
+      const preferredX = this.state?.x || 0;
+      let preferredY = this.state?.y || 0;
+      if (preferredY + height > this.viewportHeight - 8) preferredY -= 18 + height + 12;
       return {
-        left: `${this.state?.x || 0}px`,
-        top: `${this.state?.y || 0}px`,
-        maxWidth: `${this.state?.maxWidth || 360}px`
+        left: `${Math.max(8, Math.min(preferredX, this.viewportWidth - width - 8))}px`,
+        top: `${Math.max(8, Math.min(preferredY, this.viewportHeight - height - 8))}px`,
+        maxWidth: `${maxWidth}px`
       };
     }
   },
+  methods: {
+    measureTooltip() {
+      const rect = this.$refs.tooltip?.getBoundingClientRect();
+      if (!rect) return;
+      this.width = rect.width;
+      this.height = rect.height;
+    },
+    observeTooltip() {
+      const element = this.$refs.tooltip;
+      if (element === this._tooltipElement) return;
+      this._tooltipObserver.disconnect();
+      this._tooltipElement = element;
+      if (element) {
+        this._tooltipObserver.observe(element);
+        this.measureTooltip();
+      }
+    }
+  },
+  mounted() {
+    this._tooltipObserver = new ResizeObserver(() => this.measureTooltip());
+    this._tooltipResize = () => {
+      this.viewportWidth = window.innerWidth;
+      this.viewportHeight = window.innerHeight;
+    };
+    window.addEventListener('resize', this._tooltipResize);
+    this.observeTooltip();
+  },
+  updated() {
+    // Measure content/size changes, not every pointer movement.
+    this.observeTooltip();
+  },
+  beforeUnmount() {
+    this._tooltipObserver.disconnect();
+    window.removeEventListener('resize', this._tooltipResize);
+  },
   template: `
-    <div v-if="state.visible && state.text" class="appTooltip" :style="tooltipStyle" role="tooltip">
+    <div v-if="state.visible && state.text" ref="tooltip" class="appTooltip" :style="tooltipStyle" role="tooltip">
       <div v-for="(line, i) in lines" :key="i">{{ line || ' ' }}</div>
     </div>
   `
@@ -1731,22 +1775,16 @@ const config = Vue.defineComponent({
       }
       const lines = safeText.split(/\r?\n/);
       const maxLineLength = Math.max(8, ...lines.map(line => line.length));
-      const maxWidth = Math.min(360, Math.max(180, maxLineLength * 7 + 28));
-      const estimatedHeight = Math.min(320, Math.max(34, lines.length * 18 + 18));
-      let x = Number(e?.clientX || 0) + 14;
-      let y = Number(e?.clientY || 0) + 18;
       const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
-      if (x + maxWidth > viewportWidth - 8) x = Math.max(8, viewportWidth - maxWidth - 8);
-      if (y + estimatedHeight > viewportHeight - 8) y = Math.max(8, Number(e?.clientY || 0) - estimatedHeight - 12);
+      const maxWidth = Math.min(360, Math.max(180, maxLineLength * 7 + 28), Math.max(1, viewportWidth - 16));
       // Keep the object passed to AppTooltip stable. Replacing it schedules a
       // render of the entire editor for every pointer movement; nested changes
       // only update the tooltip component that reads these fields.
       Object.assign(this.tooltip, {
         visible: true,
         text: safeText,
-        x,
-        y,
+        x: Number(e?.clientX || 0) + 14,
+        y: Number(e?.clientY || 0) + 18,
         maxWidth
       });
     },
@@ -2296,6 +2334,7 @@ const config = Vue.defineComponent({
     },
     clearDiagnosticScanResults() {
       this.diagnosticScanRunId++;
+      this._diagnosticScanCache = null;
       this.diagnosticScanResults = {};
       this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = false;
@@ -2311,26 +2350,7 @@ const config = Vue.defineComponent({
     },
     refreshConsistencyResolutionDiagnostics(resolver) {
       if (this.lang !== resolver.lang || this.gameVersion !== resolver.gameVersion) return;
-      // An unfinished scan may have read the old translations before yielding.
-      if (this.diagnosticScanRunning) {
-        this.clearDiagnosticScanResults();
-        return;
-      }
-      if (!this.diagnosticScanCompleted || !this.diagnosticScanAppliedChecks) return;
-      const checks = this.diagnosticScanAppliedChecks;
-      const filepaths = new Set(resolver.entries.map(entry => entry.filepath));
-      const consistencyIndex = checks.consistency
-        ? window.TranslationDiagnostics.createConsistencyIndex(this.diagnosticScanDescs, resolver.lang) : null;
-      const results = { ...this.diagnosticScanResults };
-      // Include unchanged peers: their shared conflict is resolved too. Keep
-      // unrelated findings and use the completed scan's checks, not dialog edits.
-      for (const desc of this.descs) {
-        if (!filepaths.has(desc.filepath) || !results[desc.filepath]) continue;
-        results[desc.filepath] = this.analyzeDescDiagnostics(desc, resolver.lang, consistencyIndex, checks);
-      }
-      this.diagnosticScanResults = results;
-      this.diagnosticScanErrorFileCount = Object.values(results).filter(result => result.hasDiagnosticError).length;
-      this.diagnosticScanWarningFileCount = Object.values(results).filter(result => result.hasDiagnosticWarning).length;
+      this.updateScannedDescDiagnostics(resolver.entries.map(entry => entry.filepath));
     },
     scheduleDictionaryDiagnosticScan() {
       // Dictionary edits invalidate the snapshot; only the scan button starts a new scan.
@@ -2343,45 +2363,41 @@ const config = Vue.defineComponent({
       // An unfinished scan may have read translations that have just changed.
       if (this.diagnosticScanRunning) {
         this.clearDiagnosticScanResults();
-        return;
+        return null;
       }
-      if (!this.diagnosticScanCompleted || !this.diagnosticScanAppliedChecks) return;
+      if (!this.diagnosticScanCompleted || !this.diagnosticScanAppliedChecks) return [];
+      const cache = this._diagnosticScanCache;
+      const descriptions = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
+      if (!cache || cache.runId !== this.diagnosticScanRunId || cache.descriptions !== descriptions
+        || cache.lang !== this.lang || cache.game !== this.gameVersion || cache.source !== this.sourceIdentity
+        || cache.account !== (this.cloudUser?.id || '') || cache.branch !== (this.branchId || 'default')
+        || cache.hideDNT !== this.hideDNT) {
+        this.clearDiagnosticScanResults();
+        return null;
+      }
       const filepaths = new Set((Array.isArray(changedDescs) ? changedDescs : [changedDescs])
         .map(desc => typeof desc === 'string' ? desc : desc?.filepath));
       const checks = this.diagnosticScanAppliedChecks;
-      const descs = this.diagnosticScanDescs;
-      const changed = descs.filter(desc => filepaths.has(desc.filepath) && this.diagnosticScanResults[desc.filepath]);
-      if (!changed.length) return;
-      const normalize = window.TranslationDiagnostics.normalizeConsistencyText;
-      const affectedSources = new Set();
-      if (checks.consistency) {
-        for (const desc of changed) {
-          const previous = this.diagnosticScanResults[desc.filepath];
-          const english = desc.translations.English || [];
-          const translations = desc.translations[this.lang] || [];
-          for (let i = 0; i < Math.max(english.length, previous.englishLines.length); i++) {
-            const source = normalize(english[i]);
-            const oldSource = normalize(previous.englishLines[i]);
-            if (source === oldSource && normalize(translations[i]) === normalize(previous.translationLines[i])) continue;
-            if (source) affectedSources.add(source);
-            if (oldSource) affectedSources.add(oldSource);
-          }
-        }
-      }
-      const consistencyIndex = checks.consistency
-        ? window.TranslationDiagnostics.createConsistencyIndex(descs, this.lang) : null;
-      const results = { ...this.diagnosticScanResults };
+      const results = this.diagnosticScanResults;
+      const changed = [...filepaths].map(filepath => cache.files.get(filepath))
+        .filter(desc => desc && results[desc.filepath]);
+      if (!changed.length) return [];
+      const affected = checks.consistency
+        ? window.TranslationDiagnostics.updateConsistencyIndex(cache.consistencyIndex, changed, this.lang, results)
+        : new Set(changed.map(desc => desc.filepath));
       // Refresh saved files and peers of changed entries, including clean peers
       // that now have a conflict. Retain unrelated findings and scan selections.
-      for (const desc of descs) {
-        if (!results[desc.filepath]) continue;
-        if (!filepaths.has(desc.filepath)
-          && !(checks.consistency && desc.translations.English.some(text => affectedSources.has(normalize(text))))) continue;
-        results[desc.filepath] = this.analyzeDescDiagnostics(desc, this.lang, consistencyIndex, checks);
+      const refreshed = [];
+      for (const filepath of affected) {
+        const desc = cache.files.get(filepath), previous = results[filepath];
+        if (!desc || !previous) continue;
+        const next = this.analyzeDescDiagnostics(desc, this.lang, cache.consistencyIndex, checks);
+        results[filepath] = next;
+        refreshed.push(filepath);
+        this.diagnosticScanErrorFileCount += Number(next.hasDiagnosticError) - Number(previous.hasDiagnosticError);
+        this.diagnosticScanWarningFileCount += Number(next.hasDiagnosticWarning) - Number(previous.hasDiagnosticWarning);
       }
-      this.diagnosticScanResults = results;
-      this.diagnosticScanErrorFileCount = Object.values(results).filter(result => result.hasDiagnosticError).length;
-      this.diagnosticScanWarningFileCount = Object.values(results).filter(result => result.hasDiagnosticWarning).length;
+      return refreshed;
     },
     openDiagnosticScanDialog() {
       if ((this.inlineActive || this._inlineFinishing) && this.finishInlineSession) {
@@ -2430,6 +2446,9 @@ const config = Vue.defineComponent({
       if (this.diagnosticScanRunning || !this.hasDiagnosticScanSelection) return;
       const descs = this.diagnosticScanDescs;
       const scanLang = this.lang;
+      const descriptions = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
+      const scanGame = this.gameVersion, scanSource = this.sourceIdentity, scanHideDNT = this.hideDNT;
+      const scanAccount = this.cloudUser?.id || '', scanBranch = this.branchId || 'default';
       const checks = { ...this.diagnosticScanChecks };
       const runId = ++this.diagnosticScanRunId;
       const results = {};
@@ -2437,6 +2456,7 @@ const config = Vue.defineComponent({
       let warningFileCount = 0;
 
       this.diagnosticScanResults = {};
+      this._diagnosticScanCache = null;
       this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = true;
       this.diagnosticScanCompleted = false;
@@ -2478,6 +2498,10 @@ const config = Vue.defineComponent({
 
         if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
         this.diagnosticScanResults = results;
+        const cache = { runId, descriptions, lang: scanLang, game: scanGame, source: scanSource, hideDNT: scanHideDNT,
+          account: scanAccount, branch: scanBranch,
+          files: new Map(descs.map(desc => [desc.filepath, desc])), consistencyIndex };
+        this._diagnosticScanCache = Vue.markRaw ? Vue.markRaw(cache) : cache;
         this.diagnosticScanAppliedChecks = checks;
         this.diagnosticScanErrorFileCount = errorFileCount;
         this.diagnosticScanWarningFileCount = warningFileCount;
@@ -5693,7 +5717,7 @@ const config = Vue.defineComponent({
       cache.set(source, { lines: [...source], html });
       return html;
     },
-    filterDesc({ searchOnly = false } = {}) {
+    filterDesc({ searchOnly = false, changedFilepaths = null, draftOnly = false } = {}) {
       const hideDNT = this.hideDNT;
       const lang = this.lang;
       const selectedFilters = this.selectedFileFilters.map(key => key === 'review' ? 'dropped' : key === 'edited' ? 'revised' : key);
@@ -5705,31 +5729,40 @@ const config = Vue.defineComponent({
       const diagnosticResults = this.diagnosticScanResults;
       const descs = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
       const workspace = Vue.toRaw ? Vue.toRaw(this.localDescs) : this.localDescs;
+      const account = this._cloud?.context?.().profile || this.cloudProfileId || this.cloudUser?.id || 'guest';
+      const branch = this.branchId || 'default';
       const filters = selectedFilters.join(',');
       const droppedReviewPaths = new Set(this.collaborationDroppedReviewPaths || []);
       const droppedReviewSignature = JSON.stringify([...droppedReviewPaths].sort());
       const showDroppedConflicts = selectedFilters.includes('droppedConflict');
       let snapshot = this._fileSearchSnapshot;
-      if (!searchOnly || !snapshot || snapshot.descs !== descs || snapshot.workspace !== workspace
-        || snapshot.lang !== lang || snapshot.game !== this.gameVersion || snapshot.source !== this.sourceIdentity
-        || snapshot.hideDNT !== hideDNT || snapshot.filters !== filters || snapshot.diagnostics !== diagnosticResults
-        || snapshot.droppedReviewSignature !== droppedReviewSignature) {
-        this.invalidateEditorLookupIndex?.();
-        const entries = [];
-        const counts = { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
+      const sameScope = snapshot && snapshot.descs === descs && snapshot.workspace === workspace
+        && snapshot.sourceLength === descs.length
+        && snapshot.lang === lang && snapshot.game === this.gameVersion && snapshot.source === this.sourceIdentity
+        && snapshot.account === account && snapshot.branch === branch
+        && snapshot.hideDNT === hideDNT && snapshot.filters === filters
+        && snapshot.droppedReviewSignature === droppedReviewSignature;
+      const canPatch = sameScope && snapshot.diagnostics === diagnosticResults && Array.isArray(changedFilepaths) && snapshot.files
+        && changedFilepaths.every(filepath => {
+          const cached = snapshot.files.get(filepath);
+          return cached && descs[cached.order] === cached.desc;
+        });
+      if (canPatch || !searchOnly || !sameScope || snapshot.diagnostics !== diagnosticResults) {
+        if (!draftOnly || !canPatch) this.invalidateEditorLookupIndex?.();
+        const entries = canPatch ? snapshot.entries : [];
+        const files = canPatch ? snapshot.files : new Map();
+        const counts = canPatch ? { ...snapshot.counts } : { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
         // Read raw data once and prepare a replaced display/search snapshot.
         // Typing then only searches strings, without recalculating statuses,
         // copying translation arrays, escaping HTML, or invalidating Lookup.
-        for (const desc of descs) {
+        const prepare = (desc, order) => {
           const hiddenDNT = hideDNT && desc.isDNT;
-          if (hiddenDNT && !(showDroppedConflicts && droppedReviewPaths.has(desc.filepath))) continue;
+          const record = { desc, order, counts: {}, entry: null };
+          if (hiddenDNT && !(showDroppedConflicts && droppedReviewPaths.has(desc.filepath))) return record;
           const baseline = workspace?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
           const state = baseline ? window.WorkspaceState.workspaceFile(workspace, baseline, lang) : desc;
           if (!hiddenDNT) {
-            if (state.hasChanges) counts.hasChanges++;
-            if (state.isRevised) counts.isRevised++;
-            if (state.isMissing) counts.isMissing++;
-            if (state.isDropped) counts.isDropped++;
+            for (const field of Object.keys(counts)) record.counts[field] = !!state[field];
           }
 
           const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
@@ -5744,11 +5777,12 @@ const config = Vue.defineComponent({
             diagnosticError: !!diagnosticResult?.hasDiagnosticError,
             diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
           };
-          if (!selectedFilters.some(key => statuses[key])) continue;
+          if (!selectedFilters.some(key => statuses[key])) return record;
 
           const english = desc.translations.English || [];
           const translation = desc.translations[lang] || [];
-          entries.push({
+          record.entry = {
+            order,
             path: desc.filepath.toLocaleLowerCase(),
             english: english.join('\n').toLocaleLowerCase(),
             translation: [...translation, ...(this.inlineDraftRows?.[desc.filepath]?.translations || [])].join('\n').toLocaleLowerCase(),
@@ -5768,10 +5802,38 @@ const config = Vue.defineComponent({
               diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
               diagnosticScanTitle: this.getDiagnosticScanTitle(diagnosticResult),
             },
-          });
+          };
+          return record;
+        };
+        const addCounts = (record, direction) => {
+          for (const field of Object.keys(counts)) if (record.counts[field]) counts[field] += direction;
+        };
+        if (canPatch) {
+          // Saves and draft acknowledgements replace only their affected rows.
+          // Keep source order when a changed status enters or leaves the filters.
+          for (const filepath of new Set(changedFilepaths)) {
+            const previous = files.get(filepath);
+            const record = prepare(previous.desc, previous.order);
+            let low = 0, high = entries.length;
+            while (low < high) {
+              const middle = (low + high) >>> 1;
+              if (entries[middle].order < record.order) low = middle + 1;
+              else high = middle;
+            }
+            const existing = entries[low]?.order === record.order;
+            if (existing || record.entry) entries.splice(low, existing ? 1 : 0, ...(record.entry ? [record.entry] : []));
+            addCounts(previous, -1); addCounts(record, 1);
+            files.set(filepath, record);
+          }
+        } else {
+          for (let order = 0; order < descs.length; order++) {
+            const record = prepare(descs[order], order);
+            files.set(record.desc.filepath, record); addCounts(record, 1);
+            if (record.entry) entries.push(record.entry);
+          }
         }
         snapshot = { descs, workspace, lang, game: this.gameVersion, source: this.sourceIdentity,
-          hideDNT, filters, diagnostics: diagnosticResults, droppedReviewSignature, entries };
+          account, branch, sourceLength: descs.length, hideDNT, filters, diagnostics: diagnosticResults, droppedReviewSignature, entries, files, counts };
         this._fileSearchSnapshot = Vue.markRaw ? Vue.markRaw(snapshot) : snapshot;
         Object.assign(this.statistic, counts);
       }
