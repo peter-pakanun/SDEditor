@@ -238,6 +238,16 @@ async function run() {
     await translator.evaluate(async filepath => { const vm = window.__managedFixtureApp; vm.inlineEditor = false; await vm.editFile(filepath); }, source.filepath);
     const field = translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first();
     await field.fill('ความเสียหายไฟที่แก้ไข');
+    const guardedImport = await translator.evaluate(async () => {
+      const vm = window.__managedFixtureApp;
+      const before = JSON.stringify(vm.editorCurrentEditingDesc);
+      const visible = vm.editorVisible;
+      await vm.importZipClicked(); await vm.$nextTick();
+      return { dialog: vm.importDialogVisible, editorUnchanged: before === JSON.stringify(vm.editorCurrentEditingDesc),
+        visibilityUnchanged: visible === vm.editorVisible };
+    });
+    assert.deepEqual(guardedImport, { dialog: false, editorUnchanged: true, visibilityUnchanged: true },
+      'Direct Online import action leaves the dialog closed and the active editor unchanged');
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await translator.keyboard.press('Tab');
