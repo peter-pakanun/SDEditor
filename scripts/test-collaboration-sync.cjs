@@ -381,6 +381,7 @@ function presenceFixture(options = {}) {
     receive(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
   }
   const client = new Client({ store, WebSocket: Socket, apiBase: 'http://127.0.0.1:3333',
+    presenceEnabled: options.presenceEnabled,
     locks: options.locks, onStatus: options.onStatus, uuid: () => 'mutation-' + ++nextId,
     request: async (path, requestOptions) => {
       if (path.endsWith('/ticket')) {
@@ -867,6 +868,88 @@ test('initial socket connection is quiet but a real disconnect persists until th
   assert.equal(client.snapshot().connected, true);
   client.disconnect();
   assert.equal(client.snapshot().disconnected, false, 'Leaving a workspace is not an unexpected disconnect.');
+});
+
+test('dashboard presence stays off while translations sync and resumes when returning to the workspace', async t => {
+  let enabled = false;
+  const { client, server, sockets, tickets, connect } = presenceFixture({ presenceEnabled: () => enabled });
+  t.after(() => client.destroy());
+  await connect();
+  client.select('a.txt');
+  await client.sync({ background: true }); await client.openSocket(client.epoch);
+  assert.equal(tickets.length, 0); assert.equal(sockets.length, 0);
+  await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['saved from dashboard', 'two'] }] });
+  assert.equal(server.files[0].translations[0], 'saved from dashboard');
+  assert.equal(client.snapshot().pending, 0);
+  const key = client.key, epoch = client.epoch;
+  enabled = true; client.updatePresence(); await nextTurn();
+  assert.equal(sockets.length, 1);
+  sockets[0].open(); await client.running;
+  sockets[0].receive({ type: 'presence', selfId: 'self', peers: [{ sessionId: 'other' }] });
+  assert.equal(client.snapshot().connected, true);
+  assert.ok(sockets[0].sent.some(message => message.type === 'select' && message.filepath === 'a.txt'));
+  client.editing = 'a.txt';
+  enabled = false; client.updatePresence();
+  assert.equal(sockets[0].readyState, 3); assert.equal(client.socket, null);
+  assert.equal(client.heartbeat, null); assert.equal(client.socketOpening, null);
+  assert.deepEqual(client.peers, []); assert.equal(client.editing, null);
+  assert.equal(client.snapshot().disconnected, false);
+  assert.equal(client.key, key); assert.equal(client.epoch, epoch);
+  server.change('b.txt', ['changed while viewing dashboard']);
+  await client.sync({ background: true });
+  assert.equal(client.fileBase('b.txt').translations[0], 'changed while viewing dashboard');
+  assert.equal(tickets.length, 1, 'Background recovery cannot rejoin dashboard presence.');
+  enabled = true; client.updatePresence(); await nextTurn();
+  assert.equal(sockets.length, 2);
+});
+
+test('a dashboard transition cancels a pending presence ticket without canceling translation synchronization', async t => {
+  for (const outcome of ['success', 'failure']) await t.test(outcome, async t => {
+    let enabled = true;
+    const entered = gate(), release = gate(), statuses = [];
+    const { client, sockets, tickets, connect } = presenceFixture({ presenceEnabled: () => enabled,
+      onStatus: status => statuses.push(status), ticket: async count => {
+        if (count === 1) {
+          entered.resolve(); await release.promise;
+          if (outcome === 'failure') throw new Error('Obsolete presence failure');
+        }
+        return { ticket: 'ticket-' + count };
+      } });
+    t.after(() => { release.resolve(); client.destroy(); });
+    const connection = connect(); await entered.promise; await connection;
+    enabled = false; client.updatePresence();
+    await client.sync(); assert.equal(tickets.length, 1);
+    enabled = true; client.updatePresence(); await nextTurn();
+    assert.equal(tickets.length, 2); assert.equal(sockets.length, 1);
+    sockets[0].open(); await client.running;
+    sockets[0].receive({ type: 'presence', selfId: 'current', peers: [{ sessionId: 'current' }] });
+    release.resolve(); await nextTurn(); await nextTurn();
+    assert.equal(sockets.length, 1, 'An obsolete ticket cannot register an extra presence session.');
+    assert.equal(client.sessionId, 'current'); assert.equal(client.presenceError, null);
+    assert.ok(statuses.every(status => !status.error));
+  });
+});
+
+test('presence checks the current screen after a ticket and before sending or accepting socket events', async t => {
+  let enabled = true;
+  const entered = gate(), release = gate();
+  const { client, sockets, connect } = presenceFixture({ presenceEnabled: () => enabled, ticket: async () => {
+    entered.resolve(); await release.promise; return { ticket: 'held-ticket' };
+  } });
+  t.after(() => { release.resolve(); client.destroy(); });
+  const connection = connect(); await entered.promise;
+  enabled = false; release.resolve(); await connection; await nextTurn();
+  assert.equal(sockets.length, 0, 'The screen predicate fences a late ticket even before its watcher runs.');
+  enabled = true; client.updatePresence(); await nextTurn();
+  assert.equal(sockets.length, 1);
+  enabled = false;
+  sockets[0].receive({ type: 'presence', selfId: 'obsolete', peers: [{ sessionId: 'obsolete' }] });
+  assert.deepEqual(client.peers, []);
+  sockets[0].readyState = 1; client.select('b.txt'); client.setAway(true);
+  assert.deepEqual(sockets[0].sent, []);
+  sockets[0].open();
+  assert.equal(sockets[0].readyState, 3); assert.equal(client.socket, null);
+  assert.equal(client.snapshot().disconnected, false);
 });
 
 test('joining publishes websocket presence while translation catch-up is still held', async t => {

@@ -24,6 +24,7 @@
       this.onEditingConflict = options.onEditingConflict || (() => {});
       this.onManagedVersionChanged = options.onManagedVersionChanged || (() => {});
       this.onCanonicalArchive = options.onCanonicalArchive || (() => {});
+      this.presenceEnabled = options.presenceEnabled || (() => true);
       this.allowLegacySeed = options.allowLegacySeed !== false;
       this.projectWorkspace = options.projectWorkspace || P.projectWorkspace;
       this.WebSocket = options.WebSocket === undefined ? globalThis.WebSocket : options.WebSocket;
@@ -839,10 +840,19 @@
         this.lastDroppedSync = 0; this.schedule();
       }
     }
+    updatePresence() {
+      if (this.presenceEnabled()) { this.startPresence(this.epoch); return; }
+      // Dashboard observers keep HTTP synchronization without joining a team.
+      const hadPresenceError = !!this.presenceError;
+      this.presenceError = null; this.disconnected = false;
+      this.editing = null; this.claimGeneration++;
+      this.closeSocket();
+      if (hadPresenceError && !this.lastError) this.status('');
+    }
     startPresence(epoch) {
-      if (!this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket || this.socketOpening?.epoch === epoch) return;
+      if (!this.presenceEnabled() || !this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket || this.socketOpening?.epoch === epoch) return;
       this.openSocket(epoch).catch(error => {
-        if (error.stale || !this.current(epoch)) return;
+        if (error.stale || !this.current(epoch) || !this.presenceEnabled()) return;
         this.presenceError = error; this.disconnected = true;
         if (!this.lastError) this.reportPresenceError();
         this.notify();
@@ -1278,7 +1288,7 @@
       return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id));
     }
     openSocket(epoch) {
-      if (!this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
+      if (!this.presenceEnabled() || !this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
       if (this.socketOpening?.epoch === epoch) return this.socketOpening.promise;
       const opening = { epoch, promise: null }; this.socketOpening = opening;
       opening.promise = this.createSocket(epoch, opening).catch(error => {
@@ -1289,11 +1299,12 @@
     }
     async createSocket(epoch, opening) {
       const ticket = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/ticket', { method: 'POST' }, epoch);
-      if (!this.current(epoch) || this.socketOpening !== opening) throw staleError();
+      if (!this.presenceEnabled() || !this.current(epoch) || this.socketOpening !== opening) throw staleError();
       const url = new URL(ticket.url || ROOT + '/ws?ticket=' + encodeURIComponent(ticket.ticket), this.apiBase || globalThis.location?.href);
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       const socket = new this.WebSocket(url.href); this.socket = socket;
       socket.onopen = () => {
+        if (!this.presenceEnabled()) { this.updatePresence(); socket.close(); return; }
         if (!this.current(epoch) || this.socket !== socket) { socket.close(); return; }
         const recovered = !!this.presenceError; this.presenceError = null;
         this.connected = true; this.disconnected = false; this.backoff = 1000;
@@ -1313,7 +1324,7 @@
         }
       };
       socket.onmessage = event => {
-        if (!this.current(epoch) || this.socket !== socket) return;
+        if (!this.presenceEnabled() || !this.current(epoch) || this.socket !== socket) return;
         let message; try { message = JSON.parse(event.data); } catch (_) { return; }
         if (message.type === 'presence') {
           const peers = message.peers || [], sessionId = message.selfId || message.sessionId || this.sessionId;
@@ -1342,13 +1353,14 @@
       socket.onerror = () => { /* onclose drives retry and clears obsolete claims. */ };
       socket.onclose = () => {
         if (this.socket !== socket) return;
+        if (!this.presenceEnabled()) { this.updatePresence(); return; }
         this.disconnected = true;
         this.closeSocket();
         if (this.current(epoch)) this.schedule();
       };
     }
     send(message) {
-      if (this.socket?.readyState !== 1) return false;
+      if (!this.presenceEnabled() || this.socket?.readyState !== 1) return false;
       this.socket.send(JSON.stringify(message)); return true;
     }
     select(filepath) { this.selected = filepath || null; this.send({ type: 'select', filepath: this.selected }); }

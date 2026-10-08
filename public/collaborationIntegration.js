@@ -15,6 +15,7 @@
       branchId() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
       sourceIdentity() { this.scheduleCollaboration(); },
+      versionChooserVisible: { flush: 'sync', handler() { this._collaboration?.updatePresence?.(); } },
       selectedFilepath(path) { this._collaboration?.select(path); },
       editorVisible(visible) { if (!visible && !(this.editorSessionActive ?? this.editorVisible)) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
       editorSessionActive(active) { if (!active) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
@@ -397,6 +398,7 @@
         const originalBase = copy(this._editorCollabBase);
         let client, managedContext;
         client = new window.CollaborationSync.Client({ store: window.OfflineStore, apiBase: cloud.apiBase, allowLegacySeed: false,
+          presenceEnabled: () => !this.versionChooserVisible,
           context: () => cloud.context(), request: (path, options, captured) => cloud.request(path, options, captured),
           onChange: state => {
             if (this._collaboration !== client) return;

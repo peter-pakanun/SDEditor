@@ -138,6 +138,37 @@ test('manager collaboration joins the selected language without an assignment an
   assert.equal(joins.length, 1);
 });
 
+test('dashboard suppresses team presence while keeping saved translation collaboration available', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.versionChooserVisible = true; e.cloudSignedIn = true;
+  e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  let options, joins = 0, disconnects = 0;
+  const presenceChanges = [];
+  window.CollaborationSync = { Client: class {
+    constructor(input) { options = input; }
+    async connect() { joins++; }
+    select() {} setAway() {}
+    updatePresence() { presenceChanges.push(options.presenceEnabled()); }
+    disconnect() { disconnects++; }
+  } };
+  await e.initializeCollaboration();
+  const client = e._collaboration, key = e._collabKey;
+  assert.equal(joins, 1, 'Dashboard keeps translation synchronization available.');
+  assert.equal(options.presenceEnabled(), false, 'A preloaded dashboard workspace does not announce a team participant.');
+
+  const watcher = window.CollaborationIntegration.mixin.watch.versionChooserVisible;
+  assert.equal(watcher.flush, 'sync', 'Entering the dashboard stops presence before a pending socket callback can run.');
+  e.versionChooserVisible = false; watcher.handler.call(e, false);
+  assert.equal(options.presenceEnabled(), true, 'Presence can begin when a version workspace is opened.');
+  e.versionChooserVisible = true; watcher.handler.call(e, true);
+  assert.equal(options.presenceEnabled(), false);
+  assert.deepEqual(presenceChanges, [true, false], 'Both screen transitions update team presence immediately.');
+  assert.equal(e._collaboration, client); assert.equal(e._collabKey, key);
+  assert.equal(disconnects, 0, 'Screen transitions preserve the client needed by durable saves.');
+});
+
 test('manager archive lookup uses shared import decisions across languages', async () => {
   const { editor: e } = harness();
   e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;

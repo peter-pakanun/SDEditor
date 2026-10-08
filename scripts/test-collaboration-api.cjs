@@ -42,7 +42,9 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
   const server = createServer(app); const realtime = app.locals.collaborationRealtime.attach(server);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const apiBase = 'http://127.0.0.1:' + server.address().port;
-  const clients = users.map(user => new Client({ store: memoryStore(), apiBase, WebSocket: OriginSocket,
+  const presenceEnabled = [false, true];
+  const clients = users.map((user, index) => new Client({ store: memoryStore(), apiBase, WebSocket: OriginSocket,
+    presenceEnabled: () => presenceEnabled[index],
     request: async (pathname, options = {}) => {
       const response = await fetch(apiBase + pathname, { method: options.method || 'GET', headers: {
         Origin: ORIGIN, Authorization: 'Bearer ' + user.token,
@@ -61,6 +63,7 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
     game: 'poe1', language: 'Thai', source, files, workspace: { descs: copy(source), status: {} } });
   const [a, b] = clients;
   await connect(0);
+  assert.equal(a.socket, null, 'A persisted dashboard workspace synchronizes without registering team presence.');
   let releaseCatchUp, enteredCatchUp;
   const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve; });
   const catchUpEntered = new Promise(resolve => { enteredCatchUp = resolve; });
@@ -73,6 +76,9 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
   const joining = connect(1).then(result => { joined = true; return result; });
   try {
     await catchUpEntered;
+    await until(() => b.connected && b.peers.length === 1);
+    assert.equal(a.socket, null);
+    presenceEnabled[0] = true; a.updatePresence();
     await until(() => a.connected && b.connected && a.peers.length === 2 && b.peers.length === 2);
     assert.equal(joined, false, 'Real WebSocket presence reaches both browsers while translation catch-up is still pending.');
   } finally {
@@ -80,6 +86,13 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
     await joining;
     b.request = originalRequest;
   }
+  presenceEnabled[0] = false; a.updatePresence();
+  await until(() => b.peers.length === 1);
+  await a.sync({ background: true });
+  assert.equal(a.socket, null, 'Dashboard background sync does not rejoin team presence.');
+  assert.equal(a.snapshot().disconnected, false);
+  presenceEnabled[0] = true; a.updatePresence();
+  await until(() => a.connected && a.peers.length === 2 && b.peers.length === 2);
   const filepath = source[0].filepath;
   a.select(filepath); assert.equal((await a.claim(filepath)).granted, true);
   await until(() => b.isEditing(filepath));
