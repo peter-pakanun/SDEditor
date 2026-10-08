@@ -70,6 +70,264 @@ function harness(options = {}) {
   return { app, events, requests, storage, window };
 }
 
+// Record which payloads the real storage module requests. The browser fixture
+// separately checks IndexedDB engine behavior and rendering during held reads.
+function indexedMetadataHarness(records = {}) {
+  const tables = new Map(['kv', 'revisions', 'revisions_poe1', 'revisions_poe2'].map(name => [name, new Map()]));
+  const rows = tables.get('kv'), operations = [], commits = [];
+  for (const [key, value] of Object.entries(records)) rows.set(key, { key, value: copy(value) });
+  const db = { version: 8, close() {}, objectStoreNames: { contains: name => tables.has(name) },
+    transaction(names, mode) {
+      names = Array.isArray(names) ? names : [names];
+      let pending = 0, complete = false, scheduled = false;
+      const writes = [], tx = { objectStore(name) {
+        assert.ok(names.includes(name));
+        const request = (method, key, run) => {
+          const result = {}; pending++; operations.push({ mode, name, method, key: copy(key) });
+          queueMicrotask(() => { result.result = run(); result.onsuccess?.(); pending--; finish(); });
+          return result;
+        };
+        const match = range => [...tables.get(name)].filter(([key]) => !range || key >= range.lower && key <= range.upper);
+        return {
+          get: key => request('get', key, () => copy(tables.get(name).get(key))),
+          getAll: range => request('getAll', range, () => match(range).map(([, row]) => copy(row))),
+          getAllKeys: range => request('getAllKeys', range, () => match(range).map(([key]) => key)),
+          count: key => request('count', key, () => Number(tables.get(name).has(key))),
+          put(row) { assert.equal(mode, 'readwrite'); writes.push({ name, key: row.key, row: copy(row) }); return request('put', row.key, () => row.key); },
+          add(row) { const key = tables.get(name).size + writes.length + 1; writes.push({ name, key, row: { ...copy(row), id: key } }); return request('add', key, () => key); },
+          delete(key) { writes.push({ name, key, deleted: true }); return request('delete', key, () => undefined); },
+        };
+      }, abort() { complete = true; queueMicrotask(() => tx.onabort?.()); } };
+      function finish() {
+        if (complete || pending || scheduled) return;
+        scheduled = true;
+        setImmediate(() => {
+          scheduled = false; if (complete || pending) return;
+          complete = true;
+          for (const write of writes) {
+            if (write.deleted) tables.get(write.name).delete(write.key);
+            else tables.get(write.name).set(write.key, write.row);
+          }
+          commits.push(copy(writes)); tx.oncomplete?.();
+        });
+      }
+      finish(); return tx;
+    },
+  };
+  const root = {}, context = vm.createContext({ window: root, setTimeout, clearTimeout,
+    console: { log() {} }, IDBKeyRange: { bound: (lower, upper) => ({ lower, upper }) },
+    indexedDB: { open() { const request = {}; queueMicrotask(() => { request.result = db; request.onsuccess?.(); }); return request; } } });
+  for (const name of ['workspaceState.js', 'offlineStore.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
+  return { store: root.OfflineStore, root, rows, operations, commits };
+}
+const storageScope = fields => ({ accountId: 'alice', game: 'poe2', branchId: 'default', sourceHash: hash('a'), ...fields });
+const scopedStorageKey = (prefix, scope) => prefix + ':' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
+const activeStorageKey = scope => 'workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId]);
+
+test('dashboard scope discovery loads metadata without hydrating, adopting, assigning or auto-selecting a workspace', async () => {
+  const localReads = [], forbidden = [];
+  const { app, events, requests } = harness({ storage: {
+    async listLocalVersions(scope, options) { localReads.push({ scope: copy(scope), options: copy(options) }); return [{ ...scope, sourceHash: hash('a'), hasSource: true }]; },
+    async adoptGuestVersion() { forbidden.push('adopt'); }, async getSource() { forbidden.push('source'); },
+    async getWorkspace() { forbidden.push('workspace'); }, async getVersionMetadata() { forbidden.push('details'); },
+  } });
+  app.versionChooserVisible = true; app._managedWorkspaceOwner = JSON.stringify(['guest', 'poe2', 'default']);
+  app.loadVersionedStorage = async () => { forbidden.push('hydrate'); };
+  app.resetVersionedState = () => { app.sourceLoaded = false; app.sourceIdentity = ''; };
+  app.openManagedPresence = () => { forbidden.push('presence'); };
+  await app.managedScopeChanged({ deferWorkspace: true });
+  assert.deepEqual(forbidden, []); assert.equal(app.selectedManagedVersionId, ''); assert.equal(app.managedVersionDetails, null);
+  assert.equal(requests.length, 1); assert.match(requests[0].route, /^\/v1\/versions\?/);
+  assert.equal(localReads.length, 2); assert.ok(localReads.every(read => read.options.metadataOnly));
+  assert.equal(app.managedCatalogLoaded, true); assert.equal(app.managedLocalVersionsLoaded, true);
+  assert.equal(app.managedCatalogLoading, false); assert.equal(app.managedDetailsLoading, false);
+  assert.equal(events.some(event => event.type === 'activate' || event.type === 'import'), false);
+});
+
+test('initial catalog loading remains independent of an explicitly requested slow team detail read', async () => {
+  const catalog = deferred(), details = deferred();
+  const { app } = harness({ request: route => route.includes('?') ? catalog.promise : details.promise });
+  app.versionChooserVisible = true; app.managedVersions = []; app.managedVersionDetails = null; app.selectedManagedVersionId = '';
+  const loading = app.refreshManagedVersions();
+  assert.equal(app.managedCatalogLoading, true); assert.equal(app.managedCatalogLoaded, false);
+  catalog.resolve({ versions: [version()], branch: { id: 'default' } }); await loading;
+  assert.equal(app.managedCatalogLoaded, true); assert.equal(app.managedCatalogLoading, false);
+  const selection = app.managedReadDetails('weekly-1'); await settle();
+  assert.equal(app.managedDetailsLoading, true); assert.equal(app.managedDetailsLoaded, false);
+  await app.refreshManagedVersions();
+  assert.equal(app.managedCatalogLoading, false); assert.equal(app.managedDetailsLoading, true);
+  details.resolve({ version: version(), teams: [team()] }); await selection;
+  assert.equal(app.managedDetailsLoading, false); assert.equal(app.managedDetailsLoaded, true);
+});
+
+test('duplicate initial scope changes share one pending catalog load without resetting its loading state', async () => {
+  const catalog = deferred(), { app, requests } = harness({ request: () => catalog.promise });
+  app.versionChooserVisible = true;
+  const initial = app.managedScopeChanged({ deferWorkspace: true }); await settle();
+  assert.equal(app.managedCatalogLoading, true); assert.equal(app.managedCatalogLoaded, false);
+  const duplicate = app.managedScopeChanged({ deferWorkspace: true });
+  assert.equal(duplicate, initial);
+  assert.equal(app.managedCatalogLoading, true); assert.equal(app.managedCatalogLoaded, false);
+  assert.equal(requests.length, 1);
+  catalog.resolve({ versions: [], branch: {} }); await Promise.all([initial, duplicate]);
+  assert.equal(app.managedCatalogLoaded, true); assert.equal(app.managedCatalogLoading, false);
+});
+
+test('an old scope loader cannot release the pending-loader guard for a newer account', async () => {
+  const alice = deferred(), bob = deferred(), { app } = harness({ request: (_route, _options, current) => current.cloudProfileId === 'alice' ? alice.promise : bob.promise });
+  app.versionChooserVisible = true;
+  const old = app.managedScopeChanged(); await settle();
+  app.cloudProfileId = 'bob';
+  const newer = app.managedScopeChanged(); await settle();
+  alice.resolve({ versions: [], branch: {} }); await old;
+  assert.equal(app.managedCatalogLoading, true); assert.equal(app.managedScopeChanged(), newer);
+  bob.resolve({ versions: [version()], branch: {} }); await newer;
+  assert.equal(app.managedCatalogLoaded, true); assert.equal(app._managedScopePending, null);
+});
+
+test('cached catalog content appears immediately and a late cache cannot replace newer server metadata', async () => {
+  const cache = deferred(), remote = deferred();
+  const { app } = harness({ storage: { getVersionCatalog: () => cache.promise }, request: () => remote.promise });
+  app.versionChooserVisible = true;
+  const initial = app.managedScopeChanged(); await settle();
+  assert.equal(app.managedCatalogLoading, true);
+  remote.resolve({ versions: [version({ name: 'New server name' })], branch: {} }); await settle();
+  cache.resolve([version({ name: 'Old cache name' })]); await initial;
+  assert.equal(app.managedVersions[0].name, 'New server name');
+  const next = deferred(); app._cloud.request = () => next.promise;
+  const polling = app.refreshManagedVersions();
+  assert.equal(app.managedCatalogLoading, false); assert.equal(app.managedVersions[0].name, 'New server name');
+  next.resolve({ versions: [version({ name: 'New server name' })], branch: {} }); await polling;
+});
+
+test('explicit offline selection lazily reads scoped cached team details without loading source or workspace', async () => {
+  const reads = [], saved = { version: version(), teams: [team({ ended: true }), team({ language: 'German' })] };
+  const { app } = harness({ storage: {
+    async getVersionMetadata(scope) { reads.push(copy(scope)); return { ...scope, details: saved }; },
+    async getVersionSource() { throw new Error('Selection must not load source text.'); },
+  } });
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.cloudSignedIn = false;
+  app.versionChooserVisible = true; app.managedVersionDetails = null;
+  app.localVersions = [{ ...storageScope(), catalogVersionId: 'weekly-1', hasSource: true }];
+  await app.managedReadDetails('weekly-1');
+  assert.deepEqual(reads, [storageScope()]); assert.equal(app.managedVersionDetails.teams.length, 1);
+  assert.equal(app.managedVersionDetails.teams[0].ended, true); assert.equal(app.managedDetailsLoaded, true);
+});
+
+test('a cached team-details payload with a mismatched source cannot become the selected version facts', async () => {
+  const { app } = harness({ storage: { async getVersionMetadata() { return { details: { version: version({ sourceHash: hash('c') }), teams: [team({ ended: true })] } }; } } });
+  app.cloudSignedIn = false; app.managedVersionDetails = null;
+  await app.managedReadDetails('weekly-1');
+  assert.equal(app.managedVersionDetails, null);
+});
+
+test('old scope metadata and detail completions cannot settle a newer scope loading indicator', async () => {
+  const local = deferred(), detail = deferred(), nextLocal = deferred(), nextDetail = deferred();
+  const { app, storage } = harness({ storage: { listLocalVersions: () => local.promise }, request: () => detail.promise });
+  app.versionChooserVisible = true; app.managedVersionDetails = null;
+  const oldLocal = app.managedLoadLocal(), oldDetail = app.managedReadDetails('weekly-1');
+  app.cloudProfileId = 'bob';
+  app.managedLocalVersionsLoaded = false; app.managedDetailsLoaded = false;
+  app._cloud.request = () => nextDetail.promise;
+  storage.listLocalVersions = () => nextLocal.promise;
+  const newLocal = app.managedLoadLocal();
+  const newDetail = app.managedReadDetails('weekly-1');
+  local.resolve([]); detail.resolve({ version: version(), teams: [team()] }); await oldLocal; await oldDetail;
+  assert.equal(app.managedLocalVersionsLoading, true);
+  assert.equal(app.managedDetailsLoading, true);
+  nextLocal.resolve([]); await newLocal;
+  assert.equal(app.managedLocalVersionsLoading, false);
+  nextDetail.resolve({ version: version(), teams: [team()] }); await newDetail;
+  assert.equal(app.managedDetailsLoading, false);
+});
+
+test('metadata-only local listing never reads stored source, workspace or full cached detail payloads', async () => {
+  const scope = storageScope(), other = storageScope({ accountId: 'bob' });
+  const indexKey = scopedStorageKey('version_index_v1', scope), metadataKey = scopedStorageKey('version_metadata_v1', scope);
+  const fixture = indexedMetadataHarness({
+    [indexKey]: { ...scope, name: 'Local alias', catalogVersionId: 'weekly-1' },
+    [metadataKey]: { ...scope, details: { version: version(), teams: [{ recoveries: ['large retained text'] }] } },
+    [scopedStorageKey('source_version_v1', scope)]: ['large baseline'],
+    [scopedStorageKey('workspace_version_v1', scope)]: { descs: ['large workspace'] },
+    [scopedStorageKey('version_metadata_v1', other)]: { ...other, name: 'Other account' },
+    [activeStorageKey(scope)]: scope,
+  });
+  const versions = await fixture.store.listLocalVersions({ ...scope, sourceHash: '' }, { metadataOnly: true });
+  assert.equal(versions.length, 1); assert.equal(versions[0].name, 'Local alias');
+  assert.equal(versions[0].hasSource, true); assert.equal(versions[0].current, true); assert.equal(versions[0].details, undefined);
+  assert.ok(fixture.operations.filter(op => op.method === 'getAll').every(op => op.key.lower.startsWith('version_index_v1:')));
+  assert.ok(fixture.operations.filter(op => op.method === 'get').every(op => op.key.startsWith('workspace_active_v1:')));
+  assert.equal(fixture.commits.some(writes => writes.length), false);
+});
+
+test('unindexed records use scoped key-only placeholders and legacy slots remain ownership-unknown until explicitly opened', async () => {
+  const scope = storageScope(), metadataKey = scopedStorageKey('version_metadata_v1', scope);
+  const fixture = indexedMetadataHarness({ [metadataKey]: { ...scope, name: 'Alias retained in full metadata', details: { teams: ['large'] } },
+    [scopedStorageKey('source_version_v1', scope)]: ['baseline'] });
+  const versions = await fixture.store.listLocalVersions(scope, { metadataOnly: true });
+  assert.equal(versions[0].metadataPending, true); assert.equal(versions[0].hasSource, true);
+  const explicit = await fixture.store.getVersionMetadata(scope);
+  assert.equal(explicit.name, 'Alias retained in full metadata');
+  const indexed = fixture.rows.get(scopedStorageKey('version_index_v1', scope)).value;
+  assert.equal(indexed.name, explicit.name); assert.equal(indexed.details, undefined);
+  const legacy = indexedMetadataHarness({ workspace_poe2: { accountId: 'bob', descs: ['private text'] }, source_poe2: ['large source'] });
+  let hashed = 0; legacy.root.CollaborationProtocol = { async sourceHash() { hashed++; return hash('a'); } };
+  const hints = await legacy.store.listLocalVersions({ ...scope, sourceHash: '' }, { metadataOnly: true });
+  assert.equal(hints[0].ownershipUnknown, true); assert.equal(hints[0].sourceHash, ''); assert.equal(hashed, 0);
+  assert.ok(legacy.operations.filter(op => op.method === 'get').every(op => op.key.startsWith('workspace_active_v1:')));
+  const resolved = await legacy.store.resolveVersionScope({ ...scope, sourceHash: '' });
+  assert.equal(resolved.sourceHash, ''); assert.equal(resolved.legacyWorkspacePending, undefined);
+});
+
+test('metadata and source commits force the captured identity and atomically maintain the lightweight index', async () => {
+  const scope = storageScope(), key = scopedStorageKey('version_metadata_v1', scope);
+  const fixture = indexedMetadataHarness({ [key]: { ...scope, accountId: 'bob', game: 'poe1', branchId: 'release', sourceHash: hash('c') } });
+  await fixture.store.saveSourceWorkspaceWithRevisions([], { sourceHash: scope.sourceHash, branchId: scope.branchId, descs: [] }, [], scope);
+  for (const prefix of ['version_metadata_v1', 'version_index_v1']) {
+    const value = fixture.rows.get(scopedStorageKey(prefix, scope)).value;
+    for (const field of ['accountId', 'game', 'branchId', 'sourceHash']) assert.equal(value[field], scope[field]);
+  }
+  assert.ok(fixture.commits.some(writes => writes.some(write => write.key === key)
+    && writes.some(write => write.key === scopedStorageKey('version_index_v1', scope))
+    && writes.some(write => write.key === scopedStorageKey('source_version_v1', scope))));
+  await fixture.store.setVersionMetadata(scope, { name: 'Alias', details: { version: version(), teams: [team({ recoveries: ['large'] })] } });
+  assert.equal(fixture.rows.get(scopedStorageKey('version_index_v1', scope)).value.catalogVersion.name, version().name);
+  assert.equal(fixture.rows.get(scopedStorageKey('version_index_v1', scope)).value.details, undefined);
+});
+
+test('a mismatched active-pointer scope cannot redirect reads into another account, game or branch', async () => {
+  for (const incompatible of [{ accountId: 'bob' }, { game: 'poe1' }, { branchId: 'release' }]) {
+    const scope = storageScope({ sourceHash: '' }), fixture = indexedMetadataHarness({ [activeStorageKey(scope)]: { ...storageScope(), ...incompatible } });
+    const resolved = await fixture.store.resolveVersionScope(scope);
+    assert.equal(resolved.sourceHash, ''); assert.equal(resolved.accountId, 'alice');
+    assert.equal(resolved.game, 'poe2'); assert.equal(resolved.branchId, 'default');
+  }
+});
+
+test('denied ownership of a legacy recovery hint shows a scoped Offline error and preserves the chooser without writes', async () => {
+  for (const action of [app => app.continueOfflineVersion(), app => app.managedImportOffline(false), app => app.managedImportOffline(true)]) {
+    const { app, events } = harness({ storage: { async resolveVersionScope(scope) { return { ...scope, sourceHash: '' }; } } });
+    app.managedVersions = []; app.versionChooserVisible = true;
+    app.localVersions = [{ ...storageScope({ sourceHash: '' }), legacy: true, ownershipUnknown: true, name: 'Stored offline workspace' }];
+    app.showImportUpdateZipDialog = () => { throw new Error('Denied entry must not open an import dialog.'); };
+    app.importTranslatedZipClicked = app.showImportUpdateZipDialog;
+    const source = app.sourceIdentity, language = app.lang;
+    assert.equal(await action(app), false);
+    assert.match(app.managedVisibleError, /current account.*Switch to the account or local profile.*preserved/);
+    assert.equal(app.versionChooserVisible, true); assert.equal(app.sourceIdentity, source); assert.equal(app.lang, language);
+    assert.equal(events.some(event => ['activate', 'context', 'load', 'import', 'metadata'].includes(event.type)), false);
+  }
+});
+
+test('an Offline entry failure from an old account cannot appear in the new scope', async () => {
+  const gate = deferred(), { app } = harness({ storage: { resolveVersionScope: () => gate.promise } });
+  app.managedVersions = []; app.versionChooserVisible = true;
+  app.localVersions = [{ ...storageScope({ sourceHash: '' }), legacy: true, ownershipUnknown: true }];
+  const opening = app.continueOfflineVersion(); await settle();
+  app.cloudProfileId = 'bob'; gate.reject(new Error('Old account IndexedDB failed.'));
+  assert.equal(await opening, false); assert.equal(app.managedVisibleError, ''); assert.equal(app.versionChooserVisible, true);
+});
+
 test('weekly defaults use the New Zealand upload date and strictly following Monday at 09:00', () => {
   for (const [instant, name, deadline] of [
     ['2026-10-04T21:00:00Z', '2026-10-05_POE2', '2026-10-11T20:00:00.000Z'],
@@ -465,6 +723,7 @@ test('withdrawing the active translator version retains its recovery context out
   app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; app.activeManagedVersionId = 'weekly-1';
   app.managedActiveDetails = { version: version(), teams: [team()] };
   await app.refreshManagedVersions();
+  await settle();
   assert.equal(app.managedVisibleVersions.length, 0);
   assert.equal(app.managedActiveVersion?.id, 'weekly-1'); assert.equal(app.managedActiveVersion?.status, 'withdrawn');
   let prompts = 0; app.appConfirm = async () => { prompts++; return true; };
@@ -587,7 +846,7 @@ test('scope changes while recovering a collection id cannot write that id under 
   assert.equal(writes.some(write => write.scope.accountId === 'bob'), false);
 });
 
-test('a published upload recovered after a lost response clears its durable receipt and selects the existing catalog entry', async () => {
+test('a published upload recovery is deferred until its modal opens, then clears the durable receipt and selects the existing entry', async () => {
   const writes = [];
   const saved = { id: 'upload-finished', name: 'Weekly release', deadlineAt: '2026-10-11T20:00:00.000Z',
     createRequestId: 'create-original', publishRequestId: 'publish-original', status: 'prepared' };
@@ -600,6 +859,10 @@ test('a published upload recovered after a lost response clears its durable rece
   } });
   app.refreshManagedVersions = async () => {};
   await app.managedScopeChanged();
+  assert.equal(requests.length, 0, 'Catalog entry restores only the small local receipt.');
+  assert.equal(app.managedUpload.id, 'upload-finished');
+  assert.equal(writes.length, 0);
+  await app.openManagedUpload();
   assert.equal(app.managedUpload, null); assert.equal(app.selectedManagedVersionId, 'already-published');
   assert.equal(app._managedCreateId, null); assert.equal(app._managedPublishId, null);
   assert.equal(writes.length, 1); assert.equal(writes[0].value, null); assert.equal(writes[0].scope.accountId, 'alice');

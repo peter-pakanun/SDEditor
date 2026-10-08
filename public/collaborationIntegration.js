@@ -209,7 +209,7 @@
           this._reconcilingImport = false;
           this._importReconciliationDone = null;
           finishTransition();
-          if (reloadStorage) this.loadVersionedStorage().catch(error => this.collaborationFailure(error));
+          if (reloadStorage && !this.versionChooserVisible) this.loadVersionedStorage().catch(error => this.collaborationFailure(error));
         }
       },
       initializePendingSaves() {

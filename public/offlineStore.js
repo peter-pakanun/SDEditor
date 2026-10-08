@@ -438,12 +438,14 @@
   }
 
   function workspaceKey(version) {
+    if (version?.legacyWorkspacePending) return KV_WORKSPACE_PREFIX + normalizeGameVersion(version);
     const scope = scopedVersion(version);
     if (scope) return versionKey(scope);
     return KV_WORKSPACE_PREFIX + normalizeGameVersion(version);
   }
 
   function sourceKey(version) {
+    if (version?.legacyWorkspacePending) return KV_SOURCE_PREFIX + normalizeGameVersion(version);
     const scope = scopedVersion(version);
     if (scope) return 'source_version_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
     return KV_SOURCE_PREFIX + normalizeGameVersion(version);
@@ -455,6 +457,21 @@
   }
 
   function versionMetadataKey(scope) { return 'version_metadata_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function versionIndexKey(scope) { return 'version_index_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function versionIndexRecord(metadata, scope) {
+    const record = { ...normalizeWorkspaceScope(scope || metadata) };
+    for (const field of ['name', 'officialName', 'catalogVersionId', 'createdAt', 'updatedAt', 'migrated', 'adoptedFrom']) {
+      if (metadata?.[field] !== undefined) record[field] = metadata[field];
+    }
+    const version = metadata?.details?.version || metadata?.catalogVersion;
+    if (version) {
+      record.catalogVersion = {};
+      for (const field of ['id', 'game', 'branchId', 'sourceHash', 'zipHash', 'name', 'deadlineAt', 'status', 'revision', 'isHead', 'createdAt', 'endedTeamCount', 'teamCount', 'assignedTeam']) {
+        if (version[field] !== undefined) record.catalogVersion[field] = version[field];
+      }
+    }
+    return record;
+  }
 
   // Legacy game slots have one owner. Copy them once without deleting the old
   // evidence or attaching another signed-in account's translations.
@@ -462,7 +479,7 @@
     const captured = scopedVersion(value) || normalizeWorkspaceScope(typeof value === 'object' ? value : { game: value });
     if (captured.sourceHash) return captured;
     const known = await kvGet(activeKey(captured));
-    if (known?.sourceHash) {
+    if (known?.sourceHash && known.accountId === captured.accountId && known.game === captured.game && known.branchId === captured.branchId) {
       const resolved = normalizeWorkspaceScope(known);
       activeScopes.set(activeKey(resolved), resolved);
       return resolved;
@@ -491,15 +508,18 @@
         const workspace = reads[keys[0]], source = reads[keys[1]];
         const owner = String(workspace?.accountId || workspace?.collaborationAccountId || 'guest');
         const sourceHash = workspace?.sourceHash || inferredHash;
-        if (!sourceHash || owner !== captured.accountId || captured.branchId !== DEFAULT_BRANCH) return;
+        if (owner !== captured.accountId || captured.branchId !== DEFAULT_BRANCH) return;
+        if (!sourceHash) { if (workspace) resolved = { ...captured, legacyWorkspacePending: true }; return; }
         if (inferredSource && JSON.stringify(source) !== JSON.stringify(inferredSource)) throw new Error('The legacy source changed while its identity was being recovered. Reload to preserve the matching workspace.');
         resolved = { ...captured, sourceHash };
         const record = { ...workspace, sourceHash, accountId: owner, game: captured.game, branchId: DEFAULT_BRANCH };
         kv.put({ key: workspaceKey(resolved), value: record });
         if (source !== undefined) kv.put({ key: sourceKey(resolved), value: source });
         kv.put({ key: activeKey(resolved), value: resolved });
-        kv.put({ key: versionMetadataKey(resolved), value: { ...resolved, name: '', migrated: true,
-          createdAt: Number(workspace.lastModified) || Date.now() } });
+        const metadata = { ...resolved, name: workspace.versionName || '', migrated: true,
+          createdAt: Number(workspace.lastModified) || Date.now() };
+        kv.put({ key: versionMetadataKey(resolved), value: metadata });
+        kv.put({ key: versionIndexKey(resolved), value: versionIndexRecord(metadata, resolved) });
         if (reads[keys[2]]) kv.put({ key: receiptScopeKey(resolved), value: reads[keys[2]] });
       } catch (error) { failure = error; tx.abort(); }
     };
@@ -559,10 +579,58 @@
     read.onsuccess = () => {
       result = { ...read.result?.value, ...plainPatch, ...scope, updatedAt: Date.now() };
       kv.put({ key: versionMetadataKey(scope), value: result });
+      kv.put({ key: versionIndexKey(scope), value: versionIndexRecord(result, scope) });
     };
     await done; return result;
   }
-  async function listLocalVersions(value = {}) {
+  async function getVersionMetadata(value) {
+    const scope = normalizeWorkspaceScope(value), metadata = await kvGet(versionMetadataKey(scope));
+    if (!metadata) return null;
+    const record = { ...metadata, ...scope };
+    await kvSet(versionIndexKey(scope), versionIndexRecord(record, scope));
+    return record;
+  }
+  async function listLocalVersionsMetadata(value) {
+    const scope = normalizeWorkspaceScope(value), scopePrefix = JSON.stringify([scope.accountId, scope.game, scope.branchId]).slice(0, -1) + ',';
+    const indexPrefix = 'version_index_v1:' + scopePrefix, metadataPrefix = 'version_metadata_v1:' + scopePrefix;
+    const range = prefix => typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff');
+    const { rows, keys, active, legacyCount, legacySourceCount } = await withStore(STORE_KV, 'readonly', async store => {
+      const indexed = requestToPromise(store.getAll(range(indexPrefix)));
+      const metadataKeys = store.getAllKeys ? requestToPromise(store.getAllKeys(range(metadataPrefix))) : new Promise((resolve, reject) => {
+        const keys = [], request = store.openKeyCursor ? store.openKeyCursor(range(metadataPrefix)) : store.openCursor(range(metadataPrefix));
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => { const cursor = request.result; if (!cursor) return resolve(keys); keys.push(cursor.key); cursor.continue(); };
+      });
+      const activeRead = requestToPromise(store.get(activeKey(scope)));
+      const legacyCount = scope.branchId === DEFAULT_BRANCH && store.count ? requestToPromise(store.count(KV_WORKSPACE_PREFIX + scope.game)) : 0;
+      const legacySourceCount = scope.branchId === DEFAULT_BRANCH && store.count ? requestToPromise(store.count(KV_SOURCE_PREFIX + scope.game)) : 0;
+      return { rows: await indexed, keys: await metadataKeys, active: (await activeRead)?.value,
+        legacyCount: await legacyCount, legacySourceCount: await legacySourceCount };
+    });
+    const selected = new Map(rows.filter(row => row.key.startsWith(indexPrefix)).map(row => {
+      const identity = JSON.parse(row.key.slice('version_index_v1:'.length));
+      const record = { ...row.value, accountId: identity[0], game: identity[1], branchId: identity[2], sourceHash: identity[3] };
+      return [record.sourceHash, record];
+    }));
+    for (const key of keys) {
+      if (!key.startsWith(metadataPrefix)) continue;
+      const identity = JSON.parse(key.slice('version_metadata_v1:'.length));
+      if (!selected.has(identity[3])) selected.set(identity[3], { ...scope, sourceHash: identity[3], name: '', metadataPending: true });
+    }
+    const records = [...selected.values()];
+    const availability = await withStore(STORE_KV, 'readonly', store => Promise.all(records.map(row =>
+      store.count ? requestToPromise(store.count(sourceKey(row))).then(Boolean) : requestToPromise(store.getKey(sourceKey(row))).then(Boolean))));
+    const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash
+      || (active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active.sourceHash : '');
+    const result = records.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
+      hasSource: availability[index], current: row.sourceHash === selectedHash }));
+    if (!result.length && legacyCount) result.push({ ...scope, sourceHash: '', legacy: true, ownershipUnknown: true,
+      name: 'Stored offline workspace', offline: true, online: false, hasSource: false, hasLegacySource: !!legacySourceCount, current: false });
+    return result.sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));
+  }
+  async function listLocalVersions(value = {}, options = {}) {
+    if (options.metadataOnly) return listLocalVersionsMetadata(value);
     const scope = normalizeWorkspaceScope(value);
     await resolveWorkspaceVersion({ ...scope, sourceHash: '' });
     const prefix = 'version_metadata_v1:';
@@ -632,7 +700,9 @@
         delete workspace.collaborationAccountId;
         kv.put({ key: workspaceKey(scope), value: workspace });
         kv.put({ key: sourceKey(scope), value: reads[keys[1]] });
-        kv.put({ key: versionMetadataKey(scope), value: { ...reads[keys[2]], ...scope, adoptedFrom: 'guest', updatedAt: Date.now() } });
+        const metadata = { ...reads[keys[2]], ...scope, adoptedFrom: 'guest', updatedAt: Date.now() };
+        kv.put({ key: versionMetadataKey(scope), value: metadata });
+        kv.put({ key: versionIndexKey(scope), value: versionIndexRecord(metadata, scope) });
         kv.put({ key: activeKey(scope), value: scope }); adopted = true;
       };
     }
@@ -689,8 +759,12 @@
       if (captured?.sourceHash) {
         kv.put({ key: activeKey(captured), value: captured });
         const metadataRead = kv.get(versionMetadataKey(captured));
-        metadataRead.onsuccess = () => kv.put({ key: versionMetadataKey(captured), value: {
-          ...captured, createdAt: Date.now(), ...metadataRead.result?.value, updatedAt: Date.now() } });
+        metadataRead.onsuccess = () => {
+          const metadata = { createdAt: Date.now(), ...metadataRead.result?.value, ...captured,
+            ...(workspace.versionName ? { name: workspace.versionName } : {}), updatedAt: Date.now() };
+          kv.put({ key: versionMetadataKey(captured), value: metadata });
+          kv.put({ key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) });
+        };
       }
       if (baseline) {
         if (baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
@@ -1239,6 +1313,8 @@
     normalizeWorkspaceScope,
     getVersionWorkspace,
     getVersionSource,
+    getVersionMetadata,
+    resolveVersionScope: resolveWorkspaceVersion,
     activateVersion,
     setVersionMetadata,
     listLocalVersions,

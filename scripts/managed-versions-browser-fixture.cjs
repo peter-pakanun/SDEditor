@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { resolve, join, sep } = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { mkdtempSync, readFileSync, existsSync, rmSync } = require('node:fs');
+const { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { createServer } = require('node:http');
 const { randomUUID } = require('node:crypto');
@@ -77,7 +77,7 @@ async function run() {
       await page.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady && window.__managedFixtureApp?._cloud?.state,
         { timeout: 30000 });
     };
-    const bootstrap = async (page, account) => {
+    const bootstrapProfile = async (page, account) => {
       await ready(page);
       await page.evaluate(async ({ account, secret }) => {
         const vm = window.__managedFixtureApp;
@@ -86,9 +86,71 @@ async function run() {
         await vm._cloud.acceptLogin(await response.json()); await vm.cloudApply(vm._cloud.snapshot());
         vm.lang = 'Thai'; vm.needsInitialSettings = false; vm.showSetting = false; vm.inlineEditor = false;
         await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
-        await vm.activateGameVersion('poe2', { checkMigration: false });
       }, { account, secret });
+    };
+    const bootstrap = async (page, account) => {
+      await bootstrapProfile(page, account);
+      await page.evaluate(() => window.__managedFixtureApp.activateGameVersion('poe2', { checkMigration: false }));
       await page.getByRole('region', { name: 'Source versions' }).waitFor();
+    };
+    const installCatalogCounters = page => page.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      const counters = window.__managedCatalogCounters = { reads: {}, hydration: {}, status: {}, roomJoins: 0 };
+      const instrument = (owner, name, bucket, include = () => true) => {
+        const original = owner?.[name]; if (typeof original !== 'function') return;
+        counters[bucket][name] = 0;
+        owner[name] = function (...args) {
+          if (include(...args)) counters[bucket][name]++;
+          return original.apply(this, args);
+        };
+      };
+      for (const name of ['getSource', 'getWorkspace', 'getImportedBaseline', 'getImportBaseline', 'getVersionSource', 'getVersionWorkspace'])
+        instrument(OfflineStore, name, 'reads');
+      instrument(vm, 'loadVersionedStorage', 'hydration');
+      instrument(vm, 'prepareStoredWorkspaceSource', 'hydration', source => !!source?.length);
+      instrument(WorkspaceState, 'descriptionStatus', 'status', local => !!local?.filepath);
+      instrument(WorkspaceState, 'fileStatus', 'status', (_status, _language, local) => !!local?.filepath);
+      instrument(WorkspaceState, 'workspaceFile', 'status', (_workspace, desc) => !!desc?.filepath);
+      instrument(WorkspaceState, 'initializeWorkspace', 'status', (_workspace, options) => !!options?.source?.length);
+      const client = CollaborationSync.Client.prototype, originalApi = client.api;
+      client.api = function (path, ...args) {
+        if (path === '/join') counters.roomJoins++;
+        return originalApi.call(this, path, ...args);
+      };
+    });
+    const catalogCounters = page => page.evaluate(() => JSON.parse(JSON.stringify(window.__managedCatalogCounters)));
+    const assertMetadataOnly = async (page, phase) => {
+      const counters = await catalogCounters(page);
+      assert.equal(Object.values(counters.reads).some(Boolean), false, phase + ': no source/workspace/baseline reads');
+      assert.equal(Object.values(counters.hydration).some(Boolean), false, phase + ': no workspace hydration');
+      assert.equal(Object.values(counters.status).some(Boolean), false, phase + ': no translation status calculation');
+      assert.equal(counters.roomJoins, 0, phase + ': no translation collaboration room joins');
+      assert.equal(await page.evaluate(() => !!window.__managedFixtureApp._collaboration), false, phase + ': dashboard only observes aggregate presence');
+    };
+    const metadataGate = async (page, kind) => {
+      const pattern = apiOrigin + '/v1/versions**';
+      let release, received, requests = 0;
+      const hold = new Promise(resolve => { release = resolve; }), hit = new Promise(resolve => { received = resolve; });
+      const pending = new Set();
+      const handler = async route => {
+        const path = new URL(route.request().url()).pathname;
+        const matches = route.request().method() === 'GET' && (kind === 'list' ? path === '/v1/versions' : /^\/v1\/versions\/[^/]+$/.test(path));
+        if (!matches) return route.fallback();
+        requests++; received();
+        const completed = (async () => { await hold; await route.continue(); })();
+        pending.add(completed);
+        try { await completed; } finally { pending.delete(completed); }
+      };
+      await page.route(pattern, handler);
+      return {
+        wasRequested() { return requests > 0; },
+        async wait() {
+          let timer;
+          try { await Promise.race([hit, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('No gated ' + kind + ' metadata request')), 30000); })]); }
+          finally { clearTimeout(timer); }
+        },
+        async release() { release(); await Promise.all([...pending]); await page.unroute(pattern, handler); },
+      };
     };
     const importOffline = async page => {
       const chooser = page.waitForEvent('filechooser');
@@ -126,6 +188,13 @@ async function run() {
     const openStatusChooser = async page => {
       await page.locator('.workspaceStatus .versionStatusName').click();
       await page.getByRole('region', { name: 'Source versions' }).waitFor();
+      const activeId = await page.evaluate(() => window.__managedFixtureApp.managedActiveVersion?.id || window.__managedFixtureApp.activeManagedVersionId);
+      if (activeId) {
+        // The chooser intentionally waits for a source-row selection before loading team details.
+        const activeRow = page.locator('.onlineVersionTable tbody tr[data-version-id="' + activeId + '"]');
+        await activeRow.locator('td').first().locator('small').first().click();
+        await page.locator('.teamVersionTable tbody tr').first().waitFor();
+      }
     };
     const teamRow = (page, language) => page.locator('.teamVersionTable tbody tr').filter({
       has: page.locator('.teamEditorLink').filter({ hasText: new RegExp('^' + language + '$') }),
@@ -210,6 +279,89 @@ async function run() {
     await translator.waitForFunction(() => window.__managedFixtureApp.managedImportZipDisabled);
     assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), true,
       'Manager publication adopts the active matching Offline workspace and disables Import ZIP');
+    const probeContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
+    const catalogProbe = await probeContext.newPage();
+    catalogProbe.on('pageerror', error => failures.push(error.message));
+    await bootstrapProfile(catalogProbe, 'manager'); await installCatalogCounters(catalogProbe);
+    const initialList = await metadataGate(catalogProbe, 'list'), initialDetails = await metadataGate(catalogProbe, 'details');
+    await catalogProbe.getByRole('button', { name: 'PoE2 Path of Exile 2', exact: true }).click();
+    await catalogProbe.getByRole('region', { name: 'Source versions' }).waitFor(); await initialList.wait();
+    await catalogProbe.locator('.onlineVersions .versionLoading').filter({ hasText: 'Loading online versions…' }).waitFor();
+    assert.equal(await catalogProbe.locator('.onlineVersionTable tbody tr').count(), 0);
+    assert.equal(await catalogProbe.getByText('No source versions have been published for this game.', { exact: true }).count(), 0,
+      'Pending initial metadata does not flash the settled empty state');
+    assert.equal(await catalogProbe.locator('.versionCatalogHeader .browserWorkSpinner').count(), 0,
+      'Catalog entry does not show workspace preparation progress');
+    await assertMetadataOnly(catalogProbe, 'Dashboard displayed before initial list response');
+    const loadingSnapshot = () => catalogProbe.evaluate(() => {
+      const vm = window.__managedFixtureApp, element = document.querySelector('.onlineVersions .versionLoading');
+      const style = element && getComputedStyle(element), spinner = element?.querySelector('.browserWorkSpinner');
+      return { loading: vm.managedCatalogLoading, loaded: vm.managedCatalogLoaded, requestPending: !!vm._managedRefreshPending,
+        scopeRun: vm._managedScopeRun, text: element?.textContent.trim() || '',
+        visible: !!element && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0,
+        spinnerWidth: spinner?.getBoundingClientRect().width || 0, rows: document.querySelectorAll('.onlineVersionTable tbody tr').length };
+    });
+    const beforeCapture = await loadingSnapshot(), captureStarted = Date.now();
+    await catalogProbe.screenshot({ path: join(directory, 'catalog-initial-loading.png'), fullPage: false });
+    const afterCapture = await loadingSnapshot();
+    writeFileSync(join(directory, 'catalog-initial-loading-state.json'), JSON.stringify({ before: beforeCapture,
+      after: afterCapture, captureElapsedMs: Date.now() - captureStarted }, null, 2));
+    for (const state of [beforeCapture, afterCapture]) {
+      assert.equal(state.loading, true, 'Initial catalog loading remains true throughout the held request');
+      assert.equal(state.loaded, false); assert.equal(state.requestPending, true); assert.equal(state.rows, 0);
+      assert.equal(state.visible, true, 'Initial loader remains visually present before and after screenshot');
+      assert.equal(state.text, 'Loading online versions…'); assert.ok(state.spinnerWidth > 0, 'Initial spinner has visible dimensions');
+    }
+    await initialList.release(); await catalogProbe.locator('.onlineVersionTable tbody tr').first().waitFor();
+    assert.equal(initialDetails.wasRequested(), false, 'Initial catalog render does not prefetch any team details');
+    assert.equal(await catalogProbe.locator('.versionDetails').count(), 0, 'Team details wait for explicit source selection');
+    await versionRow(catalogProbe, version.name).locator('.versionSelect').click(); await initialDetails.wait();
+    await catalogProbe.locator('.versionDetails .versionLoading').filter({ hasText: 'Loading team details…' }).waitFor();
+    assert.equal(await catalogProbe.locator('.onlineVersionTable tbody tr').count(), 1);
+    assert.equal(await catalogProbe.locator('.teamVersionTable tbody tr').count(), 0);
+    assert.equal(await catalogProbe.locator('.onlineVersions .versionLoading').count(), 0);
+    await assertMetadataOnly(catalogProbe, 'Source row displayed before initial team-details response');
+    await initialDetails.release(); await catalogProbe.locator('.teamVersionTable tbody tr').first().waitFor();
+    assert.equal(await catalogProbe.locator('.teamVersionTable tbody tr').count(), 12);
+    await catalogProbe.waitForFunction(() => !window.__managedFixtureApp._managedRefreshPending);
+    await assertMetadataOnly(catalogProbe, 'Settled initial source/team metadata');
+    const stableMetadata = await catalogProbe.evaluate(() => {
+      window.__catalogStableNodes = { sourceRow: document.querySelector('.onlineVersionTable tbody tr'),
+        teamRow: document.querySelector('.teamVersionTable tbody tr'), header: document.querySelector('.versionDetails h2') };
+      return { version: window.__catalogStableNodes.sourceRow.textContent, team: window.__catalogStableNodes.teamRow.textContent,
+        header: window.__catalogStableNodes.header.textContent };
+    });
+    const assertSettledCatalog = async () => {
+      const current = await catalogProbe.evaluate(() => ({ version: document.querySelector('.onlineVersionTable tbody tr')?.textContent,
+        team: document.querySelector('.teamVersionTable tbody tr')?.textContent, header: document.querySelector('.versionDetails h2')?.textContent,
+        sameRows: window.__catalogStableNodes.sourceRow === document.querySelector('.onlineVersionTable tbody tr')
+          && window.__catalogStableNodes.teamRow === document.querySelector('.teamVersionTable tbody tr') }));
+      assert.deepEqual({ version: current.version, team: current.team, header: current.header }, stableMetadata,
+        'Settled cached metadata stays visible during background requests');
+      assert.equal(current.sameRows, true, 'Background requests preserve existing table rows');
+      assert.equal(await catalogProbe.locator('.versionLoading').count(), 0,
+        'Background metadata requests remain silent');
+      await assertMetadataOnly(catalogProbe, 'Background source/team metadata refresh');
+    };
+    const backgroundList = await metadataGate(catalogProbe, 'list');
+    await catalogProbe.evaluate(() => { window.__catalogRefreshTask = window.__managedFixtureApp.refreshManagedVersions(); });
+    await backgroundList.wait(); await assertSettledCatalog();
+    await backgroundList.release(); await catalogProbe.evaluate(() => window.__catalogRefreshTask);
+    const backgroundDetails = await metadataGate(catalogProbe, 'details');
+    await catalogProbe.evaluate(id => { window.__catalogDetailTask = window.__managedFixtureApp.managedReadDetails(id, false); }, version.id);
+    await backgroundDetails.wait(); await assertSettledCatalog();
+    await backgroundDetails.release(); await catalogProbe.evaluate(() => window.__catalogDetailTask);
+    await assertSettledCatalog();
+    await teamRow(catalogProbe, 'French').locator('.teamEditorLink').click(); await waitWorkspace(catalogProbe, version, 'French');
+    await catalogProbe.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
+    const activatedProbe = await catalogCounters(catalogProbe);
+    assert.ok(activatedProbe.reads.getSource > 0 && activatedProbe.reads.getWorkspace > 0 && activatedProbe.reads.getImportedBaseline > 0,
+      'Explicit editor activation reads its source, workspace and immutable baseline');
+    assert.ok(activatedProbe.hydration.loadVersionedStorage > 0 && Object.values(activatedProbe.status).some(Boolean),
+      'Explicit editor activation performs translation hydration/status work');
+    assert.ok(activatedProbe.roomJoins > 0, 'Explicit editor activation joins its exact-language collaboration room');
+    await probeContext.close();
+    results.push('Dashboard renders before gated source/team metadata, shows initial loaders only, keeps cached rows/details stable during silent polls, and defers all workspace/status/collaboration work until editor activation');
     const thaiRow = teamRow(manager, 'Thai');
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails?.teams.find(team => team.language === 'Thai')?.counts.saved === 1);
     assert.equal(await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').roomId), standaloneRoomId);
@@ -420,8 +572,10 @@ async function run() {
     await translator.route(apiOrigin + '/**', route => route.abort());
     await translator.reload();
     await translator.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady);
+    await installCatalogCounters(translator);
     await translator.getByRole('button', { name: 'PoE2 Path of Exile 2', exact: true }).click();
-    await translator.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady && window.__managedFixtureApp?.sourceLoaded).catch(async error => {
+    await translator.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady && window.__managedFixtureApp?.versionChooserVisible
+      && !window.__managedFixtureApp?.versionStorageLoading).catch(async error => {
       console.error('Offline reload state: ' + JSON.stringify(await translator.evaluate(async () => {
         const vm = window.__managedFixtureApp;
         return { ready: vm?.offlineStoreReady, sourceLoaded: vm?.sourceLoaded, game: vm?.gameVersion,
@@ -436,6 +590,7 @@ async function run() {
       await translator.screenshot({ path: join(directory, 'offline-reload-failure.png'), fullPage: true });
       throw error;
     });
+    await assertMetadataOnly(translator, 'Cached Online game selection without API connectivity');
     await versionRow(translator, version.name).locator('td').first().locator('small').first().click();
     await translator.waitForFunction(versionId => {
       const vm = window.__managedFixtureApp, team = vm.managedVersionDetails?.teams.find(team => team.language === 'Thai');
@@ -443,6 +598,7 @@ async function run() {
         && team?.ended && team.counts.saved === 1;
     }, version.id);
     assert.equal(await translator.locator('.versionDetails h2').textContent(), version.name + ' HEAD');
+    await assertMetadataOnly(translator, 'Cached Online version/team selection');
     await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
     await acceptEntryWarning(translator);
     await translator.waitForFunction(sourceHash => {
@@ -450,6 +606,11 @@ async function run() {
       return !vm.managedVersionBusy && !vm.versionChooserVisible && vm.sourceLoaded && vm.sourceIdentity === sourceHash;
     }, version.sourceHash);
     await checkStatusVersion(translator, version.name, { ended: true, deadline: true, online: true });
+    const activatedCached = await catalogCounters(translator);
+    assert.ok(activatedCached.reads.getSource > 0 && activatedCached.reads.getWorkspace > 0 && activatedCached.reads.getImportedBaseline > 0,
+      'Cached editor activation reads its source, workspace and accepted baseline');
+    assert.ok(activatedCached.hydration.loadVersionedStorage > 0 && Object.values(activatedCached.status).some(Boolean),
+      'Cached editor activation hydrates translations and calculates status');
     const stored = await translator.evaluate(async () => {
       const vm = window.__managedFixtureApp; const scope = vm.managedWorkspaceScope();
       const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
@@ -485,9 +646,11 @@ async function run() {
     await offline.waitForFunction(() => !window.__managedFixtureApp.versionStorageLoading && !window.__managedFixtureApp.versionChooserVisible);
     await offline.reload();
     await offline.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady);
+    await installCatalogCounters(offline);
     await offline.getByRole('button', { name: 'PoE2 Path of Exile 2', exact: true }).click();
     await offline.locator('#offlineVersionName').waitFor();
     assert.equal(await offline.locator('#offlineVersionName').inputValue(), 'Local reference export');
+    await assertMetadataOnly(offline, 'Named standalone Offline game selection');
     results.push('Unsigned Offline card keeps original import warnings, editable local name, keyboard naming and Continue workflow');
     results.push('Import ZIP remains enabled for named/unnamed Offline workspaces and disabled for adopted, published, ended and cached Online versions');
     const successorZip = await JSZip.loadAsync(bytes); successorZip.comment = 'Distinct successor archive for catalog navigation fixture';

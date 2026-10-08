@@ -27,7 +27,8 @@ function versionedStorage(version = 4) {
     ['revisions_poe1', new Map([[1, { id: 1, filepath: 'a.txt', lang: 'Thai', sourceHash: 'current', savedAt: 1, translations: ['Local translation'] }]])],
     ['revisions_poe2', new Map([[1, { id: 1, lang: 'German', translations: ['German history'] }]])],
   ]);
-  const connections = new Set(), waiting = [], requests = [], events = [], createdStores = [];
+  const connections = new Set(), waiting = [], requests = [], events = [], createdStores = [], operations = [], commits = [];
+  const features = { getAllKeys: true }; let nextTransaction = 0;
   let storedVersion = version;
   const fail = name => new DOMException(name === 'VersionError' ? 'The requested version is lower than the existing version.' : 'The connection is closing.', name);
   const drain = () => { for (const request of [...waiting]) advance(request); };
@@ -49,7 +50,7 @@ function versionedStorage(version = 4) {
         if (db.closing || db.closed) throw fail('InvalidStateError');
         names = Array.isArray(names) ? names : [names];
         for (const name of names) assert.ok(tables.has(name), name);
-        const writes = []; let pending = 0, completed = false, finishing = false;
+        const writes = [], transactionId = ++nextTransaction; let pending = 0, completed = false, finishing = false;
         const tx = { held: false,
           objectStore(name) {
             assert.ok(names.includes(name));
@@ -58,10 +59,14 @@ function versionedStorage(version = 4) {
               queueMicrotask(() => { result.result = run(); result.onsuccess?.(); pending--; finish(); });
               return result;
             };
+            const observed = (method, key, run) => { operations.push({ transactionId, mode, store: name, method, key: copy(key) }); return request(run); };
+            const matching = range => [...tables.get(name)].filter(([key]) => !range || (key >= range.lower && key <= range.upper));
             return {
-              get(key) { return request(() => copy(tables.get(name).get(key))); },
-              getAll(range) { return request(() => [...tables.get(name)].filter(([key]) => !range || (key >= range.lower && key <= range.upper)).map(([, row]) => copy(row))); },
-              count(key) { return request(() => key === undefined ? tables.get(name).size : Number(tables.get(name).has(key))); },
+              get(key) { return observed('get', key, () => copy(tables.get(name).get(key))); },
+              getKey(key) { return observed('getKey', key, () => tables.get(name).has(key) ? key : undefined); },
+              getAll(range) { return observed('getAll', range, () => matching(range).map(([, row]) => copy(row))); },
+              getAllKeys: features.getAllKeys ? range => observed('getAllKeys', range, () => matching(range).map(([key]) => key)) : undefined,
+              count(key) { return observed('count', key, () => key === undefined ? tables.get(name).size : Number(tables.get(name).has(key))); },
               put(row) { assert.equal(mode, 'readwrite'); writes.push({ name, row: copy(row), key: row.key }); return request(() => row.key); },
               delete(key) { assert.equal(mode, 'readwrite'); writes.push({ name, key, deleted: true }); return request(() => undefined); },
               add(row) {
@@ -69,14 +74,26 @@ function versionedStorage(version = 4) {
                 const key = Math.max(0, ...tables.get(name).keys(), ...writes.filter(write => write.name === name).map(write => write.key)) + 1;
                 writes.push({ name, key, row: { ...copy(row), id: key } }); return request(() => key);
               },
-              openCursor() {
-                const rows = [...tables.get(name).entries()]; let index = 0;
+              openCursor(range) {
+                operations.push({ transactionId, mode, store: name, method: 'openCursor', key: copy(range) });
+                const rows = matching(range); let index = 0;
                 const result = {};
                 const next = () => {
                   pending++;
                   queueMicrotask(() => {
                     const row = rows[index++];
                     result.result = row ? { key: row[0], value: copy(row[1]), continue: next } : null;
+                    result.onsuccess?.(); pending--; finish();
+                  });
+                };
+                next(); return result;
+              },
+              openKeyCursor(range) {
+                operations.push({ transactionId, mode, store: name, method: 'openKeyCursor', key: copy(range) });
+                const keys = matching(range).map(([key]) => key); let index = 0;
+                const result = {}, next = () => {
+                  pending++; queueMicrotask(() => {
+                    const key = keys[index++]; result.result = key === undefined ? null : { key, continue: next };
                     result.onsuccess?.(); pending--; finish();
                   });
                 };
@@ -112,6 +129,7 @@ function versionedStorage(version = 4) {
               if (write.deleted) tables.get(write.name).delete(write.key);
               else tables.get(write.name).set(write.key, write.row);
             }
+            commits.push({ transactionId, mode, writes: copy(writes) });
             events.push('commit:' + db.version); active.delete(tx); tx.oncomplete?.();
             if (db.closing) db.close();
           });
@@ -146,7 +164,7 @@ function versionedStorage(version = 4) {
     const request = { version: requestedVersion }; requests.push(request); waiting.push(request);
     queueMicrotask(() => advance(request)); return request;
   } };
-  return { indexedDB, tables, connections, requests, events, createdStores,
+  return { indexedDB, tables, connections, requests, events, createdStores, operations, commits, features,
     get version() { return storedVersion; },
     snapshot: () => [...tables].map(([name, rows]) => [name, copy([...rows])]),
   };
@@ -501,4 +519,102 @@ test('an unhashed legacy workspace is indexed under the real canonical source id
   await loaded.store.saveTranslationBatch({ jobId: 'first-unhashed-save', game: 'poe1', accountId: 'guest', sourceHash: expected,
     branchId: 'default', workspaceScope: scope, language: 'Thai', files: [{ filepath: 'a.txt', translations: ['First scoped save'] }] });
   assert.deepEqual(Array.from((await loaded.store.getVersionWorkspace(scope, 'Thai')).staged.Thai['a.txt'].translations), ['First scoped save']);
+});
+
+function namedVersionKey(prefix, scope) {
+  return prefix + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
+}
+function putFixtureValue(fixture, key, value) { fixture.tables.get('kv').set(key, { key, value: copy(value) }); }
+function assertMetadataOnlyReads(fixture) {
+  assert.ok(fixture.operations.every(operation => operation.store === 'kv'), 'Catalog discovery must not visit revision stores.');
+  for (const operation of fixture.operations) {
+    if (operation.method === 'get') assert.ok(operation.key.startsWith('workspace_active_v1:'), 'Only the small active pointer may be read directly: ' + operation.key);
+    if (operation.method === 'getAll') assert.ok(operation.key?.lower?.startsWith('version_index_v1:'), 'Only the small version index may be read in bulk.');
+    assert.notEqual(operation.method, 'openCursor', 'Metadata discovery must use a key-only cursor.');
+  }
+}
+
+test('metadata-only version listing reads small scoped index values and legacy keys without loading stored files or details', async () => {
+  const fixture = versionedStorage(7), loaded = loadStore(fixture), scope = localScope('', 'alice');
+  const current = { ...scope, sourceHash: 'indexed' }, older = { ...scope, sourceHash: 'old-metadata' };
+  putFixtureValue(fixture, namedVersionKey('version_index_v1:', current), { ...current, accountId: 'wrong-account', game: 'poe2', branchId: 'wrong-branch', sourceHash: 'wrong-source', name: 'Indexed name', createdAt: 20 });
+  putFixtureValue(fixture, namedVersionKey('version_metadata_v1:', older), { ...older, name: 'Heavy old metadata', details: { teams: [{ language: 'Thai', recoveries: [{ snapshot: { translations: ['Private retained translation'] } }] }] } });
+  for (const version of [current, older]) {
+    putFixtureValue(fixture, namedVersionKey('source_version_v1:', version), source);
+    putFixtureValue(fixture, namedVersionKey('workspace_version_v1:', version), workspace);
+  }
+  for (const excluded of [{ ...scope, accountId: 'alice-other', sourceHash: 'other-profile' }, { ...scope, game: 'poe2', sourceHash: 'other-game' }, { ...scope, branchId: 'release', sourceHash: 'other-branch' }]) {
+    putFixtureValue(fixture, namedVersionKey('version_index_v1:', excluded), { ...excluded, name: 'Excluded' });
+    putFixtureValue(fixture, namedVersionKey('version_metadata_v1:', excluded), { ...excluded, name: 'Excluded metadata' });
+  }
+  const activeKey = 'workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId]);
+  putFixtureValue(fixture, activeKey, { ...current, accountId: 'another-owner' });
+  loaded.store.setWorkspaceContext(scope); const before = fixture.snapshot();
+  const listed = copy(await loaded.store.listLocalVersions(scope, { metadataOnly: true }));
+  assert.deepEqual(listed.map(version => version.sourceHash), ['indexed', 'old-metadata']);
+  assert.ok(listed.every(version => version.accountId === 'alice' && version.game === 'poe1' && version.branchId === 'default' && version.hasSource));
+  assert.equal(listed[0].name, 'Indexed name'); assert.equal(listed[1].metadataPending, true); assert.equal(listed[1].name, '');
+  assert.ok(listed.every(version => !version.current)); assert.ok(!JSON.stringify(listed).includes('Private retained translation'));
+  assert.deepEqual(fixture.snapshot(), before); assertMetadataOnlyReads(fixture);
+  const expectedPrefix = 'version_metadata_v1:' + JSON.stringify(['alice','poe1','default']).slice(0, -1) + ',';
+  assert.ok(fixture.operations.filter(operation => operation.method === 'getAllKeys').every(operation => operation.key.lower === expectedPrefix));
+  putFixtureValue(fixture, activeKey, current); fixture.operations.length = 0;
+  assert.equal((await loaded.store.listLocalVersions(scope, { metadataOnly: true }))[0].current, true); assertMetadataOnlyReads(fixture);
+});
+
+test('metadata-only legacy discovery uses a scoped key cursor when getAllKeys is unavailable', async () => {
+  const fixture = versionedStorage(7), loaded = loadStore(fixture), scope = localScope('', 'alice', 'release');
+  fixture.features.getAllKeys = false;
+  const owned = { ...scope, sourceHash: 'retained' }, other = { ...owned, branchId: 'default' };
+  putFixtureValue(fixture, namedVersionKey('version_metadata_v1:', owned), { ...owned, name: 'Old private metadata', details: { teams: ['Never read'] } });
+  putFixtureValue(fixture, namedVersionKey('version_metadata_v1:', other), { ...other, name: 'Other branch' });
+  putFixtureValue(fixture, namedVersionKey('source_version_v1:', owned), source);
+  const before = fixture.snapshot(), listed = copy(await loaded.store.listLocalVersions(scope, { metadataOnly: true }));
+  assert.equal(listed.length, 1); assert.equal(listed[0].sourceHash, 'retained'); assert.equal(listed[0].metadataPending, true); assert.equal(listed[0].hasSource, true);
+  assert.deepEqual(fixture.snapshot(), before); assertMetadataOnlyReads(fixture);
+  assert.equal(fixture.operations.filter(operation => operation.method === 'openKeyCursor').length, 1);
+  assert.ok(fixture.operations.filter(operation => operation.method === 'openKeyCursor').every(operation => operation.key.lower.includes('["alice","poe1","release",')));
+});
+
+test('source imports and named metadata commit their small indexes atomically while keeping team recovery payloads out of the index', async () => {
+  const fixture = versionedStorage(7), loaded = loadStore(fixture), scope = { ...localScope('imported', 'owner', 'release'), game: 'poe2' };
+  loaded.store.setWorkspaceContext(scope);
+  const imported = { sourceHash: scope.sourceHash, game: scope.game, branchId: scope.branchId, descs: copy(source), status: {} };
+  await loaded.store.saveSourceWorkspaceWithRevisions(source, imported, [{ filepath: 'a.txt', lang: 'Thai', savedAt: 20, translations: ['Imported history'] }], scope);
+  const indexKey = namedVersionKey('version_index_v1:', scope), metadataKey = namedVersionKey('version_metadata_v1:', scope);
+  const importCommit = fixture.commits.find(commit => commit.writes.some(write => write.key === indexKey));
+  assert.ok(importCommit);
+  for (const key of [indexKey, metadataKey, namedVersionKey('source_version_v1:', scope), namedVersionKey('workspace_version_v1:', scope), 'workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId])]) {
+    assert.ok(importCommit.writes.some(write => write.name === 'kv' && write.key === key), 'The source/index commit must include ' + key);
+  }
+  assert.ok(importCommit.writes.some(write => write.name === 'revisions_poe2'));
+  const details = { version: { id: 'official', game: scope.game, branchId: scope.branchId, sourceHash: scope.sourceHash, name: 'Official name', assignedTeam: { language: 'Thai', ended: false }, archive: { files: source } },
+    teams: [{ language: 'Thai', counts: { saved: 99 }, recoveries: [{ snapshot: { translations: ['Private recovered text'] } }] }] };
+  await loaded.store.setVersionMetadata(scope, { name: 'Local name', officialName: 'Official name', catalogVersionId: 'official', details,
+    accountId: 'injected', game: 'poe1', branchId: 'injected', sourceHash: 'injected', source, workspace: imported, history: ['Private history'], recoveries: ['Private recovery'] });
+  const metadataCommit = fixture.commits.at(-1), kv = fixture.tables.get('kv'), index = kv.get(indexKey).value;
+  assert.deepEqual(metadataCommit.writes.map(write => write.key).sort(), [indexKey, metadataKey].sort());
+  assert.equal(index.accountId, 'owner'); assert.equal(index.game, 'poe2'); assert.equal(index.branchId, 'release'); assert.equal(index.sourceHash, 'imported');
+  assert.equal(index.name, 'Local name'); assert.equal(index.officialName, 'Official name'); assert.equal(index.catalogVersionId, 'official');
+  assert.equal(index.catalogVersion.id, 'official'); assert.deepEqual(index.catalogVersion.assignedTeam, { language: 'Thai', ended: false });
+  for (const field of ['details','teams','source','workspace','history','recoveries']) assert.equal(index[field], undefined, field + ' must not enter the small index.');
+  assert.equal(index.catalogVersion.archive, undefined); assert.ok(!JSON.stringify(index).includes('Private'));
+  assert.deepEqual(kv.get(metadataKey).value.details, details, 'The full details remain preserved separately.');
+  const before = fixture.snapshot(), invalidScope = { ...scope, sourceHash: 'invalid-import' };
+  await assert.rejects(loaded.store.saveSourceWorkspaceWithRevisions(source, { ...imported, sourceHash: invalidScope.sourceHash }, [], invalidScope,
+    { archive: { baselineId: 'a'.repeat(64) } }), /identity differ/);
+  assert.deepEqual(fixture.snapshot(), before); assert.equal(kv.has(namedVersionKey('version_index_v1:', invalidScope)), false);
+});
+
+test('legacy game-slot placeholders disclose no owner or files and do not migrate work during catalog listing', async () => {
+  const fixture = versionedStorage(7), loaded = loadStore(fixture), kv = fixture.tables.get('kv');
+  kv.get('workspace_poe1').value.accountId = 'actual-owner'; kv.get('workspace_poe1').value.versionName = 'Owner private name';
+  const scope = localScope('', 'another-account'), before = fixture.snapshot();
+  const listed = copy(await loaded.store.listLocalVersions(scope, { metadataOnly: true }));
+  assert.equal(listed.length, 1); assert.equal(listed[0].legacy, true); assert.equal(listed[0].ownershipUnknown, true); assert.equal(listed[0].sourceHash, '');
+  assert.equal(listed[0].name, 'Stored offline workspace'); assert.equal(listed[0].hasSource, false); assert.equal(listed[0].hasLegacySource, true); assert.equal(listed[0].current, false);
+  assert.ok(!JSON.stringify(listed).includes('Owner private name')); assert.deepEqual(fixture.snapshot(), before); assertMetadataOnlyReads(fixture);
+  fixture.operations.length = 0;
+  assert.deepEqual(copy(await loaded.store.listLocalVersions({ ...scope, branchId: 'release' }, { metadataOnly: true })), []);
+  assert.deepEqual(fixture.snapshot(), before); assertMetadataOnlyReads(fixture);
 });

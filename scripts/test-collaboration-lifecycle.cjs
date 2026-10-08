@@ -1158,6 +1158,20 @@ test('a language change during durable reconciliation reloads the accepted basel
   assert.deepEqual(plain(e.importBaseline.source[0].translations.Thai), ['Second original']);
 });
 
+test('a reconciliation completed after returning to the dashboard does not reload translation files', async () => {
+  const { editor: e, window } = harness({ realImport: true }); const { first, second } = await duplicateBaselines(e);
+  e.importBaseline = first; e.sourceIdentity = first.archive.baselineId; e.descs = plain(first.source);
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
+  const started = deferred(), commit = deferred();
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async () => { started.resolve(); await commit.promise; };
+  e.loadVersionedStorage = () => assert.fail('A completed reconciliation must not hydrate the dashboard');
+  const reconciling = e.reconcileImportArchive(second.archive); await started.promise;
+  e.versionChooserVisible = true; e.cloudUser = { id: 'another-account' };
+  commit.resolve(); await reconciling; await tick();
+  assert.equal(e.versionChooserVisible, true); assert.equal(!!e._reconcilingImport, false);
+  assert.equal(e._importReconciliationDone, null);
+});
+
 test('changing game waits for baseline reconciliation durability before loading another workspace', async () => {
   const { editor: e, window } = harness({ realImport: true }); const { first, second } = await duplicateBaselines(e);
   e.importBaseline = first; e.sourceIdentity = first.archive.baselineId; e.descs = plain(first.source);
@@ -1170,6 +1184,79 @@ test('changing game waits for baseline reconciliation durability before loading 
   commit.resolve(); await reconciling; await activating;
   assert.equal(gameDuringCommit, 'poe1'); assert.equal(e.gameVersion, 'poe2'); assert.equal(e.sourceLoaded, false);
   assert.equal(!!e._reconcilingImport, false);
+});
+
+test('managed game selection shows the catalog before migration and metadata settle without loading files', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; window.ManagedVersions = {};
+  e.versionChooserVisible = false; e.versionStorageLoading = true;
+  const migration = deferred(), catalog = deferred();
+  let metadataLoads = 0;
+  e.prepareSingleVersionMigration = () => migration.promise;
+  e.managedScopeChanged = async options => {
+    assert.equal(options.deferWorkspace, true); metadataLoads++; await catalog.promise;
+  };
+  e.loadVersionedStorage = () => assert.fail('The catalog must not hydrate an editor workspace');
+  for (const method of ['getSource', 'getWorkspace', 'getImportedBaseline']) {
+    window.OfflineStore[method] = () => assert.fail('The catalog must not read translation files');
+  }
+  const selecting = e.activateGameVersion('poe2'); await tick();
+  assert.equal(e.gameVersion, 'poe2'); assert.equal(e.versionChooserVisible, true);
+  assert.equal(e.versionStorageLoading, false); assert.equal(e.sourceLoaded, false);
+  assert.equal(e.descs.length, 0); assert.equal(metadataLoads, 0);
+  migration.resolve(); await selecting; await tick();
+  assert.equal(metadataLoads, 1); assert.equal(e.versionChooserVisible, true);
+  catalog.resolve(); await tick();
+});
+
+test('a superseded game selection cannot start a catalog request after its migration check returns', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; window.ManagedVersions = {};
+  const gates = { poe1: deferred(), poe2: deferred() }, scopes = [];
+  e.prepareSingleVersionMigration = () => gates[e.gameVersion].promise;
+  e.managedScopeChanged = async options => { scopes.push([e.gameVersion, options.deferWorkspace]); };
+  e.loadVersionedStorage = () => assert.fail('Game selection must not load files');
+  const oldSelection = e.activateGameVersion('poe1'); await tick();
+  const latestSelection = e.activateGameVersion('poe2'); await tick();
+  gates.poe2.resolve(); await latestSelection;
+  gates.poe1.resolve(); await oldSelection;
+  assert.equal(e.gameVersion, 'poe2');
+  assert.deepEqual(scopes, [['poe2', true]]);
+});
+
+test('legacy migration discovery ignores a flag read from a superseded game selection', async () => {
+  const { editor: e, window } = harness();
+  const flag = deferred();
+  e._gameSelectionGeneration = 1;
+  window.OfflineStore.hasMigratedFromSingleVersion = () => flag.promise;
+  window.OfflineStore.getLegacySource = () => assert.fail('Stale migration must not read legacy files');
+  const preparing = e.prepareSingleVersionMigration(); await tick();
+  e._gameSelectionGeneration = 2; e.gameVersion = 'poe2';
+  e.pendingSingleVersionMigration = { selectedVersion: 'poe2' };
+  flag.resolve(false); await preparing;
+  assert.equal(e.pendingSingleVersionMigration.selectedVersion, 'poe2');
+});
+
+test('changing accounts while a draft is flushed cancels the pending game selection', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; window.ManagedVersions = {};
+  e.cloudProfileId = 'account-one';
+  const draft = deferred(); e.flushEditorDraft = () => draft.promise;
+  e.managedScopeChanged = () => assert.fail('A stale account selection must not load a catalog');
+  const selecting = e.activateGameVersion('poe2'); await tick();
+  e.cloudProfileId = 'account-two'; draft.resolve(true); await selecting;
+  assert.equal(e.gameVersion, 'poe1'); assert.equal(e.sourceLoaded, true);
+});
+
+test('legacy migration discovery cannot interrupt an editor opened while its files were being read', async () => {
+  const { editor: e, window } = harness();
+  window.ManagedVersions = {}; e.versionChooserVisible = true; e.sourceLoaded = false;
+  window.OfflineStore.hasMigratedFromSingleVersion = async () => false;
+  const source = deferred(); window.OfflineStore.getLegacySource = () => source.promise;
+  const preparing = e.prepareSingleVersionMigration(); await tick();
+  e.versionChooserVisible = false; e.sourceLoaded = true;
+  source.resolve([description('legacy')]); await preparing;
+  assert.equal(e.pendingSingleVersionMigration, null);
 });
 
 test('failed canonical persistence releases its transition lock and keeps the previous baseline available', async () => {

@@ -1048,9 +1048,15 @@ const config = Vue.defineComponent({
       await this.activateGameVersion(version, { checkMigration: true });
     },
     async activateGameVersion(version, { checkMigration = true } = {}) {
+      const selection = this._gameSelectionGeneration = (this._gameSelectionGeneration || 0) + 1;
+      const owner = this.cloudProfileId || 'guest';
+      const current = () => selection === this._gameSelectionGeneration && owner === (this.cloudProfileId || 'guest');
       if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
+      if (!current()) return;
       if (this._importReconciliationDone) await this._importReconciliationDone;
+      if (!current()) return;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+      if (!current()) return;
       const v = this.normalizeGameVersion(version);
       this.gameVersion = v;
       this.gameVersionSelected = true;
@@ -1064,18 +1070,34 @@ const config = Vue.defineComponent({
         return;
       }
 
+      const catalogOnly = !!window.ManagedVersions;
+      if (catalogOnly) {
+        // Choosing a game needs catalog metadata, not the active translation files.
+        this._versionLoadGeneration = (this._versionLoadGeneration || 0) + 1;
+        this.versionStorageLoading = false;
+        this.clearBrowserWork?.('workspace');
+        this.versionChooserVisible = true;
+        this.resetVersionedState();
+      }
+
       if (checkMigration) {
         await this.prepareSingleVersionMigration();
+        if (!current() || this.gameVersion !== v) return;
         if (this.pendingSingleVersionMigration) return;
       }
 
-      await this.loadVersionedStorage();
-      if (window.ManagedVersions && !this.testMode) {
-        this.versionChooserVisible = true;
-        await this.managedScopeChanged();
-      }
+      if (!current() || this.gameVersion !== v) return;
+      if (catalogOnly) Promise.resolve(this.managedScopeChanged({ deferWorkspace: true })).catch(error => {
+        if (current() && this.gameVersion === v) this.managedSetOperationError?.('catalog', error);
+      });
+      else await this.loadVersionedStorage();
     },
     async prepareSingleVersionMigration() {
+      const selection = this._gameSelectionGeneration;
+      const versionLoad = this._versionLoadGeneration;
+      const scope = JSON.stringify([this.gameVersion, this.cloudProfileId || 'guest', this.branchId || 'default']);
+      const current = () => selection === this._gameSelectionGeneration
+        && scope === JSON.stringify([this.gameVersion, this.cloudProfileId || 'guest', this.branchId || 'default']);
       this.pendingSingleVersionMigration = null;
       if (!(window.OfflineStore && typeof window.OfflineStore.hasMigratedFromSingleVersion === 'function')) return;
 
@@ -1084,6 +1106,7 @@ const config = Vue.defineComponent({
         migrated = !!(await window.OfflineStore.hasMigratedFromSingleVersion());
       } catch (_) {
       }
+      if (!current()) return;
       if (migrated) return;
 
       let legacySource;
@@ -1095,6 +1118,9 @@ const config = Vue.defineComponent({
         legacyRevisionCount = Number(await window.OfflineStore.getLegacyRevisionCount?.()) || 0;
       } catch (_) {
       }
+      if (!current()) return;
+      if (window.ManagedVersions && (!this.versionChooserVisible || this.sourceLoaded
+        || this.managedVersionBusy || this._managedActivation || versionLoad !== this._versionLoadGeneration)) return;
 
       const workspaceDescs = Array.isArray(legacyWorkspace?.descs) ? legacyWorkspace.descs : [];
       const sourceDescs = Array.isArray(legacySource) ? legacySource : [];
@@ -1132,7 +1158,10 @@ const config = Vue.defineComponent({
 
       this.pendingSingleVersionMigration = null;
       this.migrationInProgress = false;
-      await this.loadVersionedStorage();
+      if (window.ManagedVersions && !this.testMode) {
+        this.versionChooserVisible = true;
+        await this.managedScopeChanged({ deferWorkspace: true });
+      } else await this.loadVersionedStorage();
     },
     async loadVersionedStorage() {
       if (this.flushEditorDraft && !await this.flushEditorDraft()) return;

@@ -102,8 +102,9 @@ async function run() {
       const request = vm._cloud.request.bind(vm._cloud);
       vm._cloud.request = async (path, ...args) => { const began = performance.now(); try { return await request(path, ...args); } finally { if (path.endsWith('/original')) measurements.originalDownloadMs = performance.now() - began; } };
     }, { secret });
-    await page.getByRole('button', { name: 'Open editor', exact: true }).waitFor();
-    phase = Date.now(); await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+    const openEditor = page.locator('.onlineVersionTable').getByRole('button', { name: 'Open editor', exact: true });
+    await openEditor.waitFor();
+    phase = Date.now(); await openEditor.click();
     await page.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy, null, { timeout: 180000 });
     const actual = await page.evaluate(async () => {
       const vm = window.__managedFixtureApp, baseline = vm.importBaseline;
@@ -125,11 +126,29 @@ async function run() {
     assert.equal(actual.sourceCount, canonical.files.length); assert.equal(actual.storedSourceCount, canonical.files.length);
     assert.equal(actual.leaves, digest(canonical.files.map(leafHash)), 'Every browser leaf matches the API witness');
     assert.equal(actual.paths, digest(canonical.files.map(file => file.filepath)), 'Canonical ordering matches');
+    const catalog = await page.evaluate(async () => {
+      const vm = window.__managedFixtureApp, reads = [], started = performance.now();
+      window.__archiveMeasurements.catalogReads = reads;
+      for (const method of ['getSource', 'getWorkspace', 'getImportedBaseline']) {
+        const original = OfflineStore[method].bind(OfflineStore);
+        OfflineStore[method] = (...args) => { reads.push(method); return original(...args); };
+      }
+      await vm.activateGameVersion('poe2', { checkMigration: false });
+      return { selectionMs: performance.now() - started, chooserVisible: vm.versionChooserVisible, sourceLoaded: vm.sourceLoaded, reads };
+    });
+    await page.waitForFunction(() => window.__managedFixtureApp.managedCatalogLoaded && window.__managedFixtureApp.managedLocalVersionsLoaded);
+    const settledCatalog = await page.evaluate(() => ({ sourceLoaded: window.__managedFixtureApp.sourceLoaded,
+      reads: window.__archiveMeasurements.catalogReads, parseFileCalls: window.__archiveMeasurements.parseFileCalls,
+      selectedVersion: window.__managedFixtureApp.selectedManagedVersionId }));
+    assert.equal(catalog.chooserVisible, true); assert.equal(catalog.sourceLoaded, false); assert.deepEqual(catalog.reads, []);
+    assert.equal(settledCatalog.sourceLoaded, false); assert.equal(settledCatalog.selectedVersion, '');
+    assert.deepEqual(settledCatalog.reads, [], 'Settling the production archive catalog must not hydrate files');
+    assert.equal(settledCatalog.parseFileCalls, actual.measurements.parseFileCalls, 'Returning to the catalog must not reparse the production archive');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ status: 'PASS', normalMode: true, disposable: true, zipBytes: bytes.length,
       zipHash: canonical.archive.zipHash, baselineId: canonical.archive.baselineId, treeRoot: canonical.archive.treeRoot,
       originalFiles: canonical.archive.fileCount, descriptions: canonical.files.length, fixtureDuplicateChoices,
-      repairs: status.upload.validation.repairs.length, timings: { ...timings, ...actual.measurements, elapsedMs: Date.now() - started } }, null, 2));
+      repairs: status.upload.validation.repairs.length, catalog, timings: { ...timings, ...actual.measurements, elapsedMs: Date.now() - started } }, null, 2));
   } finally {
     await browser?.close(); await api.locals.versions.idle(); await api.locals.collaborationRealtime.close();
     await Promise.all([new Promise(resolve => apiServer.close(resolve)), new Promise(resolve => frontendServer.close(resolve))]);

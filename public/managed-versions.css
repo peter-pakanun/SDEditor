@@ -42,6 +42,8 @@
 .versionCatalog .versionBadge, .versionModal .versionBadge, .versionStatusIdentity .versionBadge, .editorVersionContext .versionBadge { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 4px; padding: 2px 6px; font-size: 11px; line-height: 1.35; font-weight: 600; vertical-align: middle; white-space: nowrap; background: var(--ui-accent-soft); color: var(--ui-accent); margin: 0; }
 .versionCatalog .versionBadge.ended, .versionCatalog .versionBadge.withdrawn, .versionStatusIdentity .versionBadge.ended, .versionStatusIdentity .versionBadge.withdrawn, .editorVersionContext .versionBadge.ended, .editorVersionContext .versionBadge.withdrawn { color: var(--ui-dropped); }
 .versionMuted { color: var(--ui-muted); font-size: 13px; line-height: 1.6; }
+.versionLoading { display: flex; align-items: center; gap: 9px; min-height: 32px; }
+.versionLoading .browserWorkSpinner { flex: none; }
 .versionHash { color: var(--ui-muted); font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
 .versionError { color: var(--ui-error); padding: 12px; border: 1px solid var(--ui-error); border-radius: 6px; white-space: pre-wrap; }
 .versionNotice { color: var(--ui-warning); }

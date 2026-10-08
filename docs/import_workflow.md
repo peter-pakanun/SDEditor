@@ -4,6 +4,8 @@ This app edits Path of Exile `StatDescriptions.zip` translation files in your br
 
 SDEditor supports separate PoE1 and PoE2 workspaces with named source versions. Pick the game on launch, then choose an Online version or the Offline workspace. For identities, retained versions and migration, see [Multi-Version Support](multi_version.md).
 
+The version chooser appears as soon as the game is selected. Its Online list loads version metadata without opening a translation workspace. Selecting a row loads that version's team counts and presence separately; cached content stays visible during background refreshes. Translation files, drafts and workspace preparation load when you explicitly open an editor or continue the Offline workspace. A required legacy-storage migration still needs to finish before legacy work can be opened.
+
 ## Manager-Published Versions
 
 Managers and Admins open the version dashboard by clicking the current version name/hash in the status bar, then **Upload next version**. Choose the original ZIP, a name and an informational import deadline. Defaults use the current New Zealand date (`YYYY-MM-DD_POE1` or `YYYY-MM-DD_POE2`) and next Monday at 09:00 in `Pacific/Auckland`, including daylight-saving changes. Passing the deadline changes the reminder only; it does not collect work or end editing.
