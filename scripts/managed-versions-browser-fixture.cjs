@@ -176,7 +176,7 @@ async function run() {
       const label = page.locator('.workspaceStatus .versionStatusName');
       await label.waitFor(); assert.equal(await label.textContent(), name);
       assert.equal(await page.locator('.managedVersionBanner').count(), 0, 'No separate version banner');
-      assert.equal(await page.locator('.workspaceActions').getByRole('button', { name: /^(Versions|Version dashboard)$/ }).count(), 0, 'No duplicate header chooser');
+      assert.equal(await page.locator('.workspaceActions').getByRole('button', { name: /^(Versions|Manage version)$/ }).count(), 0, 'No duplicate header chooser');
       await checkTooltip(page, label, /ZIP SHA-256: [a-f0-9]{64}/);
       assert.equal(await page.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), online,
         online ? 'Online versions disable Import ZIP' : 'Standalone Offline workspaces keep Import ZIP enabled');
