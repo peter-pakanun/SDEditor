@@ -333,7 +333,7 @@ test('first translator seeds a new workspace with bounded upload files', async (
   assert.equal(client.snapshot().conflicts.length, 0);
   assert.deepEqual(server.upload.map(file => file.filepath), ['a.txt', 'b.txt']);
   assert.deepEqual(server.requests.find(request => request.path.endsWith('/uploads')).options.body,
-    { game: 'poe1', sourceHash: await P.sourceHash(source), language: 'Thai' });
+    { game: 'poe1', branchId: 'default', sourceHash: await P.sourceHash(source), language: 'Thai' });
   client.destroy();
 });
 
@@ -1064,6 +1064,19 @@ test('late events from a previous websocket cannot replace current avatar presen
   assert.deepEqual(client.snapshot().peers.map(peer => peer.sessionId), ['current']);
   assert.equal(client.socket, current);
   await client.running;
+});
+
+test('managed catalog hints observe only the currently joined game, branch and baseline', async t => {
+  const { client, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); const seen = []; client.onManagedVersionChanged = message => seen.push(message);
+  const identity = client.room().identity;
+  const hint = { type: 'managed_version_changed', versionId: 'weekly', game: identity.game, branchId: identity.branchId, sourceHash: identity.sourceHash };
+  sockets[0].receive({ ...hint, branchId: 'different-branch' });
+  sockets[0].receive({ ...hint, sourceHash: 'different-version' });
+  sockets[0].receive(hint);
+  assert.equal(seen.length, 1); assert.equal(seen[0].versionId, 'weekly');
+  const oldHandler = sockets[0].onmessage; await connect({ accountId: 'other' });
+  oldHandler({ data: JSON.stringify(hint) }); assert.equal(seen.length, 1);
 });
 
 test('successful translation sync cannot hide a presence ticket failure before the socket opens', async t => {

@@ -1377,7 +1377,7 @@ test('an outside-assignment correction stays Revised on another save and clears 
 
 test('real test-mode dummy data retains an immutable source through correction, repeated save and ZIP-text restore', async () => {
   const { editor: e, context, writes } = harness();
-  for (const file of ['statDescParser.js', 'dummyFiles.js']) {
+  for (const file of ['statDescCodec.js', 'statDescParser.js', 'dummyFiles.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   context.document.createElement = () => ({ get value() { return this.innerHTML; } });
@@ -1496,6 +1496,7 @@ test('a failed explicit re-recovery keeps its resolved archive, committed text a
 
 test('normal export includes staged files while full export uses current complete ZIP text beside an unresolved Dropped copy', async () => {
   const { editor: e, window, context, desc } = droppedReviewFixture();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/statDescCodec.js'), 'utf8'), context, { filename: 'statDescCodec.js' });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/statDescParser.js'), 'utf8'), context,
     { filename: 'statDescParser.js' });
   const saved = description(2, ['', '']); saved.hasChanges = false;

@@ -47,7 +47,11 @@
       else request.reject(Object.assign(new Error(message.error?.message || 'The local save failed.'), message.error || {}));
     }
     save(batch) {
-      const operation = this.queue.then(() => this.dispatch(batch));
+      // Capture before the queue/worker await. A later version switch must not
+      // change the destination used by the worker or its direct fallback.
+      const scope = this.store?.captureWorkspaceScope?.(batch);
+      const captured = scope ? { ...batch, workspaceScope: scope, branchId: scope.branchId } : batch;
+      const operation = this.queue.then(() => this.dispatch(captured));
       this.queue = operation.catch(() => {});
       return operation;
     }

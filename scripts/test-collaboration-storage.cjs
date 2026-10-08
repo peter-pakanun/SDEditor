@@ -184,7 +184,9 @@ test('wire preparation uses the newest alias from the real atomic workspace tran
   const base = P.fileState({ filepath: 'a.txt', translations: [''], revision: 1 });
   const op = { id: 'operation', status: 'pending', origin: 'save', promoteDropped: { id: 'local', revision: 0, targetSourceHash: identity.sourceHash },
     files: [{ base, yours: { ...base, translations: ['reviewed'], trackedForExport: true } }] };
-  f.kv.set('workspace_poe1', { descs: [], sourceHash: identity.sourceHash, collaborationAccountId: 'user', stagedVersion: 1, statusMetadataVersion: 1,
+  f.store.setWorkspaceContext({ ...identity, branchId: 'default' });
+  const workspaceKey = 'workspace_version_v1:' + JSON.stringify(['user', 'poe1', 'default', identity.sourceHash]);
+  f.kv.set(workspaceKey, { descs: [], sourceHash: identity.sourceHash, collaborationAccountId: 'user', stagedVersion: 1, statusMetadataVersion: 1,
     droppedAliases: { local: { id: 'server', fromRevision: 0, revision: 1 } } });
   const state = { version: 1, rooms: { [key]: { identity, outbox: [op], shared: { 'a.txt': base }, local: { 'a.txt': base }, conflicts: [] } } };
   f.kv.set('collaboration_v1', state);
@@ -192,7 +194,7 @@ test('wire preparation uses the newest alias from the real atomic workspace tran
   client.key = key; client.state = structuredClone(state);
   const prepared = client.prepare('operation', client.epoch);
   await queued(); f.transactions[0].complete();
-  f.kv.get('workspace_poe1').droppedAliases.local.revision = 3;
+  f.kv.get(workspaceKey).droppedAliases.local.revision = 3;
   await queued(); assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox[0].wire, undefined);
   f.transactions[1].complete(); await prepared;
   const wire = f.kv.get('collaboration_v1').rooms[key].outbox[0].wire;

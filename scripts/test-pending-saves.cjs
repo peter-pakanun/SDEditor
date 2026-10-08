@@ -32,6 +32,18 @@ test('enqueue returns before storage starts and captures an independent payload 
   assert.equal(queue.snapshot().jobs.length, 0); assert.equal(job.durable, true);
 });
 
+test('workspace branch scope is captured before dispatch and survives a subsequent branch change', async () => {
+  const calls = []; let branchId = 'release-one';
+  const queue = PendingSaves.create({ captureScope: value => ({ accountId: value.accountId, game: value.game, sourceHash: value.sourceHash, branchId }),
+    save: async value => { calls.push(value); return { jobId: value.jobId }; } });
+  const job = queue.enqueue(batch('captured-branch'));
+  branchId = 'release-two';
+  assert.equal(job.batch.workspaceScope.branchId, 'release-one');
+  assert.equal(queue.overlay({ ...scope, branchId: 'release-one' }, 'source/file.txt').translations[0], 'captured-branch');
+  assert.equal(queue.overlay({ ...scope, branchId: 'release-two' }, 'source/file.txt'), null);
+  await queue.drain(); assert.equal(calls[0].branchId, 'release-one');
+});
+
 test('storage and asynchronous acknowledgement callbacks finish in queue order', async () => {
   const writes = [], commits = [], firstWrite = deferred(), firstCommit = deferred();
   const queue = PendingSaves.create({

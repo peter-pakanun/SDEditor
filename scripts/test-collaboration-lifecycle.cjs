@@ -67,7 +67,7 @@ function harness({ realImport = false } = {}) {
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'statDescParser.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'statDescCodec.js', 'statDescParser.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   vm.runInContext('offlineStoreReady = true', context);
@@ -85,6 +85,31 @@ function harness({ realImport = false } = {}) {
   if (realImport) { editor.testMode = false; editor.confirmProceedByTypingYes = () => true; }
   return { editor, window, context, document: context.document, writes, alerts, confirmations, approve(value) { approved = value; } };
 }
+
+test('local history cannot replace a newer version while its scoped read is pending', async () => {
+  const { editor, window } = harness();
+  editor.editorCurrentEditingDesc = editor.descs[0];
+  const gate = deferred(); window.OfflineStore.listRevisions = () => gate.promise;
+  const loading = editor.refreshHistory(); await tick();
+  editor.sourceIdentity = 'new-version'; editor.historyItems = [{ id: 'new-history' }];
+  editor._localHistoryRun++; editor.historyLoading = true;
+  gate.resolve([{ id: 'old-history', translations: ['old'] }]); await loading;
+  assert.equal(editor.historyItems[0].id, 'new-history');
+  assert.equal(editor.historyLoading, true);
+});
+
+test('legacy history is labeled reference data and cannot be restored into the current version', async () => {
+  const { editor, window, alerts } = harness();
+  editor.editorCurrentEditingDesc = editor.descs[0]; editor.historyIncludeLegacy = true;
+  editor.managedWorkspaceScope = () => ({ accountId: 'account-one', game: 'poe1', branchId: 'default', sourceHash: 'old-hash' });
+  window.OfflineStore.listRevisions = async (filepath, lang, limit, scope) => scope.legacyHistory
+    ? [{ id: 1, sourceHash: 'older-source', lang, filepath, translations: ['Recovered'], savedAt: 1 }] : [];
+  await editor.refreshHistory();
+  assert.match(editor.historyItems[1].note, /Legacy local reference/);
+  assert.equal(editor.historyItems[1].legacyReference, true);
+  await editor.restoreHistoryRevision(editor.historyItems[1]);
+  assert.match(alerts[0], /reference copies/);
+});
 
 test('manager collaboration joins the selected language without an assignment and revocation disconnects it', async () => {
   const { editor: e, window } = harness();

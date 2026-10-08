@@ -159,12 +159,14 @@
     if (!record) return false;
     const game = workspace?.game || workspace?.sourceBaseline?.game;
     if (game && record.game && game !== record.game) return false;
+    if ((record.branchId || 'default') !== (workspace?.branchId || 'default')) return false;
     if (record.collaborationAccountId && String(record.collaborationAccountId) !== String(workspace?.collaborationAccountId || '')) return false;
     return true;
   }
   function wasDroppedInSource(workspace, filepath, language) {
     if (!object(workspace) || !workspace.sourceHash) return false;
-    const context = [workspace.droppedArchive, workspace.sourceHash, workspace.game || workspace.sourceBaseline?.game, workspace.collaborationAccountId];
+    const context = [workspace.droppedArchive, workspace.sourceHash, workspace.game || workspace.sourceBaseline?.game,
+      workspace.collaborationAccountId, workspace.branchId || 'default'];
     let cached = droppedScopeCache.get(workspace);
     if (!cached || context.some((value, index) => value !== cached.context[index])) {
       const byLanguage = new Map();
@@ -184,7 +186,9 @@
   }
   function droppedForFile(workspace, filepath, language) {
     const candidate = workspace?.dropped?.[language]?.[filepath];
-    return candidate && inWorkspaceScope(workspace, candidate) && (!candidate.status || candidate.status === 'dropped') ? candidate : null;
+    return candidate && inWorkspaceScope(workspace, candidate)
+      && (!workspace?.sourceHash || candidateScopes(candidate).includes(workspace.sourceHash))
+      && (!candidate.status || candidate.status === 'dropped') ? candidate : null;
   }
   function queueDropped(workspace, candidate, kind = 'put') {
     const previous = workspace.droppedOutbox.find(operation => operation.id === candidate.id && operation.kind === kind);
@@ -196,11 +200,13 @@
     maps(workspace);
     const content = options.snapshot || snapshot(desc, language, options.translations);
     const game = options.game || workspace.game;
+    const branchId = options.branchId || workspace.branchId || 'default';
     const originSourceHash = own(options, 'originSourceHash') ? options.originSourceHash || '' : workspace.sourceHash || '';
     const targetSourceHash = options.targetSourceHash || workspace.sourceHash || '';
-    const signature = serialized([game, language, desc.filepath, originSourceHash, content]);
+    const signature = serialized([game, language, desc.filepath, originSourceHash, content, ...(branchId === 'default' ? [] : [branchId])]);
     const active = droppedForFile(workspace, desc.filepath, language);
-    const sameContent = record => record && record.game === game && record.language === language && record.filepath === desc.filepath
+    const sameContent = record => record && record.game === game && (record.branchId || 'default') === branchId
+      && record.language === language && record.filepath === desc.filepath
       && record.originSourceHash === originSourceHash && equal(record.snapshot, content);
     const recoveryId = options.recoveryId || '';
     // A deliberate recovery is a new generation. Its stable action ID makes
@@ -231,7 +237,7 @@
       candidate.targetSourceHash = targetSourceHash;
     } else {
       const id = options.id || recoveryId || globalThis.crypto?.randomUUID?.() || ('local-' + Date.now() + '-' + Math.random().toString(36).slice(2));
-      candidate = { id, game, language, filepath: desc.filepath, originSourceHash, targetSourceHash,
+      candidate = { id, game, language, ...(branchId === 'default' ? {} : { branchId }), filepath: desc.filepath, originSourceHash, targetSourceHash,
         targetSourceHashes: candidateScopes(options),
         snapshot: copy(content), reason: options.reason || 'Source changed', signature, status: 'dropped',
         ...(recoveryId ? { recoveryId } : {}),
@@ -290,6 +296,7 @@
   function initializeWorkspace(workspace, options = {}) {
     if (!object(workspace)) return workspace;
     if (!workspace.game && options.game) workspace.game = options.game;
+    if (!workspace.branchId && options.branchId) workspace.branchId = options.branchId;
     if (Number(workspace.stagedVersion) >= 1) {
       if (!workspace.sourceBaseline?.sourceHash && options.sourceHash) {
         workspace.sourceHash ||= options.sourceHash;
@@ -468,8 +475,10 @@
       const current = next.get(previous.filepath);
       for (const language of Object.keys(previous.translations || {}).filter(languageName)) {
         const translations = lines(previous.translations[language]);
+        const preserved = workspace.dropped?.[language]?.[previous.filepath];
         if (!translations.some(text => text.trim()) || workspace.staged[language]?.[previous.filepath]
-          || droppedForFile(workspace, previous.filepath, language)) continue;
+          || droppedForFile(workspace, previous.filepath, language)
+          || (preserved && inWorkspaceScope(workspace, preserved) && candidateScopes(preserved).includes(options.sourceHash))) continue;
         const currentCount = current?.translations?.English?.length || 0;
         if (current && complete(current.translations?.[language], currentCount)) continue;
         if (current && sameSource(previous, current) && equal(translations, lines(current.translations?.[language]))) continue;
@@ -479,11 +488,15 @@
       }
     }
     for (const candidates of Object.values(workspace.dropped || {})) for (const candidate of Object.values(candidates)) {
+      if (!inWorkspaceScope(workspace, candidate) || !candidateScopes(candidate).some(hash =>
+        hash === (options.previousSourceHash || workspace.sourceHash) || hash === options.sourceHash)) continue;
       rememberDroppedScope(candidate, options.sourceHash);
       candidate.targetSourceHash = options.sourceHash; workspace.droppedArchive[candidate.id] = copy(candidate);
       queueDropped(workspace, candidate);
     }
     for (const conflicts of Object.values(workspace.droppedConflicts || {})) for (const conflict of Object.values(conflicts)) {
+      if (!inWorkspaceScope(workspace, conflict) || (conflict.targetSourceHash
+        && conflict.targetSourceHash !== (options.previousSourceHash || workspace.sourceHash))) continue;
       conflict.targetSourceHash = options.sourceHash;
       if (conflict.yours) {
         rememberDroppedScope(conflict.yours, options.sourceHash);
@@ -539,7 +552,8 @@
         targetSourceHashes: candidateScopes(local, remote),
         ...(remote.snapshot == null && local?.snapshot ? { snapshot: copy(local.snapshot) } : {}),
         ...(locallyResolved && remote.status === 'dropped' ? { status: local.status } : {}) };
-      if (remote.status === 'dropped' || (active && (active.id === remote.id || active.id === local?.id))) rememberDroppedScope(record, workspace.sourceHash);
+      // A read/join only projects assignments established by an import/review.
+      // Browsing another named version must not create new Dropped workload.
       workspace.droppedArchive[remote.id] = record;
       if (byFingerprint && record.snapshot != null) byFingerprint.set(fingerprint(record), record);
       if (local?.id && local.id !== remote.id) {
@@ -551,7 +565,7 @@
       }
       if (options.acknowledge && local) workspace.droppedOutbox = workspace.droppedOutbox.filter(operation => operation.id !== (options.acknowledgeId || local.id)
         || operation.kind !== (options.acknowledgeKind || 'put'));
-      if (record.status === 'dropped') {
+      if (record.status === 'dropped' && (!workspace.sourceHash || candidateScopes(record).includes(workspace.sourceHash))) {
         // A local reviewed promotion is already queued; an upload receipt must
         // not make its candidate visible again before the mutation completes.
         if (!locallyResolved && !workspace.droppedConflicts?.[remote.language]?.[remote.filepath]
@@ -583,7 +597,8 @@
     const fields = ['english', 'variables', 'remarks', 'stats', 'translations'];
     if (!fields.every(field => Array.isArray(left.snapshot[field]) && Array.isArray(right.snapshot[field]))
       || typeof left.snapshot.name !== 'string' || typeof right.snapshot.name !== 'string') return false;
-    return ['game', 'language', 'filepath'].every(field => left[field] === right[field]) && equal(left.snapshot, right.snapshot);
+    return (left.branchId || 'default') === (right.branchId || 'default')
+      && ['game', 'language', 'filepath'].every(field => left[field] === right[field]) && equal(left.snapshot, right.snapshot);
   }
   function sameDroppedCopy(left, right) {
     return sameDroppedContent(left, right) && left.originSourceHash === right.originSourceHash

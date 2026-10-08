@@ -12,6 +12,7 @@
       cloudCanAccessAllLanguages() { this.scheduleCollaboration(); },
       lang() { this.scheduleCollaboration(); },
       gameVersion() { this.scheduleCollaboration(); },
+      branchId() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
       sourceIdentity() { this.scheduleCollaboration(); },
       selectedFilepath(path) { this._collaboration?.select(path); },
@@ -292,7 +293,7 @@
         catch (_) { return false; }
       },
       pendingSaveScope() {
-        return { game: this.gameVersion, language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
+        return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
       },
       markCollaborationActivity(now = Date.now()) {
         this._collabActivityAt = now;
@@ -353,12 +354,13 @@
           needsReview: modern ? false : !!desc.needsReview, trackedForExport: !!state.hasChanges };
       },
       captureCollaborationContext() {
-        return { game: this.gameVersion, language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
+        return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
           assignmentVersion: this.cloudUser?.assignmentVersion, role: this.cloudUser?.role,
           allLanguagesAccess: this.cloudCanAccessAllLanguages, client: this._collaboration };
       },
       collaborationContextCurrent(ctx) {
         return ctx.game === this.gameVersion && ctx.language === this.lang && ctx.source === this.sourceIdentity
+          && (ctx.branchId || 'default') === (this.branchId || 'default')
           && ctx.account === (this.cloudUser?.id || '') && ctx.assignmentVersion === this.cloudUser?.assignmentVersion
           && ctx.role === this.cloudUser?.role && ctx.allLanguagesAccess === this.cloudCanAccessAllLanguages && ctx.client === this._collaboration;
       },
@@ -366,7 +368,7 @@
         // Invalidate an old room immediately, before the debounce or any network await.
         const eligible = this.cloudSignedIn && !!this.cloudUser?.id && !!this.lang
           && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang) && this.sourceLoaded;
-        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.lang, this.sourceIdentity].join('|') : '';
+        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this._collabFileIndexes = null;
@@ -386,14 +388,14 @@
           || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
         if (this._importingSource || this._reconcilingImport || this.pendingDuplicateLangImport?.mode === 'update') return;
-        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.lang, this.sourceIdentity].join('|');
+        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
-        const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, language: this.lang };
+        const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang };
         const cloud = this._cloud;
         const openFile = (this.editorSessionActive ?? this.editorVisible) ? this.collaborationFile(this.editorCurrentEditingDesc) : null;
         const originalBase = copy(this._editorCollabBase);
-        let client;
+        let client, managedContext;
         client = new window.CollaborationSync.Client({ store: window.OfflineStore, apiBase: cloud.apiBase, allowLegacySeed: false,
           context: () => cloud.context(), request: (path, options, captured) => cloud.request(path, options, captured),
           onChange: state => {
@@ -406,6 +408,7 @@
           },
           onStatus: status => { if (this._collaboration === client) this.collabReceiveState?.({ ...client.snapshot({ includeFiles: false }), status: status?.message ?? status, error: status?.error ? status.message : '' }); },
           onWork: work => { if (this._collaboration === client) this.setBrowserWork?.('collaboration', work); },
+          onManagedVersionChanged: () => { if (this._collaboration === client && managedContext && this.collaborationContextCurrent(managedContext)) this.refreshManagedVersions?.(); },
           onRemote: files => { if (this._collaboration === client) return this.receiveCollaborationFiles(files, ctx.language); },
           onRemoteDropped: (records, snapshot) => { if (this._collaboration === client) return this.applyRemoteDropped(records, ctx.language, snapshot); },
           onEditingConflict: ({ filepath }) => {
@@ -414,6 +417,7 @@
           },
         });
         this._collaboration = client; this._collabKey = key;
+        managedContext = this.captureCollaborationContext();
         this.updateCollaborationActivity();
         try {
           const activeSource = this.descs, activeWorkspace = this.localDescs;
@@ -619,7 +623,7 @@
           const now = Date.now();
           const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: ctx.language, sourceHash: ctx.source };
           const bases = { [desc.filepath]: copy(base) };
-          const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+          const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
             resetStaging: true, origin: 'delete_staged', deferDisplay: true, bases, files: [file],
             descriptions: [makeLocalDesc(source, ctx.language, translations, { derivedStatus: true })],
             statuses: { [desc.filepath]: window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language, { lastEditedAt: now }) },
@@ -696,7 +700,7 @@
             const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath,
               window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language,
                 { lastEditedAt: now, lastTranslatedAt: now })]));
-            const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+            const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
               ...(options.draft ? { draft: copy(options.draft) } : {}), ...(options.awaitDurable ? { deferDisplay: true } : {}),
               descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,

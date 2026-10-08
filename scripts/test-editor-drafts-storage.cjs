@@ -75,7 +75,7 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [7]);
+  assert.deepEqual(f.versions, [8]);
 });
 
 test('list and key isolate profile, game, source and language without retargeting old-source drafts', async () => {
@@ -86,6 +86,17 @@ test('list and key isolate profile, game, source and language without retargetin
   const scoped = await commit(f, f.store.listTranslationDrafts({ profile: 'guest', game: 'poe1', language: 'Thai', sourceHash: 'source' }));
   assert.equal(scoped.length, 1);
   assert.equal((await commit(f, f.store.getTranslationDraft(scoped[0].key))).id, 'draft-a');
+});
+
+test('drafts on distinct release branches remain independent while default-branch keys and IDs remain compatible', async () => {
+  const f = fixture();
+  const original = await write(f, draft());
+  assert.equal(original.record.key, 'translation_draft_v1:' + JSON.stringify(['guest', 'poe1', 'source', 'Thai', 'stat.txt']));
+  const branch = await write(f, draft({ branchId: 'release', id: 'branch-draft', revision: 'branch-revision', translations: ['branch text'] }));
+  assert.notEqual(branch.record.key, original.record.key);
+  assert.equal((await commit(f, f.store.listTranslationDrafts({ profile: 'guest', game: 'poe1', language: 'Thai' }))).length, 1);
+  const selected = await commit(f, f.store.listTranslationDrafts({ profile: 'guest', game: 'poe1', language: 'Thai', branchId: 'release' }));
+  assert.equal(selected.length, 1); assert.equal(selected[0].id, 'branch-draft'); assert.equal(selected[0].translations[0], 'branch text');
 });
 
 test('CAS preserves competing text, deduplicates retries, and a reviewed choice retains recovery', async () => {

@@ -34,12 +34,14 @@ Statuses are derived from immutable ZIP content, staged translations, dropped sn
 ## Data and persistence boundaries
 
 - Keep the original ZIP and immutable parsed baseline separate from staged translations. Saves, translated imports, restores and shared edits must not rewrite the baseline or its identity.
-- Modern sparse collaboration starts with an archive descriptor and agreed import decisions. It shares per-file baseline proofs, saved translations and server-authored history; Dropped copies synchronize separately with their old English/entry metadata and translation where available. The API contains per-file data, not only hashes. Legacy rooms may retain source manifests. Do not add full-ZIP or bulk legacy-history uploads; recovery can share a per-file snapshot derived from local history.
+- Standalone sparse collaboration starts with an archive descriptor and agreed import decisions. It shares per-file baseline proofs, saved translations and server-authored history; Dropped copies synchronize separately with their old English/entry metadata and translation where available. The API contains per-file data, not only hashes. Manager publication explicitly uploads the original ZIP and complete parsed baseline for all 12 teams, with durable translated collection artifacts. Legacy rooms may retain source manifests. Do not add full-ZIP uploads to ordinary translator saves or bulk-upload legacy history; recovery can share a per-file snapshot derived from local history.
 - Modern `baselineId` combines the raw ZIP SHA-256, parser/duplicate-decision configuration hash and Merkle root. Legacy rooms use a canonical parsed source-manifest hash. Keep these identities distinct.
 - Commit workspace, history, retry outbox and save receipt atomically before reporting a successful local save. Normal translation persistence uses `saveWorker.js`, with a fallback to the same storage command. After uncertain worker completion, retry with the same job ID and durable receipt; never resend blindly. Source imports also commit their baseline, source, workspace and recovery history together.
 - Preserve account/game/source/language/access guards across requests, queued operations and asynchronous callbacks. Never publish a pending operation into another scope. Wait for local saves before switching context or exporting. Detach Vue-reactive objects and nested arrays before IndexedDB writes or worker messages.
 - Keep legacy stores/history and recoverable data through migrations; prune current status caches after migration. IndexedDB uses `sdeditor` with `kv`, legacy `revisions`, and `revisions_poe1`/`revisions_poe2`; see `DB_VERSION` in `offlineStore.js`. Preserve older-writer exclusion and close connections on `versionchange`. Never clear storage to bypass a blocked upgrade.
 - A new explicit history recovery gets a stable `recoveryId`; retries reuse it even after resolution. Automatic migration, import, peer retargeting and provenance uploads must not create new recovery generations. Preserve resolved archives, source-version assignment provenance and revision-checked conflicts.
+- IndexedDB v8 indexes workspaces/sources by account, game, branch and baseline, with a separate active pointer. Use branch `default` initially. Activation selects an existing snapshot; source advancement performs carry-forward. Selection/join must not add Dropped `targetSourceHashes` or contaminate another version's history. Capture scopes before awaits/worker queues. Existing default-branch draft keys and receipt/mutation IDs remain compatible; legacy per-game slots are retained.
+- Managed version deadlines and ended state are advisory metadata. Collections contain immutable server-accepted Saved work, exclude drafts/pending local uploads, and become durable before marking a team ended. Upload/collection retries retain durable request IDs. Keep catalog caches account-scoped and reuse matching-baseline rooms/history during publication. Deploy API schema v13/reference-aware restore before the frontend. Backups exclude ZIP files and retain only archive references/checksums; keep `DATA_DIR/artifacts` separately for restoration.
 
 ## Platform Support
 
@@ -66,10 +68,11 @@ Browser modules below are in `public/`; `server.js` and `scripts/` are at the re
 | Area | Files |
 |---|---|
 | Entry and main app | `index.html`, `index.js`, `server.js` |
-| Content and diagnostics | `statDescParser.js` (text parsing/export), `helper.js` (ZIP entry decoding/utilities), `regexEngine.js`, `translationDiagnostics.js`, `terminologyDiagnostics.js` |
+| Content and diagnostics | `statDescCodec.js` (shared runtime parser/encoder), `statDescParser.js` (browser adapter), `helper.js` (ZIP entry decoding/utilities), `regexEngine.js`, `translationDiagnostics.js`, `terminologyDiagnostics.js` |
 | Workspace and durable saves | `workspaceState.js`, `offlineStore.js`, `saveWorker.js`, `saveWorkerClient.js`, `pendingSaves.js` |
 | Settings, Dictionary and account sync | `dictionarySync.js`, `cloudSync.js`, `cloudUi.js`, `cloudHistoryUi.js` |
 | Shared translations | `collaborationProtocol.js`, `collaborationSync.js`, `collaborationIntegration.js`, `collaborationUi.js` |
+| Managed source versions | `managedVersions.js`, `managed-versions.css` |
 | Comments and lookup | `commentsUi.js`, `editorLookup.js`, `editorDictionaryIndex.js` |
 | Shared UI and fixtures | `appDialog.js`, `interface.css`, `index.css`, `dummyFiles.js`, `scripts/test-*.cjs`, `scripts/*-browser-fixture.cjs` |
 

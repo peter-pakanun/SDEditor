@@ -2,9 +2,10 @@
   const WorkspaceState = (typeof window === 'object' ? window : self).WorkspaceState;
   const DB_NAME = 'sdeditor';
   // v4 cannot read staged records; v5 cannot retain a shared staging reset.
-  // v6 dictionary writers cannot preserve per-entry game scope. Keep every
+  // v6 dictionary writers cannot preserve per-entry game scope; v7 writers
+  // cannot preserve named-version/profile isolation. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 7;
+  const DB_VERSION = 8;
 
   const STORE_KV = 'kv';
   const STORE_REVISIONS_LEGACY = 'revisions';
@@ -22,6 +23,53 @@
   const KV_TRANSLATION_DRAFT_PREFIX = 'translation_draft_v1:';
 
   let currentGameVersion = 'poe1';
+  const DEFAULT_BRANCH = 'default';
+  const VERSION_PREFIX = 'workspace_version_v1:';
+  const ACTIVE_PREFIX = 'workspace_active_v1:';
+  const CATALOG_PREFIX = 'version_catalog_v1:';
+  let workspaceContext = null;
+  const activeScopes = new Map();
+
+  function normalizeWorkspaceScope(value = {}) {
+    const defaults = workspaceContext || {};
+    const game = normalizeGameVersion(value.game || value.version || defaults.game);
+    const accountId = String(value.accountId ?? value.profile ?? defaults.accountId ?? 'guest') || 'guest';
+    const branchId = String(value.branchId || defaults.branchId || DEFAULT_BRANCH);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(branchId)) throw new TypeError('Invalid workspace branch.');
+    const sourceHash = String(value.sourceHash ?? value.baselineId ?? '');
+    return { accountId, game, branchId, sourceHash };
+  }
+  function activeKey(scope) { return ACTIVE_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId]); }
+  function versionKey(scope) { return VERSION_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function scopedVersion(value) {
+    if (value && typeof value === 'object') return normalizeWorkspaceScope(value);
+    if (!workspaceContext) return null;
+    const scope = normalizeWorkspaceScope({ game: value || currentGameVersion });
+    if (workspaceContext.sourceHash && workspaceContext.game === scope.game && workspaceContext.accountId === scope.accountId
+      && workspaceContext.branchId === scope.branchId) return { ...workspaceContext };
+    return activeScopes.get(activeKey(scope)) || scope;
+  }
+  function captureWorkspaceScope(value = {}) {
+    if (value.workspaceScope) return normalizeWorkspaceScope(value.workspaceScope);
+    if (!workspaceContext && !value.branchId) return null;
+    return normalizeWorkspaceScope({ ...value, sourceHash: value.sourceHash ?? scopedVersion(value.game)?.sourceHash ?? '' });
+  }
+  function setWorkspaceContext(value) {
+    workspaceContext = normalizeWorkspaceScope(value);
+    currentGameVersion = workspaceContext.game;
+    if (workspaceContext.sourceHash) activeScopes.set(activeKey(workspaceContext), { ...workspaceContext });
+    else activeScopes.delete(activeKey(workspaceContext));
+    return { ...workspaceContext };
+  }
+  function scopedRevision(revision, scope) {
+    return scope?.sourceHash ? { ...revision, sourceHash: revision.sourceHash || scope.sourceHash,
+      accountId: scope.accountId, branchId: scope.branchId } : revision;
+  }
+  function matchesCollaborationIdentity(key, identity) {
+    const branch = identity?.branchId || DEFAULT_BRANCH;
+    return key === JSON.stringify([String(identity?.accountId), identity?.game, branch, identity?.sourceHash, identity?.language])
+      || (branch === DEFAULT_BRANCH && key === JSON.stringify([String(identity?.accountId), identity?.game, identity?.sourceHash, identity?.language]));
+  }
 
   function pruneWorkspace(workspace) {
     if (Number(workspace?.stagedVersion) >= 1) WorkspaceState.pruneWorkspaceStatus(workspace);
@@ -146,6 +194,7 @@
   }
 
   async function getWorkspace(version, language) {
+    if (workspaceContext || (version && typeof version === 'object')) version = await resolveWorkspaceVersion(version);
     if (!language || language === 'English') {
       const workspace = await kvGet(workspaceKey(version));
       if (Number(workspace?.stagedVersion) >= 1 && workspace.statusMetadataVersion !== 1) {
@@ -184,14 +233,15 @@
           sourceRead.onsuccess = () => { source = result.importArchive ? sourceRead.result?.value?.source : sourceRead.result?.value; finish(); };
           const collaborationRead = store.get('collaboration_v1');
           collaborationRead.onsuccess = () => { collaboration = collaborationRead.result?.value; finish(); };
-          const receiptsRead = store.get('translation_save_receipts_' + normalizeGameVersion(version));
+          const migratedScope = scopedVersion(version);
+          const receiptsRead = store.get(migratedScope ? receiptScopeKey(migratedScope) : 'translation_save_receipts_' + normalizeGameVersion(version));
           receiptsRead.onsuccess = () => { receipts = receiptsRead.result?.value || []; finish(); };
           if (history.openCursor) {
             const cursorRead = history.openCursor();
             cursorRead.onsuccess = () => {
               const cursor = cursorRead.result;
               if (!cursor) { finish(); return; }
-              revisions.push(cursor.value);
+              if (revisionInScope(cursor.value, migratedScope)) revisions.push(cursor.value);
               cursor.continue();
             };
           } else finish();
@@ -210,6 +260,8 @@
   }
 
   async function updateWorkspace(update, version, options = {}) {
+    const captured = options.scope ? normalizeWorkspaceScope(options.scope) : scopedVersion(version);
+    if (captured) version = captured;
     const revisions = options.revisions || [];
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const revisionStore = revisionStoreName(version);
@@ -222,7 +274,7 @@
         result = update(req.result?.value);
         if (result?.then) throw new Error('Workspace update must be synchronous.');
         if (result !== undefined) store.put({ key, value: pruneWorkspace(result) });
-        for (const revision of revisions) tx.objectStore(revisionStore).add(revision);
+        for (const revision of revisions) tx.objectStore(revisionStore).add(scopedRevision(revision, captured));
       } catch (error) { failure = error; tx.abort(); }
     };
     try { await done; } catch (error) { throw failure || error; }
@@ -241,21 +293,26 @@
       || typeof value.language !== 'string' || !value.language || typeof value.filepath !== 'string' || !value.filepath) {
       throw new TypeError('A translation draft requires its profile, game, source, language and filepath.');
     }
-    return { profile: value.profile, game: value.game, sourceHash: value.sourceHash, language: value.language, filepath: value.filepath };
+    const branchId = value.branchId || DEFAULT_BRANCH;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(branchId)) throw new TypeError('Invalid draft branch.');
+    return { profile: value.profile, game: value.game, sourceHash: value.sourceHash, language: value.language, filepath: value.filepath,
+      ...(branchId === DEFAULT_BRANCH ? {} : { branchId }) };
   }
 
   function translationDraftKey(value) {
     const scope = translationDraftScope(value);
-    return KV_TRANSLATION_DRAFT_PREFIX + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]);
+    // Preserve default-branch keys, IDs and consumed receipts exactly through v8.
+    return KV_TRANSLATION_DRAFT_PREFIX + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath,
+      ...(scope.branchId ? [scope.branchId] : [])]);
   }
 
   function translationDraftScopeFromKey(key) {
     if (typeof key !== 'string' || !key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)) throw new TypeError('Invalid translation draft key.');
     let parts;
     try { parts = JSON.parse(key.slice(KV_TRANSLATION_DRAFT_PREFIX.length)); } catch (_) { throw new TypeError('Invalid translation draft key.'); }
-    if (!Array.isArray(parts) || parts.length !== 5) throw new TypeError('Invalid translation draft key.');
-    const [profile, game, sourceHash, language, filepath] = parts;
-    const scope = translationDraftScope({ profile, game, sourceHash, language, filepath });
+    if (!Array.isArray(parts) || ![5, 6].includes(parts.length)) throw new TypeError('Invalid translation draft key.');
+    const [profile, game, sourceHash, language, filepath, branchId] = parts;
+    const scope = translationDraftScope({ profile, game, sourceHash, language, filepath, branchId });
     if (translationDraftKey(scope) !== key) throw new TypeError('Invalid translation draft key.');
     return scope;
   }
@@ -301,6 +358,7 @@
       const rows = await requestToPromise(store.getAll(range));
       return rows.filter(row => row.key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)).map(row => row.value)
         .filter(record => record.profile === scope.profile && record.game === scope.game && record.language === scope.language
+          && (record.branchId || DEFAULT_BRANCH) === (scope.branchId || DEFAULT_BRANCH)
           && (scope.sourceHash == null || record.sourceHash === scope.sourceHash)
           && (record.state === 'active' || record.conflicts?.length));
     });
@@ -370,7 +428,7 @@
   }
 
   function normalizeGameVersion(version) {
-    const v = String(version || currentGameVersion || '').toLowerCase();
+    const v = String((version && typeof version === 'object' ? version.game : version) || currentGameVersion || '').toLowerCase();
     if (v === 'poe2') return 'poe2';
     return 'poe1';
   }
@@ -380,10 +438,14 @@
   }
 
   function workspaceKey(version) {
+    const scope = scopedVersion(version);
+    if (scope) return versionKey(scope);
     return KV_WORKSPACE_PREFIX + normalizeGameVersion(version);
   }
 
   function sourceKey(version) {
+    const scope = scopedVersion(version);
+    if (scope) return 'source_version_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
     return KV_SOURCE_PREFIX + normalizeGameVersion(version);
   }
 
@@ -392,19 +454,208 @@
     return currentGameVersion;
   }
 
+  function versionMetadataKey(scope) { return 'version_metadata_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+
+  // Legacy game slots have one owner. Copy them once without deleting the old
+  // evidence or attaching another signed-in account's translations.
+  async function resolveWorkspaceVersion(value) {
+    const captured = scopedVersion(value) || normalizeWorkspaceScope(typeof value === 'object' ? value : { game: value });
+    if (captured.sourceHash) return captured;
+    const known = await kvGet(activeKey(captured));
+    if (known?.sourceHash) {
+      const resolved = normalizeWorkspaceScope(known);
+      activeScopes.set(activeKey(resolved), resolved);
+      return resolved;
+    }
+    let inferredHash = '', inferredSource;
+    const legacyWorkspace = await kvGet(KV_WORKSPACE_PREFIX + captured.game);
+    if (legacyWorkspace && !legacyWorkspace.sourceHash
+      && String(legacyWorkspace.accountId || legacyWorkspace.collaborationAccountId || 'guest') === captured.accountId
+      && captured.branchId === DEFAULT_BRANCH) {
+      inferredHash = legacyWorkspace.importArchive?.baselineId || '';
+      if (!inferredHash) {
+        inferredSource = await kvGet(KV_SOURCE_PREFIX + captured.game);
+        if (Array.isArray(inferredSource) && inferredSource.length && root.CollaborationProtocol?.sourceHash) {
+          inferredHash = await root.CollaborationProtocol.sourceHash(inferredSource);
+        }
+      }
+    }
+    const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV);
+    let resolved = captured, failure;
+    const reads = {}, keys = [KV_WORKSPACE_PREFIX + captured.game, KV_SOURCE_PREFIX + captured.game,
+      'translation_save_receipts_' + captured.game];
+    let waiting = keys.length;
+    const finish = () => {
+      try {
+        const workspace = reads[keys[0]], source = reads[keys[1]];
+        const owner = String(workspace?.accountId || workspace?.collaborationAccountId || 'guest');
+        const sourceHash = workspace?.sourceHash || inferredHash;
+        if (!sourceHash || owner !== captured.accountId || captured.branchId !== DEFAULT_BRANCH) return;
+        if (inferredSource && JSON.stringify(source) !== JSON.stringify(inferredSource)) throw new Error('The legacy source changed while its identity was being recovered. Reload to preserve the matching workspace.');
+        resolved = { ...captured, sourceHash };
+        const record = { ...workspace, sourceHash, accountId: owner, game: captured.game, branchId: DEFAULT_BRANCH };
+        kv.put({ key: workspaceKey(resolved), value: record });
+        if (source !== undefined) kv.put({ key: sourceKey(resolved), value: source });
+        kv.put({ key: activeKey(resolved), value: resolved });
+        kv.put({ key: versionMetadataKey(resolved), value: { ...resolved, name: '', migrated: true,
+          createdAt: Number(workspace.lastModified) || Date.now() } });
+        if (reads[keys[2]]) kv.put({ key: receiptScopeKey(resolved), value: reads[keys[2]] });
+      } catch (error) { failure = error; tx.abort(); }
+    };
+    for (const key of keys) {
+      const read = kv.get(key);
+      read.onsuccess = () => { reads[key] = read.result?.value; if (!--waiting) finish(); };
+    }
+    try { await done; } catch (error) { throw failure || error; }
+    if (resolved.sourceHash) activeScopes.set(activeKey(resolved), resolved);
+    return resolved;
+  }
+
+  async function getVersionSource(scope) { return kvGet(sourceKey(normalizeWorkspaceScope(scope))); }
+  async function getVersionWorkspace(scope, language) {
+    const value = await getWorkspace(normalizeWorkspaceScope(scope), language);
+    return value ?? null;
+  }
+  async function getSource(version) {
+    const captured = (workspaceContext || typeof version === 'object') ? await resolveWorkspaceVersion(version) : version;
+    return kvGet(sourceKey(captured));
+  }
+  async function setWorkspace(workspace, version) {
+    const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: version }), sourceHash: workspace?.sourceHash });
+    return kvSet(workspaceKey(captured || version), workspace);
+  }
+  async function activateVersion(value) {
+    const scope = normalizeWorkspaceScope(value);
+    if (!scope.sourceHash) throw new TypeError('A version activation requires its source identity.');
+    const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV), values = {};
+    const keys = [workspaceKey(scope), sourceKey(scope), versionMetadataKey(scope)];
+    let waiting = keys.length, failure;
+    for (const key of keys) {
+      const read = kv.get(key);
+      read.onsuccess = () => {
+        values[key] = read.result?.value;
+        if (--waiting) return;
+        if (!values[keys[0]] || !values[keys[1]]) { failure = new Error('This version is not available in this browser.'); tx.abort(); return; }
+        kv.put({ key: activeKey(scope), value: scope });
+      };
+    }
+    try { await done; } catch (error) { throw failure || error; }
+    activeScopes.set(activeKey(scope), scope);
+    if (workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
+    const workspace = values[keys[0]], baseline = workspace.importArchive
+      ? await kvGet(importedBaselineKey(workspace.importArchive.baselineId, scope.game)) : null;
+    return { scope, source: values[keys[1]], workspace, metadata: values[keys[2]] || { ...scope }, baseline };
+  }
+  async function setVersionMetadata(value, patch) {
+    const scope = normalizeWorkspaceScope(value);
+    if (!scope.sourceHash || !patch || typeof patch !== 'object') throw new TypeError('Version metadata requires its scope and fields.');
+    const plainPatch = JSON.parse(JSON.stringify(patch));
+    const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV); let result;
+    const read = kv.get(versionMetadataKey(scope));
+    read.onsuccess = () => {
+      result = { ...read.result?.value, ...plainPatch, ...scope, updatedAt: Date.now() };
+      kv.put({ key: versionMetadataKey(scope), value: result });
+    };
+    await done; return result;
+  }
+  async function listLocalVersions(value = {}) {
+    const scope = normalizeWorkspaceScope(value);
+    await resolveWorkspaceVersion({ ...scope, sourceHash: '' });
+    const prefix = 'version_metadata_v1:';
+    const rows = await withStore(STORE_KV, 'readonly', store => requestToPromise(store.getAll(
+      typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff'))));
+    const selected = rows.filter(row => row.key.startsWith(prefix)).map(row => row.value)
+      .filter(row => row.accountId === scope.accountId && row.game === scope.game && row.branchId === scope.branchId);
+    const { active, availability } = await withStore(STORE_KV, 'readonly', async store => {
+      const activeRead = requestToPromise(store.get(activeKey(scope)));
+      const availability = await Promise.all(selected.map(async row => {
+        const key = sourceKey(row);
+        return store.count ? !!(await requestToPromise(store.count(key))) : !!(await requestToPromise(store.get(key)));
+      }));
+      return { active: (await activeRead)?.value, availability };
+    });
+    const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash || active?.sourceHash;
+    return selected.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
+        hasSource: availability[index], current: row.sourceHash === selectedHash }))
+      .sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));
+  }
+  function catalogKey(value) {
+    const scope = normalizeWorkspaceScope(typeof value === 'object' ? value : { game: value });
+    return CATALOG_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId]);
+  }
+  function getVersionCatalog(value) { return kvGet(catalogKey(value)); }
+  function setVersionCatalog(value, catalog) { return kvSet(catalogKey(value), JSON.parse(JSON.stringify(catalog))); }
+  function getVersionUpload(scope) { return kvGet('version_upload_v1:' + catalogKey(scope)); }
+  function setVersionUpload(scope, metadata) {
+    const key = 'version_upload_v1:' + catalogKey(scope);
+    if (metadata == null) return kvDel(key);
+    if (!metadata || typeof metadata !== 'object') throw new TypeError('Upload recovery requires metadata.');
+    const text = JSON.stringify(metadata);
+    if (text.length > 65536) throw new TypeError('Upload recovery metadata is too large.');
+    return kvSet(key, JSON.parse(text));
+  }
+  function collectionRequestKey(scope, versionId, language) {
+    if (typeof versionId !== 'string' || !versionId || typeof language !== 'string' || !language) throw new TypeError('A collection requires its version and team.');
+    return 'version_collection_v1:' + catalogKey(scope) + ':' + JSON.stringify([versionId, language]);
+  }
+  function getVersionCollectionRequest(scope, versionId, language) { return kvGet(collectionRequestKey(scope, versionId, language)); }
+  function setVersionCollectionRequest(scope, versionId, language, requestId) {
+    const key = collectionRequestKey(scope, versionId, language);
+    if (requestId == null) return kvDel(key);
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('Invalid collection recovery identifier.');
+    return kvSet(key, requestId);
+  }
+  function receiptScopeKey(scope) { return 'translation_save_receipts_v2:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+
+  async function adoptGuestVersion(value) {
+    const target = normalizeWorkspaceScope(value);
+    if (target.accountId === 'guest') return null;
+    const guestActive = await resolveWorkspaceVersion({ ...target, accountId: 'guest', sourceHash: '' });
+    const guest = target.sourceHash ? { ...target, accountId: 'guest' } : guestActive;
+    if (!guest.sourceHash) return null;
+    const scope = { ...target, sourceHash: guest.sourceHash };
+    const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    const kv = tx.objectStore(STORE_KV), reads = {};
+    const keys = [workspaceKey(guest), sourceKey(guest), versionMetadataKey(guest), workspaceKey(scope)];
+    let waiting = keys.length, adopted = false;
+    for (const key of keys) {
+      const read = kv.get(key);
+      read.onsuccess = () => {
+        reads[key] = read.result?.value;
+        if (--waiting || reads[keys[3]] || !reads[keys[0]] || !reads[keys[1]]) return;
+        const workspace = { ...reads[keys[0]], accountId: target.accountId, branchId: target.branchId };
+        delete workspace.collaborationAccountId;
+        kv.put({ key: workspaceKey(scope), value: workspace });
+        kv.put({ key: sourceKey(scope), value: reads[keys[1]] });
+        kv.put({ key: versionMetadataKey(scope), value: { ...reads[keys[2]], ...scope, adoptedFrom: 'guest', updatedAt: Date.now() } });
+        kv.put({ key: activeKey(scope), value: scope }); adopted = true;
+      };
+    }
+    await done;
+    if (adopted) activeScopes.set(activeKey(scope), scope);
+    return adopted ? scope : null;
+  }
+
   // Persist a bulk translation change and its recovery history together. Queue
   // every write synchronously so IndexedDB cannot commit a partial batch.
   async function saveWorkspaceWithRevisions(workspace, revisions, version) {
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
+    const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: gameVersion }),
+      sourceHash: workspace.sourceHash, branchId: workspace.branchId || (typeof version === 'object' ? version.branchId : undefined) });
     const revisionsStore = revisionStoreName(gameVersion);
     const db = await openDb();
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
     try {
-      tx.objectStore(STORE_KV).put({ key: workspaceKey(gameVersion), value: pruneWorkspace(workspace) });
+      tx.objectStore(STORE_KV).put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(workspace) });
       const store = tx.objectStore(revisionsStore);
-      for (const revision of revisions) store.add(revision);
+      for (const revision of revisions) store.add(scopedRevision(revision, captured));
     } catch (error) {
       try { tx.abort(); } catch (_) {}
       await done.catch(() => {});
@@ -423,25 +674,40 @@
   async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version, baseline) {
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
+    const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: gameVersion }),
+      sourceHash: workspace.sourceHash, branchId: workspace.branchId || (typeof version === 'object' ? version.branchId : undefined) });
+    const contextAtStart = workspaceContext;
     const revisionsStore = revisionStoreName(gameVersion);
     const db = await openDb();
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
     try {
       const kv = tx.objectStore(STORE_KV);
-      kv.put({ key: sourceKey(gameVersion), value: source });
-      kv.put({ key: workspaceKey(gameVersion), value: pruneWorkspace(workspace) });
+      kv.put({ key: sourceKey(captured || gameVersion), value: source });
+      kv.put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(captured ? { ...workspace,
+        accountId: captured.accountId, game: captured.game, branchId: captured.branchId } : workspace) });
+      if (captured?.sourceHash) {
+        kv.put({ key: activeKey(captured), value: captured });
+        const metadataRead = kv.get(versionMetadataKey(captured));
+        metadataRead.onsuccess = () => kv.put({ key: versionMetadataKey(captured), value: {
+          ...captured, createdAt: Date.now(), ...metadataRead.result?.value, updatedAt: Date.now() } });
+      }
       if (baseline) {
         if (baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
         kv.put({ key: importedBaselineKey(baseline.archive.baselineId, gameVersion), value: baseline });
       }
-      for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
+      for (const revision of revisions) tx.objectStore(revisionsStore).add(scopedRevision(revision, captured));
     } catch (error) {
       try { tx.abort(); } catch (_) {}
       await done.catch(() => {});
       throw error;
     }
     await done;
+    if (captured?.sourceHash) {
+      activeScopes.set(activeKey(captured), captured);
+      if (workspaceContext === contextAtStart && workspaceContext?.accountId === captured.accountId
+        && workspaceContext?.game === captured.game && workspaceContext.branchId === captured.branchId) workspaceContext = { ...captured };
+    }
   }
 
   // Ordinary editor saves send only their touched files to the worker. Read the
@@ -476,10 +742,16 @@
       throw new TypeError('A staged translation deletion requires its captured saved translation.');
     }
     const draft = batch.draft;
+    const captured = captureWorkspaceScope(batch);
+    if (captured && (captured.game !== batch.game || captured.sourceHash !== (batch.sourceHash || '')
+      || captured.accountId !== String(batch.accountId || 'guest') || captured.branchId !== (batch.branchId || captured.branchId))) {
+      throw new TypeError('The captured workspace does not match this translation save.');
+    }
     if (draft) {
       const scope = translationDraftScopeFromKey(draft.key);
       if (files.length !== 1 || scope.profile !== String(batch.accountId || 'guest') || scope.game !== batch.game
         || scope.sourceHash !== batch.sourceHash || scope.language !== batch.language || scope.filepath !== files[0].filepath
+        || (scope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH)
         || typeof draft.id !== 'string' || !draft.id || typeof draft.revision !== 'string' || !draft.revision
         || !Array.isArray(draft.base?.translations) || draft.base.translations.some(line => typeof line !== 'string')) {
         throw new TypeError('The saved draft does not match its translation save scope.');
@@ -490,7 +762,8 @@
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
       ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
       ...(draft ? { draft } : {}) });
-    const receiptKey = 'translation_save_receipts_' + batch.game;
+    const receiptKey = captured ? receiptScopeKey(captured) : 'translation_save_receipts_' + batch.game;
+    const batchWorkspaceKey = workspaceKey(captured || batch.game), batchSourceKey = sourceKey(captured || batch.game);
     const db = await openDb();
     const revisionsStore = revisionStoreName(batch.game);
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
@@ -498,7 +771,7 @@
     const kv = tx.objectStore(STORE_KV);
     let failure, result;
     const values = {};
-    const keys = [workspaceKey(batch.game), sourceKey(batch.game), receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
+    const keys = [batchWorkspaceKey, batchSourceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
     let remaining = keys.length;
     const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
     const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
@@ -510,11 +783,12 @@
           if (receipt.signature !== signature) throw new Error('A local save identifier was reused with different content.');
           result = { ...receipt.result, duplicate: true };
           if (batch.collaboration) {
-            const workspace = values[workspaceKey(batch.game)];
+            const workspace = values[batchWorkspaceKey];
             const room = values.collaboration_v1?.rooms?.[batch.collaboration.key];
             const current = workspace && room && (!workspace.sourceHash || workspace.sourceHash === batch.sourceHash)
               && (!workspace?.collaborationAccountId || String(workspace.collaborationAccountId) === String(batch.accountId))
-              && JSON.stringify([String(room.identity?.accountId), room.identity?.game, room.identity?.sourceHash, room.identity?.language]) === batch.collaboration.key;
+              && matchesCollaborationIdentity(batch.collaboration.key, room.identity)
+              && (room.identity?.branchId || DEFAULT_BRANCH) === (captured?.branchId || batch.branchId || DEFAULT_BRANCH);
             // Network synchronization might already have accepted this operation
             // before the worker reply was lost. Never resurrect an old outbox.
             result.operations = current ? room.outbox?.filter(operation => (receipt.result.mutationIds || [batch.jobId]).includes(operation.id)) || [] : [];
@@ -525,7 +799,7 @@
               result.status = result.operation ? result.operation.status === 'conflict' ? 'conflict' : 'pending' : 'synced';
             }
           } else if (resetStaging) {
-            const workspace = values[workspaceKey(batch.game)], source = values[sourceKey(batch.game)];
+            const workspace = values[batchWorkspaceKey], source = values[batchSourceKey];
             if (workspace && (!workspace.sourceHash || workspace.sourceHash === batch.sourceHash)
               && (!batch.accountId || !workspace.collaborationAccountId || String(workspace.collaborationAccountId) === String(batch.accountId))) {
               result.files = files.map(file => {
@@ -542,23 +816,25 @@
           }
           return;
         }
-        const workspace = values[workspaceKey(batch.game)];
+        const workspace = values[batchWorkspaceKey];
         if (!workspace || !Array.isArray(workspace.descs)) {
           throw new Error('The local workspace is unavailable. Keep this tab open and import the source archive before retrying the save.');
         }
         if (workspace.sourceHash && workspace.sourceHash !== (batch.sourceHash || '')) {
           throw stale('The source archive changed before this translation could be saved.');
         }
+        if (captured && ((workspace.accountId && workspace.accountId !== captured.accountId)
+          || (workspace.branchId || DEFAULT_BRANCH) !== captured.branchId)) throw stale('The saved translation belongs to another workspace profile or branch.');
         if (batch.accountId && workspace.collaborationAccountId
           && String(workspace.collaborationAccountId) !== String(batch.accountId)) {
           throw stale('The signed-in account changed before this translation could be saved.');
         }
         workspace.descs ||= []; workspace.status ||= {};
         const legacyWorkspace = Number(workspace.stagedVersion || 0) < 1;
-        WorkspaceState.initializeWorkspace(workspace, { source: values[sourceKey(batch.game)] || batch.descriptions || [],
+        WorkspaceState.initializeWorkspace(workspace, { source: values[batchSourceKey] || batch.descriptions || [],
           sourceHash: batch.sourceHash, game: batch.game, language: batch.language, collaboration: values.collaboration_v1 });
         if (resetStaging) {
-          const file = files[0], original = values[sourceKey(batch.game)]?.find(desc => desc.filepath === file.filepath);
+          const file = files[0], original = values[batchSourceKey]?.find(desc => desc.filepath === file.filepath);
           if (!original) throw new Error('The original ZIP translation is unavailable. Reimport the source archive before deleting its staged translation.');
           const current = WorkspaceState.workspaceFile(workspace, original, batch.language);
           if (!current.hasChanges) {
@@ -585,7 +861,7 @@
         }
         if (draft) {
           const filepath = files[0].filepath;
-          const original = (values[sourceKey(batch.game)] || batch.descriptions || []).find(file => file.filepath === filepath)
+          const original = (values[batchSourceKey] || batch.descriptions || []).find(file => file.filepath === filepath)
             || workspace.descs.find(file => file.filepath === filepath);
           const current = original ? WorkspaceState.workspaceFile(workspace, original, batch.language).translations : [];
           if (JSON.stringify(current) !== JSON.stringify(draft.base.translations)) {
@@ -613,12 +889,13 @@
           const identity = collaboration.identity;
           if (!identity || identity.game !== batch.game || identity.language !== batch.language
             || identity.sourceHash !== batch.sourceHash || String(identity.accountId) !== String(batch.accountId)
-            || collaboration.key !== JSON.stringify([String(identity.accountId), identity.game, identity.sourceHash, identity.language])) {
+            || (identity.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH)
+            || !matchesCollaborationIdentity(collaboration.key, identity)) {
             throw stale('This translation save no longer matches its shared workspace.');
           }
           state = values.collaboration_v1;
           room = state?.rooms?.[collaboration.key];
-          if (!room || JSON.stringify([String(room.identity?.accountId), room.identity?.game, room.identity?.sourceHash, room.identity?.language]) !== collaboration.key) {
+          if (!room || !matchesCollaborationIdentity(collaboration.key, room.identity)) {
             throw stale('The shared workspace changed before this translation could be saved.');
           }
           if (draft && ((room.conflicts || []).some(conflict => paths.has(conflict.filepath))
@@ -715,11 +992,11 @@
         }
         if (batch.sourceHash) workspace.sourceHash = batch.sourceHash;
         if (collaboration) workspace.collaborationAccountId = String(batch.accountId);
-        kv.put({ key: workspaceKey(batch.game), value: pruneWorkspace(workspace) });
+        kv.put({ key: batchWorkspaceKey, value: pruneWorkspace(workspace) });
         if (state) kv.put({ key: 'collaboration_v1', value: state });
-        for (const revision of batch.revisions || []) tx.objectStore(revisionsStore).add({ ...revision,
+        for (const revision of batch.revisions || []) tx.objectStore(revisionsStore).add(scopedRevision({ ...revision,
           ...(batch.sourceHash ? { sourceHash: batch.sourceHash } : {}),
-          ...(collaboration ? { collaborationAccountId: String(batch.accountId) } : {}) });
+          ...(collaboration ? { collaborationAccountId: String(batch.accountId) } : {}) }, captured));
         let draftConsumed = false;
         if (draft) {
           const current = values[draft.key];
@@ -755,6 +1032,8 @@
   // working/history data in one transaction. Both callbacks must be synchronous.
   async function updateCollaborationState(update, options = {}) {
     const gameVersion = normalizeGameVersion(options.version);
+    const captured = options.scope ? normalizeWorkspaceScope(options.scope) : captureWorkspaceScope({ game: gameVersion,
+      sourceHash: options.workspace?.sourceHash });
     const revisions = options.revisions || [];
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const revisionsStore = revisionStoreName(gameVersion);
@@ -770,15 +1049,15 @@
         result = update(read.result?.value);
         if (result && typeof result.then === 'function') throw new Error('Collaboration storage update must be synchronous');
         if (!options.projectWorkspace) kv.put({ key: 'collaboration_v1', value: result });
-        for (const revision of revisions) tx.objectStore(revisionsStore).add(revision);
-        if (Object.hasOwn(options, 'workspace')) kv.put({ key: workspaceKey(gameVersion), value: pruneWorkspace(options.workspace) });
+        for (const revision of revisions) tx.objectStore(revisionsStore).add(scopedRevision(revision, captured));
+        if (Object.hasOwn(options, 'workspace')) kv.put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(options.workspace) });
         if (options.projectWorkspace) {
-          const workspaceRead = kv.get(workspaceKey(gameVersion));
+          const workspaceRead = kv.get(workspaceKey(captured || gameVersion));
           workspaceRead.onsuccess = () => {
             try {
               const projected = options.projectWorkspace(workspaceRead.result?.value, result);
               if (projected && typeof projected.then === 'function') throw new Error('Workspace projection must be synchronous');
-              if (projected !== undefined) kv.put({ key: workspaceKey(gameVersion), value: pruneWorkspace(projected) });
+              if (projected !== undefined) kv.put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(projected) });
               // The projection may bind an operation to the latest candidate
               // receipt from this same transaction. Persist the final state.
               kv.put({ key: 'collaboration_v1', value: result });
@@ -792,19 +1071,24 @@
   }
 
   async function revisionAdd(rev, version) {
+    const captured = scopedVersion(version);
     return withStore(revisionStoreName(version), 'readwrite', async (store) => {
-      return requestToPromise(store.add(rev));
+      return requestToPromise(store.add(scopedRevision(rev, captured)));
     });
   }
 
   async function revisionGet(id, version) {
+    const captured = typeof version === 'object' && version.legacyHistory
+      ? { ...normalizeWorkspaceScope(version), legacyHistory: true } : scopedVersion(version);
     return withStore(revisionStoreName(version), 'readonly', async (store) => {
       const row = await requestToPromise(store.get(Number(id)));
-      return row || undefined;
+      return row && revisionInScope(row, captured) ? row : undefined;
     });
   }
 
   async function revisionList(filepath, lang, limit = 50, version) {
+    const captured = typeof version === 'object' && version.legacyHistory
+      ? { ...normalizeWorkspaceScope(version), legacyHistory: true } : scopedVersion(version);
     return withStore(revisionStoreName(version), 'readonly', async (store) => {
       const idx = store.index('by_file_lang_time');
       const range = IDBKeyRange.bound([filepath, lang, 0], [filepath, lang, Number.MAX_SAFE_INTEGER]);
@@ -819,7 +1103,7 @@
             resolve();
             return;
           }
-          items.push(cursor.value);
+          if (revisionInScope(cursor.value, captured)) items.push(cursor.value);
           if (items.length >= limit) {
             resolve();
             return;
@@ -837,9 +1121,25 @@
     return items[0] || undefined;
   }
 
+  function revisionInScope(row, scope) {
+    return !scope || ((scope.legacyHistory || row.sourceHash === scope.sourceHash) && (row.branchId || DEFAULT_BRANCH) === scope.branchId
+      && String(row.accountId || row.collaborationAccountId || 'guest') === scope.accountId);
+  }
+
   async function revisionClearAll(version) {
+    const captured = scopedVersion(version);
     return withStore(revisionStoreName(version), 'readwrite', async (store) => {
-      store.clear();
+      if (!captured) { store.clear(); return; }
+      await new Promise((resolve, reject) => {
+        const read = store.openCursor();
+        read.onerror = () => reject(read.error);
+        read.onsuccess = () => {
+          const cursor = read.result;
+          if (!cursor) { resolve(); return; }
+          if (revisionInScope(cursor.value, captured)) cursor.delete();
+          cursor.continue();
+        };
+      });
     });
   }
 
@@ -920,6 +1220,21 @@
     isAvailable,
     normalizeGameVersion,
     setGameVersion,
+    setWorkspaceContext,
+    captureWorkspaceScope,
+    normalizeWorkspaceScope,
+    getVersionWorkspace,
+    getVersionSource,
+    activateVersion,
+    setVersionMetadata,
+    listLocalVersions,
+    getVersionCatalog,
+    setVersionCatalog,
+    getVersionUpload,
+    setVersionUpload,
+    getVersionCollectionRequest,
+    setVersionCollectionRequest,
+    adoptGuestVersion,
     migrateFromLocalStorageIfNeeded,
     getSettings: () => kvGet(KV_SETTINGS),
     setSettings: (settings) => kvSet(KV_SETTINGS, settings),
@@ -927,7 +1242,7 @@
     updateHybridState,
     getWorkspace,
     updateWorkspace,
-    setWorkspace: (workspace, version) => kvSet(workspaceKey(version), workspace),
+    setWorkspace,
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
     getImportedBaseline: (id, version) => kvGet(importedBaselineKey(id, version)),
@@ -939,13 +1254,14 @@
     saveTranslationBatch,
     getCollaborationState: () => kvGet('collaboration_v1'),
     updateCollaborationState,
-    getSource: (version) => kvGet(sourceKey(version)),
+    getSource,
     setSource: (source, version) => kvSet(sourceKey(version), source),
     clearWorkspace: (version) => kvDel(workspaceKey(version)),
     clearSource: (version) => kvDel(sourceKey(version)),
     clearRevisions: (version) => revisionClearAll(version),
     addRevision: revisionAdd,
     listRevisions: revisionList,
+    listLegacyRevisions: (filepath, language, limit, game) => revisionList(filepath, language, limit, { game, legacyHistory: true }),
     getRevision: revisionGet,
     getLatestRevision: revisionLatest,
     getLegacyWorkspace: () => kvGet(KV_WORKSPACE_LEGACY),
@@ -957,8 +1273,8 @@
       const v = normalizeGameVersion(version);
       const legacyWorkspace = await kvGet(KV_WORKSPACE_LEGACY);
       const legacySource = await kvGet(KV_SOURCE_LEGACY);
-      if (typeof legacyWorkspace !== 'undefined') await kvSet(workspaceKey(v), legacyWorkspace);
-      if (typeof legacySource !== 'undefined') await kvSet(sourceKey(v), legacySource);
+      if (typeof legacyWorkspace !== 'undefined') await kvSet(KV_WORKSPACE_PREFIX + v, legacyWorkspace);
+      if (typeof legacySource !== 'undefined') await kvSet(KV_SOURCE_PREFIX + v, legacySource);
       await revisionCopyAll(STORE_REVISIONS_LEGACY, revisionStoreName(v));
       await kvSet(KV_MIGRATED_SINGLE_VERSION, true);
       return { workspace: legacyWorkspace, source: legacySource };

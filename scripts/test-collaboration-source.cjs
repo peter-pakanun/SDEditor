@@ -16,7 +16,7 @@ function fixture() {
   const context = vm.createContext({ Blob, FileReader,
     window: { AppDialogs: { alert: async value => { alerts.push(value); } } },
     alert: () => assert.fail('Native parser alerts must not be used'), console });
-  for (const filename of ['helper.js', 'statDescParser.js', 'dummyFiles.js']) {
+  for (const filename of ['helper.js', 'statDescCodec.js', 'statDescParser.js', 'dummyFiles.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', filename), 'utf8'), context, { filename });
   }
   return { alerts, parse: (text, strict = true, filename = 'source/test.txt') => context.parseDesc(filename, text, 'Thai', { strict }),

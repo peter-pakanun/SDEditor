@@ -1,29 +1,33 @@
 /* Ordered local saves. Editor navigation can finish while durable writes run. */
 (function (root, factory) {
-  const api = factory();
+  const api = factory(root);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.PendingSaves = api;
-})(typeof window === 'object' ? window : this, function () {
+})(typeof window === 'object' ? window : this, function (root) {
   'use strict';
 
   const plain = value => JSON.parse(JSON.stringify(value));
   const asError = value => value instanceof Error ? value : new Error(value?.message || String(value));
   let fallbackId = 0;
   function scopeKey(batch) {
-    return JSON.stringify([batch.accountId || '', batch.game, batch.sourceHash || '', batch.language]);
+    const branch = batch.workspaceScope?.branchId || batch.branchId || 'default';
+    return JSON.stringify([batch.accountId || '', batch.game, batch.sourceHash || '', batch.language,
+      ...(branch === 'default' ? [] : [branch])]);
   }
   function matchesScope(scope, batch) {
     if (typeof scope === 'string') return scope === scopeKey(batch);
     if (!scope) return false;
-    for (const [field, alias] of [['game'], ['language'], ['sourceHash', 'source'], ['accountId', 'account']]) {
+    for (const [field, alias] of [['game'], ['language'], ['sourceHash', 'source'], ['accountId', 'account'], ['branchId', 'branch']]) {
       if (!Object.hasOwn(scope, field) && !(alias && Object.hasOwn(scope, alias))) continue;
       const expected = Object.hasOwn(scope, field) ? scope[field] : scope[alias];
-      if ((expected || '') !== (batch[field] || '')) return false;
+      if (field === 'branchId') {
+        if ((expected || 'default') !== (batch.workspaceScope?.branchId || batch.branchId || 'default')) return false;
+      } else if ((expected || '') !== (batch[field] || '')) return false;
     }
     return true;
   }
 
-  function create({ save, onChange = () => {}, onCommit = () => {}, onError = () => {} } = {}) {
+  function create({ save, captureScope = batch => root.OfflineStore?.captureWorkspaceScope?.(batch), onChange = () => {}, onCommit = () => {}, onError = () => {} } = {}) {
     if (typeof save !== 'function') throw new TypeError('A local save function is required.');
     const jobs = [];
     const waiters = [];
@@ -91,6 +95,8 @@
       if (disposed) throw new Error('The local save queue is closed.');
       const captured = plain(batch);
       if (!captured || typeof captured !== 'object' || Array.isArray(captured)) throw new TypeError('A save batch is required.');
+      const workspaceScope = captureScope?.(captured);
+      if (workspaceScope) { captured.workspaceScope = plain(workspaceScope); captured.branchId = workspaceScope.branchId; }
       captured.jobId ||= globalThis.crypto?.randomUUID?.() || 'local-save-' + Date.now() + '-' + (++fallbackId);
       const previous = jobs.find(job => job.id === captured.jobId);
       if (previous) {

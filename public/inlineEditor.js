@@ -49,6 +49,7 @@
       sourceIdentity() { this.draftScopeChanged(); },
       lang() { this.draftScopeChanged(); },
       gameVersion() { this.draftScopeChanged(); },
+      branchId() { this.draftScopeChanged(); },
       editorVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
       descsDisplay() { this.$nextTick(() => this.observeInlineBlocks()); },
       inlineSidebarVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
@@ -91,11 +92,12 @@
     methods: {
       editorDraftScope(filepath = this.editorCurrentEditingDesc?.filepath) {
         return { profile: this._cloud?.context?.().profile || this.cloudProfileId || this.cloudUser?.id || 'guest',
-          game: this.gameVersion, sourceHash: this.sourceIdentity || (this.testMode ? 'test-source' : ''), language: this.lang, filepath };
+          game: this.gameVersion, branchId: this.branchId || 'default', sourceHash: this.sourceIdentity || (this.testMode ? 'test-source' : ''), language: this.lang, filepath };
       },
       editorDraftKey(scope) {
         return root.OfflineStore?.translationDraftKey?.(scope)
-          || 'translation_draft_' + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]);
+          || 'translation_draft_' + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath,
+            ...(scope.branchId && scope.branchId !== 'default' ? [scope.branchId] : [])]);
       },
       serializeEditorTranslations(blocks = this.editorBlocks || []) {
         return blocks.map(block => {
@@ -127,12 +129,12 @@
         const scope = this.editorDraftScope('');
         if (!scope.game || !scope.language) { this.inlineDraftRows = {}; this.draftRecords = []; return; }
         const run = this._draftLoadRun = (this._draftLoadRun || 0) + 1;
-        const inScope = record => record.profile === scope.profile && record.game === scope.game && record.language === scope.language;
+        const inScope = record => record.profile === scope.profile && record.game === scope.game && (record.branchId || 'default') === scope.branchId && record.language === scope.language;
         let records, readError;
         try {
           records = this.testMode || !root.OfflineStore?.listTranslationDrafts
             ? [...(this._draftMemory?.values() || [])].filter(r => inScope(r) && (r.state === 'active' || r.conflicts?.length))
-            : await root.OfflineStore.listTranslationDrafts({ profile: scope.profile, game: scope.game, language: scope.language });
+            : await root.OfflineStore.listTranslationDrafts({ profile: scope.profile, game: scope.game, branchId: scope.branchId, language: scope.language });
         } catch (error) {
           readError = error;
           records = this.draftRecords.filter(inScope);
@@ -447,12 +449,14 @@
       },
       async activateInlineRow(filepath, options = {}) {
         if (!this.inlineEditor || this.editorVisible || !this.getDescByFilepath(filepath) || this._importingSource) return false;
+        const scope = this.editorDraftScope(filepath), context = this.captureCollaborationContext?.();
+        if (!this.inlineActive && this.managedWarnBeforeEdit && !await this.managedWarnBeforeEdit()) return false;
+        if (!this.draftScopeCurrent(scope) || (context && !this.collaborationContextCurrent(context))) return false;
         this._inlineRequestedPath = filepath;
         if (this.inlineTransitionBusy) return false;
         if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) return true;
         this.inlineTransitionBusy = true;
-        const scope = this.editorDraftScope(filepath);
-        const opening = this.runInlineRowActivation(filepath, scope, this.captureCollaborationContext?.(), options);
+        const opening = this.runInlineRowActivation(filepath, scope, context, options);
         this._inlineActivationPromise = opening;
         try { return await opening; }
         finally { if (this._inlineActivationPromise === opening) this._inlineActivationPromise = null; }

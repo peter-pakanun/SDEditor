@@ -468,12 +468,19 @@ test('resolved Dropped history excludes Revised only for matching source, game, 
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true, 'Changing the account context invalidates the derived index.');
 });
 
-test('receiving an unresolved older-target Dropped copy records its current-version assignment for cloud upload and later discard', () => {
+test('receiving an older-target copy does not assign it to a browsed version; source advancement establishes the assignment', () => {
   const source = sourceDesc(), workspace = modern(source, 'current');
   const remote = { id: 'shared', game: 'poe1', language: 'Thai', filepath: 'a.txt', originSourceHash: 'original',
     targetSourceHash: 'previous', status: 'dropped', revision: 2, snapshot: { english: ['Old English'], translations: ['old work'] } };
   W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['correction'] }, 'Thai', { source });
   W.acceptDropped(workspace, [remote]);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true);
+  assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), null);
+  assert.deepEqual(workspace.droppedArchive.shared.targetSourceHashes, ['previous']);
+  assert.equal(workspace.droppedOutbox.length, 0);
+  workspace.sourceHash = 'previous'; workspace.sourceBaseline.sourceHash = 'previous';
+  W.acceptDropped(workspace, [remote]);
+  W.upgradeSource(workspace, { previousSource: [source], source: [source], previousSourceHash: 'previous', sourceHash: 'current', game: 'poe1' });
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false);
   assert.deepEqual(W.droppedForFile(workspace, 'a.txt', 'Thai').targetSourceHashes, ['previous', 'current']);
   assert.equal(workspace.droppedOutbox.length, 1);
@@ -485,6 +492,23 @@ test('receiving an unresolved older-target Dropped copy records its current-vers
   const reloaded = structuredClone(workspace);
   assert.equal(W.workspaceFile(reloaded, source, 'Thai').isRevised, false);
   assert.deepEqual(reloaded.droppedArchive.shared.targetSourceHashes, ['previous', 'current']);
+});
+
+test('named-version selection and another branch cannot add dropped assignments or change a complete saved correction', () => {
+  const source = sourceDesc(), workspace = modern(source, 'older');
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['correction'] }, 'Thai', { source });
+  const future = { id: 'future', game: 'poe1', language: 'Thai', filepath: 'a.txt', originSourceHash: 'older',
+    targetSourceHash: 'future', targetSourceHashes: ['future'], status: 'dropped', revision: 1,
+    snapshot: { english: ['One'], translations: ['future text'], name: '', variables: ['#'], remarks: [''], stats: ['stat'] } };
+  W.acceptDropped(workspace, [future]);
+  W.acceptDropped(workspace, [{ ...future, id: 'other-branch', branchId: 'release', targetSourceHashes: ['older'] }]);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, false);
+  assert.equal(workspace.droppedArchive['other-branch'], undefined); assert.equal(workspace.droppedOutbox.length, 0);
+  const before = structuredClone(workspace.droppedArchive.future);
+  W.upgradeSource(workspace, { previousSource: [source], source: [source], previousSourceHash: 'older', sourceHash: 'successor', game: 'poe1' });
+  assert.deepEqual(workspace.droppedArchive.future, before, 'A withdrawn/future-only candidate does not enter the predecessor lineage.');
+  assert.equal(workspace.droppedOutbox.length, 0); assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, false);
 });
 
 test('a fresh peer derives ordinary Saved from resolved cloud Dropped provenance for this version', () => {
@@ -508,10 +532,11 @@ test('an old resolved tombstone with unavailable scope does not fabricate a curr
   assert.equal(workspace.droppedOutbox.length, 0);
 });
 
-test('a peer resolution racing an old-target upload preserves and shares the observed current-version assignment', () => {
-  const source = sourceDesc(), workspace = modern(source, 'current');
+test('a peer resolution racing an advanced-source upload preserves and shares the established assignment', () => {
+  const source = sourceDesc(), workspace = modern(source, 'previous');
   const candidate = W.dropTranslation(workspace, sourceDesc('Old English'), 'Thai', { id: 'local', game: 'poe1',
     originSourceHash: 'old', targetSourceHash: 'previous' });
+  W.upgradeSource(workspace, { previousSource: [source], source: [source], previousSourceHash: 'previous', sourceHash: 'current', game: 'poe1' });
   W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['correction'] }, 'Thai', { source });
   const receipt = { id: 'server', game: 'poe1', language: 'Thai', filepath: 'a.txt', status: 'discarded', revision: 3,
     targetSourceHash: 'previous', targetSourceHashes: ['previous'], snapshot: null };

@@ -1,10 +1,14 @@
 # Multi-Version Support
 
-SDEditor supports separate PoE1 and PoE2 workspaces.
+SDEditor separates PoE1 and PoE2, and retains named source versions within each game. Each game initially has one release branch, `default`; workspace, catalog and collaboration identities include the branch so future release branches can stay independent. The current UI does not offer branch creation or switching.
 
 ## Selecting A Version
 
-When the app opens, choose **PoE1** or **PoE2** before importing or editing files.
+When the app opens, choose **PoE1** or **PoE2**, then use **Versions** to choose a source workspace. **Online** lists manager-published versions with HEAD first. Selecting a row shows the authorized language teams' Missing, Saved, Revised and Dropped counts, translation-window state and online participants. Managers/Admins see all 12 teams and can open any team's editor. Translators see their assigned team.
+
+**Offline** retains the existing local workflow: import the previous ZIP, import the next/update ZIP, or import translated work. Give the standalone workspace a local name with **Save name**. A published version already downloaded into this browser can also be opened while disconnected; details may reflect the last cached server state. An uncached online version must be downloaded while connected first.
+
+Selecting an existing version activates its stored source and workspace. It does not import it again, carry translations backward or forward, create Dropped assignments, or alter its baseline. Explicit **Import next/update** advances the source and calculates carry-forward and Dropped work. Both paths retain previous versions' saved work, drafts, recovery records and history.
 
 The selected version controls:
 
@@ -33,27 +37,32 @@ If the ZIP looks like a different version from the one currently selected, SDEdi
 
 ## Storage Split
 
-Version-specific data is stored separately in IndexedDB:
+IndexedDB v8 retains source/workspace snapshots and active pointers separately:
 
-| Data            | PoE1                | PoE2                |
-|-----------------|---------------------|---------------------|
-| Parsed source   | `kv.source_poe1`    | `kv.source_poe2`    |
-| Workspace       | `kv.workspace_poe1` | `kv.workspace_poe2` |
-| History         | `revisions_poe1`    | `revisions_poe2`    |
+| Data | Identity |
+| --- | --- |
+| Parsed source and workspace | Account/local profile + game + branch + accepted source baseline |
+| Active version pointer | Account/local profile + game + branch |
+| Local version names and cached catalog/details | Account/local profile + game + branch, with source identity for version metadata |
+| History | `revisions_poe1` / `revisions_poe2`, filtered by account, branch, source and language |
+| Drafts | Account/local profile + game + branch + source + language + file |
+| Save receipts and queued shared work | Captured account, game, branch, source and language; original job/mutation IDs retained |
 
-The old single-version `kv.source`, `kv.workspace`, and `revisions` data are left intact as a backup.
+The old single-version `kv.source`, `kv.workspace`, `revisions`, and per-game `source_poe1`/`workspace_poe1` slots (and their PoE2 equivalents) remain as recovery evidence. The v8 loader copies each existing per-game slot into its recorded owner's default branch once. Unowned legacy work belongs to the guest profile. First sign-in can adopt guest source and committed work into an empty account workspace; it never copies another signed-in account's work. Original guest drafts, receipts and history remain under their original scope.
 
 These stores retain the browser's current parsed source, language-specific staged translations, Dropped snapshots and local history. Immutable imported baseline caches are also kept in `kv`, keyed by game and accepted baseline ID. Saving, restoring or importing translated work does not rewrite that original baseline. IndexedDB stores collaboration caches, recovery copies and pending saves scoped by account and workspace.
 
-Signed-in users automatically join a shared room for the same **game + accepted source baseline + language** when their role permits it. A Translator joins only when the editor language matches their assignment. Managers and Admins join the selected language's room regardless of their assignment. The room's source identity differs between modern and legacy imports:
+Signed-in users automatically join a shared room for the same **game + branch + accepted source baseline + language** when their role permits it. A Translator joins only when the editor language matches their assignment. Managers and Admins join the selected language's room regardless of their assignment. The room's source identity differs between modern and legacy imports:
 
 - For an original ZIP import, `zipHash` is the SHA-256 hash of the archive bytes. Repacking the ZIP changes this hash even if its parsed text is identical.
 - The modern room's `sourceHash` is its `baselineId`, derived from `zipHash`, the accepted parser version and duplicate-language choices, and the parsed baseline tree's root hash. The ZIP hash alone is not the room identity. Collaborators use the accepted import configuration for that ZIP.
 - Legacy workspaces without a cached ZIP descriptor use a hash of the canonical parsed English/source metadata manifest. They can join an existing legacy room; creating a new room requires importing the original ZIP.
 
-Modern rooms use sparse synchronization: joining shares the small ZIP/import descriptor rather than the whole ZIP or every baseline file. A file's first save supplies its baseline witness and membership proof; the API retains that file's original translation for the room language, the saved override and authenticated change history. Untouched baseline files remain local. Older legacy rooms may retain uploaded source manifests and initial translation snapshots. Existing local revision history is never uploaded.
+Standalone imports use sparse synchronization: joining shares the small ZIP/import descriptor. A file's first save supplies its baseline witness and membership proof; the API retains that file's original translation for the room language, the saved override and authenticated change history. Manager publication explicitly uploads and retains the original ZIP and complete parsed baseline on the API so teams can download the same source and the manager can collect translated ZIPs. Older legacy rooms may retain uploaded source manifests and initial translation snapshots. Existing local revision history is never uploaded.
 
-Dropped copies synchronize separately by game, language and file and can survive later source imports. Each copy preserves its old translation, original English and entry metadata where available, plus source-version provenance. Missing old source text stays unavailable. Dropped is separate from current ZIP/staged text: **Save** or **Confirm unchanged** stages a translation and resolves the copy; **Discard** resolves it without staging. A dropped snapshot is never exported directly. See the [workspace status contract](workspace_statuses.md) for Saved, Missing, Dropped and Revised rules.
+Publishing an identical accepted baseline associates existing local work and matching collaboration rooms with the catalog entry. It keeps the room ID, staged work, active draft and shared history; offline/online is a catalog association, not a second translation history. A published entry with the same raw ZIP hash is rejected within its game and branch. Different parser or duplicate-block decisions must not be silently treated as the same baseline.
+
+Dropped copies synchronize separately by game, branch, language and file and can survive later source imports. Each copy preserves its old translation, original English and entry metadata where available, plus source-version provenance. Only versions recorded in `targetSourceHashes` have that Dropped assignment. Import advancement can extend unresolved assignments; selecting an old/new version or receiving an unrelated record cannot. Missing old source text stays unavailable. Dropped is separate from current ZIP/staged text: **Save** or **Confirm unchanged** stages a translation and resolves the copy; **Discard** resolves it without staging. A dropped snapshot is never exported directly. See the [workspace status contract](workspace_statuses.md) for Saved, Missing, Dropped and Revised rules.
 
 Import Next Version activates a separate shared room after the new source and working copy are durably saved. Previous rooms retain their shared history and pending saved-translation operations under their original identity; loading a new version never publishes those operations into it. Return to the original source, game, account and language to retry its pending saves. Preserved Dropped copies can still be encountered and reviewed in the newer version. Deploy the compatible API before updating the frontend, then reload older editor tabs; IndexedDB's newer schema prevents older editors/workers from writing the migrated workspace. Production authentication, tunnel connectivity and backup restoration require separate deployment checks.
 

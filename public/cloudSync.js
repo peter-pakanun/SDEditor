@@ -274,16 +274,29 @@
     async request(path, options = {}, ctx = this.context()) {
       if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20000);
+      const timeout = setTimeout(() => controller.abort(), options.timeout || 20000);
       try {
-        const response = await this.fetcher(this.apiBase + path, { method: options.method || 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal,
-          headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}),
-            ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}) },
-          ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
-        const data = response.status === 204 ? null : await response.json();
+        const request = { method: options.method || 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal,
+          headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(options.rawBody ? { 'Content-Type': 'application/zip' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}),
+            ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}),
+            ...(/^\/v1\/(collaboration|versions|version-uploads|collections)(\/|\?|$)/.test(path) ? { 'X-SDEditor-Workspace-Version': '2' } : {}) },
+          ...(options.rawBody ? { body: options.rawBody } : options.body ? { body: JSON.stringify(options.body) } : {}) };
+        const response = options.onUploadProgress && typeof XMLHttpRequest === 'function'
+          ? await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest(); xhr.open(request.method, this.apiBase + path); xhr.responseType = 'blob';
+            for (const [key, value] of Object.entries(request.headers)) xhr.setRequestHeader(key, value);
+            xhr.upload.onprogress = event => { if (this.permissionsCurrent(ctx)) options.onUploadProgress(event.loaded, event.lengthComputable ? event.total : options.rawBody?.size); };
+            xhr.onload = () => resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300,
+              json: async () => JSON.parse(await xhr.response.text()), blob: async () => xhr.response });
+            xhr.onerror = () => reject(new Error('Archive upload could not reach the server. Retry to resume this upload.'));
+            xhr.onabort = () => reject(Object.assign(new Error('Archive upload was interrupted. Retry this upload.'), { name: 'AbortError' }));
+            controller.signal.addEventListener('abort', () => xhr.abort(), { once: true }); xhr.send(request.body);
+          }) : await this.fetcher(this.apiBase + path, request);
+        const data = response.status === 204 ? null : response.ok && options.responseType === 'blob' ? await response.blob() : await response.json();
         if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
         if (!response.ok) {
-          const error = Object.assign(new Error(data?.error?.message || 'Cloud request failed'), { status: response.status, code: data?.error?.code, current: data?.current });
+          const error = Object.assign(new Error(data?.error?.message || 'Cloud request failed'), { status: response.status, code: data?.error?.code, current: data?.current, details: data });
           if (response.status === 401 && ctx.token) {
             await this.update(state => { state.auth = { ...state.auth, token: null }; }, ctx);
             this.status('Session expired. Sign in again; your local changes are safe.', true);

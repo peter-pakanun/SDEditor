@@ -14,6 +14,17 @@ function description(name = 'first', translation = 'translation') {
     translations: { English: ['Source'], Thai: [translation] }, hasChanges: false, isMissing: false, needsReview: false };
 }
 
+test('an ended-version warning cannot activate a file in a switched source or language', async () => {
+  for (const change of [editor => { editor.sourceIdentity = 'another-version'; }, editor => { editor.lang = 'German'; }, editor => { editor.branchId = 'another-branch'; }]) {
+    const { editor, desc } = harness(), gate = deferred();
+    editor.managedWarnBeforeEdit = () => gate.promise;
+    let activations = 0; editor.runInlineRowActivation = async () => { activations++; return true; };
+    const opening = editor.activateInlineRow(desc.filepath); await tick();
+    change(editor); gate.resolve(true);
+    assert.equal(await opening, false); assert.equal(activations, 0);
+  }
+});
+
 function harness({ records = new Map() } = {}) {
   let config, nextId = 0;
   const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };

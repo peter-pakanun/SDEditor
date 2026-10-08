@@ -15,6 +15,10 @@ The editor helps you translate game stat descriptions while maintaining formatti
 
 When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Both versions use the same Dictionary for the selected language and your personal Regex rules. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
 
+Open **Versions** to choose a source. **Online** lists manager-published versions with HEAD first; select one to see your team's progress, deadline reminder and open/ended window, then **Open editor**. Managers/Admins see all teams. A version downloaded into this browser remains available while disconnected. **Offline** keeps the previous ZIP → next/update import workflow and allows a local version name. Selecting a stored version preserves its own work and history without reimporting it or recalculating Dropped assignments.
+
+An import deadline is a reminder. Passing it does not end editing. When a manager collects your team's Saved work and marks it ended, opening the editor warns that new saves will not change the already collected ZIP. You can continue after confirming. Unsaved drafts and pending offline uploads are excluded from the manager's collection; synchronize saved work before collection when you want it included.
+
 Click the **PoE1/PoE2** label in the navbar to open **Settings → General → Game version**. Choose the other game and save and close Settings to switch; pending local translation saves finish first.
 
 Use each Dictionary entry's **PoE1 / PoE2 / All** selector to choose where it applies. Existing entries are **All**; new entries start in your selected game. You can repeat a Find or keyword identifier in separate game entries. The current game's entry takes priority over an All entry with the same Find, including its alternates; All is the fallback when that game has no specific entry. Other-game entries stay visible and editable with a yellow warning, but do not appear in autocomplete or move to the top when matched. They also do not supply highlights, keyword/Regex replacements or terminology rules.
@@ -25,7 +29,7 @@ Open **Settings → Cloud backup → Back up with Google** to connect personal s
 
 An administrator can change an account's role between **Translator** and **Manager** in **Settings → Cloud backup → Manage users**. Managers and admins can view and edit shared dictionaries and saved translations in every language, inspect and restore shared history, and read all language teams' comments. Select the language to work in; managers and admins also have a navbar language link that opens its Settings selector. User management remains an admin control.
 
-Settings and Regex rules stay personal to each account. Dictionaries are shared by language; saved translations and new shared history synchronize within the same game, source version, and language. Dropped translations synchronize separately across source versions for that game and language. The editor clipboard, original ZIPs, unsaved typing, and legacy local history stay in this browser. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
+Settings and Regex rules stay personal to each account. Dictionaries are shared by language; saved translations and new shared history synchronize within the same game, branch, source version, and language. Dropped translations synchronize separately across assigned source versions for that game, branch and language. The editor clipboard, unsaved typing and legacy local history stay in this browser. Standalone imports keep their ZIP/baseline local; manager-published versions explicitly store the ZIP and parsed baseline on the server for authorized teams. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
 
 ### Settings
 
@@ -410,7 +414,17 @@ The **History** panel on the right shows all saved versions of the current file.
 - Click a different history entry to compare it with the current version
 - Revert to a specific version by clicking on the revert button next to the version entry
 
+Normal local history uses the selected account, game, branch, source and language. **Show legacy local references** adds older or ambiguous records from the same account/branch as comparison-only rows. A workspace adopted from the guest profile can also show its original guest references. These rows cannot be restored directly into this source version; review the text and explicitly recover it in the intended workspace. Existing local history stays in the browser when an offline workspace becomes an online catalog version.
+
 ## Managing Your Work
+
+### Manager Dashboard
+
+Managers/Admins open **Versions** to upload a named source, review validation/duplicate-block decisions and publish it to all 12 teams. The default name uses the New Zealand date and game; the deadline defaults to next Monday at 09:00 New Zealand time. Selecting a version shows each team's Missing, Saved and Revised counts/bars, Dropped navigation, ended state and participant avatars. Counts overlap: Revised files are also Saved. **Open editor** enters that team's workspace.
+
+Inherited reference copies preserve prior work that cannot be applied automatically, including files absent from the selected source. Inspect their preserved source/text in the version's reference view; references for a loaded file also appear in its History panel for comparison. They do not become Saved translations or enter collections merely because you open them.
+
+**Download and mark ended** creates a named ZIP of server-accepted Saved files and ends that team's translation window. It preserves the snapshot for later download, shows changes saved after collection and supports **Recollect** or **Reopen**. Publishing while a previous HEAD has open teams requires an explicit override. **Withdraw** hides an accidental version; work/collections/active editors require confirmation, and data remains recoverable. See [Import Workflow](import_workflow.md#manager-published-versions) for collection and withdrawal details.
 
 ### Confirming Unchanged Translations
 

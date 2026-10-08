@@ -22,6 +22,7 @@
       this.onStatus = options.onStatus || (() => {});
       this.onWork = options.onWork || (() => {});
       this.onEditingConflict = options.onEditingConflict || (() => {});
+      this.onManagedVersionChanged = options.onManagedVersionChanged || (() => {});
       this.onCanonicalArchive = options.onCanonicalArchive || (() => {});
       this.allowLegacySeed = options.allowLegacySeed !== false;
       this.projectWorkspace = options.projectWorkspace || P.projectWorkspace;
@@ -136,7 +137,7 @@
         const desc = { filepath: candidate.filepath, ...candidate.snapshot, translations: { English: candidate.snapshot.english } };
         registered = W.dropTranslation(current, desc, identity.language, { ...candidate, snapshot: candidate.snapshot });
         return current;
-      }, identity.game, { revisions });
+      }, this.workspaceScope(identity), { revisions });
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(workspace, [registered], epoch);
       this.lastDroppedSync = 0; await this.retry();
@@ -151,7 +152,7 @@
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         discarded = W.discardDropped(current, filepath, identity.language, expected);
         return current;
-      }, identity.game);
+      }, this.workspaceScope(identity));
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(workspace, [{ ...copy(discarded), status: 'discarded' }], epoch);
       this.lastDroppedSync = 0; await this.retry();
@@ -191,6 +192,7 @@
       // The worker acknowledgement is durable even if a UI observer fails.
       try { this.notify(); } catch (_) {}
     }
+    workspaceScope(identity) { return this.store.captureWorkspaceScope ? identity : identity?.game; }
     async update(fn, options = {}, epoch = this.epoch) {
       return this.withLocalWrite(() => this.updateStored(fn, options, epoch));
     }
@@ -202,7 +204,7 @@
         state ||= { version: 1, rooms: {} };
         fn(state, state.rooms[key]);
         return state;
-      }, { version: this.room()?.identity.game, ...options });
+      }, { version: this.room()?.identity.game, scope: copy(this.room()?.identity), ...options });
       if (!this.current(epoch)) throw staleError();
       this.state = state; this.notify();
       return this.room();
@@ -221,8 +223,8 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree }) {
-      if (archive) return this.connectSparse({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree });
+    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree }) {
+      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree });
       this.disconnect(); this.destroyed = false;
       this.baselineStates = null; this.baselineTree = null; this.archive = null;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
@@ -244,7 +246,7 @@
       } finally {
         if (epoch === this.epoch) { this.hashing = false; this.notify(); }
       }
-      const identity = { accountId: String(accountId), game, sourceHash, language };
+      const identity = { accountId: String(accountId), game, branchId, sourceHash, language };
       let incoming;
       await this.prepareWork(async () => {
         this.source = await this.prepareItems(source, desc => copy(desc), epoch);
@@ -277,7 +279,7 @@
             if (room.initialized) this.rebuild(room);
           }
         }
-      }, { version: game, projectWorkspace: stored => {
+      }, { version: game, scope: identity, projectWorkspace: stored => {
         const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash;
@@ -294,7 +296,7 @@
       }
       return this.snapshot({ includeFiles: false });
     }
-    async connectSparse({ accountId, game, language, source, files, workspace, archive, baselineSource, baselineTree }) {
+    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree }) {
       this.disconnect(); this.destroyed = false;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
@@ -314,7 +316,7 @@
         }, epoch);
         await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
       }, epoch);
-      const identity = { accountId: String(accountId), game, sourceHash: archive.baselineId, language };
+      const identity = { accountId: String(accountId), game, branchId, sourceHash: archive.baselineId, language };
       this.key = scopeKey(identity); this.context = this.getContext();
       // Resolve the tiny descriptor before creating or altering durable room state.
       const canonical = await this.api('/archives/resolve', { method: 'POST', body: { game, archive } }, epoch);
@@ -363,7 +365,7 @@
           room.recovery.push({ id: this.uuid(), at: Date.now(), reason: 'Preserved dropped translation', files: [copy(carry)] });
         }
         this.rebuild(room);
-      }, { version: game, projectWorkspace: stored => {
+      }, { version: game, scope: identity, projectWorkspace: stored => {
         const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash; current.collaborationAccountId = identity.accountId;
@@ -390,7 +392,7 @@
     }
     async initializeRoom(epoch) {
       const room = this.room();
-      const identity = { game: room.identity.game, sourceHash: room.identity.sourceHash, language: room.identity.language };
+      const identity = { game: room.identity.game, branchId: room.identity.branchId || 'default', sourceHash: room.identity.sourceHash, language: room.identity.language };
       let snapshot;
       if (room.mode === 'sparse') {
         snapshot = await this.api('/join', { method: 'POST', body: { ...identity, archive: room.archive } }, epoch);
@@ -650,7 +652,7 @@
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         return W.acceptDropped(current, records, { ...options, game: identity.game, language: identity.language });
-      }, identity.game);
+      }, this.workspaceScope(identity));
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(updated, records, epoch);
       if (!this.current(epoch)) throw staleError();
@@ -744,11 +746,11 @@
     async resolveDroppedConflict(filepath, choice = 'shared', expected) {
       const epoch = this.epoch, identity = copy(this.room()?.identity);
       if (!identity || !this.store.updateWorkspace || !['shared', 'local'].includes(choice)) throw staleError();
-      const observedWorkspace = await this.store.getWorkspace(identity.game);
+      const observedWorkspace = await this.store.getWorkspace(this.workspaceScope(identity));
       const observed = copy(observedWorkspace?.droppedConflicts?.[identity.language]?.[filepath]);
       if (!observed || observed.targetSourceHash !== identity.sourceHash
         || (expected && (expected.id !== observed.shared.id || Number(expected.revision) !== Number(observed.shared.revision)))) throw staleError();
-      const params = new URLSearchParams({ game: identity.game, language: identity.language, includeResolved: '1' });
+      const params = new URLSearchParams({ game: identity.game, branchId: identity.branchId || 'default', sourceHash: identity.sourceHash, language: identity.language, includeResolved: '1' });
       const result = await this.api('/dropped?' + params, {}, epoch);
       const candidates = result.candidates || result.items || result.records || [];
       const latest = candidates.filter(item => item.filepath === filepath)
@@ -765,7 +767,7 @@
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         chosen = W.resolveDroppedConflict(current, filepath, identity.language, choice, observed.shared);
         return current;
-      }, identity.game);
+      }, this.workspaceScope(identity));
       // Choosing an old copy does not approve publishing a previously rejected
       // promotion. Keep its saved text durable until a fresh explicit save.
       if (observed.operationId) await this.update((state, room) => {
@@ -781,12 +783,14 @@
       if (!force && !this.pendingDropped && !Object.keys(this.droppedConflicts).length && Date.now() - this.lastDroppedSync < 20000) return;
       const identity = copy(this.room()?.identity);
       if (!identity) return;
-      let workspace = await this.store.getWorkspace(identity.game);
+      let workspace = await this.store.getWorkspace(this.workspaceScope(identity));
       if (!this.current(epoch)) throw staleError();
       if (!workspace || (workspace.sourceHash && workspace.sourceHash !== identity.sourceHash)) return;
       this.droppedConflicts = copy(workspace.droppedConflicts?.[identity.language] || {});
       const pending = (workspace.droppedOutbox || []).filter(operation => !operation.conflict && operation.candidate?.game === identity.game
-        && operation.candidate?.language === identity.language);
+        && (operation.candidate?.branchId || 'default') === (identity.branchId || 'default')
+        && operation.candidate?.language === identity.language
+        && [...(operation.candidate?.targetSourceHashes || []), operation.candidate?.targetSourceHash].includes(identity.sourceHash));
       const apply = async (records, options = {}) => {
         workspace = await this.receiveDropped(records, epoch, options);
       };
@@ -802,7 +806,7 @@
         if (operation.kind === 'discard') response = await this.api('/dropped/' + encodeURIComponent(resolved.id) + '/discard',
           { method: 'POST', body: { revision: Number(resolved.revision) || 0 } }, epoch);
         else response = await this.api('/dropped', { method: 'PUT', body: {
-          game: candidate.game, language: candidate.language, filepath: candidate.filepath,
+          game: candidate.game, branchId: identity.branchId || 'default', language: candidate.language, filepath: candidate.filepath,
           originSourceHash: candidate.originSourceHash, targetSourceHash: candidate.targetSourceHash,
           targetSourceHashes: [...new Set([...(candidate.targetSourceHashes || []), candidate.targetSourceHash].filter(Boolean))],
           snapshot: copy(candidate.snapshot), baseRevision: Number(candidate.revision) || 0,
@@ -822,7 +826,7 @@
         await apply([response.candidate], { acknowledge: true, acknowledgeKind: operation.kind, acknowledgeId: operation.id });
       }
       if (force || pending.length || Object.keys(this.droppedConflicts).length || Date.now() - this.lastDroppedSync >= 20000) {
-        const params = new URLSearchParams({ game: identity.game, language: identity.language, includeResolved: '1' });
+        const params = new URLSearchParams({ game: identity.game, branchId: identity.branchId || 'default', sourceHash: identity.sourceHash, language: identity.language, includeResolved: '1' });
         const result = await this.api('/dropped?' + params, {}, epoch);
         const records = result.candidates || result.items || result.records || [];
         workspace = await this.coalesceDroppedCopies(records, epoch) || workspace;
@@ -1081,7 +1085,7 @@
       }
     }
     async prepare(id, epoch) {
-      const workspace = this.store.getWorkspace ? await this.store.getWorkspace(this.room()?.identity.game) : null;
+      const workspace = this.store.getWorkspace ? await this.store.getWorkspace(this.workspaceScope(this.room()?.identity)) : null;
       if (!this.current(epoch)) throw staleError();
       const observed = this.room().outbox.find(op => op.id === id);
       const existingConflict = observed?.promoteDropped && workspace?.droppedConflicts?.[this.room().identity.language]?.[observed.files[0].yours.filepath];
@@ -1325,7 +1329,13 @@
             pending.resolve({ granted: !!message.granted && !stale, peers: message.peers || [], ...(stale ? { stale: true } : {}) });
           }
         } else if (message.type === 'changed' && (!Number.isSafeInteger(message.sequence) || message.sequence > (this.room()?.sequence || 0))) { this.retry(); }
-        else if (message.type === 'dropped_changed' && message.game === this.room()?.identity.game && message.language === this.room()?.identity.language) {
+        else if (message.type === 'managed_version_changed') {
+          const identity = this.room()?.identity;
+          if (identity && message.game === identity.game && (message.branchId || 'default') === (identity.branchId || 'default')
+            && message.sourceHash === identity.sourceHash) this.onManagedVersionChanged(copy(message));
+        }
+        else if (message.type === 'dropped_changed' && message.game === this.room()?.identity.game && message.language === this.room()?.identity.language
+          && (message.branchId || 'default') === (this.room()?.identity.branchId || 'default')) {
           this.lastDroppedSync = 0; this.retry();
         }
       };

@@ -100,7 +100,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -216,6 +216,7 @@ const config = Vue.defineComponent({
       historyFilepath: '',
       historyLang: '',
       historyMode: 'translation',
+      historyIncludeLegacy: false,
 
       editorVisible: false,
       editorLoading: false,
@@ -995,6 +996,7 @@ const config = Vue.defineComponent({
       this.gameVersion = v;
       this.gameVersionSelected = true;
       window.OfflineStore?.setGameVersion?.(v);
+      if (this.managedWorkspaceScope) window.OfflineStore?.setWorkspaceContext?.(this.managedWorkspaceScope(''));
       this.updateDocumentTitle();
 
       if (this.testMode) {
@@ -1009,6 +1011,10 @@ const config = Vue.defineComponent({
       }
 
       await this.loadVersionedStorage();
+      if (window.ManagedVersions && !this.testMode) {
+        this.versionChooserVisible = true;
+        await this.managedScopeChanged();
+      }
     },
     async prepareSingleVersionMigration() {
       this.pendingSingleVersionMigration = null;
@@ -1074,8 +1080,10 @@ const config = Vue.defineComponent({
       if (this._importReconciliationDone) await this._importReconciliationDone;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       const game = this.gameVersion;
+      const profile = this.cloudProfileId || 'guest', branch = this.branchId || 'default';
       const generation = this._versionLoadGeneration = (this._versionLoadGeneration || 0) + 1;
-      const current = () => generation === this._versionLoadGeneration && game === this.gameVersion;
+      const current = () => generation === this._versionLoadGeneration && game === this.gameVersion
+        && profile === (this.cloudProfileId || 'guest') && branch === (this.branchId || 'default');
       this.versionStorageLoading = true;
       const workKey = 'load-' + generation;
       this.setBrowserWork('workspace', { key: workKey, label: 'Preparing stored translation files', active: true });
@@ -1113,7 +1121,7 @@ const config = Vue.defineComponent({
         this._workspaceSourceBaseline = importedBaseline?.source || this.toPlainForStorage(source);
         this._workspaceBaselineIndex = null;
         window.WorkspaceState.initializeWorkspace(workspace, { source: this._workspaceSourceBaseline,
-          sourceHash, game, language: this.lang });
+          sourceHash, game, branchId: branch, language: this.lang });
         let prepared;
         if (Array.isArray(source) && source.length) {
           // Preferences may arrive while preparation yields. Apply the latest
@@ -5851,6 +5859,11 @@ const config = Vue.defineComponent({
       } finally { this.navigationBusy = false; }
     },
     editFile(filepath, returnToFileList = false, options = {}) {
+      if (!options.endedAcknowledged && this.managedWarnBeforeEdit && (this.managedActiveTeam?.ended || this.managedActiveVersion?.status === 'withdrawn')) {
+        const context = this.captureCollaborationContext();
+        return this.managedWarnBeforeEdit().then(ok => ok && this.collaborationContextCurrent(context)
+          ? this.editFile(filepath, returnToFileList, { ...options, endedAcknowledged: true }) : false);
+      }
       if (this.inlineActive && !options.inline && this.editorCurrentEditingDesc?.filepath === filepath && !this._nextEditorSurface) return this.openInlineFullEditor(filepath);
       if (this._draftSession && this.editorCurrentEditingDesc?.filepath !== filepath && !options.draftFlushed) {
         return this.flushEditorDraft().then(ok => ok ? this.editFile(filepath, returnToFileList, { ...options, draftFlushed: true }) : false);
@@ -6316,7 +6329,14 @@ const config = Vue.defineComponent({
       } finally { if (this._editorSaveToken === saveToken) this.editorSaving = false; }
     },
     async refreshHistory() {
+      const generation = this._localHistoryRun = (this._localHistoryRun || 0) + 1;
+      const desc = this.editorCurrentEditingDesc, scope = this.managedWorkspaceScope?.();
+      const context = this.captureCollaborationContext?.(), mode = this.historyMode, includeLegacy = this.historyIncludeLegacy;
+      const current = () => generation === this._localHistoryRun && desc === this.editorCurrentEditingDesc
+        && mode === this.historyMode && includeLegacy === this.historyIncludeLegacy
+        && (!context || this.collaborationContextCurrent(context));
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+      if (!current()) return;
       if (!this.editorCurrentEditingDesc) {
         this.historyItems = [];
         this.historySelectedA = null;
@@ -6332,7 +6352,8 @@ const config = Vue.defineComponent({
       this.historyLoading = true;
       try {
         if (window.OfflineStore && typeof window.OfflineStore.listRevisions === 'function') {
-          const items = await window.OfflineStore.listRevisions(filepath, lang, 100, this.gameVersion);
+          const items = await window.OfflineStore.listRevisions(filepath, lang, 100, scope || this.gameVersion);
+          if (!current()) return;
           this.historyItems = (Array.isArray(items) ? items : []).map((it, idx) => {
             if (idx !== 0) return it;
             return {
@@ -6346,14 +6367,37 @@ const config = Vue.defineComponent({
               sourceHash: this.sourceIdentity, needsReview: true, note: item.note || 'Dropped translation' }));
             this.historyItems.push(...recoveries);
           }
+          if (includeLegacy && scope) {
+            const metadata = this.localVersions?.find(v => v.sourceHash === scope.sourceHash);
+            const legacy = await window.OfflineStore.listRevisions(filepath, lang, 100, { ...scope, legacyHistory: true });
+            const guest = metadata?.adoptedFrom === 'guest' ? await window.OfflineStore.listRevisions(filepath, lang, 100,
+              { ...scope, accountId: 'guest', legacyHistory: true }) : [];
+            if (!current()) return;
+            if (!this.historyItems.length) this.historyItems.push({ id: 'current-version', filepath, lang,
+              sourceHash: this.sourceIdentity, branchId: this.branchId, translations: [...(desc.translations?.[lang] || [])],
+              note: '(current)', savedAt: this.localDescs?.lastModified });
+            const existing = new Set(this.historyItems.map(row => String(row.id)));
+            this.historyItems.push(...[...(legacy || []).filter(row => !existing.has(String(row.id))), ...(guest || [])].map((row, index) => ({ ...row,
+              id: 'legacy-reference:' + index + ':' + row.id, legacyReference: true,
+              note: `Legacy local reference · ${row.accountId === 'guest' || !row.accountId ? 'original local profile · ' : ''}${row.sourceHash?.slice(0, 12) || 'unknown source'}${row.note ? ' · ' + row.note : ''}` })));
+          }
+          const inherited = (this.managedActiveTeam?.recoveries || []).filter(row => row.filepath === filepath);
+          if (inherited.length) {
+            if (!this.historyItems.length) this.historyItems.push({ id: 'current-version', filepath, lang, translations: [...(desc.translations?.[lang] || [])], note: '(current)' });
+            this.historyItems.push(...inherited.map(row => ({ id: 'inherited-reference:' + row.id, filepath, lang,
+              sourceHash: row.originSourceHash, translations: [...(row.snapshot?.translations || [])], legacyReference: true,
+              savedAt: row.provenance?.capturedAt || row.provenance?.savedAt,
+              note: 'Inherited reference · ' + (row.reason || 'Previous version work') })));
+          }
         } else {
           this.historyItems = [];
         }
       } catch (_) {
-        this.historyItems = [];
+        if (current()) this.historyItems = [];
       } finally {
-        this.historyLoading = false;
+        if (current()) this.historyLoading = false;
       }
+      if (!current()) return;
 
       this.historySelectedA = this.historyItems?.[0] || null;
       this.historySelectedB = null;
@@ -6487,6 +6531,8 @@ const config = Vue.defineComponent({
     async restoreHistoryRevision(rev) {
       const desc = this.editorCurrentEditingDesc;
       if (!desc || !rev || this.editorSaving) return;
+      if (rev.legacyReference) { this.appAlert('Legacy local records are reference copies. Compare their text and explicitly recover it in the intended source version.'); return; }
+      if (rev.branchId && rev.branchId !== this.branchId) { this.appAlert('Cannot restore: revision belongs to another branch.'); return; }
       if (this.historyMode === 'source' || String(rev.lang) === 'English') { this.appAlert('Restoring source English text is disabled.'); return; }
       if (desc.filepath !== rev.filepath || this.lang !== rev.lang || (rev.sourceHash && this.sourceIdentity && rev.sourceHash !== this.sourceIdentity)) {
         this.appAlert('Cannot restore: revision does not match the current source, file and language.'); return;

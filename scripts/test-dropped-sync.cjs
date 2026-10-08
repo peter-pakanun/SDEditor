@@ -244,15 +244,13 @@ test('automatic provenance upload of a peer recovery uses ordinary dedup when th
   const { client, store, server } = fixture(); t.after(() => client.destroy());
   const peer = { ...recoveryCandidate('peer-explicit-action'), id: 'peer-server-copy', targetSourceHash: oldHash,
     targetSourceHashes: [oldHash], revision: 4, status: 'dropped', createdAt: 1 };
+  store.workspace.sourceHash = oldHash;
+  W.acceptDropped(store.workspace, [peer], { game: 'poe1', language: 'Thai' });
+  W.upgradeSource(store.workspace, { previousSource: [source], previousSourceHash: oldHash,
+    source: [source], sourceHash: hash, game: 'poe1', language: 'Thai' });
   server.records = [copy(peer)];
-  const original = server.request.bind(server); let listed = false, provenanceUpload;
+  const original = server.request.bind(server); let provenanceUpload;
   client.request = async (path, options = {}) => {
-    if (path.includes('/dropped?') && !listed) {
-      listed = true;
-      const response = await original(path, options);
-      server.records[0] = { ...server.records[0], revision: 5, status: 'discarded', snapshot: null };
-      return response;
-    }
     if (path.endsWith('/dropped') && options.method === 'PUT') {
       server.requests.push({ path, options: copy(options) }); provenanceUpload = copy(options.body);
       assert.equal(options.body.recoveryId, undefined, 'A downloaded peer action is not a new explicit recovery by this user.');
@@ -263,10 +261,10 @@ test('automatic provenance upload of a peer recovery uses ordinary dedup when th
     }
     return original(path, options);
   };
-  await client.syncDropped(client.epoch, { force: true });
   assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, peer.id);
-  assert.equal(store.workspace.droppedOutbox.length, 1, 'Viewing the copy in a new source version queues its assignment provenance.');
+  assert.equal(store.workspace.droppedOutbox.length, 1, 'Explicit source advancement queues its established assignment provenance.');
   assert.equal(store.workspace.droppedOutbox[0].candidate.recoveryId, 'peer-explicit-action');
+  server.records[0] = { ...server.records[0], revision: 5, status: 'discarded', snapshot: null };
   client.lastDroppedSync = 0; await client.retry();
   assert.ok(provenanceUpload); assert.equal(server.recoveryGenerations, 0);
   assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
@@ -275,6 +273,18 @@ test('automatic provenance upload of a peer recovery uses ordinary dedup when th
   assert.equal(archived.status, 'discarded'); assert.deepEqual(archived.snapshot, peer.snapshot);
   assert.ok(archived.targetSourceHashes.includes(hash));
   assert.equal(server.records[0].snapshot, null);
+});
+
+test('reading a dropped copy assigned to another named version does not assign it or upload provenance', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  const peer = { ...recoveryCandidate('old-version-action'), id: 'old-version-copy', targetSourceHash: oldHash,
+    targetSourceHashes: [oldHash], revision: 4, status: 'dropped', createdAt: 1 };
+  server.records = [copy(peer)];
+  await client.syncDropped(client.epoch, { force: true });
+  assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
+  assert.equal(store.workspace.droppedOutbox.length, 0);
+  assert.deepEqual(store.workspace.droppedArchive[peer.id].targetSourceHashes, [oldHash]);
+  assert.equal(server.requests.some(request => request.options.method === 'PUT'), false);
 });
 
 test('a conflicting dropped upload preserves both copies without retry loops or blocking unrelated saves', async t => {

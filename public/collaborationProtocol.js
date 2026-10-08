@@ -250,7 +250,9 @@
     return { file: result, indexes, metadata, conflict: indexes.length > 0 || metadata.length > 0 };
   }
   function scopeKey(identity) {
-    return JSON.stringify([String(identity.accountId), identity.game, identity.sourceHash, identity.language]);
+    const branch = identity.branchId || 'default';
+    return JSON.stringify(branch === 'default' ? [String(identity.accountId), identity.game, identity.sourceHash, identity.language]
+      : [String(identity.accountId), identity.game, branch, identity.sourceHash, identity.language]);
   }
   function projectWorkspace(workspace, files, language, source = [], { mutate = false } = {}) {
     // Internal transaction projections own their IndexedDB snapshot. Other
