@@ -60,6 +60,7 @@
   const filename = value => String(value || 'StatDescriptions').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '') || 'StatDescriptions';
   const mixin = {
     data() { return { branchId: DEFAULT_BRANCH, versionChooserVisible: false, managedVersions: [], managedBranch: null,
+      managedTeamSort: 'progress', managedTeamSortDir: 'desc',
       selectedManagedVersionId: '', managedVersionDetails: null, managedVersionError: '', managedOperationErrors: {}, managedVersionBusy: false,
       managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '',
       managedCatalogLoading: false, managedCatalogLoaded: false, managedLocalVersionsLoading: false, managedLocalVersionsLoaded: false,
@@ -87,12 +88,19 @@
       managedSelectedVersion() { return this.managedCatalogAccess ? (this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedVersionDetails.version : null) || this.managedVersions.find(v => v.id === this.selectedManagedVersionId) || null : null; },
       managedSelectedDetails() {
         const details = this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedScopedDetails(this.managedVersionDetails) : null;
-        details?.teams.sort((a, b) => {
-          const first = this.managedProgress(a), second = this.managedProgress(b);
-          return second.percent - first.percent || first.total - second.total;
-        });
         return details;
       },
+      managedSortedTeams() {
+        const modifier = this.managedTeamSortDir === 'desc' ? -1 : 1;
+        return (this.managedSelectedDetails?.teams || []).slice().sort((a, b) => {
+          if (this.managedTeamSort === 'language') {
+            return String(a.language || '').localeCompare(String(b.language || ''), undefined, { numeric: true, sensitivity: 'base' }) * modifier;
+          }
+          const first = this.managedProgress(a), second = this.managedProgress(b);
+          return (first.percent - second.percent || second.total - first.total) * modifier;
+        });
+      },
+      managedTeamSortIcon() { return this.managedTeamSortDir === 'asc' ? '▲' : '▼'; },
       managedVisibleRecoveryTeam() { return this.managedCatalogAccess && (this.cloudCanAccessAllLanguages || this.managedRecoveryTeam?.language === this.managedSingleLanguage) ? this.managedRecoveryTeam : null; },
       managedActiveVersion() {
         if (!this.managedCatalogAccess) return null;
@@ -187,6 +195,11 @@
       document.removeEventListener('scroll', this._managedMenuMove, true); root.removeEventListener('resize', this._managedMenuMove);
     },
     methods: {
+      managedSortTeams(sort) {
+        if (sort !== 'language' && sort !== 'progress') return;
+        if (sort === this.managedTeamSort) this.managedTeamSortDir = this.managedTeamSortDir === 'asc' ? 'desc' : 'asc';
+        this.managedTeamSort = sort;
+      },
       managedClearCatalogAccess() {
         this.closeManagedPresence(); this._managedDetailRun = (this._managedDetailRun || 0) + 1;
         this._managedOperation = null; this._managedActivation = null; this.managedVersionBusy = false; this.clearBrowserWork?.('versions');

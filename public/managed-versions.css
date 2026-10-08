@@ -15,6 +15,9 @@
 .versionTableScroll { overflow-x: auto; }
 .versionTable { width: 100%; border-collapse: collapse; text-align: left; }
 .versionTable th { padding: 10px; color: var(--ui-muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--ui-border); vertical-align: middle; }
+.teamVersionTable .tableSort { border: 0; padding: 0; border-radius: 2px; background: transparent; color: inherit; font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
+.teamVersionTable .tableSort:hover { color: var(--ui-accent); }
+.teamVersionTable .tableSort:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .versionTable td { padding: 12px 10px; border-bottom: 1px solid var(--ui-border); vertical-align: middle; font-size: 13px; line-height: 1.4; }
 .versionTable tr.selected { background: var(--ui-accent-soft); }
 .versionCatalog table.versionTable:not(#table) tbody > tr:hover { background: var(--ui-accent-soft); }
