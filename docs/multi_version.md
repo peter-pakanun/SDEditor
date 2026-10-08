@@ -37,6 +37,8 @@ If the ZIP looks like a different version from the one currently selected, SDEdi
 
 ## Storage Split
 
+For the recorded direction on reducing server baseline duplication and generating managed collections on clients, read [Local-first baselines and incremental server storage](local_first_server_storage.md). That design is pending implementation; this section describes the current storage and version behavior.
+
 IndexedDB v8 retains source/workspace snapshots and active pointers separately:
 
 | Data | Identity |

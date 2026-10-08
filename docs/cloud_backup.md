@@ -2,6 +2,8 @@
 
 SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings backup, shared dictionaries, translation collaboration, and file discussions according to your account's language access. Translators work in their assigned language; managers and admins can access every language's shared work. The static editor calls the separate API at `https://sdeditor-api.poemaid.com`; these instructions describe the implementation, not confirmation that the public API has been deployed.
 
+The storage direction for future work is recorded in [Local-first baselines and incremental server storage](local_first_server_storage.md): client-generated managed downloads, no permanent complete parsed baseline in SQLite, and lossless shared-data deduplication. That direction is not implemented yet. The table and workflows below describe the current behavior and remain applicable until a coordinated migration changes it.
+
 ## What Is Saved Where
 
 | Data | Browser storage | Cloud |
