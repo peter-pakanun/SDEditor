@@ -1199,3 +1199,244 @@ test('Settings and Local drafts wait for an in-flight blur warning decision befo
     }
   }
 });
+
+function inlineArrowEvent(filepath, changes = {}) {
+  return { key: 'ArrowDown', ctrlKey: true,
+    target: { tagName: 'INPUT', closest: selector => selector === 'tr[data-filepath]' ? { dataset: { filepath } } : null },
+    preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.propagationStopped = true; }, ...changes };
+}
+
+async function inlineNavigationHarness({ current = 'first', table = false } = {}) {
+  const h = harness(), { editor, calls } = h;
+  h.rows = [description('first'), description('second'), description('third')];
+  if (table) {
+    h.rows[1].translations.English = ['Source@Second source'];
+    h.rows[1].translations.Thai = ['Translation@Second translation'];
+  }
+  editor.descs = [h.rows[2], h.rows[0], h.rows[1]];
+  editor.filteredDescs = editor.descs;
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  editor.currentSort = 'filename'; editor.currentSortDir = 'asc'; editor.pageSize = 1;
+  editor.currentPage = h.rows.findIndex(row => row.filename === current + '.txt') + 1;
+  calls.translationFocus = []; calls.reveals = [];
+  editor.getEditorRef = (...args) => ({ focus(options) { calls.translationFocus.push({ args, options }); } });
+  editor.focusSelectedFileRow = moveFocus => { calls.reveals.push({ moveFocus, filepath: editor.selectedFilepath }); };
+  assert.equal(await editor.activateInlineRow(h.rows.find(row => row.filename === current + '.txt').filepath), true);
+  return h;
+}
+
+test('Ctrl+Up and Ctrl+Down from inline translation text consume the shortcut before autocomplete handling', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  const directions = []; editor.moveInlineFile = async direction => { directions.push(direction); return true; };
+  editor.hlPopup.visible = true; editor.hlPopup.filter = 'keep';
+  for (const [key, direction] of [['ArrowUp', -1], ['ArrowDown', 1]]) {
+    const event = inlineArrowEvent(desc.filepath, { key });
+    editor.translationKeydown(event, 0);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+    assert.equal(directions.at(-1), direction);
+    assert.equal(editor.hlPopup.filter, 'keep');
+  }
+  assert.deepEqual(directions, [-1, 1]);
+});
+
+test('inline row shortcuts leave ordinary arrows, IME, other modifiers, popup filters and full-editor text alone', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.moveInlineFile = () => assert.fail('A native or unrelated key must not navigate files');
+  for (const changes of [{ ctrlKey: false }, { altKey: true }, { metaKey: true }, { shiftKey: true },
+    { isComposing: true }, { keyCode: 229 }, { key: 'ArrowLeft' },
+    { target: { tagName: 'INPUT', closest: () => null } },
+    { target: { tagName: 'INPUT', closest: () => ({ dataset: { filepath: 'test/other.txt' } }) } }]) {
+    const event = inlineArrowEvent(desc.filepath, changes);
+    assert.equal(editor.inlineTranslationKeydown(event), false);
+    assert.equal(!!event.defaultPrevented, false); assert.equal(!!event.propagationStopped, false);
+  }
+  const prevented = inlineArrowEvent(desc.filepath, { defaultPrevented: true });
+  assert.equal(editor.inlineTranslationKeydown(prevented), false); assert.equal(!!prevented.propagationStopped, false);
+  editor.inlineActive = false; editor.editorVisible = true;
+  const full = inlineArrowEvent(desc.filepath); editor.translationKeydown(full, 0);
+  assert.equal(!!full.defaultPrevented, false); assert.equal(!!full.propagationStopped, false);
+});
+
+test('inline Ctrl+Arrow navigation follows sorted rows across pages and focuses the first translation', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+  assert.equal(editor.currentPage, 2); assert.equal(editor.selectedFilepath, rows[1].filepath);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+  assert.equal(calls.reveals.at(-1).moveFocus, false);
+  assert.equal(calls.reveals.at(-1).filepath, rows[1].filepath);
+  assert.equal(await editor.moveInlineFile(-1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath); assert.equal(editor.currentPage, 1);
+  editor.currentSortDir = 'desc';
+  assert.equal(await editor.moveInlineFile(-1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+});
+
+test('inline keyboard navigation focuses column zero for table entries', async () => {
+  const { editor, calls } = await inlineNavigationHarness({ table: true });
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(editor.editorBlocks[0].isTable, true);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, 0]);
+});
+
+test('inline keyboard navigation stops at both bounds without staging the current draft or wrapping', async () => {
+  for (const [current, direction] of [['first', -1], ['third', 1]]) {
+    const { editor, calls } = await inlineNavigationHarness({ current });
+    editor.editorBlocks[0].translation = 'retain draft at list boundary';
+    const desc = editor.editorCurrentEditingDesc, session = editor._draftSession;
+    assert.equal(await editor.moveInlineFile(direction), false);
+    assert.equal(editor.editorCurrentEditingDesc, desc); assert.equal(editor._draftSession, session);
+    assert.equal(editor.inlineActive, true); assert.equal(calls.promotions.length, 0);
+    assert.equal(calls.translationFocus.length, 0);
+  }
+});
+
+test('a filtered-out active row keeps its sorted anchor when navigating in either direction', async () => {
+  for (const direction of [-1, 1]) {
+    const { editor, rows } = await inlineNavigationHarness({ current: 'second' });
+    editor.filteredDescs = [rows[2], rows[0]];
+    editor.filterDesc = () => { editor.filteredDescs = [rows[2], rows[0]]; };
+    assert.equal(await editor.moveInlineFile(direction), true);
+    assert.equal(editor.editorCurrentEditingDesc.filepath, rows[direction < 0 ? 0 : 2].filepath);
+  }
+});
+
+test('navigation snapshots the outgoing anchor before draft promotion removes it from the filter', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'newly saved translation';
+  editor.filterDesc = () => { editor.filteredDescs = editor.descs.filter(row => row.translations.Thai[0] !== 'newly saved translation'); };
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(calls.promotions.length, 1); assert.equal(rows[0].translations.Thai[0], 'newly saved translation');
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(editor.currentPage, 1, 'The remaining first result moves onto the first page');
+});
+
+test('inline keyboard navigation skips occupied files and requests claims without interrupting prompts', async () => {
+  const { editor, rows } = await inlineNavigationHarness();
+  const claims = [];
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing(filepath) { return filepath === rows[1].filepath; } };
+  editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return true; };
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.deepEqual(claims, [{ filepath: rows[2].filepath, automatic: true }]);
+});
+
+test('automatic claim rejection advances to the next available inline row', async () => {
+  const { editor, rows } = await inlineNavigationHarness();
+  const claims = [];
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing() { return false; } };
+  editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return filepath !== rows[1].filepath; };
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.deepEqual(claims, [{ filepath: rows[1].filepath, automatic: true }, { filepath: rows[2].filepath, automatic: true }]);
+});
+
+test('inline keyboard navigation preserves an invalid outgoing draft and its findings', async () => {
+  const { editor, rows, calls, records } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'invalid outgoing draft';
+  editor.editorSaveFindings = () => ({ errors: [{ message: 'Broken tag' }], warnings: [], confirmations: [] });
+  assert.equal(await editor.moveInlineFile(1), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(editor.inlineDraftRows[rows[0].filepath].translations[0], 'invalid outgoing draft');
+  assert.equal([...records.values()][0].state, 'active'); assert.equal(editor.inlineFindingsFor(rows[0].filepath)[0].level, 'error');
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.alerts.length, 0);
+});
+
+test('inline keyboard navigation retains focus and text on the current row after draft persistence fails', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'keep this pending draft';
+  store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  assert.equal(await editor.moveInlineFile(1), false);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath); assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorBlocks[0].translation, 'keep this pending draft');
+  assert.match(editor.inlineDraftError, /Quota exceeded/);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(calls.promotions.length, 0);
+});
+
+test('inline keyboard navigation ignores busy, read-only, import and overlay states', async () => {
+  const changes = [editor => { editor.editorLoading = true; }, editor => { editor.editorSaving = true; },
+    editor => { editor.navigationBusy = true; }, editor => { editor.inlineTransitionBusy = true; },
+    editor => { editor._importingSource = true; }, editor => { editor.editorLoadError = 'Load failed'; },
+    editor => { editor.collaborationConflictVisible = true; }, editor => { editor.importDialogVisible = true; },
+    editor => { editor.$refs.diagnosticScanDialog = { open: true }; },
+    editor => { Object.defineProperty(editor, 'editorTranslationReadOnly', { get: () => true }); }];
+  for (const change of changes) {
+    const { editor, rows, calls } = await inlineNavigationHarness(); change(editor);
+    assert.equal(await editor.moveInlineFile(1), false);
+    assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath);
+    assert.equal(calls.translationFocus.length, 0); assert.equal(calls.promotions.length, 0);
+  }
+});
+
+test('a queued inline keyboard destination cannot steal focus after its language or source changes', async () => {
+  for (const change of [editor => { editor.lang = 'German'; }, editor => { editor.sourceIdentity = 'another-source'; }]) {
+    const { editor, rows, calls, store } = await inlineNavigationHarness();
+    const gate = deferred(); store.getTranslationDraft = async () => { await gate.promise; return null; };
+    const navigating = editor.moveInlineFile(1); await tick(); change(editor);
+    gate.resolve(); assert.equal(await navigating, false); await tick();
+    assert.equal(calls.translationFocus.length, 0);
+    assert.equal(editor.navigationBusy, false);
+    assert.notEqual(editor.editorCurrentEditingDesc?.filepath, rows[2].filepath);
+  }
+});
+
+test('a manual row selection supersedes pending inline keyboard navigation without stealing text focus', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  const gate = deferred(); let reads = 0;
+  store.getTranslationDraft = async () => { if (++reads === 1) await gate.promise; return null; };
+  const navigating = editor.moveInlineFile(1); await tick();
+  const selecting = editor.activateInlineRow(rows[2].filepath); await tick();
+  gate.resolve(); assert.equal(await navigating, false); await selecting; await tick();
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+});
+
+test('a full-editor request supersedes pending inline keyboard navigation', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  const gate = deferred(); store.getTranslationDraft = async () => { await gate.promise; return null; };
+  const navigating = editor.moveInlineFile(1); await tick();
+  const opening = editor.openInlineFullEditor(rows[1].filepath); await tick();
+  gate.resolve(); assert.equal(await navigating, false); assert.equal(await opening, true); await tick();
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(calls.reveals.length, 0, 'The inline shortcut must not scroll the file table after a full-editor request');
+});
+
+test('denied automatic claims restore the original inline row and its table-field focus', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  await editor.finishInlineSession({ promote: false });
+  rows[0].translations.English = ['Source', 'First column@Second column'];
+  rows[0].translations.Thai = ['translation', 'left@right'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  assert.equal(await editor.activateInlineRow(rows[0].filepath), true);
+  editor.editorFocusedIndex = 1; editor.editorFocusedColumnIndex = 1;
+  const claims = [];
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing() { return false; } };
+  editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return filepath === rows[0].filepath; };
+  assert.equal(await editor.moveInlineFile(1), false);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath);
+  assert.equal(editor.currentPage, 1); assert.equal(editor.selectedFilepath, rows[0].filepath);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['translation', 'left@right']);
+  assert.deepEqual(claims, [{ filepath: rows[1].filepath, automatic: true },
+    { filepath: rows[2].filepath, automatic: true }, { filepath: rows[0].filepath, automatic: true }]);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 1, 1]);
+  assert.equal(calls.reveals.at(-1).moveFocus, false); assert.equal(editor.navigationBusy, false);
+});
+
+test('a manual row click queued during keyboard draft persistence retains manual claim behavior', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'save outgoing draft before manual selection';
+  const gate = deferred(), put = store.putTranslationDraft, claims = [];
+  store.putTranslationDraft = async (...args) => { await gate.promise; return put(...args); };
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing() { return false; } };
+  editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return true; };
+  const navigating = editor.moveInlineFile(1); await tick();
+  assert.equal(editor.draftWritePending, 1);
+  await editor.inlineRowClick({ target: { closest: () => null } }, rows[2].filepath);
+  gate.resolve(); assert.equal(await navigating, false); await tick();
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.deepEqual(claims, [{ filepath: rows[2].filepath, automatic: false }]);
+  assert.equal(rows[0].translations.Thai[0], 'save outgoing draft before manual selection');
+  assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+});

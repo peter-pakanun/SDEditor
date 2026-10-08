@@ -101,6 +101,8 @@ In the list, **Up/Down Arrow** selects the previous/next row without leaving the
 
 Only the focused file has live translation fields. Its source and translation share the full editor's highlights, autocomplete and block separators, with matching blocks aligned across the columns. Moving between its fields, autocomplete popup and file tools keeps that file active. Leaving the file returns its cells to normal display.
 
+Inside an inline translation field, **Ctrl + Up Arrow** opens the previous file and **Ctrl + Down Arrow** opens the next file, then focuses its first translation field. This follows the current sort and filters, crosses page boundaries, skips files another translator is editing, and stops at the ends of the list. Leaving the current file uses the normal local-draft and save checks. Plain arrows keep their normal text-editing behavior.
+
 The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **Lookup**, **Preview**, and **Comments** for the selected file. It fills the space between the header and bottom status bar and stays in view while the main scrollbar moves the table. Dictionary matches remain first, Lookup reads committed references, and Preview follows the active draft with frames filling the available width. Clicking anywhere inside the sidebar keeps inline editing active. The right-sidebar icon in the header hides or shows file tools to give the table more room. File selection and editing indicators continue to show other online collaborators.
 
 Typing is retained as a **Local draft** in this browser, separately from staged translations. The inline draft label and **Stage draft** / **Discard draft** controls appear below the translation; errors and warnings stay in the filename column. **Stage draft** appears only when the editor text differs from this file's committed translation: its staged text when available, otherwise its original ZIP text. Opening an untouched row, including a blank translation, does not show it. Drafts keep their account/profile, game, source version, language and file identity. They do not enter translated ZIPs, change Saved/Missing/Revised counts or synchronize to other translators. Closing the full editor also keeps its draft. Use **Drafts** to review preserved drafts, including copies from other source versions, or explicitly discard a draft.
@@ -348,6 +350,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 |--------------------|----------------------------------------------|
 | Ctrl + Space (default), Ctrl + I (optional), or literal [ | Open Autocomplete Popup |
 | Ctrl + S           | Save; open next file when enabled in settings |
+| Ctrl + Up / Down   | Previous / next file from inline translation text |
 | Escape             | Close the file, retaining its local draft     |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
 ```

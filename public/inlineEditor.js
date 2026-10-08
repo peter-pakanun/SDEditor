@@ -324,20 +324,81 @@
         if (event?.target?.closest?.('button, a, input, textarea, select, [contenteditable="true"], .HLter')) return;
         return this.openInlineFullEditor(filepath);
       },
-      async activateInlineRow(filepath) {
+      inlineTranslationKeydown(event) {
+        if (!this.inlineActive || this.editorVisible || event.defaultPrevented || this.isImeComposingEvent(event)
+          || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+          || !['ArrowUp', 'ArrowDown'].includes(event.key)
+          || event.target?.closest?.('tr[data-filepath]')?.dataset.filepath !== this.editorCurrentEditingDesc?.filepath) return false;
+        event.preventDefault(); event.stopPropagation();
+        this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
+        return true;
+      },
+      async moveInlineFile(direction) {
+        if (!this.inlineActive || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
+          || this.editorTranslationReadOnly || this._importingSource || this.versionStorageLoading
+          || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return false;
+        const path = this.editorCurrentEditingDesc?.filepath;
+        if (!path || ![-1, 1].includes(direction)) return false;
+        const scope = this.editorDraftScope(path), context = this.captureCollaborationContext?.();
+        const cancelRevision = this._editorOpenCancelRevision || 0;
+        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context))
+          && cancelRevision === (this._editorOpenCancelRevision || 0) && !this._importingSource
+          && !this.draftRecoveryVisible && !this.fileListNavigationBlocked();
+        const originalFocus = { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
+        const focusFile = async (filepath, index = 0, column = 0) => {
+          const run = this._editorOpenRun;
+          await this.$nextTick();
+          if (!current() || !this.inlineActive || this._editorOpenRun !== run
+            || this.editorCurrentEditingDesc?.filepath !== filepath || this._inlineRequestedPath !== filepath) return false;
+          index = Math.min(index, Math.max(0, this.editorBlocks.length - 1));
+          const block = this.editorBlocks[index];
+          this.getEditorRef('translation', index, block?.isTable ? Math.min(column, Math.max(0, block.tableColumns.length - 1)) : null)?.focus?.({ preventScroll: true });
+          this.focusSelectedFileRow(false);
+          return true;
+        };
+        // Preserve the outgoing anchor before promotion can remove it from a filter.
+        const rows = this.filteredDescs.slice();
+        if (!rows.some(row => row.filepath === path)) rows.push(this.descsDisplay.find(row => row.filepath === path) || this.editorCurrentEditingDesc);
+        const modifier = this.currentSortDir === 'desc' ? -1 : 1;
+        rows.sort((a, b) => a[this.currentSort] < b[this.currentSort] ? -modifier : a[this.currentSort] > b[this.currentSort] ? modifier : 0);
+        const candidates = [], anchor = rows.findIndex(row => row.filepath === path);
+        for (let index = anchor + direction; index >= 0 && index < rows.length; index += direction) candidates.push(rows[index].filepath);
+        let lastRequested = path;
+        this.navigationBusy = true;
+        try {
+          for (const filepath of candidates) {
+            if (!current()) return false;
+            if (this._collaboration?.isEditing(filepath) || !this.filteredDescs.some(row => row.filepath === filepath)) continue;
+            lastRequested = filepath;
+            const opened = await this.activateInlineRow(filepath, { automatic: true });
+            if (!current() || this._inlineRequestedPath !== filepath) return false;
+            if (opened === false) {
+              if (this.inlineActive || this.editorLoadError || this.inlineDraftError) return false;
+              continue;
+            }
+            return await focusFile(filepath);
+          }
+          // A claim can lose the occupancy race after the outgoing row was closed.
+          if (!this.inlineActive && current() && this._inlineRequestedPath === lastRequested
+            && await this.activateInlineRow(path, { automatic: true })) await focusFile(path, originalFocus.index, originalFocus.column);
+          return false;
+        } finally { this.navigationBusy = false; }
+      },
+      async activateInlineRow(filepath, options = {}) {
         if (!this.inlineEditor || this.editorVisible || !this.getDescByFilepath(filepath) || this._importingSource) return false;
         this._inlineRequestedPath = filepath;
         if (this.inlineTransitionBusy) return false;
         if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) return true;
         this.inlineTransitionBusy = true;
         const scope = this.editorDraftScope(filepath);
-        const opening = this.runInlineRowActivation(filepath, scope, this.captureCollaborationContext?.());
+        const opening = this.runInlineRowActivation(filepath, scope, this.captureCollaborationContext?.(), options);
         this._inlineActivationPromise = opening;
         try { return await opening; }
         finally { if (this._inlineActivationPromise === opening) this._inlineActivationPromise = null; }
       },
-      async runInlineRowActivation(filepath, scope, context) {
+      async runInlineRowActivation(filepath, scope, context, options = {}) {
         const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context));
+        const automaticPath = options.automatic ? filepath : null;
         try {
           if (this.inlineActive && !await this.finishInlineSession({ promote: true, ownedTransition: true })) return false;
           if (!current() || this.editorVisible) return false;
@@ -356,7 +417,7 @@
           this._inlineHeldRows = this.descsDisplay.slice();
           if (!['dictionary', 'lookup', 'preview', 'comments'].includes(this.sideTab)) this.sideTab = 'dictionary';
           this._nextEditorSurface = 'inline';
-          const opened = await this.editFile(filepath, true, { inline: true });
+          const opened = await this.editFile(filepath, true, { inline: true, automatic: filepath === automaticPath });
           this.$nextTick(() => this.observeInlineBlocks());
           return opened;
         } finally {
