@@ -52,10 +52,14 @@
       managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '',
       activeManagedVersionId: '', managedActiveDetails: null, managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
       managedUploadName: '', managedUploadDeadline: '', managedUploadFile: null, managedUploadBytes: 0,
-      managedUploadError: '', managedDuplicateChoices: {}, managedDuplicateVersion: null, managedMetadataVisible: false, managedMetadataName: '', managedMetadataDeadline: '',
+      managedUploadError: '', managedDuplicateChoices: {}, managedDuplicateVersion: null, managedMetadataVisible: false, managedMetadataVersion: null, managedMetadataName: '', managedMetadataDeadline: '',
       managedRecoveryVisible: false, managedRecoveryTeam: null }; },
     computed: {
       managedOnlineAvailable() { return !this.testMode && this.cloudSignedIn && !!this._cloud && !!(this.cloudCanAccessAllLanguages || this.cloudUser?.language); },
+      managedSingleLanguage() {
+        return !this.cloudCanAccessAllLanguages && !['manager', 'admin'].includes(this.cloudUser?.role) ? this.cloudUser?.language || '' : '';
+      },
+      managedSingleLanguageAccess() { return !!this.managedSingleLanguage; },
       managedCatalogScope() { return JSON.stringify([this.cloudProfileId || 'guest', this.cloudSignedIn, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudUser?.language, this.gameVersion, this.branchId]); },
       managedVisibleVersions() { return this.managedVersions.filter(v => this.managedShowWithdrawn || v.status !== 'withdrawn').slice().sort((a, b) => Number(b.isHead) - Number(a.isHead) || String(b.createdAt).localeCompare(String(a.createdAt))); },
       managedSelectedVersion() { return (this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedVersionDetails.version : null) || this.managedVersions.find(v => v.id === this.selectedManagedVersionId) || null; },
@@ -125,13 +129,47 @@
       this._managedVisibility = () => { if (!document.hidden) this.refreshManagedVersions(); };
       this._managedOnline = () => this.refreshManagedVersions();
       root.addEventListener('online', this._managedOnline); document.addEventListener('visibilitychange', this._managedVisibility);
+      this._managedMenuClick = event => {
+        const menu = event.target?.closest?.('.versionActionMenu');
+        const action = menu && event.target?.closest?.('button, a');
+        this.managedCloseVersionMenus(action ? null : menu, action ? menu : null);
+      };
+      this._managedMenuMove = event => {
+        if (!event.target?.closest?.('.versionActionMenuItems')) this.managedCloseVersionMenus();
+      };
+      document.addEventListener('click', this._managedMenuClick, true);
+      document.addEventListener('scroll', this._managedMenuMove, true); root.addEventListener('resize', this._managedMenuMove);
       this._managedTimer = setInterval(() => { this.managedNow = Date.now(); if (!document.hidden) this.refreshManagedVersions(); }, 20000);
     },
     beforeUnmount() {
       clearInterval(this._managedTimer); this._managedScopeRun = (this._managedScopeRun || 0) + 1;
       this.closeManagedPresence(); root.removeEventListener('online', this._managedOnline); document.removeEventListener('visibilitychange', this._managedVisibility);
+      document.removeEventListener('click', this._managedMenuClick, true);
+      document.removeEventListener('scroll', this._managedMenuMove, true); root.removeEventListener('resize', this._managedMenuMove);
     },
     methods: {
+      managedCloseVersionMenus(except, returnFocus) {
+        for (const menu of document.querySelectorAll('.versionActionMenu[open]')) {
+          if (menu === except) continue;
+          menu.open = false;
+          if (menu === returnFocus) menu.querySelector('summary')?.focus();
+        }
+      },
+      managedVersionMenuToggle(event) {
+        const menu = event.currentTarget;
+        if (!menu.open) return;
+        this.$nextTick(() => {
+          if (!menu.open || !menu.isConnected) return;
+          this.managedCloseVersionMenus(menu);
+          const summary = menu.querySelector('summary'), items = menu.querySelector('.versionActionMenuItems');
+          if (!summary || !items) return;
+          const anchor = summary.getBoundingClientRect(), box = items.getBoundingClientRect(), edge = 8;
+          const left = Math.max(edge, Math.min(anchor.right - box.width, root.innerWidth - box.width - edge));
+          const below = anchor.bottom + 6;
+          const top = below + box.height <= root.innerHeight - edge ? below : Math.max(edge, anchor.top - box.height - 6);
+          items.style.left = left + 'px'; items.style.top = top + 'px';
+        });
+      },
       managedModalVisibility(visible, inputId) {
         if (visible) {
           this._managedModalReturnFocus = document.activeElement;
@@ -180,7 +218,7 @@
         this.localVersions = []; this.offlineVersionName = ''; this.managedBranch = null; this.managedDuplicateVersion = null;
         this.managedDuplicateChoices = {}; this.managedUploadError = ''; this.managedShowWithdrawn = false;
         this.closeManagedPresence(); this.managedVersionDetails = null; this.managedVersions = []; this.selectedManagedVersionId = ''; this.activeManagedVersionId = '';
-        this.managedVersionError = ''; this.managedOperationErrors = {}; this.managedActiveDetails = null; this.managedUpload = null; this.managedUploadFile = null; this.managedUploadVisible = false; this.managedRecoveryVisible = false; this.managedRecoveryTeam = null;
+        this.managedVersionError = ''; this.managedOperationErrors = {}; this.managedActiveDetails = null; this.managedUpload = null; this.managedUploadFile = null; this.managedUploadVisible = false; this.managedMetadataVisible = false; this.managedMetadataVersion = null; this.managedRecoveryVisible = false; this.managedRecoveryTeam = null;
         if (previousOwner && owner !== previousOwner && JSON.parse(previousOwner)[1] === this.gameVersion) {
           if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
           if (key !== this.managedCatalogScope || run !== this._managedScopeRun) return;
@@ -291,6 +329,33 @@
         this.versionChooserVisible = true; await this.managedLoadLocal(); await this.refreshManagedVersions(); return true;
       },
       managedCached(version) { return this.localVersions.some(v => v.hasSource && v.sourceHash === version.sourceHash && v.branchId === version.branchId); },
+      managedRowActionTarget(event) { return !!event?.target?.closest?.('a, button, input, select, textarea, summary, details, [role="button"]'); },
+      managedSelectVersionRow(version, event) {
+        if (this.managedVersionBusy || this.managedRowActionTarget(event)) return;
+        return this.managedReadDetails(version.id);
+      },
+      managedOpenVersionRow(version, event) {
+        if (this.managedRowActionTarget(event)) return false;
+        return this.managedOpenVersion(version);
+      },
+      managedOpenVersion(version) {
+        if (!this.managedSingleLanguageAccess) return false;
+        return this.continueManagedVersion(version, this.managedSingleLanguage);
+      },
+      managedOpenTeam(version, team, event) {
+        if (!team || this.managedRowActionTarget(event)) return false;
+        return this.continueManagedVersion(version, team.language);
+      },
+      managedDetailsForVersion(version) {
+        const matches = details => details?.version?.id === version.id;
+        if (matches(this.managedVersionDetails)) return this.managedScopedDetails(this.managedVersionDetails);
+        if (matches(this.managedActiveDetails)) return this.managedScopedDetails(this.managedActiveDetails);
+        const scope = this.managedWorkspaceScope(version.sourceHash);
+        const cached = this.localVersions.find(v => v.catalogVersionId === version.id && v.sourceHash === scope.sourceHash
+          && (!v.accountId || v.accountId === scope.accountId) && (!v.game || v.game === scope.game)
+          && (v.branchId || DEFAULT_BRANCH) === scope.branchId);
+        return matches(cached?.details) ? this.managedScopedDetails(cached.details) : null;
+      },
       async continueOfflineVersion() {
         const version = this.managedOfflineVersion;
         if (version) await this.managedActivateWorkspace(version.sourceHash);
@@ -325,7 +390,10 @@
         if (version.game !== this.gameVersion || (version.branchId || DEFAULT_BRANCH) !== this.branchId) {
           this.managedSetOperationError('open', 'Select a source version in the current game and branch.'); return false;
         }
-        const targetLanguage = language || (this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language || this.lang);
+        const targetLanguage = language || (this.cloudCanAccessAllLanguages ? this.lang : this.managedSingleLanguage);
+        if (!targetLanguage || (!this.cloudCanAccessAllLanguages && targetLanguage !== this.managedSingleLanguage)) {
+          this.managedSetOperationError('open', 'Select a language you have access to.'); return false;
+        }
         const scope = this.managedWorkspaceScope(version.sourceHash), key = this.managedCatalogScope;
         const operation = this.managedBeginOperation({ key: 'open', label: 'Preparing selected source version' });
         const current = () => key === this.managedCatalogScope && operation === this._managedOperation;
@@ -335,6 +403,30 @@
           if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
           if (!current()) return;
           const source = await root.OfflineStore.getVersionSource(scope);
+          if (!current()) return;
+          let details = this.managedDetailsForVersion(version);
+          if (this.managedOnlineAvailable) {
+            try {
+              const result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id));
+              if (!current()) return;
+              if (result.version?.id !== version.id || result.version.sourceHash !== scope.sourceHash
+                || result.version.game !== scope.game || (result.version.branchId || DEFAULT_BRANCH) !== scope.branchId) {
+                const error = new Error('The selected source version changed. Select it again before opening.');
+                error.code = 'VERSION_IDENTITY_CHANGED'; throw error;
+              }
+              details = this.managedScopedDetails(result); version = details.version;
+            } catch (error) {
+              if (!current()) return;
+              if (!source?.length || error.code === 'VERSION_IDENTITY_CHANGED' || error.status === 401 || error.status === 403 || error.status === 404) throw error;
+              // Retained source and version facts remain usable during a connection failure.
+            }
+          }
+          const targetTeam = details?.teams?.find(team => team.language === targetLanguage)
+            || (version.assignedTeam?.language === targetLanguage ? version.assignedTeam : null);
+          const warning = this.managedVersionOpenWarning(version, targetTeam, targetLanguage);
+          const acknowledgedWindow = targetTeam?.ended || version.status === 'withdrawn'
+            ? this.managedEditWarningKey(version, targetLanguage, targetTeam) : '';
+          if (warning && !await this.appConfirm(warning, { title: 'Open source version?', confirmLabel: 'Open editor', danger: false })) return false;
           if (!current()) return;
           if (!source?.length) {
             if (!this.managedOnlineAvailable) throw new Error('Download this source version once while connected before working offline.');
@@ -359,11 +451,16 @@
             await root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline);
           }
           if (!current()) return;
-          const details = this.managedVersionDetails?.version?.id === version.id ? copy(this.managedVersionDetails) : undefined;
-          await root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details } : {}) });
+          await root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) });
           if (!current()) return;
           const opened = await this.managedActivateWorkspace(version.sourceHash, targetLanguage);
-          if (opened) this.managedSetOperationError('open', '');
+          if (opened && current()) {
+            this.managedSetOperationError('open', '');
+            if (acknowledgedWindow && this.managedActiveVersion?.id === version.id
+              && acknowledgedWindow === this.managedEditWarningKey(this.managedActiveVersion, this.lang, this.managedActiveTeam)) {
+              this._managedEditAcknowledged = acknowledgedWindow;
+            }
+          }
           return opened;
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError('open', error); return false; }
         finally { this.managedFinishOperation(operation); }
@@ -429,15 +526,25 @@
         const online = (team.presence || []).map(peer => peer.name || peer.displayName || peer.userName || 'Translator');
         return `${team.language} · ${team.isManaged ? 'Published room' : 'Standalone / Offline import'}\nSaved: ${team.counts?.saved ?? team.savedFileCount ?? 0} · Missing: ${team.counts?.missing || 0} · Revised: ${team.counts?.revised || 0}\nDropped: ${team.counts?.dropped || 0} · Shared history: ${team.historyCount || 0} changes\n${online.length ? 'Online: ' + online.join(', ') : 'No translators currently online.'}\nThis existing room and its work will be reused. Unuploaded offline work and local drafts are not visible here.`;
       },
+      managedVersionOpenWarning(version, team, language) {
+        const warnings = [];
+        if (!version.isHead) warnings.push('“' + version.name + '” is not HEAD. You are opening an older source version.');
+        if (team?.ended) warnings.push('The ' + language + ' team’s translation window has ended. Further saves are allowed, but they will not change the ZIP already collected by the manager.');
+        if (version.status === 'withdrawn') warnings.push('This source version was withdrawn. Shared saves are paused; local work remains available for recovery.');
+        return warnings.join('\n\n');
+      },
+      managedEditWarningKey(version, language, team) {
+        return JSON.stringify([this.managedCatalogScope, version?.id, language, team?.latestCollection?.id || team?.latestCollectionId || null, version?.status]);
+      },
       async managedWarnBeforeEdit() {
         const version = this.managedActiveVersion, team = this.managedActiveTeam;
         if (!version || (!team?.ended && version.status !== 'withdrawn')) return true;
-        const key = JSON.stringify([this.managedCatalogScope, version.id, this.lang, team?.latestCollection?.id, version.status]);
+        const key = this.managedEditWarningKey(version, this.lang, team);
         if (this._managedEditAcknowledged === key) return true;
         if (this._managedWarnPending) return this._managedWarnPending;
         this._managedWarnPending = (async () => {
           const accepted = await this.appConfirm(version.status === 'withdrawn' ? 'This source version was withdrawn. Shared saves are paused; local drafts and existing work remain available for recovery. Continue editing only if you intend to work on this withdrawn version.' : 'This team’s version has been collected and marked ended. Further saves are allowed, but they will not change the ZIP already collected by the manager.', { title: version.status === 'withdrawn' ? 'Withdrawn source version' : 'Translation window ended', confirmLabel: 'Continue editing', danger: false });
-          if (accepted && key === JSON.stringify([this.managedCatalogScope, this.managedActiveVersion?.id, this.lang, this.managedActiveTeam?.latestCollection?.id, this.managedActiveVersion?.status])) this._managedEditAcknowledged = key;
+          if (accepted && key === this.managedEditWarningKey(this.managedActiveVersion, this.lang, this.managedActiveTeam)) this._managedEditAcknowledged = key;
           return accepted;
         })().finally(() => { this._managedWarnPending = null; });
         return this._managedWarnPending;
@@ -527,9 +634,13 @@
         const head = this.managedBranch?.headVersionId ?? null;
         return this.managedAction('/v1/versions/' + encodeURIComponent(version.id) + '/restore', { setHead: head === null, expectedHeadId: head });
       },
-      openManagedMetadata() { const v = this.managedSelectedVersion; if (!v) return; this.managedMetadataName = v.name; this.managedMetadataDeadline = deadlineInput(v.deadlineAt); this.managedMetadataVisible = true; },
+      openManagedMetadata(version = this.managedSelectedVersion) {
+        if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        this.managedMetadataVersion = copy(version); this.managedMetadataName = version.name;
+        this.managedMetadataDeadline = deadlineInput(version.deadlineAt); this.managedMetadataVisible = true;
+      },
       async saveManagedMetadata() {
-        const version = this.managedSelectedVersion, key = this.managedCatalogScope; if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
+        const version = this.managedMetadataVersion || this.managedSelectedVersion, key = this.managedCatalogScope; if (!version || this.managedVersionBusy || !this.cloudCanAccessAllLanguages) return;
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try { await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id), { method: 'PATCH', body: { name: this.managedMetadataName.trim(), deadlineAt: parseDeadline(this.managedMetadataDeadline), expectedRevision: version.revision, idempotencyKey: id() } }); if (current()) { this.managedSetOperationError('metadata', ''); this.managedMetadataVisible = false; await this.refreshManagedVersions(); } }
         catch (error) { if (!error.stale && current()) this.managedSetOperationError('metadata', error); }

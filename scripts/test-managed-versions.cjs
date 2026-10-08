@@ -145,6 +145,69 @@ test('status tooltips retain ended and withdrawn guidance with the exact active 
   assert.match(app.managedStatusTooltip, /Withdrawn · shared saves paused; local work retained/);
 });
 
+test('direct version entry uses the assigned language and never assumes a manager language', async () => {
+  const { app } = harness(); const opened = [];
+  app.continueManagedVersion = async (selected, language) => { opened.push([selected.id, language]); return true; };
+  assert.equal(await app.managedOpenVersion(version()), false); assert.equal(opened.length, 0);
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'manager';
+  assert.equal(app.managedSingleLanguageAccess, false);
+  app.cloudUser.role = 'translator'; app.lang = 'German';
+  assert.equal(await app.managedOpenVersion(version()), true); assert.deepEqual(opened, [['weekly-1', 'Thai']]);
+  app.cloudUser.language = ''; assert.equal(await app.managedOpenVersion(version()), false);
+});
+
+test('cancelling older ended version entry preserves active drafts, workspace and chooser without writes', async () => {
+  const older = version({ id: 'older', sourceHash: hash('c'), isHead: false });
+  const { app, events } = harness({ request: async () => ({ version: older, teams: [team({ ended: true })] }) });
+  const draft = app._draftSession = { text: 'Unfinished typing' }; let message;
+  app.versionChooserVisible = true; app.editorVisible = true; app.editorSessionActive = true;
+  app.appConfirm = async (text, options) => { message = text; assert.equal(options.confirmLabel, 'Open editor'); return false; };
+  assert.equal(await app.continueManagedVersion(older, 'Thai'), false);
+  assert.match(message, /not HEAD/); assert.match(message, /translation window has ended/);
+  assert.equal(app.sourceIdentity, hash('a')); assert.equal(app.lang, 'Thai');
+  assert.equal(app._draftSession, draft); assert.equal(app.editorVisible, true); assert.equal(app.versionChooserVisible, true);
+  assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+  assert.equal(app.managedVersionBusy, false);
+});
+
+test('accepted ended entry covers the same editing session but a new collection warns again', async () => {
+  const details = { version: version(), teams: [team({ ended: true, latestCollection: { id: 'collection-1' } })] };
+  const { app } = harness({ request: async () => details }); let prompts = 0;
+  app.managedVersionDetails = copy(details); app.appConfirm = async () => { prompts++; return true; };
+  assert.equal(await app.continueManagedVersion(version(), 'Thai'), true);
+  assert.equal(prompts, 1); assert.equal(await app.managedWarnBeforeEdit(), true); assert.equal(prompts, 1);
+  app.managedActiveDetails.teams[0].latestCollection.id = 'collection-2';
+  assert.equal(await app.managedWarnBeforeEdit(), true); assert.equal(prompts, 2);
+});
+
+test('a late entry confirmation cannot activate a version after the account changes', async () => {
+  const older = version({ isHead: false }), gate = deferred();
+  const { app, events } = harness({ request: async () => ({ version: older, teams: [team()] }) });
+  app.appConfirm = () => gate.promise;
+  const pending = app.continueManagedVersion(older, 'Thai'); await settle();
+  app.cloudProfileId = 'bob'; gate.resolve(true); await pending;
+  assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+});
+
+test('direct team entry refuses another translator language and changed server identities even with cached source', async () => {
+  const { app, events } = harness({ request: async () => ({ version: version({ sourceHash: hash('c') }), teams: [team()] }) });
+  app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator';
+  assert.equal(await app.continueManagedVersion(version(), 'German'), false);
+  assert.equal(await app.continueManagedVersion(version(), 'Thai'), false);
+  assert.match(app.managedOperationErrors.open, /source version changed/);
+  assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+});
+
+test('row metadata saves retain their explicit version target when another version is selected', async () => {
+  const { app, requests } = harness({ request: async () => ({}) });
+  const edited = version({ id: 'row-action', name: 'Row action target', revision: 4 });
+  app.openManagedMetadata(edited); app.selectedManagedVersionId = 'weekly-1';
+  app.managedMetadataName = 'Renamed target'; app.refreshManagedVersions = async () => {};
+  await app.saveManagedMetadata();
+  assert.equal(requests[0].route, '/v1/versions/row-action');
+  assert.equal(requests[0].options.body.name, 'Renamed target'); assert.equal(requests[0].options.body.expectedRevision, 4);
+});
+
 test('deadline reminders stay passive and progress uses Missing plus Saved with Revised inside Saved', () => {
   const { app, events, requests } = harness();
   const before = copy(app.managedVersionDetails), deadline = '2026-10-11T20:00:00Z';

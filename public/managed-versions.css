@@ -21,7 +21,24 @@
 .versionCatalog table.versionTable:not(#table) th:hover { background: var(--color-bg2); }
 .versionTable small, .versionSelect small { display: block; color: var(--ui-muted); margin-top: 5px; }
 .versionTable .versionSelect { border: 0; padding: 0; background: transparent; text-align: left; width: 100%; }
+.versionNameLine .versionSelect { width: auto; max-width: 100%; }
 .versionSelect strong { overflow-wrap: anywhere; }
+.versionEditorLink, .teamEditorLink { color: var(--ui-accent); text-decoration: none; border-radius: 3px; overflow-wrap: anywhere; }
+.versionEditorLink:hover, .teamEditorLink:hover { text-decoration: underline; }
+.versionEditorLink[aria-disabled="true"], .teamEditorLink[aria-disabled="true"] { opacity: .55; cursor: default; }
+.versionEditorLink:focus-visible, .teamEditorLink:focus-visible, .versionActionMenu > summary:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+.onlineVersionTable tbody > tr { cursor: pointer; }
+.versionRowActions, .versionSecondaryActions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.versionRowActions { min-width: 140px; }
+.versionRowActions button { white-space: nowrap; }
+.versionActionMenu { display: none; }
+.versionActionMenu > summary { display: inline-flex; align-items: center; gap: 8px; padding: 7px 11px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); font-size: 13px; line-height: 1.4; cursor: pointer; list-style: none; }
+.versionActionMenu > summary::-webkit-details-marker { display: none; }
+.versionActionMenu > summary::after { content: '▾'; font-size: 11px; }
+.versionActionMenu[open] > summary::after { content: '▴'; }
+.versionActionMenu > summary[aria-disabled="true"] { opacity: .55; cursor: default; }
+.versionActionMenuItems { position: fixed; z-index: 1300; display: flex; flex-direction: column; align-items: stretch; gap: 6px; margin: 0; padding: 8px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element); box-sizing: border-box; min-width: 150px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; box-shadow: var(--ui-shadow); }
+.versionActionMenuItems button { text-align: left; }
 .versionCatalog .versionBadge, .versionModal .versionBadge, .versionStatusIdentity .versionBadge, .editorVersionContext .versionBadge { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 4px; padding: 2px 6px; font-size: 11px; line-height: 1.35; font-weight: 600; vertical-align: middle; white-space: nowrap; background: var(--ui-accent-soft); color: var(--ui-accent); margin: 0; }
 .versionCatalog .versionBadge.ended, .versionCatalog .versionBadge.withdrawn, .versionStatusIdentity .versionBadge.ended, .versionStatusIdentity .versionBadge.withdrawn, .editorVersionContext .versionBadge.ended, .editorVersionContext .versionBadge.withdrawn { color: var(--ui-dropped); }
 .versionMuted { color: var(--ui-muted); font-size: 13px; line-height: 1.6; }
@@ -64,3 +81,4 @@
 .versionDeadline { color: var(--ui-muted); font-size: 12px; line-height: 1.4; white-space: nowrap; border-radius: 3px; }
 .editorVersionContext { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin-left: 12px; vertical-align: middle; font-size: 12px; line-height: 1.4; font-weight: 400; }
 @media (max-width: 1050px) { .versionChooserColumns { grid-template-columns: minmax(0, 1fr); } .versionCatalog { padding: 18px; } .versionCatalogHeader, .versionPanelHeading { flex-wrap: wrap; } }
+@media (max-width: 1400px) { .versionSecondaryActions { display: none; } .versionActionMenu { display: block; } .versionRowActions { align-items: flex-start; min-width: 0; } }

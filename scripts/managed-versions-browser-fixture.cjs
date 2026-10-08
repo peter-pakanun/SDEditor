@@ -127,6 +127,41 @@ async function run() {
       await page.locator('.workspaceStatus .versionStatusName').click();
       await page.getByRole('region', { name: 'Source versions' }).waitFor();
     };
+    const teamRow = (page, language) => page.locator('.teamVersionTable tbody tr').filter({
+      has: page.locator('.teamEditorLink').filter({ hasText: new RegExp('^' + language + '$') }),
+    });
+    const versionRow = (page, name) => page.locator('.onlineVersionTable tbody tr').filter({ hasText: name });
+    const waitWorkspace = (page, version, language) => page.waitForFunction(({ sourceHash, language }) => {
+      const vm = window.__managedFixtureApp;
+      return vm.sourceLoaded && vm.sourceIdentity === sourceHash && vm.lang === language
+        && !vm.managedVersionBusy && !vm.versionStorageLoading && !vm.versionChooserVisible;
+    }, { sourceHash: version.sourceHash, language });
+    const checkPrimary = async target => {
+      const style = await target.evaluate(element => {
+        const probe = document.createElement('i'); probe.style.backgroundColor = 'var(--ui-accent)'; document.body.append(probe);
+        const expected = getComputedStyle(probe).backgroundColor; probe.remove();
+        return { primary: element.classList.contains('primaryAction'), expected, actual: getComputedStyle(element).backgroundColor };
+      });
+      assert.equal(style.primary, true, 'Open editor is the primary row action');
+      assert.equal(style.actual, style.expected, 'Primary row action uses the theme accent');
+    };
+    const entryScope = page => page.evaluate(() => {
+      const vm = window.__managedFixtureApp;
+      return { chooser: vm.versionChooserVisible, selectedId: vm.selectedManagedVersionId,
+        sourceHash: vm.sourceIdentity, language: vm.lang, editorVisible: vm.editorVisible };
+    });
+    const cancelEntry = async (page, action, warning) => {
+      const before = await entryScope(page);
+      await action(); await page.locator('#appDialogMessage').waitFor();
+      assert.match(await page.locator('#appDialogMessage').textContent(), warning);
+      await page.locator('.appDialogCancel').click();
+      await page.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
+      assert.deepEqual(await entryScope(page), before, 'Canceling entry keeps the chooser, selection, active language and workspace stable');
+    };
+    const acceptEntryWarning = async page => {
+      await page.locator('.appDialogConfirm').waitFor();
+      await page.locator('.appDialogConfirm').click();
+    };
     const checkTranslatedDownload = async download => {
       assert.equal(download.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
       const collectedZip = await JSZip.loadAsync(readFileSync(await download.path()));
@@ -175,7 +210,7 @@ async function run() {
     await translator.waitForFunction(() => window.__managedFixtureApp.managedImportZipDisabled);
     assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), true,
       'Manager publication adopts the active matching Offline workspace and disables Import ZIP');
-    const thaiRow = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: /^Thai$/ }) });
+    const thaiRow = teamRow(manager, 'Thai');
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails?.teams.find(team => team.language === 'Thai')?.counts.saved === 1);
     assert.equal(await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').roomId), standaloneRoomId);
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
@@ -184,7 +219,7 @@ async function run() {
       assert.equal(await manager.locator('html').getAttribute('data-theme'), theme);
       assert.equal(await manager.locator('.versionProgressTrack').count(), 12);
       assert.equal(await manager.locator('.teamVersionTable thead th').count(), 4);
-      assert.equal(await manager.locator('.onlineVersions thead th').count(), 3);
+      assert.equal(await manager.locator('.onlineVersions thead th').count(), 4);
       const columnNames = await manager.locator('.versionTable th').allTextContents();
       assert.equal(columnNames.some(name => /Window|Teams ended/i.test(name)), false, 'Window and collection-summary columns are removed');
       const progress = await thaiRow.locator('.versionProgress').evaluate(element => ({
@@ -201,6 +236,8 @@ async function run() {
       assert.ok(layout.alignment.every(alignment => alignment === 'middle'), 'Headers and data cells center vertically in ' + theme);
       assert.ok(layout.badges.every(badge => badge.height <= 22 && badge.minWidth === '0px' && badge.fontSize <= 11), 'Compact badges in ' + theme);
       assert.equal(layout.nativeTitles, 0, 'Dashboard uses shared tooltips only in ' + theme);
+      assert.equal(await thaiRow.getByRole('button', { name: 'Open editor', exact: true }).evaluate(element => element.classList.contains('primaryAction')), false,
+        'Manager team actions keep equal prominence across all languages');
       await checkTooltip(manager, manager.locator('.onlineVersions time').first(), /New Zealand.*local/);
       await checkTooltip(manager, thaiRow.locator('.versionProgress'), /Revised: 1 \(included in Saved\)/);
       assert.equal(await manager.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'No page overflow in ' + theme);
@@ -214,15 +251,86 @@ async function run() {
       await manager.screenshot({ path: join(directory, 'dashboard-' + theme + '.png'), fullPage: true });
     }
     results.push('Prepared upload discovers matching standalone Saved work/history/presence and reuses its room; 12-team combined progress, compact aligned badges, hover/keyboard tooltips in four themes');
+    const managerVersionRow = versionRow(manager, version.name);
+    const managerBeforeRowOpen = await entryScope(manager);
+    await managerVersionRow.locator('td').first().locator('small').first().dblclick();
+    await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
+    assert.deepEqual(await entryScope(manager), managerBeforeRowOpen, 'Manager Online double-click selects without choosing a team language');
+    assert.equal(await managerVersionRow.getByRole('button', { name: 'Open editor', exact: true }).count(), 0,
+      'Manager upper row has no implicit-language Open editor action');
+    await managerVersionRow.locator('.versionSelect').focus(); await manager.keyboard.press('Enter');
+    await manager.waitForFunction(id => window.__managedFixtureApp.managedVersionDetails?.version.id === id, version.id);
+    assert.deepEqual(await entryScope(manager), managerBeforeRowOpen, 'Manager version name is a keyboard-selectable details control');
+    assert.equal(await manager.locator('.versionDetails > .versionPanelHeading button').count(), 0, 'Source actions reside in the upper table');
+    await manager.setViewportSize({ width: 1100, height: 820 });
+    const actionMenu = managerVersionRow.locator('.versionActionMenu'), menuSummary = actionMenu.locator('summary');
+    const closedRowHeight = await managerVersionRow.evaluate(element => element.getBoundingClientRect().height);
+    const checkFloatingMenu = async () => {
+      await actionMenu.locator('.versionActionMenuItems').waitFor();
+      await manager.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const geometry = await actionMenu.evaluate(element => {
+        const items = element.querySelector('.versionActionMenuItems'), bounds = items.getBoundingClientRect();
+        return { fixed: getComputedStyle(items).position === 'fixed', rowHeight: element.closest('tr').getBoundingClientRect().height,
+          visible: bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight };
+      });
+      assert.equal(geometry.fixed, true, 'Compact actions float above the table');
+      assert.ok(Math.abs(geometry.rowHeight - closedRowHeight) <= 1, 'Opening compact actions leaves the version row height unchanged');
+      assert.equal(geometry.visible, true, 'Floating compact actions fit within the viewport');
+    };
+    await menuSummary.waitFor(); await menuSummary.focus(); await manager.keyboard.press('Enter');
+    assert.equal(await actionMenu.getAttribute('open'), '', 'Compact source actions open from the keyboard');
+    await checkFloatingMenu();
+    await manager.locator('.versionCatalogHeader h1').click();
+    assert.equal(await actionMenu.getAttribute('open'), null, 'Clicking outside closes the floating actions');
+    await menuSummary.focus(); await manager.keyboard.press('Space');
+    assert.equal(await actionMenu.getAttribute('open'), '', 'Space also opens compact source actions');
+    await checkFloatingMenu();
+    await actionMenu.getByRole('button', { name: 'Edit name/deadline', exact: true }).click();
+    await manager.locator('#versionMetadataName').waitFor();
+    assert.equal(await actionMenu.getAttribute('open'), null, 'Invoking metadata closes the floating actions');
+    assert.equal(await manager.locator('#versionMetadataName').inputValue(), version.name);
+    await manager.getByRole('dialog', { name: 'Edit version details' }).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await menuSummary.focus();
+    if (await actionMenu.getAttribute('open') === null) await manager.keyboard.press('Space');
+    await manager.keyboard.press('Escape');
+    assert.equal(await actionMenu.getAttribute('open'), null, 'Escape closes the compact menu');
+    assert.equal(await menuSummary.evaluate(element => element === document.activeElement), true, 'Escape returns focus to the action summary');
+    await menuSummary.click();
+    const originalDownload = manager.waitForEvent('download');
+    await actionMenu.getByRole('button', { name: 'Download original ZIP', exact: true }).click();
+    const downloadedOriginal = await originalDownload;
+    assert.equal(await actionMenu.getAttribute('open'), null, 'Invoking original download closes the floating actions');
+    assert.equal(downloadedOriginal.suggestedFilename(), version.name + '_StatDescriptions.zip');
+    assert.deepEqual(readFileSync(await downloadedOriginal.path()), bytes, 'Upper-row original download preserves the exact ZIP bytes');
+    assert.equal(await manager.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Compact action menu stays inside the desktop viewport');
+    await menuSummary.click(); await checkFloatingMenu();
+    // A full-page capture temporarily resizes the viewport and intentionally dismisses floating menus.
+    await manager.screenshot({ path: join(directory, 'dashboard-compact-menu.png'), fullPage: false });
+    await manager.locator('.versionCatalogHeader h1').click();
+    await manager.setViewportSize({ width: 1440, height: 1000 });
     await openStatusChooser(translator);
     await translator.locator('.teamVersionTable tbody tr').first().waitFor();
     assert.equal(await translator.locator('.teamVersionTable tbody tr').count(), 1);
     assert.equal(await translator.getByRole('button', { name: 'Upload next version', exact: true }).count(), 0);
-    await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
-    await translator.waitForFunction(() => {
-      const vm = window.__managedFixtureApp;
-      return vm.sourceLoaded && vm.sourceIdentity && !vm.managedVersionBusy && !vm.versionStorageLoading && !vm.versionChooserVisible;
-    });
+    const translatorVersionRow = versionRow(translator, version.name);
+    await translatorVersionRow.locator('td').first().locator('small').first().click();
+    assert.equal(await translator.evaluate(() => window.__managedFixtureApp.versionChooserVisible), true, 'Online single-click selects details without opening');
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
+      await checkPrimary(translatorVersionRow.getByRole('button', { name: 'Open editor', exact: true }));
+      await checkPrimary(teamRow(translator, 'Thai').getByRole('button', { name: 'Open editor', exact: true }));
+    }
+    await translatorVersionRow.locator('.versionEditorLink').focus(); await translator.keyboard.press('Enter');
+    await waitWorkspace(translator, version, 'Thai');
+    await openStatusChooser(translator);
+    await versionRow(translator, version.name).locator('td').first().locator('small').first().dblclick();
+    await waitWorkspace(translator, version, 'Thai');
+    await openStatusChooser(translator);
+    await teamRow(translator, 'Thai').locator('.teamEditorLink').click();
+    await waitWorkspace(translator, version, 'Thai');
+    await openStatusChooser(translator);
+    await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+    await waitWorkspace(translator, version, 'Thai');
     await checkStatusVersion(translator, version.name, { deadline: true, online: true });
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
@@ -286,7 +394,7 @@ async function run() {
       'Manager version badge waits until every team ends');
     const remainingTeams = await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.filter(team => !team.ended).map(team => team.language));
     for (const language of remainingTeams) {
-      const row = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: new RegExp('^' + language + '$') }) });
+      const row = teamRow(manager, language);
       await row.getByRole('button', { name: 'Mark ended — no saved files', exact: true }).click();
       await manager.locator('.appDialogConfirm').click();
       await manager.waitForFunction(language => {
@@ -301,10 +409,12 @@ async function run() {
     await openStatusChooser(translator);
     assert.equal(await translator.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
     assert.equal(await translator.locator('.teamVersionTable tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
-    await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
+    await cancelEntry(translator, () => teamRow(translator, 'Thai').locator('.teamEditorLink').click(), /ended/i);
+    await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+    await acceptEntryWarning(translator);
     await translator.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy && !window.__managedFixtureApp.versionChooserVisible);
-    const opening = translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), source.filepath);
-    await translator.locator('.appDialogConfirm').filter({ hasText: 'Continue editing' }).click(); await opening;
+    await translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), source.filepath);
+    assert.equal(await translator.locator('.appDialogConfirm').count(), 0, 'Accepted ended entry warning covers editing in the same session');
     await translator.evaluate(async () => { await window.__managedFixtureApp.editorExit(); });
     results.push('First-column team/assigned-team/all-team Ended badges, footer name/deadline and tooltip, sole status-label chooser, hashing spinner and editable ended warning');
     await translator.route(apiOrigin + '/**', route => route.abort());
@@ -326,14 +436,15 @@ async function run() {
       await translator.screenshot({ path: join(directory, 'offline-reload-failure.png'), fullPage: true });
       throw error;
     });
-    await translator.locator('.versionSelect').filter({ hasText: version.name }).click();
+    await versionRow(translator, version.name).locator('td').first().locator('small').first().click();
     await translator.waitForFunction(versionId => {
       const vm = window.__managedFixtureApp, team = vm.managedVersionDetails?.teams.find(team => team.language === 'Thai');
       return vm.managedSelectedVersion?.id === versionId && vm.managedVersionDetails?.version?.id === versionId
         && team?.ended && team.counts.saved === 1;
     }, version.id);
     assert.equal(await translator.locator('.versionDetails h2').textContent(), version.name + ' HEAD');
-    await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
+    await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+    await acceptEntryWarning(translator);
     await translator.waitForFunction(sourceHash => {
       const vm = window.__managedFixtureApp;
       return !vm.managedVersionBusy && !vm.versionChooserVisible && vm.sourceLoaded && vm.sourceIdentity === sourceHash;
@@ -379,6 +490,49 @@ async function run() {
     assert.equal(await offline.locator('#offlineVersionName').inputValue(), 'Local reference export');
     results.push('Unsigned Offline card keeps original import warnings, editable local name, keyboard naming and Continue workflow');
     results.push('Import ZIP remains enabled for named/unnamed Offline workspaces and disabled for adopted, published, ended and cached Online versions');
+    const successorZip = await JSZip.loadAsync(bytes); successorZip.comment = 'Distinct successor archive for catalog navigation fixture';
+    const successorBytes = await successorZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
+    await manager.locator('#managerUploadName').fill('2026-10-12_POE2');
+    await manager.locator('#managerUploadArchive').setInputFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: successorBytes });
+    await manager.getByRole('button', { name: 'Upload and prepare', exact: true }).click();
+    await manager.waitForFunction(() => window.__managedFixtureApp.managedUpload?.status === 'prepared' || window.__managedFixtureApp.managedUploadError);
+    assert.equal(await manager.evaluate(() => window.__managedFixtureApp.managedUploadError), '');
+    await manager.getByRole('button', { name: 'Publish to all teams', exact: true }).click();
+    await manager.waitForFunction(() => window.__managedFixtureApp.managedSelectedVersion?.name === '2026-10-12_POE2'
+      && !window.__managedFixtureApp.managedVersionBusy && window.__managedFixtureApp.managedVersionDetails?.teams.length === 12);
+    const successor = await manager.evaluate(() => JSON.parse(JSON.stringify(window.__managedFixtureApp.managedSelectedVersion)));
+    assert.equal(successor.isHead, true); assert.notEqual(successor.sourceHash, version.sourceHash);
+    assert.equal(await manager.locator('.onlineVersionTable tbody tr').count(), 2);
+    const frenchLink = teamRow(manager, 'French').locator('.teamEditorLink');
+    await frenchLink.focus(); await manager.keyboard.press('Enter'); await waitWorkspace(manager, successor, 'French');
+    await openStatusChooser(manager); await teamRow(manager, 'German').waitFor();
+    await teamRow(manager, 'German').locator('td').nth(1).dblclick(); await waitWorkspace(manager, successor, 'German');
+    await openStatusChooser(manager); await teamRow(manager, 'French').waitFor();
+    await teamRow(manager, 'French').getByRole('button', { name: 'Open editor', exact: true }).click();
+    await waitWorkspace(manager, successor, 'French');
+    await openStatusChooser(manager);
+    await translator.unroute(apiOrigin + '/**');
+    await translator.evaluate(async () => { const vm = window.__managedFixtureApp; await vm.refreshManagedVersions(); await vm.managedRefreshActive(); });
+    await openStatusChooser(translator);
+    await translator.waitForFunction(() => window.__managedFixtureApp.managedVersions.length === 2);
+    const olderRow = versionRow(translator, version.name);
+    await olderRow.locator('td').first().locator('small').first().click();
+    await translator.waitForFunction(id => window.__managedFixtureApp.selectedManagedVersionId === id
+      && window.__managedFixtureApp.managedVersionDetails?.version.id === id, version.id);
+    await cancelEntry(translator, async () => {
+      await olderRow.locator('.versionEditorLink').focus(); await translator.keyboard.press('Enter');
+    }, /not HEAD[\s\S]*ended/i);
+    await cancelEntry(translator, () => teamRow(translator, 'Thai').locator('td').nth(1).dblclick(), /not HEAD[\s\S]*ended/i);
+    await versionRow(translator, successor.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+    await waitWorkspace(translator, successor, 'Thai');
+    await openStatusChooser(translator);
+    await olderRow.locator('td').first().locator('small').first().click();
+    await translator.waitForFunction(id => window.__managedFixtureApp.selectedManagedVersionId === id
+      && window.__managedFixtureApp.managedVersionDetails?.version.id === id, version.id);
+    await olderRow.locator('td').first().locator('small').first().dblclick(); await acceptEntryWarning(translator);
+    await waitWorkspace(translator, version, 'Thai');
+    results.push('Online single-select and translator double-click/name/primary entry, exact-language team links and double-click, manager no-language assumption, compact keyboard/pointer actions, and canceled non-HEAD/ended warnings');
     assert.deepEqual(failures, [], 'Browser script errors');
     console.log(JSON.stringify({ status: 'PASS', normalMode: true, browser: executablePath, results }, null, 2));
   } finally {
