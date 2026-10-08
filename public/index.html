@@ -429,12 +429,11 @@
                   </template>
                   <div v-else class="inlineReadText" :lang="translationEditorBcp47">{{ block.translation || '\u00a0' }}</div>
                 </div></div>
-                <div v-if="inlineDraftFor(desc.filepath) || (inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (inlineDraftHasChanges || editorHasStagedTranslation))" class="inlineDraftTools">
+                <div v-if="inlineDraftFor(desc.filepath) || (inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && inlineDraftHasChanges)" class="inlineDraftTools">
                   <span v-if="inlineDraftFor(desc.filepath)" class="fileDraftLabel">Local draft</span>
-                  <div v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (inlineDraftHasChanges || inlineDraftFor(desc.filepath) || editorHasStagedTranslation)" class="inlineFileActions" @click.stop>
+                  <div v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && (inlineDraftHasChanges || inlineDraftFor(desc.filepath))" class="inlineFileActions" @click.stop>
                     <button v-if="inlineDraftHasChanges" type="button" @click="saveInlineDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Stage draft</button>
                     <button v-if="inlineDraftFor(desc.filepath)" type="button" @click="discardEditorDraft" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Discard draft</button>
-                    <button v-if="editorHasStagedTranslation" type="button" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorTranslationReadOnly || editorSaving || navigationBusy">Delete staged translation</button>
                   </div>
                 </div>
               </template>
