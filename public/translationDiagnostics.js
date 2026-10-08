@@ -237,6 +237,15 @@
     };
   }
 
+  function isKeywordReferenceVariableAt(text, index, keyword) {
+    if (keyword.hasDynamicSeparator) return false;
+    // Parameterized references such as [TentacleSmash::{0}|Tentacle Whip]
+    // allow one numeric variable after the double colon, before the display text.
+    const prefix = text.slice(keyword.index + 1, index);
+    return /^[A-Za-z][A-Za-z0-9_]*::$/.test(prefix)
+      && /^\{\d+\}(?=[|\]])/.test(text.slice(index));
+  }
+
   function scanTags(text, addDiagnostic) {
     const stack = [];
 
@@ -270,11 +279,11 @@
       }
 
       if (Object.prototype.hasOwnProperty.call(OPENERS, ch)) {
-        const isAllowedVariableInKeywordDynamicPart = ch === "{"
+        const isAllowedVariableInKeyword = ch === "{"
           && current?.open === "["
-          && current.hasDynamicSeparator;
+          && (current.hasDynamicSeparator || isKeywordReferenceVariableAt(text, i, current));
 
-        if (stack.length > 0 && !isAllowedVariableInKeywordDynamicPart) {
+        if (stack.length > 0 && !isAllowedVariableInKeyword) {
           addDiagnostic(
             LEVEL_ERROR,
             "nested-tags",

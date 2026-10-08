@@ -56,6 +56,112 @@ function variableErrors(editor, english, translation) {
     .filter(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch');
 }
 
+test('keyword reference parameters accept numeric variables without allowing arbitrary nesting', () => {
+  const { context } = loadEditor();
+  const analyze = text => context.window.TranslationDiagnostics.analyze(text);
+  for (const text of [
+    '[TentacleSmash::{0}|Tentacle Whip]',
+    '[Skill_2::{12}|Translated skill]',
+    '[TentacleSmash::{0}]',
+    '[TentacleSmash::10|Tentacle Whip]',
+    '[Damage|Damage {0}%]',
+    '<white>{{[TentacleSmash::{0}|Tentacle Whip]}}',
+  ]) {
+    assert.equal(analyze(text).errorCount, 0, text);
+  }
+  for (const text of [
+    '[TentacleSmash{0}|Tentacle Whip]',
+    '[TentacleSmash:{0}|Tentacle Whip]',
+    '[TentacleSmash:::{0}|Tentacle Whip]',
+    '[::{0}|Tentacle Whip]',
+    '[TentacleSmash::{name}|Tentacle Whip]',
+    '[TentacleSmash::{0:d}|Tentacle Whip]',
+    '[TentacleSmash::{0}%|Tentacle Whip]',
+    '[TentacleSmash::{0}suffix|Tentacle Whip]',
+    '[TentacleSmash::{0}{1}|Tentacle Whip]',
+    '[TentacleSmash::{{0}}|Tentacle Whip]',
+    '[TentacleSmash::{0|Tentacle Whip]',
+    '[TentacleSmash::{0}\n|Tentacle Whip]',
+    '[TentacleSmash::{0}|[Cold]]',
+    '[Fire [Cold]]',
+    '{0 {1}}',
+  ]) {
+    assert.ok(analyze(text).diagnostics.some(diagnostic => diagnostic.code === 'nested-tags'), text);
+  }
+  for (const text of [
+    '[TentacleSmash::{0}|Tentacle Whip',
+    '[TentacleSmash::{0}|Tentacle Whip]}',
+  ]) {
+    assert.ok(analyze(text).errorCount > 0, `Unbalanced delimiters must remain errors: ${text}`);
+  }
+});
+
+test('keyword reference parameters retain variable and keyword identity checks', () => {
+  const { editor } = loadEditor();
+  const english = '[TentacleSmash::{0}|Tentacle Whip]';
+  assert.equal(editor.analyzeTranslationDiagnostics('[TentacleSmash::{0}|หนวดอสูร]', english).errorCount, 0);
+  const changedVariable = editor.analyzeTranslationDiagnostics('[TentacleSmash::{1}|หนวดอสูร]', english);
+  assert.ok(changedVariable.diagnostics.some(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch'));
+  assert.ok(changedVariable.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
+  const changedKeyword = editor.analyzeTranslationDiagnostics('[OtherSkill::{0}|หนวดอสูร]', english);
+  assert.ok(changedKeyword.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
+});
+
+test('reported two-entry Tentacle Whip translation saves and retains unrelated scan errors', async () => {
+  const { editor, alerts, confirmations } = loadEditor();
+  const english = [
+    '{0}% chance to Trigger Level 20 [TentacleSmash::{0}|Tentacle Whip] on Kill',
+    'Trigger Level 20 [TentacleSmash::{0}|Tentacle Whip] on Kill',
+  ];
+  const translation = [
+    'มีโอกาสทริกเกอร์ [TentacleSmash::{0}|หนวดอสูรร่ายฟาด (Tentacle Whip)] เลเวล 20 {0}% เมื่อสังหาร',
+    'ทริกเกอร์ [TentacleSmash::{0}|หนวดอสูรร่ายฟาด (Tentacle Whip)] เลเวล 20 เมื่อสังหาร',
+  ];
+  const desc = fixtureDescription('tentacle-whip', english[0], '[TentacleSmash::{0}|เดิม] {0}%');
+  desc.translations.English = english;
+  desc.translations.Thai.push('[TentacleSmash::{0}|เดิม]');
+  const unrelated = fixtureDescription('nested', '[Fire]', '[Fire [Cold]]');
+  editor.descs = [desc, unrelated];
+  await editor.scanAllDiagnostics();
+  const unrelatedResult = editor.diagnosticScanResults[unrelated.filepath];
+  editor.editorCurrentEditingDesc = desc;
+  editor.editorVisible = true;
+  editor.editorOriginalTranslations = [...desc.translations.Thai];
+  editor.editorBlocks = english.map((source, index) => ({ english: source, translation: translation[index] }));
+  let persisted = 0;
+  const persist = editor.persistTranslationBatch;
+  editor.persistTranslationBatch = async (...args) => { persisted++; return persist.call(editor, ...args); };
+
+  assert.equal(await editor.editorSave(), true);
+  assert.deepEqual(Array.from(desc.translations.Thai), translation);
+  assert.deepEqual(Array.from(editor.localDescs.descs.find(row => row.filepath === desc.filepath).translations.Thai), translation);
+  assert.equal(persisted, 1);
+  assert.equal(editor.editorVisible, false);
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(confirmations, []);
+  assert.equal(editor.diagnosticScanResults[desc.filepath].errorCount, 0);
+  assert.equal(editor.diagnosticScanResults[unrelated.filepath], unrelatedResult);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1);
+});
+
+test('editorSave still blocks genuine nested tags after a keyword reference parameter', async () => {
+  const { editor, alerts } = loadEditor();
+  const english = '[TentacleSmash::{0}|Tentacle Whip]';
+  const original = '[TentacleSmash::{0}|หนวดอสูร]';
+  const desc = fixtureDescription('nested-save', english, original);
+  editor.descs = [desc];
+  editor.editorCurrentEditingDesc = desc;
+  editor.editorVisible = true;
+  editor.editorOriginalTranslations = [original];
+  editor.editorBlocks = [{ english, translation: '[TentacleSmash::{0}|[Cold]]' }];
+  editor.persistTranslationBatch = async () => assert.fail('Invalid nesting must not be persisted.');
+  assert.equal(await editor.editorSave(), false);
+  assert.equal(desc.translations.Thai[0], original);
+  assert.equal(editor.editorVisible, true);
+  assert.match(alerts[0], /Nested tag/);
+});
+
 test('missing and extra percentage suffixes are errors with readable expected and actual tags', () => {
   const { editor } = loadEditor();
   for (const [english, translation] of [['Damage {1}%', 'ความเสียหาย {1}'], ['Damage {1}', 'ความเสียหาย {1}%']]) {
