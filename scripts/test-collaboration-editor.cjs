@@ -1933,9 +1933,13 @@ test('draft-backed full saves close or navigate before acknowledgment without pu
   });
 });
 
-test('F2 prepares the next draft and paints its editable fields before dispatching the old save', async () => {
+for (const reverse of [false, true]) test(`${reverse ? 'F1' : 'F2'} prepares the destination draft and paints its editable fields before dispatching the old save`, async () => {
   const h = await pendingDraftFixture(), { editor: e, calls, window, acknowledge } = h;
-  const nextPath = 'source/002.txt', nextKey = e.editorDraftKey(e.editorDraftScope(nextPath));
+  if (reverse) {
+    assert.equal(await e.editFile('source/002.txt'), true);
+    e.editorBlocks[0].translation = 'Submitted previous-file draft';
+  }
+  const nextPath = reverse ? 'source/001.txt' : 'source/002.txt', nextKey = e.editorDraftKey(e.editorDraftScope(nextPath));
   let releaseHydration, hydrationStarted, releasePaint, paintStarted;
   const hydrationGate = new Promise(resolve => { releaseHydration = resolve; });
   const hydrationReady = new Promise(resolve => { hydrationStarted = resolve; });
@@ -1947,7 +1951,7 @@ test('F2 prepares the next draft and paints its editable fields before dispatchi
     return readDraft(key);
   };
   e.yieldEditorPaint = async () => { paintStarted(); await paintGate; };
-  const navigating = e.saveAndSkipFile();
+  const navigating = e.saveAndSkipFile(reverse);
   await hydrationReady; await pendingTick();
   assert.equal(calls.length, 0, 'The old save must not take the draft store before next-file hydration.');
   assert.equal(e.pendingLocalSaves, 1);
@@ -1964,7 +1968,7 @@ test('F2 prepares the next draft and paints its editable fields before dispatchi
   assert.equal(e.editorBlocks[0].translation, 'Typing in the ready next file');
 });
 
-test('unsuccessful F2 transitions release queued saves on every exit path', async t => {
+for (const reverse of [false, true]) test(`unsuccessful ${reverse ? 'F1' : 'F2'} transitions release queued saves on every exit path`, async t => {
   for (const outcome of ['save rejected', 'no candidate', 'open rejected', 'cancelled', 'open failed']) {
     await t.test(outcome, async () => {
       const { editor: e } = navigationFixture(outcome === 'no candidate' ? 1 : 3);
@@ -1972,13 +1976,13 @@ test('unsuccessful F2 transitions release queued saves on every exit path', asyn
       e._pendingSaves = require('../public/pendingSaves.js').create({ save: async value => { calls.push(value.jobId); return {}; } });
       e._pendingSaves.enqueue({ jobId: outcome, game: 'poe1', language: 'Thai', sourceHash: 'source-one', accountId: 'account-one',
         files: [{ filepath: 'other.txt', translations: ['Existing queued work'] }], revisions: [] });
-      e.editorVisible = true; e.editorCurrentEditingDesc = e.descs[0];
+      e.editorVisible = true; e.editorCurrentEditingDesc = e.descs[reverse ? e.descs.length - 1 : 0];
       e.editorSave = async () => outcome !== 'save rejected';
       if (outcome === 'open rejected') e.editFile = async () => false;
       if (outcome === 'cancelled') e.editFile = async () => { e._editorOpenCancelRevision = (e._editorOpenCancelRevision || 0) + 1; return true; };
       if (outcome === 'open failed') e.editFile = async () => { throw new Error('Could not prepare next file'); };
-      if (outcome === 'open failed') await assert.rejects(e.saveAndSkipFile(), /Could not prepare/);
-      else assert.equal(await e.saveAndSkipFile(), false);
+      if (outcome === 'open failed') await assert.rejects(e.saveAndSkipFile(reverse), /Could not prepare/);
+      else assert.equal(await e.saveAndSkipFile(reverse), false);
       await e._pendingSaves.drain();
       assert.deepEqual(calls, [outcome]); assert.equal(e.navigationBusy, false);
       e._pendingSaves.dispose();
@@ -1986,21 +1990,23 @@ test('unsuccessful F2 transitions release queued saves on every exit path', asyn
   }
 });
 
-test('F2 releases its navigation hold before revisiting a draft with a queued save', async () => {
+for (const reverse of [false, true]) test(`${reverse ? 'F1' : 'F2'} releases its navigation hold before revisiting a draft with a queued save`, async () => {
   const h = await pendingDraftFixture(), { editor: e, calls, acknowledge } = h;
-  assert.equal(await e.editFile('source/002.txt'), true);
+  const nextPath = reverse ? 'source/001.txt' : 'source/002.txt';
+  const outgoingPath = reverse ? 'source/002.txt' : 'source/001.txt';
+  assert.equal(await e.editFile(nextPath), true);
   e.editorBlocks[0].translation = 'Previously submitted next-file draft';
   assert.equal(await e.editorSave({ close: false, defer: true }), true);
-  assert.equal(await e.editFile('source/001.txt'), true);
-  const navigating = e.saveAndSkipFile();
+  assert.equal(await e.editFile(outgoingPath), true);
+  const navigating = e.saveAndSkipFile(reverse);
   await pendingTick();
   assert.equal(calls.length, 1, 'The pending-target barrier must be able to run its queued transaction.');
-  assert.equal(calls[0].batch.files[0].filepath, 'source/002.txt');
+  assert.equal(calls[0].batch.files[0].filepath, nextPath);
   acknowledge(calls[0]); await pendingTick();
-  assert.equal(calls.length, 2); assert.equal(calls[1].batch.files[0].filepath, 'source/001.txt');
+  assert.equal(calls.length, 2); assert.equal(calls[1].batch.files[0].filepath, outgoingPath);
   acknowledge(calls[1]);
   assert.equal(await navigating, true);
-  assert.equal(e.editorCurrentEditingDesc.filepath, 'source/002.txt');
+  assert.equal(e.editorCurrentEditingDesc.filepath, nextPath);
   assert.equal(e.editorBlocks[0].translation, 'Previously submitted next-file draft');
   assert.equal(e.pendingLocalSaves, 0);
 });

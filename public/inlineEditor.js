@@ -493,8 +493,15 @@
         finally { if (this._inlineActivationPromise === opening) this._inlineActivationPromise = null; }
       },
       async runInlineRowActivation(filepath, scope, context, options = {}) {
-        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context));
+        const cancelRevision = this._editorOpenCancelRevision || 0;
+        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context))
+          && cancelRevision === (this._editorOpenCancelRevision || 0);
         const automaticPath = options.automatic ? filepath : null;
+        const activation = this._inlineActivationToken = {};
+        // The outgoing promotion writes the store used to hydrate the next draft.
+        // Prepare and paint the next inline row before starting that queued write.
+        const releaseLocalSaves = this.inlineActive
+          ? (!this.testMode ? this.initializePendingSaves?.() : this._pendingSaves)?.hold?.() : null;
         try {
           if (this.inlineActive && !await this.finishInlineSession({ promote: true, ownedTransition: true })) return false;
           if (!current() || this.editorVisible) return false;
@@ -513,15 +520,27 @@
           this._inlineHeldRows = this.descsDisplay.slice();
           if (!['dictionary', 'lookup', 'preview', 'comments'].includes(this.sideTab)) this.sideTab = 'dictionary';
           this._nextEditorSurface = 'inline';
+          // Reopening a pending draft waits for its save; allow that queue to run.
+          if (this.pendingDraftSaveFor?.(filepath)) releaseLocalSaves?.();
           const opened = await this.editFile(filepath, true, { inline: true, automatic: filepath === automaticPath });
           this.$nextTick(() => this.observeInlineBlocks());
+          if (opened !== false && releaseLocalSaves) await this.yieldEditorPaint();
+          if (!current()) return false;
           return opened;
         } finally {
-          this._nextEditorSurface = null; this.inlineTransitionBusy = false;
-          if (current() && this._inlineRequestedPath && this._inlineRequestedPath !== filepath) this.activateInlineRow(this._inlineRequestedPath);
+          releaseLocalSaves?.();
+          if (this._inlineActivationToken === activation) {
+            this._inlineActivationToken = null;
+            this._nextEditorSurface = null; this.inlineTransitionBusy = false;
+            if (current() && this._inlineRequestedPath && this._inlineRequestedPath !== filepath) this.activateInlineRow(this._inlineRequestedPath);
+          }
         }
       },
       async finishInlineSession({ promote = true, ownedTransition = false } = {}) {
+        if (!promote) {
+          this._editorOpenCancelRevision = (this._editorOpenCancelRevision || 0) + 1;
+          this._inlineRequestedPath = null;
+        }
         if (this._inlineFinishing) return this._inlineFinishing;
         if (!this.inlineActive) return true;
         if (!ownedTransition) this.inlineTransitionBusy = true;

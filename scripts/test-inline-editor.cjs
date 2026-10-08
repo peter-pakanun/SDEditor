@@ -1679,6 +1679,198 @@ async function inlineNavigationHarness({ current = 'first', table = false } = {}
   return h;
 }
 
+for (const direction of [-1, 1]) {
+  const shortcut = direction < 0 ? 'Ctrl+Up' : 'Ctrl+Down';
+  test(`${shortcut} hydrates and paints the destination before the outgoing draft promotion starts`, { timeout: 3000 }, async t => {
+    const h = enableDeletionWorker(await inlineNavigationHarness({ current: 'second' }));
+    const { editor, rows, calls, store, records } = h;
+    const outgoing = rows[1], next = rows[direction < 0 ? 0 : 2], session = editor._draftSession;
+    const nextKey = editor.editorDraftKey(editor.editorDraftScope(next.filepath));
+    const hydration = deferred(), hydrating = deferred(), paint = deferred(), painting = deferred();
+    t.after(() => { hydration.resolve(); paint.resolve(); editor._pendingSaves?.dispose(); });
+    const read = store.getTranslationDraft;
+    store.getTranslationDraft = async key => {
+      if (key === nextKey) { hydrating.resolve(); await hydration.promise; }
+      return read(key);
+    };
+    editor.yieldEditorPaint = async () => {
+      if (!editor.editorLoading && editor.editorCurrentEditingDesc?.filepath === next.filepath) {
+        painting.resolve(); await paint.promise;
+      }
+    };
+    editor.editorBlocks[0].translation = 'Submitted outgoing inline draft';
+    const event = inlineArrowEvent(outgoing.filepath, { key: direction < 0 ? 'ArrowUp' : 'ArrowDown' });
+    const navigating = dispatchInlineNavigationKey(editor, event, true);
+    await hydrating.promise; await settleFocus();
+    assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+    assert.equal(editor.pendingLocalSaves, 1); assert.equal(calls.storage.length, 0,
+      'Draft hydration must finish before the old promotion can take the IndexedDB store.');
+    assert.equal(records.get(session.key).state, 'active');
+    assert.equal(outgoing.translations.Thai[0], 'translation');
+    hydration.resolve(); await painting.promise; await settleFocus();
+    assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+    assert.equal(editor.editorTranslationReadOnly, false); assert.equal(calls.storage.length, 0,
+      'The editable destination paint must have priority over worker intake.');
+    paint.resolve(); assert.equal(await navigating, true);
+    const promotion = await waitForDeletionWrite(h);
+    assert.equal(promotion.batch.files[0].filepath, outgoing.filepath);
+    assert.equal(promotion.batch.draft.id, session.record.id);
+    assert.equal(promotion.batch.deferDisplay, true);
+    assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+    const nextSession = editor._draftSession, blocks = editor.editorBlocks;
+    editor.editorBlocks[0].translation = 'Typing in the ready destination';
+    assert.equal(await editor.flushEditorDraft(), true);
+    const retained = JSON.stringify(records.get(nextSession.key));
+    h.acknowledge(promotion); await editor._pendingSaves.drain();
+    assert.equal(outgoing.translations.Thai[0], 'Submitted outgoing inline draft');
+    assert.equal(records.get(session.key).state, 'promoted');
+    assert.equal(editor.inlineDraftRows[outgoing.filepath], undefined);
+    assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+    assert.equal(editor._draftSession, nextSession); assert.equal(editor.editorBlocks, blocks);
+    assert.equal(editor.editorBlocks[0].translation, 'Typing in the ready destination');
+    assert.equal(JSON.stringify(records.get(nextSession.key)), retained);
+  });
+
+  test(`${shortcut} releases the queue before reopening a destination with a pending draft promotion`, { timeout: 3000 }, async t => {
+    const h = enableDeletionWorker(await inlineNavigationHarness({ current: 'second' }));
+    const { editor, rows, calls } = h;
+    const next = rows[direction < 0 ? 0 : 2], outgoing = rows[1];
+    t.after(() => editor._pendingSaves?.dispose());
+    assert.equal(await editor.activateInlineRow(next.filepath), true);
+    editor.editorBlocks[0].translation = 'Previously submitted destination draft';
+    assert.equal(await editor.saveInlineDraft(), true);
+    assert.equal(await editor.activateInlineRow(outgoing.filepath), true);
+    editor.editorBlocks[0].translation = 'Outgoing draft to promote';
+    const navigating = editor.moveInlineFile(direction);
+    const destinationPromotion = await waitForDeletionWrite(h);
+    assert.equal(destinationPromotion.batch.files[0].filepath, next.filepath);
+    h.acknowledge(destinationPromotion);
+    const outgoingPromotion = await waitForDeletionWrite(h, 2);
+    assert.equal(outgoingPromotion.batch.files[0].filepath, outgoing.filepath);
+    h.acknowledge(outgoingPromotion);
+    assert.equal(await navigating, true);
+    assert.equal(editor.pendingLocalSaves, 0);
+    assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+    assert.equal(editor.editorBlocks[0].translation, 'Previously submitted destination draft');
+    assert.equal(editor.inlineActive, true); assert.equal(editor.editorTranslationReadOnly, false);
+  });
+}
+
+test('inline transitions release queued work after draft failure, failed opening, cancellation and scope changes', async t => {
+  for (const outcome of ['draft write failed', 'open rejected', 'open failed', 'cancelled', 'language changed', 'source changed']) {
+    await t.test(outcome, { timeout: 3000 }, async () => {
+      const { editor, rows, store, window } = await inlineNavigationHarness();
+      const saved = [];
+      editor._pendingSaves = require('../public/pendingSaves.js').create({ save: async batch => { saved.push(batch.jobId); return {}; } });
+      window.PendingSaves = require('../public/pendingSaves.js');
+      editor._pendingSaves.enqueue({ jobId: outcome, game: 'poe1', language: 'Thai', sourceHash: 'source-a', accountId: '',
+        files: [{ filepath: 'unrelated.txt', translations: ['Already queued work'] }], revisions: [] });
+      if (outcome === 'draft write failed') {
+        editor.editorBlocks[0].translation = 'Preserve this outgoing draft';
+        store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+      }
+      if (outcome === 'open rejected') editor.editFile = async () => false;
+      if (outcome === 'open failed') editor.editFile = async () => { throw new Error('Could not prepare inline destination'); };
+      if (outcome === 'cancelled') editor.editFile = async () => { editor._editorOpenCancelRevision = (editor._editorOpenCancelRevision || 0) + 1; return true; };
+      if (outcome === 'language changed') editor.editFile = async () => { editor.lang = 'German'; return true; };
+      if (outcome === 'source changed') editor.editFile = async () => { editor.sourceIdentity = 'source-b'; return true; };
+      try {
+        if (outcome === 'open failed') await assert.rejects(editor.activateInlineRow(rows[1].filepath), /Could not prepare inline destination/);
+        else assert.equal(await editor.activateInlineRow(rows[1].filepath), false);
+        await editor._pendingSaves.drain();
+        assert.deepEqual(saved, [outcome]); assert.equal(editor.inlineTransitionBusy, false);
+      } finally { editor._pendingSaves.dispose(); }
+    });
+  }
+});
+
+for (const exit of ['Escape', 'editorExit']) test(`${exit} cancels a queued manual row selection during the inline navigation paint`, { timeout: 3000 }, async t => {
+  const h = enableDeletionWorker(await inlineNavigationHarness());
+  const { editor, rows, calls, records } = h;
+  const outgoingSession = editor._draftSession, painting = deferred(), paint = deferred();
+  t.after(() => { paint.resolve(); editor._pendingSaves?.dispose(); });
+  const opened = [], open = editor.editFile;
+  editor.editFile = function (filepath, ...args) { opened.push(filepath); return open.call(this, filepath, ...args); };
+  editor.yieldEditorPaint = async () => {
+    if (!editor.editorLoading && editor.editorCurrentEditingDesc?.filepath === rows[1].filepath) {
+      painting.resolve(); await paint.promise;
+    }
+  };
+  editor.editorBlocks[0].translation = 'Outgoing translation queued for promotion';
+  const navigating = dispatchInlineNavigationKey(editor, inlineArrowEvent(rows[0].filepath), true);
+  await painting.promise; await settleFocus();
+  assert.equal(calls.storage.length, 0); assert.equal(editor.pendingLocalSaves, 1);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(await editor.activateInlineRow(rows[2].filepath), false);
+  assert.equal(editor._inlineRequestedPath, rows[2].filepath);
+  const destinationSession = editor._draftSession;
+  editor.editorBlocks[0].translation = 'Keep the destination local draft on exit';
+  if (exit === 'Escape') {
+    const finish = editor.finishInlineSession;
+    let closing;
+    editor.finishInlineSession = function (options) { return closing = finish.call(this, options); };
+    const event = { key: 'Escape', code: 'Escape', target: { closest: () => null }, preventDefault() { this.defaultPrevented = true; } };
+    editor.handleKeydown(event);
+    assert.equal(event.defaultPrevented, true); assert.ok(closing); assert.equal(await closing, true);
+  } else assert.equal(await editor.editorExit(), true);
+  assert.equal(editor._inlineRequestedPath, null); assert.equal(editor.inlineActive, false);
+  assert.equal(editor.editorVisible, false); assert.equal(editor._draftSession, null);
+  assert.equal(records.get(destinationSession.key).state, 'active');
+  assert.equal(records.get(destinationSession.key).translations[0], 'Keep the destination local draft on exit');
+  paint.resolve(); assert.equal(await navigating, false); await settleFocus();
+  assert.deepEqual(opened, [rows[1].filepath], 'The queued manual selection must not reopen a third row after cancellation.');
+  const promotion = await waitForDeletionWrite(h);
+  assert.equal(promotion.batch.files[0].filepath, rows[0].filepath);
+  h.acknowledge(promotion); await editor._pendingSaves.drain(); await settleFocus();
+  assert.deepEqual(opened, [rows[1].filepath], 'The queued manual selection must not reopen a third row after cancellation.');
+  assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+  assert.equal(editor.inlineActive, false); assert.equal(editor.editorVisible, false);
+  assert.equal(records.get(outgoingSession.key).state, 'promoted');
+  assert.equal(rows[0].translations.Thai[0], 'Outgoing translation queued for promotion');
+  assert.equal(records.get(destinationSession.key).state, 'active');
+  assert.equal(records.get(destinationSession.key).translations[0], 'Keep the destination local draft on exit');
+});
+
+test('a cancelled inline paint cannot clear the transition owned by a newly selected row', { timeout: 3000 }, async t => {
+  const h = enableDeletionWorker(await inlineNavigationHarness());
+  const { editor, rows, calls, store } = h;
+  const painting = deferred(), paint = deferred(), hydrating = deferred(), hydration = deferred();
+  t.after(() => { paint.resolve(); hydration.resolve(); editor._pendingSaves?.dispose(); });
+  editor.yieldEditorPaint = async () => {
+    if (!editor.editorLoading && editor.editorCurrentEditingDesc?.filepath === rows[1].filepath) {
+      painting.resolve(); await paint.promise;
+    }
+  };
+  const read = store.getTranslationDraft, freshKey = editor.editorDraftKey(editor.editorDraftScope(rows[2].filepath));
+  store.getTranslationDraft = async key => {
+    if (key === freshKey) { hydrating.resolve(); await hydration.promise; }
+    return read(key);
+  };
+  editor.editorBlocks[0].translation = 'Preserve the outgoing queued promotion';
+  const navigating = editor.moveInlineFile(1);
+  await painting.promise;
+  assert.equal(await editor.editorExit(), true);
+  const selecting = editor.activateInlineRow(rows[2].filepath);
+  await hydrating.promise;
+  const activation = editor._inlineActivationToken;
+  assert.equal(editor.inlineTransitionBusy, true); assert.equal(editor._nextEditorSurface, 'inline');
+  paint.resolve(); assert.equal(await navigating, false); await settleFocus();
+  assert.equal(editor._inlineActivationToken, activation);
+  assert.equal(editor.inlineTransitionBusy, true, 'The cancelled activation must not unlock the newer activation.');
+  assert.equal(editor._nextEditorSurface, 'inline', 'The newer activation must retain its intended editing surface.');
+  const promotion = await waitForDeletionWrite(h);
+  assert.equal(promotion.batch.files[0].filepath, rows[0].filepath);
+  hydration.resolve(); assert.equal(await selecting, true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+  assert.equal(editor.inlineTransitionBusy, false); assert.equal(editor.editorTranslationReadOnly, false);
+  editor.editorBlocks[0].translation = 'New typing in the fresh manual selection';
+  h.acknowledge(promotion); await editor._pendingSaves.drain();
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(editor.editorBlocks[0].translation, 'New typing in the fresh manual selection');
+  assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+});
+
 test('Ctrl+Up and Ctrl+Down from inline translation text consume the shortcut before autocomplete handling', async () => {
   const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
   const directions = []; editor.moveInlineFile = async direction => { directions.push(direction); return true; };
