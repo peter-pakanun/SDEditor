@@ -3332,7 +3332,7 @@ const config = Vue.defineComponent({
       return `${entryGame} entry. Excluded from ${currentGame} matches, autocomplete, and regex.`;
     },
     findActiveDictionaryKeywordEntry(tagName) {
-      const key = String(tagName || '').trim().toLowerCase();
+      const key = getKeywordPopupLookupName(tagName).toLowerCase();
       const index = this.getPreparedEditorDictionaryIndex();
       const entry = index && key ? index.keywordEntries(key)[0]
         : this.getActiveDictionaryEntries().find(entry => window.DictionaryScope.findKey(entry) === key);
@@ -3522,7 +3522,8 @@ const config = Vue.defineComponent({
         let tagName = m[2];
         let dynamicContent = m[3] || '';
         let rawTagName = unescapeHtml(tagName || "");
-        let tagLower = rawTagName.trim().toLowerCase();
+        let lookupName = getKeywordPopupLookupName(rawTagName);
+        let tagLower = lookupName.toLowerCase();
         let rawDynamicContent = unescapeHtml(dynamicContent || "");
         let hasDynamicContent = /<[^>]*>/.test(rawDynamicContent);
         let staticDynamicContent = rawDynamicContent
@@ -3530,7 +3531,7 @@ const config = Vue.defineComponent({
           .replace(/\s+/g, " ")
           .trim();
         let dictIdSet = new Set();
-        addMatchingDictIds(dictIdSet, rawTagName, tagLower);
+        addMatchingDictIds(dictIdSet, lookupName, tagLower);
         addMatchingDictIds(dictIdSet, staticDynamicContent, tagLower);
         let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent,
           dictionaryIndex && tagLower ? dictionaryIndex.keywordEntries(tagLower) : activeDictionary || this.getActiveDictionaryEntries());
@@ -3924,7 +3925,7 @@ const config = Vue.defineComponent({
           let matchCandidate = "";
           if (hl?.isKeywordPopup) {
             let dc = unescapeHtml(hl.dynamicContent || "").trim();
-            let tn = unescapeHtml(hl.tagName || "").trim();
+            let tn = getKeywordPopupLookupName(unescapeHtml(hl.tagName || ""));
             matchCandidate = (dc || tn || "").trim();
           } else {
             matchCandidate = String(hl?.dictDefFind || hl?.find || "").trim();
@@ -3932,7 +3933,7 @@ const config = Vue.defineComponent({
           let matchCandidateLower = matchCandidate.toLowerCase();
           let keywordTagNameLower = "";
           if (hl?.isKeywordPopup) {
-            keywordTagNameLower = unescapeHtml(hl.tagName || "").trim().toLowerCase();
+            keywordTagNameLower = getKeywordPopupLookupName(unescapeHtml(hl.tagName || "")).toLowerCase();
           }
 
           let itemToAdds = [];
@@ -4223,7 +4224,7 @@ const config = Vue.defineComponent({
       return { tagName, dynamicContent };
     },
     ensureDictionaryKeywordTag(tagName, altFind = "", replaceText = "") {
-      let tn = String(tagName ?? "").trim();
+      let tn = getKeywordPopupLookupName(tagName);
       if (!tn) return { dictId: "", created: false, addedAlt: false };
       let alt = String(altFind ?? "").trim();
       let replace = String(replaceText ?? "");

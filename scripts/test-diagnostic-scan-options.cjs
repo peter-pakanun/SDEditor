@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const Terminology = require('../public/terminologyDiagnostics.js');
 
 const CHECKS = ['whitespace', 'dash', 'tagSyntax', 'variables', 'keywords', 'decorations', 'consistency', 'terminology'];
 const only = (...selected) => Object.fromEntries(CHECKS.map(key => [key, selected.includes(key)]));
@@ -272,6 +273,72 @@ test('terminology is opt-in and cached table warnings disappear after a draft ch
   editor.refreshEditorDiagnostics();
   assert.equal(editor.blockTerminologyDiagnostics(block).length, 0, 'Edited table cells must not retain stale terminology warnings.');
   assert.deepEqual(calls, scannedCalls);
+});
+
+test('gem level keywords retain dictionary ownership, alternatives and plain terminology', () => {
+  const compiled = Terminology.compileDictionary([
+    { _id: 'skill', find: 'BattlemagesCry', replace: 'คำรามนักรบเวท', alts: [
+      { find: "Battlemage's Cry", replace: "คำรามนักรบเวท (Battlemage's Cry)" },
+    ] },
+    { _id: 'cry', find: 'Cry', replace: 'ร้อง' },
+  ]);
+  for (const identity of ['BattlemagesCry', 'BattlemagesCry<gemlevel=20>', 'BattlemagesCry<gemlevel={0}>']) {
+    const english = `[${identity}|Battlemage's Cry]`;
+    for (const display of ['คำรามนักรบเวท', "คำรามนักรบเวท (Battlemage's Cry)"]) {
+      assert.deepEqual(Terminology.analyze(english, `[${identity}|${display}]`, compiled), [], identity);
+    }
+    const translation = `[${identity}|ผิด]`;
+    const findings = Terminology.analyze(english, translation, compiled);
+    assert.equal(findings.length, 1, 'The keyword owns its display; Cry must not add a second warning.');
+    assert.equal(findings[0].sourceTerm, `[${identity}]`);
+    assert.deepEqual(findings[0].dictionaryIds, ['skill']);
+    assert.equal(translation.slice(findings[0].start, findings[0].end), translation);
+  }
+  assert.deepEqual(Terminology.analyze('Cry', 'ร้อง', compiled), []);
+  assert.equal(Terminology.analyze('Cry', 'ผิด', compiled)[0].sourceTerm, 'Cry');
+});
+
+test('different gem levels compare their own display and target range independently', () => {
+  const compiled = Terminology.compileDictionary([{ _id: 'skill', find: 'BattlemagesCry', replace: 'คำรามนักรบเวท' }]);
+  const first = 'BattlemagesCry<gemlevel={0}>', second = 'BattlemagesCry<gemlevel={1}>';
+  const english = `[${first}|Battlemage's Cry] and [${second}|Battlemage's Cry]`;
+  const wrongTag = `[${second}|ผิด]`;
+  const translation = `ก่อน ${wrongTag} แล้ว [${first}|คำรามนักรบเวท]`;
+  const findings = Terminology.analyze(english, translation, compiled);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].sourceTerm, `[${second}]`);
+  assert.equal(findings[0].start, translation.indexOf(wrongTag));
+  assert.equal(translation.slice(findings[0].start, findings[0].end), wrongTag);
+});
+
+test('a changed gem level remains a missing full terminology identity and a keyword error', () => {
+  const compiled = Terminology.compileDictionary([{ find: 'BattlemagesCry', replace: 'คำรามนักรบเวท' }]);
+  const english = '[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]';
+  const translation = '[BattlemagesCry<gemlevel={1}>|คำรามนักรบเวท]';
+  const findings = Terminology.analyze(english, translation, compiled);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].sourceTerm, '[BattlemagesCry<gemlevel={0}>]');
+  assert.match(findings[0].message, /No corresponding \[BattlemagesCry<gemlevel=\{0\}>\]/);
+  const { editor } = loadEditor();
+  const result = editor.analyzeTranslationDiagnostics(translation, english, 'Thai', only('keywords'));
+  assert.equal(result.errorCount, 1);
+  assert.equal(result.diagnostics[0].code, 'keyword-popup-tag-name-mismatch');
+});
+
+test('gem level metadata preserves placeholder display handling', () => {
+  const compiled = Terminology.compileDictionary([{ find: 'BattlemagesCry', replace: 'คำรามนักรบเวท' }]);
+  const identity = 'BattlemagesCry<gemlevel={0}>';
+  assert.deepEqual(Terminology.analyze(`[${identity}]`, `[${identity}|คำรามนักรบเวท]`, compiled), []);
+  assert.deepEqual(Terminology.analyze(`[${identity}|Battlemage's Cry {1}]`, `[${identity}|คำรามนักรบเวท {1}]`, compiled), []);
+  assert.deepEqual(Terminology.analyze(`[${identity}|Battlemage's Cry]`, `[${identity}|<skill_name>]`, compiled), []);
+});
+
+test('terminology ignores only valid trailing gem level metadata during dictionary lookup', () => {
+  const compiled = Terminology.compileDictionary([{ find: 'BattlemagesCry', replace: 'คำรามนักรบเวท' }]);
+  for (const suffix of ['<other=20>', '<gemlevel=-1>', '<gemlevel={name}>', '<gemlevel={0}>tail']) {
+    const identity = 'BattlemagesCry' + suffix;
+    assert.deepEqual(Terminology.analyze(`[${identity}|Unknown wording]`, `[${identity}|ผิด]`, compiled), [], suffix);
+  }
 });
 
 test('saving a partial correction preserves remaining file issues, unrelated results, and list state', async () => {

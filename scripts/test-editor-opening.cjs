@@ -1234,3 +1234,69 @@ test('visible and keyword Dictionary rows preserve exact identity before importe
   assert.equal(editor.findActiveDictionaryKeywordEntry('Cold'), fixture.dictionary[1]);
   assert.equal(editor.findActiveDictionaryKeywordEntry('Flame'), fixture.dictionary[3]);
 });
+
+test('gemlevel links reuse base Dictionary Find and autocomplete preserves every level', () => {
+  for (const indexed of [false, true]) {
+    const entries = [{ _id: 'cry', find: 'BattlemagesCry', replace: 'คำรามนักรบเวท', alts: [
+      { _id: 'cry-alt', find: "Battlemage's Cry", replace: "คำรามนักรบเวท (Battlemage's Cry)" },
+    ] }];
+    const { editor } = loadEditor({ dictionary: entries });
+    if (!indexed) {
+      editor.getEditorDictionaryIndex = () => null;
+      editor.getPreparedEditorDictionaryIndex = () => null;
+    } else {
+      editor.getEditorDictionaryIndex();
+    }
+    for (const level of ['{0}', '{1}', '20']) {
+      const identity = `BattlemagesCry<gemlevel=${level}>`;
+      assert.equal(editor.findActiveDictionaryKeywordEntry(identity), entries[0]);
+      const english = `[${identity}|Battlemage's Cry]`;
+      const { HLs, englishHLter } = editor.buildEnglishHLter(english);
+      assert.equal(HLs.length, 1);
+      assert.equal(HLs[0].dictId, 'cry');
+      assert.deepEqual(Array.from(HLs[0].dictIds), ['cry']);
+      assert.equal(HLs[0].replace, `[${identity}|คำรามนักรบเวท (Battlemage's Cry)]`);
+      assert.ok(englishHLter.includes('&lt;gemlevel='));
+      assert.equal(englishHLter.includes('<gemlevel='), false, 'Metadata must be rendered as text.');
+      editor.editorBlocks = [{ english, translation: '', HLs }];
+      const items = editor.buildHlPopupItems(0);
+      assert.equal(items.length, 2);
+      assert.equal(items[0].value, `[${identity}|คำรามนักรบเวท (Battlemage's Cry)]`);
+      assert.equal(items[0].dictEntryId, 'cry');
+      assert.equal(items[0].kwTagName, identity);
+      assert.equal(items.some(item => item.mustCreate), false);
+      assert.equal(items.every(item => item.value.startsWith(`[${identity}|`)), true);
+      assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(items[0]), false);
+
+      const noDisplay = editor.buildEnglishHLter(`[${identity}]`);
+      editor.editorBlocks = [{ english: `[${identity}]`, translation: '', HLs: noDisplay.HLs }];
+      const noDisplayItems = editor.buildHlPopupItems(0);
+      assert.equal(noDisplayItems[0].value, `[${identity}|คำรามนักรบเวท]`);
+      assert.equal(noDisplayItems.some(item => item.mustCreate), false);
+    }
+    assert.equal(editor.findActiveDictionaryKeywordEntry('BattlemagesCry<other={0}>'), undefined);
+    assert.equal(editor.findActiveDictionaryKeywordEntry('BattlemagesCry<gemlevel={x}>'), undefined);
+  }
+});
+
+test('creating or adding Dictionary alternatives strips gemlevel only from Find', () => {
+  const { editor } = loadEditor({ dictionary: [] });
+  editor.syncEditorHlterWithDictionaryNow = () => {};
+  editor.focusDictionaryEntryReplaceInput = () => {};
+  const identity = 'BattlemagesCry<gemlevel={0}>';
+  const item = { value: `[${identity}|Battlemage's Cry]`, kwTagName: identity, kwDynamicContent: "Battlemage's Cry" };
+  assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), true);
+  const created = editor.ensureDictionaryKeywordTag(identity, item.kwDynamicContent, 'คำรามนักรบเวท');
+  assert.equal(created.created, true);
+  assert.equal(editor.dictionary.length, 1);
+  assert.equal(editor.dictionary[0].find, 'BattlemagesCry');
+  assert.equal(editor.dictionary[0].alts[0].find, "Battlemage's Cry");
+  assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
+  const existing = editor.ensureDictionaryKeywordTag('BattlemagesCry<gemlevel=20>', 'War Cry', 'คำราม');
+  assert.equal(existing.created, false);
+  assert.equal(existing.addedAlt, true);
+  assert.equal(editor.dictionary.length, 1);
+  assert.ok(editor.dictionary[0].alts.some(alt => alt.find === 'War Cry'));
+  const parsed = editor.parseKeywordPopupTagText(item.value);
+  assert.equal(parsed.tagName, identity, 'Dictionary return insertion must retain the complete identity.');
+});

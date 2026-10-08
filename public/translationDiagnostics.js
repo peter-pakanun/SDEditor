@@ -242,8 +242,12 @@
     // Parameterized references such as [TentacleSmash::{0}|Tentacle Whip]
     // allow one numeric variable after the double colon, before the display text.
     const prefix = text.slice(keyword.index + 1, index);
-    return /^[A-Za-z][A-Za-z0-9_]*::$/.test(prefix)
-      && /^\{\d+\}(?=[|\]])/.test(text.slice(index));
+    if (/^[A-Za-z][A-Za-z0-9_]*::$/.test(prefix)
+      && /^\{\d+\}(?=[|\]])/.test(text.slice(index))) return true;
+    // Skill references can carry a gem level in their identity. Only its
+    // numeric placeholder is allowed here; other nested braces remain errors.
+    return /^[A-Za-z][A-Za-z0-9_]*<gemlevel=$/.test(prefix)
+      && /^\{\d+\}>(?=[|\]])/.test(text.slice(index));
   }
 
   function scanTags(text, addDiagnostic) {

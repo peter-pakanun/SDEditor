@@ -38,6 +38,9 @@
               const tag = {
                 name,
                 key: normalize(name),
+                // Gem level metadata selects the link identity, while its
+                // dictionary wording belongs to the base keyword.
+                lookupKey: normalize(name.replace(/<gemlevel=(?:\d+|\{\d+\})>$/i, '').trim()),
                 display,
                 visible: rendered.text.trim(),
                 dynamic: rendered.dynamic,
@@ -48,7 +51,7 @@
               tags.push(tag);
               const visibleStart = text.length;
               append(separator >= 0 || source ? rendered.text : " ");
-              if (ownedNames?.has(tag.key)) ownedRanges.push({ start: visibleStart, end: text.length });
+              if (ownedNames?.has(tag.lookupKey)) ownedRanges.push({ start: visibleStart, end: text.length });
               dynamic = dynamic || rendered.dynamic;
               position = close + 1;
               continue;
@@ -231,7 +234,7 @@
     const seenTags = new Set();
 
     for (const tag of source.tags) {
-      const rule = compiled.groups.get(tag.key);
+      const rule = compiled.groups.get(tag.lookupKey);
       if (!rule || seenTags.has(tag.key)) continue;
       seenTags.add(tag.key);
       const translatedTags = target.tags.filter(candidate => candidate.key === tag.key);

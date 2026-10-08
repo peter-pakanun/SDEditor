@@ -107,6 +107,108 @@ test('numeric keyword ID suffixes retain keyword identity without creating varia
   assert.ok(changedKeyword.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
 });
 
+test('numeric gemlevel metadata is allowed without allowing arbitrary nested or malformed tags', () => {
+  const { context } = loadEditor();
+  const analyze = text => context.window.TranslationDiagnostics.analyze(text);
+  for (const text of [
+    '[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]',
+    '[Skill_2<gemlevel={12}>|Translated skill]',
+    '[BattlemagesCry<gemlevel={0}>]',
+    '[BattlemagesCry<gemlevel=20>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel=0>]',
+    '[BattlemagesCry<gemlevel={0}>|Level {1} skill]',
+    '<white>{{[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]}}',
+  ]) {
+    assert.equal(analyze(text).errorCount, 0, text);
+  }
+  for (const text of [
+    '[<gemlevel={0}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<other={0}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={name}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0:d}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}%>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}suffix>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}{1}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={{0}}>|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}>suffix|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}>\n|Battlemage\'s Cry]',
+    '[BattlemagesCry<gemlevel={0}>|[Cold]]',
+  ]) {
+    assert.ok(analyze(text).diagnostics.some(diagnostic => diagnostic.code === 'nested-tags'), text);
+  }
+  for (const text of [
+    '[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry',
+    '[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]}',
+  ]) {
+    assert.ok(analyze(text).errorCount > 0, `Unbalanced delimiters must remain errors: ${text}`);
+  }
+});
+
+test('gemlevel metadata remains part of exact keyword diagnostic identity', () => {
+  const { editor } = loadEditor();
+  const english = 'Grants Level {0} [BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry] Skill';
+  const translation = 'ได้รับสกิล [BattlemagesCry<gemlevel={0}>|คำรามนักรบเวท (Battlemage\'s Cry)] เลเวล {0}';
+  assert.equal(editor.analyzeTranslationDiagnostics(translation, english).errorCount, 0);
+  for (const sourceMetadata of ['{0}', '20']) {
+    const source = `[BattlemagesCry<gemlevel=${sourceMetadata}>|Battlemage\'s Cry]`;
+    for (const targetMetadata of ['{1}', '21']) {
+      const target = `[BattlemagesCry<gemlevel=${targetMetadata}>|คำรามนักรบเวท]`;
+      const diagnostics = editor.analyzeTranslationDiagnostics(target, source).diagnostics;
+      assert.equal(diagnostics.some(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch'), false);
+      const mismatch = diagnostics.find(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch');
+      assert.equal(mismatch?.level, 'error', `${source} -> ${target}`);
+      assert.equal(target.slice(mismatch.start, mismatch.end), target);
+    }
+    const missingMetadata = editor.analyzeTranslationDiagnostics('[BattlemagesCry|คำรามนักรบเวท]', source);
+    assert.ok(missingMetadata.diagnostics.some(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch'));
+  }
+});
+
+test('gemlevel placeholders are excluded from variable counts while display and external variables remain checked', () => {
+  const { editor, context } = loadEditor();
+  for (const [text, vars, keywords] of [
+    ['[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]', 0, 1],
+    ['{0} [BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]', 1, 1],
+    ['[BattlemagesCry<gemlevel={12}>|Level {2} skill]', 1, 1],
+    ['[BattlemagesCry<gemlevel={0}>]', 0, 1],
+    ['[BattlemagesCry<gemlevel={0}>] and [OtherSkill<gemlevel={12}>|{3}]', 1, 2],
+  ]) {
+    assert.equal(context.countGGGVarTag(text), vars, text);
+    assert.equal(editor.computeTextStats(text).vars, vars, text);
+    assert.equal(editor.computeTextStats(text).kw, keywords, text);
+    assert.equal(editor.extractGggVarIdentityTags(text).length, vars, text);
+  }
+  const keyword = '[BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry]';
+  for (const [english, translation] of [
+    [`{0} ${keyword}`, keyword],
+    [keyword, `${keyword} {0}`],
+    ['[BattlemagesCry<gemlevel={0}>|Level {2} skill]', '[BattlemagesCry<gemlevel={0}>|Skill]'],
+    ['[BattlemagesCry<gemlevel={0}>|Skill]', '[BattlemagesCry<gemlevel={0}>|Level {2} skill]'],
+  ]) {
+    assert.equal(variableErrors(editor, english, translation).length, 1, `${english} -> ${translation}`);
+  }
+});
+
+test('reported Battlemage\'s Cry translation saves without a variable count confirmation', async () => {
+  const { editor, alerts, confirmations } = loadEditor();
+  const english = 'Grants Level {0} [BattlemagesCry<gemlevel={0}>|Battlemage\'s Cry] Skill';
+  const translation = 'ได้รับสกิล [BattlemagesCry<gemlevel={0}>|คำรามนักรบเวท (Battlemage\'s Cry)] เลเวล {0}';
+  const desc = fixtureDescription('battlemages-cry', english, '[BattlemagesCry<gemlevel={0}>|เดิม] {0}');
+  editor.descs = [desc];
+  editor.editorCurrentEditingDesc = desc;
+  editor.editorVisible = true;
+  editor.editorOriginalTranslations = [...desc.translations.Thai];
+  editor.editorBlocks = [{ english, translation }];
+  assert.equal(editor.computeTextStats(english).vars, 1);
+  assert.equal(editor.computeTextStats(translation).vars, 1);
+  assert.equal(await editor.editorSave(), true);
+  assert.equal(desc.translations.Thai[0], translation);
+  assert.equal(editor.localDescs.descs[0].translations.Thai[0], translation);
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(confirmations, []);
+});
+
 test('keyword IDs are excluded from variable counts while ordinary and display variables remain counted', () => {
   const { editor, context } = loadEditor();
   for (const [text, vars, keywords] of [

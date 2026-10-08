@@ -78,6 +78,12 @@ let gggVarTagRegex = "([@\\+\\-]?\\{[\\dd\\:\\+]*\\}\\%?)";
 
 let keywordPopupTagRegex = "(\\[([^\\]|]+)(?:\\|([^\\]]*))?\\])";
 
+// Gem level metadata belongs to the link identity, not the Dictionary Find name.
+// Keep the original identity for insertion and diagnostic comparisons.
+function getKeywordPopupLookupName(tagName) {
+  return String(tagName ?? "").trim().replace(/<gemlevel=(?:\d+|\{\d+\})>$/i, '').trim();
+}
+
 let textDecorationTagNameRegex = "[A-Za-z][A-Za-z0-9_:\\-]*";
 let textDecorationTagRegex = `(<(${textDecorationTagNameRegex})>\\{\\{([\\s\\S]*?)\\}\\})`;
 
@@ -292,7 +298,8 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
   let foundEntry = null;
   let matchedFind = null;
   let dict = Array.isArray(dictionary) ? dictionary : [];
-  let tagNameLower = String(tagName ?? "").trim().toLowerCase();
+  let lookupName = getKeywordPopupLookupName(tagName);
+  let tagNameLower = lookupName.toLowerCase();
   if (tagNameLower) {
     dict = dict.filter(d => String(d?.find ?? "").trim().toLowerCase() === tagNameLower);
   }
@@ -318,7 +325,7 @@ function lookupKeywordPopupReplacementInfo(tagName, dynamicContent, dictionary) 
       for (const def of getDictEntryDefinitionsWithMeta(dictEntry)) {
         let escapedFind = escapeRegExp(def.find);
         let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-        if (regex.test(tagName)) {
+        if (regex.test(lookupName)) {
           replacement = def.replace;
           foundEntry = dictEntry;
           matchedFind = def.find;
