@@ -617,6 +617,21 @@ test('deadline reminders stay passive and progress uses Missing plus Saved with 
   assert.match(app.managedProgressTooltip(team()), /counts can overlap/);
 });
 
+test('teams with the same displayed progress sort by lowest workload denominator first', () => {
+  const { app } = harness();
+  app.managedVersionDetails.teams = [
+    team({ language: 'Larger zero progress', counts: { missing: 200, saved: 0 } }),
+    team({ language: 'Smaller zero progress', counts: { missing: 5, saved: 0 } }),
+    team({ language: 'Larger rounded tie', counts: { missing: 33, saved: 1 } }),
+    team({ language: 'Smaller rounded tie', counts: { missing: 30, saved: 1 } }),
+    team({ language: 'Higher progress', counts: { missing: 3, saved: 1 } }),
+  ];
+
+  assert.deepEqual(app.managedSelectedDetails.teams.map(item => item.language), [
+    'Higher progress', 'Smaller rounded tie', 'Larger rounded tie', 'Smaller zero progress', 'Larger zero progress',
+  ]);
+});
+
 test('pre-check tooltips describe existing standalone accepted work and disclose unavailable offline drafts', () => {
   const { app } = harness();
   const preview = { ...team(), isManaged: false, historyCount: 3, savedFileCount: 20, presence: [{ name: 'Fixture translator' }] };

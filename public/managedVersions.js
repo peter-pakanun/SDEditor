@@ -89,7 +89,7 @@
         const details = this.managedVersionDetails?.version?.id === this.selectedManagedVersionId ? this.managedScopedDetails(this.managedVersionDetails) : null;
         details?.teams.sort((a, b) => {
           const first = this.managedProgress(a), second = this.managedProgress(b);
-          return (second.total ? second.saved / second.total : 0) - (first.total ? first.saved / first.total : 0);
+          return second.percent - first.percent || first.total - second.total;
         });
         return details;
       },
