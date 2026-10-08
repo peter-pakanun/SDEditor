@@ -1557,6 +1557,70 @@ function cloudUiEditor(client) {
   return editor;
 }
 
+test('equivalent Dictionary sync snapshots retain the live rows and completed diagnostic scan', async t => {
+  const current = [{ find: 'Fire', replace: 'ไฟ', _id: 'fire', tlnote: '',
+    alts: [{ find: 'Flame', replace: 'เปลวไฟ', _id: 'flame' }] }];
+  const cases = [
+    ['normalized object key order', current, Dictionary.normalizeEntries(current)],
+    ['explicit All scope received', current, current.map(entry => ({ ...clone(entry), gameScope: 'all' }))],
+    ['explicit All scope omitted', current.map(entry => ({ ...clone(entry), gameScope: 'all' })), current],
+    ['original snapshot after editor fills optional defaults', [word()], [{ _id: 'fire', find: 'Fire', replace: 'ไฟ' }]],
+    ['settings change with equivalent Dictionary normalization', current, Dictionary.normalizeEntries(current), { theme: 'dark' }],
+  ];
+  for (const [name, liveRows, incoming, remoteSettings = {}] of cases) await t.test(name, async () => {
+    const editor = cloudUiEditor();
+    const liveDictionary = clone(liveRows);
+    const results = { 'test/other.txt': { warningCount: 1, hasDiagnosticWarning: true } };
+    const checks = { consistency: true, terminology: false };
+    Object.assign(editor, Cloud.completeSettings(settings()), {
+      dictionary: liveDictionary, cloudUser: user(), cloudProfileId: 'alice', cloudSignedIn: true,
+      diagnosticScanResults: results, diagnosticScanAppliedChecks: checks, diagnosticScanCompleted: true,
+    });
+    let replacements = 0;
+    const importSettings = editor.importSettings;
+    editor.importSettings = function (next) {
+      if (next.dictionary !== this.dictionary) {
+        replacements++;
+        // The application's deep Dictionary watcher invalidates manual scans.
+        this.diagnosticScanResults = {}; this.diagnosticScanAppliedChecks = null; this.diagnosticScanCompleted = false;
+      }
+      importSettings.call(this, next);
+    };
+    const snapshot = { settings: settings(remoteSettings), dictionary: clone(incoming), editorClipboard: '',
+      user: user(), profileId: 'alice', signedIn: true, conflicts: [], revision: 2,
+      needsDictionaryLanguage: false, recoveryCount: 0 };
+    const before = clone(snapshot);
+    await editor.cloudApply(snapshot);
+    assert.equal(editor.dictionary, liveDictionary, 'Equivalent sync data must preserve the live Dictionary identity');
+    assert.equal(replacements, 0);
+    assert.equal(editor.diagnosticScanResults, results);
+    assert.equal(editor.diagnosticScanAppliedChecks, checks);
+    assert.equal(editor.diagnosticScanCompleted, true);
+    if (remoteSettings.theme) assert.equal(editor.theme, remoteSettings.theme);
+    assert.deepEqual(snapshot, before, 'Comparing a sync snapshot must not normalize its data in place');
+  });
+});
+
+test('real Dictionary content and scope changes still replace the live sync rows', async t => {
+  for (const [name, fields] of [
+    ['translation', { replace: 'เปลวไฟ' }],
+    ['TL note', { tlnote: 'Approved wording' }],
+    ['game scope', { gameScope: 'poe2' }],
+    ['alternate', { alts: [{ _id: 'flame', find: 'Flame', replace: 'เปลวไฟ' }] }],
+  ]) await t.test(name, async () => {
+    const editor = cloudUiEditor();
+    const liveDictionary = [word()];
+    Object.assign(editor, Cloud.completeSettings(settings()), {
+      dictionary: liveDictionary, cloudUser: user(), cloudProfileId: 'alice', cloudSignedIn: true,
+    });
+    const incoming = [word('fire', fields)];
+    await editor.cloudApply({ settings: settings(), dictionary: incoming, editorClipboard: '',
+      user: user(), profileId: 'alice', signedIn: true, conflicts: [], revision: 2 });
+    assert.notEqual(editor.dictionary, liveDictionary, 'A real Dictionary change must reach the editor');
+    assert.deepEqual(editor.dictionary, incoming);
+  });
+});
+
 test('unsolicited account changes capture and detach the outgoing editor before replacing scope', async () => {
   const editor = cloudUiEditor();
   Object.assign(editor, { cloudSignedIn: true, cloudUser: user('alice'), lang: 'Thai', editorVisible: false, editorSessionActive: true });

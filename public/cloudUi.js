@@ -3,6 +3,17 @@
   const API = 'https://sdeditor-api.poemaid.com';
   const clone = value => JSON.parse(JSON.stringify(value));
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  function sameDictionary(left, right) {
+    if (same(left, right)) return true;
+    // Sync and the editor can serialize identical entries in different field
+    // order, with omitted empty fields or an explicit All scope. Replacing
+    // those rows triggers the Dictionary watcher and discards completed scans.
+    const comparable = entries => window.DictionarySync.normalizeEntries(entries).map(entry => {
+      if (entry.gameScope === 'all') delete entry.gameScope;
+      return entry;
+    });
+    return same(comparable(left), comparable(right));
+  }
   // Local overrides are deliberately restricted to a loopback editor origin.
   function apiBase() {
     if (['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
@@ -98,7 +109,7 @@
           this.cloudDefinitionsChoice = ''; this.cloudNoteChoice = '';
         }
         const rawDictionary = typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
-        const dictionaryChanged = Object.hasOwn(snapshot, 'dictionary') && !same(rawDictionary, snapshot.dictionary);
+        const dictionaryChanged = Object.hasOwn(snapshot, 'dictionary') && !sameDictionary(rawDictionary, snapshot.dictionary);
         if (!dictionaryChanged && same(window.CloudSync.preferences(this), settings) && this.editorClipboard === snapshot.editorClipboard) {
           if (scopeChanged) await this.loadEditorDrafts?.();
           return;
