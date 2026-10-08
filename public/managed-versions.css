@@ -9,7 +9,7 @@
 .versionChooserColumns { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; margin: 20px 0; }
 .versionPanel { background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 10px; padding: 20px; min-width: 0; }
 .versionActions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.versionPanel button, .versionCatalogHeader button, .versionModal button, .managedVersionBanner button { padding: 7px 11px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); cursor: pointer; }
+.versionPanel button, .versionCatalogHeader button, .versionModal button { padding: 7px 11px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); cursor: pointer; }
 .versionPanel button:disabled, .versionModal button:disabled { opacity: .55; cursor: default; }
 .versionPanel .primaryAction, .versionCatalogHeader .primaryAction, .versionModal .primaryAction { background: var(--ui-accent); color: var(--ui-on-accent); }
 .versionTableScroll { overflow-x: auto; }
@@ -22,8 +22,8 @@
 .versionTable small, .versionSelect small { display: block; color: var(--ui-muted); margin-top: 5px; }
 .versionTable .versionSelect { border: 0; padding: 0; background: transparent; text-align: left; width: 100%; }
 .versionSelect strong { overflow-wrap: anywhere; }
-.versionCatalog .versionBadge, .versionModal .versionBadge { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 4px; padding: 2px 6px; font-size: 11px; line-height: 1.35; font-weight: 600; vertical-align: middle; white-space: nowrap; background: var(--ui-accent-soft); color: var(--ui-accent); margin: 0; }
-.versionCatalog .versionBadge.ended, .versionCatalog .versionBadge.withdrawn { color: var(--ui-dropped); }
+.versionCatalog .versionBadge, .versionModal .versionBadge, .versionStatusIdentity .versionBadge, .editorVersionContext .versionBadge { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 0; height: auto; min-height: 0; border: 0; border-radius: 4px; padding: 2px 6px; font-size: 11px; line-height: 1.35; font-weight: 600; vertical-align: middle; white-space: nowrap; background: var(--ui-accent-soft); color: var(--ui-accent); margin: 0; }
+.versionCatalog .versionBadge.ended, .versionCatalog .versionBadge.withdrawn, .versionStatusIdentity .versionBadge.ended, .versionStatusIdentity .versionBadge.withdrawn, .editorVersionContext .versionBadge.ended, .editorVersionContext .versionBadge.withdrawn { color: var(--ui-dropped); }
 .versionMuted { color: var(--ui-muted); font-size: 13px; line-height: 1.6; }
 .versionHash { color: var(--ui-muted); font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
 .versionError { color: var(--ui-error); padding: 12px; border: 1px solid var(--ui-error); border-radius: 6px; white-space: pre-wrap; }
@@ -57,6 +57,10 @@
 .versionTeamChips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 10px; }
 .versionTeamChip { display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element-alt); font-size: 12px; line-height: 1.3; }
 .versionTeamChip small { color: var(--ui-muted); font-size: 11px; }
-.managedVersionBanner { display: flex; gap: 16px; align-items: center; padding: 9px 20px; background: var(--color-element); border-bottom: 1px solid var(--ui-border); font-size: 12px; }
-.managedVersionBanner span { flex: 1; color: var(--ui-muted); }.managedVersionBanner.ended span { color: var(--ui-warning); }
+.versionStatusIdentity { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.workspaceStatus button.versionStatusName, .editorVersionContext button.versionStatusName { display: inline-block; max-width: 260px; padding: 0; margin: 0; border: 0; border-radius: 3px; background: transparent; color: var(--ui-accent); font: inherit; font-size: 12px; line-height: 1.4; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workspaceStatus button.versionStatusName:hover:not(:disabled), .editorVersionContext button.versionStatusName:hover:not(:disabled) { text-decoration: underline; }
+.versionStatusName:focus-visible, .versionStatusIdentity [tabindex="0"]:focus-visible, .editorVersionContext [tabindex="0"]:focus-visible, .versionDeadline:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+.versionDeadline { color: var(--ui-muted); font-size: 12px; line-height: 1.4; white-space: nowrap; border-radius: 3px; }
+.editorVersionContext { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin-left: 12px; vertical-align: middle; font-size: 12px; line-height: 1.4; font-weight: 400; }
 @media (max-width: 1050px) { .versionChooserColumns { grid-template-columns: minmax(0, 1fr); } .versionCatalog { padding: 18px; } .versionCatalogHeader, .versionPanelHeading { flex-wrap: wrap; } }

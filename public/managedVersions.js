@@ -73,6 +73,41 @@
           : this.localVersions.find(v => v.sourceHash === version.sourceHash && v.branchId === version.branchId)?.details;
         return details?.teams?.find(team => team.language === this.lang) || null;
       },
+      managedStatusLocalVersion() {
+        if (!this.sourceIdentity) return null;
+        const accountId = this.cloudProfileId || 'guest';
+        return this.localVersions.find(version => version.sourceHash === this.sourceIdentity
+          && (version.branchId || DEFAULT_BRANCH) === this.branchId && (!version.game || version.game === this.gameVersion)
+          && (!version.accountId || version.accountId === accountId)) || null;
+      },
+      managedImportZipDisabled() {
+        return !!(this.managedActiveVersion || this.managedStatusLocalVersion?.catalogVersionId);
+      },
+      managedStatusName() {
+        const currentLocalName = this.localDescs?.sourceHash === this.sourceIdentity ? this.localDescs.versionName : '';
+        return this.managedActiveVersion?.name || this.managedStatusLocalVersion?.name || currentLocalName
+          || this.collaborationShortVersion || (this.sourceIdentity || '').slice(0, 12);
+      },
+      managedStatusReminder() {
+        if (this.managedActiveVersion?.status === 'withdrawn') return 'Withdrawn · shared saves paused; local work retained for recovery.';
+        if (this.managedActiveTeam?.ended) return 'Ended · further saves are outside the last collection.';
+        return '';
+      },
+      managedStatusDeadlineTooltip() {
+        return [this.managedFormatDeadline(this.managedActiveVersion?.deadlineAt), this.managedStatusReminder].filter(Boolean).join('\n');
+      },
+      managedStatusTooltip() {
+        const version = this.managedActiveVersion, local = this.managedStatusLocalVersion;
+        const lines = [this.managedStatusName, `${this.gameVersionLabel || this.gameVersion} · ${this.lang} · ${this.branchId || DEFAULT_BRANCH} branch`];
+        if (version && local?.name && local.name !== version.name) lines.push('Local alias: ' + local.name);
+        const zipHash = this.collaborationExportHash || this.importBaseline?.archive?.zipHash;
+        if (zipHash) lines.push('ZIP SHA-256: ' + zipHash);
+        if (this.sourceIdentity && this.sourceIdentity !== zipHash) lines.push('Source baseline: ' + this.sourceIdentity);
+        if (version?.deadlineAt) lines.push('Import deadline: ' + this.managedFormatDeadline(version.deadlineAt));
+        if (this.managedStatusReminder) lines.push(this.managedStatusReminder);
+        lines.push('Open source versions.');
+        return lines.filter(Boolean).join('\n');
+      },
       managedOfflineVersion() { return this.localVersions.filter(v => !v.catalogVersionId && !this.managedVersions.some(m => m.sourceHash === v.sourceHash)).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null; },
       managedUploadGroups() { return this.managedUpload?.duplicateGroups || []; },
       managedVisibleError() { return [this.managedVersionError, ...Object.values(this.managedOperationErrors)].filter(Boolean).join('\n'); },
@@ -373,6 +408,11 @@
       managedDeadlineTooltip(instant) { return this.managedFormatDeadline(instant); },
       managedTimestampTooltip(instant) { return instant ? this.managedFormatDate(instant) + ' local' : ''; },
       managedReminder(instant) { return reminder(instant, this.managedNow); },
+      managedVersionEnded(version) {
+        if (!this.cloudCanAccessAllLanguages) return !!version.assignedTeam?.ended;
+        const teamCount = version.teamCount || 12;
+        return teamCount > 0 && version.endedTeamCount >= teamCount;
+      },
       managedProgress(team) {
         const count = value => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
         const missing = count(team.counts?.missing), saved = count(team.counts?.saved);

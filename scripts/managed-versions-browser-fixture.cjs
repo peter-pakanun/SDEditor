@@ -107,6 +107,26 @@ async function run() {
       assert.equal(await target.evaluate(element => element === document.activeElement), true, 'Tooltip target is keyboard reachable');
       await page.getByRole('tooltip').waitFor(); assert.match(await page.getByRole('tooltip').textContent(), expected);
     };
+    const checkStatusVersion = async (page, name, { ended = false, deadline = false, online = false } = {}) => {
+      const label = page.locator('.workspaceStatus .versionStatusName');
+      await label.waitFor(); assert.equal(await label.textContent(), name);
+      assert.equal(await page.locator('.managedVersionBanner').count(), 0, 'No separate version banner');
+      assert.equal(await page.locator('.workspaceActions').getByRole('button', { name: /^(Versions|Version dashboard)$/ }).count(), 0, 'No duplicate header chooser');
+      await checkTooltip(page, label, /ZIP SHA-256: [a-f0-9]{64}/);
+      assert.equal(await page.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), online,
+        online ? 'Online versions disable Import ZIP' : 'Standalone Offline workspaces keep Import ZIP enabled');
+      assert.equal(await page.locator('.workspaceStatus .versionBadge.ended').count(), ended ? 1 : 0);
+      const reminder = page.locator('.workspaceStatus .versionDeadline');
+      assert.equal(await reminder.count(), deadline ? 1 : 0);
+      if (deadline) {
+        assert.equal(await reminder.evaluate(element => element.previousElementSibling?.classList.contains('saved')), true, 'Deadline immediately follows Saved counts');
+        await checkTooltip(page, reminder, /New Zealand.*local/);
+      }
+    };
+    const openStatusChooser = async page => {
+      await page.locator('.workspaceStatus .versionStatusName').click();
+      await page.getByRole('region', { name: 'Source versions' }).waitFor();
+    };
     const checkTranslatedDownload = async download => {
       assert.equal(download.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
       const collectedZip = await JSZip.loadAsync(readFileSync(await download.path()));
@@ -122,6 +142,12 @@ async function run() {
     await bootstrap(translator, 'thai'); await importOffline(translator);
     await translator.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
     const standaloneRoomId = await translator.evaluate(() => window.__managedFixtureApp._collaboration.snapshot().roomId);
+    const unnamedHash = await translator.evaluate(() => window.__managedFixtureApp.collaborationExportHash.slice(0, 12));
+    assert.match(unnamedHash, /^[a-f0-9]{12}$/); await checkStatusVersion(translator, unnamedHash);
+    await translator.evaluate(async () => { const vm = window.__managedFixtureApp; vm.importBaselineHashing = true; await vm.$nextTick(); });
+    await translator.locator('.workspaceStatus .collaborationHashSpinner').waitFor();
+    assert.equal(await translator.locator('.workspaceStatus .versionStatusName').count(), 0);
+    await translator.evaluate(async () => { const vm = window.__managedFixtureApp; vm.importBaselineHashing = false; await vm.$nextTick(); });
     await translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), source.filepath);
     await translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first().fill('ความเสียหายไฟที่แก้ไข');
     await translator.getByRole('button', { name: 'Save & close', exact: true }).click();
@@ -146,6 +172,9 @@ async function run() {
     assert.equal(await manager.locator('.teamVersionTable tbody tr').count(), 12);
     const version = await manager.evaluate(() => JSON.parse(JSON.stringify(window.__managedFixtureApp.managedSelectedVersion)));
     assert.equal(version.name, '2026-10-05_POE2'); assert.equal(version.isHead, true);
+    await translator.waitForFunction(() => window.__managedFixtureApp.managedImportZipDisabled);
+    assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), true,
+      'Manager publication adopts the active matching Offline workspace and disables Import ZIP');
     const thaiRow = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: /^Thai$/ }) });
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails?.teams.find(team => team.language === 'Thai')?.counts.saved === 1);
     assert.equal(await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').roomId), standaloneRoomId);
@@ -154,7 +183,10 @@ async function run() {
       await manager.keyboard.press('Tab');
       assert.equal(await manager.locator('html').getAttribute('data-theme'), theme);
       assert.equal(await manager.locator('.versionProgressTrack').count(), 12);
-      assert.equal(await manager.locator('.teamVersionTable thead th').count(), 5);
+      assert.equal(await manager.locator('.teamVersionTable thead th').count(), 4);
+      assert.equal(await manager.locator('.onlineVersions thead th').count(), 3);
+      const columnNames = await manager.locator('.versionTable th').allTextContents();
+      assert.equal(columnNames.some(name => /Window|Teams ended/i.test(name)), false, 'Window and collection-summary columns are removed');
       const progress = await thaiRow.locator('.versionProgress').evaluate(element => ({
         saved: element.getAttribute('aria-valuenow'), total: element.getAttribute('aria-valuemax'),
         widths: Array.from(element.querySelectorAll('.versionProgressTrack > span')).map(segment => parseFloat(segment.style.width)),
@@ -182,7 +214,8 @@ async function run() {
       await manager.screenshot({ path: join(directory, 'dashboard-' + theme + '.png'), fullPage: true });
     }
     results.push('Prepared upload discovers matching standalone Saved work/history/presence and reuses its room; 12-team combined progress, compact aligned badges, hover/keyboard tooltips in four themes');
-    await translator.evaluate(() => window.__managedFixtureApp.showVersionChooser());
+    await openStatusChooser(translator);
+    await translator.locator('.teamVersionTable tbody tr').first().waitFor();
     assert.equal(await translator.locator('.teamVersionTable tbody tr').count(), 1);
     assert.equal(await translator.getByRole('button', { name: 'Upload next version', exact: true }).count(), 0);
     await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
@@ -190,6 +223,18 @@ async function run() {
       const vm = window.__managedFixtureApp;
       return vm.sourceLoaded && vm.sourceIdentity && !vm.managedVersionBusy && !vm.versionStorageLoading && !vm.versionChooserVisible;
     });
+    await checkStatusVersion(translator, version.name, { deadline: true, online: true });
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
+      await checkStatusVersion(translator, version.name, { deadline: true, online: true });
+      assert.equal(await translator.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Footer fits in ' + theme);
+      await translator.screenshot({ path: join(directory, 'footer-' + theme + '.png'), fullPage: true });
+    }
+    await translator.setViewportSize({ width: 1100, height: 820 });
+    await checkStatusVersion(translator, version.name, { deadline: true, online: true });
+    assert.equal(await translator.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Footer fits a resized desktop window');
+    await translator.screenshot({ path: join(directory, 'footer-resized-desktop.png'), fullPage: true });
+    await translator.setViewportSize({ width: 1440, height: 1000 });
     await translator.evaluate(async filepath => { const vm = window.__managedFixtureApp; vm.inlineEditor = false; await vm.editFile(filepath); }, source.filepath);
     const field = translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first();
     await field.fill('ความเสียหายไฟที่แก้ไข');
@@ -197,6 +242,7 @@ async function run() {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await translator.keyboard.press('Tab');
       assert.equal(await translator.locator('html').getAttribute('data-theme'), theme);
+      await checkTooltip(translator, translator.locator('.editorVersionContext .versionStatusName'), /Import deadline:.*New Zealand/);
       assert.equal(await translator.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Editor fits ' + theme);
       await translator.screenshot({ path: join(directory, 'translator-' + theme + '.png'), fullPage: true });
     }
@@ -218,19 +264,39 @@ async function run() {
     assert.deepEqual(afterDownloadOnly.latestCollection, beforeDownloadOnly.latestCollection, 'Download only preserves ending collection/cutoff');
     const downloadSnapshot = afterDownloadOnly.collections.find(collection => collection.kind === 'download_only');
     assert.ok(downloadSnapshot?.downloadReady); assert.equal(downloadSnapshot.endWindow, false);
-    assert.equal(await thaiRow.locator('.versionBadge').textContent(), 'Open');
+    assert.equal(await thaiRow.locator('td').first().locator('.versionBadge.ended').count(), 0);
     results.push('Download only retains a Saved-only ZIP snapshot without changing the window or latest ending collection');
     const download = manager.waitForEvent('download');
     await thaiRow.getByRole('button', { name: 'Download and mark ended', exact: true }).click();
     await manager.locator('.appDialogConfirm').click();
     await checkTranslatedDownload(await download);
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').ended);
+    assert.equal(await thaiRow.locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
+    assert.equal(await manager.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').count(), 0,
+      'Manager version badge waits until every team ends');
+    const remainingTeams = await manager.evaluate(() => window.__managedFixtureApp.managedVersionDetails.teams.filter(team => !team.ended).map(team => team.language));
+    for (const language of remainingTeams) {
+      const row = manager.locator('.teamVersionTable tbody tr').filter({ has: manager.locator('td strong').filter({ hasText: new RegExp('^' + language + '$') }) });
+      await row.getByRole('button', { name: 'Mark ended — no saved files', exact: true }).click();
+      await manager.locator('.appDialogConfirm').click();
+      await manager.waitForFunction(language => {
+        const vm = window.__managedFixtureApp;
+        return !vm.managedVersionBusy && vm.managedVersionDetails.teams.find(team => team.language === language).ended;
+      }, language);
+    }
+    await manager.waitForFunction(() => window.__managedFixtureApp.managedVersions[0].endedTeamCount === 12);
+    assert.equal(await manager.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
     await translator.evaluate(async () => { await window.__managedFixtureApp.managedRefreshActive(); });
-    await translator.locator('.managedVersionBanner').filter({ hasText: 'Ended' }).waitFor();
+    await checkStatusVersion(translator, version.name, { ended: true, deadline: true, online: true });
+    await openStatusChooser(translator);
+    assert.equal(await translator.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
+    assert.equal(await translator.locator('.teamVersionTable tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
+    await translator.getByRole('button', { name: 'Open editor', exact: true }).click();
+    await translator.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy && !window.__managedFixtureApp.versionChooserVisible);
     const opening = translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), source.filepath);
     await translator.locator('.appDialogConfirm').filter({ hasText: 'Continue editing' }).click(); await opening;
     await translator.evaluate(async () => { await window.__managedFixtureApp.editorExit(); });
-    results.push('Immutable named collection download/end, live ended banner, editable warning flow');
+    results.push('First-column team/assigned-team/all-team Ended badges, footer name/deadline and tooltip, sole status-label chooser, hashing spinner and editable ended warning');
     await translator.route(apiOrigin + '/**', route => route.abort());
     await translator.reload();
     await translator.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady);
@@ -262,7 +328,7 @@ async function run() {
       const vm = window.__managedFixtureApp;
       return !vm.managedVersionBusy && !vm.versionChooserVisible && vm.sourceLoaded && vm.sourceIdentity === sourceHash;
     }, version.sourceHash);
-    await translator.locator('.managedVersionBanner').filter({ hasText: 'Ended' }).waitFor();
+    await checkStatusVersion(translator, version.name, { ended: true, deadline: true, online: true });
     const stored = await translator.evaluate(async () => {
       const vm = window.__managedFixtureApp; const scope = vm.managedWorkspaceScope();
       const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
@@ -283,7 +349,8 @@ async function run() {
       await vm.activateGameVersion('poe2', { checkMigration: false });
     });
     await importOffline(offline);
-    await offline.evaluate(() => window.__managedFixtureApp.showVersionChooser());
+    const offlineHash = await offline.evaluate(() => window.__managedFixtureApp.collaborationExportHash.slice(0, 12));
+    await checkStatusVersion(offline, offlineHash); await openStatusChooser(offline);
     await offline.locator('#offlineVersionName').fill('Local reference export');
     await offline.locator('#offlineVersionName').press('Enter');
     await offline.waitForFunction(() => window.__managedFixtureApp.managedOfflineVersion?.name === 'Local reference export');
@@ -291,12 +358,17 @@ async function run() {
     await offline.waitForFunction(() => window.__managedFixtureApp.sourceLoaded && !window.__managedFixtureApp.versionChooserVisible);
     assert.equal(await offline.evaluate(() => window.__managedFixtureApp.managedOfflineVersion?.name), 'Local reference export');
     assert.equal(await offline.evaluate(() => window.__managedFixtureApp.cloudSignedIn), false);
+    await checkStatusVersion(offline, 'Local reference export');
+    await openStatusChooser(offline);
+    await offline.getByRole('button', { name: 'Continue offline workspace', exact: true }).click();
+    await offline.waitForFunction(() => !window.__managedFixtureApp.versionStorageLoading && !window.__managedFixtureApp.versionChooserVisible);
     await offline.reload();
     await offline.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady);
     await offline.getByRole('button', { name: 'PoE2 Path of Exile 2', exact: true }).click();
     await offline.locator('#offlineVersionName').waitFor();
     assert.equal(await offline.locator('#offlineVersionName').inputValue(), 'Local reference export');
     results.push('Unsigned Offline card keeps original import warnings, editable local name, keyboard naming and Continue workflow');
+    results.push('Import ZIP remains enabled for named/unnamed Offline workspaces and disabled for adopted, published, ended and cached Online versions');
     assert.deepEqual(failures, [], 'Browser script errors');
     console.log(JSON.stringify({ status: 'PASS', normalMode: true, browser: executablePath, results }, null, 2));
   } finally {

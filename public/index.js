@@ -4826,6 +4826,7 @@ const config = Vue.defineComponent({
       this.$refs.importUpdateZipFile?.click?.();
     },
     importZipClicked() {
+      if (this.managedImportZipDisabled) return;
       if ((this.inlineActive || this._inlineFinishing) && this.finishInlineSession) {
         return this.finishInlineSession({ promote: true }).then(done => done && this.importZipClicked());
       }

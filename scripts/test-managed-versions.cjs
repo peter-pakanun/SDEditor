@@ -103,6 +103,48 @@ test('filename sanitation preserves version identity and removes filesystem sepa
   assert.equal(Managed.filename('week\u0000name'), 'week_name');
 });
 
+test('status name prefers the current published name, retains its local alias in the tooltip and falls back to scoped local names or hash', () => {
+  const { app } = harness();
+  app.collaborationShortVersion = 'bbbbbbbbbbbb'; app.collaborationExportHash = hash('b');
+  app.localVersions = [{ accountId: 'alice', game: 'poe2', branchId: 'default', sourceHash: hash('a'), name: 'My offline alias' }];
+  assert.equal(app.managedStatusName, '2026-10-05_POE2');
+  assert.match(app.managedStatusTooltip, /Local alias: My offline alias/);
+  assert.match(app.managedStatusTooltip, new RegExp('ZIP SHA-256: ' + hash('b')));
+  assert.match(app.managedStatusTooltip, /Import deadline:/);
+  app.managedVersions = []; app.managedVersionDetails = null;
+  assert.equal(app.managedStatusName, 'My offline alias');
+  app.localVersions[0].sourceHash = hash('c');
+  app.localDescs = { sourceHash: hash('c'), versionName: 'Wrong workspace' };
+  assert.equal(app.managedStatusName, 'bbbbbbbbbbbb');
+  app.collaborationShortVersion = ''; assert.equal(app.managedStatusName, hash('a').slice(0, 12));
+});
+
+test('status local names never come from another account, game or branch', () => {
+  const { app } = harness(); app.managedVersions = []; app.managedVersionDetails = null;
+  app.collaborationShortVersion = 'bbbbbbbbbbbb';
+  for (const incompatible of [{ accountId: 'bob' }, { game: 'poe1' }, { branchId: 'release' }]) {
+    app.localVersions = [{ accountId: 'alice', game: 'poe2', branchId: 'default', sourceHash: hash('a'), name: 'Other workspace', ...incompatible }];
+    assert.equal(app.managedStatusName, 'bbbbbbbbbbbb');
+  }
+});
+
+test('version ended badge represents all teams for managers and the assigned team for translators', () => {
+  const { app } = harness();
+  assert.equal(app.managedVersionEnded(version({ teamCount: 12, endedTeamCount: 11 })), false);
+  assert.equal(app.managedVersionEnded(version({ teamCount: 12, endedTeamCount: 12 })), true);
+  app.cloudCanAccessAllLanguages = false;
+  assert.equal(app.managedVersionEnded(version({ endedTeamCount: 1, assignedTeam: { ended: true } })), true);
+  assert.equal(app.managedVersionEnded(version({ endedTeamCount: 12, assignedTeam: { ended: false } })), false);
+});
+
+test('status tooltips retain ended and withdrawn guidance with the exact active deadline', () => {
+  const { app } = harness(); app.managedVersionDetails.teams[0].ended = true;
+  assert.match(app.managedStatusTooltip, /Ended · further saves are outside the last collection/);
+  assert.match(app.managedStatusDeadlineTooltip, /New Zealand/); assert.match(app.managedStatusDeadlineTooltip, /Ended/);
+  app.managedVersions[0].status = 'withdrawn';
+  assert.match(app.managedStatusTooltip, /Withdrawn · shared saves paused; local work retained/);
+});
+
 test('deadline reminders stay passive and progress uses Missing plus Saved with Revised inside Saved', () => {
   const { app, events, requests } = harness();
   const before = copy(app.managedVersionDetails), deadline = '2026-10-11T20:00:00Z';
@@ -350,7 +392,7 @@ test('simultaneous ended edit attempts share one warning dialog', async () => {
   assert.deepEqual(await Promise.all([first, second]), [true, true]);
 });
 
-test('withdrawing the active translator version retains its recovery banner outside ordinary listings', async () => {
+test('withdrawing the active translator version retains its recovery context outside ordinary listings', async () => {
   const withdrawn = version({ status: 'withdrawn', isHead: false });
   const { app } = harness({ request: async route => {
     if (route.startsWith('/v1/versions?')) return { branch: { id: 'default' }, versions: [] };
