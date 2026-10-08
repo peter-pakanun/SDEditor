@@ -5601,8 +5601,15 @@ const config = Vue.defineComponent({
       const row = target?.matches?.('tr[data-filepath]') ? target : target?.closest?.('tr[data-filepath]');
       const isRow = row && region?.contains(target);
       if (event.defaultPrevented || (target !== region && !isRow) || this.isImeComposingEvent(event)
-        || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
         || this.fileListNavigationBlocked() || this.isFileNavigationInput(target)) return;
+      if (this.inlineEditor && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+        && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1, row?.dataset?.filepath || this.selectedFilepath);
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter'].includes(event.key)) return;
       if (event.key === 'Enter' && target !== region && target !== row) return;
       const rows = this.descsDisplay;

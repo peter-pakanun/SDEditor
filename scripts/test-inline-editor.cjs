@@ -1440,3 +1440,155 @@ test('a manual row click queued during keyboard draft persistence retains manual
   assert.equal(rows[0].translations.Thai[0], 'save outgoing draft before manual selection');
   assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
 });
+
+function fileTableArrowEvent(editor, filepath = editor.selectedFilepath, changes = {}) {
+  const row = { tagName: 'TR', dataset: { filepath },
+    matches: selector => selector === 'tr[data-filepath]',
+    closest: selector => selector === 'tr[data-filepath]' ? row : null };
+  return inlineArrowEvent(filepath, { target: filepath == null ? editor.$refs.fileTableRegion : row, ...changes });
+}
+
+async function dispatchInlineNavigationKey(editor, event, translation = false) {
+  const navigate = editor.moveInlineFile;
+  let pending;
+  editor.moveInlineFile = function (...args) { return pending = navigate.apply(this, args); };
+  try {
+    if (translation) editor.translationKeydown(event, 0);
+    else editor.fileTableKeydown(event);
+    return pending ? await pending : undefined;
+  } finally { editor.moveInlineFile = navigate; }
+}
+
+test('Ctrl+Arrow from the file table, rows and non-input row descendants uses inline navigation', () => {
+  const { editor, desc } = harness(), requests = [];
+  editor.selectedFilepath = desc.filepath;
+  editor.moveInlineFile = (direction, filepath) => { requests.push({ direction, filepath }); return Promise.resolve(true); };
+  for (const [filepath, key] of [[null, 'ArrowDown'], [desc.filepath, 'ArrowUp']]) {
+    const event = fileTableArrowEvent(editor, filepath, { key });
+    editor.fileTableKeydown(event);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+  }
+  const row = fileTableArrowEvent(editor, desc.filepath).target;
+  const descendant = fileTableArrowEvent(editor, desc.filepath,
+    { target: { tagName: 'BUTTON', closest: selector => selector === 'tr[data-filepath]' ? row : null } });
+  editor.fileTableKeydown(descendant);
+  assert.equal(descendant.defaultPrevented, true); assert.equal(descendant.propagationStopped, true);
+  assert.deepEqual(requests, [{ direction: 1, filepath: desc.filepath },
+    { direction: -1, filepath: desc.filepath }, { direction: 1, filepath: desc.filepath }]);
+});
+
+test('table Ctrl+Arrow leaves editable controls, IME, modified shortcuts and unrelated surfaces alone', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.moveInlineFile = () => assert.fail('An unrelated or native key must not navigate inline rows');
+  const row = fileTableArrowEvent(editor, desc.filepath).target;
+  const editable = tagName => ({ tagName, closest: selector => selector === 'tr[data-filepath]' ? row : null });
+  for (const changes of [{ altKey: true }, { metaKey: true }, { shiftKey: true },
+    { isComposing: true }, { keyCode: 229 }, { key: 'ArrowLeft' }, { key: 'Home' },
+    { target: editable('INPUT') }, { target: editable('TEXTAREA') }, { target: editable('SELECT') },
+    { target: { ...editable('DIV'), isContentEditable: true } },
+    { target: { tagName: 'BUTTON', closest: () => null } }]) {
+    const event = fileTableArrowEvent(editor, desc.filepath, changes);
+    editor.fileTableKeydown(event);
+    assert.equal(!!event.defaultPrevented, false); assert.equal(!!event.propagationStopped, false);
+  }
+  const prevented = fileTableArrowEvent(editor, desc.filepath, { defaultPrevented: true });
+  editor.fileTableKeydown(prevented); assert.equal(!!prevented.propagationStopped, false);
+  for (const [property, value] of [['inlineEditor', false], ['editorVisible', true], ['importDialogVisible', true]]) {
+    const before = editor[property]; editor[property] = value;
+    const event = fileTableArrowEvent(editor, desc.filepath);
+    editor.fileTableKeydown(event);
+    assert.equal(!!event.defaultPrevented, false, property); assert.equal(!!event.propagationStopped, false, property);
+    editor[property] = before;
+  }
+});
+
+test('a translation Ctrl+Arrow event cannot navigate twice when it reaches the file table handler', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  let requests = 0;
+  editor.moveInlineFile = async () => { requests++; return true; };
+  const event = inlineArrowEvent(desc.filepath);
+  editor.translationKeydown(event, 0);
+  editor.fileTableKeydown(event);
+  assert.equal(requests, 1); assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+});
+
+test('Ctrl+Down starts from an inactive table selection and continues from translation and row focus', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  assert.equal(await editor.finishInlineSession({ promote: false }), true);
+  assert.equal(editor.inlineActive, false);
+  const fromTable = fileTableArrowEvent(editor, null);
+  assert.equal(await dispatchInlineNavigationKey(editor, fromTable), true);
+  assert.equal(fromTable.defaultPrevented, true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(editor.selectedFilepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+  assert.equal(await dispatchInlineNavigationKey(editor, inlineArrowEvent(rows[1].filepath), true), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(editor.selectedFilepath, rows[2].filepath); assert.equal(editor.currentPage, 3);
+  const finalDown = fileTableArrowEvent(editor, rows[2].filepath);
+  assert.equal(await dispatchInlineNavigationKey(editor, finalDown), false);
+  assert.equal(finalDown.defaultPrevented, true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(calls.translationFocus.length, 2, 'The last row must not wrap or take focus again');
+  assert.equal(await dispatchInlineNavigationKey(editor, fileTableArrowEvent(editor, rows[2].filepath, { key: 'ArrowUp' })), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+});
+
+test('a focused file row anchors Ctrl+Arrow even when selection and the active draft are on another row', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'preserve the outgoing file';
+  assert.equal(editor.selectedFilepath, rows[0].filepath);
+  assert.equal(await dispatchInlineNavigationKey(editor, fileTableArrowEvent(editor, rows[1].filepath)), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(editor.selectedFilepath, rows[2].filepath); assert.equal(editor.currentPage, 3);
+  assert.equal(rows[0].translations.Thai[0], 'preserve the outgoing file'); assert.equal(calls.promotions.length, 1);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+});
+
+test('inactive table navigation skips occupied rows without reopening an outgoing editor after denied claims', async () => {
+  for (const denyAll of [false, true]) {
+    const { editor, rows, calls } = await inlineNavigationHarness();
+    assert.equal(await editor.finishInlineSession({ promote: false }), true);
+    const claims = [];
+    editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing(filepath) { return !denyAll && filepath === rows[1].filepath; } };
+    editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return !denyAll; };
+    assert.equal(await dispatchInlineNavigationKey(editor, fileTableArrowEvent(editor, null)), !denyAll);
+    if (denyAll) {
+      assert.equal(editor.inlineActive, false);
+      assert.equal(calls.translationFocus.length, 0);
+      assert.deepEqual(claims, [{ filepath: rows[1].filepath, automatic: true }, { filepath: rows[2].filepath, automatic: true }]);
+    } else {
+      assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+      assert.deepEqual(claims, [{ filepath: rows[2].filepath, automatic: true }]);
+    }
+    assert.equal(editor.navigationBusy, false);
+  }
+});
+
+test('table Ctrl+Arrow preserves an invalid outgoing draft through the normal inline workflow', async () => {
+  const { editor, rows, calls, records } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'invalid table-origin draft';
+  editor.editorSaveFindings = () => ({ errors: [{ message: 'Broken tag' }], warnings: [], confirmations: [] });
+  assert.equal(await dispatchInlineNavigationKey(editor, fileTableArrowEvent(editor, null)), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath);
+  assert.equal(editor.inlineDraftRows[rows[0].filepath].translations[0], 'invalid table-origin draft');
+  assert.equal([...records.values()][0].state, 'active');
+  assert.equal(editor.inlineFindingsFor(rows[0].filepath)[0].level, 'error');
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.alerts.length, 0);
+});
+
+test('pending table Ctrl+Arrow does not move again or steal focus from a newer manual row selection', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  assert.equal(await editor.finishInlineSession({ promote: false }), true);
+  const gate = deferred(); let reads = 0;
+  store.getTranslationDraft = async () => { if (++reads === 1) await gate.promise; return null; };
+  const navigating = dispatchInlineNavigationKey(editor, fileTableArrowEvent(editor, null));
+  await tick(); assert.equal(editor.navigationBusy, true);
+  const repeated = fileTableArrowEvent(editor, rows[1].filepath);
+  editor.fileTableKeydown(repeated); assert.equal(repeated.defaultPrevented, true);
+  assert.equal(reads, 1, 'A repeat during hydration must not start another destination');
+  const selecting = editor.activateInlineRow(rows[2].filepath); await tick();
+  gate.resolve(); assert.equal(await navigating, false); await selecting; await tick();
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+});

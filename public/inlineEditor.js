@@ -333,12 +333,12 @@
         this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
         return true;
       },
-      async moveInlineFile(direction) {
-        if (!this.inlineActive || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
-          || this.editorTranslationReadOnly || this._importingSource || this.versionStorageLoading
+      async moveInlineFile(direction, path = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : this.selectedFilepath) {
+        if (!this.inlineEditor || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
+          || (this.inlineActive && this.editorTranslationReadOnly) || this._importingSource || this.versionStorageLoading
           || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return false;
-        const path = this.editorCurrentEditingDesc?.filepath;
         if (!path || ![-1, 1].includes(direction)) return false;
+        const outgoingPath = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : null;
         const scope = this.editorDraftScope(path), context = this.captureCollaborationContext?.();
         const cancelRevision = this._editorOpenCancelRevision || 0;
         const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context))
@@ -358,7 +358,11 @@
         };
         // Preserve the outgoing anchor before promotion can remove it from a filter.
         const rows = this.filteredDescs.slice();
-        if (!rows.some(row => row.filepath === path)) rows.push(this.descsDisplay.find(row => row.filepath === path) || this.editorCurrentEditingDesc);
+        if (!rows.some(row => row.filepath === path)) {
+          const anchorRow = this.descsDisplay.find(row => row.filepath === path) || this.getDescByFilepath(path);
+          if (!anchorRow) return false;
+          rows.push(anchorRow);
+        }
         const modifier = this.currentSortDir === 'desc' ? -1 : 1;
         rows.sort((a, b) => a[this.currentSort] < b[this.currentSort] ? -modifier : a[this.currentSort] > b[this.currentSort] ? modifier : 0);
         const candidates = [], anchor = rows.findIndex(row => row.filepath === path);
@@ -379,8 +383,8 @@
             return await focusFile(filepath);
           }
           // A claim can lose the occupancy race after the outgoing row was closed.
-          if (!this.inlineActive && current() && this._inlineRequestedPath === lastRequested
-            && await this.activateInlineRow(path, { automatic: true })) await focusFile(path, originalFocus.index, originalFocus.column);
+          if (outgoingPath && !this.inlineActive && current() && this._inlineRequestedPath === lastRequested
+            && await this.activateInlineRow(outgoingPath, { automatic: true })) await focusFile(outgoingPath, originalFocus.index, originalFocus.column);
           return false;
         } finally { this.navigationBusy = false; }
       },
