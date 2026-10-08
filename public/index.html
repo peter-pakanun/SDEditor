@@ -288,7 +288,10 @@
       <div class="versionChooserColumns">
         <section class="versionPanel onlineVersions" aria-label="Online versions">
           <header class="versionPanelHeading"><h2>Online</h2><label v-if="cloudCanAccessAllLanguages"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
-          <p v-if="!cloudSignedIn" class="versionMuted">Sign in to select manager-published versions. Your offline workspace remains available.</p>
+          <template v-if="!cloudSignedIn">
+            <p class="versionMuted">Sign in to select manager-published versions. Your offline workspace remains available.</p>
+            <button class="primaryAction" @click="cloudLogin" :disabled="cloudBusy">Sign in with Google</button>
+          </template>
           <p v-else-if="!managedOnlineAvailable" class="versionMuted">Your account needs a team language assignment before online versions are available.</p>
           <p v-if="managedVersionsUnavailable && managedVersions.length" class="versionMuted">Showing versions cached in this browser. Downloaded versions remain available offline.</p>
           <div v-if="managedVisibleVersions.length" class="versionTableScroll">
