@@ -118,10 +118,21 @@
       schedule();
       return drain();
     }
+    function discardRejectedDraft(id) {
+      const index = jobs.findIndex(job => job.id === id);
+      const job = jobs[index];
+      if (!job || job.durable || job.status !== 'failed' || !job.batch.draft
+        || !['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(job.error?.code)) return false;
+      // These transactional rejections made no durable change. The separate
+      // local draft remains recoverable and needs a fresh, reviewed submission.
+      jobs.splice(index, 1);
+      notify(); settle(); schedule();
+      return true;
+    }
     function overlay(scope, filepath) {
       for (let index = jobs.length - 1; index >= 0; index--) {
         const job = jobs[index];
-        if (job.durable) continue;
+        if (job.durable || job.batch.deferDisplay) continue;
         if (!matchesScope(scope, job.batch)) continue;
         const file = job.batch.files?.find(file => file.filepath === filepath);
         if (file) return file;
@@ -135,7 +146,7 @@
       const error = new Error('The local save queue is closed.');
       for (const waiter of waiters.splice(0)) waiter.reject(error);
     }
-    return { enqueue, retry, drain, overlay, pendingFor: overlay, snapshot, dispose };
+    return { enqueue, retry, drain, discardRejectedDraft, overlay, pendingFor: overlay, snapshot, dispose };
   }
 
   return { create, scopeKey };

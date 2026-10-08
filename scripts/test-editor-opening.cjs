@@ -771,6 +771,23 @@ test('dictionary focus transitions retain editing order through fields and rows,
   assert.equal(editor.dictionaryEditOrder.length, 0);
 });
 
+test('inline Dictionary focus fallback preserves row order when relatedTarget is unavailable', async () => {
+  const { editor, document } = loadEditor();
+  editor.editorVisible = false;
+  editor.inlineActive = true;
+  editor.sideTab = 'dictionary';
+  const entry = editor.dictionary[119];
+  const first = dictionaryField(entry._id), replacement = dictionaryField(entry._id);
+  document.activeElement = first;
+  editor.dictionaryEntryFocusIn({ target: first });
+  const order = Array.from(editor.dictionaryEditOrder);
+  editor.dictionaryEntryFocusOut({ relatedTarget: null });
+  document.activeElement = replacement;
+  await editor.$nextTick();
+  assert.equal(editor.dictionaryEditingId, entry._id);
+  assert.deepEqual(Array.from(editor.dictionaryEditOrder), order);
+});
+
 test('editing a filtered dictionary result keeps its row visible when its text stops matching the filter', async () => {
   const { editor, config, document } = loadEditor();
   editor.editorVisible = true;

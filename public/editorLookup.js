@@ -170,7 +170,7 @@
       },
       lookupResults() {
         // Wait for an applied nonempty query before indexing the corpus.
-        if (!this.editorVisible || this.sideTab !== 'lookup' || !this.lookupHasAppliedQuery) return [];
+        if (!(this.editorSessionActive ?? this.editorVisible) || this.sideTab !== 'lookup' || !this.lookupHasAppliedQuery) return [];
         const revision = this.lookupRevision;
         const lang = this.lookupActiveLanguage;
         const source = this.descs;
@@ -216,7 +216,7 @@
         });
       },
       lookupSelectedReference() {
-        if (!this.editorVisible || this.sideTab !== 'lookup' || !this.lookupSelectedFilepath) return null;
+        if (!(this.editorSessionActive ?? this.editorVisible) || this.sideTab !== 'lookup' || !this.lookupSelectedFilepath) return null;
         // Depend on the active index as well as the live text, so refreshed saved
         // translations update both matching results and the selected reference.
         this.lookupResults;
@@ -231,13 +231,13 @@
       lookupLanguage() { this.lookupApplySearch(); },
       lookupScope() { this.lookupApplySearch(); },
       lookupPageCount(count) {
-        if (this.editorVisible && this.sideTab === 'lookup') this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
+        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup') this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
       },
       lookupLanguages(languages) {
         if (this.lookupLanguage && !languages.includes(this.lookupLanguage)) this.lookupLanguage = '';
       },
       lookupResults(results) {
-        if (this.editorVisible && this.sideTab === 'lookup' && this.lookupSelectedFilepath
+        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup' && this.lookupSelectedFilepath
           && !results.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
@@ -260,7 +260,7 @@
         this._editorLookupSearchTimer = null;
         this.lookupAppliedQuery = this.lookupQuery;
         this.lookupPage = 1;
-        if (this.editorVisible && this.sideTab === 'lookup' && this.lookupSelectedFilepath
+        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup' && this.lookupSelectedFilepath
           && !this.lookupResults.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
         this.$nextTick(() => { if (this.$refs.lookupResultsList) this.$refs.lookupResultsList.scrollTop = 0; });
       },

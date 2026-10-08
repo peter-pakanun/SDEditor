@@ -17,7 +17,7 @@
   const b64url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const mixin = {
     data() { return {
-      cloudUser: null, cloudSignedIn: false, cloudStatus: '', cloudError: false, cloudWarning: false,
+      cloudUser: null, cloudProfileId: 'guest', cloudSignedIn: false, cloudStatus: '', cloudError: false, cloudWarning: false,
       cloudBusy: false, cloudLanguageSwitching: false, cloudStorageError: '', cloudConflicts: [], cloudRevision: 0,
       cloudResolverVisible: false, cloudConflictIndex: 0, cloudDefinitionsChoice: '', cloudNoteChoice: '',
       cloudAdminVisible: false, cloudAdminUsers: [], cloudNeedsDictionaryLanguage: false, cloudRecoveryCount: 0,
@@ -56,6 +56,7 @@
       async confirmSettingsImport() {
         if (this.settingsImportConfirm !== 'YES' || !this.settingsImportDraft) return;
         try {
+          if (await this.flushEditorDraft?.() === false) return;
           if (this._cloud) { if (!await this.cloudImport(this.settingsImportDraft)) return; }
           else this.importSettings(this.settingsImportDraft);
           this.settingsImportDraft = null;
@@ -69,7 +70,21 @@
       },
       async cloudApply(snapshot) {
         if (!snapshot) return;
+        const settings = window.CloudSync.completeSettings(snapshot.settings);
+        const oldUser = this.cloudUser || {}, nextUser = snapshot.user || {};
+        const nextProfile = snapshot.profileId || nextUser.id || 'guest';
+        const scopeChanged = this.cloudSignedIn !== snapshot.signedIn || this.lang !== settings.lang
+          || (this.cloudProfileId || oldUser.id || 'guest') !== nextProfile
+          || ['id', 'language', 'assignmentVersion', 'role', 'isAdmin'].some(key => oldUser[key] !== nextUser[key]);
+        if (scopeChanged && (this.editorSessionActive ?? this.editorVisible)) {
+          // Capture the outgoing draft before applying new account/access state.
+          // Session detachment captures its immutable scope synchronously; an
+          // unsolicited account update must not wait for an old storage write.
+          const flushing = this.detachEditorSessionForScopeChange?.() || this.flushEditorDraft?.();
+          Promise.resolve(flushing).catch(error => { this.cloudStorageError = 'Could not preserve the previous editor draft: ' + error.message; });
+        }
         if (!same(this.cloudUser, snapshot.user)) this.cloudUser = snapshot.user;
+        this.cloudProfileId = nextProfile;
         this.cloudSignedIn = snapshot.signedIn;
         const prior = this.cloudConflict;
         const priorRevision = this.cloudRevision;
@@ -82,10 +97,12 @@
         if (!same(prior, this.cloudConflict) || priorRevision !== snapshot.revision) {
           this.cloudDefinitionsChoice = ''; this.cloudNoteChoice = '';
         }
-        const settings = window.CloudSync.completeSettings(snapshot.settings);
         const rawDictionary = typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
         const dictionaryChanged = Object.hasOwn(snapshot, 'dictionary') && !same(rawDictionary, snapshot.dictionary);
-        if (!dictionaryChanged && same(window.CloudSync.preferences(this), settings) && this.editorClipboard === snapshot.editorClipboard) return;
+        if (!dictionaryChanged && same(window.CloudSync.preferences(this), settings) && this.editorClipboard === snapshot.editorClipboard) {
+          if (scopeChanged) await this.loadEditorDrafts?.();
+          return;
+        }
         const payload = { ...settings, dictionary: dictionaryChanged ? snapshot.dictionary : this.dictionary, editorClipboard: snapshot.editorClipboard };
         if (same(this.editorRegexes, payload.editorRegexes)) payload.editorRegexes = this.editorRegexes;
         this._cloudApplying = true;
@@ -94,6 +111,7 @@
           if (!this._cloudInitializing && this.needsInitialSettings && this.lang) this.showSetting = true;
           this.needsInitialSettings = !this.lang;
           await this.$nextTick();
+          if (scopeChanged) await this.loadEditorDrafts?.();
         } finally { this._cloudApplying = false; }
       },
       async initializeCloud(legacy) {
@@ -173,7 +191,7 @@
       },
       async cloudSelectLanguage(language, previous) {
         if (!this._cloud || this._cloudApplying) return true;
-        if (await this.flushScheduledSettingsSave?.() === false) {
+        if (await this.flushEditorDraft?.() === false || await this.flushScheduledSettingsSave?.() === false) {
           this._cloudApplying = true;
           try { this.lang = previous; await this.$nextTick(); }
           finally { this._cloudApplying = false; }
@@ -194,6 +212,7 @@
         finally { await this.$nextTick(); this._cloudApplying = false; this.cloudLanguageSwitching = false; }
       },
       async cloudImport(payload) {
+        if (await this.flushEditorDraft?.() === false) return false;
         if (await this.flushScheduledSettingsSave?.() === false) return false;
         this._cloudApplying = true;
         try {
@@ -210,6 +229,7 @@
         const popup = window.open('about:blank', 'sdeditor-google-login', 'width=540,height=720');
         this.cloudBusy = true;
         try {
+          if (await this.flushEditorDraft?.() === false) throw new Error('Save the local editor draft before signing in.');
           if (!await this.saveSettings()) throw new Error('Save local settings before signing in.');
           const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
           const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
@@ -242,6 +262,7 @@
         const saved = JSON.parse(sessionStorage.getItem('sdeditor-login') || 'null');
         if (!saved || saved.state !== state || Date.now() - saved.at > 10 * 60 * 1000) throw new Error('Login expired. Please sign in again.');
         const result = await this._cloud.request('/auth/exchange', { method: 'POST', body: { code, verifier: saved.verifier } });
+        if (await this.flushEditorDraft?.() === false) throw new Error('Save the local editor draft before switching accounts.');
         if (!await this.saveSettings()) throw new Error('Save local settings before switching accounts.');
         sessionStorage.removeItem('sdeditor-login');
         await this._cloud.acceptLogin(result);
@@ -251,6 +272,7 @@
       async cloudLogout() {
         this.cloudBusy = true;
         try {
+          if (await this.flushEditorDraft?.() === false) return;
           if (this.waitForPendingSaves && !await this.waitForPendingSaves()) return;
           if (!await this.saveSettings()) return;
           await this._cloud.logout(); this.cloudResolverVisible = false;

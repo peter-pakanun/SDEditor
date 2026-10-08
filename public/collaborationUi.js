@@ -136,6 +136,8 @@
         const context = scope();
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
         if (context !== scope()) return;
+        if (this.inlineActive) await this.finishInlineSession?.({ promote: true });
+        if (this.inlineActive || context !== scope()) return;
         if (this.editorVisible) await this.editorExit();
         if (this.editorVisible || context !== scope()) return;
         clearTimeout(this._fileSearchTimer);
@@ -195,10 +197,24 @@
       },
       async collaborationOpenConflicts() {
         if (!this.collaborationConflicts.length) return;
-        this._collaborationConflictFocus = document.activeElement;
         const context = this.collaborationContext;
+        let targetId;
+        if ((this.inlineEditor || this.inlineActive) && !this.editorVisible) {
+          // The footer receives focus before its click, which can already be
+          // finishing the inline row. Finish that write before reopening its
+          // durable draft in the full editor for the shared comparison.
+          if (this._inlineFinishing && !await this._inlineFinishing) return;
+          if (context !== this.collaborationContext || !this.collaborationConflicts.length) return;
+          const target = this.collaborationConflicts.find(conflict => conflict.filepath === this.selectedFilepath)
+            || this.collaborationConflicts[0];
+          targetId = target.id;
+          if (!await this.openInlineFullEditor?.(target.filepath)) return;
+        }
+        if (context !== this.collaborationContext || !this.collaborationConflicts.length) return;
+        this._collaborationConflictFocus = document.activeElement;
         this.collaborationConflictVisible = true;
-        this.collaborationSelectConflict(this.collaborationConflict?.id || this.collaborationConflicts[0].id);
+        this.collaborationSelectConflict(this.collaborationConflicts.find(conflict => conflict.id === targetId)?.id
+          || this.collaborationConflict?.id || this.collaborationConflicts[0].id);
         await this.$nextTick();
         if (!this.collaborationConflictVisible || context !== this.collaborationContext) return;
         const dialog = this.$refs.collaborationConflictDialog;

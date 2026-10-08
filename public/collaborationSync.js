@@ -31,7 +31,7 @@
       this.state = null; this.key = null; this.epoch = 0; this.connected = false; this.disconnected = false; this.hashing = false;
       this.peers = []; this.sessionId = null; this.selected = null; this.editing = null;
       this.away = false;
-      this.claims = new Map(); this.running = null; this.socket = null;
+      this.claims = new Map(); this.claimGeneration = 0; this.running = null; this.socket = null;
       this.socketOpening = null; this.presenceError = null;
       this.timer = null; this.heartbeat = null; this.backoff = 1000;
       this.destroyed = false;
@@ -1264,7 +1264,7 @@
         if (this.editing) {
           const filepath = this.editing;
           this.claim(filepath).then(result => {
-            if (!result.granted && this.current(epoch)) this.onEditingConflict({ filepath, peers: result.peers });
+            if (!result.granted && !result.stale && this.current(epoch) && this.editing === filepath) this.onEditingConflict({ filepath, peers: result.peers });
           }).catch(error => { if (this.current(epoch)) this.status(error.message, true); });
         }
       };
@@ -1278,7 +1278,12 @@
         } else if (message.type === 'welcome') { this.sessionId = message.sessionId; this.notify(); }
         else if (message.type === 'claim-result') {
           const pending = this.claims.get(message.requestId);
-          if (pending) { clearTimeout(pending.timer); this.claims.delete(message.requestId); if (message.granted) this.editing = pending.filepath; pending.resolve({ granted: !!message.granted, peers: message.peers || [] }); }
+          if (pending) {
+            clearTimeout(pending.timer); this.claims.delete(message.requestId);
+            const stale = pending.generation !== this.claimGeneration;
+            if (message.granted && !stale) this.editing = pending.filepath;
+            pending.resolve({ granted: !!message.granted && !stale, peers: message.peers || [], ...(stale ? { stale: true } : {}) });
+          }
         } else if (message.type === 'changed' && (!Number.isSafeInteger(message.sequence) || message.sequence > (this.room()?.sequence || 0))) { this.retry(); }
         else if (message.type === 'dropped_changed' && message.game === this.room()?.identity.game && message.language === this.room()?.identity.language) {
           this.lastDroppedSync = 0; this.retry();
@@ -1307,17 +1312,18 @@
     editingPeers(filepath) { return this.peers.filter(peer => peer.sessionId !== this.sessionId && peer.editing === filepath); }
     isEditing(filepath) { return this.editingPeers(filepath).length > 0; }
     claim(filepath, { force = false } = {}) {
+      const generation = ++this.claimGeneration;
       if (!this.socket || !this.connected) { this.editing = filepath; return Promise.resolve({ granted: true, peers: [], offline: true }); }
       const requestId = this.uuid();
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => { this.claims.delete(requestId); reject(new Error('Could not confirm editing availability. Try again.')); }, 8000);
-        timer.unref?.(); this.claims.set(requestId, { resolve, reject, timer, filepath });
+        timer.unref?.(); this.claims.set(requestId, { resolve, reject, timer, filepath, generation });
         if (!this.send({ type: 'claim', requestId, filepath, force })) {
           clearTimeout(timer); this.claims.delete(requestId); resolve({ granted: true, peers: [], offline: true });
         }
       });
     }
-    leaveEdit() { this.editing = null; this.send({ type: 'release' }); }
+    leaveEdit() { this.claimGeneration++; this.editing = null; this.send({ type: 'release' }); }
     closeSocket() {
       this.socketOpening = null;
       const socket = this.socket; this.socket = null;

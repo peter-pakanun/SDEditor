@@ -10,7 +10,7 @@ function harness() {
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} },
     CollaborationProtocol: require('../public/collaborationProtocol.js'),
     OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(structuredClone({ workspace, revisions, game })); } } };
-  const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout,
+  const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto,
     alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
@@ -175,6 +175,126 @@ function enablePending(h) {
   return { ...h, calls, downloads, acknowledge, warnsBeforeUnload };
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
+test('draft promotion publishes committed translations only after its durable acknowledgement', async () => {
+  const { editor: e, desc, calls, acknowledge } = enablePending(saveFixture());
+  const before = [...desc.translations.Thai];
+  const draft = { key: 'draft-scope', id: 'draft-id', revision: 3, base: { translations: before } };
+  let finished = false;
+  const saving = e.persistTranslationBatch([{ desc, lines: ['Promoted', 'Second'] }], 'save',
+    { draft, awaitDurable: true, inline: true }).then(result => { finished = true; return result; });
+  await pendingTick();
+  assert.equal(calls.length, 1);
+  assert.equal(finished, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].batch.draft)), draft);
+  assert.deepEqual(Array.from(desc.translations.Thai), before);
+  assert.equal(e._pendingSaves.overlay(e.pendingSaveScope(), desc.filepath), null);
+  acknowledge(calls[0], { draftConsumed: true });
+  const result = await saving;
+  assert.equal(result.durable, true); assert.equal(result.draftConsumed, true);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['Promoted', 'Second']);
+  assert.ok(e.localDescs.status[desc.filepath]);
+});
+
+test('rejected stale draft promotion retains committed text and releases only its failed queue entry', async () => {
+  const { editor: e, desc, calls } = enablePending(saveFixture());
+  const before = [...desc.translations.Thai];
+  const saving = e.persistTranslationBatch([{ desc, lines: ['Stale proposal', 'Second'] }], 'save',
+    { draft: { key: 'draft-scope', id: 'draft-id', revision: 1 }, awaitDurable: true, inline: true });
+  await pendingTick();
+  const rejected = assert.rejects(saving, error => error.code === 'DRAFT_BASE_CHANGED');
+  calls[0].reject(Object.assign(new Error('Committed base changed'), { code: 'DRAFT_BASE_CHANGED' }));
+  await rejected;
+  assert.deepEqual(Array.from(desc.translations.Thai), before);
+  assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+});
+
+test('inline promotion cannot implicitly approve an unresolved dropped translation', async () => {
+  const { editor: e, desc, writes, window } = droppedReviewFixture();
+  const candidate = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang);
+  await assert.rejects(e.persistTranslationBatch([{ desc, lines: ['Replacement', 'Second'] }], 'save', { inline: true }), /full editor.*dropped translation/);
+  assert.equal(writes.length, 0);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang).id, candidate.id);
+});
+
+test('known shared conflicts and committed-base changes retain drafts before either editor can enqueue staging', async t => {
+  for (const inline of [false, true]) for (const conflict of [false, true]) await t.test(`${inline ? 'inline' : 'full'} ${conflict ? 'conflict' : 'changed base'}`, async () => {
+    const { editor: e, desc, calls } = enablePending(saveFixture());
+    const before = [...desc.translations.Thai];
+    const draft = { key: 'draft-scope', id: 'draft-id', revision: 'draft-revision', base: { translations: before } };
+    e._draftSession = { record: draft };
+    e._collaboration = {
+      snapshot: () => ({ conflicts: conflict ? [{ filepath: desc.filepath }] : [] }),
+      fileBase: () => ({ filepath: desc.filepath, translations: conflict ? before : ['new committed peer text', before[1]] }),
+    };
+    await assert.rejects(e.persistTranslationBatch([{ desc, lines: ['My draft', 'Second'] }], 'save',
+      { draft, awaitDurable: true, inline }), error => error.code === (conflict ? 'DRAFT_CONFLICT' : 'DRAFT_BASE_CHANGED') && /full editor/.test(error.message));
+    assert.equal(calls.length, 0);
+    assert.equal(e._draftSession.record, draft);
+    assert.deepEqual(desc.translations.Thai, before);
+  });
+});
+
+test('post-commit draft bookkeeping cannot close a replacement editor session', async () => {
+  const { editor: e } = saveFixture();
+  let release, started;
+  const waiting = new Promise(resolve => { started = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  e._draftSession = { record: null };
+  e.editorDraftCommitted = async () => { started(); await gate; };
+  const saving = e.editorSave();
+  await waiting;
+  const replacement = description(2);
+  const blocks = [{ english: 'Other', translation: 'New session typing' }];
+  const session = { record: null };
+  e.editorCurrentEditingDesc = replacement; e.editorBlocks = blocks; e._draftSession = session;
+  e.editorVisible = true; e.editorDroppedCandidate = { id: 'new-session-candidate' };
+  release();
+  assert.equal(await saving, false);
+  assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks, blocks); assert.equal(e._draftSession, session);
+  assert.equal(e.editorDroppedCandidate.id, 'new-session-candidate');
+});
+
+test('a delayed inline blur cannot promote or clear a replacement scope session', async () => {
+  const h = saveFixture(), e = h.editor;
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/inlineEditor.js'), 'utf8'), h.context);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const original = { scope: { profile: 'first' }, record: { id: 'first' } };
+  const replacement = { scope: { profile: 'second' }, record: { id: 'second' } };
+  e.inlineActive = true; e.editorVisible = false; e._draftSession = original; e.inlineTransitionBusy = false;
+  e.flushEditorDraft = () => gate;
+  e.draftScopeCurrent = scope => scope.profile === e._draftSession.scope.profile;
+  let promotions = 0; e.editorSave = async () => { promotions++; return true; };
+  const finishing = h.window.InlineEditor.mixin.methods.finishInlineSession.call(e, { promote: true });
+  e._draftSession = replacement; release(true);
+  assert.equal(await finishing, false);
+  assert.equal(promotions, 0); assert.equal(e._draftSession, replacement); assert.equal(e.inlineActive, true);
+});
+
+test('reconnect claims serialize with newer inline row claims before releasing a stale result', async () => {
+  const { editor: e } = saveFixture();
+  const events = [], waiters = [];
+  const client = e._collaboration = {
+    editing: null,
+    claim(filepath) {
+      events.push('claim:' + filepath);
+      return new Promise(resolve => waiters.push(() => { client.editing = filepath; resolve({ granted: true }); }));
+    },
+    leaveEdit() { events.push('release:' + client.editing); client.editing = null; },
+  };
+  let originalCurrent = true;
+  const original = e.claimCollaborationFile('old-row.txt', false, () => originalCurrent);
+  originalCurrent = false;
+  const current = e.claimCollaborationFile('new-row.txt', false, () => true);
+  assert.deepEqual(events, ['claim:old-row.txt']);
+  waiters[0](); assert.equal(await original, false);
+  await Promise.resolve();
+  assert.deepEqual(events, ['claim:old-row.txt', 'release:old-row.txt', 'claim:new-row.txt']);
+  waiters[1](); assert.equal(await current, true);
+  assert.equal(client.editing, 'new-row.txt');
+  assert.equal(e._collaborationClaimPending, null);
+});
+
 test('F2 opens first available visible row, F1 opens last available visible row', async () => {
   const { editor: e, opened } = navigationFixture();
   e._collaboration = { isEditing: p => /001|020/.test(p) };
@@ -182,12 +302,30 @@ test('F2 opens first available visible row, F1 opens last available visible row'
   e.editorVisible = false; e.currentPage = 1;
   await e.saveAndSkipFile(true); assert.equal(opened[1], 'source/019.txt');
 });
+test('a claim superseded inside the client does not release or ask to override its newer claim', async () => {
+  const { editor: e } = saveFixture();
+  e._collaboration = {
+    claim: async () => ({ granted: false, stale: true }),
+    leaveEdit: () => assert.fail('The newer claim must remain active'),
+  };
+  e.appConfirm = () => assert.fail('An obsolete claim must not ask for an override');
+  assert.equal(await e.claimCollaborationFile('old-row.txt', false, () => false), false);
+  assert.equal(await e.claimCollaborationFile('old-row.txt'), false);
+});
 test('automatic navigation skips occupied pages without wrapping', async () => {
   const { editor: e, opened } = navigationFixture();
   e.editorVisible = true; e.editorCurrentEditingDesc = e.descs[0]; e.editorHaveChanges = () => false;
   e._collaboration = { isEditing: p => p !== 'source/041.txt' };
-  assert.equal(await e.saveAndSkipFile(), true); assert.equal(opened[0], 'source/041.txt'); assert.equal(e.currentPage, 3);
-  assert.equal(await e.saveAndSkipFile(), false); assert.equal(opened.length, 1); assert.match(e.collaborationNotice, /No available files/);
+  assert.equal(await e.saveAndSkipFile(false, true), true); assert.equal(opened[0], 'source/041.txt'); assert.equal(e.currentPage, 3);
+  assert.equal(await e.saveAndSkipFile(false, true), false); assert.equal(opened.length, 1); assert.match(e.collaborationNotice, /No available files/);
+});
+test('explicit save-and-next stages an unchanged file before navigation', async () => {
+  const { editor: e, opened } = navigationFixture(3);
+  e.editorVisible = true; e.editorCurrentEditingDesc = e.descs[0]; e.editorHaveChanges = () => false;
+  let saves = 0;
+  e.editorSave = async options => { assert.equal(options.close, false); saves++; return true; };
+  assert.equal(await e.saveAndSkipFile(), true);
+  assert.equal(saves, 1); assert.deepEqual(opened, ['source/002.txt']);
 });
 test('availability race continues to the next candidate and ignores selections without editing', async () => {
   const { editor: e, opened } = navigationFixture(4);
@@ -492,16 +630,37 @@ test('startup shared data preserves the ancestor of a draft opened before collab
   assert.deepEqual(merged.indexes, [0], 'An unseen startup edit must conflict with the older typing draft.');
 });
 
+test('peer updates preserve an inline draft and capture its ancestor before replacing committed text', () => {
+  const { editor: e, window } = saveFixture();
+  e.editorVisible = false; e.inlineActive = true;
+  const record = { id: 'private-draft', revision: 'draft-one', translations: ['ใหม่', 'สอง'], base: { translations: ['เดิม', 'สอง'] } };
+  e._draftSession = { record, base: record.base };
+  const session = e._draftSession, blocks = e.editorBlocks;
+  const shared = { filepath: e.descs[0].filepath, translations: ['ทีม', 'สอง'], trackedForExport: true, revision: 2 };
+  e._editorCollabBase = undefined; e._collaboration = { fileBase: () => shared };
+  e.applyCollaborationFiles([shared]);
+  assert.equal(e.editorSessionActive, true);
+  assert.equal(e.editorBlocks, blocks); assert.equal(e._draftSession, session); assert.equal(session.record, record);
+  assert.deepEqual(record.translations, ['ใหม่', 'สอง']);
+  assert.deepEqual([...e._editorCollabBase.translations], ['เดิม', 'สอง']);
+  assert.equal(e.descs[0].translations.Thai[0], 'ทีม');
+  const merged = window.CollaborationProtocol.mergeFile(e._editorCollabBase,
+    { ...e._editorCollabBase, translations: record.translations }, shared);
+  assert.deepEqual(merged.indexes, [0]);
+});
+
 test('empty and equivalent shared data preserve display snapshots and Lookup caches', () => {
   const { editor: e } = saveFixture(); let filters = 0;
   e.filterDesc = () => { filters++; };
   e.applyCollaborationFiles([]); assert.equal(filters, 0);
   const files = [{ filepath: e.descs[0].filepath, translations: ['เดิม', 'สอง'], trackedForExport: true, needsReview: false }];
   e.applyCollaborationFiles(files);
+  e.localDescs.staged[e.lang][e.descs[0].filepath].savedAt = 12345;
   filters = 0; const translation = e.descs[0].translations.Thai, saved = e.localDescs.descs[0].translations.Thai;
   e.applyCollaborationFiles(files);
   assert.equal(filters, 0); assert.equal(e.descs[0].translations.Thai, translation);
   assert.equal(e.localDescs.descs[0].translations.Thai, saved);
+  assert.equal(e.localDescs.staged[e.lang][e.descs[0].filepath].savedAt, 12345);
 });
 
 test('large shared batches refresh the list and diagnostics once while preserving the current draft', async () => {
@@ -1387,6 +1546,23 @@ test('the integrated consistency save preserves unrelated manual diagnostics and
   assert.equal(e.editorHaveChanges(), false);
 });
 
+test('reviewed shared conflict resolution advances and persists the clean draft base', async () => {
+  const { editor: e, desc } = saveFixture();
+  const yours = { filepath: desc.filepath, translations: e.editorBlocks.map(block => block.translation), trackedForExport: true, revision: 1 };
+  const accepted = { ...yours, translations: ['Reviewed shared translation', 'Reviewed second entry'], revision: 4 };
+  const conflict = { id: 'conflict-one', filepath: desc.filepath, yours };
+  const session = e._draftSession = { base: { translations: ['old base', 'old second'] } };
+  let flushed = 0;
+  e.flushEditorDraft = async () => { flushed++; assert.deepEqual(Array.from(session.base.translations), accepted.translations); return true; };
+  e._collaboration = {
+    snapshot: () => ({ conflicts: [conflict] }), fileBase: () => JSON.parse(JSON.stringify(accepted)),
+    resolve: async () => ({ status: 'synced' }),
+  };
+  assert.equal((await e.collabResolve('conflict-one', accepted.translations)).status, 'synced');
+  assert.equal(flushed, 1); assert.equal(e._draftSession, session);
+  assert.deepEqual(Array.from(e.editorBlocks, block => block.translation), accepted.translations);
+});
+
 test('conflict resolution preserves a newer typing draft and its prior ancestor for the next save', async () => {
   const { editor: e, desc, window } = saveFixture(), P = window.CollaborationProtocol;
   const yours = { filepath: desc.filepath, translations: ['เราเคยบันทึก', 'สอง'], needsReview: false, trackedForExport: true, revision: 1 };
@@ -1539,6 +1715,33 @@ test('beforeunload protects pending local writes and dirty drafts while durable 
   assert.equal(warnsBeforeUnload(), false);
   e.editorVisible = true; e.editorBlocks[0].translation = 'ร่างใหม่'; e.updateLeaveProtection();
   assert.equal(warnsBeforeUnload(), true);
+});
+
+test('beforeunload stays silent for durable shared-runtime drafts and protects only new or failed writes', () => {
+  const { editor: e, warnsBeforeUnload } = enablePending(saveFixture());
+  e.initializePendingSaves();
+  e.flushEditorDraft = async () => true;
+  e.serializeEditorTranslations = () => e.editorBlocks.map(block => block.translation);
+  e._draftSession = { record: { translations: e.serializeEditorTranslations() } };
+  assert.equal(e.editorHaveChanges(), true, 'The local draft still differs from committed text.');
+  e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), false);
+  e.editorBlocks[0].translation = 'New typing before the debounce watcher';
+  assert.equal(warnsBeforeUnload(), true);
+  e._draftSession.record.translations = e.serializeEditorTranslations();
+  e._draftTimer = 123; assert.equal(warnsBeforeUnload(), true);
+  e._draftTimer = null; e.draftWritePending = 1; assert.equal(warnsBeforeUnload(), true);
+  e.draftWritePending = 0; e._draftSession.pendingRecord = { translations: e.serializeEditorTranslations() };
+  assert.equal(warnsBeforeUnload(), true);
+  e._draftSession.pendingRecord = null; e._draftSession.writeError = new Error('Storage full');
+  assert.equal(warnsBeforeUnload(), true);
+  e._draftSession.writeError = null; assert.equal(warnsBeforeUnload(), false);
+  e.editorBlocks[0].translation = 'Durably preserved conflict alternative';
+  e._draftSession.record.conflicts = [{ translations: e.serializeEditorTranslations() }];
+  assert.equal(warnsBeforeUnload(), false, 'A stored conflict alternative is recoverable without keeping this tab open.');
+  e._retainedDraftSessions = new Map([['previous', { pendingRecord: { translations: ['Retained after a scope switch'] } }]]);
+  e._draftSession = null; e.editorVisible = false; e.updateLeaveProtection();
+  assert.equal(warnsBeforeUnload(), true);
+  e._retainedDraftSessions.clear(); e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), false);
 });
 
 test('older worker and remote acknowledgements preserve a newer pending same-file save and a different typing draft', async () => {

@@ -19,6 +19,7 @@
   const KV_SOURCE_PREFIX = 'source_';
   const KV_MIGRATED = 'migratedFromLocalStorage';
   const KV_MIGRATED_SINGLE_VERSION = 'migratedFromSingleVersion';
+  const KV_TRANSLATION_DRAFT_PREFIX = 'translation_draft_v1:';
 
   let currentGameVersion = 'poe1';
 
@@ -234,6 +235,140 @@
     });
   }
 
+  function translationDraftScope(value) {
+    if (!value || typeof value.profile !== 'string' || !value.profile
+      || !['poe1', 'poe2'].includes(value.game) || typeof value.sourceHash !== 'string' || !value.sourceHash
+      || typeof value.language !== 'string' || !value.language || typeof value.filepath !== 'string' || !value.filepath) {
+      throw new TypeError('A translation draft requires its profile, game, source, language and filepath.');
+    }
+    return { profile: value.profile, game: value.game, sourceHash: value.sourceHash, language: value.language, filepath: value.filepath };
+  }
+
+  function translationDraftKey(value) {
+    const scope = translationDraftScope(value);
+    return KV_TRANSLATION_DRAFT_PREFIX + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]);
+  }
+
+  function translationDraftScopeFromKey(key) {
+    if (typeof key !== 'string' || !key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)) throw new TypeError('Invalid translation draft key.');
+    let parts;
+    try { parts = JSON.parse(key.slice(KV_TRANSLATION_DRAFT_PREFIX.length)); } catch (_) { throw new TypeError('Invalid translation draft key.'); }
+    if (!Array.isArray(parts) || parts.length !== 5) throw new TypeError('Invalid translation draft key.');
+    const [profile, game, sourceHash, language, filepath] = parts;
+    const scope = translationDraftScope({ profile, game, sourceHash, language, filepath });
+    if (translationDraftKey(scope) !== key) throw new TypeError('Invalid translation draft key.');
+    return scope;
+  }
+
+  function plainDraft(value) {
+    const scope = translationDraftScope(value);
+    const key = translationDraftKey(scope);
+    if ((value.key != null && value.key !== key) || typeof value.id !== 'string' || !value.id
+      || typeof value.revision !== 'string' || !value.revision || !Array.isArray(value.translations)
+      || value.translations.some(line => typeof line !== 'string') || !Array.isArray(value.base?.translations)
+      || value.base.translations.some(line => typeof line !== 'string')) throw new TypeError('Invalid translation draft.');
+    // Detach nested source/base data too; a Vue proxy must never reach IndexedDB.
+    return JSON.parse(JSON.stringify({ ...scope, key, id: value.id, revision: value.revision,
+      translations: value.translations, base: value.base, source: value.source ?? null,
+      ...(typeof value.declined === 'string' && value.declined ? { declined: value.declined } : {}),
+      updatedAt: Number(value.updatedAt) || Date.now(), state: 'active' }));
+  }
+
+  function draftContentSignature(value) {
+    return JSON.stringify({ ...plainDraft(value), updatedAt: 0 });
+  }
+
+  function sameDraftContent(left, right) {
+    return draftContentSignature(left) === draftContentSignature(right);
+  }
+
+  function sameDraftVariant(left, right) {
+    return JSON.stringify({ ...plainDraft(left), revision: '', updatedAt: 0 })
+      === JSON.stringify({ ...plainDraft(right), revision: '', updatedAt: 0 });
+  }
+
+  async function getTranslationDraft(key) {
+    translationDraftScopeFromKey(key);
+    return (await kvGet(key)) || null;
+  }
+
+  async function listTranslationDrafts(scope) {
+    if (!scope || typeof scope.profile !== 'string' || !scope.profile || !['poe1', 'poe2'].includes(scope.game)
+      || typeof scope.language !== 'string' || !scope.language) throw new TypeError('A draft listing requires its profile, game and language.');
+    return withStore(STORE_KV, 'readonly', async store => {
+      const range = typeof IDBKeyRange === 'undefined' ? undefined
+        : IDBKeyRange.bound(KV_TRANSLATION_DRAFT_PREFIX, KV_TRANSLATION_DRAFT_PREFIX + '\uffff');
+      const rows = await requestToPromise(store.getAll(range));
+      return rows.filter(row => row.key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)).map(row => row.value)
+        .filter(record => record.profile === scope.profile && record.game === scope.game && record.language === scope.language
+          && (scope.sourceHash == null || record.sourceHash === scope.sourceHash)
+          && (record.state === 'active' || record.conflicts?.length));
+    });
+  }
+
+  async function updateTranslationDraft(key, change) {
+    translationDraftScopeFromKey(key);
+    const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    const store = tx.objectStore(STORE_KV);
+    let result, failure;
+    const read = store.get(key);
+    read.onsuccess = () => {
+      try {
+        result = change(read.result?.value || null);
+        if (result.write !== false) store.put({ key, value: result.record });
+      } catch (error) { failure = error; tx.abort(); }
+    };
+    try { await done; } catch (error) { throw failure || error; }
+    delete result.write;
+    return result;
+  }
+
+  async function putTranslationDraft(value, { expectedRevision = null, resolveConflicts = false } = {}) {
+    const incoming = plainDraft(value);
+    if (expectedRevision !== null && (typeof expectedRevision !== 'string' || !expectedRevision)) throw new TypeError('Invalid expected draft revision.');
+    return updateTranslationDraft(incoming.key, current => {
+      if (current?.revision === incoming.revision) {
+        if (!sameDraftContent(current, incoming)) throw new Error('A draft revision cannot be reused for different content.');
+        return { status: 'saved', record: current, duplicate: true, write: false };
+      }
+      // An uncertain retry of a consumed snapshot must not resurrect it.
+      if (current?.consumedRevision === incoming.revision && current.id === incoming.id) {
+        if (current.consumedSignature && current.consumedSignature !== draftContentSignature(incoming)) throw new Error('A draft revision cannot be reused for different content.');
+        return { status: current.state, record: current, duplicate: true, write: false };
+      }
+      if ((current?.revision || null) !== expectedRevision || (current?.conflicts?.length && !resolveConflicts)) {
+        const conflicts = current?.conflicts || [];
+        const sameRevision = conflicts.find(record => record.id === incoming.id && record.revision === incoming.revision);
+        if (sameRevision && !sameDraftContent(sameRevision, incoming)) throw new Error('A draft revision cannot be reused for different content.');
+        const duplicate = sameRevision || conflicts.find(record => sameDraftVariant(record, incoming))
+          || (current?.state === 'active' && sameDraftVariant(current, incoming) ? plainDraft(current) : null);
+        const record = current || { ...translationDraftScope(incoming), key: incoming.key, id: incoming.id,
+          revision: 'unavailable:' + expectedRevision, state: 'unavailable', conflicts: [] };
+        // A conflict is part of the reviewed state. Advance its revision as well
+        // so a review opened before another variant arrived cannot resolve it.
+        return { status: 'conflict', record: duplicate ? record
+          : { ...record, revision: incoming.revision + ':conflict', conflicts: [...conflicts, incoming] },
+          preserved: duplicate || incoming, duplicate: !!duplicate, ...(duplicate ? { write: false } : {}) };
+      }
+      const recovery = [...(current?.recovery || []), ...(resolveConflicts ? current?.conflicts || [] : []),
+        ...(resolveConflicts && current?.state === 'active' ? [plainDraft(current)] : [])];
+      return { status: 'saved', record: { ...incoming, conflicts: resolveConflicts ? [] : current?.conflicts || [],
+        ...(recovery.length ? { recovery } : {}) } };
+    });
+  }
+
+  async function discardTranslationDraft(key, expectedRevision) {
+    if (typeof expectedRevision !== 'string' || !expectedRevision) throw new TypeError('A draft discard requires its revision.');
+    return updateTranslationDraft(key, current => {
+      if (current?.state === 'discarded' && current.consumedRevision === expectedRevision) return { status: 'discarded', record: current, duplicate: true, write: false };
+      if (!current || current.revision !== expectedRevision) return { status: 'conflict', record: current, write: false };
+      return { status: 'discarded', record: { ...current, state: 'discarded', consumedRevision: expectedRevision,
+        consumedSignature: current.state === 'active' ? draftContentSignature(current) : current.consumedSignature,
+        revision: expectedRevision + ':discarded', translations: [], base: null, source: null,
+        ...(current.conflicts?.length ? { conflicts: [], recovery: [...(current.recovery || []), ...current.conflicts] } : {}) } };
+    });
+  }
+
   function normalizeGameVersion(version) {
     const v = String(version || currentGameVersion || '').toLowerCase();
     if (v === 'poe2') return 'poe2';
@@ -327,9 +462,20 @@
       return { filepath: file.filepath, translations: [...file.translations], needsReview: !!file.needsReview,
         trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0 };
     });
+    const draft = batch.draft;
+    if (draft) {
+      const scope = translationDraftScopeFromKey(draft.key);
+      if (files.length !== 1 || scope.profile !== String(batch.accountId || 'guest') || scope.game !== batch.game
+        || scope.sourceHash !== batch.sourceHash || scope.language !== batch.language || scope.filepath !== files[0].filepath
+        || typeof draft.id !== 'string' || !draft.id || typeof draft.revision !== 'string' || !draft.revision
+        || !Array.isArray(draft.base?.translations) || draft.base.translations.some(line => typeof line !== 'string')) {
+        throw new TypeError('The saved draft does not match its translation save scope.');
+      }
+    }
     const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || '')];
     const signature = JSON.stringify({ scope, files, descriptions: batch.descriptions || [], statuses: batch.statuses || {}, revisions: batch.revisions || [],
-      collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null });
+      collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
+      ...(draft ? { draft } : {}) });
     const receiptKey = 'translation_save_receipts_' + batch.game;
     const db = await openDb();
     const revisionsStore = revisionStoreName(batch.game);
@@ -338,7 +484,7 @@
     const kv = tx.objectStore(STORE_KV);
     let failure, result;
     const values = {};
-    const keys = [workspaceKey(batch.game), sourceKey(batch.game), receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : [])];
+    const keys = [workspaceKey(batch.game), sourceKey(batch.game), receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
     let remaining = keys.length;
     const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
     const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
@@ -382,6 +528,25 @@
         const legacyWorkspace = Number(workspace.stagedVersion || 0) < 1;
         WorkspaceState.initializeWorkspace(workspace, { source: values[sourceKey(batch.game)] || batch.descriptions || [],
           sourceHash: batch.sourceHash, game: batch.game, language: batch.language, collaboration: values.collaboration_v1 });
+        if (draft) {
+          const current = values[draft.key];
+          if (!current || current.state !== 'active' || current.id !== draft.id) {
+            throw Object.assign(new Error('This draft was discarded, promoted or replaced before it could be saved. Reopen the file to review its current draft.'), { code: 'DRAFT_CHANGED' });
+          }
+          if (current.conflicts?.length) {
+            throw Object.assign(new Error('Another local draft exists for this file. Review both drafts before saving.'), { code: 'DRAFT_CONFLICT' });
+          }
+        }
+        if (draft) {
+          const filepath = files[0].filepath;
+          const original = (values[sourceKey(batch.game)] || batch.descriptions || []).find(file => file.filepath === filepath)
+            || workspace.descs.find(file => file.filepath === filepath);
+          const current = original ? WorkspaceState.workspaceFile(workspace, original, batch.language).translations : [];
+          if (JSON.stringify(current) !== JSON.stringify(draft.base.translations)) {
+            throw Object.assign(new Error('The committed translation changed after this draft was opened. Review both versions in the editor before saving.'),
+              { code: 'DRAFT_BASE_CHANGED', filepath, currentTranslations: [...current] });
+          }
+        }
         for (const file of files) if (!legacyWorkspace || !file.needsReview) {
           // An editor save stages translations. Legacy wire booleans cannot
           // turn a modern save into a dropped record or suppress its presence.
@@ -408,6 +573,13 @@
           room = state?.rooms?.[collaboration.key];
           if (!room || JSON.stringify([String(room.identity?.accountId), room.identity?.game, room.identity?.sourceHash, room.identity?.language]) !== collaboration.key) {
             throw stale('The shared workspace changed before this translation could be saved.');
+          }
+          if (draft && ((room.conflicts || []).some(conflict => paths.has(conflict.filepath))
+            || (room.outbox || []).some(operation => (operation.blockedByConflict
+              || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(operation.status))
+              && operation.files?.some(entry => paths.has(entry.yours?.filepath))))) {
+            throw Object.assign(new Error('This file has an unresolved shared translation conflict. Review it in the editor before saving the draft.'),
+              { code: 'DRAFT_CONFLICT', filepath: files[0].filepath });
           }
           const originals = new Map((room.manifest?.files || []).map(file => [file.filepath, file]));
           for (const file of files) {
@@ -481,7 +653,21 @@
         for (const revision of batch.revisions || []) tx.objectStore(revisionsStore).add({ ...revision,
           ...(batch.sourceHash ? { sourceHash: batch.sourceHash } : {}),
           ...(collaboration ? { collaborationAccountId: String(batch.accountId) } : {}) });
+        let draftConsumed = false;
+        if (draft) {
+          const current = values[draft.key];
+          if (current?.state === 'active' && current.id === draft.id && current.revision === draft.revision) {
+            if (JSON.stringify(current.translations) !== JSON.stringify(files[0].translations)) {
+              throw Object.assign(new Error('The saved translation does not match the captured draft.'), { code: 'DRAFT_CHANGED' });
+            }
+            kv.put({ key: draft.key, value: { ...current, state: 'promoted', consumedRevision: current.revision,
+              consumedSignature: draftContentSignature(current),
+              revision: current.revision + ':promoted:' + batch.jobId, translations: [], base: null, source: null, saveJobId: batch.jobId } });
+            draftConsumed = true;
+          }
+        }
         result = { jobId: batch.jobId, status: collaboration ? 'pending' : 'local', files,
+          ...(draft ? { draftConsumed } : {}),
           ...(collaboration ? { mutationId: batch.jobId, mutationIds: operations.map(op => op.id), pending: room.outbox.length, operation, operations } : {}) };
         // A lost worker response can be retried with the original identifier.
         // Keep recent receipts without growing the workspace on every save.
@@ -678,6 +864,11 @@
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
     getImportedBaseline: (id, version) => kvGet(importedBaselineKey(id, version)),
+    translationDraftKey,
+    getTranslationDraft,
+    listTranslationDrafts,
+    putTranslationDraft,
+    discardTranslationDraft,
     saveTranslationBatch,
     getCollaborationState: () => kvGet('collaboration_v1'),
     updateCollaborationState,

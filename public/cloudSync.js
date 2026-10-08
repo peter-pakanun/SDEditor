@@ -5,8 +5,8 @@
   else root.CloudSync = api;
 })(typeof window === 'object' ? window : this, function () {
   'use strict';
-  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideSourceInPreviewPanel', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'filterShortcutCtrlD', 'autocompleteShortcut', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
-  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideSourceInPreviewPanel: false, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
+  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideSourceInPreviewPanel', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'inlineEditor', 'filterShortcutCtrlD', 'autocompleteShortcut', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
+  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideSourceInPreviewPanel: false, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, inlineEditor: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
   const LANGUAGES = ['French', 'German', 'Japanese', 'Korean', 'Polish', 'Portuguese', 'Russian', 'Simplified Chinese', 'Spanish', 'Thai', 'Traditional Chinese', 'Turkish'];
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;

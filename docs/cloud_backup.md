@@ -9,7 +9,8 @@ SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings
 | Editor preferences and Regex rules | Saved for the current local/account profile | Personal to your Google account |
 | Dictionary, including Alternates and TL notes | Separate dictionary for each language and profile | Shared by language; assigned translators, managers, and admins can edit it |
 | Editor clipboard | Local to the profile | Not uploaded |
-| Immutable imported baseline, unsaved typing, and legacy history | Local only | Not uploaded |
+| Immutable imported baseline and legacy history | Local only | Not uploaded |
+| Translation drafts from inline/full editing | Durable local records scoped by profile, game, source, language and file | Not uploaded; only explicitly accepted promotion becomes shared staged work |
 | ZIP identity and accepted import decisions | Cached locally with the baseline | Hashes, size/counts, importer version, and duplicate-language-block choices; shared across language teams |
 | Saved/staged translation files | Cached locally with pending changes and recovery state | Saved overrides shared by game, accepted baseline, and language |
 | Dropped translations | Separate recoverable copy with old source and metadata | Shared by game, language, and file across source versions; retained until promoted or discarded |
@@ -42,6 +43,10 @@ Changes save in IndexedDB before cloud synchronization. The first connection che
 A small spinner in the workspace status bar and editor toolbar indicates work in progress, such as preparing collaboration data, updating Dictionary entries, checking diagnostics, or uploading saved translations to the shared workspace. Hover or focus it to see the current work. It disappears when the work finishes or an upload fails; failed saves stay local with an actionable warning. Routine network checks do not show it.
 
 Dictionary typing is grouped into local saves after a short pause, with large snapshots and match updates processed in small batches so the editor can keep responding. Closing settings, switching language or account, importing settings, and explicit saves finish pending local writes first. Keep the tab open if the browser warns that a local save is still pending. Cloud requests run in the background after local storage succeeds; adding or editing an entry does not wait for the upload.
+
+Translation typing is also retained locally as a draft. Inline editing is enabled by default in **Settings → Editor & shortcuts**; this preference follows the current account's settings. Leaving an inline file attempts the same validated save as the full editor, asks before accepting warnings, and preserves rejected drafts. No typing is shared before promotion. The row's colored collaboration indicator continues to represent selected/editing presence, without transmitting its draft text. Account or language changes capture the outgoing draft in its original scope before switching shared views.
+
+A known shared conflict or changed committed base prevents draft promotion until reviewed in the full editor. Peer updates preserve the open draft. A peer save that arrives only after local staging can still produce a shared conflict during synchronization; the existing conflict comparison retains both saved versions for a decision.
 
 Dictionary uploads contain only changed entries and deleted IDs. When the cached shared revision is current, an ordinary edit skips the full Dictionary download and receives a small revision acknowledgement instead of the complete Dictionary. First connection, remote changes, conflicts and recovery can still require a full snapshot. The compact acknowledgement needs the matching API update; older API responses remain supported. Deploy the API before the frontend.
 
@@ -106,7 +111,7 @@ Shared accepted work participates in normal ZIP export for everyone in the room.
 
 ## Shared File Comments
 
-The **Comments** tab beside **History** in the editor's right pane opens the current file's discussion. **Show all comments**, between the participant avatars and pagination, toggles a right sidebar listing discussions from every file in the selected game. This includes paths absent from the currently loaded source. A file link opens its editor when the path is available; **Load older comments** retrieves earlier posts.
+The **Comments** tab in either the full editor's right pane or the inline file-tools sidebar opens the current file's discussion. **Show all comments**, between the participant avatars and pagination, toggles a right sidebar listing discussions from every file in the selected game. This includes paths absent from the currently loaded source. A file link selects its inline editor when that mode is enabled, or opens the full editor, when the path is available; **Load older comments** retrieves earlier posts.
 
 Comments belong to **game + file path** across source hashes. New Translator posts default to the author's administrator-assigned language; Manager and Admin posts default to the selected language. Managers and admins can read comments from every language team, including posts scoped to a single language. Both the file comment box and sidebar replies have a **Post to all languages** checkbox, unchecked by default; checking it makes that post visible across language teams. Existing comments remain global. Global posts show an **All languages** label beside the posting language. The checkbox resets after a successful post; failed posts retain their text and audience choice for retry. PoE1 and PoE2 stay separate, and importing a new hash keeps discussions attached to matching file paths. A global comment does not grant a Translator access to another language's dictionary or translations. Each comment records its author's name, posting language, time, and source hash. A small yellow information icon appears when the comment's source hash differs from the source currently loaded. Hover over the icon for the **Different version** explanation and full source hash.
 
@@ -127,6 +132,10 @@ On upgrade, the old dictionary is placed under its previously selected language.
 **Download local recovery copies** appears after a first cloud-settings restore, settings import or shared history restore. It downloads `sdeditor_local_recovery.json` with the retained original settings and dated copies. This is a recovery archive, not a file to import directly with **Import settings**. To restore a dated copy, make a standard settings JSON from that copy's `settings`, add `dictionary` from its `dictionaries[settings.lang]` and `editorClipboard` from the same copy, then use the normal import. The archive's `legacySettings` object can also be saved as a standard settings JSON. Keep the original archive unchanged while recovering.
 
 ## Local Validation
+
+### Deploying inline editing and local drafts
+
+Deploy the API update before the frontend: `/v1/settings` must accept the new boolean `inlineEditor` preference or settings synchronization rejects the new payload. This setting uses the existing JSON settings record and needs no additional API database migration. Missing preferences default to enabled. Translation drafts stay in browser storage; the collaboration presence, saved-translation and comments wire contracts remain unchanged. Keep the existing browser data and reload older tabs; local tests do not establish hosted deployment.
 
 ### Deploying the staged/dropped workspace upgrade
 

@@ -48,6 +48,16 @@ Run `node scripts/workspace-search-browser-fixture.cjs` and open its loopback UR
 
 Use `--baseline <path-to-old-index.js>` to compare with an earlier implementation. The fixture keeps its immutable source separate from staged translations and bypasses storage/cloud. Timings describe this synthetic local workspace, not production performance.
 
+## Inline Editor and Durable Draft Fixture
+
+Run `node scripts/inline-editor-browser-fixture.cjs`, open `http://127.0.0.1:3353/`, and click **Seed source v1** once. Do not add `testMode=1`: this uses normal guest initialization, a real ZIP import, IndexedDB and the save worker. Set `INLINE_FIXTURE_PORT` to use a fresh disposable origin. Stopping the server leaves that origin's browser data intact.
+
+The fixture includes ordinary, multiline and table blocks, a Dictionary, diagnostic errors/warnings and a dropped copy. **Inspect persisted** reads draft/staged records without flushing edits. **Reload data** and **Reload page** check durable state. **Switch to source v2** changes one source and removes another while retaining old drafts for recovery. Use two tabs on the same origin to exercise competing local drafts. Check warning rejection, recovery comparison and discard through the normal UI; the seed buttons do not clear existing drafts.
+
+Local browser validation covered draft reload and recovery, warning confirmation, discard and two-tab races, plus aligned source/translation blocks in light, grey, dark and modern-dark themes. **Cycle theme** and **Toggle wrapping peers** support layout checks; the inspector reports paired-block offsets. That peer toggle is simulated presence. Real two-client indicators and editing claims were checked separately with `node scripts/collaboration-browser-fixture.cjs`, its two normal-mode editor origins, and the sibling API/WebSocket implementation; see [local collaboration validation](cloud_backup.md#local-validation).
+
+**Simulate IME [** inserts a bracket through synthetic composition events in the focused translation field and reports model/autocomplete behavior. It intentionally changes the local draft. This is not an operating-system IME check; actual OS IME input remains unverified. These local fixtures do not establish production deployment, live Google authentication or hosted synchronization behavior.
+
 ## Shared Comments Fixture
 
 Run `node scripts/comments-browser-fixture.cjs` after installing dependencies in the sibling `SDEditor-API` checkout. Open either editor URL printed by the script and click its **Bootstrap Thai** or **Bootstrap German** button. These are separate loopback origins with normal IndexedDB storage and an in-memory API, using disposable accounts rather than Google sign-in. Do not add `testMode=1` to their URLs.

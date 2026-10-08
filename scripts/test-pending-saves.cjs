@@ -170,6 +170,45 @@ test('drain also waits for new saves enqueued while the first write is pending',
   secondWrite.resolve({}); await waiting; assert.equal(drained, true);
 });
 
+test('draft promotion waits for durability before becoming an overlay', async () => {
+  const write = deferred();
+  const queue = PendingSaves.create({ save: async () => { await write.promise; return { draftConsumed: true }; } });
+  const job = queue.enqueue(batch('draft', 'uncommitted', { deferDisplay: true }));
+  await tick();
+  assert.equal(queue.overlay(scope, 'source/file.txt'), null);
+  assert.equal(job.durable, false);
+  write.resolve(); await queue.drain();
+  assert.equal(job.durable, true);
+  assert.equal(job.ack.draftConsumed, true);
+  assert.equal(queue.overlay(scope, 'source/file.txt'), null);
+  queue.dispose();
+});
+
+test('a stale draft rejection can be removed without erasing unrelated saves or retrying its old decision', async () => {
+  const rejected = Object.assign(new Error('The base changed'), { code: 'DRAFT_BASE_CHANGED' });
+  const calls = [];
+  const queue = PendingSaves.create({ save: async payload => {
+    calls.push(payload.jobId); if (payload.draft) throw rejected; return {};
+  } });
+  queue.enqueue(batch('draft', 'old decision', { draft: { key: 'scope', id: 'draft-id', revision: 1 }, deferDisplay: true }));
+  queue.enqueue(batch('next'));
+  await assert.rejects(queue.drain(), /base changed/);
+  assert.equal(queue.discardRejectedDraft('draft'), true);
+  await queue.drain();
+  assert.deepEqual(calls, ['draft', 'next']);
+  assert.equal(queue.snapshot().pending, 0);
+  queue.dispose();
+});
+
+test('storage failures and uncertain completion cannot be discarded as rejected drafts', async () => {
+  const queue = PendingSaves.create({ save: async () => { throw Object.assign(new Error('Worker stopped'), { durableUnknown: true }); } });
+  queue.enqueue(batch('draft', 'recoverable', { draft: { key: 'scope', id: 'draft-id', revision: 1 } }));
+  await assert.rejects(queue.drain(), /Worker stopped/);
+  assert.equal(queue.discardRejectedDraft('draft'), false);
+  assert.equal(queue.snapshot().jobs.length, 1);
+  queue.dispose();
+});
+
 test('disposing a queue cancels deferred intake without erasing recovery records', async () => {
   let writes = 0;
   const queue = PendingSaves.create({ save: async () => { writes++; return {}; } });

@@ -17,6 +17,14 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+test('inline editing defaults on and preserves an explicit disabled preference', () => {
+  assert.equal(Cloud.completeSettings({}).inlineEditor, true);
+  assert.equal(Cloud.completeSettings({ inlineEditor: false }).inlineEditor, false);
+  assert.deepEqual(Cloud.preferences({ inlineEditor: false }), { inlineEditor: false });
+  assert.doesNotThrow(() => Cloud.validateImport({ inlineEditor: false }));
+  assert.throws(() => Cloud.validateImport({ inlineEditor: 'false' }), /inlineEditor must be boolean/);
+});
+
 // Transactions clone their input and publish only at commit, like structured
 // cloning and atomic read/modify/write in the real IndexedDB adapter.
 class MemoryStore {
@@ -1548,6 +1556,32 @@ function cloudUiEditor(client) {
   for (const [name, getter] of Object.entries(mixin.computed)) Object.defineProperty(editor, name, { get() { return getter.call(editor); } });
   return editor;
 }
+
+test('unsolicited account changes capture and detach the outgoing editor before replacing scope', async () => {
+  const editor = cloudUiEditor();
+  Object.assign(editor, { cloudSignedIn: true, cloudUser: user('alice'), lang: 'Thai', editorVisible: false, editorSessionActive: true });
+  const flushed = deferred(), captures = [];
+  editor.detachEditorSessionForScopeChange = () => {
+    captures.push([editor.cloudUser.id, editor.lang]); editor.editorSessionActive = false; return flushed.promise;
+  };
+  editor.loadEditorDrafts = async () => { captures.push([editor.cloudUser.id, editor.lang]); };
+  await editor.cloudApply({ settings: settings({ lang: 'French' }), editorClipboard: '', user: user('bob', 'French'),
+    signedIn: true, conflicts: [], revision: 0 });
+  assert.deepEqual(captures, [['alice', 'Thai'], ['bob', 'French']]);
+  flushed.resolve();
+});
+
+test('explicit language selection preserves the old draft before changing cloud profiles', async () => {
+  const actions = [], gate = deferred();
+  const editor = cloudUiEditor({ selectLanguage: async () => actions.push('switch'), snapshot: () => ({}) });
+  editor.lang = 'French';
+  editor.flushEditorDraft = async () => { actions.push('draft'); await gate.promise; return true; };
+  editor.cloudApply = async () => actions.push('apply');
+  const switching = editor.cloudSelectLanguage('French', 'Thai');
+  await Promise.resolve(); assert.deepEqual(actions, ['draft']);
+  gate.resolve(); assert.equal(await switching, true);
+  assert.deepEqual(actions, ['draft', 'switch', 'apply']);
+});
 
 test('language selection waits for durable storage and UI application while preserving unrelated errors', async t => {
   const state = authenticatedState();

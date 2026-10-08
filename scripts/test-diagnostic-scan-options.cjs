@@ -157,6 +157,27 @@ test('default manual scan finds consistency and reuses warnings only for unchang
   assert.deepEqual(calls, scannedCalls, 'Rendering or editing cached results must not perform another analysis.');
 });
 
+test('inline save checks retain cached manual warnings without starting another scan', async () => {
+  const { editor, calls } = loadEditor();
+  const { first } = conflictingEntries(editor);
+  editor.diagnosticScanChecks = only('consistency', 'terminology');
+  await editor.scanAllDiagnostics();
+  await editor.editFile(first.filepath);
+  editor.editorVisible = false;
+  editor.inlineActive = true;
+  const before = { ...calls };
+  assert.equal(editor.editorConsistencyDiagnostics[0]?.code, 'inconsistent-translation');
+  assert.equal(editor.blockTerminologyDiagnostics(editor.editorBlocks[0]).length, 1);
+  const findings = editor.editorSaveFindings(first.translations.Thai);
+  assert.ok(findings.warnings.some(item => item.code === 'inconsistent-translation'));
+  assert.ok(findings.warnings.some(item => item.code !== 'inconsistent-translation'));
+  assert.ok(findings.confirmations.some(message => message.startsWith('Translation warnings found:')));
+  editor.editorBlocks[0].translation += ' draft';
+  assert.equal(editor.editorConsistencyDiagnostics.some(Boolean), false);
+  assert.equal(editor.blockTerminologyDiagnostics(editor.editorBlocks[0]).length, 0);
+  assert.deepEqual(calls, before, 'Rendering and validating inline drafts reuse the completed scan only.');
+});
+
 test('Hide DNT excludes files from every selected check and from consistency peers', async () => {
   const { editor, calls } = loadEditor();
   const visible = description('visible', 'Fire damage {1}%', 'ไฟ {1}%');

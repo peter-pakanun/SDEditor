@@ -46,6 +46,63 @@ test('unchanged compact state retains reactive identity while presence updates p
   assert.equal(app.collaborationState.identity, withConflicts.identity);
 });
 
+test('shared conflict review hands an inline draft to the full editor before opening its comparison', async () => {
+  const { app } = editor({ inlineActive: true, editorVisible: false });
+  app.collaborationState.conflicts = [conflict()];
+  const draft = app._draftSession = { record: { translations: ['my newer draft'] } };
+  let opened = 0;
+  app.openInlineFullEditor = async () => {
+    assert.equal(app.collaborationConflictVisible, false);
+    opened++; app.inlineActive = false; app.editorVisible = true; return true;
+  };
+  await app.collaborationOpenConflicts();
+  assert.equal(opened, 1); assert.equal(app.editorVisible, true); assert.equal(app._draftSession, draft);
+  assert.equal(app.collaborationConflictVisible, true); assert.equal(app.$refs.collaborationConflictDialog.open, true);
+});
+
+test('failed or stale inline handoff cannot open a shared-conflict comparison', async t => {
+  for (const stale of [false, true]) await t.test(stale ? 'changed account' : 'failed draft flush', async () => {
+    const { app } = editor({ inlineActive: true });
+    app.collaborationState.conflicts = [conflict()];
+    app.openInlineFullEditor = async () => {
+      if (stale) app.collaborationState.identity.accountId = 'different-account';
+      return stale;
+    };
+    await app.collaborationOpenConflicts();
+    assert.equal(app.collaborationConflictVisible, false); assert.equal(app.$refs.collaborationConflictDialog.open, false);
+  });
+});
+
+test('footer conflict review waits for inline blur and opens the selected conflicting file after focus is lost', async t => {
+  for (const selected of ['selected.txt', 'unrelated.txt']) await t.test(selected, async () => {
+    const finishing = deferred();
+    const { app } = editor({ inlineEditor: true, inlineActive: false, editorVisible: false,
+      selectedFilepath: selected, _inlineFinishing: finishing.promise });
+    app.collaborationState.conflicts = [conflict(), conflict({ id: 'selected-conflict', filepath: 'selected.txt' })];
+    const opened = [];
+    app.openInlineFullEditor = async filepath => { opened.push(filepath); app.editorVisible = true; return true; };
+    const review = app.collaborationOpenConflicts();
+    assert.deepEqual(opened, []); assert.equal(app.collaborationConflictVisible, false);
+    finishing.resolve(true); await review;
+    assert.deepEqual(opened, [selected === 'selected.txt' ? selected : 'stat.txt']);
+    assert.equal(app.collaborationConflictId, selected === 'selected.txt' ? 'selected-conflict' : 'conflict-1');
+    assert.equal(app.editorVisible, true); assert.equal(app.collaborationConflictVisible, true);
+    app.collaborationCloseConflicts();
+    assert.equal(app.editorVisible, true, 'Closing the comparison returns to the full editor.');
+  });
+});
+
+test('scope changes while finishing inline blur prevent footer conflict handoff', async () => {
+  const finishing = deferred();
+  const { app } = editor({ inlineEditor: true, inlineActive: false, editorVisible: false,
+    _inlineFinishing: finishing.promise, openInlineFullEditor: () => assert.fail('Do not reopen an old-scope file') });
+  app.collaborationState.conflicts = [conflict()];
+  const review = app.collaborationOpenConflicts();
+  app.collaborationState.identity.accountId = 'new-account';
+  finishing.resolve(true); await review;
+  assert.equal(app.collaborationConflictVisible, false);
+});
+
 test('dropped review paths include saved-only blockers and remain scoped to account, game, source, and language', () => {
   const sourceHash = 'a'.repeat(64);
   const { app } = editor({ sourceIdentity: sourceHash, localDescs: { sourceHash, game: 'poe1', collaborationAccountId: 'alice',

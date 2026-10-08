@@ -1,0 +1,90 @@
+/* The inline workspace keeps a native row per file, including narrow desktop windows. */
+.workspaceMain { min-width: 0; }
+.workspaceContent.inlineWorkspaceLayout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 18px; max-width: none; }
+.workspaceContent.inlineSidebarOpen { grid-template-columns: minmax(0, 1fr) clamp(360px, 29vw, 460px); }
+.inlineEditorSidebar { position: sticky; top: var(--workspace-header-height, 84px); height: calc(100dvh - var(--workspace-header-height, 84px) - var(--workspace-footer-height, 100px) - 24px); min-height: 240px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--color-element); box-shadow: var(--ui-shadow); }
+.inlineSidebarHeading { display: flex; align-items: start; gap: 12px; padding: 12px; border-bottom: 1px solid var(--ui-border); }
+.inlineSidebarHeading > div { flex: 1; min-width: 0; }
+.inlineSidebarHeading strong, .inlineSidebarHeading span { display: block; }
+.inlineSidebarHeading span { margin-top: 3px; color: var(--ui-muted); font-size: 11px; overflow-wrap: anywhere; }
+.inlineSidebarHeading button { flex: none; padding: 4px 8px; }
+.inlineSidebarEmpty { padding: 18px; color: var(--ui-muted); line-height: 1.6; }
+#inlineEditorSidebarHost { min-height: 0; flex: 1; overflow: hidden; }
+.inlineEditorSidebar .sharedEditorSidebar { height: 100%; display: flex; flex-direction: column; overflow: auto; }
+.inlineEditorSidebar .sharedEditorSidebar > :not(.sideHeader) { flex-shrink: 0; }
+.inlineEditorSidebar .sharedEditorSidebar > .editorLookupPanel,
+.inlineEditorSidebar .sharedEditorSidebar > .fileCommentsPanel { flex: 1; min-height: 0; }
+.inlineEditorSidebar .sideHeader { top: 0; padding: 10px; background: var(--color-element); z-index: 3; }
+.inlineEditorSidebar .sideTabs { flex-wrap: wrap; gap: 4px; }
+.inlineEditorSidebar .tabBtn { flex: 1 1 auto; padding: 6px 7px; font-size: 12px; white-space: nowrap; }
+.inlineEditorSidebar .side .editBlock { margin-left: 10px; margin-right: 10px; }
+.inlineEditorSidebar .fileCommentsPanel { border: 0; }
+.inlineEditorSidebar .commentsPanelHeader { padding: 10px; }
+.inlineEditorSidebar .commentsComposer { padding: 10px; }
+.inlineEditorSidebar .lookupControls { padding: 10px; }
+.inlineEditorSidebar .lookupResults { max-height: 34vh; }
+.inlineEditorSidebar .lookupOptions { flex-wrap: wrap; }
+.editor > .editorSidebarHost { overflow: hidden; }
+.editorSidebarHost > .sharedEditorSidebar { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.editorSidebarHost > .sharedEditorSidebar:is(.commentsActive, .lookupActive) { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+#fullEditorPreviewHost { display: contents; }
+.editorSourceField { flex: 1; min-width: 0; }
+.inlineEditorMode #table .inlineFileBlock { box-sizing: content-box; }
+.inlineEditorMode #table .inlineFileBlock:not(.inlineBlockPrelude) + .inlineFileBlock { border-top: 1px solid var(--ui-border); }
+.inlineEditorMode #table .inlineBlockNatural { padding: 8px 0; }
+.inlineEditorMode #table .inlineBlockPrelude .inlineBlockNatural { display: flow-root; padding: 0; }
+.inlineEditorMode #table .inlineBlockPrelude .collaborationPeerLabels { margin-bottom: 8px; }
+.inlineReadText { white-space: pre-wrap; overflow-wrap: anywhere; }
+.inlineEditorMode #table .editorTextField { min-width: 0; font-size: calc(13px * var(--density)); line-height: calc(1.6em * var(--density)); --padding-top: 7px; --padding-left: 8px; }
+.inlineEditorMode #table .editorTextField > input,
+.inlineEditorMode #table .editorTextField > textarea { box-sizing: border-box; min-width: 0; padding-right: 8px; padding-bottom: 7px; }
+.inlineEditorMode #table .editorTextField > textarea { min-height: 84px; }
+.inlineEditorMode #table .editorTextField > input:focus,
+.inlineEditorMode #table .editorTextField > textarea:focus { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.inlineTableColumns { display: grid; grid-template-columns: repeat(var(--table-columns, 1), minmax(0, 1fr)); gap: 5px; }
+.fileDraftLabel { display: block; margin-top: 4px; color: var(--ui-accent); font-size: 11px; font-weight: 600; }
+.inlineFileActions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.inlineFileActions button { padding: 0; border: 0; background: transparent; color: var(--ui-accent); font-size: 11px; text-align: left; line-height: 1.5; text-decoration: underline; text-underline-offset: 2px; }
+.inlineFileActions .inlineReviewLink { color: var(--ui-dropped); }
+.inlineFileFindings { list-style: none; margin: 8px 0 0; padding: 0; font-size: 11px; }
+.inlineFileFindings li + li { margin-top: 5px; }
+.inlineFileFindings .error, .inlineFileFinding.error { color: var(--ui-missing); }
+.inlineFileFindings .warning { color: var(--ui-warning); }
+.inlineDraftCount { color: var(--ui-accent); border-color: var(--ui-border); background: var(--color-element); cursor: pointer; }
+.inlinePreviewHost { padding: 12px; }
+.inlinePreviewHost .gamePreviewStrip { position: static; height: auto; margin: 0; overflow: visible; }
+.inlinePreviewHost .gamePreviewMainRow { height: auto; flex-direction: column; align-items: stretch; }
+.inlinePreviewHost .gamePreviewFrameWrap, .inlinePreviewHost .gamePreviewFramesColumn { height: auto; min-width: 0; width: 100%; }
+.inlinePreviewHost .gamePreviewWindow { box-sizing: border-box; max-width: 100%; }
+.inlinePreviewHost .gamePreviewVarsColumn { flex: none; height: auto; width: 100%; min-width: 0; max-width: none; }
+.inlinePreviewHost .gamePreviewVarsPanel { max-height: none; }
+.inlinePreviewHost .gamePreviewToolbar { position: static; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.inlinePreviewHost .gamePreviewLabel { font-size: 13px; }
+.inlineEditorSidebar .lookupResult { display: block; box-sizing: border-box; width: 100%; margin: 0 0 6px; padding: 9px 10px; text-align: left; border: 1px solid var(--ui-border); border-radius: 6px; line-height: 1.5; }
+.inlineEditorSidebar .lookupReference h3 { margin: 0 0 5px; font: 600 13px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
+.draftRecoveryDialog { width: min(1080px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); padding: 0; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--color-element); color: var(--color-font); }
+.draftRecoveryDialog::backdrop { background: rgba(0, 0, 0, .5); }
+.draftRecoveryHeading { display: flex; gap: 18px; justify-content: space-between; align-items: flex-start; padding: 20px; border-bottom: 1px solid var(--ui-border); }
+.draftRecoveryHeading h2, .draftRecoveryHeading p { margin: 0 0 6px; }
+.draftRecoveryHeading p { color: var(--ui-muted); font-size: 13px; }
+.draftRecoveryLayout { display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 320px; }
+.draftRecoveryList { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-right: 1px solid var(--ui-border); overflow-y: auto; max-height: 64vh; }
+.draftRecoveryList button { display: flex; flex-direction: column; gap: 5px; text-align: left; padding: 10px; overflow-wrap: anywhere; }
+.draftRecoveryList button.active { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.draftRecoveryList span { color: var(--ui-muted); font-size: 11px; }
+.draftRecoveryDetail { padding: 18px; min-width: 0; overflow-y: auto; max-height: 64vh; }
+.draftRecoveryDetail h3 { overflow-wrap: anywhere; margin: 0 0 12px; }
+.draftRecoveryComparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.draftRecoveryComparison pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--color-bg); font-size: 12px; }
+.draftRecoveryActions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+@media (max-width: 700px) {
+  .workspace.inlineEditorMode #table { display: table; table-layout: fixed; min-width: 750px; }
+  .workspace.inlineEditorMode #table thead { position: static; display: table-header-group; width: auto; height: auto; overflow: visible; clip-path: none; }
+  .workspace.inlineEditorMode #table tbody { display: table-row-group; }
+  .workspace.inlineEditorMode #table tbody tr { display: table-row; }
+  .workspace.inlineEditorMode #table td { display: table-cell; border-bottom: 1px solid var(--ui-border); }
+  .workspace.inlineEditorMode #table td[data-label]::before { display: none; }
+  .workspace.inlineEditorMode #table tbody tr.selectedFileRow::before { display: none; }
+  .workspace.inlineEditorMode #table tbody tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
+  .draftRecoveryLayout { grid-template-columns: 210px minmax(320px, 1fr); }
+}

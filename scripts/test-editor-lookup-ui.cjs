@@ -107,6 +107,26 @@ test('configured global search shortcut focuses Lookup rather than dictionary', 
   assert.equal(calls.select, 2);
 });
 
+test('inline global search shortcuts retain the file session and target its active helper filter', () => {
+  const { editor, calls, document } = loadEditor();
+  editor.editorVisible = false;
+  editor.inlineActive = true;
+  editor.sideTab = 'lookup';
+  editor.$refs.searchInput = { focus() { assert.fail('Workspace search would leave the inline editing context'); } };
+  for (const [filterShortcutCtrlD, code] of [[false, 'KeyF'], [true, 'KeyD']]) {
+    editor.filterShortcutCtrlD = filterShortcutCtrlD;
+    document.activeElement = { tagName: 'TEXTAREA' };
+    const key = event(code === 'KeyF' ? 'f' : 'd', { code, ctrlKey: true });
+    editor.handleKeydown(key);
+    assert.equal(key.defaultPrevented, true);
+    assert.equal(document.activeElement, editor.$refs.lookupSearchInput);
+    assert.equal(editor.inlineActive, true);
+  }
+  assert.equal(calls.focus, 2);
+  assert.equal(calls.save, 0);
+  assert.equal(calls.exit, 0);
+});
+
 test('Lookup search is recognized as a search box and panel shortcut retains focus', () => {
   const { editor, calls, document } = loadEditor();
   editor.sideTab = 'lookup';

@@ -10,6 +10,8 @@ The immutable parsed **original ZIP baseline** supplies English, entry metadata,
 
 The **current committed translation** is the staged translation for this file, language, and source version when one exists; otherwise it is the original ZIP translation. Staged presence is meaningful even for an empty array, blank lines, or text identical to the ZIP. Unsaved editor typing is a draft and must not change workspace counts or export data.
 
+Both inline and full editors retain translation drafts locally under their profile/account, game, accepted source, language and filepath. A **Local draft** label and draft findings describe this separate editing state; they are not Saved, Error or Warning workspace statuses. Displaying draft text in a row must not replace its committed descriptor or make Lookup, exports, manual scans or collaboration treat it as committed text.
+
 A **dropped copy** is a separate unresolved snapshot of translation text with its original English and entry metadata where available. It is not the current translation. A valid current ZIP translation may coexist with a dropped copy. Missing old English must be reported as unavailable rather than reconstructed from the new source.
 
 Shared translation rooms use **game + accepted source baseline + language**. Local profiles, unsaved drafts, and queued operations retain their account scope; queued work also retains its original game, language, source version, and access context. Switching accounts or versions must not publish an old operation in the new scope. Dictionaries are shared by **language**, independent of game and source version. Translators synchronize their assigned language; Managers and Admins synchronize the selected language with or without an assignment.
@@ -68,11 +70,15 @@ Manual scans use the selected checks, current language, and Hide DNT eligibility
 
 Keep completed scan results and their selected checks while correcting translations. A local save, restore, shared translation update, or consistency correction refreshes affected files and any relevant consistency peers; retain unrelated results. Unsaved draft diagnostics belong to the editor and do not rewrite committed workspace statuses.
 
+Inline focus loss attempts promotion using the full editor's save checks. Errors block promotion; warnings and the existing missing/structural confirmations require explicit acceptance. Declining keeps the draft and its findings below the filepath. Moving into that file's tools or helper popup retains the editing session. Dropped approval, competing copies and comparison-based decisions require the full editor or their existing resolver; inline promotion must never implicitly resolve Dropped.
+
 Changing language, the Dictionary, Hide DNT eligibility, or the imported workspace clears scan results without starting another scan. Translation changes invalidate an unfinished scan. **Stop scan** clears partial results. Clearing or stopping a scan removes its Error/Warning filters' matches and counters; it does not change Missing, Dropped, Revised, or Saved. The scan result list is titled **Files with findings**.
 
 ## Persistence, Migration, and Exports
 
 Persist immutable baselines, staged text, dropped snapshots and assignment provenance, and factual metadata/history. Derive status booleans from those records. UI descriptors may cache derived values for rendering, but cached `isMissing`, `isDropped`, `isRevised`, or `hasChanges` values must not become authoritative workspace data.
+
+Draft promotion atomically commits staged text, history, any collaboration outbox, its durable receipt and consumption of the exact draft revision. Publish committed UI only after acknowledgement. Newer typing remains a draft; retries reuse the original save identifier. Cross-tab draft conflicts and changed committed bases preserve recoverable drafts and require a new decision. Source/profile changes keep older drafts in their original scope for explicit recovery, without retargeting or uploading them automatically.
 
 Older workspaces may use `needsReview`, `trackedForExport`, `hasChanges`, or language status flags. A one-time migration can use that evidence to recover staged work and dropped snapshots in the correct language. Preserve recoverable history and identify unavailable old source text. Historical **Needs Review** labels and older wire compatibility fields may remain; they do not define a new persisted UI status. “Review” remains an action word, not the current status name.
 

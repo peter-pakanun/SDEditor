@@ -70,7 +70,7 @@ function description(name, flags = {}, english = `English ${name}`, thai = `р╕ар
 }
 
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
-const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
+const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning', 'localDraft'];
 
 test('Revised filters changed existing translations separately from initial fills and saved baseline files', () => {
   const { editor } = loadEditor();

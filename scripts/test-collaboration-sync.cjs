@@ -780,6 +780,39 @@ test('away presence is retained offline, sent once per transition, and restored 
   client.destroy();
 });
 
+test('late reconnect claim replies cannot revive a released row or replace its newer claim', async t => {
+  for (const granted of [true, false]) for (const newer of [false, true]) await t.test(`${granted ? 'granted' : 'denied'} after ${newer ? 'new row' : 'blur'}`, async t => {
+    const { client } = await fixture();
+    t.after(() => client.destroy());
+    const sockets = [];
+    class Socket {
+      constructor() { this.readyState = 0; this.sent = []; sockets.push(this); }
+      send(text) { this.sent.push(JSON.parse(text)); }
+      open() { this.readyState = 1; this.onopen(); }
+      close() { this.readyState = 3; }
+      receive(message) { this.onmessage({ data: JSON.stringify(message) }); }
+    }
+    const request = client.request;
+    client.request = (path, options) => path.endsWith('/ticket') ? Promise.resolve({ ticket: 'ticket', url: '/v1/collaboration/ws?ticket=ticket' }) : request(path, options);
+    client.apiBase = 'http://127.0.0.1:3333'; client.WebSocket = Socket;
+    let conflicts = 0; client.onEditingConflict = () => conflicts++;
+    await client.claim('a.txt');
+    await client.openSocket(client.epoch); sockets[0].open(); await client.running;
+    const socket = sockets[0], reconnect = socket.sent.find(message => message.type === 'claim');
+    assert.equal(reconnect.filepath, 'a.txt');
+    if (newer) {
+      const claiming = client.claim('b.txt');
+      const current = socket.sent.at(-1);
+      socket.receive({ type: 'claim-result', requestId: current.requestId, granted: true });
+      assert.equal((await claiming).granted, true);
+    } else client.leaveEdit();
+    socket.receive({ type: 'claim-result', requestId: reconnect.requestId, granted, peers: [{ name: 'Peer' }] });
+    await Promise.resolve();
+    assert.equal(client.editing, newer ? 'b.txt' : null);
+    assert.equal(conflicts, 0, 'An obsolete reconnect denial must not ask to override the current row.');
+  });
+});
+
 test('collaboration keeps failed sync visible while another durable save retries', async t => {
   const { client, server, store } = await fixture();
   t.after(() => client.destroy());

@@ -47,6 +47,17 @@ function search(model, query, scope = 'all') {
 }
 
 const plain = value => JSON.parse(JSON.stringify(value));
+test('inline editor sessions share Lookup search and references without including unsaved drafts', () => {
+  const desc = description('inline', 'Fire damage', 'Saved fire');
+  const { model } = loadLookup({ editorVisible: false, editorSessionActive: true, descs: [desc],
+    editorBlocks: [{ translation: 'Unsaved cold draft' }] });
+  assert.deepEqual(search(model, 'Fire'), [desc.filepath]);
+  model.lookupSelectedFilepath = desc.filepath;
+  assert.equal(model.lookupSelectedReference.filepath, desc.filepath);
+  assert.deepEqual(search(model, 'Unsaved'), []);
+  model.editorSessionActive = false;
+  assert.deepEqual(search(model, 'Fire'), []);
+});
 function deepFreeze(value) {
   if (value && typeof value === 'object') {
     for (const item of Object.values(value)) deepFreeze(item);

@@ -15,8 +15,10 @@
       sourceLoaded() { this.scheduleCollaboration(); },
       sourceIdentity() { this.scheduleCollaboration(); },
       selectedFilepath(path) { this._collaboration?.select(path); },
-      editorVisible(visible) { if (!visible) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
+      editorVisible(visible) { if (!visible && !(this.editorSessionActive ?? this.editorVisible)) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
+      editorSessionActive(active) { if (!active) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
       pendingLocalSaves() { this.updateLeaveProtection(); },
+      draftWritePending() { this.updateLeaveProtection(); },
     },
     mounted() {
       this.initializePendingSaves(); this.updateLeaveProtection();
@@ -153,7 +155,7 @@
         if (this._reconcilingImport || this._importingSource || this.versionStorageLoading || this.editorSaving || this.navigationBusy
           || this._translationWrites || this._collabDiagnosticBatch || (this.loadingProgress > 0 && this.loadingProgress < 100)) return false;
         if (!this.importBaseline?.rawSource) throw new Error('Reimport the original upstream ZIP to apply the shared import decisions.');
-        if (this.editorVisible) {
+        if (this.editorSessionActive ?? this.editorVisible) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this.collaborationNotice = 'Close the editor to apply the shared import decisions. Your local draft is preserved.';
           return false;
@@ -166,7 +168,7 @@
           const ctx = this.captureCollaborationContext();
           const oldBaseline = this.importBaseline, oldWorkspace = this.localDescs, oldSource = this.descs;
           const baseline = await this.buildImportedBaseline(oldBaseline.archive, oldBaseline.rawSource, [], archive);
-          if (this.editorVisible || !this.collaborationContextCurrent(ctx) || this.importBaseline !== oldBaseline || this.localDescs !== oldWorkspace || this.descs !== oldSource) return false;
+          if ((this.editorSessionActive ?? this.editorVisible) || !this.collaborationContextCurrent(ctx) || this.importBaseline !== oldBaseline || this.localDescs !== oldWorkspace || this.descs !== oldSource) return false;
           const workspace = copy(oldWorkspace);
           window.WorkspaceState.upgradeSource(workspace, { previousSource: this.workspaceSource(), source: baseline.source,
             previousSourceHash: ctx.source, sourceHash: baseline.archive.baselineId, game: ctx.game });
@@ -224,6 +226,12 @@
           onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
           onCommit: (job, ack) => {
             if (this.collaborationContextCurrent(job.context)) {
+              if (job.batch.deferDisplay) {
+                for (const [filepath, status] of Object.entries(job.batch.statuses || {})) {
+                  this.localDescs.status[filepath] = window.WorkspaceState.setFileMetadata(
+                    this.localDescs.status[filepath] || {}, job.batch.language, status);
+                }
+              }
               const files = (ack.files || job.batch.files).map(file => this._pendingSaves.overlay(this.pendingSaveScope(), file.filepath) || file);
               const changed = files.some(file => {
                 const desc = this.getDescByFilepath(file.filepath);
@@ -240,14 +248,34 @@
         });
         return this._pendingSaves;
       },
+      editorDraftNeedsLeaveProtection() {
+        const active = this.editorSessionActive ?? this.editorVisible;
+        // Older consumers keep the original in-memory draft protection. The
+        // shared draft runtime can distinguish retained local text from typing
+        // that has not reached its IndexedDB record yet.
+        if (typeof this.flushEditorDraft !== 'function') return !!active && this.editorHaveChanges();
+        const session = this._draftSession;
+        if (this.draftWritePending || this._draftTimer != null || session?.pendingRecord || session?.writeError) return true;
+        for (const retained of this._retainedDraftSessions?.values() || []) {
+          if (retained.pendingRecord || retained.writeError) return true;
+        }
+        if (!active || !session || this.editorLoading || this.editorLoadError || this.editorCompareActive) return false;
+        if (!session.record) return this.editorHaveChanges();
+        if (typeof this.serializeEditorTranslations !== 'function') return this.editorHaveChanges();
+        const current = JSON.stringify(this.serializeEditorTranslations());
+        return ![session.record, ...(session.record.conflicts || [])]
+          .some(record => JSON.stringify(record.translations) === current);
+      },
       updateLeaveProtection() {
         if (!window.addEventListener) return;
         this._pendingSaveBeforeUnload ||= event => {
-          if (!this.pendingLocalSaves && !(this.editorVisible && this.editorHaveChanges())) return;
+          if (!this.pendingLocalSaves && !this.editorDraftNeedsLeaveProtection()) return;
           event.preventDefault(); event.returnValue = 'Unsaved translations';
         };
         window.removeEventListener('beforeunload', this._pendingSaveBeforeUnload);
-        if (this.pendingLocalSaves || this.editorVisible) window.addEventListener('beforeunload', this._pendingSaveBeforeUnload);
+        if (this.pendingLocalSaves || (this.editorSessionActive ?? this.editorVisible) || this.editorDraftNeedsLeaveProtection()) {
+          window.addEventListener('beforeunload', this._pendingSaveBeforeUnload);
+        }
       },
       async retryPendingSaves() {
         try { await this._pendingSaves?.retry(); }
@@ -362,7 +390,7 @@
         this._collaboration?.disconnect();
         const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, language: this.lang };
         const cloud = this._cloud;
-        const openFile = this.editorVisible ? this.collaborationFile(this.editorCurrentEditingDesc) : null;
+        const openFile = (this.editorSessionActive ?? this.editorVisible) ? this.collaborationFile(this.editorCurrentEditingDesc) : null;
         const originalBase = copy(this._editorCollabBase);
         let client;
         client = new window.CollaborationSync.Client({ store: window.OfflineStore, apiBase: cloud.apiBase, allowLegacySeed: false,
@@ -380,7 +408,7 @@
           onRemote: files => { if (this._collaboration === client) return this.receiveCollaborationFiles(files, ctx.language); },
           onRemoteDropped: (records, snapshot) => { if (this._collaboration === client) return this.applyRemoteDropped(records, ctx.language, snapshot); },
           onEditingConflict: ({ filepath }) => {
-            const isCurrent = () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath;
+            const isCurrent = () => this._collaboration === client && (this.editorSessionActive ?? this.editorVisible) && this.editorCurrentEditingDesc?.filepath === filepath;
             if (isCurrent()) return this.claimCollaborationFile(filepath, false, isCurrent);
           },
         });
@@ -421,7 +449,7 @@
         }
         if (this._collaboration !== client) return;
         client.select(this.selectedFilepath);
-        if (this.editorVisible) {
+        if (this.editorSessionActive ?? this.editorVisible) {
           const filepath = this.editorCurrentEditingDesc.filepath;
           // The editor may have opened or changed files while preparation was
           // yielding. Keep the ancestor paired with its visible draft.
@@ -429,7 +457,7 @@
             || (openFile?.filepath === filepath ? originalBase || openFile : null)
             || client.fileBase(filepath);
           await this.claimCollaborationFile(filepath, false,
-            () => this._collaboration === client && this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath);
+            () => this._collaboration === client && (this.editorSessionActive ?? this.editorVisible) && this.editorCurrentEditingDesc?.filepath === filepath);
         }
       },
       async collabRetry(options) {
@@ -475,7 +503,7 @@
       applyCollaborationFiles(files, lang = this.lang, batchState = null) {
         if (lang !== this.lang || !files?.length) return;
         this.ensureLocalDescsReady();
-        if (this.editorVisible && !this._editorCollabBase && this.editorCurrentEditingDesc?.filepath) {
+        if ((this.editorSessionActive ?? this.editorVisible) && !this._editorCollabBase && this.editorCurrentEditingDesc?.filepath) {
           const desc = this.editorCurrentEditingDesc;
           const known = this._collaboration?.fileBase?.(desc.filepath);
           this._editorCollabBase = { ...this.collaborationFile(desc, lang), revision: known?.revision || 0 };
@@ -503,8 +531,12 @@
             }
           } else if (file.stagingReset && !file.trackedForExport) {
             if (this.localDescs.staged?.[lang]) delete this.localDescs.staged[lang][file.filepath];
-          } else if (file.trackedForExport || file.revision > 0) window.WorkspaceState.stageTranslation(this.localDescs, file, lang,
-            { source: original, sourceHash: this.sourceIdentity, game: this.gameVersion });
+          } else if (file.trackedForExport || file.revision > 0) {
+            const staged = this.localDescs.staged?.[lang]?.[file.filepath];
+            window.WorkspaceState.stageTranslation(this.localDescs, file, lang,
+              { source: original, sourceHash: this.sourceIdentity, game: this.gameVersion,
+                savedAt: staged && arrayEquals(staged.translations, file.translations) ? staged.savedAt : undefined });
+          }
           const state = window.WorkspaceState.workspaceFile(this.localDescs, original, lang);
           const translationChanged = !arrayEquals(desc.translations[lang] || [], state.translations);
           const needsReview = state.needsReview, hasChanges = state.hasChanges, isMissing = state.isMissing;
@@ -539,23 +571,38 @@
         const context = this.captureCollaborationContext();
         const client = this._collaboration;
         if (!client) return true;
-        if (automatic && client.isEditing(filepath)) return false;
-        const result = await client.claim(filepath, { force: false });
-        if (!this.collaborationContextCurrent(context)) return false;
-        if (!isCurrent()) { client.leaveEdit(); return false; }
-        if (result.granted) return true;
-        if (automatic) return false;
-        const names = (result.peers || []).map(peer => peer.name).join(', ') || 'Another translator';
-        const confirmed = await this.appConfirm(`${names} is editing this file. Edit anyway?`, {
-          title: 'File already being edited', confirmLabel: 'Edit anyway', danger: true,
-        });
-        if (!this.collaborationContextCurrent(context)) return false;
-        if (!isCurrent()) { client.leaveEdit(); return false; }
-        if (!confirmed) return false;
-        const forced = await client.claim(filepath, { force: true });
-        if (!this.collaborationContextCurrent(context)) return false;
-        if (!isCurrent()) { client.leaveEdit(); return false; }
-        return !!forced.granted;
+        // Reconnection and late collaboration initialization also claim files.
+        // Serialize them with row/editor claims so obsolete responses release
+        // their own claim before the next session acquires one.
+        const previous = this._collaborationClaimPending;
+        let release;
+        const pending = this._collaborationClaimPending = new Promise(resolve => { release = resolve; });
+        try {
+          if (previous) await previous;
+          if (!this.collaborationContextCurrent(context) || !isCurrent()) return false;
+          if (automatic && client.isEditing(filepath)) return false;
+          const result = await client.claim(filepath, { force: false });
+          if (!this.collaborationContextCurrent(context)) return false;
+          if (result.stale) return false;
+          if (!isCurrent()) { client.leaveEdit(); return false; }
+          if (result.granted) return true;
+          if (automatic) return false;
+          const names = (result.peers || []).map(peer => peer.name).join(', ') || 'Another translator';
+          const confirmed = await this.appConfirm(`${names} is editing this file. Edit anyway?`, {
+            title: 'File already being edited', confirmLabel: 'Edit anyway', danger: true,
+          });
+          if (!this.collaborationContextCurrent(context)) return false;
+          if (!isCurrent()) { client.leaveEdit(); return false; }
+          if (!confirmed) return false;
+          const forced = await client.claim(filepath, { force: true });
+          if (!this.collaborationContextCurrent(context)) return false;
+          if (forced.stale) return false;
+          if (!isCurrent()) { client.leaveEdit(); return false; }
+          return !!forced.granted;
+        } finally {
+          release();
+          if (this._collaborationClaimPending === pending) this._collaborationClaimPending = null;
+        }
       },
       async persistTranslationBatch(updates, origin, options = {}) {
         if (this._reconcilingImport) return { stale: true };
@@ -565,9 +612,25 @@
           if (!this.collaborationContextCurrent(ctx)) return { stale: true };
           window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
             sourceHash: ctx.source, game: ctx.game, language: ctx.language });
+          if (options.draft) for (const { desc } of updates) {
+            const conflicts = ctx.client?.snapshot?.({ includeFiles: false })?.conflicts || this.collaborationConflicts || [];
+            if (conflicts.some(conflict => conflict.filepath === desc.filepath)) {
+              throw Object.assign(new Error('Open the full editor to review the shared translation conflict before staging this draft.'),
+                { code: 'DRAFT_CONFLICT', draftReview: 'shared', filepath: desc.filepath });
+            }
+            const current = ctx.client?.fileBase?.(desc.filepath) || this.collaborationFile(desc, ctx.language);
+            if (Array.isArray(options.draft.base?.translations)
+              && JSON.stringify(options.draft.base.translations) !== JSON.stringify(current.translations)) {
+              throw Object.assign(new Error('Open the full editor and review this Local draft against the changed committed translation before staging it.'),
+                { code: 'DRAFT_BASE_CHANGED', draftReview: 'base', filepath: desc.filepath, currentTranslations: [...current.translations] });
+            }
+          }
           const promotions = { ...(options.promoteDroppedByPath || {}) };
           for (const { desc } of updates) {
             const candidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, ctx.language);
+            if (options.inline && (candidate || this.localDescs.droppedConflicts?.[ctx.language]?.[desc.filepath])) {
+              throw new Error('Open the full editor to review the dropped translation before saving this file.');
+            }
             if (candidate) promotions[desc.filepath] ||= this.capturedDroppedPromotion(desc.filepath, candidate);
           }
           if (options.promoteDropped && updates.length === 1) promotions[updates[0].desc.filepath] = options.promoteDropped;
@@ -584,6 +647,7 @@
                 { lastEditedAt: now, lastTranslatedAt: now })]));
             const batch = { jobId: crypto.randomUUID(), game: ctx.game, language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
+              ...(options.draft ? { draft: copy(options.draft) } : {}), ...(options.awaitDurable ? { deferDisplay: true } : {}),
               descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
                 { derivedStatus: true })),
               revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
@@ -594,7 +658,15 @@
                   Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin,
                 ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}) } } : {}),
             };
-            this._pendingSaves.enqueue(batch, { context: ctx });
+            const job = this._pendingSaves.enqueue(batch, { context: ctx });
+            if (options.awaitDurable) {
+              // Inline drafts remain private until the complete save transaction
+              // acknowledges staging and exact draft consumption together.
+              try { await this._pendingSaves.drain(); }
+              catch (error) { this._pendingSaves.discardRejectedDraft?.(job.id); throw error; }
+              return { status: 'local', jobId: batch.jobId, durable: job.durable,
+                draftConsumed: job.ack?.draftConsumed === true, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
+            }
             ctx.client?.stageLocalSave(batch);
             for (const file of files) this.localDescs.status[file.filepath] = statuses[file.filepath];
             for (const file of files) window.WorkspaceState.stageTranslation(this.localDescs, file, ctx.language,
@@ -695,6 +767,7 @@
         if (errors.length) throw new Error('Fix the translation errors before saving the result: ' + errors.map(item => item.message).join(' '));
         const warnings = diagnostics.filter(item => item.level === 'warning');
         const blocksAtResolution = this.editorBlocks;
+        const draftAtResolution = this._draftSession;
         if (warnings.length) {
           const confirmed = await this.appConfirm('Translation warnings: ' + warnings.map(item => item.message).join('\n') + '\nSave the result anyway?', {
             title: 'Save with translation warnings?', confirmLabel: 'Save anyway', danger: true,
@@ -705,13 +778,17 @@
         const result = await client.resolve(id, translations, options);
         if (!this.collaborationContextCurrent(context)) return { ...result, stale: true };
         if (result.status !== 'conflict') this.collaborationNotice = result.status === 'pending' ? 'Resolution saved locally · Pending sync' : 'Translation conflict resolved.';
-        if (result.status !== 'conflict' && conflict && this.editorVisible && this.editorBlocks === blocksAtResolution
+        if (result.status !== 'conflict' && conflict && (this.editorSessionActive ?? this.editorVisible) && this.editorBlocks === blocksAtResolution
           && this.editorCurrentEditingDesc.filepath === conflict.filepath) {
           const saved = client.fileBase(conflict.filepath);
           this.rebaseEditorAfterCommit(saved, {
             draftBefore: conflict.yours.translations.map(value => this.getEditorDisplayText(value)),
             submittedTranslations: conflict.yours.translations,
           });
+          if (draftAtResolution && this._draftSession === draftAtResolution) {
+            draftAtResolution.base = copy(this._editorCollabBase || saved);
+            await this.flushEditorDraft?.();
+          }
         }
         return result;
       },
@@ -773,9 +850,10 @@
         const result = await this.persistTranslationBatch([{ desc, lines: file.translations, needsReview: !!file.needsReview }], 'restore', { context, bases: { [filepath]: base }, restore: { eventId: id, version } });
         if (result.stale) return result;
         if (result.status === 'conflict') throw new Error('The shared file changed. Review the conflict before restoring.');
-        if (this.editorVisible && this.editorCurrentEditingDesc.filepath === filepath && !this.editorHaveChanges()) {
+        if ((this.editorSessionActive ?? this.editorVisible) && this.editorCurrentEditingDesc.filepath === filepath && !this.editorHaveChanges()) {
           this._editorCollabBase = client.fileBase(filepath);
-          this.openEditorFile(filepath);
+          if (this.inlineActive) await this.reloadInlineSession?.(filepath);
+          else this.openEditorFile(filepath);
         }
         return result;
       },

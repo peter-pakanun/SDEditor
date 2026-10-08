@@ -894,6 +894,19 @@ test('polling and list requests do not overlap, and background tabs do not poll'
   assert.equal(calls.length, 2);
 });
 
+test('inline comments use the active file session and stop reads when the session closes', async () => {
+  const { app, observers } = fixture(async () => ({ items: [comment(7)], nextCursor: null }));
+  app.editorVisible = false; app.editorSessionActive = true;
+  app.$refs.commentsFileList = { querySelectorAll: () => [node(7)] };
+  assert.equal(app.commentsSurfaceVisible('file'), true);
+  await app.commentsRefreshFile();
+  assert.equal(app.commentsFileItems.length, 1);
+  await app.commentsObserveVisible();
+  assert.equal(observers.at(-1).nodes.length, 1);
+  app.editorSessionActive = false;
+  assert.equal(app.commentsSurfaceVisible('file'), false);
+});
+
 test('unmount invalidates pending responses and disconnects the visibility observer', async () => {
   const pending = deferred();
   const { app, observers, destroy } = fixture(() => pending.promise);
