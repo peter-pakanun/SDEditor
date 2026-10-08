@@ -241,8 +241,29 @@
       inlineRowBlocks(row) {
         const desc = this.getDescByFilepath(row.filepath), english = desc?.translations?.English || [];
         const lines = this.inlineDraftFor(row.filepath)?.translations || desc?.translations?.[this.lang] || [];
-        return Array.from({ length: Math.max(english.length, lines.length) }, (_, index) => ({ index,
-          english: this.decodeEscapedNewlines(english[index] || ''), translation: this.decodeEscapedNewlines(lines[index] || '') }));
+        if (!desc) return [];
+        if (!this._inlineRowBlockCache) this._inlineRowBlockCache = new WeakMap();
+        const key = root.Vue?.toRaw ? root.Vue.toRaw(desc) : desc;
+        const cached = this._inlineRowBlockCache.get(key);
+        const count = Math.max(english.length, lines.length);
+        // Read only this row's strings to retain reactive updates, including
+        // in-place repairs. Popup selection can then reuse both columns' blocks
+        // without decoding or allocating them again on every parent render.
+        let unchanged = cached?.blocks.length === count;
+        for (let index = 0; index < count; index++) {
+          const source = english[index] || '', translation = lines[index] || '';
+          if (cached?.source[index] !== source || cached?.translation[index] !== translation) unchanged = false;
+        }
+        if (unchanged) return cached.blocks;
+        const source = [], translation = [], blocks = [];
+        for (let index = 0; index < count; index++) {
+          source.push(english[index] || ''); translation.push(lines[index] || '');
+          blocks.push({ index,
+            english: cached?.source[index] === source[index] ? cached.blocks[index].english : this.decodeEscapedNewlines(source[index]),
+            translation: cached?.translation[index] === translation[index] ? cached.blocks[index].translation : this.decodeEscapedNewlines(translation[index]) });
+        }
+        this._inlineRowBlockCache.set(key, { source, translation, blocks });
+        return blocks;
       },
       inlineFocusContains(target) {
         if (!target?.closest) return false;

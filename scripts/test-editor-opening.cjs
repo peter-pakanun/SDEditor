@@ -38,6 +38,25 @@ function dictionaryIds(entries) {
   return Array.from(entries, entry => entry._id);
 }
 
+function trackedDictionary(entries) {
+  const proxies = new WeakMap(), originals = new WeakMap();
+  const counts = { reads: 0, writes: 0 };
+  const toRaw = value => originals.get(value) || value;
+  const wrap = value => {
+    if (!value || typeof value !== 'object') return value;
+    if (originals.has(value)) return value;
+    if (!proxies.has(value)) {
+      const proxy = new Proxy(value, {
+        get(target, key, receiver) { counts.reads++; return wrap(Reflect.get(target, key, receiver)); },
+        set(target, key, next) { counts.writes++; return Reflect.set(target, key, toRaw(next)); },
+      });
+      proxies.set(value, proxy); originals.set(proxy, value);
+    }
+    return proxies.get(value);
+  };
+  return { entries, dictionary: wrap(entries), toRaw, wrap, counts };
+}
+
 function loadEditor(options = {}) {
   let config;
   let clock = 0;
@@ -66,7 +85,7 @@ function loadEditor(options = {}) {
       defineComponent(value) { config = value; return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; },
       nextTick(callback) { return Promise.resolve().then(callback); },
-      markRaw(value) { return value; }, toRaw(value) { return value; },
+      markRaw(value) { return value; }, toRaw(value) { return options.toRaw ? options.toRaw(value) : value; },
     },
   });
   for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
@@ -89,8 +108,17 @@ function loadEditor(options = {}) {
     const original = editor[method];
     editor[method] = function (...args) { calls[counter]++; return original.apply(this, args); };
   }
+  let dictionaryViewCache;
   for (const [name, getter] of Object.entries(config.computed)) {
-    Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+    Object.defineProperty(editor, name, { get: () => {
+      if (name !== 'dictionaryScopeView' || !options.cacheDictionaryScope) return getter.call(editor);
+      // Model Vue's computed caching for tests that measure reactive array reads.
+      const key = [editor.dictionary, editor.gameVersion, editor.editorDictionaryRevision];
+      if (!dictionaryViewCache || key.some((value, index) => value !== dictionaryViewCache.key[index])) {
+        dictionaryViewCache = { key, value: getter.call(editor) };
+      }
+      return dictionaryViewCache.value;
+    } });
   }
   return { editor, config, calls, document, window };
 }
@@ -1044,4 +1072,165 @@ test('imported duplicate IDs are repaired without losing either Find or overwrit
   assert.equal(editor.dictionary[2].gameScope, undefined, 'Legacy entries retain their All representation.');
   editor.beginDictionaryEdit('shared~3');
   assert.equal(editor.visibleDictionary.length, 3);
+});
+
+test('autocomplete reuses the prepared Dictionary index without scans and keeps live TL notes', async () => {
+  const entries = dictionary(20000);
+  const { editor, calls } = loadEditor({ dictionary: entries, cacheDictionaryScope: true });
+  await editor.prepareEditorDictionaryIndex(() => true);
+  const indexes = calls.asyncIndexes + calls.syncIndexes;
+  let scans = 0;
+  entries.find = () => { scans++; assert.fail('Autocomplete must not scan the full Dictionary.'); };
+  editor.getActiveDictionaryEntries = () => { scans++; assert.fail('Keyword selection must reuse the prepared index.'); };
+  editor.hlPopup.visible = true;
+  editor.hlPopup.filtered = [
+    { dictEntryId: 'word-19999', kwTagName: 'Term 19999', value: '[Term 19999]' },
+    { dictEntryId: 'word-19998', kwTagName: 'Term 19998', value: '[Term 19998]' },
+  ];
+  entries[19999].tlnote = 'Live selected note';
+  const started = performance.now();
+  for (let index = 0; index < 200; index++) {
+    editor.moveHlPopupSelection(1);
+    const item = editor.hlPopupSelectedItem;
+    assert.equal(editor.getDictionaryEntryById(item.dictEntryId), entries[19999 - editor.hlPopup.selectedIndex]);
+    assert.equal(editor.findActiveDictionaryKeywordEntry(item.kwTagName), editor.getDictionaryEntryById(item.dictEntryId));
+    assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
+    assert.equal(editor.hlPopupTlnote, editor.hlPopup.selectedIndex ? '' : 'Live selected note');
+  }
+  console.log(`20,000-entry Dictionary: 200 cached autocomplete selections in ${Math.round(performance.now() - started)} ms (VM fixture).`);
+  entries[19999].tlnote = 'Changed note';
+  editor.hlPopup.selectedIndex = 0;
+  assert.equal(editor.hlPopupTlnote, 'Changed note');
+  assert.equal(scans, 0);
+  assert.equal(calls.asyncIndexes + calls.syncIndexes, indexes, 'Arrow navigation must not rebuild the Dictionary index.');
+});
+
+test('autocomplete lookup rejects replaced, invalidated, and other-game prepared indexes', () => {
+  const { editor } = loadEditor({ dictionary: [
+    { _id: 'one', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
+    { _id: 'two', find: 'Fire', replace: 'two', gameScope: 'poe2', alts: [] },
+  ] });
+  editor.getEditorDictionaryIndex();
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'one');
+  editor.gameVersion = 'poe2';
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'two');
+  editor.getEditorDictionaryIndex();
+  editor.dictionary = [{ _id: 'replacement', find: 'Fire', replace: 'new', alts: [] }];
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
+  assert.equal(editor.getDictionaryEntryById('two'), undefined);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'replacement');
+  editor.getEditorDictionaryIndex();
+  editor.dictionary[0].find = 'Cold';
+  editor.invalidateEditorDictionaryIndex();
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire'), undefined);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Cold')._id, 'replacement');
+});
+
+test('rendering autocomplete action hints does not create a Dictionary return action', () => {
+  const { editor } = loadEditor({ dictionary: [] });
+  const item = { kwTagName: 'Fire', value: '[Fire]', mustCreate: true };
+  const previous = { dictEntryId: 'earlier-action' };
+  editor.hlPopupReturnInfo = previous;
+  assert.equal(editor.hlPopupCtrlEnterPillText(item), 'Ctrl+Enter Add');
+  assert.equal(editor.hlPopupReturnInfo, previous, 'Rendering a hint must not mutate state or schedule a second render.');
+  editor.hlPopup.visible = true;
+  editor.hlPopup.filtered = [item];
+  editor.ensureDictionaryKeywordTag = () => ({ created: true });
+  assert.equal(editor.createDictionaryEntryFromHlPopupSelection(), true);
+  assert.equal(editor.hlPopupReturnInfo, item, 'An explicit create action still remembers its insertion target.');
+});
+
+test('autocomplete Dictionary page lookup reuses positions and refreshes on ordering changes', () => {
+  const { editor } = loadEditor();
+  const first = dictionary(120);
+  const second = first.slice().reverse();
+  // Exercise the method with a stable computed-view result, as Vue supplies it.
+  const view = { filteredDictionary: first, dictionaryPageSize: 40, dictionaryPage: 1 };
+  editor.revealDictionaryEntry.call(view, 'word-119');
+  assert.equal(view.dictionaryPage, 3);
+  const positions = view._popupDictionaryPositions;
+  editor.revealDictionaryEntry.call(view, 'word-1');
+  assert.equal(view.dictionaryPage, 1);
+  assert.equal(view._popupDictionaryPositions, positions);
+  view.filteredDictionary = second;
+  editor.revealDictionaryEntry.call(view, 'word-119');
+  assert.equal(view.dictionaryPage, 1);
+  assert.notEqual(view._popupDictionaryPositions, positions);
+  editor.revealDictionaryEntry.call(view, 'unknown');
+  assert.equal(view.dictionaryPage, 1);
+});
+
+test('Dictionary scope, matches-first ordering and filtering scan raw entries while visible edits stay reactive', () => {
+  const fixture = trackedDictionary(dictionary(20000));
+  const { editor } = loadEditor({ dictionary: fixture.dictionary, toRaw: fixture.toRaw, cacheDictionaryScope: true });
+  editor.editorVisible = true;
+  editor.editorBlocks = [{ HLs: [{ dictId: 'word-19999' }, { dictId: 'word-19998' }] }];
+  const view = editor.dictionaryScopeView;
+  assert.equal(editor.getActiveDictionaryEntries()[0], fixture.entries[0]);
+  assert.equal(editor.activeDictionaryIds.has('word-19999'), true);
+  assert.equal(editor.orderedDictionary[0], fixture.entries[19998]);
+  editor.dictionaryFilter = 'Term 19999';
+  assert.equal(editor.filteredDictionary[0], fixture.entries[19999]);
+  const visible = editor.visibleDictionary[0];
+  assert.equal(visible, fixture.dictionary[19999]);
+  assert.notEqual(visible, fixture.entries[19999], 'Only the visible row is resolved through the reactive array.');
+  visible.replace = 'Edited through v-model';
+  visible.alts.push({ find: 'New alternate', replace: 'Live alternate' });
+  assert.equal(fixture.entries[19999].replace, 'Edited through v-model');
+  assert.equal(fixture.entries[19999].alts[0].replace, 'Live alternate');
+  assert.ok(fixture.counts.writes >= 2);
+  assert.ok(fixture.counts.reads < 200, `Ordering/filtering must not traverse 20,000 proxies (${fixture.counts.reads} reads).`);
+  assert.equal(editor.dictionaryScopeView, view);
+});
+
+test('raw Dictionary view refreshes after in-place edits, source replacement and game changes without losing held order', () => {
+  const fixture = trackedDictionary([
+    { _id: 'shared', find: 'Fire', replace: 'fallback', alts: [], tlnote: '' },
+    { _id: 'one', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [], tlnote: '' },
+    { _id: 'two', find: 'Fire', replace: 'two', gameScope: 'poe2', alts: [], tlnote: '' },
+  ]);
+  const { editor, config } = loadEditor({ dictionary: fixture.dictionary, toRaw: fixture.toRaw, cacheDictionaryScope: true });
+  editor.scheduleSettingsSave = () => {};
+  editor.editorVisible = true;
+  const firstView = editor.dictionaryScopeView;
+  const entry = editor.findActiveDictionaryKeywordEntry('Fire');
+  assert.equal(entry, fixture.dictionary[1]);
+  assert.notEqual(entry, fixture.entries[1], 'Keyword actions must receive a reactive entry.');
+  editor.beginDictionaryEdit('one');
+  const order = dictionaryIds(editor.filteredDictionary);
+  entry.find = 'Cold'; entry.tlnote = 'Updated note';
+  config.watch.dictionary.handler.call(editor);
+  assert.notEqual(editor.dictionaryScopeView, firstView);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire'), fixture.dictionary[0]);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Cold'), entry);
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
+  const replacement = fixture.wrap([
+    { ...fixture.entries[0], replace: 'remote fallback' },
+    { ...fixture.entries[1], replace: 'remote replacement' },
+    fixture.entries[2],
+    { _id: 'new', find: 'Added remotely', replace: 'new', alts: [] },
+  ]);
+  editor.dictionary = replacement;
+  assert.deepEqual(dictionaryIds(editor.filteredDictionary), [...order, 'new']);
+  assert.equal(editor.visibleDictionary.find(word => word._id === 'one'), replacement[1]);
+  editor.gameVersion = 'poe2';
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire'), replacement[2]);
+  assert.equal(editor.activeDictionaryIds.has('one'), false);
+  editor.setDictionaryEntryScope(replacement[2], 'poe1');
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Fire'), replacement[0], 'Explicit scope changes exclude suggestions immediately.');
+});
+
+test('visible and keyword Dictionary rows preserve exact identity before imported IDs are normalized', () => {
+  const fixture = trackedDictionary([
+    { find: 'Fire', replace: 'first', alts: [] },
+    { find: 'Cold', replace: 'second', alts: [] },
+    { _id: 'duplicate', find: 'Ice', replace: 'third', alts: [] },
+    { _id: 'duplicate', find: 'Flame', replace: 'fourth', alts: [] },
+  ]);
+  const { editor } = loadEditor({ dictionary: fixture.dictionary, toRaw: fixture.toRaw, cacheDictionaryScope: true });
+  assert.deepEqual(Array.from(editor.visibleDictionary), Array.from(fixture.dictionary));
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Cold'), fixture.dictionary[1]);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Flame'), fixture.dictionary[3]);
 });

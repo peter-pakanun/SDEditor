@@ -75,8 +75,68 @@ function harness({ records = new Map() } = {}) {
     editor.editorOriginalTranslations = [...accepted.translations];
     return { typedDuringSave: false };
   };
-  return { editor, config, calls, window, store, records, desc, document };
+  return { editor, config, calls, window, store, records, desc, document, context };
 }
+
+test('row lookups index the raw corpus and only read the selected reactive description', () => {
+  const { editor, context } = harness();
+  const source = Array.from({ length: 20520 }, (_, index) => description(String(index)));
+  let reads = 0;
+  const proxies = source.map(desc => new Proxy(desc, { get(target, property) { reads++; return target[property]; } }));
+  const corpus = new Proxy(proxies, { get(target, property) { reads++; return target[property]; } });
+  context.Vue.toRaw = value => value === corpus ? source : value;
+  editor.descs = corpus;
+  const row = { filepath: source.at(-1).filepath };
+  for (let i = 0; i < 100; i++) assert.equal(editor.getDescByFilepath(row.filepath), proxies.at(-1));
+  assert.ok(reads <= 100, 'repeated rendering must not walk or subscribe to the reactive corpus: ' + reads);
+  assert.equal(editor.getDescByFilepath('absent.txt'), undefined);
+  source.at(-1).translations.Thai[0] = 'peer update';
+  assert.equal(editor.getDescByFilepath(row.filepath).translations.Thai[0], 'peer update');
+});
+
+test('filepath index follows source replacement, additions, reordering and duplicate first-match semantics', () => {
+  const { editor } = harness();
+  const first = editor.descs[0], second = editor.descs[1];
+  assert.equal(editor.getDescByFilepath(first.filepath), first);
+  editor.descs.reverse();
+  assert.equal(editor.getDescByFilepath(first.filepath), first);
+  const added = description('added'); editor.descs.push(added);
+  assert.equal(editor.getDescByFilepath(added.filepath), added);
+  const replacement = description('first', 'new source');
+  editor.descs = [replacement, second, first];
+  assert.equal(editor.getDescByFilepath(first.filepath), replacement);
+  editor.descs = [];
+  assert.equal(editor.getDescByFilepath(first.filepath), undefined);
+});
+
+test('paired inline blocks reuse decoded text while tracking drafts, peer repairs and language/source changes', () => {
+  const { editor, desc } = harness();
+  desc.translations.English = ['Source\\nline', 'source-only'];
+  desc.translations.Thai = ['translation\\nline'];
+  let decodes = 0;
+  const decode = editor.decodeEscapedNewlines.bind(editor);
+  editor.decodeEscapedNewlines = text => { decodes++; return decode(text); };
+  const first = editor.inlineRowBlocks(desc);
+  assert.equal(first.length, 2); assert.equal(first[0].english, 'Source\nline'); assert.equal(first[1].translation, '');
+  assert.equal(decodes, 4);
+  for (let i = 0; i < 100; i++) assert.equal(editor.inlineRowBlocks(desc), first);
+  assert.equal(decodes, 4, 'popup rerenders reuse decoded blocks in both columns');
+  desc.translations.Thai[0] = 'peer update';
+  const peer = editor.inlineRowBlocks(desc);
+  assert.equal(peer[0].translation, 'peer update'); assert.equal(decodes, 5);
+  editor.inlineDraftRows[desc.filepath] = { translations: ['draft', '', 'translation-only'] };
+  const draft = editor.inlineRowBlocks(desc);
+  assert.equal(draft.length, 3); assert.equal(draft[2].english, ''); assert.equal(draft[2].translation, 'translation-only');
+  editor.inlineDraftRows[desc.filepath].translations[0] = 'new draft';
+  assert.equal(editor.inlineRowBlocks(desc)[0].translation, 'new draft');
+  delete editor.inlineDraftRows[desc.filepath];
+  assert.equal(editor.inlineRowBlocks(desc)[0].translation, 'peer update');
+  editor.lang = 'German'; desc.translations.German = ['Deutsch'];
+  assert.equal(editor.inlineRowBlocks(desc)[0].translation, 'Deutsch');
+  editor.descs = [{ ...desc, translations: { English: ['new source'], German: ['neu'] } }];
+  assert.equal(editor.inlineRowBlocks(desc)[0].english, 'new source');
+  assert.equal(editor.inlineRowBlocks(desc)[0].translation, 'neu');
+});
 
 test('inline row activation prepares the shared editing session without showing the full editor', async () => {
   const h = harness(), { editor, desc } = h;

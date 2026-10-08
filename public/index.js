@@ -220,6 +220,7 @@ const config = Vue.defineComponent({
       editorVisible: false,
       editorLoading: false,
       editorLoadError: '',
+      editorDictionaryRevision: 0,
       editorCurrentEditingDesc: null,
       editorFocusedIndex: 0,
       editorFocusedColumnIndex: 0,
@@ -605,8 +606,26 @@ const config = Vue.defineComponent({
     terminologyDictionary() {
       return window.TerminologyDiagnostics.compileDictionary(this.getActiveDictionaryEntries());
     },
+    dictionaryScopeView() {
+      const source = this.dictionary || [];
+      // The deep Dictionary watcher advances this revision for in-place edits.
+      // Read-only indexing and ordering must not subscribe to every field of
+      // every reactive entry; only the visible page is resolved to live proxies.
+      const revision = this.editorDictionaryRevision;
+      const entries = Vue.toRaw ? Vue.toRaw(source) : source;
+      const active = window.DictionaryScope.activeEntries(entries, this.gameVersion);
+      const positions = new Map();
+      const entryPositions = new WeakMap();
+      entries.forEach((entry, index) => {
+        const id = String(entry?._id);
+        if (!positions.has(id)) positions.set(id, index);
+        if (entry && typeof entry === 'object') entryPositions.set(entry, index);
+      });
+      return { source, revision, entries, active, positions, entryPositions,
+        activeIds: new Set(active.map(entry => String(entry?._id || ''))) };
+    },
     activeDictionaryIds() {
-      return new Set(this.getActiveDictionaryEntries().map(entry => String(entry?._id || '')));
+      return this.dictionaryScopeView.activeIds;
     },
     editorConsistencyDiagnostics() {
       return (this.editorBlocks || []).map((block, blockIndex) =>
@@ -718,7 +737,7 @@ const config = Vue.defineComponent({
     hlPopupTlnote() {
       const dictId = this.hlPopupSelectedItem?.dictEntryId;
       if (!dictId) return '';
-      const entry = this.dictionary.find(word => String(word?._id) === String(dictId));
+      const entry = this.getDictionaryEntryById(dictId);
       return String(entry?.tlnote ?? '').trim();
     },
     foundDictionarySet() {
@@ -760,13 +779,14 @@ const config = Vue.defineComponent({
       return map;
     },
     orderedDictionary() {
-      const dictionary = this.dictionary || [];
+      const dictionary = this.dictionaryScopeView.entries;
       // Resolve the captured order against live entries so cloud replacements
       // still update the fields without moving the row being edited.
       if (this.dictionaryEditOrder.length) {
         const entries = new Map(dictionary.map(entry => [String(entry?._id), entry]));
         const ordered = [];
-        for (const id of this.dictionaryEditOrder) {
+        const heldOrder = Vue.toRaw ? Vue.toRaw(this.dictionaryEditOrder) : this.dictionaryEditOrder;
+        for (const id of heldOrder) {
           if (!entries.has(id)) continue;
           ordered.push(entries.get(id));
           entries.delete(id);
@@ -813,7 +833,8 @@ const config = Vue.defineComponent({
     visibleDictionary() {
       if (!this.editorReady) return [];
       const page = Math.min(this.dictionaryPage, this.dictionaryPageCount);
-      return this.filteredDictionary.slice((page - 1) * this.dictionaryPageSize, page * this.dictionaryPageSize);
+      return this.filteredDictionary.slice((page - 1) * this.dictionaryPageSize, page * this.dictionaryPageSize)
+        .map(entry => this.getLiveDictionaryEntry(entry));
     },
     dictionaryRangeLabel() {
       return formatPageRange(this.filteredDictionary.length, Math.min(this.dictionaryPage, this.dictionaryPageCount), this.dictionaryPageSize);
@@ -3141,7 +3162,24 @@ const config = Vue.defineComponent({
       }
     },
     getActiveDictionaryEntries() {
-      return window.DictionaryScope.activeEntries(this.dictionary, this.gameVersion);
+      return this.dictionaryScopeView.active;
+    },
+    getPreparedEditorDictionaryIndex() {
+      return this._editorDictionaryIndexRevision === this.editorDictionaryRevision
+        && this._editorDictionarySource === this.dictionary && this._editorDictionaryGame === this.gameVersion
+        ? this._editorDictionaryIndex : null;
+    },
+    getDictionaryEntryById(dictId) {
+      // Resolve only the requested entry through Vue's array so v-model, notes,
+      // and explicit Dictionary actions receive a live proxy, never the raw row.
+      const position = this.dictionaryScopeView.positions.get(String(dictId));
+      return position === undefined ? undefined : this.dictionary[position];
+    },
+    getLiveDictionaryEntry(entry) {
+      // Keep exact identity even for imported entries awaiting ID normalization.
+      const raw = Vue.toRaw ? Vue.toRaw(entry) : entry;
+      const position = this.dictionaryScopeView.entryPositions.get(raw);
+      return position === undefined ? entry : this.dictionary[position];
     },
     isDictionaryEntryActive(word) {
       if (!word) return false;
@@ -3158,6 +3196,7 @@ const config = Vue.defineComponent({
       const normalized = window.DictionaryScope.normalize(scope);
       if (normalized === 'all') delete word.gameScope;
       else word.gameScope = normalized;
+      this.invalidateEditorDictionaryIndex();
     },
     dictionaryEntryScopeWarning(word) {
       if (window.DictionaryScope.available(word, this.gameVersion)) return '';
@@ -3167,10 +3206,13 @@ const config = Vue.defineComponent({
     },
     findActiveDictionaryKeywordEntry(tagName) {
       const key = String(tagName || '').trim().toLowerCase();
-      return this.getActiveDictionaryEntries().find(entry => window.DictionaryScope.findKey(entry) === key);
+      const index = this.getPreparedEditorDictionaryIndex();
+      const entry = index && key ? index.keywordEntries(key)[0]
+        : this.getActiveDictionaryEntries().find(entry => window.DictionaryScope.findKey(entry) === key);
+      return entry ? this.getLiveDictionaryEntry(entry) : undefined;
     },
     isDictionaryHighlightActive(highlight) {
-      return !highlight?.dictId || this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(highlight.dictId)));
+      return !highlight?.dictId || this.isDictionaryEntryActive(this.getDictionaryEntryById(highlight.dictId));
     },
     isDictionaryEntryFound(word) {
       return this.isDictionaryEntryActive(word) && (this.foundDictionarySet?.has?.(word?._id) || false);
@@ -3202,7 +3244,7 @@ const config = Vue.defineComponent({
     },
     beginDictionaryEdit(dictId, options = {}) {
       const id = String(dictId || '');
-      if (!id || !this.dictionary.some(entry => String(entry?._id) === id)) return;
+      if (!id || !this.dictionaryScopeView.positions.has(id)) return;
       if (!this.dictionaryEditOrder.length || options.newEntry) {
         const order = this.orderedDictionary.map(entry => String(entry?._id));
         this.dictionaryEditOrder = options.newEntry ? [id, ...order.filter(entryId => entryId !== id)] : order;
@@ -3234,7 +3276,7 @@ const config = Vue.defineComponent({
       });
     },
     invalidateEditorDictionaryIndex() {
-      this._editorDictionaryRevision = (this._editorDictionaryRevision || 0) + 1;
+      this.editorDictionaryRevision = (this.editorDictionaryRevision || 0) + 1;
       this._editorDictionaryIndex = null;
     },
     getEditorDictionaryIndex() {
@@ -3246,6 +3288,7 @@ const config = Vue.defineComponent({
         this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
         this._editorDictionarySource = this.dictionary;
         this._editorDictionaryGame = this.gameVersion;
+        this._editorDictionaryIndexRevision = this.editorDictionaryRevision;
       }
       return this._editorDictionaryIndex;
     },
@@ -3255,10 +3298,10 @@ const config = Vue.defineComponent({
         if (this._editorDictionaryIndex && this._editorDictionarySource === this.dictionary && this._editorDictionaryGame === this.gameVersion) return true;
         const source = this.dictionary;
         const game = this.gameVersion;
-        const revision = this._editorDictionaryRevision || 0;
+        const revision = this.editorDictionaryRevision || 0;
         const active = this.getActiveDictionaryEntries();
         const dictionary = Vue.toRaw ? Vue.toRaw(active) : active;
-        const stale = () => !isCurrent() || source !== this.dictionary || game !== this.gameVersion || revision !== (this._editorDictionaryRevision || 0);
+        const stale = () => !isCurrent() || source !== this.dictionary || game !== this.gameVersion || revision !== (this.editorDictionaryRevision || 0);
         const index = await window.EditorDictionaryIndex.createAsync(dictionary, entry => this.getDictionaryDefinitionPairs(entry), {
           yieldTask: () => this.yieldEditorWork(), isCancelled: stale,
         });
@@ -3266,6 +3309,7 @@ const config = Vue.defineComponent({
         this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
         this._editorDictionarySource = source;
         this._editorDictionaryGame = game;
+        this._editorDictionaryIndexRevision = revision;
         return true;
       }
       return false;
@@ -3276,7 +3320,19 @@ const config = Vue.defineComponent({
       this.$nextTick(() => { const side = this.$refs.editorSide; if (side) side.scrollTop = 0; });
     },
     revealDictionaryEntry(dictId) {
-      const index = this.filteredDictionary.findIndex(word => String(word?._id) === String(dictId));
+      const dictionary = this.filteredDictionary;
+      // The computed filtered view is stable while arrowing through suggestions.
+      // Rebuild only when filtering, matches-first ordering, or membership changes.
+      if (this._popupDictionaryPositionsSource !== dictionary) {
+        const positions = new Map();
+        dictionary.forEach((entry, index) => {
+          const id = String(entry?._id);
+          if (!positions.has(id)) positions.set(id, index);
+        });
+        this._popupDictionaryPositions = positions;
+        this._popupDictionaryPositionsSource = dictionary;
+      }
+      const index = this._popupDictionaryPositions.get(String(dictId));
       if (index >= 0) this.dictionaryPage = Math.floor(index / this.dictionaryPageSize) + 1;
     },
     buildEnglishHLter(english) {
@@ -3619,8 +3675,8 @@ const config = Vue.defineComponent({
         await this.$nextTick();
         await this.yieldEditorWork();
         if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
-        const revision = this._editorDictionaryRevision || 0;
-        const matchesCurrent = () => isCurrent() && revision === (this._editorDictionaryRevision || 0);
+        const revision = this.editorDictionaryRevision || 0;
+        const matchesCurrent = () => isCurrent() && revision === (this.editorDictionaryRevision || 0);
         const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
         let batchStarted = now();
         const preserveFocus = () => {
@@ -3755,7 +3811,7 @@ const config = Vue.defineComponent({
           let itemToAdds = [];
           let exactMatchItem = null;
           for (const dictId of uniqueDictIds) {
-            let dictEntry = (this.dictionary || []).find(d => String(d?._id) === String(dictId));
+            let dictEntry = this.getDictionaryEntryById(dictId);
             if (!dictEntry || !this.isDictionaryEntryActive(dictEntry)) continue;
             if (keywordTagNameLower && String(dictEntry?.find || "").trim().toLowerCase() !== keywordTagNameLower) continue;
             let pairs = this.getDictionaryDefinitionPairs(dictEntry);
@@ -4073,6 +4129,7 @@ const config = Vue.defineComponent({
         tlnote: ""
       };
       this.dictionary.unshift(entry);
+      this.invalidateEditorDictionaryIndex();
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.dictionaryFlashId = entry._id;
       if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
@@ -4091,7 +4148,6 @@ const config = Vue.defineComponent({
       let tagNameLower = info.tagName.toLowerCase();
       if (!tagNameLower) return false;
 
-      this.hlPopupReturnInfo = item;
       let alt = String(info.dynamicContent ?? "").trim();
 
       let existing = this.findActiveDictionaryKeywordEntry(tagNameLower);
@@ -4104,12 +4160,12 @@ const config = Vue.defineComponent({
     },
     canJumpToDictionaryFromHlPopupItem(item) {
       if (!item) return false;
-      return this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(item.dictEntryId)));
+      return this.isDictionaryEntryActive(this.getDictionaryEntryById(item.dictEntryId));
     },
     jumpToDictionaryFromHlPopupItem(item) {
       let dictId = String(item?.dictEntryId || "");
       if (!dictId) return false;
-      let entry = (this.dictionary || []).find(d => String(d?._id) === dictId);
+      let entry = this.getDictionaryEntryById(dictId);
       if (!entry || !this.isDictionaryEntryActive(entry)) return false;
       let altId = String(item?.dictAltId || "");
       let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
@@ -4245,6 +4301,7 @@ const config = Vue.defineComponent({
       if (!info) return false;
 
       let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
+      this.hlPopupReturnInfo = item;
       this.closeHlPopup();
       let r = this.ensureDictionaryKeywordTag(info.tagName, info.dynamicContent, selectedText);
       return r.created || r.addedAlt;
@@ -4407,7 +4464,7 @@ const config = Vue.defineComponent({
       });
     },
     insertHlPopupItem(item) {
-      if (item.dictEntryId && !this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === String(item.dictEntryId)))) {
+      if (item.dictEntryId && !this.isDictionaryEntryActive(this.getDictionaryEntryById(item.dictEntryId))) {
         this.closeHlPopup({ refocus: true });
         return;
       }
@@ -5742,7 +5799,24 @@ const config = Vue.defineComponent({
         data;
     },
     getDescByFilepath(filepath) {
-      return this.descs.find(o => o.filepath == filepath);
+      // Source filepaths are immutable; imports replace this array. Index the
+      // raw corpus once so rendering does not subscribe to every file's path.
+      // Return the selected proxy, keeping edits and peer updates reactive.
+      const source = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
+      let cache = this._descFilepathIndex;
+      const key = String(filepath);
+      if (!cache || cache.source !== source || cache.length !== source.length
+        || (cache.paths.has(key) && String(source[cache.paths.get(key)]?.filepath) !== key)) {
+        const paths = new Map();
+        for (let i = 0; i < source.length; i++) {
+          const path = String(source[i].filepath);
+          if (!paths.has(path)) paths.set(path, i);
+        }
+        cache = { source, length: source.length, paths };
+        this._descFilepathIndex = Vue.markRaw ? Vue.markRaw(cache) : cache;
+      }
+      const index = cache.paths.get(key);
+      return index === undefined ? undefined : this.descs[index];
     },
     async commentsOpenFile(filepath) {
       if (this.editorLoading || this.navigationBusy || this.editorSaving || !this.getDescByFilepath(filepath)) return;
@@ -6010,11 +6084,11 @@ const config = Vue.defineComponent({
         await this.yieldEditorPaint();
         if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
         const blocks = [];
-        const dictionaryRevision = this._editorDictionaryRevision || 0;
+        const dictionaryRevision = this.editorDictionaryRevision || 0;
         let sliceStart = Date.now();
         for (let i = 0; i < Math.max(source.english.length, source.translations.length); i++) {
           if (!isCurrent()) return false;
-          if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
+          if (dictionaryRevision !== (this.editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
           blocks.push(this.makeEditorBlock(source.english[i] || "", source.translations[i] || "", true));
           if (Date.now() - sliceStart >= 8) {
             await this.yieldEditorWork();
@@ -6023,7 +6097,7 @@ const config = Vue.defineComponent({
         }
         if (!isCurrent()) return false;
         // A cloud dictionary update during preparation must not publish mixed matches.
-        if (dictionaryRevision !== (this._editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
+        if (dictionaryRevision !== (this.editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
         this.applyPreparedEditorBlocks(blocks);
         this.editorLoading = false;
         this.$nextTick(() => {
@@ -6784,6 +6858,7 @@ const config = Vue.defineComponent({
     addVocab() {
       const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1', find: "", replace: "", alts: [], tlnote: "" };
       this.dictionary.unshift(entry);
+      this.invalidateEditorDictionaryIndex();
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.focusDictionaryEntryReplaceInput(entry._id);
     },
