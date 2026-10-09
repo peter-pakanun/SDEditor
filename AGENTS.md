@@ -33,6 +33,7 @@ Statuses are derived from immutable ZIP content, staged translations, dropped sn
 
 ## Data and persistence boundaries
 
+- For storage performance, preparation scheduling or future content modes, read [Storage Performance Design](docs/storage_performance_design.md). It records current scope/transaction/cache contracts, measurements and unfinished follow-ups; keep proposed work distinct from implemented behavior.
 - Keep the original ZIP and immutable parsed baseline separate from staged translations. Saves, translated imports, restores and shared edits must not rewrite the baseline or its identity.
 - Read [Local-first Server Storage](docs/local_first_server_storage.md) before changing baseline retention, collection generation, payload storage or compaction. Standalone sparse collaboration shares an archive descriptor, agreed import decisions, per-file baseline proofs, saved translations and server-authored history; Dropped copies synchronize separately with old English/entry metadata and translation. Manager publication retains the original ZIP externally and compact verified baseline metadata for all 12 teams; complete parsed baselines remain local or transient server parses. Modern collection ZIPs are generated client-side from verified originals and immutable Saved manifests. The API contains real per-file content, not only hashes. Legacy source manifests, seed history and archive collections remain retrievable through immutable payload references. Do not add full-ZIP uploads to ordinary saves or bulk-upload local history.
 - Modern `baselineId` combines the raw ZIP SHA-256, parser/duplicate-decision configuration hash and Merkle root. Legacy rooms use a canonical parsed source-manifest hash. Keep these identities distinct.
@@ -130,6 +131,7 @@ Keep `workspaceState.js` loaded before its helper/storage/protocol consumers and
 - [Cloud Backup](docs/cloud_backup.md) — access, synchronization, recovery, validation and deployment order
 - [Multi-Version Support](docs/multi_version.md) — game/source identities, storage and migration
 - [Local-first Server Storage](docs/local_first_server_storage.md) — baseline boundary, client collections, payload reduction and operational rollout
+- [Storage Performance Design](docs/storage_performance_design.md) — scoped records, atomic saves, cooperative preparation, measurements and future content-mode adapters
 - [Regex Guide](docs/regex_guide.md) — pattern reference
 - [Test Mode](docs/test-mode.md) — editor fixtures and validation limits
 - [TODO](TODO.md) — developer TODO list
