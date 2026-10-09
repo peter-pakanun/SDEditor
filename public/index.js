@@ -6401,6 +6401,7 @@ const config = Vue.defineComponent({
         this.appAlert('Unexpected Error! cannot find the file you want to edit!');
         return null;
       }
+      this._inlineFullEditorReturn = null;
       if (!this.editorVisible) this._fileTableReturnFocus = returnToFileList || !!document.activeElement?.closest?.('.fileTableScroll');
       this.selectFileRow(filepath);
 
@@ -6989,7 +6990,8 @@ const config = Vue.defineComponent({
         this.closeHlPopup({ refocus: true });
         return;
       }
-      this.editorExit();
+      e?.preventDefault();
+      this.editorExit({ returnInline: true });
     },
     editorHaveChanges() {
       if (this.editorLoading || this.editorLoadError) return false;
@@ -6997,14 +6999,20 @@ const config = Vue.defineComponent({
       let current = (this.editorBlocks || []).map(b => b?.translation ?? "");
       return !arrayEquals(original, current);
     },
-    async editorExit() {
+    async editorExit({ returnInline = false } = {}) {
       if (this.inlineActive) return this.finishInlineSession({ promote: false });
+      if (returnInline && this.restoreInlineEditorFromFull) {
+        const restored = await this.restoreInlineEditorFromFull();
+        if (restored !== null) return restored;
+      }
       if (this.flushEditorDraft && !this.editorLoading && !this.editorLoadError) {
         if (this.editorSaving || this.navigationBusy || !await this.flushEditorDraft()) return;
+        this._inlineFullEditorReturn = null;
         this.saveSettings(); this.closeHlPopup(); this.editorVisible = false;
         this._draftSession = null; this._collaboration?.leaveEdit(); this.restoreFileTableFocusAfterEditor(); return;
       }
       if (this.editorLoading || this.editorLoadError) {
+        this._inlineFullEditorReturn = null;
         this._editorOpenCancelRevision = (this._editorOpenCancelRevision || 0) + 1;
         this.cancelEditorOpen();
         this._collaboration?.leaveEdit();
@@ -7031,6 +7039,7 @@ const config = Vue.defineComponent({
       this.saveSettings();
       this.closeHlPopup();
       this.editorVisible = false;
+      this._inlineFullEditorReturn = null;
       this._collaboration?.leaveEdit();
       this.restoreFileTableFocusAfterEditor();
     },

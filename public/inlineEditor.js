@@ -358,6 +358,7 @@
       },
       detachEditorSessionForScopeChange() {
         const pending = this.flushEditorDraft();
+        this._inlineFullEditorReturn = null;
         if (this._draftSession) this._draftSession.detached = true;
         this._draftSession = null; this.inlineActive = false; this.editorVisible = false;
         this.inlineDraftFindings = {}; this.draftRecoveryCandidate = null;
@@ -441,7 +442,7 @@
             || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return true;
           this.closeHlPopup();
           this.setEditorFocus(index, column);
-          this.openInlineFullEditor();
+          this.openInlineFullEditor(this.editorCurrentEditingDesc.filepath, '', { returnInline: true });
         } else if (tab) this.moveInlineTranslation(event.shiftKey ? -1 : 1, index, column);
         else this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
         return true;
@@ -615,7 +616,7 @@
             && (!session || this.draftScopeCurrent(session.scope))) this.activateInlineRow(this._inlineRequestedPath);
         }
       },
-      async openInlineFullEditor(filepath = this.editorCurrentEditingDesc?.filepath, action = '') {
+      async openInlineFullEditor(filepath = this.editorCurrentEditingDesc?.filepath, action = '', { returnInline = false } = {}) {
         if (!filepath) return false;
         const scope = this.editorDraftScope(filepath);
         const context = this.captureCollaborationContext?.();
@@ -643,6 +644,8 @@
             activeSession = this._draftSession, activeRun = this._editorOpenRun;
           const targetFocus = handoff ? focus : { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
           this.closeHlPopup();
+          this._inlineFullEditorReturn = returnInline ? { scope, context, cancelRevision,
+            desc: activeDesc, blocks: activeBlocks, session: activeSession, run: activeRun, ...targetFocus } : null;
           this.inlineActive = false; this.editorVisible = true; this._fileTableReturnFocus = true;
           if (this.sideTab === 'preview') this.sideTab = 'dictionary';
           const candidate = root.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
@@ -656,6 +659,41 @@
         if (action === 'regex' || action === 'history') this.sideTab = action;
         if (action === 'consistency') this.openConsistencyResolver(this.editorFocusedIndex || 0);
         return true;
+      },
+      async restoreInlineEditorFromFull() {
+        const target = this._inlineFullEditorReturn;
+        if (!target) return null;
+        const current = () => this._inlineFullEditorReturn === target && this.inlineEditor
+          && this.editorCurrentEditingDesc === target.desc && this.editorBlocks === target.blocks
+          && this._draftSession === target.session && this._editorOpenRun === target.run
+          && (this._editorOpenCancelRevision || 0) === target.cancelRevision
+          && this.draftScopeCurrent(target.scope) && (!target.context || this.collaborationContextCurrent(target.context));
+        if (!current() || !this.editorVisible || this.inlineActive) {
+          if (this._inlineFullEditorReturn === target) this._inlineFullEditorReturn = null;
+          return null;
+        }
+        if (target.returning) return target.returning;
+        if (this.editorSaving || this.navigationBusy || this.inlineTransitionBusy || this.editorLoading || this.editorLoadError
+          || this._importingSource || this.versionStorageLoading || this.draftRecoveryVisible) return false;
+        const returning = (async () => {
+          if (this.editorCompareActive) this.exitEditorCompareMode();
+          if (!await this.flushEditorDraft() || !current() || !this.editorVisible || this.inlineActive
+            || this._importingSource || this.versionStorageLoading) return false;
+          this.saveSettings(); this.closeHlPopup();
+          this.editorVisible = false; this.inlineActive = true;
+          this._inlineRequestedPath = target.scope.filepath;
+          this._fileTableReturnFocus = false;
+          await this.$nextTick();
+          if (!current() || !this.inlineActive || this.editorVisible || this._importingSource || this.versionStorageLoading) return false;
+          const index = Math.min(target.index, Math.max(0, target.blocks.length - 1)), block = target.blocks[index];
+          const column = block?.isTable ? Math.min(target.column, Math.max(0, block.tableColumns.length - 1)) : null;
+          this.getEditorRef('translation', index, column)?.focus();
+          this._inlineFullEditorReturn = null;
+          return true;
+        })();
+        target.returning = returning;
+        try { return await returning; }
+        finally { if (target.returning === returning) delete target.returning; }
       },
       async reloadInlineSession(filepath) {
         if (this.editorCurrentEditingDesc?.filepath !== filepath || !this.inlineActive) return;

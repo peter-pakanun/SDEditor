@@ -1895,6 +1895,36 @@ async function dispatchInlineFullEditorShortcut(editor, event, index = 0, column
   } finally { editor.openInlineFullEditor = open; }
 }
 
+async function dispatchEditorEscape(editor, changes = {}) {
+  const exit = editor.editorExit;
+  let pending;
+  editor.editorExit = function (...args) { return pending = exit.apply(this, args); };
+  try {
+    editor.editorEsc(inlineArrowEvent(editor.editorCurrentEditingDesc?.filepath, { key: 'Escape', code: 'Escape', ctrlKey: false, ...changes }));
+    return pending ? await pending : undefined;
+  } finally { editor.editorExit = exit; }
+}
+
+async function launchedInlineFullEditorHarness({ table = false } = {}) {
+  const h = harness(), { editor, desc, calls } = h;
+  desc.translations.English = ['First source', table ? 'Left source@Middle source@Right source' : 'Second source\\nline'];
+  desc.translations.Thai = ['first', table ? 'left@middle@right' : 'second\\nline'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  calls.translationFocus = []; calls.leaveEdits = 0;
+  editor._collaboration = { leaveEdit() { calls.leaveEdits++; }, fileBase() { return null; }, isEditing() { return false; } };
+  editor.claimCollaborationFile = async () => true;
+  editor.getEditorRef = (...args) => ({ focus() {
+    calls.translationFocus.push(args); editor.setEditorFocus(args[1], args[2]);
+  }, scrollIntoView() {} });
+  editor.$refs.fileTableRegion.querySelectorAll = () => [];
+  await editor.activateInlineRow(desc.filepath);
+  h.launchFocus = [1, table ? 2 : 0];
+  assert.equal(await dispatchInlineFullEditorShortcut(editor, inlineArrowEvent(desc.filepath, { key: 'Enter' }), ...h.launchFocus), true);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  calls.translationFocus = []; calls.leaveEdits = 0;
+  return h;
+}
+
 async function inlineNavigationHarness({ current = 'first', table = false } = {}) {
   const h = harness(), { editor, calls } = h;
   h.rows = [description('first'), description('second'), description('third')];
@@ -2418,6 +2448,218 @@ test('inline-to-full focus callbacks cannot focus after exit, scope changes or r
     assert.equal(calls.focused, 0, 'A deferred handoff must not steal focus from another surface or session');
     assert.equal(calls.promotions.length, 0);
   }
+});
+
+for (const table of [false, true]) test(`Escape returns a Ctrl+Enter full editor to its launch ${table ? 'table column' : 'block'} and retains full-editor changes`, async () => {
+  const { editor, desc, calls, records, launchFocus } = await launchedInlineFullEditorHarness({ table });
+  const blocks = editor.editorBlocks, session = editor._draftSession, [index, column] = launchFocus;
+  const field = table ? blocks[index].tableColumns[column] : blocks[index];
+  field.translation = 'draft continued in full editor'; editor.setEditorFocus(0, 0);
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorCurrentEditingDesc, desc); assert.equal(editor.editorBlocks, blocks); assert.equal(editor._draftSession, session);
+  assert.equal(field.translation, 'draft continued in full editor');
+  assert.deepEqual(calls.translationFocus, [['translation', index, table ? column : null]]);
+  assert.equal(editor.editorFocusedIndex, index); assert.equal(editor.editorFocusedColumnIndex, column);
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.leaveEdits, 0);
+  assert.equal(records.get(session.key).state, 'active');
+  assert.deepEqual(desc.translations.Thai, ['first', table ? 'left@middle@right' : 'second\\nline']);
+});
+
+test('a fast untouched Ctrl+Enter return consumes Escape before the document listener can close its restored inline session', async () => {
+  const { editor, desc, calls } = await launchedInlineFullEditorHarness(), session = editor._draftSession, blocks = editor.editorBlocks;
+  const exit = editor.editorExit;
+  let returning;
+  editor.editorExit = function (...args) { return returning = exit.apply(this, args); };
+  const event = inlineArrowEvent(desc.filepath, { key: 'Escape', code: 'Escape', ctrlKey: false,
+    target: { tagName: 'TEXTAREA', closest: selector => selector === '.editor' ? {} : null } });
+  try {
+    assert.equal(calls.writes.length, 0, 'The untouched draft takes the immediate flush path');
+    editor.editorEsc(event);
+    assert.equal(event.defaultPrevented, true, 'The element listener must consume Escape before any asynchronous handoff');
+    await returning; await tick();
+    assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+    editor.handleKeydown(event); await tick();
+    assert.equal(editor.inlineActive, true, 'The same bubbling event must not finish the newly restored inline session');
+    assert.equal(editor.editorVisible, false); assert.equal(editor._draftSession, session); assert.equal(editor.editorBlocks, blocks);
+    assert.deepEqual(calls.translationFocus, [['translation', 1, null]]);
+    assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0); assert.equal(calls.writes.length, 0);
+  } finally { editor.editorExit = exit; }
+});
+
+test('ordinary full-editor Escape also consumes its event before the document listener', async () => {
+  const { editor, desc, calls } = harness(); await editor.activateInlineRow(desc.filepath); await editor.openInlineFullEditor(desc.filepath);
+  const exit = editor.editorExit;
+  let closing;
+  editor.editorExit = function (...args) { return closing = exit.apply(this, args); };
+  const event = inlineArrowEvent(desc.filepath, { key: 'Escape', code: 'Escape', ctrlKey: false,
+    target: { tagName: 'INPUT', closest: selector => selector === '.editor' ? {} : null } });
+  try {
+    editor.editorEsc(event); assert.equal(event.defaultPrevented, true);
+    await closing; await tick(); editor.handleKeydown(event); await tick();
+    assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, null);
+    assert.equal(calls.promotions.length, 0);
+  } finally { editor.editorExit = exit; }
+});
+
+test('Escape closes a full-editor autocomplete popup before returning to the inline launch field', async () => {
+  const { editor, calls, launchFocus } = await launchedInlineFullEditorHarness({ table: true });
+  editor.setEditorFocus(0, 0);
+  editor.hlPopup.visible = true; editor.hlPopup.editorIndex = 0; editor.hlPopup.columnIndex = 0;
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.hlPopup.visible, false); assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+  calls.translationFocus = [];
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+  assert.deepEqual(calls.translationFocus, [['translation', ...launchFocus]]);
+});
+
+test('IME Escape and already-consumed Escape leave a launched full editor unchanged', async () => {
+  const { editor, calls } = await launchedInlineFullEditorHarness();
+  const session = editor._draftSession;
+  for (const changes of [{ isComposing: true }, { keyCode: 229 }, { defaultPrevented: true }]) {
+    await dispatchEditorEscape(editor, changes);
+    assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, session);
+  }
+  assert.equal(calls.translationFocus.length, 0); assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+});
+
+test('Escape retains a launched full editor when busy and can return after the busy state clears', async () => {
+  for (const flag of ['editorSaving', 'navigationBusy', 'inlineTransitionBusy', '_importingSource', 'versionStorageLoading']) {
+    const { editor, calls } = await launchedInlineFullEditorHarness(), session = editor._draftSession;
+    editor[flag] = true;
+    await dispatchEditorEscape(editor); await tick();
+    assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, session);
+    assert.equal(calls.translationFocus.length, 0); assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+    editor[flag] = false;
+    await dispatchEditorEscape(editor); await tick();
+    assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true); assert.equal(editor._draftSession, session);
+  }
+});
+
+test('Escape keeps a failed full-editor draft open and retries the same inline launch destination', async () => {
+  const { editor, calls, store, launchFocus } = await launchedInlineFullEditorHarness({ table: true });
+  const session = editor._draftSession, write = store.putTranslationDraft;
+  editor.editorBlocks[1].tableColumns[2].translation = 'retain this return draft'; editor.setEditorFocus(0, 0);
+  store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, session);
+  assert.equal(editor.editorBlocks[1].tableColumns[2].translation, 'retain this return draft'); assert.match(editor.inlineDraftError, /Quota exceeded/);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+  store.putTranslationDraft = write;
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+  assert.deepEqual(calls.translationFocus, [['translation', ...launchFocus]]);
+});
+
+test('repeated Escape while the return draft is flushing performs one inline return and one focus', async () => {
+  const { editor, calls, launchFocus } = await launchedInlineFullEditorHarness({ table: true }), gate = deferred();
+  const exit = editor.editorExit, returning = [];
+  let flushes = 0;
+  editor.flushEditorDraft = async () => { flushes++; await gate.promise; return true; };
+  editor.editorExit = function (...args) {
+    const pending = exit.apply(this, args); returning.push(pending); return pending;
+  };
+  try {
+    editor.editorEsc(inlineArrowEvent(editor.editorCurrentEditingDesc.filepath, { key: 'Escape', ctrlKey: false }));
+    editor.editorEsc(inlineArrowEvent(editor.editorCurrentEditingDesc.filepath, { key: 'Escape', ctrlKey: false }));
+    await tick(); assert.equal(flushes, 1); assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+    gate.resolve(); await Promise.all(returning); await tick();
+    assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+    assert.deepEqual(calls.translationFocus, [['translation', ...launchFocus]]);
+    assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+  } finally { editor.editorExit = exit; }
+});
+
+test('Escape restores the held inline launch row even when current filters no longer include it', async () => {
+  const { editor, desc, calls } = await launchedInlineFullEditorHarness(), held = editor._inlineHeldRows;
+  assert.ok(held.some(row => row.filepath === desc.filepath));
+  editor.filteredDescs = editor.descs.filter(row => row.filepath !== desc.filepath);
+  assert.equal(editor.descsDisplay.some(row => row.filepath === desc.filepath), false);
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false); assert.equal(editor._inlineHeldRows, held);
+  assert.ok(editor.descsDisplay.some(row => row.filepath === desc.filepath));
+  assert.deepEqual(calls.translationFocus, [['translation', 1, null]]);
+});
+
+test('Escape exits full-editor comparison and returns its editable draft with supported inline tools', async () => {
+  const { editor, calls, records, config } = await launchedInlineFullEditorHarness({ table: true }), session = editor._draftSession;
+  editor.editorBlocks[1].tableColumns[2].translation = 'draft edited before comparing';
+  editor.historyMode = 'translation'; editor.sideTab = 'history';
+  editor.historySelectedA = { savedAt: 1, translations: ['older first', 'older left@older middle@older right'] };
+  editor.historySelectedB = { savedAt: 2, translations: ['newer first', 'newer left@newer middle@newer right'] };
+  editor.enterEditorCompareModeFromHistory();
+  assert.equal(editor.editorTranslationReadOnly, true);
+  assert.equal(editor.editorBlocks[1].translationCompareColumns.length, 3);
+  await dispatchEditorEscape(editor); await tick();
+  config.watch.editorVisible.call(editor, editor.editorVisible);
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorCompareActive, false); assert.equal(editor.editorTranslationReadOnly, false);
+  assert.equal(editor.sideTab, 'dictionary'); assert.equal(editor._draftSession, session);
+  assert.equal(records.get(session.key).translations[1], 'left@middle@draft edited before comparing');
+  assert.deepEqual(calls.translationFocus, [['translation', 1, 2]]);
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.leaveEdits, 0);
+});
+
+test('a pending full-to-inline return cannot switch or close a newer scope or editing session', async () => {
+  const changes = [editor => { editor.lang = 'German'; }, editor => { editor.sourceIdentity = 'another-source'; },
+    editor => { editor.cloudProfileId = 'another-profile'; }, editor => { editor.branchId = 'another-branch'; },
+    editor => { editor._draftSession = { ...editor._draftSession }; }, editor => { editor.editorBlocks = editor.editorBlocks.slice(); },
+    editor => { editor.editorCurrentEditingDesc = { ...editor.editorCurrentEditingDesc }; }, editor => { editor._editorOpenRun++; },
+    editor => { editor._editorOpenCancelRevision = (editor._editorOpenCancelRevision || 0) + 1; }];
+  for (const change of changes) {
+    const { editor, calls } = await launchedInlineFullEditorHarness(), gate = deferred();
+    editor.flushEditorDraft = async () => { await gate.promise; return true; };
+    const returning = dispatchEditorEscape(editor); await tick();
+    change(editor); const session = editor._draftSession; gate.resolve(); await returning; await tick();
+    assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, session);
+    assert.equal(calls.translationFocus.length, 0); assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+  }
+});
+
+test('a full-to-inline return cannot steal focus after its render is superseded', async () => {
+  const changes = [editor => { editor.lang = 'German'; }, editor => { editor.sourceIdentity = 'another-source'; },
+    editor => { editor._draftSession = { ...editor._draftSession }; }, editor => { editor.editorBlocks = editor.editorBlocks.slice(); },
+    editor => { editor._editorOpenRun++; }, editor => { editor.inlineActive = false; editor.editorVisible = true; }];
+  for (const change of changes) {
+    const { editor, calls } = await launchedInlineFullEditorHarness(), render = deferred();
+    editor.$nextTick = callback => render.promise.then(callback);
+    const returning = dispatchEditorEscape(editor); await tick();
+    assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true);
+    change(editor); const session = editor._draftSession; render.resolve(); await returning; await tick();
+    assert.equal(editor._draftSession, session); assert.equal(calls.translationFocus.length, 0);
+    assert.equal(calls.leaveEdits, 0); assert.equal(calls.promotions.length, 0);
+  }
+});
+
+test('normal Close exits a Ctrl+Enter full editor and clears the inline-return intent', async () => {
+  const { editor, desc, calls } = await launchedInlineFullEditorHarness();
+  await editor.editorExit(); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, null);
+  assert.equal(calls.leaveEdits, 1); assert.equal(calls.translationFocus.length, 0);
+  await editor.activateInlineRow(desc.filepath); await editor.openInlineFullEditor(desc.filepath);
+  calls.translationFocus = []; await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, null);
+  assert.equal(calls.translationFocus.length, 0);
+});
+
+test('Escape normally closes a full editor opened from a row action without Ctrl+Enter', async () => {
+  const { editor, desc, calls } = harness(); await editor.activateInlineRow(desc.filepath);
+  await editor.openInlineFullEditor(desc.filepath); calls.focused = 0;
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, null);
+  assert.equal(calls.focused, 0); assert.equal(calls.promotions.length, 0);
+});
+
+test('opening a different full-editor file clears an earlier Ctrl+Enter inline-return intent', async () => {
+  const { editor, calls } = await launchedInlineFullEditorHarness(), next = editor.descs[1];
+  assert.equal(await editor.editFile(next.filepath, true), true); await tick();
+  calls.translationFocus = [];
+  await dispatchEditorEscape(editor); await tick();
+  assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, false); assert.equal(editor._draftSession, null);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(calls.promotions.length, 0);
 });
 
 test('inline row shortcuts leave ordinary arrows, IME, other modifiers, popup filters and full-editor text alone', async () => {
