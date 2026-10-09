@@ -22,6 +22,61 @@ function storeFixture() {
     },
   };
 }
+function enableRecordCommands(store) {
+  store.recordCommands = []; store.recordReads = []; store.recordWrites = 0;
+  const maps = ['shared', 'local', 'carries', 'carryRevisions'];
+  const select = command => {
+    const original = store.state.rooms[command.key], paths = new Set(command.filepaths || []), ids = new Set(command.operationIds || []);
+    let changed;
+    do {
+      changed = false;
+      for (const operation of original.outbox) if (ids.has(operation.id) || operation.files.some(entry => paths.has(entry.yours.filepath))) {
+        if (!ids.has(operation.id)) { ids.add(operation.id); changed = true; }
+        for (const entry of operation.files) if (!paths.has(entry.yours.filepath)) { paths.add(entry.yours.filepath); changed = true; }
+      }
+    } while (changed);
+    const room = {};
+    for (const [field, value] of Object.entries(original)) if (!maps.includes(field) && !['outbox', 'conflicts', 'recovery', 'manifest'].includes(field)) room[field] = copy(value);
+    room.manifest = { version: original.manifest?.version };
+    for (const field of maps) room[field] = Object.fromEntries([...paths].filter(path => Object.hasOwn(original[field] || {}, path)).map(path => [path, copy(original[field][path])]));
+    room.outbox = original.outbox.filter(op => ids.has(op.id)).map(value => copy(value));
+    room.conflicts = original.conflicts.filter(conflict => ids.has(conflict.mutationId) || paths.has(conflict.filepath)).map(value => copy(value));
+    room.recovery = original.recovery.filter(entry => entry.files?.some(file => paths.has(file.filepath))).map(value => copy(value));
+    return { room, selection: { filepaths: [...paths], operationIds: [...ids] } };
+  };
+  store.getCollaborationRecords = async command => { store.recordReads.push(copy(command)); return select(command); };
+  store.updateCollaborationRecords = async (command, fn, options = {}) => {
+    store.recordCommands.push(copy(command));
+    const result = select(command), before = copy(result.room), state = { version: 1, rooms: { [command.key]: result.room } };
+    fn(state, result.room);
+    const room = state.rooms[command.key], target = store.state.rooms[command.key], { selection } = result;
+    const selectedPaths = new Set(selection.filepaths), selectedIds = new Set(selection.operationIds);
+    if (options.projectWorkspace) {
+      const workspace = { ...copy(store.workspace), descs: copy(store.workspace?.descs?.filter(desc => selectedPaths.has(desc.filepath)) || []) };
+      const next = options.projectWorkspace(workspace, state);
+      if (next) {
+        const descriptions = (store.workspace?.descs || []).filter(desc => !selectedPaths.has(desc.filepath)).concat(next.descs || []);
+        store.workspace = { ...store.workspace, ...next, descs: descriptions };
+      }
+    }
+    for (const [field, value] of Object.entries(room)) if (!maps.includes(field) && !['outbox', 'conflicts', 'recovery', 'manifest'].includes(field)) target[field] = copy(value);
+    for (const field of maps) {
+      target[field] ||= {};
+      for (const path of selectedPaths) {
+        if (Object.hasOwn(room[field] || {}, path)) target[field][path] = copy(room[field][path]);
+        else delete target[field][path];
+      }
+    }
+    target.outbox = target.outbox.filter(op => !selectedIds.has(op.id)).concat(copy(room.outbox));
+    target.conflicts = target.conflicts.filter(conflict => !selectedIds.has(conflict.mutationId) && !selectedPaths.has(conflict.filepath)).concat(copy(room.conflicts));
+    target.recovery = target.recovery.filter(entry => !entry.files?.some(file => selectedPaths.has(file.filepath))).concat(copy(room.recovery));
+    store.revisions.push(...copy(options.revisions || []));
+    if (!P.equal(before, room)) store.recordWrites++;
+    return { room: copy(room), selection };
+  };
+  store.updateCollaborationState = async () => { throw new Error('Hot synchronization used aggregate storage'); };
+  return store;
+}
 function serverFixture() {
   const server = { files: copy(initial), sequence: 1, events: [], receipts: new Map(), requests: [], offline: false, exists: true,
     snapshot() { return { roomId: 'room', game: 'poe1', language: 'Thai', sequence: this.sequence, files: copy(this.files) }; },
@@ -1431,4 +1486,103 @@ test('idle synchronization and received peer changes do not publish saved upload
   server.change('b.txt', ['received peer translation']); await client.retry();
   assert.equal(work.some(value => value.key === 'upload' && value.active), false);
   assert.equal(client.snapshot().pending, 0);
+});
+
+test('record commands save and acknowledge one file without opening unrelated cached rooms', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  enableRecordCommands(store);
+  Object.defineProperty(store.state.rooms, 'unrelated-room', { enumerable: true, get() { throw new Error('An unrelated room was read'); } });
+  const unrelated = copy(client.fileBase('b.txt')), manifest = copy(client.room().manifest);
+  await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['small record save', 'two'] }] });
+  assert.deepEqual(server.files[0].translations, ['small record save', 'two']);
+  assert.deepEqual(client.fileBase('b.txt'), unrelated);
+  assert.deepEqual(client.room().manifest, manifest, 'Partial room metadata retains the immutable complete manifest.');
+  assert.deepEqual(store.recordCommands.map(command => command.command), ['local-save', 'prepare-operation', 'acknowledge-operation']);
+  assert.ok(store.recordCommands.every(command => command.filepaths.length === 1 && command.filepaths[0] === 'a.txt'));
+  assert.equal(client.room().outbox.length, 0);
+});
+
+test('prepared record operations retry with scoped readonly reads and no writes', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  server.offline = true;
+  await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['retry payload', 'two'] }] });
+  enableRecordCommands(store);
+  const id = client.room().outbox[0].id;
+  await client.prepare(id, client.epoch);
+  const wire = copy(client.room().outbox[0].wire), writes = store.recordWrites, commands = store.recordCommands.length;
+  await client.prepare(id, client.epoch); await client.prepare(id, client.epoch);
+  assert.deepEqual(client.room().outbox[0].wire, wire);
+  assert.equal(store.recordWrites, writes);
+  assert.equal(store.recordCommands.length, commands);
+  assert.equal(store.recordReads.at(-1).command, 'read-operation');
+  assert.deepEqual(store.recordReads.at(-1).operationIds, [id]);
+});
+
+test('ordered remote record events update the replay cursor and preserve other file rows', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  enableRecordCommands(store);
+  const untouched = copy(client.fileBase('a.txt'));
+  server.change('b.txt', ['remote record event']); await client.catchUp(client.epoch);
+  assert.equal(client.room().sequence, server.sequence);
+  assert.equal(store.state.rooms[client.key].sequence, server.sequence);
+  assert.deepEqual(client.fileBase('a.txt'), untouched);
+  assert.deepEqual(client.fileBase('b.txt').translations, ['remote record event']);
+  assert.deepEqual(store.recordCommands.map(command => [command.command, command.filepaths]), [['remote-events', ['b.txt']]]);
+});
+
+test('record acknowledgment preserves an unrelated queued operation and its local text', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  server.offline = true;
+  await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['first row', 'two'] }] });
+  await client.save({ files: [{ ...client.fileBase('b.txt'), translations: ['second row'] }] });
+  enableRecordCommands(store);
+  const first = client.room().outbox[0].id, second = client.room().outbox[1].id;
+  await client.prepare(first, client.epoch);
+  server.offline = false;
+  const accepted = (await client.sendMutation(client.room().outbox.find(op => op.id === first), client.epoch)).files;
+  await client.update((state, room) => {
+    for (const file of accepted) room.shared[file.filepath] = P.fileState(file);
+    room.outbox = room.outbox.filter(op => op.id !== first); client.rebuild(room);
+  }, { records: client.records('acknowledge-operation', ['a.txt'], [first]), projectWorkspace: client.projection(accepted, client.epoch) });
+  assert.deepEqual(client.room().outbox.map(op => op.id), [second]);
+  assert.deepEqual(client.fileBase('b.txt').translations, ['second row']);
+  assert.deepEqual(store.state.rooms[client.key].outbox.map(op => op.id), [second]);
+  assert.equal(client.room().sequence, 1, 'Mutation acknowledgments do not skip incoming replay events.');
+});
+
+test('record synchronization retains exact prepared requests across lost acknowledgments', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  enableRecordCommands(store); server.loseReply = true;
+  const result = await client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['durable wire', 'two'] }] });
+  assert.equal(result.status, 'pending');
+  const wire = copy(client.room().outbox[0].wire);
+  server.change('b.txt', ['intervening remote']); await client.retry();
+  const bodies = server.requests.filter(request => request.path.endsWith('/mutations')).map(request => request.options.body);
+  assert.deepEqual(bodies, [wire, wire]);
+  assert.deepEqual(client.fileBase('b.txt').translations, ['intervening remote']);
+  assert.equal(client.room().sequence, server.sequence);
+  assert.equal(client.room().outbox.length, 0);
+});
+
+test('partial recovery deltas keep unselected members in the active room and retain original file order', () => {
+  const client = new Client({ store: {}, request: async () => {} }); client.key = 'room';
+  const files = Array.from({ length: 250 }, (_, index) => ({ filepath: `file-${249 - index}.txt`, translations: ['Recovered ' + index] }));
+  const recovery = { id: 'retained-id', localRecordId: 'retained-id', at: 123, reason: 'Disconnected workspace', sourceHash: 'original-source',
+    files: copy(files), _storageRecovery: { order: 1, fileCount: files.length, nextFileOrder: files.length, fileOrders: files.map((file, index) => index) } };
+  client.state = { version: 1, rooms: { room: { shared: {}, local: {}, outbox: [], conflicts: [], recovery: [recovery] } } };
+  const filepath = files[71].filepath, changed = { ...copy(recovery), files: [{ ...copy(files[71]), translations: ['Changed preserved file'] }],
+    _storageRecovery: { ...copy(recovery._storageRecovery), fileOrders: [71] } };
+  client.mergeStoredRecords({ room: { shared: {}, local: {}, outbox: [], conflicts: [], recovery: [changed] }, selection: { filepaths: [filepath], operationIds: [] } });
+  const expected = copy(files); expected[71].translations = ['Changed preserved file'];
+  assert.deepEqual(client.room().recovery[0].files, expected);
+  assert.deepEqual(client.room().recovery[0]._storageRecovery.fileOrders, files.map((file, index) => index));
+  assert.equal(client.room().recovery[0].sourceHash, 'original-source');
+  client.mergeStoredRecords({ room: { shared: {}, local: {}, outbox: [], conflicts: [], recovery: [] }, selection: { filepaths: [filepath], operationIds: [] } });
+  assert.deepEqual(client.room().recovery[0].files, files.filter(file => file.filepath !== filepath));
+  const added = { id: 'new-id', localRecordId: 'new-id', at: 123, reason: recovery.reason, files: [copy(files[71])],
+    _storageRecovery: { order: 2, fileCount: 1, nextFileOrder: 1, fileOrders: [0] } };
+  client.mergeStoredRecords({ room: { shared: {}, local: {}, outbox: [], conflicts: [], recovery: [added] }, selection: { filepaths: [filepath], operationIds: [] } });
+  assert.deepEqual(client.room().recovery.map(group => group.id), [recovery.id, added.id]);
+  assert.equal(client.room().recovery[0].files.length, files.length - 1);
+  assert.equal(client.room().recovery[1].files[0].filepath, filepath);
 });

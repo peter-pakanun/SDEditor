@@ -296,6 +296,49 @@ test('staged deletion storage failures, uncertain completion and durable acknowl
   }
 });
 
+test('journaled stale submissions without checkpoints release only after durable review preservation', async () => {
+  const calls = [], reviewed = deferred();
+  const queue = PendingSaves.create({ save: async value => {
+    calls.push(value.jobId);
+    if (value.jobId === 'stale') throw Object.assign(new Error('Review required'), { code: 'DRAFT_BASE_CHANGED' });
+    return {};
+  }, onError: async job => { await reviewed.promise; queue.discardRejectedSubmission(job.id); } });
+  const job = queue.enqueue(batch('stale', 'Captured direct save', { deferDisplay: true })); job.journaled = true;
+  queue.enqueue(batch('next'));
+  await assert.rejects(queue.drain(), /Review required/);
+  assert.equal(queue.discardRejectedDraft(job.id), false);
+  await tick(); assert.deepEqual(calls, ['stale']);
+  reviewed.resolve(); await tick(); await queue.drain();
+  assert.deepEqual(calls, ['stale', 'next']); assert.equal(queue.snapshot().pending, 0); queue.dispose();
+});
+
+test('uncertain, unjournaled or durable failed submissions cannot be removed as reviewed saves', async () => {
+  for (const extra of [{}, { journaled: true, error: { durableUnknown: true } }, { journaled: true, durable: true }]) {
+    const queue = PendingSaves.create({ save: async () => { throw Object.assign(new Error('Failed'), { code: 'DRAFT_CHANGED' }); } });
+    const job = queue.enqueue(batch('failed'));
+    await assert.rejects(queue.drain());
+    if (extra.journaled) job.journaled = true;
+    if (extra.error) Object.assign(job.error, extra.error);
+    if (extra.durable) job.durable = true;
+    assert.equal(queue.discardRejectedSubmission(job.id), false); queue.dispose();
+  }
+});
+
+test('captured scope and stale deletion rejections require review before journaled jobs release', async () => {
+  for (const code of ['SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED', 'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']) {
+    const error = Object.assign(new Error('A fresh decision is required'), { code });
+    assert.equal(PendingSaves.requiresReview(error), true);
+    assert.equal(PendingSaves.requiresReview({ ...error, durableUnknown: true }), false);
+    const queue = PendingSaves.create({ save: async () => { throw error; } });
+    const job = queue.enqueue(batch(code, 'Captured text', { resetStaging: code.startsWith('DELETE_STAGED_') }));
+    job.journaled = true;
+    await assert.rejects(queue.drain(), /fresh decision/);
+    assert.equal(queue.discardRejectedSubmission(job.id), true);
+    assert.equal(queue.snapshot().pending, 0); queue.dispose();
+  }
+  assert.equal(PendingSaves.requiresReview({ code: 'QUOTA_EXCEEDED' }), false);
+});
+
 test('disposing a queue cancels deferred intake without erasing recovery records', async () => {
   let writes = 0;
   const queue = PendingSaves.create({ save: async () => { writes++; return {}; } });

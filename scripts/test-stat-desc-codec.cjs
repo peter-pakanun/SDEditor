@@ -42,6 +42,46 @@ test('browser and API detect the same game from normalized archive paths', () =>
   }
 });
 
+test('one DNT-marked English entry hides the whole file regardless of entry position', () => {
+  for (const parser of [codec, browser(), require(vendorPath)]) {
+    for (const marker of ['[DNT] Internal', 'DNT Internal']) {
+      for (const english of [[marker], [marker, 'Visible'], ['Visible', marker], ['First', 'Second', marker]]) {
+        const text = 'description test\n1 damage\n' + english.length + '\n'
+          + english.map(line => '# "' + line + '"').join('\n');
+        for (const strict of [false, true]) {
+          assert.equal(parser.parseText('source/test.txt', text, 'Thai', { strict }).isDNT, true);
+        }
+      }
+    }
+    for (const english of [[], ['Visible', 'Also visible'], ['A reference to [DNT] inside normal text']]) {
+      assert.equal(parser.computeIsDNT(english), false);
+    }
+    const translatedMarker = source.replace('"ไทย"', '"[DNT] Thai only"');
+    assert.equal(parser.parseText('source/test.txt', translatedMarker, 'Thai', { strict: true }).isDNT, false);
+  }
+});
+
+test('duplicate English choices recompute DNT from every selected entry without changing baseline hashes', async () => {
+  const text = source + '\nlang "English"\n2\n# "Ordinary first entry"\n# "[DNT] Later entry"';
+  for (const parser of [codec, browser(), require(vendorPath)]) {
+    const raw = [parser.parseText('source/test.txt', text, 'Thai', { strict: true })];
+    assert.equal(raw[0].isDNT, false, 'An unselected duplicate block cannot hide the file.');
+    const group = parser.collectDuplicateLangGroups(raw)[0];
+    const decisions = async option => [{ filepath: group.filepath, language: group.lang,
+      occurrence: option.occurrence, blockHash: await parser.blockHash(option) }];
+    const selected = plain(await parser.applyDuplicateSelections(raw, await decisions(group.options[1]), { language: 'Thai' }));
+    assert.equal(selected[0].isDNT, true);
+    const cached = structuredClone(selected);
+    cached[0].isDNT = false;
+    assert.equal(await protocol.sourceHash(cached), await protocol.sourceHash(selected));
+    assert.equal(await protocol.leafHash(cached[0]), await protocol.leafHash(selected[0]));
+    // A later choice of the ordinary block must also clear a previously cached flag.
+    const flaggedRaw = plain(raw); flaggedRaw[0].isDNT = true;
+    const ordinary = await parser.applyDuplicateSelections(flaggedRaw, await decisions(group.options[0]), { language: 'Thai' });
+    assert.equal(ordinary[0].isDNT, false);
+  }
+});
+
 test('UTF-16LE encoding retains BOM, all baseline languages, remarks and intentional blanks', () => {
   const parsed = codec.parseText('source/test.txt', source, 'Thai', { strict: true });
   parsed.translations.Thai = [''];

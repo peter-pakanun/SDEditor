@@ -24,6 +24,12 @@
     for (let index = 0; index < engLen; index++) if (String(lines[index] ?? '').trim() === '') return true;
     return false;
   }
+  function computeIsDNT(english) {
+    return Array.isArray(english) && english.some(line => {
+      const text = String(line || '');
+      return text.startsWith('[DNT') || text.startsWith('DNT ');
+    });
+  }
   function parseText(filepath, text, lang, options = {}) {
     const count = (text.match(options.strict ? /^[ \t]*description\b/gim : /^description/gim) || []).length;
     if (!count) return false;
@@ -298,8 +304,7 @@ function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {
   const trLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
   desc.isMissing = computeIsMissing(engLen, trLines);
 
-  const firstEnglish = desc.translations.English?.[0] || '';
-  if (firstEnglish.indexOf('[DNT') == 0 || firstEnglish.indexOf('DNT ') == 0) desc.isDNT = true;
+  desc.isDNT = computeIsDNT(desc.translations.English);
 
   return desc;
 }
@@ -407,13 +412,12 @@ function strEncodeUTF16(str) {
       if (group.lang === 'English') {
         desc.variables = [...selected.variables]; desc.remarks = [...selected.remarks];
         desc.duplicateLangEntries = (desc.duplicateLangEntries || []).filter(entry => entry.lang !== 'English');
-        const firstLine = String(desc.translations.English?.[0] || '');
-        desc.isDNT = firstLine.indexOf('[DNT') === 0 || firstLine.indexOf('DNT ') === 0;
+        desc.isDNT = computeIsDNT(desc.translations.English);
       }
       if (language) desc.isMissing = computeIsMissing(desc.translations.English?.length || 0, desc.translations[language]);
     }
     return source.filter(Boolean);
   }
-  return { parserVersion: 1, detectGameVersionFromFilepaths, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
+  return { parserVersion: 1, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
     decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash };
 });

@@ -25,6 +25,17 @@ test('an ended-version warning cannot activate a file in a switched source or la
   }
 });
 
+test('early settings hydration scopes draft loading safely before the cloud client state initializes', async () => {
+  const h = harness(), { editor, desc } = h;
+  editor._cloud = { state: null, context() { assert.fail('Uninitialized cloud context cannot be read'); } };
+  editor.cloudProfileId = 'stored-profile';
+  assert.equal(editor.editorDraftScope(desc.filepath).profile, 'stored-profile');
+  await editor.draftScopeChanged();
+  editor._cloud.state = { activeProfile: 'ready-profile' };
+  editor._cloud.context = () => ({ profile: editor._cloud.state.activeProfile });
+  assert.equal(editor.editorDraftScope(desc.filepath).profile, 'ready-profile');
+});
+
 function harness({ records = new Map() } = {}) {
   let config, nextId = 0;
   const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };
@@ -125,6 +136,11 @@ async function stagedDeletionFixture({ inline = false } = {}) {
 function enableDeletionWorker(h) {
   const { editor, window, context, calls, records } = h;
   calls.storage = [];
+  calls.submissions = [];
+  window.OfflineStore.putSaveSubmission = async batch => {
+    const record = { batch: copy(batch), state: 'pending' }; calls.submissions.push(record); return record;
+  };
+  window.OfflineStore.updateSaveSubmission = async (batch, patch) => ({ batch: copy(batch), ...patch });
   context.crypto = require('node:crypto').webcrypto;
   window.PendingSaves = require('../public/pendingSaves.js');
   window.SaveWorkerClient = { create: () => ({
@@ -1153,6 +1169,7 @@ test('failed local draft persistence keeps editing open and leaves committed dat
   const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
   editor.editorBlocks[0].translation = 'must not lose';
   h.store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  editor.editorSaveFindings = () => ({ errors: [{ message: 'Invalid translation' }], warnings: [], confirmations: [] });
   assert.equal(await editor.finishInlineSession(), false);
   assert.equal(editor.inlineActive, true); assert.match(editor.inlineDraftError, /Quota exceeded/);
   assert.equal(editor.inlineDraftRows[desc.filepath].translations[0], 'must not lose');
@@ -1250,6 +1267,7 @@ test('workspace chrome measurements follow header/footer resize and workspace re
 test('a clean automatic promotion submits the durable draft identity and consumes only after save', async () => {
   const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
   editor.editorBlocks[0].translation = 'ready translation';
+  await editor.flushEditorDraft();
   assert.equal(await editor.finishInlineSession(), true);
   assert.equal(h.calls.promotions.length, 1); assert.equal(h.calls.confirms.length, 0);
   const submitted = h.calls.promotions[0];
@@ -1362,7 +1380,7 @@ for (const change of [
     editor.editorBlocks[0].translation = 'outgoing unsaved text';
     const gate = deferred(), put = h.store.putTranslationDraft;
     h.store.putTranslationDraft = async (...args) => { await gate.promise; return put(...args); };
-    const finishing = editor.finishInlineSession(); await tick();
+    const finishing = editor.finishInlineSession({ promote: false }); await tick();
     change.apply(editor);
     const switching = editor.draftScopeChanged();
     assert.equal(editor._draftSession, null);
@@ -1705,7 +1723,8 @@ for (const direction of [-1, 1]) {
     assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
     assert.equal(editor.pendingLocalSaves, 1); assert.equal(calls.storage.length, 0,
       'Draft hydration must finish before the old promotion can take the IndexedDB store.');
-    assert.equal(records.get(session.key).state, 'active');
+    assert.equal(records.get(session.key), undefined);
+    assert.equal(calls.submissions.length, 1);
     assert.equal(outgoing.translations.Thai[0], 'translation');
     hydration.resolve(); await painting.promise; await settleFocus();
     assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
@@ -1714,7 +1733,8 @@ for (const direction of [-1, 1]) {
     paint.resolve(); assert.equal(await navigating, true);
     const promotion = await waitForDeletionWrite(h);
     assert.equal(promotion.batch.files[0].filepath, outgoing.filepath);
-    assert.equal(promotion.batch.draft.id, session.record.id);
+    assert.equal(promotion.batch.draft, undefined);
+    assert.equal(promotion.batch.checkpoint.key, session.key);
     assert.equal(promotion.batch.deferDisplay, true);
     assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
     const nextSession = editor._draftSession, blocks = editor.editorBlocks;
@@ -1723,7 +1743,7 @@ for (const direction of [-1, 1]) {
     const retained = JSON.stringify(records.get(nextSession.key));
     h.acknowledge(promotion); await editor._pendingSaves.drain();
     assert.equal(outgoing.translations.Thai[0], 'Submitted outgoing inline draft');
-    assert.equal(records.get(session.key).state, 'promoted');
+    assert.equal(records.get(session.key), undefined);
     assert.equal(editor.inlineDraftRows[outgoing.filepath], undefined);
     assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
     assert.equal(editor._draftSession, nextSession); assert.equal(editor.editorBlocks, blocks);
@@ -1768,6 +1788,7 @@ test('inline transitions release queued work after draft failure, failed opening
       if (outcome === 'draft write failed') {
         editor.editorBlocks[0].translation = 'Preserve this outgoing draft';
         store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+        editor.editorSaveFindings = () => ({ errors: [{ message: 'Invalid translation' }], warnings: [], confirmations: [] });
       }
       if (outcome === 'open rejected') editor.editFile = async () => false;
       if (outcome === 'open failed') editor.editFile = async () => { throw new Error('Could not prepare inline destination'); };
@@ -1825,7 +1846,7 @@ for (const exit of ['Escape', 'editorExit']) test(`${exit} cancels a queued manu
   assert.deepEqual(opened, [rows[1].filepath], 'The queued manual selection must not reopen a third row after cancellation.');
   assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
   assert.equal(editor.inlineActive, false); assert.equal(editor.editorVisible, false);
-  assert.equal(records.get(outgoingSession.key).state, 'promoted');
+  assert.equal(records.get(outgoingSession.key), undefined);
   assert.equal(rows[0].translations.Thai[0], 'Outgoing translation queued for promotion');
   assert.equal(records.get(destinationSession.key).state, 'active');
   assert.equal(records.get(destinationSession.key).translations[0], 'Keep the destination local draft on exit');
@@ -1993,6 +2014,7 @@ test('inline keyboard navigation retains focus and text on the current row after
   const { editor, rows, calls, store } = await inlineNavigationHarness();
   editor.editorBlocks[0].translation = 'keep this pending draft';
   store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  editor.editorSaveFindings = () => ({ errors: [{ message: 'Invalid translation' }], warnings: [], confirmations: [] });
   assert.equal(await editor.moveInlineFile(1), false);
   assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath); assert.equal(editor.inlineActive, true);
   assert.equal(editor.editorBlocks[0].translation, 'keep this pending draft');
@@ -2075,6 +2097,7 @@ test('a manual row click queued during keyboard draft persistence retains manual
   editor.editorBlocks[0].translation = 'save outgoing draft before manual selection';
   const gate = deferred(), put = store.putTranslationDraft, claims = [];
   store.putTranslationDraft = async (...args) => { await gate.promise; return put(...args); };
+  editor.flushEditorDraft();
   editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing() { return false; } };
   editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return true; };
   const navigating = editor.moveInlineFile(1); await tick();
@@ -2237,4 +2260,205 @@ test('pending table Ctrl+Arrow does not move again or steal focus from a newer m
   gate.resolve(); assert.equal(await navigating, false); await selecting; await tick();
   assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
   assert.equal(calls.translationFocus.length, 0); assert.equal(editor.navigationBusy, false);
+});
+
+function normalizedDraftFixture(extraDependencies = {}) {
+  const N = require('../public/normalizedStore.js'), values = new Map(Object.values(N.stores).map(name => [name, new Map()]));
+  const writes = [], reads = [];
+  const db = { transaction(names) {
+    const pending = []; let finished = false;
+    const tx = { objectStore(name) {
+      assert.ok(names.includes(name));
+      return {
+        get(id) { const req = {}; reads.push({ name, id }); queueMicrotask(() => {
+          const previous = pending.findLast(write => write.name === name && write.id === id);
+          req.result = previous ? copy(previous.value) : values.get(name).get(id) && copy(values.get(name).get(id)); req.onsuccess?.();
+        }); return req; },
+        put(row) { pending.push({ name, id: row.key, value: copy(row) }); },
+        delete(id) { pending.push({ name, id }); },
+        index(indexName) { return { getAll(scope) { const req = {}; queueMicrotask(() => {
+          const field = indexName === 'by_path' ? 'pathKey' : indexName === 'by_kind' ? 'kindScope' : 'scope';
+          req.result = [...values.get(name).values()].filter(row => row[field] === scope).map(copy); req.onsuccess?.();
+        }); return req; } }; },
+      };
+    }, abort() { if (!finished) { finished = true; queueMicrotask(() => tx.onabort?.()); } } };
+    setImmediate(() => { if (finished) return; finished = true;
+      for (const write of pending) { writes.push(write); if (write.value) values.get(write.name).set(write.id, write.value); else values.get(write.name).delete(write.id); }
+      tx.oncomplete?.();
+    });
+    return tx;
+  } };
+  const normalizeScope = scope => ({ accountId: scope.accountId || 'guest', game: scope.game, branchId: scope.branchId || 'default', sourceHash: scope.sourceHash });
+  const api = N.create({ openDb: async () => db, normalizeScope, W: require('../public/workspaceState.js'), ...extraDependencies });
+  const scope = { accountId: 'guest', game: 'poe1', branchId: 'default', sourceHash: 'source' };
+  const source = { filepath: 'stat.txt', translations: { English: ['Source'], Thai: ['Original'], German: ['Original DE'] } };
+  values.get(N.stores.baseline).set(api.key(api.baselineKey(scope), source.filepath), api.row(api.baselineKey(scope), source.filepath, source));
+  const draftKey = 'translation_draft_v1:' + JSON.stringify(['guest', 'poe1', 'source', 'Thai', source.filepath]);
+  const batch = { jobId: 'submitted', game: 'poe1', sourceHash: 'source', language: 'Thai', accountId: '', workspaceScope: scope,
+    checkpoint: { key: draftKey, id: 'session', revision: null }, bases: { [source.filepath]: { translations: ['Original'] } },
+    files: [{ filepath: source.filepath, translations: ['Submitted'] }] };
+  const seedSubmission = value => values.get(N.stores.submissions).set(api.key(api.scopeKey(scope), value.jobId),
+    api.row(api.scopeKey(scope), value.jobId, { batch: copy(value), state: 'queued', createdAt: 1 }));
+  seedSubmission(batch);
+  return { api, N, scope, source, draftKey, batch, values, db, reads, writes, seedSubmission };
+}
+
+test('normalized checkpoints compact and hydrate every recovery variant using one immutable per-file read', async () => {
+  const h = normalizedDraftFixture(), { api, scope, source, draftKey } = h;
+  const draft = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: 'Thai', filepath: source.filepath,
+    key: draftKey, id: 'primary', revision: 'primary-revision', state: 'active', source: copy(source), translations: ['Primary'], base: { translations: ['Original'] } };
+  draft.conflicts = [{ ...copy(draft), id: 'variant', revision: 'variant-revision', translations: ['Variant'] }];
+  draft.recovery = [{ ...copy(draft), id: 'older', revision: 'older-revision', translations: ['Older'] }];
+  const row = api.draftRow(draft, source);
+  assert.equal(row.value.source, undefined); assert.equal(row.value.conflicts[0].source, undefined); assert.equal(row.value.recovery[0].source, undefined);
+  const hydrated = await api.hydrateDraft(h.db.transaction([h.N.stores.baseline], 'readonly'), row.value);
+  assert.deepEqual(hydrated.source, source); assert.deepEqual(hydrated.conflicts[0].source, source); assert.deepEqual(hydrated.recovery[0].source, source);
+  assert.equal(h.reads.length, 1, 'All same-baseline variants share a single per-file lookup.');
+});
+
+test('checkpoint normalization keeps anomalous captured source evidence instead of replacing it with the baseline', async () => {
+  const h = normalizedDraftFixture(), { api, scope, source, draftKey } = h;
+  const captured = { ...copy(source), translations: { ...copy(source.translations), English: ['Different captured comparison source'] } };
+  const draft = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: 'Thai', filepath: source.filepath,
+    key: draftKey, id: 'primary', revision: 'primary-revision', state: 'active', source: captured,
+    sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: source.filepath },
+    translations: ['Recovered text'], base: { translations: ['Original'] } };
+  draft.conflicts = [{ ...copy(draft), source: copy(source), id: 'matching-source', revision: 'matching-revision' }];
+  const row = api.draftRow(draft, source);
+  assert.deepEqual(row.value.source, captured); assert.equal(row.value.sourceRef, undefined);
+  assert.equal(row.value.conflicts[0].source, undefined); assert.deepEqual(row.value.conflicts[0].sourceRef, draft.sourceRef);
+  const hydrated = await api.hydrateDraft(h.db.transaction([h.N.stores.baseline], 'readonly'), row.value);
+  assert.deepEqual(hydrated.source, captured); assert.deepEqual(hydrated.conflicts[0].source, source);
+});
+
+test('a concurrent checkpoint transfer returns the actual retained normalized revision instead of stale legacy text', async () => {
+  for (const state of ['active', 'promoted']) {
+    let h;
+    h = normalizedDraftFixture({ legacyGet: async id => {
+      assert.equal(id, h.draftKey);
+      h.values.get(h.N.stores.drafts).set(id, h.api.draftRow({ ...legacy, state, revision: 'newer-normalized-revision',
+        translations: state === 'active' ? ['Newer normalized text'] : [] }, h.source));
+      return copy(legacy);
+    } });
+    const legacy = { profile: h.scope.accountId, game: h.scope.game, sourceHash: h.scope.sourceHash, language: 'Thai', filepath: h.source.filepath,
+      key: h.draftKey, id: 'draft-session', revision: 'old-legacy-revision', state: 'active', source: copy(h.source),
+      translations: ['Stale legacy text'], base: { translations: ['Original'] } };
+    const actual = await h.api.draftGet(h.draftKey);
+    assert.equal(actual.revision, 'newer-normalized-revision'); assert.equal(actual.state, state);
+    assert.deepEqual(actual.source, h.source);
+    assert.deepEqual(actual.translations, state === 'active' ? ['Newer normalized text'] : []);
+    assert.equal(h.writes.filter(write => write.name === h.N.stores.drafts).length, 0);
+    assert.deepEqual(legacy.translations, ['Stale legacy text']);
+  }
+});
+
+test('durable submission sequence preserves equal-clock intake order and retries write nothing', async () => {
+  const h = normalizedDraftFixture(), { api, N, scope, values } = h;
+  const id = api.scopeKey(scope);
+  values.get(N.stores.submissions).clear();
+  // A removed workspace remains removed while its retained recovery commands
+  // receive ordering; the sequence lives in a separate scoped metadata row.
+  values.get(N.stores.migration).set(id, { key: id, scope: id, value: { state: 'ready', removed: true } });
+  const first = { ...copy(h.batch), jobId: 'z-first' }, second = { ...copy(h.batch), jobId: 'a-second' };
+  const clock = Date.now; Date.now = () => 1234;
+  try {
+    const a = await api.putSubmission(first), b = await api.putSubmission(second);
+    assert.equal(a.createdAt, b.createdAt); assert.equal(a.sequence, 1); assert.equal(b.sequence, 2);
+    assert.equal(values.get(N.stores.meta).size, 0);
+    const count = h.writes.length;
+    assert.deepEqual(await api.putSubmission(first), a); assert.equal(h.writes.length, count);
+    const listed = await api.listSubmissions({ ...scope, language: 'Thai' });
+    assert.deepEqual(listed.map(record => record.batch.jobId), ['z-first', 'a-second']);
+    const different = { ...copy(first), files: [{ ...copy(first.files[0]), translations: ['Different content'] }] };
+    await assert.rejects(api.putSubmission(different), /identifier.*different content/);
+    assert.equal(h.writes.length, count);
+    values.get(N.stores.submissions).delete(api.key(id, first.jobId));
+    values.get(N.stores.receipts).set(api.key(id, first.jobId), api.row(id, first.jobId, { jobId: first.jobId, result: { status: 'local' } }));
+    const completed = await api.putSubmission(first);
+    assert.equal(completed.state, 'completed'); assert.deepEqual(completed.batch, first);
+    assert.equal(h.writes.length, count, 'A receipt-backed retry does not re-journal or increment its sequence.');
+  } finally { Date.now = clock; }
+});
+
+test('reviewing a direct submission creates a compact checkpoint and discard resolves its durable journal', async () => {
+  const h = normalizedDraftFixture(), { api, batch, draftKey, values, N, scope } = h;
+  await api.updateSubmission(batch, { state: 'review', error: { code: 'DRAFT_BASE_CHANGED', message: 'Changed base' } });
+  const row = values.get(N.stores.drafts).get(draftKey);
+  assert.equal(row.value.source, undefined); assert.equal(row.value.sourceRef.sourceHash, scope.sourceHash);
+  assert.deepEqual(row.value.translations, ['Submitted']); assert.deepEqual(row.value.submissionJobIds, [batch.jobId]);
+  const reviewed = await api.draftUpdate(draftKey, current => ({ status: 'discarded', record: { ...current, state: 'discarded',
+    consumedRevision: current.revision, revision: current.revision + ':discarded', translations: [], base: null, source: null } }));
+  assert.equal(reviewed.status, 'discarded'); assert.equal(values.get(N.stores.submissions).size, 0);
+});
+
+test('new submitted recovery invalidates an old checkpoint review while repeated recovery does not duplicate variants', async () => {
+  const h = normalizedDraftFixture(), { api, batch, draftKey, values, N, scope, source } = h;
+  const previous = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: 'Thai', filepath: source.filepath,
+    key: draftKey, id: 'primary', revision: 'reviewed-revision', state: 'active', source: copy(source),
+    translations: ['Other tab text'], base: { translations: ['Original'] }, conflicts: [] };
+  values.get(N.stores.drafts).set(draftKey, api.draftRow(previous, source));
+  await api.updateSubmission(batch, { state: 'review' });
+  const row = values.get(N.stores.drafts).get(draftKey);
+  assert.equal(row.value.translations[0], 'Other tab text'); assert.notEqual(row.value.revision, previous.revision);
+  assert.equal(row.value.conflicts.length, 1); assert.equal(row.value.conflicts[0].submissionJobId, batch.jobId);
+  const writes = h.writes.length;
+  await api.updateSubmission(batch, { state: 'review' });
+  assert.equal(h.writes.length, writes, 'An unchanged review retry writes nothing.');
+  const stale = await api.draftUpdate(draftKey, current => ({ status: current.revision === previous.revision ? 'discarded' : 'conflict', record: current, write: false }));
+  assert.equal(stale.status, 'conflict');
+});
+
+test('equal submitted recovery links its journal without creating a second checkpoint copy', async () => {
+  const h = normalizedDraftFixture(), { api, batch, draftKey, values, N, scope, source } = h;
+  const previous = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: 'Thai', filepath: source.filepath,
+    key: draftKey, id: 'primary', revision: 'primary-revision', state: 'active', source: copy(source),
+    translations: ['Submitted'], base: copy(batch.bases[source.filepath]), conflicts: [] };
+  values.get(N.stores.drafts).set(draftKey, api.draftRow(previous, source));
+  await api.updateSubmission(batch, { state: 'review' });
+  const current = values.get(N.stores.drafts).get(draftKey).value;
+  assert.equal(current.revision, previous.revision); assert.equal(current.conflicts.length, 0);
+  assert.deepEqual(current.submissionJobIds, [batch.jobId]);
+});
+
+test('editing a submitted recovery preserves the journal links through the next explicit Save', async () => {
+  const h = harness(), { editor, desc, calls } = h;
+  await editor.editFile(desc.filepath); editor.editorBlocks[0].translation = 'Reviewed draft'; await editor.flushEditorDraft();
+  editor._draftSession.record.submissionJobId = 'review-one'; editor._draftSession.record.submissionJobIds = ['review-one', 'review-two'];
+  editor.editorBlocks[0].translation = 'Edited reviewed draft'; await editor.flushEditorDraft();
+  assert.deepEqual(copy(editor._draftSession.record.submissionJobIds), ['review-one', 'review-two']);
+  assert.equal(await editor.editorSave({ close: false }), true);
+  assert.deepEqual(copy(calls.promotions.at(-1).options.draft.submissionJobIds), ['review-one', 'review-two']);
+});
+
+test('cold import recovery reconstructs exact snapshots while one-file writes exclude every archived record', async () => {
+  const h = normalizedDraftFixture(), { api, N, scope, source, values } = h;
+  const archive = [{ id: 'retained-recovery', at: 5, sourceHash: 'previous', reason: 'Changed duplicate selection',
+    descs: [{ ...copy(source), translations: { English: ['Earlier English'], Thai: ['Earlier staged Thai'], German: ['Earlier German'] } },
+      { ...copy(source), translations: { English: ['Duplicate original English'], Thai: ['Duplicate entry'] } }],
+    status: { [source.filepath]: { needsReview: true, lastEditedAt: 3 } } },
+    { sourceHash: 'another', descs: [], status: {}, custom: { retained: true } }, { id: 'metadata-only', reason: 'Retained context' }];
+  const workspace = { game: scope.game, sourceHash: scope.sourceHash, stagedVersion: 1, descs: [copy(source)],
+    staged: {}, status: {}, importRecovery: copy(archive) };
+  const selected = [N.stores.meta, N.stores.baseline, N.stores.files, N.stores.records];
+  await api.transaction(selected, 'readwrite', tx => api.writeWorkspace(tx, scope, workspace));
+  const storedMeta = values.get(N.stores.meta).get(api.scopeKey(scope)).value;
+  assert.equal(storedMeta.importRecovery, undefined);
+  assert.ok(JSON.stringify(storedMeta).length < 256, 'Hot metadata excludes all archived file arrays.');
+  const archivedRows = [...values.get(N.stores.records).values()].filter(row => row.value.field === 'importRecovery');
+  assert.ok(archivedRows.length > archive.length);
+  assert.ok(archivedRows.every(row => !Object.hasOwn(row, 'pathKey')));
+  assert.ok(archivedRows.filter(row => row.value.kind === 'group').every(row => !(row.value.data.descs || []).length));
+  const cold = await api.transaction(selected, 'readonly', tx => api.readWorkspace(tx, scope));
+  assert.deepEqual(cold.importRecovery, archive); assert.equal(cold._storageArchiveKinds, undefined);
+  const partial = await api.transaction(selected, 'readonly', tx => api.readWorkspace(tx, scope, [source.filepath]));
+  assert.equal(partial.importRecovery, undefined);
+  const merged = api.mergeWorkspaceRecords(cold, partial);
+  assert.equal(merged.importRecovery, cold.importRecovery); assert.equal(merged._storageArchiveKinds, undefined);
+  partial.status[source.filepath] = { lastEditedAt: 20 };
+  const previousWrites = h.writes.length;
+  await api.transaction(selected, 'readwrite', tx => api.writeWorkspace(tx, scope, partial, [source.filepath]));
+  assert.equal(h.writes.slice(previousWrites).filter(write => write.value?.value?.field === 'importRecovery').length, 0);
+  assert.deepEqual([...values.get(N.stores.records).values()].filter(row => row.value.field === 'importRecovery'), archivedRows);
+  const after = await api.transaction(selected, 'readonly', tx => api.readWorkspace(tx, scope));
+  assert.deepEqual(after.importRecovery, archive);
 });

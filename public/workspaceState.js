@@ -277,7 +277,7 @@
       const candidate = droppedForFile(workspace, file.filepath, language);
       if (!candidate || candidate.id !== promotion.id || Number(candidate.revision || 0) !== Number(promotion.revision || 0)
         || (promotion.targetSourceHash && promotion.targetSourceHash !== (options.sourceHash || workspace.sourceHash))) {
-        throw Object.assign(new Error('The dropped translation changed before it could be promoted.'), { stale: true });
+        throw Object.assign(new Error('The dropped translation changed before it could be promoted. Review its current preserved copy before saving again.'), { stale: true, code: 'DROPPED_PROMOTION_CHANGED' });
       }
       rememberDroppedScope(candidate, options.sourceHash || workspace.sourceHash);
       workspace.droppedArchive[candidate.id] = { ...copy(candidate), status: 'promoted', resolvedAt: options.savedAt || Date.now() };
@@ -338,7 +338,8 @@
           const originSourceAvailable = !!historical || (!englishRevision && !!originSourceHash && originSourceHash === workspace.sourceHash && !changedSource);
           dropTranslation(workspace, origin, language, { game: options.game, translations: old,
             originSourceHash, targetSourceHash: sourceHash, originSourceAvailable,
-            reason: 'Preserved legacy review translation', createdAt: carried?.savedAt });
+            reason: 'Preserved legacy review translation', createdAt: carried?.savedAt || options.migrationAt,
+            ...(options.migrationId ? { id: carried?.id || options.migrationId(desc.filepath, language, originSourceHash) } : {}) });
         // Legacy editors pad absent/short ZIP translations with blank entries.
         // Only infer a save when the padded text differs; an explicit
         // legacy save remains meaningful even when it is blank or unchanged.
@@ -347,7 +348,7 @@
           displayedLines(original.translations?.[language], original.translations?.English?.length || 0)))) {
           if (!workspace.staged[language]?.[desc.filepath]) stageTranslation(workspace,
             { filepath: desc.filepath, translations: desc.translations[language] }, language,
-            { source: original, sourceHash, savedAt: status.lastTranslatedAt || status.lastEditedAt,
+            { source: original, sourceHash, savedAt: status.lastTranslatedAt || status.lastEditedAt || options.migrationAt,
               saveOrigin: state.hasChanges ? 'legacy_save' : 'legacy_inferred' });
         }
       }
@@ -361,7 +362,8 @@
         const desc = (workspace.descs || []).find(desc => desc.filepath === carry.filepath) || originals.get(carry.filepath);
         if (!desc) continue;
         dropTranslation(workspace, desc, identity.language, { game: identity.game, translations: carry.translations,
-          originSourceHash: '', originSourceAvailable: false, targetSourceHash: sourceHash, reason: 'Preserved local review translation' });
+          originSourceHash: '', originSourceAvailable: false, targetSourceHash: sourceHash, reason: 'Preserved local review translation',
+          ...(options.migrationId ? { id: options.migrationId(desc.filepath, identity.language, 'carry'), createdAt: options.migrationAt } : {}) });
         if (workspace.staged[identity.language]) delete workspace.staged[identity.language][carry.filepath];
       }
     }
@@ -431,10 +433,10 @@
       if (workspace.collaborationAccountId && (!room || !joinedHere)) continue;
       const shared = room?.shared?.[filepath];
       if (shared && (shared.revision !== 1 || !shared.trackedForExport || shared.needsReview || !empty(shared.translations))) continue;
-      const repairId = globalThis.crypto?.randomUUID?.() || ('placeholder-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      const repairId = options.repairId?.(filepath, language) || globalThis.crypto?.randomUUID?.() || ('placeholder-' + Date.now() + '-' + Math.random().toString(36).slice(2));
       workspace.placeholderRepairArchive ||= {};
       workspace.placeholderRepairArchive[repairId] = { filepath, language, sourceHash: workspace.sourceHash,
-        staged: copy(entry), repairedAt: Date.now(), reason: 'Recovered migration placeholder', status: room ? 'pending' : 'local' };
+        staged: copy(entry), repairedAt: options.repairAt ?? Date.now(), reason: 'Recovered migration placeholder', status: room ? 'pending' : 'local' };
       if (room) {
         room.placeholderRepairs ||= [];
         room.placeholderRepairs.push({ id: repairId, filepath, baseRevision: 1 });

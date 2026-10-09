@@ -575,7 +575,8 @@ test('worker entrypoint queues actual save commands and sends ACK only after sto
     writes.push(value.jobId);
     return value.jobId === 'save-1' ? new Promise(resolve => { resolveFirst = resolve; }) : Promise.resolve({ jobId: value.jobId });
   } } };
-  const context = vm.createContext({ self: root, importScripts: (...files) => assert.deepEqual(files, ['workspaceState.js', 'offlineStore.js']) });
+  const context = vm.createContext({ self: root, importScripts: (...files) => assert.deepEqual(files,
+    ['workspaceState.js', 'collaborationProtocol.js', 'normalizedStore.js', 'normalizedRooms.js', 'offlineStore.js']) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'saveWorker.js'), 'utf8'), context);
   assert.equal(messages[0].type, 'ready');
   root.onmessage({ data: { type: 'saveTranslations', id: 'save-1', batch: batch() } });

@@ -6,6 +6,20 @@ const { Client } = require('../public/collaborationSync.js');
 const copy = structuredClone;
 const hash = 'a'.repeat(64), oldHash = 'b'.repeat(64);
 const source = { filepath: 'a.txt', name: 'stat', stats: ['stat'], variables: ['#'], remarks: [''], translations: { English: ['Current English'], Thai: [''] } };
+
+test('unchanged empty Dropped polling performs no persistence or replacement notification', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  let writes = 0, notifications = 0;
+  const update = store.updateWorkspace.bind(store);
+  store.updateWorkspace = (...args) => { writes++; return update(...args); };
+  client.onRemoteDropped = () => { notifications++; };
+  await client.syncDropped(client.epoch, { force: true });
+  await client.syncDropped(client.epoch, { force: true });
+  assert.equal(server.requests.filter(request => request.path.includes('/dropped?')).length, 2);
+  assert.equal(writes, 0);
+  assert.equal(notifications, 0);
+  assert.ok(client.lastDroppedSync > 0);
+});
 function fixture() {
   const identity = { accountId: 'user', game: 'poe1', language: 'Thai', sourceHash: hash }, key = P.scopeKey(identity);
   const base = P.fileState({ filepath: 'a.txt', translations: [''], revision: 1 });

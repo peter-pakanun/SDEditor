@@ -41,20 +41,21 @@ The manager's **Upload next version → Upload and prepare** uses the same path 
 
 For implemented server storage reductions, client-generated managed collections, migration safeguards and pending deployment work, read [Local-first baselines and incremental server storage](local_first_server_storage.md).
 
-IndexedDB v8 retains source/workspace snapshots and active pointers separately:
+IndexedDB v9 retains scoped source/workspace records and active pointers separately:
 
 | Data | Identity |
 | --- | --- |
-| Parsed source and workspace | Account/local profile + game + branch + accepted source baseline |
+| Immutable parsed files and accepted assets | Game + accepted source baseline + filepath for original files |
+| Workspace metadata, staged files and Dropped records | Account/local profile + game + branch + accepted source baseline, plus language/file or candidate identity |
 | Active version pointer | Account/local profile + game + branch |
 | Local version names and cached catalog/details | Account/local profile + game + branch, with source identity for version metadata |
 | History | `revisions_poe1` / `revisions_poe2`, filtered by account, branch, source and language |
 | Drafts | Account/local profile + game + branch + source + language + file |
-| Save receipts and queued shared work | Captured account, game, branch, source and language; original job/mutation IDs retained |
+| Save submissions, receipts and queued shared work | Captured account, game, branch, source and language; original job/mutation IDs retained |
 
-The old single-version `kv.source`, `kv.workspace`, `revisions`, and per-game `source_poe1`/`workspace_poe1` slots (and their PoE2 equivalents) remain as recovery evidence. The v8 loader copies each existing per-game slot into its recorded owner's default branch once. Unowned legacy work belongs to the guest profile. First sign-in can adopt guest source and committed work into an empty account workspace; it never copies another signed-in account's work. Original guest drafts, receipts and history remain under their original scope.
+The old single-version `kv.source`, `kv.workspace`, `revisions`, per-game `source_poe1`/`workspace_poe1` slots (and their PoE2 equivalents), and v8 named-version aggregates remain as recovery evidence. Legacy per-game work maps into its recorded owner's default branch; v9 conversion runs in resumable bounded batches and freezes old aggregates. Unowned legacy work belongs to the guest profile. First sign-in can adopt guest source and committed work into an empty account workspace; it never copies another signed-in account's work. Original guest drafts, receipts and history remain under their original scope.
 
-These stores retain the browser's current parsed source, language-specific staged translations, Dropped snapshots and local history. Immutable imported baseline caches are also kept in `kv`, keyed by game and accepted baseline ID. Saving, restoring or importing translated work does not rewrite that original baseline. IndexedDB stores collaboration caches, recovery copies and pending saves scoped by account and workspace.
+Normalized stores retain the browser's immutable parsed files/assets, language-specific staged translations, Dropped snapshots and local history. Complete source/workspace/room objects are materialized read views; ordinary file saves and sync acknowledgments do not rewrite aggregates. Saving, restoring or importing translated work does not rewrite that original baseline. IndexedDB stores collaboration caches, recovery copies and pending submissions scoped by account and workspace. Readiness makes normalized absence authoritative, so retained aggregate data cannot resurrect deleted staged work. Reload replays durably submitted saves with their original IDs; stale bases require review. v9 excludes earlier aggregate writers, including v8 editors and workers, without clearing storage.
 
 Signed-in users automatically join a shared room for the same **game + branch + accepted source baseline + language** when their role permits it. A Translator joins only when the editor language matches their assignment. Managers and Admins join the selected language's room regardless of their assignment. The room's source identity differs between modern and legacy imports:
 

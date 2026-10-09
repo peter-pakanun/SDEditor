@@ -75,7 +75,7 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [8]);
+  assert.deepEqual(f.versions, [9]);
 });
 
 test('list and key isolate profile, game, source and language without retargeting old-source drafts', async () => {

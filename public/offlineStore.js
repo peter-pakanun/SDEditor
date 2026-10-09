@@ -3,9 +3,19 @@
   const DB_NAME = 'sdeditor';
   // v4 cannot read staged records; v5 cannot retain a shared staging reset.
   // v6 dictionary writers cannot preserve per-entry game scope; v7 writers
-  // cannot preserve named-version/profile isolation. Keep every
+  // cannot preserve named-version/profile isolation; v8 writers would replace
+  // normalized facts with stale aggregates. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 8;
+  const DB_VERSION = 9;
+  const runtime = typeof window === 'object' ? window : self;
+  const normalized = runtime.NormalizedStore?.create({ openDb, W: WorkspaceState, legacyGet: kvGet,
+    workspaceKey, sourceKey, receiptKey: receiptScopeKey, revisionStoreName, scopedRevision, normalizeScope: normalizeWorkspaceScope,
+    prepareWorkspace: scope => getLegacyWorkspaceView(scope, undefined, true),
+    preparedRoom: (scope, key) => preparedRoomRepairs.get(normalized.scopeKey(scope))?.rooms?.[key],
+    legacyBaseline: (workspace, scope) => workspace.importArchive ? kvGet(importedBaselineKey(workspace.importArchive.baselineId, scope.game)) : undefined });
+  const normalizedRooms = normalized && runtime.NormalizedRooms?.create(normalized);
+  const preparedRoomRepairs = new Map();
+  async function usesRecords(scope) { return !!(scope?.sourceHash && normalized && await normalized.available()); }
 
   const STORE_KV = 'kv';
   const STORE_REVISIONS_LEGACY = 'revisions';
@@ -63,7 +73,8 @@
   }
   function scopedRevision(revision, scope) {
     return scope?.sourceHash ? { ...revision, sourceHash: revision.sourceHash || scope.sourceHash,
-      accountId: scope.accountId, branchId: scope.branchId } : revision;
+      accountId: scope.accountId, branchId: scope.branchId } : runtime.NormalizedStore ? { ...revision,
+        accountId: String(revision.accountId || revision.collaborationAccountId || 'guest'), branchId: revision.branchId || DEFAULT_BRANCH, sourceHash: revision.sourceHash || '' } : revision;
   }
   function matchesCollaborationIdentity(key, identity) {
     const branch = identity?.branchId || DEFAULT_BRANCH;
@@ -123,7 +134,13 @@
             store.createIndex('by_file_lang_time', ['filepath', 'lang', 'savedAt']);
             store.createIndex('by_file_time', ['filepath', 'savedAt']);
           }
+          if (runtime.NormalizedStore) {
+            const store = req.transaction.objectStore(storeName);
+            if (!store.indexNames.contains('by_scope_file_lang_time')) store.createIndex('by_scope_file_lang_time', ['accountId', 'branchId', 'sourceHash', 'filepath', 'lang', 'savedAt']);
+            if (!store.indexNames.contains('by_scope_file_time')) store.createIndex('by_scope_file_time', ['accountId', 'branchId', 'sourceHash', 'filepath', 'savedAt']);
+          }
         }
+        runtime.NormalizedStore?.upgrade(db, req.transaction);
       };
       req.onsuccess = () => {
         if (blocked) { req.result.close(); return; }
@@ -195,7 +212,20 @@
 
   async function getWorkspace(version, language) {
     if (workspaceContext || (version && typeof version === 'object')) version = await resolveWorkspaceVersion(version);
-    if (!language || language === 'English') {
+    if (await usesRecords(scopedVersion(version))) {
+      const scope = scopedVersion(version);
+      const marker = await normalized.transaction([normalized.stores.migration], 'readonly', tx => normalized.get(tx, normalized.stores.migration, normalized.scopeKey(scope)));
+      if (marker?.state !== 'ready') {
+        const legacy = await getLegacyWorkspaceView(version, language, true);
+        await normalized.migrate(scope, legacy);
+        await normalizePreparedRoomRepairs(scope);
+      }
+      return normalized.workspace(scope);
+    }
+    return getLegacyWorkspaceView(version, language);
+  }
+  async function getLegacyWorkspaceView(version, language, frozen = false) {
+    if ((!language || language === 'English') && !frozen) {
       const workspace = await kvGet(workspaceKey(version));
       if (Number(workspace?.stagedVersion) >= 1 && workspace.statusMetadataVersion !== 1) {
         return updateWorkspace(pruneWorkspace, version);
@@ -203,7 +233,7 @@
       return workspace;
     }
     const db = await openDb();
-    const tx = db.transaction([STORE_KV, revisionStoreName(version)], 'readwrite');
+    const tx = db.transaction([STORE_KV, revisionStoreName(version)], frozen ? 'readonly' : 'readwrite');
     const done = txDone(tx);
     const store = tx.objectStore(STORE_KV);
     const key = workspaceKey(version);
@@ -221,12 +251,16 @@
             if (--waiting) return;
             try {
               if (!(Number(result.stagedVersion) >= 1)) WorkspaceState.initializeWorkspace(result, { source: source || [], sourceHash: result.sourceHash,
-                game: normalizeGameVersion(version), language, collaboration, revisions, originSources });
+                game: normalizeGameVersion(version), language, collaboration, revisions, originSources,
+                ...(frozen ? { migrationAt: Number(result.lastModified) || 1,
+                  migrationId: (filepath, lang, origin) => 'migration-' + stableRepairId([scopedVersion(version), filepath, lang, origin]) } : {}) });
               else pruneWorkspace(result);
               const repaired = WorkspaceState.repairLegacyPlaceholders(result, { source, collaboration, receipts, revisions,
-                game: normalizeGameVersion(version), evidenceComplete: !!history.openCursor });
-              if (repaired && collaboration) store.put({ key: 'collaboration_v1', value: collaboration });
-              if (JSON.stringify(result) !== beforeMigration) store.put({ key, value: pruneWorkspace(result) });
+                game: normalizeGameVersion(version), evidenceComplete: !!history.openCursor,
+                ...(frozen ? { repairId: (filepath, lang) => stableRepairId([scopedVersion(version), filepath, lang]), repairAt: Number(result.lastModified) || 0 } : {}) });
+              if (frozen && repaired && collaboration) preparedRoomRepairs.set(normalized.scopeKey(scopedVersion(version)), collaboration);
+              if (repaired && collaboration && !frozen) store.put({ key: 'collaboration_v1', value: collaboration });
+              if (JSON.stringify(result) !== beforeMigration && !frozen) store.put({ key, value: pruneWorkspace(result) });
             } catch (error) { failure = error; tx.abort(); }
           };
           const sourceRead = store.get(result.importArchive ? importedBaselineKey(result.importArchive.baselineId, version) : sourceKey(version));
@@ -259,11 +293,27 @@
     return result;
   }
 
+  function stableRepairId(value) {
+    const text = JSON.stringify(value);
+    const hashes = [2166136261, 2246822519, 3266489917, 668265263];
+    for (let i = 0; i < text.length; i++) for (let j = 0; j < hashes.length; j++) hashes[j] = Math.imul(hashes[j] ^ (text.charCodeAt(i) + j), 16777619);
+    return 'placeholder-v9-' + hashes.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+  async function normalizePreparedRoomRepairs(scope) {
+    const state = preparedRoomRepairs.get(normalized.scopeKey(scope));
+    if (!state || !normalizedRooms) return;
+    for (const [key, room] of Object.entries(state.rooms || {})) if (String(room.identity?.accountId) === scope.accountId
+      && room.identity.game === scope.game && room.identity.sourceHash === scope.sourceHash && (room.identity.branchId || DEFAULT_BRANCH) === scope.branchId)
+      await normalizedRooms.ensureRoom(key, room.identity, room);
+    preparedRoomRepairs.delete(normalized.scopeKey(scope));
+  }
+
   async function updateWorkspace(update, version, options = {}) {
     const captured = options.scope ? normalizeWorkspaceScope(options.scope) : scopedVersion(version);
     if (captured) version = captured;
     const revisions = options.revisions || [];
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
+    if (await usesRecords(captured)) return normalized.saveWorkspace(captured, update, options);
     const revisionStore = revisionStoreName(version);
     const db = await openDb(), tx = db.transaction(revisions.length ? [STORE_KV, revisionStore] : [STORE_KV], 'readwrite'), done = txDone(tx);
     const store = tx.objectStore(STORE_KV), key = workspaceKey(version);
@@ -324,15 +374,26 @@
       || typeof value.revision !== 'string' || !value.revision || !Array.isArray(value.translations)
       || value.translations.some(line => typeof line !== 'string') || !Array.isArray(value.base?.translations)
       || value.base.translations.some(line => typeof line !== 'string')) throw new TypeError('Invalid translation draft.');
+    const submissionJobIds = [...new Set([value.submissionJobId, ...(value.submissionJobIds || [])].filter(Boolean))];
+    if (submissionJobIds.some(id => typeof id !== 'string' || !id)) throw new TypeError('Invalid submitted draft recovery.');
+    if (value.sourceRef && (value.sourceRef.game !== scope.game || value.sourceRef.sourceHash !== scope.sourceHash
+      || value.sourceRef.filepath !== scope.filepath)) throw new TypeError('The draft source reference does not match its scope.');
     // Detach nested source/base data too; a Vue proxy must never reach IndexedDB.
     return JSON.parse(JSON.stringify({ ...scope, key, id: value.id, revision: value.revision,
       translations: value.translations, base: value.base, source: value.source ?? null,
       ...(typeof value.declined === 'string' && value.declined ? { declined: value.declined } : {}),
-      updatedAt: Number(value.updatedAt) || Date.now(), state: 'active' }));
+      updatedAt: Number(value.updatedAt) || Date.now(), state: 'active',
+      ...(value.sourceRef ? { sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: scope.filepath } } : {}),
+      ...(typeof value.submissionJobId === 'string' ? { submissionJobId: value.submissionJobId } : {}),
+      ...(submissionJobIds.length ? { submissionJobIds } : {}) }));
   }
 
   function draftContentSignature(value) {
-    return JSON.stringify({ ...plainDraft(value), updatedAt: 0 });
+    const draft = plainDraft(value);
+    // Storage references and submission links are transport provenance. Keep
+    // pre-v9 content/consumption signatures valid after normalization.
+    delete draft.sourceRef; delete draft.submissionJobId; delete draft.submissionJobIds;
+    return JSON.stringify({ ...draft, updatedAt: 0 });
   }
 
   function sameDraftContent(left, right) {
@@ -340,18 +401,19 @@
   }
 
   function sameDraftVariant(left, right) {
-    return JSON.stringify({ ...plainDraft(left), revision: '', updatedAt: 0 })
-      === JSON.stringify({ ...plainDraft(right), revision: '', updatedAt: 0 });
+    return draftContentSignature({ ...left, revision: 'variant' }) === draftContentSignature({ ...right, revision: 'variant' });
   }
 
   async function getTranslationDraft(key) {
     translationDraftScopeFromKey(key);
+    if (normalized && await normalized.available()) return (await normalized.draftGet(key)) || null;
     return (await kvGet(key)) || null;
   }
 
   async function listTranslationDrafts(scope) {
     if (!scope || typeof scope.profile !== 'string' || !scope.profile || !['poe1', 'poe2'].includes(scope.game)
       || typeof scope.language !== 'string' || !scope.language) throw new TypeError('A draft listing requires its profile, game and language.');
+    if (normalized && await normalized.available()) return normalized.draftList(scope);
     return withStore(STORE_KV, 'readonly', async store => {
       const range = typeof IDBKeyRange === 'undefined' ? undefined
         : IDBKeyRange.bound(KV_TRANSLATION_DRAFT_PREFIX, KV_TRANSLATION_DRAFT_PREFIX + '\uffff');
@@ -366,6 +428,9 @@
 
   async function updateTranslationDraft(key, change) {
     translationDraftScopeFromKey(key);
+    if (normalized && await normalized.available()) {
+      const result = await normalized.draftUpdate(key, change); delete result.write; return result;
+    }
     const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
     const store = tx.objectStore(STORE_KV);
     let result, failure;
@@ -532,22 +597,33 @@
     return resolved;
   }
 
-  async function getVersionSource(scope) { return kvGet(sourceKey(normalizeWorkspaceScope(scope))); }
+  async function getVersionSource(scope) { return getSource(normalizeWorkspaceScope(scope)); }
   async function getVersionWorkspace(scope, language) {
     const value = await getWorkspace(normalizeWorkspaceScope(scope), language);
     return value ?? null;
   }
   async function getSource(version) {
     const captured = (workspaceContext || typeof version === 'object') ? await resolveWorkspaceVersion(version) : version;
+    if (await usesRecords(scopedVersion(captured))) return normalized.source(scopedVersion(captured));
     return kvGet(sourceKey(captured));
   }
   async function setWorkspace(workspace, version) {
     const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: version }), sourceHash: workspace?.sourceHash });
+    if (await usesRecords(captured)) return normalized.saveWorkspace(captured, workspace);
     return kvSet(workspaceKey(captured || version), workspace);
   }
   async function activateVersion(value) {
     const scope = normalizeWorkspaceScope(value);
     if (!scope.sourceHash) throw new TypeError('A version activation requires its source identity.');
+    if (await usesRecords(scope)) {
+      await normalized.ensure(scope);
+      if (!await normalized.hasScope(scope)) throw new Error('This version is not available in this browser.');
+      const [workspace, source, metadata, baseline] = await Promise.all([normalized.workspace(scope), normalized.source(scope), kvGet(versionMetadataKey(scope)), normalized.assets(scope)]);
+      await kvSet(activeKey(scope), scope);
+      activeScopes.set(activeKey(scope), scope);
+      if (workspaceContext?.accountId === scope.accountId && workspaceContext.game === scope.game && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
+      return { scope, workspace, source, metadata: metadata || { ...scope }, baseline: workspace.importArchive ? baseline : null };
+    }
     const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
     const kv = tx.objectStore(STORE_KV), values = {};
     const keys = [workspaceKey(scope), sourceKey(scope), versionMetadataKey(scope)];
@@ -620,6 +696,7 @@
     const records = [...selected.values()];
     const availability = await withStore(STORE_KV, 'readonly', store => Promise.all(records.map(row =>
       store.count ? requestToPromise(store.count(sourceKey(row))).then(Boolean) : requestToPromise(store.getKey(sourceKey(row))).then(Boolean))));
+    if (normalized && await normalized.available()) for (let index = 0; index < records.length; index++) if (await normalized.hasScope(records[index])) availability[index] = true;
     const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
       && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash
       || (active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active.sourceHash : '');
@@ -648,6 +725,7 @@
     });
     const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
       && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash || active?.sourceHash;
+    if (normalized && await normalized.available()) for (let index = 0; index < selected.length; index++) if (await normalized.hasScope(selected[index])) availability[index] = true;
     return selected.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
         hasSource: availability[index], current: row.sourceHash === selectedHash }))
       .sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));
@@ -687,6 +765,18 @@
     const guest = target.sourceHash ? { ...target, accountId: 'guest' } : guestActive;
     if (!guest.sourceHash) return null;
     const scope = { ...target, sourceHash: guest.sourceHash };
+    if (await usesRecords(scope)) {
+      await Promise.all([normalized.ensure(guest), normalized.ensure(scope)]);
+      if (await normalized.hasScope(scope)) return scope;
+      const workspace = await normalized.workspace(guest);
+      if (!workspace) return null;
+      workspace.accountId = scope.accountId; workspace.game = scope.game; workspace.branchId = scope.branchId;
+      workspace.legacyHistoryProfile = 'guest'; delete workspace.collaborationAccountId;
+      const metadata = { ...await kvGet(versionMetadataKey(guest)), ...scope, adoptedFrom: 'guest', updatedAt: Date.now() };
+      await normalized.importScope(scope, await normalized.source(guest), workspace, [], await normalized.assets(guest), [
+        { key: versionMetadataKey(scope), value: metadata }, { key: versionIndexKey(scope), value: versionIndexRecord(metadata, scope) }, { key: activeKey(scope), value: scope }]);
+      activeScopes.set(activeKey(scope), scope); return scope;
+    }
     const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
     const kv = tx.objectStore(STORE_KV), reads = {};
     const keys = [workspaceKey(guest), sourceKey(guest), versionMetadataKey(guest), workspaceKey(scope)];
@@ -719,6 +809,7 @@
     const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: gameVersion }),
       sourceHash: workspace.sourceHash, branchId: workspace.branchId || (typeof version === 'object' ? version.branchId : undefined) });
     const revisionsStore = revisionStoreName(gameVersion);
+    if (await usesRecords(captured)) { await normalized.saveWorkspace(captured, workspace, { revisions }); return; }
     const db = await openDb();
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
@@ -748,6 +839,17 @@
       sourceHash: workspace.sourceHash, branchId: workspace.branchId || (typeof version === 'object' ? version.branchId : undefined) });
     const contextAtStart = workspaceContext;
     const revisionsStore = revisionStoreName(gameVersion);
+    if (await usesRecords(captured)) {
+      if (baseline && baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
+      const metadata = { createdAt: Date.now(), ...await kvGet(versionMetadataKey(captured)), ...captured,
+        ...(workspace.versionName ? { name: workspace.versionName } : {}), updatedAt: Date.now() };
+      await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId }, revisions, baseline, [
+        { key: activeKey(captured), value: captured }, { key: versionMetadataKey(captured), value: metadata },
+        { key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) }]);
+      activeScopes.set(activeKey(captured), captured);
+      if (workspaceContext === contextAtStart && workspaceContext?.accountId === captured.accountId && workspaceContext.game === captured.game && workspaceContext.branchId === captured.branchId) workspaceContext = { ...captured };
+      return;
+    }
     const db = await openDb();
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
@@ -816,6 +918,7 @@
       throw new TypeError('A staged translation deletion requires its captured saved translation.');
     }
     const draft = batch.draft;
+    const checkpoint = batch.checkpoint || draft;
     const captured = captureWorkspaceScope(batch);
     if (captured && (captured.game !== batch.game || captured.sourceHash !== (batch.sourceHash || '')
       || captured.accountId !== String(batch.accountId || 'guest') || captured.branchId !== (batch.branchId || captured.branchId))) {
@@ -831,21 +934,31 @@
         throw new TypeError('The saved draft does not match its translation save scope.');
       }
     }
+    if (checkpoint) {
+      const draftScope = translationDraftScopeFromKey(checkpoint.key);
+      if (files.length !== 1 || draftScope.profile !== String(batch.accountId || 'guest') || draftScope.game !== batch.game
+        || draftScope.sourceHash !== batch.sourceHash || draftScope.language !== batch.language || draftScope.filepath !== files[0].filepath
+        || (draftScope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH)) throw new TypeError('The checkpoint does not match its save scope.');
+    }
     const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || '')];
     const signature = JSON.stringify({ scope, files, descriptions: batch.descriptions || [], statuses: batch.statuses || {}, revisions: batch.revisions || [],
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
       ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
+      ...(!resetStaging && batch.bases ? { bases: batch.bases } : {}), ...(batch.checkpoint ? { checkpoint: batch.checkpoint } : {}),
       ...(draft ? { draft } : {}) });
     const receiptKey = captured ? receiptScopeKey(captured) : 'translation_save_receipts_' + batch.game;
     const batchWorkspaceKey = workspaceKey(captured || batch.game), batchSourceKey = sourceKey(captured || batch.game);
     const db = await openDb();
     const revisionsStore = revisionStoreName(batch.game);
-    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const recordMode = await usesRecords(captured);
+    const recordBatch = recordMode ? await normalized.beginBatch(batch, captured,
+      { workspace: batchWorkspaceKey, source: batchSourceKey, receipts: receiptKey }, normalizedRooms) : null;
+    const tx = recordBatch?.tx || db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
-    const kv = tx.objectStore(STORE_KV);
+    const kv = recordBatch?.kv || tx.objectStore(STORE_KV);
     let failure, result;
     const values = {};
-    const keys = [batchWorkspaceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(draft ? [draft.key] : [])];
+    const keys = [batchWorkspaceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(checkpoint ? [checkpoint.key] : []), ...(recordMode ? [batchSourceKey] : [])];
     let remaining = keys.length;
     const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
     const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
@@ -870,6 +983,7 @@
         if (receipt) {
           if (receipt.signature !== signature) throw new Error('A local save identifier was reused with different content.');
           result = { ...receipt.result, duplicate: true };
+          recordBatch?.consumeJournal();
           if (batch.collaboration) {
             const workspace = values[batchWorkspaceKey];
             const room = values.collaboration_v1?.rooms?.[batch.collaboration.key];
@@ -881,12 +995,12 @@
             // before the worker reply was lost. Never resurrect an old outbox.
             result.operations = current ? room.outbox?.filter(operation => (receipt.result.mutationIds || [batch.jobId]).includes(operation.id)) || [] : [];
             result.operation = result.operations[0] || null;
-            result.pending = current ? room.outbox?.length || 0 : 0;
+            result.pending = current ? recordMode ? room.pendingCount || 0 : room.outbox?.length || 0 : 0;
             if (current) {
               result.files = files.map(file => room.local?.[file.filepath] || file);
               result.status = result.operation ? result.operation.status === 'conflict' ? 'conflict' : 'pending' : 'synced';
             }
-          } else if (resetStaging) {
+          } else if (resetStaging || recordMode) {
             const workspace = values[batchWorkspaceKey], source = values[batchSourceKey];
             if (workspace && (!workspace.sourceHash || workspace.sourceHash === batch.sourceHash)
               && (!batch.accountId || !workspace.collaborationAccountId || String(workspace.collaborationAccountId) === String(batch.accountId))) {
@@ -894,13 +1008,17 @@
                 const original = source?.find(desc => desc.filepath === file.filepath);
                 if (!original) return file;
                 const current = WorkspaceState.workspaceFile(workspace, original, batch.language);
-                // Another tab may have staged a new translation after this
-                // deletion committed but before its lost response was retried.
+                // Another tab may have saved or deleted this translation after
+                // the commit but before its lost response was retried.
                 return { filepath: file.filepath, translations: current.translations, needsReview: false,
                   trackedForExport: current.hasChanges, revision: file.revision,
                   ...(!current.hasChanges ? { stagingReset: true } : {}) };
               });
             }
+          }
+          if (recordMode && values[batchWorkspaceKey]?.sourceHash === batch.sourceHash) {
+            result.statuses = Object.fromEntries(files.map(file => [file.filepath,
+              JSON.parse(JSON.stringify(values[batchWorkspaceKey].status?.[file.filepath] || {}))]));
           }
           return;
         }
@@ -919,8 +1037,22 @@
         }
         workspace.descs ||= []; workspace.status ||= {};
         const legacyWorkspace = Number(workspace.stagedVersion || 0) < 1;
-        WorkspaceState.initializeWorkspace(workspace, { source: values[batchSourceKey] || batch.descriptions || [],
+        if (!recordMode) WorkspaceState.initializeWorkspace(workspace, { source: values[batchSourceKey] || batch.descriptions || [],
           sourceHash: batch.sourceHash, game: batch.game, language: batch.language, collaboration: values.collaboration_v1 });
+        else { workspace.staged[batch.language] ||= {}; }
+        if (checkpoint) {
+          const current = values[checkpoint.key];
+          if (current?.conflicts?.length) throw Object.assign(new Error('Another local checkpoint needs review before saving.'), { code: 'DRAFT_CONFLICT' });
+          if (checkpoint.revision == null && current?.state === 'active' && current.id !== checkpoint.id)
+            throw Object.assign(new Error('Another tab created a checkpoint for this file. Review it before saving.'), { code: 'DRAFT_CHANGED' });
+        }
+        if (!resetStaging && batch.bases) for (const file of files) {
+          const original = values[batchSourceKey]?.find(desc => desc.filepath === file.filepath) || workspace.descs.find(desc => desc.filepath === file.filepath);
+          const current = original ? WorkspaceState.workspaceFile(workspace, original, batch.language).translations : [];
+          const capturedBase = batch.bases[file.filepath];
+          if (!capturedBase || JSON.stringify(current) !== JSON.stringify(capturedBase.translations))
+            throw Object.assign(new Error('The committed translation changed before this save. Review both versions before saving again.'), { code: 'DRAFT_BASE_CHANGED', filepath: file.filepath, currentTranslations: current });
+        }
         if (resetStaging) {
           const file = files[0], original = values[batchSourceKey]?.find(desc => desc.filepath === file.filepath);
           if (!original) throw new Error('The original ZIP translation is unavailable. Reimport the source archive before deleting its staged translation.');
@@ -965,7 +1097,7 @@
         }
         const descriptions = new Map(workspace.descs.map(desc => [desc.filepath, desc]));
         const templates = new Map((batch.descriptions || []).map(desc => [desc.filepath, desc]));
-        let room, state, operation, operations;
+        let room, state, operation, operations, previousRoomPending = 0, previousSelectedPending = 0;
         const collaboration = batch.collaboration;
         const promotions = { ...(batch.promoteDroppedByPath || {}), ...(collaboration?.promoteDroppedByPath || {}) };
         const singlePromotion = batch.promoteDropped || collaboration?.promoteDropped;
@@ -983,6 +1115,7 @@
           }
           state = values.collaboration_v1;
           room = state?.rooms?.[collaboration.key];
+          previousRoomPending = Number(room?.pendingCount || 0); previousSelectedPending = room?.outbox?.length || 0;
           if (!room || !matchesCollaborationIdentity(collaboration.key, room.identity)) {
             throw stale('The shared workspace changed before this translation could be saved.');
           }
@@ -1053,7 +1186,8 @@
           let desc = descriptions.get(file.filepath);
           if (!desc) {
             if (!template) throw new Error('The saved file is missing its source description: ' + file.filepath);
-            desc = { ...template, translations: { English: [...(template.translations?.English || [])] } };
+            const original = recordMode && values[batchSourceKey]?.find(desc => desc.filepath === file.filepath);
+            desc = original ? JSON.parse(JSON.stringify(original)) : { ...template, translations: { English: [...(template.translations?.English || [])] } };
             workspace.descs.push(desc); descriptions.set(file.filepath, desc);
           } else if (template) {
             for (const key of ['filedir', 'filename', 'name', 'remarks', 'stats', 'variables']) {
@@ -1070,7 +1204,7 @@
               originSourceHash: batch.sourceHash, reason: 'Recovered translation' });
             if (workspace.staged[batch.language]) delete workspace.staged[batch.language][file.filepath];
           } else {
-            WorkspaceState.stageTranslation(workspace, file, batch.language, { source: desc, sourceHash: batch.sourceHash,
+            WorkspaceState.stageTranslation(workspace, file, batch.language, { source: recordMode ? values[batchSourceKey]?.find(original => original.filepath === file.filepath) || desc : desc, sourceHash: batch.sourceHash,
               promoteDropped: promotions[file.filepath], saveOrigin: collaboration?.origin || batch.origin || 'save' });
           }
           desc.translations[batch.language] = [...file.translations];
@@ -1100,10 +1234,11 @@
         }
         result = { jobId: batch.jobId, status: collaboration ? 'pending' : 'local', files,
           ...(draft ? { draftConsumed } : {}),
-          ...(collaboration ? { mutationId: batch.jobId, mutationIds: operations.map(op => op.id), pending: room.outbox.length, operation, operations } : {}) };
+          ...(collaboration ? { mutationId: batch.jobId, mutationIds: operations.map(op => op.id),
+            pending: recordMode ? previousRoomPending - previousSelectedPending + room.outbox.length : room.outbox.length, operation, operations } : {}) };
         // A lost worker response can be retried with the original identifier.
         // Keep recent receipts without growing the workspace on every save.
-        kv.put({ key: receiptKey, value: [...receipts, { jobId: batch.jobId, signature, result }].slice(-256) });
+        kv.put({ key: receiptKey, value: recordMode ? [{ jobId: batch.jobId, signature, result }] : [...receipts, { jobId: batch.jobId, signature, result }].slice(-256) });
       } catch (error) { fail(error); }
     };
     try {
@@ -1112,13 +1247,14 @@
         read.onsuccess = () => { values[key] = read.result?.value; if (--remaining === 0) apply(); };
       }
     } catch (error) { fail(error); }
-    try { await done; } catch (error) { throw failure || error; }
+    try { await done; } catch (error) { throw failure || tx._normalizedError || error; }
     return result;
   }
 
   // Read/modify/write collaboration cache, retry queue, replay cursor and local
   // working/history data in one transaction. Both callbacks must be synchronous.
   async function updateCollaborationState(update, options = {}) {
+    if (normalizedRooms && await normalized.available()) return normalizedRooms.updateState(update, options);
     const gameVersion = normalizeGameVersion(options.version);
     const captured = options.scope ? normalizeWorkspaceScope(options.scope) : captureWorkspaceScope({ game: gameVersion,
       sourceHash: options.workspace?.sourceHash });
@@ -1177,9 +1313,12 @@
   async function revisionList(filepath, lang, limit = 50, version) {
     const captured = typeof version === 'object' && version.legacyHistory
       ? { ...normalizeWorkspaceScope(version), legacyHistory: true } : scopedVersion(version);
+    if (normalized && await normalized.available()) await normalized.normalizeHistory(normalizeGameVersion(version), revisionStoreName(version));
     return withStore(revisionStoreName(version), 'readonly', async (store) => {
-      const idx = store.index('by_file_lang_time');
-      const range = IDBKeyRange.bound([filepath, lang, 0], [filepath, lang, Number.MAX_SAFE_INTEGER]);
+      const indexedScope = captured?.sourceHash && !captured.legacyHistory && store.indexNames?.contains('by_scope_file_lang_time');
+      const idx = store.index(indexedScope ? 'by_scope_file_lang_time' : 'by_file_lang_time');
+      const prefix = indexedScope ? [captured.accountId, captured.branchId, captured.sourceHash, filepath, lang] : [filepath, lang];
+      const range = IDBKeyRange.bound([...prefix, 0], [...prefix, Number.MAX_SAFE_INTEGER]);
       const items = [];
 
       await new Promise((resolve, reject) => {
@@ -1335,19 +1474,43 @@
     setWorkspace,
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
-    getImportedBaseline: (id, version) => kvGet(importedBaselineKey(id, version)),
+    getImportedBaseline: async (id, version) => {
+      const scope = normalizeWorkspaceScope({ game: normalizeGameVersion(version), sourceHash: id });
+      if (await usesRecords(scope)) {
+        const value = await normalized.assets(scope);
+        if (value?.archive) return value;
+      }
+      return kvGet(importedBaselineKey(id, version));
+    },
     translationDraftKey,
     getTranslationDraft,
     listTranslationDrafts,
     putTranslationDraft,
     discardTranslationDraft,
     saveTranslationBatch,
-    getCollaborationState: () => kvGet('collaboration_v1'),
+    getCollaborationState: async options => normalizedRooms && await normalized.available() ? normalizedRooms.getState(options) : kvGet('collaboration_v1'),
     updateCollaborationState,
+    getCollaborationRecords: normalizedRooms ? (command) => normalizedRooms.getRecords(command) : undefined,
+    updateCollaborationRecords: normalizedRooms ? (command, update, options) => normalizedRooms.updateRecords(command, update, options) : undefined,
+    getWorkspaceRecords: normalized ? async (scope, options = {}) => {
+      const captured = normalizeWorkspaceScope(scope);
+      return normalized.workspace(captured, { ...options, filepaths: options.filepaths || [], allDropped: options.allDropped || !options.filepaths });
+    } : undefined,
+    mergeWorkspaceRecords: (target, patch) => normalized ? normalized.mergeWorkspaceRecords(target, patch) : patch,
+    putSaveSubmission: normalized ? batch => normalized.putSubmission(batch) : undefined,
+    listSaveSubmissions: normalized ? scope => normalized.listSubmissions(scope) : undefined,
+    updateSaveSubmission: normalized ? (batch, patch) => normalized.updateSubmission(batch, patch) : undefined,
     getSource,
-    setSource: (source, version) => kvSet(sourceKey(version), source),
-    clearWorkspace: (version) => kvDel(workspaceKey(version)),
-    clearSource: (version) => kvDel(sourceKey(version)),
+    setSource: async (source, version) => {
+      const scope = scopedVersion(version);
+      if (await usesRecords(scope)) {
+        const workspace = await normalized.workspace(scope) || { ...scope, descs: [], status: {}, staged: {}, stagedVersion: 1, statusMetadataVersion: 1 };
+        return normalized.importScope(scope, source, workspace, []);
+      }
+      return kvSet(sourceKey(version), source);
+    },
+    clearWorkspace: async (version) => await usesRecords(scopedVersion(version)) ? normalized.clearScope(scopedVersion(version)) : kvDel(workspaceKey(version)),
+    clearSource: async (version) => await usesRecords(scopedVersion(version)) ? normalized.clearScope(scopedVersion(version)) : kvDel(sourceKey(version)),
     clearRevisions: (version) => revisionClearAll(version),
     addRevision: revisionAdd,
     listRevisions: revisionList,

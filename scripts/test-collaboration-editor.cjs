@@ -15,7 +15,7 @@ function harness() {
     document: { activeElement: null, body: {}, querySelector: () => null },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   const mixin = window.CollaborationIntegration.mixin;
@@ -147,7 +147,16 @@ function diagnosticSaveFixture() {
 
 function enablePending(h) {
   const { editor: e, window, context } = h;
-  const calls = [], downloads = [], listeners = new Map();
+  const calls = [], downloads = [], listeners = new Map(), submissions = new Map(), journals = [];
+  window.OfflineStore.putSaveSubmission = async batch => {
+    const record = { batch: structuredClone(batch), state: 'pending', createdAt: Date.now() };
+    submissions.set(batch.jobId, record); journals.push(record); return structuredClone(record);
+  };
+  window.OfflineStore.listSaveSubmissions = async scope => [...submissions.values()].filter(record =>
+    window.PendingSaves.scopeKey(record.batch) === window.PendingSaves.scopeKey(scope)).map(structuredClone);
+  window.OfflineStore.updateSaveSubmission = async (batch, patch) => {
+    const record = { ...submissions.get(batch.jobId), ...structuredClone(patch) }; submissions.set(batch.jobId, record); return record;
+  };
   context.crypto = require('node:crypto').webcrypto;
   context.Blob = Blob;
   context.saveAs = (blob, filename) => downloads.push({ blob, filename });
@@ -162,6 +171,7 @@ function enablePending(h) {
   window.removeEventListener = (name, handler) => listeners.get(name)?.delete(handler);
   e.localDescs = { descs: JSON.parse(JSON.stringify(e.descs)), status: {}, sourceHash: e.sourceIdentity };
   function acknowledge(call, extra = {}) {
+    submissions.delete(call.batch.jobId);
     call.resolve({ jobId: call.batch.jobId, status: call.batch.collaboration ? 'pending' : 'local', files: call.batch.files,
       ...(call.batch.collaboration ? { operation: { id: call.batch.jobId, origin: 'save', status: 'pending',
         files: call.batch.files.map(file => ({ base: call.batch.collaboration.bases[file.filepath] || null, yours: file })) } } : {}), ...extra });
@@ -172,7 +182,7 @@ function enablePending(h) {
     for (const listener of listeners.get('beforeunload') || []) listener(event);
     return prevented;
   }
-  return { ...h, calls, downloads, acknowledge, warnsBeforeUnload };
+  return { ...h, calls, downloads, acknowledge, warnsBeforeUnload, submissions, journals };
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 
@@ -216,6 +226,7 @@ async function pendingDraftFixture() {
   };
   await e.editFile(h.desc.filepath);
   e.editorBlocks[0].translation = 'Submitted first draft';
+  await e.flushEditorDraft();
   const acknowledge = (call, extra = {}) => {
     const draft = call.batch.draft, record = draft && records.get(draft.key);
     const draftConsumed = !!draft && record?.revision === draft.revision;
@@ -331,7 +342,8 @@ test('a staged deletion acknowledgement awaits its captured editor hook before t
 });
 
 test('a transactionally rejected staged deletion leaves the stage intact and removes only that stale reset from the queue', async () => {
-  const { editor: e, desc, calls, base } = pendingStagedDeletionFixture();
+  const { editor: e, desc, calls, base, submissions } = pendingStagedDeletionFixture();
+  let draftReads = 0; e.loadEditorDrafts = async () => { draftReads++; };
   const deleting = e.persistStagedDeletion(desc, base);
   const rejected = assert.rejects(deleting, error => error.code === 'DELETE_STAGED_BASE_CHANGED');
   await pendingTick();
@@ -339,6 +351,8 @@ test('a transactionally rejected staged deletion leaves the stage intact and rem
   await rejected;
   assert.deepEqual(Array.from(desc.translations.Thai), base.translations);
   assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+  assert.equal(submissions.get(calls[0].batch.jobId).state, 'review'); assert.equal(draftReads, 0);
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /confirm deletion again/);
 });
 
 test('a late staged deletion acknowledgement cannot update a replacement editor scope', async () => {
@@ -688,13 +702,17 @@ test('saving a diagnostic correction preserves the completed scan and remaining 
   }
 });
 
-test('optimistic worker Save & close retains remaining diagnostics before and after acknowledgment', async () => {
+test('journaled worker Save & close preserves diagnostics until committed acknowledgment', async () => {
   const { editor: e, desc, remaining, calls, acknowledge } = enablePending(diagnosticSaveFixture());
   await e.scanAllDiagnostics();
   const untouchedResult = e.diagnosticScanResults[remaining.filepath];
   const scanId = e.diagnosticScanRunId, appliedChecks = e.diagnosticScanAppliedChecks;
   assert.equal(await e.editorSave(), true);
   assert.equal(e.editorVisible, false); assert.equal(e.pendingLocalSaves, 1);
+  assert.equal(e.diagnosticScanResults[desc.filepath].hasDiagnosticError, true);
+  assert.equal(e.diagnosticScanErrorFileCount, 2);
+  await pendingTick(); assert.equal(calls.length, 1);
+  acknowledge(calls[0]); await e._pendingSaves.drain();
   const correctedResult = e.diagnosticScanResults[desc.filepath];
   const assertRemainingDiagnostics = () => {
     assert.equal(e.diagnosticScanCompleted, true);
@@ -709,8 +727,6 @@ test('optimistic worker Save & close retains remaining diagnostics before and af
     assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [remaining.filepath]);
   };
   assertRemainingDiagnostics();
-  await pendingTick(); assert.equal(calls.length, 1);
-  acknowledge(calls[0]); await e._pendingSaves.drain();
   assert.equal(e.pendingLocalSaves, 0); assert.equal(e.editorVisible, false);
   assertRemainingDiagnostics();
 });
@@ -2017,6 +2033,7 @@ test('another draft save can queue before acknowledgment while callbacks preserv
   await assertSaveReleased(h, () => e.saveAndSkipFile());
   const second = e.editorCurrentEditingDesc, secondSession = e._draftSession;
   e.editorBlocks[0].translation = 'Submitted second draft';
+  await e.flushEditorDraft();
   await assertSaveReleased(h, () => e.editorSave());
   assert.equal(e.pendingLocalSaves, 2); assert.equal(calls.length, 1);
   assert.equal(await e.editFile('source/003.txt'), true);
@@ -2289,7 +2306,7 @@ test('worker saves close the editor and navigate before the local transaction ac
     e.editFile = async filepath => { opened.push(filepath); e.editorVisible = true; e.editorCurrentEditingDesc = e.getDescByFilepath(filepath); return true; };
     assert.equal(await (navigate ? e.saveAndSkipFile() : e.editorSave()), true);
     assert.equal(e.editorSaving, false); assert.equal(e.pendingLocalSaves, 1);
-    assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(calls.length, 0);
+    assert.equal(desc.translations.Thai[0], 'เดิม'); assert.equal(calls.length, 0);
     assert.equal(warnsBeforeUnload(), true);
     if (navigate) assert.deepEqual(opened, ['source/002.txt']);
     else assert.equal(e.editorVisible, false);
@@ -2317,7 +2334,7 @@ test('a failed background local save retains closed edits, downloadable recovery
   const originalPayload = JSON.stringify(calls[0].batch);
   calls[0].reject(new Error('Disk full')); await assert.rejects(drained, /Disk full/);
   assert.equal(e.pendingLocalSaves, 1); assert.match(e.localSaveError, /Disk full/);
-  assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(warnsBeforeUnload(), true);
+  assert.equal(desc.translations.Thai[0], 'เดิม'); assert.equal(warnsBeforeUnload(), true);
   e.downloadPendingSaves();
   assert.equal(downloads[0].filename, 'SDEditor_pending_edits.json');
   const recovery = JSON.parse(await downloads[0].blob.text());
@@ -2373,7 +2390,7 @@ test('beforeunload stays silent for durable shared-runtime drafts and protects o
   e._retainedDraftSessions.clear(); e.updateLeaveProtection(); assert.equal(warnsBeforeUnload(), false);
 });
 
-test('older worker and remote acknowledgements preserve a newer pending same-file save and a different typing draft', async () => {
+test('older acknowledgements preserve newer same-file typing without allowing duplicate pending submissions', async () => {
   const { editor: e, window, desc, calls, acknowledge } = enablePending(saveFixture());
   const { Client } = require('../public/collaborationSync.js');
   const identity = { accountId: 'translator', game: 'poe1', language: 'Thai', sourceHash: e.sourceIdentity };
@@ -2383,15 +2400,20 @@ test('older worker and remote acknowledgements preserve a newer pending same-fil
   client.state = { version: 1, rooms: { [client.key]: { identity, roomId: 'room', manifest: window.CollaborationProtocol.manifest(e.descs),
     local: { [desc.filepath]: initial }, shared: { [desc.filepath]: initial }, outbox: [], conflicts: [], recovery: [] } } };
   let retries = 0; client.retry = async () => { retries++; return {}; };
-  e.cloudUser = { id: 'translator' }; e._collaboration = client; e._editorCollabBase = client.fileBase(desc.filepath);
+  e.cloudUser = { id: 'translator', language: 'Thai' }; e.cloudSignedIn = true;
+  e._collaboration = client; e._editorCollabBase = client.fileBase(desc.filepath);
   assert.equal(await e.editorSave(), true);
   e.editorVisible = true; e.editorBlocks[0].translation = 'ใหม่กว่า';
-  assert.equal(await e.editorSave(), true); assert.equal(e.pendingLocalSaves, 2);
+  assert.equal(await e.editorSave(), false); assert.equal(e.pendingLocalSaves, 1);
   e.applyCollaborationFiles([{ ...initial, translations: ['ตอบกลับเก่า', 'สอง'] }]);
-  assert.equal(desc.translations.Thai[0], 'ใหม่กว่า');
-  await pendingTick(); acknowledge(calls[0]); await pendingTick();
-  assert.equal(desc.translations.Thai[0], 'ใหม่กว่า'); assert.equal(client.fileBase(desc.filepath).translations[0], 'ใหม่กว่า');
-  assert.equal(calls.length, 2); assert.equal(calls[1].batch.collaboration.bases[desc.filepath].translations[0], 'ใหม่');
+  assert.equal(e.editorBlocks[0].translation, 'ใหม่กว่า');
+  await pendingTick(); acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(client.fileBase(desc.filepath).translations[0], 'ใหม่');
+  assert.equal(e.editorBlocks[0].translation, 'ใหม่กว่า');
+  e._editorCollabBase = client.fileBase(desc.filepath);
+  assert.equal(await e.editorSave(), true);
+  await pendingTick(); assert.equal(calls.length, 2);
+  assert.equal(calls[1].batch.collaboration.bases[desc.filepath].translations[0], 'ใหม่');
   const other = description(2); e.descs.push(other);
   e.editorCurrentEditingDesc = other; e.editorVisible = true;
   e.editorBlocks = [{ english: 'Original', translation: 'ร่างไฟล์ใหม่' }, { english: 'Second', translation: 'สอง' }];
@@ -2444,9 +2466,401 @@ test('a source import blocks new editor saves and waits for an in-flight save qu
   assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks[0].translation, 'ใหม่');
   assert.deepEqual(e.editorOriginalTranslations, ['เดิม', 'สอง']); assert.equal(calls.length, 0);
   // A save already in flight may hand its batch to the queue after import preparation starts.
-  const queued = await e.persistTranslationBatch([{ desc, lines: ['ใหม่', 'สอง'] }], 'save');
+  const queued = await e.persistTranslationBatch([{ desc, lines: ['ใหม่', 'สอง'] }], 'save', { deferCommit: true });
   assert.equal(queued.status, 'queued'); releaseHash('new-source-hash'); await pendingTick();
   assert.equal(calls.length, 1); assert.equal(imports, 0, 'Source replacement must wait for saves queued during its hash await.');
   acknowledge(calls[0]); await importing;
   assert.equal(imports, 1); assert.equal(e.pendingLocalSaves, 0); assert.equal(e.sourceIdentity, 'new-source-hash');
+});
+
+test('valid Save journals its captured text before releasing navigation and never forces a checkpoint', async () => {
+  const h = await pendingDraftFixture(), { editor: e, window, records, draftWrites, calls, acknowledge } = h;
+  const session = e._draftSession;
+  records.clear(); draftWrites.length = 0; session.record = null; session.expectedRevision = null;
+  let releaseJournal;
+  const put = window.OfflineStore.putSaveSubmission;
+  window.OfflineStore.putSaveSubmission = batch => new Promise(resolve => { releaseJournal = () => put(batch).then(resolve); });
+  let finished = false;
+  const saving = e.editorSave().then(result => { finished = true; return result; });
+  await pendingTick();
+  assert.equal(finished, false); assert.equal(e.editorVisible, true); assert.equal(calls.length, 0);
+  assert.equal(draftWrites.length, 0);
+  await releaseJournal(); assert.equal(await saving, true);
+  assert.equal(e.editorVisible, false); assert.equal(h.journals.length, 1);
+  const batch = h.journals[0].batch;
+  assert.equal(batch.draft, undefined); assert.equal(batch.checkpoint.key, session.key);
+  assert.equal(batch.checkpoint.revision, null); assert.equal(batch.checkpoint.id, session.id);
+  assert.equal(batch.bases[h.desc.filepath].translations[0], 'เดิม');
+  assert.equal(batch.files[0].translations[0], 'Submitted first draft');
+  assert.equal(batch.deferDisplay, true); assert.equal(batch.context, undefined);
+  assert.equal(draftWrites.length, 0); assert.equal(h.desc.translations.Thai[0], 'เดิม');
+  await pendingTick(); acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(h.desc.translations.Thai[0], 'Submitted first draft');
+});
+
+test('a journal failure keeps the editor open and retains typed text as a recovery checkpoint', async () => {
+  const h = await pendingDraftFixture(), { editor: e, window, records, calls } = h;
+  records.clear(); e._draftSession.record = null; e._draftSession.expectedRevision = null;
+  window.OfflineStore.putSaveSubmission = async () => { throw new Error('Submission quota exceeded'); };
+  assert.equal(await e.editorSave(), false); assert.equal(e.editorVisible, true);
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(calls.length, 0);
+  assert.equal(records.get(e._draftSession.key).translations[0], 'Submitted first draft');
+  assert.match(e.cloudStorageError, /Submission quota exceeded/);
+  assert.equal(h.desc.translations.Thai[0], 'เดิม');
+});
+
+test('typing during the submission journal acknowledgment stays open and survives the older commit', async () => {
+  const h = await pendingDraftFixture(), { editor: e, window, records, calls, acknowledge } = h;
+  const session = e._draftSession;
+  records.clear(); session.record = null; session.expectedRevision = null;
+  const put = window.OfflineStore.putSaveSubmission;
+  let release;
+  window.OfflineStore.putSaveSubmission = batch => new Promise(resolve => { release = () => put(batch).then(resolve); });
+  const saving = e.editorSave(); await pendingTick();
+  e.editorBlocks[0].translation = 'New typing during journal'; await release();
+  assert.equal(await saving, false); assert.equal(e.editorVisible, true);
+  assert.equal(records.get(session.key).translations[0], 'New typing during journal');
+  assert.equal(records.get(session.key).id, h.journals[0].batch.checkpoint.id);
+  await pendingTick(); acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(e.editorBlocks[0].translation, 'New typing during journal');
+  assert.equal(h.desc.translations.Thai[0], 'Submitted first draft');
+  assert.equal(records.get(session.key).base.translations[0], 'Submitted first draft');
+});
+
+test('reload recovers durable submitted commands in original order with the original IDs and a fresh runtime context', async () => {
+  const original = enablePending(saveFixture()), first = original.editor;
+  await first.editorSave(); first._pendingSaves.dispose();
+  const record = structuredClone(original.journals[0]);
+  const h = enablePending(saveFixture()), { editor: e, window, calls, acknowledge } = h;
+  e.editorVisible = false; e.offlineStoreReady = true;
+  window.OfflineStore.listSaveSubmissions = async () => [structuredClone(record)];
+  await e.recoverPendingSaves(); await e.recoverPendingSaves();
+  assert.equal(e.pendingLocalSaves, 1); assert.equal(h.journals.length, 0);
+  const job = e._pendingSaves.snapshot().jobs[0];
+  assert.equal(job.id, record.batch.jobId); assert.equal(job.recovered, true);
+  assert.equal(job.context.client, undefined); assert.equal(e.collaborationContextCurrent(job.context), true);
+  await pendingTick(); assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].batch, record.batch);
+  acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(h.desc.translations.Thai[0], 'ใหม่'); assert.equal(e.pendingLocalSaves, 0);
+});
+
+test('a scoped submission listing cannot enqueue work after its account, version or language changes', async t => {
+  for (const change of [e => { e.cloudUser = { id: 'other-account' }; }, e => { e.sourceIdentity = 'other-version'; }, e => { e.lang = 'German'; }]) {
+    await t.test(String(change), async () => {
+      const h = enablePending(saveFixture()), { editor: e, window } = h;
+      e.offlineStoreReady = true;
+      let finish;
+      window.OfflineStore.listSaveSubmissions = () => new Promise(resolve => { finish = resolve; });
+      const recovering = e.recoverPendingSaves(); await Promise.resolve();
+      change(e);
+      finish([{ state: 'pending', batch: { jobId: 'old-command', ...{ accountId: '', game: 'poe1', language: 'Thai', sourceHash: 'source-one' },
+        files: [{ filepath: h.desc.filepath, translations: ['Old submitted text'] }] } }]);
+      await recovering;
+      assert.equal(e.pendingLocalSaves, 0); assert.equal(e._pendingSaves.snapshot().jobs.length, 0);
+      assert.equal(e._recoveredSaveScope, undefined); e._pendingSaves.dispose();
+    });
+  }
+});
+
+test('a review submission stays actionable after reload and is not automatically resubmitted', async () => {
+  const h = enablePending(saveFixture()), { editor: e, window, calls } = h;
+  e.offlineStoreReady = true; e.inlineDraftFindings = {};
+  window.OfflineStore.listSaveSubmissions = async () => [{ state: 'review', error: { code: 'DRAFT_BASE_CHANGED', message: 'Review a changed base.' },
+    batch: { jobId: 'review-command', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+      files: [{ filepath: h.desc.filepath, translations: ['Preserved submitted text'] }] } }];
+  await e.recoverPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 0); assert.equal(e.pendingLocalSaves, 0);
+  assert.match(e.inlineDraftFindings[h.desc.filepath][0].message, /Review a changed base/);
+  assert.equal(e.inlineDraftFindings[h.desc.filepath][0].deferredSave, true);
+  e._pendingSaves.dispose();
+});
+
+test('post-commit synchronization rechecks the captured scope and current language access', async t => {
+  const changes = {
+    account: e => { e.cloudUser = { ...e.cloudUser, id: 'other-account' }; },
+    version: e => { e.sourceIdentity = 'other-source'; },
+    language: e => { e.lang = 'German'; },
+    branch: e => { e.branchId = 'other-branch'; },
+    assignment: e => { e.cloudUser.assignmentVersion++; },
+    role: e => { e.cloudUser.role = 'manager'; },
+    assignedLanguage: e => { e.cloudUser.language = 'German'; },
+    signedOut: e => { e.cloudSignedIn = false; },
+    access: e => { e.cloudCanAccessAllLanguages = false; e.cloudUser.language = 'German'; },
+    commitCallback: e => { e.lang = 'German'; },
+    unchanged: () => {},
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const h = enablePending(saveFixture()), { editor: e, desc, window, calls, acknowledge } = h;
+    e.cloudUser = { id: 'translator', language: 'Thai', role: 'translator', assignmentVersion: 1 };
+    e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = name === 'access';
+    const identity = { accountId: e.cloudUser.id, game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity };
+    let retries = 0;
+    e._collaboration = { key: window.CollaborationProtocol.scopeKey(identity), room: () => ({ identity }),
+      fileBase: () => e.collaborationFile(desc), withLocalWrite: write => write(), acceptLocalSave() {},
+      async retry() { retries++; } };
+    await e.persistTranslationBatch([{ desc, lines: ['Captured submitted text', 'Second'] }], 'save', { deferCommit: true });
+    await pendingTick();
+    if (name === 'commitCallback') e._pendingSaves.snapshot().jobs[0].onCommitted = () => change(e);
+    else change(e);
+    acknowledge(calls[0]); await e._pendingSaves.drain();
+    assert.equal(retries, name === 'unchanged' ? 1 : 0);
+    e._pendingSaves.dispose();
+  });
+});
+
+test('a changed save scope requires a fresh decision and preserves the direct submission for review', async () => {
+  const h = enablePending(saveFixture()), { editor: e, calls, submissions, desc } = h;
+  assert.equal(await e.editorSave(), true);
+  const drained = e._pendingSaves.drain(); await pendingTick();
+  const batch = calls[0].batch;
+  calls[0].reject(Object.assign(new Error('The captured workspace changed.'), { code: 'SAVE_SCOPE_CHANGED' }));
+  await assert.rejects(drained, error => error.code === 'SAVE_SCOPE_CHANGED'); await pendingTick();
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(submissions.get(batch.jobId).state, 'review');
+  assert.equal(submissions.get(batch.jobId).batch.files[0].translations[0], 'ใหม่');
+  assert.equal(desc.translations.Thai[0], 'เดิม');
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /Local drafts/);
+  await e.retryPendingSaves(); assert.equal(calls.length, 1);
+  e._pendingSaves.dispose();
+});
+
+test('a changed Dropped promotion preserves captured text for fresh review and releases unrelated queued saves', async () => {
+  const h = await pendingDraftFixture(), { editor: e, window, desc, calls, records, submissions, acknowledge } = h;
+  const firstSession = e._draftSession, committed = [...desc.translations.Thai];
+  const dropped = window.WorkspaceState.dropTranslation(e.localDescs, desc, e.lang, {
+    translations: ['Preserved older Dropped text', 'Preserved second'], originSourceHash: 'older-source', targetSourceHash: e.sourceIdentity,
+  });
+  await assertSaveReleased(h, () => e.saveAndSkipFile());
+  const submitted = h.journals[0].batch;
+  assert.equal(submitted.promoteDropped.id, dropped.id);
+  const second = e.editorCurrentEditingDesc;
+  e.editorBlocks[0].translation = 'Independent queued translation';
+  await assertSaveReleased(h, () => e.editorSave());
+  dropped.revision++;
+  e.localDescs.droppedArchive[dropped.id] = JSON.parse(JSON.stringify(dropped));
+  const latestDropped = JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang));
+  let rejection;
+  assert.throws(() => window.WorkspaceState.stageTranslation(JSON.parse(JSON.stringify(e.localDescs)), submitted.files[0], e.lang,
+    { source: e.workspaceSourceFile(desc.filepath), sourceHash: e.sourceIdentity, promoteDropped: submitted.promoteDropped }), error => {
+    rejection = error; return error.code === 'DROPPED_PROMOTION_CHANGED';
+  });
+  calls[0].reject(Object.assign(new Error(rejection.message), { code: rejection.code })); await pendingTick(); await pendingTick();
+  assert.equal(calls.length, 2); assert.equal(e.pendingLocalSaves, 1);
+  assert.equal(submissions.get(submitted.jobId).state, 'review');
+  assert.equal(submissions.get(submitted.jobId).batch.files[0].translations[0], 'Submitted first draft');
+  assert.equal(records.get(firstSession.key).state, 'active');
+  assert.equal(records.get(firstSession.key).translations[0], 'Submitted first draft');
+  assert.deepEqual(Array.from(desc.translations.Thai), committed);
+  assert.equal(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang)), latestDropped);
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /full editor.*current Dropped/);
+  acknowledge(calls[1]); await e._pendingSaves.drain();
+  assert.equal(second.translations.Thai[0], 'Independent queued translation'); assert.equal(e.pendingLocalSaves, 0);
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /current Dropped/);
+  e.showSaveSubmissionReview(submissions.get(submitted.jobId));
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /full editor.*current Dropped/);
+  e._pendingSaves.dispose();
+});
+
+test('a recovered rejected deletion stays actionable without resubmitting or loading a translation draft', async () => {
+  const h = enablePending(saveFixture()), { editor: e, window, calls } = h;
+  e.offlineStoreReady = true; let draftReads = 0; e.loadEditorDrafts = async () => { draftReads++; };
+  window.OfflineStore.listSaveSubmissions = async () => [{ state: 'review',
+    error: { code: 'DELETE_STAGED_BASE_CHANGED', message: 'The saved translation changed.' },
+    batch: { jobId: 'delete-review', resetStaging: true, game: e.gameVersion, language: e.lang,
+      sourceHash: e.sourceIdentity, accountId: '', files: [{ filepath: h.desc.filepath, translations: ['ZIP original'] }] } }];
+  await e.recoverPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 0); assert.equal(draftReads, 0); assert.equal(e.pendingLocalSaves, 0);
+  assert.match(e.inlineDraftFindings[h.desc.filepath][0].message, /confirm deletion again/);
+  assert.doesNotMatch(e.inlineDraftFindings[h.desc.filepath][0].message, /Local drafts/);
+  e._pendingSaves.dispose();
+});
+
+test('a fresh acknowledged deletion clears only its earlier submitted-delete review warning', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, desc, base, calls, acknowledge } = h;
+  e.showSaveSubmissionReview({ batch: { resetStaging: true, files: [{ filepath: desc.filepath }] },
+    error: { message: 'The earlier saved translation changed.' } });
+  e.inlineDraftFindings[desc.filepath].push({ level: 'warning', message: 'Separate recoverable draft warning', deferredSave: true });
+  const deleting = e.persistStagedDeletion(desc, base); await pendingTick();
+  assert.equal(e.inlineDraftFindings[desc.filepath].length, 2, 'Starting the new decision keeps the old warning visible.');
+  acknowledge(calls[0]); assert.equal((await deleting).durable, true);
+  assert.equal(e.inlineDraftFindings[desc.filepath].length, 1);
+  assert.equal(e.inlineDraftFindings[desc.filepath][0].message, 'Separate recoverable draft warning');
+  e._pendingSaves.dispose();
+});
+
+test('record-backed confirmation, restore and consistency saves preserve other tabs files and languages', async t => {
+  for (const origin of ['confirm', 'restore', 'consistency']) await t.test(origin, async () => {
+    const h = saveFixture(), { editor: e, window, desc } = h;
+    const other = description(2, ['Other original', 'Other second']);
+    e.descs.push(other);
+    const source = JSON.parse(JSON.stringify(e.descs));
+    source.forEach(file => { file.hasChanges = false; file.translations.German = ['German original', 'German second']; });
+    e._workspaceSourceBaseline = source;
+    e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, { source, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+    window.WorkspaceState.stageTranslation(e.localDescs, { filepath: desc.filepath, translations: ['Previous saved text', 'Second'] }, e.lang,
+      { source: source[0], sourceHash: e.sourceIdentity });
+    window.WorkspaceState.stageTranslation(e.localDescs, { filepath: other.filepath, translations: ['Other old local view', 'Other second'] }, e.lang,
+      { source: source[1], sourceHash: e.sourceIdentity });
+    e.applyWorkspaceOverlay();
+    const authoredWorkspace = JSON.parse(JSON.stringify(e.localDescs));
+    let durable = JSON.parse(JSON.stringify(e.localDescs));
+    window.WorkspaceState.stageTranslation(durable, { filepath: other.filepath, translations: ['Saved by another tab during authoring', 'Other second'] }, e.lang,
+      { source: source[1], sourceHash: e.sourceIdentity });
+    window.WorkspaceState.stageTranslation(durable, { filepath: desc.filepath, translations: ['Latest German saved by another tab', 'German second'] }, 'German',
+      { source: source[0], sourceHash: e.sourceIdentity });
+    durable.status[desc.filepath] = window.WorkspaceState.setFileMetadata({}, 'German', { lastEditedAt: 987654 });
+    const normalized = require('../public/normalizedStore.js').create({ W: window.WorkspaceState, normalizeScope: value => value });
+    const revisions = [{ filepath: desc.filepath, lang: e.lang, translations: ['Reviewed target text', 'Second'], note: origin }];
+    const transactions = [];
+    window.OfflineStore.getWorkspaceRecords = () => assert.fail('The atomic update must read selected records itself.');
+    window.OfflineStore.mergeWorkspaceRecords = normalized.mergeWorkspaceRecords;
+    window.OfflineStore.saveWorkspaceWithRevisions = () => assert.fail('A one-file factual update must not persist an aggregate workspace.');
+    window.OfflineStore.updateWorkspace = async (update, game, options) => {
+      transactions.push({ game, options });
+      assert.deepEqual(Array.from(options.filepaths), [desc.filepath]);
+      assert.deepEqual(JSON.parse(JSON.stringify(options.scope)), { accountId: 'guest', game: 'poe1', branchId: 'default', sourceHash: e.sourceIdentity });
+      const selected = new Set(options.filepaths), view = JSON.parse(JSON.stringify(durable));
+      view._storageSelection = { filepaths: options.filepaths };
+      view.descs = view.descs.filter(file => selected.has(file.filepath));
+      view.status = Object.fromEntries(Object.entries(view.status).filter(([path]) => selected.has(path)));
+      for (const field of ['staged', 'dropped', 'droppedConflicts', 'droppedAssignments'])
+        view[field] = Object.fromEntries(Object.entries(view[field] || {}).map(([lang, files]) => [lang,
+          Object.fromEntries(Object.entries(files).filter(([path, file]) => selected.has(file?.filepath || path)))]));
+      for (const field of ['droppedArchive', 'droppedAliases', 'placeholderRepairArchive']) view[field] = {};
+      view.droppedOutbox = [];
+      const committed = update(view);
+      assert.equal(typeof committed?.then, 'undefined', 'The transaction mutation remains synchronous.');
+      durable = normalized.mergeWorkspaceRecords(durable, committed);
+      return committed;
+    };
+    const result = await e.persistTranslationBatch([{ desc, lines: ['Reviewed target text', 'Second'] }], origin,
+      { revisions, ...(origin === 'consistency' ? { workspace: authoredWorkspace } : {}) });
+    assert.equal(result.status, 'local'); assert.equal(transactions.length, 1);
+    assert.equal(transactions[0].options.revisions, revisions);
+    assert.equal(durable.staged.Thai[desc.filepath].translations[0], 'Reviewed target text');
+    assert.equal(durable.staged.Thai[other.filepath].translations[0], 'Saved by another tab during authoring');
+    assert.equal(durable.staged.German[desc.filepath].translations[0], 'Latest German saved by another tab');
+    assert.equal(durable.status[desc.filepath].languageStatus.German.lastEditedAt, 987654);
+    assert.equal(e.localDescs.staged.German[desc.filepath].translations[0], 'Latest German saved by another tab');
+    assert.equal(e.localDescs.staged.Thai[other.filepath].translations[0], 'Other old local view');
+    assert.equal(desc.translations.Thai[0], 'Reviewed target text');
+  });
+});
+
+test('shared restore loads only its selected durable records and preserves newer unrelated UI work', async () => {
+  const h = saveFixture(), { editor: e, window, desc } = h, other = description(2);
+  e.descs.push(other); e._workspaceSourceBaseline = JSON.parse(JSON.stringify(e.descs));
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, { source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  e.cloudUser = { id: 'translator', language: 'Thai' }; e.cloudSignedIn = true;
+  const identity = { accountId: 'translator', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity };
+  const accepted = { filepath: desc.filepath, translations: ['Accepted reviewed restoration', 'Second'], trackedForExport: true, needsReview: false };
+  const records = require('../public/normalizedStore.js').create({ W: window.WorkspaceState, normalizeScope: value => value });
+  window.OfflineStore.mergeWorkspaceRecords = records.mergeWorkspaceRecords;
+  window.OfflineStore.getWorkspace = () => assert.fail('A one-file shared restore must not read an aggregate workspace.');
+  let reads = 0;
+  window.OfflineStore.getWorkspaceRecords = async (scope, options) => {
+    reads++; assert.equal(scope.accountId, 'translator'); assert.equal(scope.sourceHash, e.sourceIdentity);
+    assert.deepEqual(Array.from(options.filepaths), [desc.filepath]);
+    return { sourceHash: e.sourceIdentity, stagedVersion: 1, statusMetadataVersion: 1, descs: [], status: {},
+      staged: { Thai: { [desc.filepath]: { sourceHash: e.sourceIdentity, translations: accepted.translations } } },
+      _storageSelection: { filepaths: [desc.filepath] } };
+  };
+  e._collaboration = { key: window.CollaborationProtocol.scopeKey(identity), room: () => ({ identity }),
+    snapshot: () => ({ files: [accepted] }),
+    async save(command) {
+      assert.equal(command.origin, 'restore'); assert.equal(command.files.length, 1);
+      e.applyCollaborationFiles([{ filepath: other.filepath, translations: ['New unrelated shared work', 'Second'], trackedForExport: true }], e.lang);
+      return { status: 'local' };
+    } };
+  const result = await e.persistTranslationBatch([{ desc, lines: accepted.translations }], 'restore');
+  assert.equal(result.status, 'local'); assert.equal(reads, 1);
+  assert.equal(e.localDescs.staged.Thai[other.filepath].translations[0], 'New unrelated shared work');
+  assert.equal(other.translations.Thai[0], 'New unrelated shared work');
+  assert.equal(desc.translations.Thai[0], 'Accepted reviewed restoration');
+});
+
+test('record-backed Confirm and Restore reject a same-file change against the base captured before awaiting', async t => {
+  for (const origin of ['confirm', 'restore']) await t.test(origin, async () => {
+    const h = saveFixture(), { editor: e, window, desc } = h;
+    const source = JSON.parse(JSON.stringify(desc)); source.hasChanges = false;
+    e._workspaceSourceBaseline = [source];
+    e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, { source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+    window.WorkspaceState.stageTranslation(e.localDescs, { filepath: desc.filepath, translations: ['Captured original committed text', 'Second'] }, e.lang,
+      { source, sourceHash: e.sourceIdentity });
+    e.applyWorkspaceOverlay();
+    const durable = JSON.parse(JSON.stringify(e.localDescs));
+    window.WorkspaceState.stageTranslation(durable, { filepath: desc.filepath, translations: ['New same-file work from another tab', 'Second'] }, e.lang,
+      { source, sourceHash: e.sourceIdentity });
+    const before = JSON.stringify(durable);
+    e._pendingSaves = { overlay: () => null, snapshot: () => ({ jobs: [] }) };
+    e.waitForPendingSaves = async () => {
+      e.applyCollaborationFiles([{ filepath: desc.filepath, translations: ['New same-file work from another tab', 'Second'], trackedForExport: true }], e.lang);
+      return true;
+    };
+    window.OfflineStore.getWorkspaceRecords = () => assert.fail('The selected transaction supplies its own current records.');
+    window.OfflineStore.saveWorkspaceWithRevisions = () => assert.fail('No aggregate fallback is permitted.');
+    let writes = 0;
+    window.OfflineStore.updateWorkspace = async update => {
+      const current = JSON.parse(JSON.stringify(durable)), snapshot = JSON.stringify(current);
+      try { const result = update(current); writes++; return result; }
+      finally { assert.equal(JSON.stringify(current), snapshot, 'Every captured base is checked before factual mutation.'); }
+    };
+    await assert.rejects(e.persistTranslationBatch([{ desc, lines: ['Reviewed replacement text', 'Second'] }], origin), error => {
+      assert.equal(error.code, 'DRAFT_BASE_CHANGED'); assert.equal(error.filepath, desc.filepath);
+      assert.deepEqual(Array.from(error.currentTranslations), ['New same-file work from another tab', 'Second']); return true;
+    });
+    assert.equal(writes, 0); assert.equal(JSON.stringify(durable), before);
+    assert.equal(desc.translations.Thai[0], 'New same-file work from another tab');
+    assert.equal(e.editorBlocks[0].translation, 'ใหม่', 'Private typing remains available after the rejected replacement.');
+  });
+});
+
+test('a local receipt replay preserves newer same-file committed text, metadata and private typing', async () => {
+  const h = enablePending(saveFixture()), { editor: e, window, desc, calls, acknowledge } = h;
+  e._workspaceSourceBaseline = JSON.parse(JSON.stringify(e.descs));
+  assert.equal(await e.editorSave(), true); const failed = e._pendingSaves.drain(); await pendingTick();
+  const original = JSON.stringify(calls[0].batch), jobId = calls[0].batch.jobId;
+  calls[0].reject(Object.assign(new Error('The worker acknowledgment was lost.'), { durableUnknown: true }));
+  await assert.rejects(failed, /acknowledgment was lost/);
+  const current = { filepath: desc.filepath, translations: ['Newer same-file text committed by another tab', 'Second'], trackedForExport: true };
+  e.applyCollaborationFiles([current]);
+  const editedAt = calls[0].batch.statuses[desc.filepath].languageStatus.Thai.lastEditedAt + 500;
+  e.localDescs.status[desc.filepath] = window.WorkspaceState.setFileMetadata(e.localDescs.status[desc.filepath] || {}, 'Thai',
+    { lastEditedAt: editedAt, lastTranslatedAt: editedAt });
+  window.WorkspaceState.setFileMetadata(e.localDescs.status[desc.filepath], 'German', { lastEditedAt: editedAt + 1000 });
+  assert.equal(e.localDescs.status[desc.filepath].languageStatus.German.lastEditedAt, editedAt + 1000);
+  const replayStatus = window.WorkspaceState.setFileMetadata({}, 'Thai', { lastEditedAt: editedAt, lastTranslatedAt: editedAt });
+  window.WorkspaceState.setFileMetadata(replayStatus, 'German', { lastEditedAt: 1 });
+  e.editorVisible = true; e.editorBlocks[0].translation = 'Private typing after the lost acknowledgment';
+  const retry = e.retryPendingSaves(); await pendingTick();
+  assert.equal(JSON.stringify(calls[1].batch), original); assert.equal(calls[1].batch.jobId, jobId);
+  acknowledge(calls[1], { duplicate: true, files: [current], statuses: { [desc.filepath]: replayStatus } }); await retry;
+  assert.equal(desc.translations.Thai[0], current.translations[0]);
+  assert.equal(e.localDescs.staged.Thai[desc.filepath].translations[0], current.translations[0]);
+  assert.equal(e.localDescs.status[desc.filepath].languageStatus.Thai.lastEditedAt, editedAt);
+  assert.equal(e.localDescs.status[desc.filepath].languageStatus.Thai.lastTranslatedAt, editedAt);
+  assert.equal(e.localDescs.status[desc.filepath].languageStatus.German.lastEditedAt, editedAt + 1000);
+  assert.equal(e.editorBlocks[0].translation, 'Private typing after the lost acknowledgment');
+  assert.equal(e.pendingLocalSaves, 0); e._pendingSaves.dispose();
+});
+
+test('a local receipt replay adopts a later staged deletion instead of restoring the original save', async () => {
+  const h = enablePending(saveFixture()), { editor: e, window, desc, calls, acknowledge } = h;
+  const baseline = JSON.parse(JSON.stringify(desc)); baseline.hasChanges = false;
+  e._workspaceSourceBaseline = [baseline];
+  assert.equal(await e.editorSave(), true); const failed = e._pendingSaves.drain(); await pendingTick();
+  calls[0].reject(Object.assign(new Error('The worker acknowledgment was lost.'), { durableUnknown: true }));
+  await assert.rejects(failed);
+  e.applyCollaborationFiles(calls[0].batch.files);
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]);
+  const retry = e.retryPendingSaves(); await pendingTick();
+  acknowledge(calls[1], { duplicate: true, files: [{ filepath: desc.filepath, translations: baseline.translations.Thai,
+    trackedForExport: false, stagingReset: true }], statuses: { [desc.filepath]: { lastEditedAt: 12345 } } }); await retry;
+  assert.equal(e.localDescs.staged.Thai[desc.filepath], undefined); assert.equal(desc.hasChanges, false);
+  assert.deepEqual(Array.from(desc.translations.Thai), baseline.translations.Thai);
+  assert.equal(e.localDescs.status[desc.filepath].languageStatus.Thai.lastEditedAt, 12345);
+  assert.equal(e.pendingLocalSaves, 0); e._pendingSaves.dispose();
 });

@@ -229,7 +229,8 @@
           onCommit: async (job, ack) => {
             if (this.collaborationContextCurrent(job.context)) {
               if (job.batch.deferDisplay) {
-                for (const [filepath, status] of Object.entries(job.batch.statuses || {})) {
+                const statuses = ack.duplicate ? ack.statuses || {} : job.batch.statuses || {};
+                for (const [filepath, status] of Object.entries(statuses)) {
                   this.localDescs.status[filepath] = window.WorkspaceState.setFileMetadata(
                     this.localDescs.status[filepath] || {}, job.batch.language, status);
                 }
@@ -241,20 +242,32 @@
                   || !!desc.needsReview !== !!file.needsReview || !!desc.hasChanges !== !!file.trackedForExport);
               });
               if (changed) this.applyCollaborationFiles(files, job.batch.language);
+              if (job.batch.resetStaging) for (const file of job.batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
+                [file.filepath]: (this.inlineDraftFindings?.[file.filepath] || []).filter(finding => !finding.submissionReset) };
             }
             await job.onCommitted?.(ack);
             // Synchronization starts only after workspace, history and outbox commit.
-            if (job.context.client && job.context.client === this._collaboration && job.context.client.key === job.batch.collaboration?.key) {
+            if (this.collaborationContextCurrent(job.context) && this.cloudSignedIn && this.cloudUser?.id
+              && (this.cloudCanAccessAllLanguages || this.cloudUser.language === job.batch.language)
+              && job.context.client && job.context.client.key === job.batch.collaboration?.key) {
               job.context.client.retry().catch(error => this.collaborationFailure(error));
             }
           },
           onError: async (job, error) => {
-            if (!job.onRejected || job.durable || error.durableUnknown
-              || !['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(error.code)) return;
-            await job.onRejected(error);
-            // A rejected transaction left its private draft intact. Release it
-            // for a fresh review without blocking saves of other files.
-            this._pendingSaves.discardRejectedDraft(job.id);
+            if (job.durable || !window.PendingSaves.requiresReview(error)) return;
+            // Retain a reviewable checkpoint even when Save went directly to
+            // its submission journal without creating a recovery draft first.
+            await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review',
+              error: { code: error.code, message: error.message } });
+            try {
+              if (this.collaborationContextCurrent(job.context)) this.showSaveSubmissionReview({ batch: job.batch, error });
+              await job.onRejected?.(error);
+              if (!job.batch.resetStaging && this.collaborationContextCurrent(job.context)) await this.loadEditorDrafts?.();
+            } finally {
+              // Durable review evidence permits a fresh decision even if an
+              // editor callback or draft listing could not finish.
+              this._pendingSaves.discardRejectedSubmission(job.id);
+            }
           },
         });
         return this._pendingSaves;
@@ -304,10 +317,64 @@
       pendingSaveScope() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
       },
+      async journalPendingSave(batch, context) {
+        // Capture the workspace before the journal write yields; a later
+        // account/version switch must never retarget the submitted command.
+        const captured = window.OfflineStore.captureWorkspaceScope?.(batch);
+        if (captured) { batch.workspaceScope = copy(captured); batch.branchId = captured.branchId; }
+        const record = await window.OfflineStore.putSaveSubmission(copy(batch));
+        const job = this._pendingSaves.enqueue(record.batch, { context });
+        job.journaled = true;
+        return job;
+      },
+      async recoverPendingSaves() {
+        if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource
+          || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !window.OfflineStore?.listSaveSubmissions) return;
+        const context = this.captureCollaborationContext(), scope = this.pendingSaveScope();
+        const key = window.PendingSaves?.scopeKey(scope);
+        if (!key || this._recoveredSaveScope === key) return;
+        if (this._saveRecovery?.key === key) return this._saveRecovery.promise;
+        const queue = this.initializePendingSaves();
+        if (!queue) return;
+        const release = queue.hold(), recovery = { key };
+        recovery.promise = (async () => {
+          try {
+            const records = await window.OfflineStore.listSaveSubmissions(scope);
+            if (!this.collaborationContextCurrent(context)) return;
+            for (const record of records) {
+              if (window.PendingSaves.scopeKey(record.batch) !== key) continue;
+              if (record.state === 'review') {
+                this.showSaveSubmissionReview(record);
+                continue;
+              }
+              const job = queue.enqueue(record.batch, { context }); job.journaled = true; job.recovered = true;
+            }
+            this._recoveredSaveScope = key;
+          } catch (error) {
+            if (this.collaborationContextCurrent(context)) {
+              this.cloudStorageError = 'Could not recover pending local saves. ' + error.message;
+              this.collaborationNotice = this.cloudStorageError;
+            }
+            throw error;
+          } finally { release(); if (this._saveRecovery === recovery) this._saveRecovery = null; }
+        })();
+        this._saveRecovery = recovery;
+        return recovery.promise;
+      },
+      showSaveSubmissionReview(record) {
+        const advice = record.batch.resetStaging
+          ? 'Review the current saved translation and confirm deletion again.'
+          : record.error?.code === 'DROPPED_PROMOTION_CHANGED'
+          ? 'Open the full editor to review the current Dropped translation before saving again.'
+          : 'Open Local drafts to review this submitted translation.';
+        for (const file of record.batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
+          [file.filepath]: [{ level: 'error', deferredSave: true, ...(record.batch.resetStaging ? { submissionReset: true } : {}),
+            message: file.filepath + ': ' + [record.error?.message, advice].filter(Boolean).join(' ') }] };
+      },
       pendingDraftSaveFor(filepath) {
         if (!this._pendingSaves || !window.PendingSaves) return null;
         const scope = window.PendingSaves.scopeKey(this.pendingSaveScope());
-        return this._pendingSaves.snapshot().jobs.find(job => job.batch.draft && job.batch.deferDisplay
+        return this._pendingSaves.snapshot().jobs.find(job => job.batch.deferDisplay
           && window.PendingSaves.scopeKey(job.batch) === scope && job.batch.files.some(file => file.filepath === filepath)) || null;
       },
       markCollaborationActivity(now = Date.now()) {
@@ -370,13 +437,14 @@
       },
       captureCollaborationContext() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
-          assignmentVersion: this.cloudUser?.assignmentVersion, role: this.cloudUser?.role,
+          assignmentVersion: this.cloudUser?.assignmentVersion, assignedLanguage: this.cloudUser?.language, role: this.cloudUser?.role,
           allLanguagesAccess: this.cloudCanAccessAllLanguages, client: this._collaboration };
       },
       collaborationContextCurrent(ctx) {
         return ctx.game === this.gameVersion && ctx.language === this.lang && ctx.source === this.sourceIdentity
           && (ctx.branchId || 'default') === (this.branchId || 'default')
           && ctx.account === (this.cloudUser?.id || '') && ctx.assignmentVersion === this.cloudUser?.assignmentVersion
+          && ctx.assignedLanguage === this.cloudUser?.language
           && ctx.role === this.cloudUser?.role && ctx.allLanguagesAccess === this.cloudCanAccessAllLanguages && ctx.client === this._collaboration;
       },
       scheduleCollaboration() {
@@ -391,7 +459,8 @@
           this.collabReceiveState?.({ status: 'Local workspace', peers: [], conflicts: [], pending: 0, connected: false });
         }
         clearTimeout(this._collabStartTimer);
-        this._collabStartTimer = setTimeout(() => this.initializeCollaboration().catch(error => this.collaborationFailure(error)), 30);
+        this._collabStartTimer = setTimeout(() => this.recoverPendingSaves()
+          .then(() => this.initializeCollaboration()).catch(error => this.collaborationFailure(error)), 30);
       },
       collaborationFailure(error) {
         if (error?.stale) return;
@@ -399,6 +468,7 @@
         this.collabReceiveState?.({ ...(this._collaboration?.snapshot({ includeFiles: false }) || {}), status: 'Saved locally · collaboration unavailable', error: this.collaborationNotice });
       },
       async initializeCollaboration() {
+        if (window.OfflineStore?.listSaveSubmissions) await this.recoverPendingSaves();
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
@@ -661,10 +731,17 @@
           }
           const queue = this.initializePendingSaves();
           if (queue) {
-            const job = queue.enqueue(batch, { context: ctx });
+            const job = await this.journalPendingSave(batch, ctx);
             job.onCommitted = onCommitted;
             try { await queue.drain(); }
-            catch (error) { queue.discardRejectedReset?.(job.id); throw error; }
+            catch (error) {
+              if (!job.durable && window.PendingSaves.requiresReview(error)) {
+                await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review', error: { code: error.code, message: error.message } });
+                if (this.collaborationContextCurrent(ctx)) this.showSaveSubmissionReview({ batch: job.batch, error });
+                queue.discardRejectedSubmission?.(job.id);
+              }
+              throw error;
+            }
             return { status: 'local', durable: job.durable, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
           }
           const write = () => window.OfflineStore.saveTranslationBatch(batch);
@@ -682,7 +759,9 @@
         try {
           const ctx = options.context || this.captureCollaborationContext();
           if (!this.collaborationContextCurrent(ctx)) return { stale: true };
-          window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
+          const capturedBases = copy(Object.fromEntries(updates.map(({ desc }) => [desc.filepath,
+            options.bases?.[desc.filepath] || this.collaborationFile(desc, ctx.language)])));
+          if (Number(this.localDescs.stagedVersion || 0) < 1) window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
             sourceHash: ctx.source, game: ctx.game, language: ctx.language });
           if (options.draft) for (const { desc } of updates) {
             const conflicts = ctx.client?.snapshot?.({ includeFiles: false })?.conflicts || this.collaborationConflicts || [];
@@ -719,7 +798,10 @@
                 { lastEditedAt: now, lastTranslatedAt: now })]));
             const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
-              ...(options.draft ? { draft: copy(options.draft) } : {}), ...(options.awaitDurable || options.deferCommit ? { deferDisplay: true } : {}),
+              ...(options.draft ? { draft: copy(options.draft) } : {}),
+              ...(options.checkpoint ? { checkpoint: copy(options.checkpoint) } : {}),
+              bases: capturedBases,
+              deferDisplay: true,
               descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
                 { derivedStatus: true })),
               revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
@@ -730,37 +812,31 @@
                   Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin,
                 ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}) } } : {}),
             };
-            const job = this._pendingSaves.enqueue(batch, { context: ctx });
+            const job = await this.journalPendingSave(batch, ctx);
             if (options.deferCommit) {
               job.onCommitted = options.onCommitted;
               job.onRejected = options.onRejected;
-              // The retained draft is already durable. Navigation may continue,
-              // while committed text and draft consumption wait for this job.
+              // The captured submission is durable. Navigation may continue,
+              // while committed text and checkpoint consumption wait for this job.
               return { status: 'queued', jobId: batch.jobId };
             }
-            if (options.awaitDurable) {
-              // Inline drafts remain private until the complete save transaction
-              // acknowledges staging and exact draft consumption together.
-              try { await this._pendingSaves.drain(); }
-              catch (error) { this._pendingSaves.discardRejectedDraft?.(job.id); throw error; }
-              return { status: 'local', jobId: batch.jobId, durable: job.durable,
-                draftConsumed: job.ack?.draftConsumed === true, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
-            }
-            ctx.client?.stageLocalSave(batch);
-            for (const file of files) this.localDescs.status[file.filepath] = statuses[file.filepath];
-            for (const file of files) window.WorkspaceState.stageTranslation(this.localDescs, file, ctx.language,
-              { source: this.workspaceSourceFile(file.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[file.filepath] });
-            this.applyCollaborationFiles(files, ctx.language);
-            // Close in the same turn as the optimistic update so Vue paints the
-            // file list without first rendering the outgoing editor again.
-            if (options.close) this.editorVisible = false;
-            return { status: 'queued', jobId: batch.jobId };
+            // Committed UI waits for staging, history, outbox, receipt and exact
+            // checkpoint consumption to acknowledge together.
+            await this._pendingSaves.drain();
+            return { status: 'local', jobId: batch.jobId, durable: job.durable,
+              draftConsumed: job.ack?.draftConsumed === true, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
           }
           if (this._pendingSaves && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before continuing.');
+          if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          const recordScope = window.OfflineStore.captureWorkspaceScope?.({ accountId: ctx.account || 'guest', game: ctx.game,
+            branchId: ctx.branchId || 'default', sourceHash: ctx.source }) || { accountId: ctx.account || 'guest', game: ctx.game,
+            branchId: ctx.branchId || 'default', sourceHash: ctx.source };
+          const localRecords = !this.testMode && !ctx.client && !!window.OfflineStore.getWorkspaceRecords && !!window.OfflineStore.updateWorkspace;
           // Collaboration projects saved files onto the latest durable workspace.
           // Ordinary saves only need to stage their metadata, not clone the archive.
           const incremental = !!ctx.client && origin === 'save' && !options.workspace && !hasPromotions;
-          const workspace = options.workspace || (incremental ? { descs: [], status: {} } : this.toPlainForStorage(this.localDescs));
+          const workspace = localRecords ? { descs: [], status: {} }
+            : options.workspace || (incremental ? { descs: [], status: {} } : this.toPlainForStorage(this.localDescs));
           workspace.descs ||= []; workspace.status ||= {};
           window.WorkspaceState.scopeWorkspace(workspace, ctx.language);
           const now = Date.now();
@@ -774,16 +850,19 @@
             if (local) updateLocalDesc(local, desc, ctx.language, lines, { derivedStatus: true });
             else workspace.descs.push(makeLocalDesc(desc, ctx.language, lines, { derivedStatus: true }));
             workspace.status[desc.filepath] = window.WorkspaceState.setFileMetadata(
-              copy((incremental ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]) || {}), ctx.language,
+              copy((incremental || localRecords ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]) || {}), ctx.language,
               { lastEditedAt: now, lastTranslatedAt: now });
             if (!options.revisions) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
               lang: ctx.language, savedAt: now, note: origin, translations: lines, isMissing,
               ...(ctx.source ? { sourceHash: ctx.source } : {}) });
             const file = { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true };
-            window.WorkspaceState.stageTranslation(workspace, file, ctx.language,
+            if (!localRecords) window.WorkspaceState.stageTranslation(workspace, file, ctx.language,
               { source: this.workspaceSourceFile(desc.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[desc.filepath] });
             return file;
           });
+          const filepaths = files.map(file => file.filepath);
+          const originals = localRecords ? new Map(filepaths.map(filepath => [filepath, this.toPlainForStorage(this.workspaceSourceFile(filepath))])) : null;
+          let localCommitted;
           let result = { status: 'local' };
           const previousBatch = this._collabDiagnosticBatch;
           const batch = origin === 'consistency' ? { context: ctx, expected: new Map(files.map(file => [file.filepath, [...file.translations]])), touched: false } : null;
@@ -792,19 +871,53 @@
             if (!this.testMode) {
               if (ctx.client) result = await ctx.client.save({ workspace, revisions, files, origin, bases: options.bases, restore: options.restore,
                 waitForSync: origin !== 'save', promoteDropped: promotion, promoteDroppedByPath: promotions });
+              else if (localRecords) localCommitted = await window.OfflineStore.updateWorkspace(latest => {
+                if (!this.collaborationContextCurrent(ctx) || latest?.sourceHash && latest.sourceHash !== ctx.source)
+                  throw Object.assign(new Error('The workspace changed before the translation could be saved.'), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
+                for (const file of files) {
+                  const source = originals.get(file.filepath);
+                  if (!source) throw new Error('The original source is unavailable: ' + file.filepath);
+                  const current = window.WorkspaceState.workspaceFile(latest, source, ctx.language).translations;
+                  if (!arrayEquals(current, capturedBases[file.filepath]?.translations))
+                    throw Object.assign(new Error('The committed translation changed before this save. Review both versions before saving again.'),
+                      { code: 'DRAFT_BASE_CHANGED', filepath: file.filepath, currentTranslations: [...current] });
+                }
+                latest ||= { ...recordScope, sourceHash: ctx.source, stagedVersion: 1, descs: [], status: {} };
+                latest.descs ||= []; latest.status ||= {};
+                window.WorkspaceState.scopeWorkspace(latest, ctx.language);
+                const localFiles = new Map(latest.descs.map(desc => [desc.filepath, desc]));
+                for (const file of files) {
+                  const source = originals.get(file.filepath);
+                  if (!source) throw new Error('The original source is unavailable: ' + file.filepath);
+                  const local = localFiles.get(file.filepath);
+                  if (local) updateLocalDesc(local, source, ctx.language, file.translations, { derivedStatus: true });
+                  else { const created = makeLocalDesc(source, ctx.language, file.translations, { derivedStatus: true }); latest.descs.push(created); localFiles.set(file.filepath, created); }
+                  latest.status[file.filepath] = window.WorkspaceState.setFileMetadata(latest.status[file.filepath] || {}, ctx.language,
+                    { lastEditedAt: now, lastTranslatedAt: now });
+                  window.WorkspaceState.stageTranslation(latest, file, ctx.language,
+                    { source, sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[file.filepath] });
+                }
+                return latest;
+              }, ctx.game, { scope: recordScope, filepaths, revisions });
               else await window.OfflineStore.saveWorkspaceWithRevisions(workspace, revisions, ctx.game);
             }
             if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
-            if (incremental) {
+            if (localRecords) {
+              this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, localCommitted) || localCommitted;
+            } else if (incremental) {
               // Keep unrelated remote updates that arrived while the transaction
               // committed instead of replacing them with an older workspace copy.
               for (const file of files) this.localDescs.status[file.filepath] = window.WorkspaceState.setFileMetadata(
                 this.localDescs.status[file.filepath] || {}, ctx.language, workspace.status[file.filepath]);
             } else {
-              const committed = ctx.client && !this.testMode && window.OfflineStore.getWorkspace
-                ? await window.OfflineStore.getWorkspace(ctx.game, ctx.language) : null;
+              const committed = ctx.client && !this.testMode
+                ? window.OfflineStore.getWorkspaceRecords
+                  ? await window.OfflineStore.getWorkspaceRecords(recordScope, { filepaths })
+                  : window.OfflineStore.getWorkspace ? await window.OfflineStore.getWorkspace(ctx.game, ctx.language) : null
+                : null;
               if (!this.collaborationContextCurrent(ctx)) return { ...result, stale: true };
-              this.localDescs = committed || workspace;
+              this.localDescs = committed?._storageSelection
+                ? window.OfflineStore.mergeWorkspaceRecords(this.localDescs, committed) : committed || workspace;
             }
             // Each submitted file may include independent remote changes. Remote
             // callbacks already apply other files; avoid rewriting the whole list.
@@ -907,16 +1020,16 @@
           else {
             const recover = workspace => {
               if (!this.collaborationContextCurrent(context) || workspace.sourceHash !== context.source) throw new Error('The workspace changed before recovery.');
-              window.WorkspaceState.initializeWorkspace(workspace, { source: this.workspaceSource(), sourceHash: context.source,
+              if (Number(workspace.stagedVersion || 0) < 1) window.WorkspaceState.initializeWorkspace(workspace, { source: [source], sourceHash: context.source,
                 game: context.game, language: context.language });
               window.WorkspaceState.dropTranslation(workspace, source, context.language, { ...candidate, snapshot: candidate.snapshot });
               return workspace;
             };
             const workspace = this.testMode ? recover(copy(this.localDescs))
-              : await window.OfflineStore.updateWorkspace(recover, context.game, { revisions });
+              : await window.OfflineStore.updateWorkspace(recover, context.game, { revisions, filepaths: [desc.filepath] });
             result = { status: 'local' };
             if (!this.collaborationContextCurrent(context)) return { stale: true };
-            this.localDescs = workspace;
+            this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, workspace) || workspace;
           }
           if (!this.collaborationContextCurrent(context)) return { stale: true };
           this.applyWorkspaceOverlay(); this.filterDesc();

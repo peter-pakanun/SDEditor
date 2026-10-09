@@ -1,0 +1,756 @@
+// Disposable real IndexedDB / authenticated API acceptance fixture for v9.
+// No production account, browser profile or storage is used.
+const assert = require('node:assert/strict');
+const { createRequire } = require('node:module');
+const { resolve, join, sep } = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { mkdtempSync, readFileSync, existsSync, rmSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { randomUUID } = require('node:crypto');
+const { createServer } = require('node:http');
+
+const runtimeModules = 'C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
+const playwright = require(process.env.PLAYWRIGHT_MODULE_PATH || require.resolve('playwright', { paths: [runtimeModules] }));
+const executablePath = process.env.FIXTURE_BROWSER_PATH || [
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+].find(existsSync);
+
+function browserProbe() {
+    const probe = window.__normalizedProbe = { operations: [], workerOperations: [], events: [], held: [], mode: 'normal' };
+    const bytes = value => { try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; } catch (_) { return 0; } };
+    for (const name of ['get', 'getAll', 'put', 'add', 'delete', 'openCursor', 'openKeyCursor', 'count']) {
+        const original = IDBObjectStore.prototype[name];
+        IDBObjectStore.prototype[name] = function (...args) {
+            const entry = { store: this.name, method: name, key: name === 'put' || name === 'add' ? args[0]?.key : args[0],
+                mode: this.transaction.mode, bytes: name === 'put' || name === 'add' ? bytes(args[0]) : 0 };
+            probe.operations.push(entry);
+            if (probe.fail && this.name !== 'kv' && ['put', 'add'].includes(name) && --probe.fail.after <= 0) {
+                probe.fail = null;
+                throw new DOMException('Fixture quota failure', 'QuotaExceededError');
+            }
+            const request = original.apply(this, args);
+            if (name === 'get' || name === 'getAll') request.addEventListener('success', () => { entry.bytes = bytes(request.result); });
+            return request;
+        };
+    }
+    for (const method of ['get', 'getAll', 'openCursor', 'openKeyCursor', 'count']) {
+        const original = IDBIndex.prototype[method];
+        IDBIndex.prototype[method] = function (...args) {
+            const entry = { store: this.objectStore.name, index: this.name, method, key: args[0], mode: this.objectStore.transaction.mode, bytes: 0 };
+            probe.operations.push(entry);
+            const request = original.apply(this, args);
+            if (method === 'get' || method === 'getAll') request.addEventListener('success', () => { entry.bytes = bytes(request.result); });
+            return request;
+        };
+    }
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+        constructor(...args) {
+            super(...args);
+            this.addEventListener('message', event => {
+                if (event.data?.type === 'saved') probe.events.push({ name: 'saved', at: performance.now() });
+                if (event.data?.type === 'storageProbe') probe.workerOperations.push(...event.data.operations);
+            });
+        }
+        postMessage(message, options) {
+            if (message?.type === 'saveTranslations') {
+                probe.events.push({ name: 'dispatch', at: performance.now(), id: message.id });
+                if (probe.mode === 'hold') { probe.held.push({ worker: this, message, options }); return; }
+                probe.events.push({ name: 'worker.start', at: performance.now(), id: message.id });
+            }
+            return super.postMessage(message, options);
+        }
+    };
+    probe.release = () => {
+        probe.mode = 'normal';
+        for (const item of probe.held.splice(0)) {
+            probe.events.push({ name: 'worker.start', at: performance.now(), id: item.message.id });
+            NativeWorker.prototype.postMessage.call(item.worker, item.message, item.options);
+        }
+    };
+}
+
+function workerStorageProbe() {
+    const operations = [], bytes = value => { try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; } catch (_) { return 0; } };
+    for (const method of ['get', 'getAll', 'put', 'add', 'delete', 'openCursor', 'openKeyCursor', 'count']) {
+        const original = IDBObjectStore.prototype[method];
+        IDBObjectStore.prototype[method] = function (...args) {
+            const entry = { store: this.name, method, key: ['put', 'add'].includes(method) ? args[0]?.key : args[0],
+                mode: this.transaction.mode, bytes: ['put', 'add'].includes(method) ? bytes(args[0]) : 0 };
+            operations.push(entry);
+            const request = original.apply(this, args);
+            if (method === 'get' || method === 'getAll') request.addEventListener('success', () => { entry.bytes = bytes(request.result); });
+            return request;
+        };
+    }
+    for (const method of ['get', 'getAll', 'openCursor', 'openKeyCursor', 'count']) {
+        const original = IDBIndex.prototype[method];
+        IDBIndex.prototype[method] = function (...args) {
+            const entry = { store: this.objectStore.name, index: this.name, method, key: args[0], mode: this.objectStore.transaction.mode, bytes: 0 };
+            operations.push(entry);
+            const request = original.apply(this, args);
+            if (method === 'get' || method === 'getAll') request.addEventListener('success', () => { entry.bytes = bytes(request.result); });
+            return request;
+        };
+    }
+    const send = self.postMessage.bind(self);
+    self.postMessage = message => {
+        if (message?.type === 'saved' || message?.type === 'error') send({ type: 'storageProbe', id: message.id, operations: operations.splice(0) });
+        send(message);
+    };
+}
+
+function aggregateOperations(operations) {
+    return operations.filter(op => op.store === 'kv' && typeof op.key === 'string'
+        && /^(workspace_version_v1:|source_version_v1:|workspace_poe|source_poe|collaboration_v1$|translation_save_receipts)/.test(op.key));
+}
+
+function assertNoAssetReads(operations, scenario) {
+    assert.equal(operations.some(operation => operation.store === 'baseline_assets'
+        && ['get', 'getAll', 'openCursor', 'openKeyCursor'].includes(operation.method)), false,
+    scenario + ': hot commands never read archive assets');
+}
+
+function assertSelectedBaselineReads(operations, filepaths, scenario) {
+    const allowed = new Set(filepaths);
+    for (const operation of operations.filter(operation => operation.store === 'baseline_files')) {
+        assert.equal(operation.method, 'get', scenario + ': no complete baseline enumeration');
+        assert.ok(allowed.has(JSON.parse(operation.key)[1]), scenario + ': no unrelated baseline file read');
+    }
+}
+
+async function runFixture({ storageOnly = false } = {}) {
+    if (!executablePath) throw new Error('No installed Edge/Chrome found. Set FIXTURE_BROWSER_PATH.');
+    const apiRoot = process.env.SDEDITOR_FIXTURE_API_ROOT ? resolve(process.env.SDEDITOR_FIXTURE_API_ROOT) : resolve(__dirname, '../../SDEditor-API');
+    const fromApi = createRequire(join(apiRoot, 'package.json'));
+    const load = name => import(pathToFileURL(join(apiRoot, 'src', name)).href);
+    const [{ loadConfig }, { openDatabase, CloudStore }, { createApp }] = await Promise.all([load('config.js'), load('database.js'), load('app.js')]);
+    const directory = mkdtempSync(join(tmpdir(), 'sdeditor-normalized-browser-'));
+    const publicDir = resolve(__dirname, '../public'), express = fromApi('express'), frontend = express(), frontendServer = createServer(frontend);
+    await new Promise(resolve => frontendServer.listen(0, '127.0.0.1', resolve));
+    const origin = 'http://127.0.0.1:' + frontendServer.address().port, secret = randomUUID();
+    const config = loadConfig({ ADMIN_GOOGLE_SUB: 'normalized-admin', FRONTEND_ORIGIN: origin,
+        API_PUBLIC_URL: 'http://127.0.0.1:1', DATA_DIR: directory, DATABASE_PATH: ':memory:' });
+    const database = openDatabase(':memory:'), cloudStore = new CloudStore(database, config);
+    cloudStore.registerIdentity({ sub: 'normalized-admin', email: 'admin@normalized.fixture', name: 'Fixture Admin' });
+    cloudStore.registerIdentity({ sub: 'normalized-translator', email: 'translator@normalized.fixture', name: 'Fixture Translator' });
+    cloudStore.assignLanguage('normalized-admin', 'normalized-translator', 'Thai');
+    const api = createApp({ config, database, store: cloudStore, oauthProvider: null }), apiServer = createServer(api);
+    api.locals.collaborationRealtime.attach(apiServer);
+    await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
+    const apiOrigin = 'http://127.0.0.1:' + apiServer.address().port;
+    frontend.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+    frontend.post('/fixture/session', (req, res) => req.get('X-Fixture-Key') === secret
+        ? res.json(cloudStore.createSession('normalized-translator')) : res.sendStatus(403));
+    frontend.get('/fixture/storage', (req, res) => res.type('html').send('<!doctype html><script>(' + browserProbe.toString()
+        + ')();</script><script src="/workspaceState.js"></script><script src="/collaborationProtocol.js"></script><script src="/normalizedStore.js"></script><script src="/normalizedRooms.js"></script><script src="/offlineStore.js"></script>'));
+    frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(publicDir, 'index.html'), 'utf8')
+        .replace('<head>', '<head><script>(' + browserProbe.toString() + ')();</script>')
+        .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
+    frontend.get('/fixture/jszip.min.js', (req, res) => res.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
+    frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(publicDir, 'index.js'), 'utf8')
+        .replace("app.mount('#app');", "window.__normalizedApp = app.mount('#app');")));
+    frontend.get('/saveWorker.js', (req, res) => res.type('js').send('(' + workerStorageProbe.toString() + ')();\n'
+        + readFileSync(join(publicDir, 'saveWorker.js'), 'utf8')));
+    frontend.use(express.static(publicDir));
+    let browser, activePage;
+    const errors = [], results = [];
+    try {
+        browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
+        const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
+        const page = await context.newPage();
+        activePage = page;
+        page.on('pageerror', error => { errors.push(error.message); console.error('Fixture browser error: ' + error.stack); });
+        await page.goto(origin + '/fixture/storage');
+        await page.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const migration = await page.evaluate(async () => {
+            const copy = value => JSON.parse(JSON.stringify(value));
+            const scope = { accountId: 'fixture-owner', game: 'poe1', branchId: 'release', sourceHash: 'fixture-v8' };
+            const suffix = JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
+            const source = Array.from({ length: 700 }, (_, i) => ({ filepath: 'storage/' + i + '.txt', filename: i + '.txt', filedir: 'storage',
+                stats: ['stat_' + i], variables: ['#'], remarks: [''], translations: { English: ['English ' + i], Thai: ['Thai ' + i], German: ['German ' + i] } }));
+            const workspace = { ...scope, descs: copy(source), status: {} };
+            WorkspaceState.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
+            WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['Saved Thai'] }, 'Thai', { source: source[0] });
+            WorkspaceState.stageTranslation(workspace, { filepath: source[6].filepath, translations: ['Saved six'] }, 'Thai', { source: source[6] });
+            WorkspaceState.stageTranslation(workspace, { filepath: source[10].filepath, translations: ['Saved ten'] }, 'Thai', { source: source[10] });
+            WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: [''] }, 'German', { source: source[0] });
+            WorkspaceState.dropTranslation(workspace, source[1], 'Thai', { id: 'retained-recovery', recoveryId: 'explicit-generation',
+                originSourceHash: 'predecessor', targetSourceHash: scope.sourceHash, translations: ['Dropped Thai'] });
+            const request = indexedDB.open('sdeditor', 8);
+            request.onupgradeneeded = () => {
+                request.result.createObjectStore('kv', { keyPath: 'key' });
+                for (const name of ['revisions', 'revisions_poe1', 'revisions_poe2']) {
+                    const store = request.result.createObjectStore(name, { keyPath: 'id', autoIncrement: true });
+                    store.createIndex('by_file_lang_time', ['filepath', 'lang', 'savedAt']);
+                    store.createIndex('by_file_time', ['filepath', 'savedAt']);
+                }
+            };
+            const db = await new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+            const values = { ['workspace_version_v1:' + suffix]: workspace, ['source_version_v1:' + suffix]: source,
+                ['workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId])]: scope,
+                ['version_metadata_v1:' + suffix]: { ...scope, name: 'Retained v8 source' },
+                ['translation_save_receipts_v2:' + suffix]: [{ jobId: 'original-id', signature: 'original-signature', files: [] }],
+                collaboration_v1: { version: 1, rooms: {} }, settings: { lang: 'Thai', dictionary: [{ find: 'untouched', replace: 'unchanged' }] } };
+            const orphanScope = { profile: scope.accountId, game: scope.game, branchId: scope.branchId, sourceHash: 'absent-older-source',
+                language: 'Thai', filepath: 'removed/old.txt' };
+            const orphanKey = OfflineStore.translationDraftKey(orphanScope);
+            values[orphanKey] = { ...orphanScope, key: orphanKey, id: 'old-checkpoint-id', revision: 'old-checkpoint-revision',
+                state: 'active', translations: ['Unfinished older text'], base: { translations: ['Older committed text'] }, updatedAt: 1,
+                source: { ...copy(source[0]), filepath: orphanScope.filepath, translations: { English: ['Older English'], Thai: ['Older ZIP translation'] } },
+                recovery: [{ id: 'retained-variant', translations: ['Variant text'], revision: 'variant-revision' }] };
+            const missingScope = { ...scope, game: 'poe2', sourceHash: 'missing-source-evidence' };
+            values['workspace_version_v1:' + JSON.stringify([missingScope.accountId, missingScope.game, missingScope.branchId, missingScope.sourceHash])] =
+                { ...missingScope, descs: [copy(source[0])], stagedVersion: 1, staged: { Thai: { [source[0].filepath]: { translations: ['Retain despite missing source'] } } }, status: {} };
+            const roomIdentity = { ...scope, language: 'Thai' }, roomKey = JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, 'Thai']);
+            const sharedFile = { filepath: source[0].filepath, translations: ['Remote accepted zero'], revision: 2, trackedForExport: true, needsReview: false };
+            values.collaboration_v1.rooms[roomKey] = { identity: roomIdentity, roomId: 'retained-room', mode: 'legacy', seq: 8,
+                manifest: CollaborationProtocol.manifest(source), shared: { [source[0].filepath]: sharedFile },
+                seedUpload: { id: 'retained-seed-upload', expiresAt: 4102444800000,
+                    files: CollaborationProtocol.manifest(source).files.map(file => ({ ...file, translations: copy(source.find(desc => desc.filepath === file.filepath).translations.Thai), trackedForExport: false })) },
+                local: { [source[0].filepath]: { ...sharedFile, translations: ['Saved Thai'] } },
+                outbox: [{ id: 'lost-response-operation', status: 'pending', kind: 'mutation', origin: 'save',
+                    files: [{ base: sharedFile, yours: { ...sharedFile, translations: ['Saved Thai'] } }],
+                    wire: { mutationId: 'lost-response-operation', baseRevision: 2, files: [{ filepath: source[0].filepath, translations: ['Saved Thai'] }] } }],
+                conflicts: [{ id: 'retained-conflict', filepath: source[1].filepath, yours: { filepath: source[1].filepath, translations: ['Conflicting text'] } }],
+                recovery: [{ id: 'retained-room-recovery', at: 1, reason: 'Preserved cache text', files: [{ filepath: source[7].filepath, translations: ['Recovery seven'] }] },
+                    { id: 'retained-many-file-recovery', at: 2, reason: 'Preserved disconnected workspace', sourceHash: 'predecessor',
+                        files: source.map(desc => ({ filepath: desc.filepath, translations: ['Recovered ' + desc.filename], revision: 0, trackedForExport: true, needsReview: false })) }] };
+            const historyScope = { accountId: 'fixture-history-owner', game: 'poe1', branchId: 'default', sourceHash: 'tiny-baseline' };
+            const tinyScopes = [historyScope, { ...historyScope, accountId: 'fixture-history-other' }, { ...historyScope, branchId: 'release' },
+                { ...historyScope, game: 'poe2' }, { ...historyScope, sourceHash: 'tiny-successor' }];
+            for (const [index, tinyScope] of tinyScopes.entries()) {
+                const suffix = JSON.stringify([tinyScope.accountId, tinyScope.game, tinyScope.branchId, tinyScope.sourceHash]);
+                const tinySource = [copy(source[0])], tinyWorkspace = { ...tinyScope, descs: copy(tinySource), status: {} };
+                WorkspaceState.initializeWorkspace(tinyWorkspace, { source: tinySource, sourceHash: tinyScope.sourceHash, game: tinyScope.game, language: 'Thai' });
+                WorkspaceState.stageTranslation(tinyWorkspace, { filepath: source[0].filepath, translations: [index === 1 ? '' : 'Tiny scoped save ' + index] }, 'Thai', { source: tinySource[0] });
+                values['workspace_version_v1:' + suffix] = tinyWorkspace;
+                values['source_version_v1:' + suffix] = tinySource;
+            }
+            const tx = db.transaction(['kv', 'revisions_poe1'], 'readwrite');
+            for (const [key, value] of Object.entries(values)) tx.objectStore('kv').put({ key, value });
+            tx.objectStore('revisions_poe1').add({ filepath: source[0].filepath, lang: 'Thai', savedAt: 1, translations: ['Saved Thai'], ...scope });
+            tx.objectStore('revisions_poe1').add({ id: 51, filepath: source[0].filepath, lang: 'Thai', savedAt: 1,
+                translations: ['Legacy owned history'], collaborationAccountId: historyScope.accountId, sourceHash: historyScope.sourceHash });
+            await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); }); db.close();
+            window.__storageScope = scope; window.__storageSource = source; window.__legacyValues = values;
+            OfflineStore.setWorkspaceContext(scope);
+            // Fail after one migration batch has had an opportunity to commit.
+            window.__normalizedProbe.fail = { after: 380 };
+            let interrupted = false;
+            try { await OfflineStore.getVersionWorkspace(scope, 'Thai'); }
+            catch (error) { interrupted = /quota|fixture/i.test(error.message) || error.name === 'QuotaExceededError'; }
+            window.__normalizedProbe.fail = null;
+            const recovered = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            const importedSource = await OfflineStore.getVersionSource(scope);
+            const orphanedDrafts = await OfflineStore.listTranslationDrafts({ profile: scope.accountId, game: scope.game,
+                branchId: scope.branchId, language: 'Thai', sourceHash: orphanScope.sourceHash });
+            const roomState = await OfflineStore.getCollaborationState({ key: roomKey, scope: roomIdentity });
+            window.__storageRoom = { key: roomKey, identity: roomIdentity };
+            let missingBlocked = false;
+            try { await OfflineStore.getVersionWorkspace(missingScope, 'Thai'); }
+            catch (error) { missingBlocked = /source.*unavailable|matching ZIP|retained/i.test(error.message); }
+            const tinyWorkspaces = [];
+            for (const tinyScope of tinyScopes) tinyWorkspaces.push(await OfflineStore.getVersionWorkspace(tinyScope, 'Thai'));
+            const legacyHistory = await OfflineStore.listRevisions(source[0].filepath, 'Thai', 100, historyScope);
+            const read = indexedDB.open('sdeditor', 9), upgraded = await new Promise((resolve, reject) => {
+                read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error);
+            });
+            const frozen = {}, inspect = upgraded.transaction(['kv', 'collaboration_rooms', 'collaboration_records'], 'readonly');
+            const roomMetadata = inspect.objectStore('collaboration_rooms').get(roomKey);
+            const roomRecords = inspect.objectStore('collaboration_records').index('by_scope').getAll(roomKey);
+            for (const key of Object.keys(values)) {
+                const get = inspect.objectStore('kv').get(key); get.onsuccess = () => { frozen[key] = get.result?.value; };
+            }
+            await new Promise(resolve => { inspect.oncomplete = resolve; });
+            const stores = [...upgraded.objectStoreNames]; upgraded.close();
+            const recoveryHeader = roomRecords.result.find(record => record.value.field === 'recovery' && record.value.entry === 'retained-many-file-recovery');
+            const recoveryMembers = roomRecords.result.filter(record => record.value.field === 'recoveryFiles' && record.value.groupId === 'retained-many-file-recovery');
+            const recordFacts = { recoveryHeaderHasFiles: Object.hasOwn(recoveryHeader.value.data, 'files'), recoveryMembers: recoveryMembers.length,
+                recoveryMemberPaths: recoveryMembers.every(record => record.paths.length === 1 && !Object.hasOwn(record.value.data, 'files')),
+                seedMembers: roomRecords.result.filter(record => record.value.field === 'seedUploadFiles').length };
+            return { interrupted, recovered, source: importedSource, originalSource: source, frozen, values, stores,
+                orphanedDrafts, orphanKey, missingBlocked, roomState, roomKey, roomMetadata: roomMetadata.result?.value, recordFacts, tinyWorkspaces, legacyHistory };
+        });
+        assert.equal(migration.interrupted, true, 'A failed bounded migration remains retryable');
+        assert.equal(migration.missingBlocked, true, 'Missing immutable source prevents conversion instead of reconstructing baseline from edited work');
+        const byPath = files => files.slice().sort((left, right) => left.filepath.localeCompare(right.filepath));
+        assert.deepEqual(byPath(migration.source), byPath(migration.originalSource), 'Immutable source survives migration');
+        assert.deepEqual(migration.frozen, migration.values, 'v8 evidence is frozen, including unrelated settings');
+        assert.deepEqual(migration.recovered.staged.Thai['storage/0.txt'].translations, ['Saved Thai']);
+        assert.deepEqual(migration.recovered.staged.German['storage/0.txt'].translations, ['']);
+        assert.ok(migration.recovered.dropped.Thai['storage/1.txt']);
+        assert.equal(migration.orphanedDrafts.length, 1, 'Older-version recovery stays available without a full retained baseline');
+        assert.deepEqual(migration.orphanedDrafts[0].source, migration.values[migration.orphanKey].source, 'Orphan checkpoint preserves original comparison evidence');
+        assert.deepEqual(migration.orphanedDrafts[0].recovery, migration.values[migration.orphanKey].recovery, 'Recovery variants survive compaction');
+        const room = migration.roomState.rooms[migration.roomKey], originalRoom = migration.values.collaboration_v1.rooms[migration.roomKey];
+        assert.deepEqual(room.shared, originalRoom.shared, 'Accepted server files survive room conversion');
+        assert.equal(room.seq, 8, 'Replay cursor survives room conversion');
+        assert.equal(room.outbox[0].id, 'lost-response-operation');
+        assert.deepEqual(room.outbox[0].wire, originalRoom.outbox[0].wire, 'Prepared retry payload survives room conversion');
+        assert.deepEqual(room.conflicts, originalRoom.conflicts, 'Conflict records survive conversion');
+        assert.ok(room.recovery.some(record => record.id === 'retained-room-recovery'), 'Cached recovery records survive conversion');
+        const retainedGroup = room.recovery.find(record => record.id === 'retained-many-file-recovery');
+        const { localRecordId, _storageRecovery, ...group } = retainedGroup;
+        assert.deepEqual(group, originalRoom.recovery.find(record => record.id === 'retained-many-file-recovery'),
+            'Cold room assembly preserves all 700 recovery members, facts and their original order');
+        assert.deepEqual(migration.recordFacts, { recoveryHeaderHasFiles: false, recoveryMembers: 700, recoveryMemberPaths: true, seedMembers: 700 },
+            'Native recovery and seed snapshots are physically stored as individually keyed file records');
+        assert.equal(Object.hasOwn(migration.roomMetadata.seedUpload, 'files'), false, 'Legacy seed upload files are excluded from room metadata');
+        assert.deepEqual(room.seedUpload, originalRoom.seedUpload, 'Cold room adapters hydrate exact seed-upload files and retry ticket');
+        assert.deepEqual(migration.tinyWorkspaces.map(workspace => workspace.staged.Thai['storage/0.txt'].translations),
+            [['Tiny scoped save 0'], [''], ['Tiny scoped save 2'], ['Tiny scoped save 3'], ['Tiny scoped save 4']],
+            'Accounts, branches, games, versions and intentional blank saves remain independent');
+        assert.deepEqual(migration.legacyHistory.map(row => row.id), [51], 'Scoped history index preserves the original legacy revision ID');
+        assert.equal(migration.legacyHistory[0].accountId, 'fixture-history-owner');
+        assert.equal(migration.legacyHistory[0].branchId, 'default');
+        results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length });
+        console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
+
+        const writes = await page.evaluate(async () => {
+            const scope = window.__storageScope, filepath = 'storage/2.txt';
+            const batch = { jobId: 'one-file-save', ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath, translations: ['New saved text'] }],
+                revisions: [{ filepath, lang: 'Thai', savedAt: 2, translations: ['New saved text'] }] };
+            window.__storageReplayBatch = JSON.parse(JSON.stringify(batch));
+            window.__normalizedProbe.operations = [];
+            const acknowledgment = await OfflineStore.saveTranslationBatch(batch);
+            const operations = window.__normalizedProbe.operations.slice();
+            const firstHistory = await OfflineStore.listRevisions(filepath, 'Thai', 100, scope);
+            window.__normalizedProbe.operations = [];
+            const duplicate = await OfflineStore.saveTranslationBatch(batch), replayOperations = window.__normalizedProbe.operations.slice();
+            const history = await OfflineStore.listRevisions(filepath, 'Thai', 100, scope);
+            const before = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            window.__normalizedProbe.fail = { after: 1 };
+            let failed = false;
+            try { await OfflineStore.saveTranslationBatch({ ...batch, jobId: 'aborted-save', files: [{ filepath, translations: ['Must abort'] }] }); }
+            catch (_) { failed = true; }
+            window.__normalizedProbe.fail = null;
+            const after = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            return { acknowledgment, operations, duplicate, replayOperations, firstHistory, history, before, after, failed };
+        });
+        assert.equal(writes.failed, true, 'Quota failure aborts a one-file commit');
+        assert.deepEqual(writes.before, writes.after, 'Abort preserves committed state');
+        assert.equal(writes.duplicate.duplicate, true, 'Lost acknowledgment retry finds the original receipt');
+        assert.equal(writes.history.length, writes.firstHistory.length, 'Replay does not duplicate history');
+        assert.deepEqual(aggregateOperations(writes.operations), [], 'One-file save avoids all legacy aggregates');
+        assertNoAssetReads(writes.operations, 'One-file save');
+        assert.equal(writes.replayOperations.filter(op => ['put', 'add', 'delete'].includes(op.method)).length, 0, 'Receipt replay performs no writes');
+        const saveBytes = writes.operations.reduce((total, operation) => total + operation.bytes, 0);
+        assert.ok(saveBytes < 65536, 'One-file transaction copies only bounded data');
+        results.push({ scenario: 'one-file atomic save and receipt replay', operations: writes.operations.length, bytes: saveBytes });
+        const changedReplay = await page.evaluate(async () => {
+            const scope = window.__storageScope, filepath = 'storage/2.txt', batch = window.__storageReplayBatch;
+            const latestWorkspace = await OfflineStore.updateWorkspace(workspace => {
+                WorkspaceState.stageTranslation(workspace, { filepath, translations: ['Later text from another tab'] }, 'Thai',
+                    { source: window.__storageSource[2], sourceHash: scope.sourceHash });
+                return workspace;
+            }, scope, { scope, filepaths: [filepath] });
+            window.__normalizedProbe.operations = [];
+            const latest = await OfflineStore.saveTranslationBatch(batch), latestOperations = window.__normalizedProbe.operations.slice();
+            await OfflineStore.updateWorkspace(workspace => {
+                delete workspace.staged.Thai[filepath]; delete workspace.status[filepath]; return workspace;
+            }, scope, { scope, filepaths: [filepath] });
+            window.__normalizedProbe.operations = [];
+            const deleted = await OfflineStore.saveTranslationBatch(batch), deletedOperations = window.__normalizedProbe.operations.slice();
+            const history = await OfflineStore.listRevisions(filepath, 'Thai', 100, scope);
+            return { latest, deleted, latestOperations, deletedOperations, history,
+                latestStatus: latestWorkspace.status?.[filepath] || {} };
+        });
+        assert.deepEqual(changedReplay.latest.files[0].translations, ['Later text from another tab'], 'Lost response replay returns newer durable text');
+        assert.equal(changedReplay.latest.files[0].trackedForExport, true, 'Newer Saved presence survives receipt replay');
+        assert.deepEqual(changedReplay.latest.statuses['storage/2.txt'], changedReplay.latestStatus, 'Replay returns current factual metadata');
+        assert.deepEqual(changedReplay.deleted.files[0].translations, ['Thai 2'], 'Replay returns immutable text after another tab removes the stage');
+        assert.equal(changedReplay.deleted.files[0].trackedForExport, false); assert.equal(changedReplay.deleted.files[0].stagingReset, true);
+        assert.deepEqual(changedReplay.deleted.statuses['storage/2.txt'], {}, 'Deleted-stage replay cannot restore old Saved metadata');
+        assert.equal([...changedReplay.latestOperations, ...changedReplay.deletedOperations].filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+            'Receipt reconciliation after another tab changes or deletes text performs zero writes');
+        assert.deepEqual(changedReplay.history.map(row => row.id), writes.firstHistory.map(row => row.id), 'Changed-text replay creates no duplicate history');
+        assertSelectedBaselineReads(changedReplay.latestOperations, ['storage/2.txt'], 'Later-text receipt replay');
+        assertSelectedBaselineReads(changedReplay.deletedOperations, ['storage/2.txt'], 'Deleted-stage receipt replay');
+        results.push({ scenario: 'same-ID receipt replay reconciles later saved text and staged deletion without writes' });
+        const absence = await page.evaluate(async () => {
+            const scope = window.__storageScope, filepath = 'storage/0.txt', original = window.__storageSource[0];
+            await OfflineStore.saveTranslationBatch({ jobId: 'delete-original-v8-save', ...scope, workspaceScope: scope, language: 'Thai',
+                origin: 'delete_staged', resetStaging: true,
+                files: [{ filepath, translations: original.translations.Thai, trackedForExport: false, stagingReset: true }],
+                bases: { [filepath]: { filepath, translations: ['Saved Thai'], trackedForExport: true, revision: 0 } },
+                revisions: [{ filepath, lang: 'Thai', savedAt: 3, translations: original.translations.Thai, note: 'Delete staged translation' }] });
+            const first = await OfflineStore.getVersionWorkspace(scope, 'Thai'), activated = await OfflineStore.activateVersion(scope),
+                second = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            return { first: first.staged.Thai?.[filepath], second: second.staged.Thai?.[filepath],
+                activated: activated.workspace.staged.Thai?.[filepath], committed: second.descs.find(desc => desc.filepath === filepath).translations.Thai };
+        });
+        assert.equal(absence.first, undefined); assert.equal(absence.second, undefined); assert.equal(absence.activated, undefined);
+        assert.deepEqual(absence.committed, ['Thai 0'], 'Normalized absence stays authoritative across reads and activation');
+        results.push({ scenario: 'deleted staged work is never resurrected from frozen v8 evidence' });
+        const journal = await page.evaluate(async () => {
+            const scope = window.__storageScope, batch = { jobId: 'journal-recovery', ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath: 'storage/3.txt', translations: ['Submitted without a checkpoint'] }],
+                bases: { 'storage/3.txt': { translations: ['Thai 3'] } },
+                revisions: [{ filepath: 'storage/3.txt', lang: 'Thai', savedAt: 3, translations: ['Submitted without a checkpoint'] }] };
+            await OfflineStore.putSaveSubmission(batch);
+            const queued = await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' });
+            const isolated = await OfflineStore.listSaveSubmissions({ ...scope, accountId: 'another-account', language: 'Thai' });
+            await OfflineStore.saveTranslationBatch(batch);
+            const consumed = await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' });
+            return { queued, isolated, consumed };
+        });
+        assert.equal(journal.queued.length, 1); assert.equal(journal.queued[0].batch.jobId, 'journal-recovery');
+        assert.deepEqual(journal.isolated, [], 'Submitted saves remain account scoped');
+        assert.deepEqual(journal.consumed, [], 'Submission is removed atomically by its save');
+        results.push({ scenario: 'durable submitted save without a private checkpoint' });
+        const order = await page.evaluate(async () => {
+            const scope = window.__storageScope, make = (id, filepath) => ({ jobId: id, ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath, translations: ['Ordered submission ' + id] }],
+                revisions: [{ filepath, lang: 'Thai', savedAt: 10, translations: ['Ordered submission ' + id] }] });
+            const batches = [make('ordered-z', 'storage/8.txt'), make('ordered-a', 'storage/9.txt')], clock = Date.now;
+            let retryOperations;
+            try {
+                Date.now = () => 1234567890000;
+                for (const batch of batches) await OfflineStore.putSaveSubmission(batch);
+                window.__normalizedProbe.operations = [];
+                await OfflineStore.putSaveSubmission(batches[0]);
+                retryOperations = window.__normalizedProbe.operations.slice();
+            } finally { Date.now = clock; }
+            const queued = await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' });
+            for (const batch of batches) await OfflineStore.saveTranslationBatch(batch);
+            return { queued, retryOperations };
+        });
+        assert.deepEqual(order.queued.map(submission => submission.batch.jobId), ['ordered-z', 'ordered-a'],
+            'Same-clock submitted saves preserve insertion order instead of sorting random job IDs');
+        assert.equal(order.retryOperations.filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+            'Same-ID submission retry performs no writes');
+        results.push({ scenario: 'same-clock durable submission ordering and zero-write retry' });
+        const sharedSave = await page.evaluate(async () => {
+            const scope = window.__storageScope, { key, identity } = window.__storageRoom, filepath = 'storage/12.txt';
+            window.__normalizedProbe.operations = [];
+            await OfflineStore.saveTranslationBatch({ jobId: 'bounded-shared-save', ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath, translations: ['Authored bounded shared save'] }], collaboration: { key, identity, origin: 'save' },
+                revisions: [{ filepath, lang: 'Thai', savedAt: 12, translations: ['Authored bounded shared save'] }] });
+            return window.__normalizedProbe.operations;
+        });
+        assert.deepEqual(aggregateOperations(sharedSave), [], 'Shared save avoids every aggregate');
+        assertNoAssetReads(sharedSave, 'Shared save');
+        assertSelectedBaselineReads(sharedSave, ['storage/12.txt'], 'Shared save with a 700-file recovery group');
+        const sharedSaveBytes = sharedSave.reduce((sum, operation) => sum + operation.bytes, 0);
+        assert.ok(sharedSaveBytes < 65536, 'A one-file shared save never reads or copies unrelated recovery members');
+        results.push({ scenario: 'bounded shared save with a 700-file recovery group', operations: sharedSave.length, bytes: sharedSaveBytes });
+        const command = await page.evaluate(async () => {
+            const { key, identity } = window.__storageRoom, scope = window.__storageScope, filepath = 'storage/5.txt';
+            const options = { key, scope: identity, filepaths: [filepath], operationIds: [], includeOutbox: 'paths',
+                includeConflicts: true, command: 'remote-events' };
+            const mutate = state => {
+                const room = state.rooms[key]; room.seq = 9;
+                room.shared[filepath] = { filepath, translations: ['Remote event text'], revision: 1, trackedForExport: true, needsReview: false };
+                return state;
+            };
+            const project = (workspace, state) => {
+                WorkspaceState.stageTranslation(workspace, state.rooms[key].shared[filepath], 'Thai', { source: window.__storageSource[5], sourceHash: scope.sourceHash });
+                return workspace;
+            };
+            window.__normalizedProbe.operations = [];
+            await OfflineStore.updateCollaborationRecords(options, mutate, { projectWorkspace: project });
+            const operations = window.__normalizedProbe.operations.slice();
+            window.__normalizedProbe.operations = [];
+            await OfflineStore.updateCollaborationRecords(options, state => state, { projectWorkspace: workspace => workspace });
+            const unchanged = window.__normalizedProbe.operations.slice();
+            let failed = false;
+            try { await OfflineStore.updateCollaborationRecords(options, state => {
+                const room = state.rooms[key]; room.seq = 10; room.shared[filepath].translations = ['Must roll back']; return state;
+            }, { projectWorkspace: () => { throw new Error('Fixture remote event projection abort'); } }); }
+            catch (_) { failed = true; }
+            const result = await OfflineStore.getCollaborationRecords(options), workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            return { operations, unchanged, failed, room: result.room, staged: workspace.staged.Thai[filepath].translations };
+        });
+        assert.deepEqual(aggregateOperations(command.operations), [], 'Remote event avoids workspace, source and collaboration aggregates');
+        assertNoAssetReads(command.operations, 'Remote event');
+        assertSelectedBaselineReads(command.operations, ['storage/5.txt'], 'Remote event with a 700-file recovery group');
+        assert.ok(command.operations.reduce((sum, operation) => sum + operation.bytes, 0) < 65536, 'Remote event reads and writes only bounded touched-file records');
+        assert.equal(command.unchanged.filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+            'Identical accepted state performs no writes');
+        assertSelectedBaselineReads(command.unchanged, ['storage/5.txt'], 'Unchanged event with a 700-file recovery group');
+        assert.equal(command.failed, true); assert.equal(command.room.seq, 9, 'Aborted projection cannot advance the replay cursor');
+        assert.deepEqual(command.room.shared['storage/5.txt'].translations, ['Remote event text']);
+        assert.deepEqual(command.staged, ['Remote event text'], 'Accepted text and cursor commit or abort together');
+        results.push({ scenario: 'bounded remote event, no-op replay and atomic cursor projection', operations: command.operations.length,
+            bytes: command.operations.reduce((sum, operation) => sum + operation.bytes, 0) });
+        const ack = await page.evaluate(async () => {
+            const { key, identity } = window.__storageRoom, scope = window.__storageScope, filepath = 'storage/4.txt';
+            const command = { key, scope: identity, filepaths: [filepath], operationIds: ['acknowledged-operation'], includeOutbox: 'paths',
+                includeConflicts: true, command: 'prepare-operation' };
+            const authored = { filepath, translations: ['Authored fourth file'], revision: 0, trackedForExport: true, needsReview: false };
+            await OfflineStore.updateCollaborationRecords(command, state => {
+                state.rooms[key].outbox.push({ id: 'acknowledged-operation', origin: 'save', status: 'pending',
+                    files: [{ base: { ...authored, translations: ['Thai 4'], trackedForExport: false }, yours: authored }],
+                    wire: { mutationId: 'acknowledged-operation', files: [{ filepath, translations: authored.translations }] } });
+                return state;
+            }, { projectWorkspace: workspace => {
+                WorkspaceState.stageTranslation(workspace, authored, 'Thai', { source: window.__storageSource[4], sourceHash: scope.sourceHash }); return workspace;
+            } });
+            window.__normalizedProbe.operations = [];
+            const result = await OfflineStore.updateCollaborationRecords({ ...command, command: 'acknowledge-operation' }, state => {
+                const room = state.rooms[key]; room.shared[filepath] = { ...authored, revision: 2 };
+                room.outbox = room.outbox.filter(operation => operation.id !== 'acknowledged-operation'); return state;
+            }, { projectWorkspace: (workspace, state) => {
+                WorkspaceState.stageTranslation(workspace, state.rooms[key].shared[filepath], 'Thai', { source: window.__storageSource[4], sourceHash: scope.sourceHash }); return workspace;
+            } });
+            return { operations: window.__normalizedProbe.operations.slice(), room: result.room };
+        });
+        assert.deepEqual(aggregateOperations(ack.operations), [], 'Operation acknowledgment avoids aggregate reads/writes');
+        assertNoAssetReads(ack.operations, 'Operation acknowledgment');
+        assertSelectedBaselineReads(ack.operations, ['storage/4.txt'], 'Operation acknowledgment with a 700-file recovery group');
+        const ackBytes = ack.operations.reduce((sum, operation) => sum + operation.bytes, 0);
+        assert.ok(ackBytes < 65536, 'Acknowledgment is bounded to its touched files');
+        assert.equal(ack.room.seq, 9, 'Acknowledging a local mutation leaves the replay cursor intact');
+        assert.equal(ack.room.outbox.some(operation => operation.id === 'acknowledged-operation'), false);
+        assert.deepEqual(ack.room.shared['storage/4.txt'].translations, ['Authored fourth file']);
+        results.push({ scenario: 'bounded operation acknowledgment', operations: ack.operations.length, bytes: ackBytes });
+        const preservedGroup = await page.evaluate(async () => {
+            const { key, identity } = window.__storageRoom;
+            const state = await OfflineStore.getCollaborationState({ key, scope: identity });
+            const { localRecordId, _storageRecovery, ...group } = state.rooms[key].recovery.find(record => record.id === 'retained-many-file-recovery');
+            return group;
+        });
+        assert.deepEqual(preservedGroup, originalRoom.recovery.find(record => record.id === 'retained-many-file-recovery'),
+            'Hot shared save, events and acknowledgments preserve every unselected recovery member');
+        console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
+        if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
+        assert.deepEqual(errors, []);
+        console.log(JSON.stringify({ storageOnly, results }, null, 2));
+        return results;
+    } catch (error) {
+        if (activePage && !activePage.isClosed()) console.error(JSON.stringify(await activePage.evaluate(() => {
+            const vm = window.__normalizedApp;
+            return { body: document.body.innerText.slice(-2000), errors: window.__normalizedProbe?.events,
+                startup: vm?.startupReady, storage: vm?.offlineStoreReady, sourceLoaded: vm?.sourceLoaded, signedIn: vm?.cloudSignedIn,
+                cloudError: vm?.cloudStorageError, collaboration: vm?.collaborationNotice, connected: vm?._collaboration?.connected,
+                current: vm?.editorCurrentEditingDesc?.filepath, sourceIdentity: vm?.sourceIdentity, descCount: vm?.descs?.length,
+                pending: vm?.pendingLocalSaves, queue: vm?._pendingSaves?.snapshot().jobs.map(job => ({ id: job.jobId, status: job.status, error: job.error?.message })),
+                versionLoading: vm?.versionStorageLoading, chooser: vm?.versionChooserVisible, game: vm?.gameVersion,
+                language: vm?.lang, accountId: vm?.cloudUser?.id };
+        }).catch(() => ({ diagnostic: 'Fixture page was unavailable.' })), null, 2));
+        throw error;
+    } finally {
+        await browser?.close(); api.locals.collaborationRealtime.close();
+        await Promise.all([new Promise(resolve => apiServer.close(resolve)), new Promise(resolve => frontendServer.close(resolve))]);
+        database.close();
+        const absolute = resolve(directory), expectedRoot = resolve(tmpdir()) + sep;
+        if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
+        rmSync(absolute, { recursive: true, force: true });
+    }
+}
+
+async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage }) {
+    await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+    await page.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
+        && window.__normalizedApp?._cloud?.state && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
+    const count = Number(process.env.NORMALIZED_FILE_COUNT || 20000), dictionaryCount = Number(process.env.NORMALIZED_DICTIONARY_COUNT || 8000);
+    const imported = await page.evaluate(async ({ secret, count, dictionaryCount }) => {
+        const vm = window.__normalizedApp;
+        const session = await fetch('/fixture/session', { method: 'POST', headers: { 'X-Fixture-Key': secret } });
+        if (!session.ok) throw new Error('Fixture login refused.');
+        await vm._cloud.acceptLogin(await session.json()); await vm.cloudApply(vm._cloud.snapshot());
+        vm.lang = 'Thai'; vm.needsInitialSettings = false; vm.showSetting = false; vm.inlineEditor = false; vm.hideDNT = false;
+        await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
+        await vm.activateGameVersion('poe1', { checkMigration: false });
+        const source = Array.from({ length: count }, (_, i) => ({ filepath: 'normalized/' + String(i).padStart(5, '0') + '.txt',
+            filename: String(i).padStart(5, '0') + '.txt', filedir: 'normalized', stats: ['normalized_' + i], variables: ['#'], remarks: [''],
+            translations: { English: ['Damage amount ' + i], Thai: ['Original damage ' + i] }, isDNT: false }));
+        // Include one real duplicate-language choice so asset hydration verifies
+        // decision content rather than only the presence of an empty array.
+        const duplicateText = new TextDecoder('utf-16le').decode(descEncode(source[0]))
+            + '\tlang "Thai"\r\n\t1\r\n\t\t# "Alternative damage 0"\r\n';
+        const duplicateBytes = new Uint8Array(strEncodeUTF16(duplicateText).buffer), duplicateFile = new Uint8Array(2 + duplicateBytes.length);
+        duplicateFile.set([0xff, 0xfe]); duplicateFile.set(duplicateBytes, 2);
+        source[0] = parseDesc(source[0].filepath, duplicateText, 'Thai', { strict: true });
+        const groups = vm.collectDuplicateLangGroups(source);
+        for (const group of groups) group.selectedOptionId = group.options[0].id;
+        const decisions = await vm.importDecisionRecords(groups), acceptedSource = await vm.sourceWithImportDecisions(source, decisions);
+        const zip = new JSZip();
+        for (const desc of source) zip.file(desc.filepath, desc.filepath === source[0].filepath ? duplicateFile : descEncode(desc),
+            { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+        const file = new File([await zip.generateAsync({ type: 'uint8array', compression: 'STORE' })], 'NormalizedFixture.zip', { type: 'application/zip' });
+        const identity = await vm.readImportZipIdentity(file, zip), copy = value => JSON.parse(JSON.stringify(value));
+        window.__normalizedProbe.operations = [];
+        await vm.importUpdateZipFile(file, copy(acceptedSource), { identity, rawSource: copy(source), decisions });
+        const importOperations = copy(window.__normalizedProbe.operations), scope = vm.managedWorkspaceScope();
+        const persisted = await new Promise((resolve, reject) => {
+            const opening = indexedDB.open('sdeditor', 9);
+            opening.onerror = () => reject(opening.error);
+            opening.onsuccess = () => {
+                const db = opening.result, tx = db.transaction(['translation_workspaces', 'baseline_assets', 'kv'], 'readonly');
+                const metadata = tx.objectStore('translation_workspaces').get(NormalizedStore.scopeKey(scope));
+                const assets = tx.objectStore('baseline_assets').get(NormalizedStore.baselineKey(scope));
+                const keys = tx.objectStore('kv').getAllKeys();
+                tx.onerror = () => { db.close(); reject(tx.error); };
+                tx.oncomplete = () => { db.close(); resolve({ metadata: metadata.result, assets: assets.result, keys: keys.result }); };
+            };
+        });
+        const cold = await OfflineStore.getWorkspace(scope), accepted = copy(vm.importBaseline.archive);
+        vm.dictionary = Array.from({ length: dictionaryCount }, (_, i) => ({ _id: 'normalized_dictionary_' + i, find: 'Keyword' + i, replace: 'คำศัพท์' + i, alts: [] }));
+        vm.showSetting = false; vm.needsInitialSettings = false; vm.versionChooserVisible = false; vm.loadingProgress = 100;
+        vm.selectAllFileFilters(); vm.applyFileSearch(); vm.currentSort = 'filename'; vm.currentSortDir = 'asc';
+        await vm.loadEditorDrafts(); await vm.$nextTick();
+        const applyFiles = vm.applyCollaborationFiles;
+        vm.applyCollaborationFiles = function (...args) {
+            const start = performance.now(), result = applyFiles.apply(this, args), end = performance.now();
+            window.__normalizedProbe.events.push({ name: 'applyFiles', at: start, duration: end - start });
+            this.$nextTick().then(() => window.__normalizedProbe.events.push({ name: 'applyFiles.painted', at: performance.now() }));
+            return result;
+        };
+        window.__normalizedProbe.operations = []; window.__normalizedProbe.events = [];
+        return { ...persisted, scope, accepted, hydratedArchive: copy(cold.importArchive), importOperations };
+    }, { secret, count, dictionaryCount });
+    assert.equal(Object.hasOwn(imported.metadata.value.importArchive, 'decisions'), false,
+        'New workspace metadata never copies accepted duplicate-decision arrays');
+    assert.deepEqual(imported.assets.value.archive.decisions, imported.accepted.decisions,
+        'Accepted archive decisions are retained separately with baseline assets');
+    assert.equal(imported.accepted.decisions.length, 1, 'Fixture preserves a real duplicate-language import decision');
+    assert.deepEqual(imported.hydratedArchive, imported.accepted, 'Cold workspace reads hydrate the complete immutable archive descriptor');
+    assert.equal(imported.keys.some(key => typeof key === 'string' && /^(workspace_version_v1:|source_version_v1:)/.test(key)
+        && key.includes(imported.scope.accountId) && key.includes(imported.scope.sourceHash)), false,
+    'A new import creates no aggregate workspace or source payload');
+    assert.deepEqual(aggregateOperations(imported.importOperations).filter(operation => ['put', 'add'].includes(operation.method)), [],
+        'Source import never duplicates accepted source or workspace arrays into KV');
+    results.push({ scenario: 'new import keeps archive assets separate and cold activation hydrates them', decisions: imported.accepted.decisions.length });
+    await page.waitForFunction(() => window.__normalizedApp.cloudSignedIn && window.__normalizedApp._collaboration?.connected,
+        null, { timeout: 60000 });
+    const persistedRoom = await page.evaluate(async () => {
+        const client = window.__normalizedApp._collaboration, identity = JSON.parse(JSON.stringify(client.room().identity));
+        const metadata = await new Promise((resolve, reject) => {
+            const opening = indexedDB.open('sdeditor', 9);
+            opening.onerror = () => reject(opening.error);
+            opening.onsuccess = () => {
+                const db = opening.result, tx = db.transaction('collaboration_rooms', 'readonly'), reading = tx.objectStore('collaboration_rooms').get(client.key);
+                tx.onerror = () => { db.close(); reject(tx.error); };
+                tx.oncomplete = () => { db.close(); resolve(reading.result?.value); };
+            };
+        });
+        const cold = await OfflineStore.getCollaborationState({ key: client.key, scope: identity });
+        return { metadata, archive: cold.rooms[client.key]?.archive };
+    });
+    assert.equal(Object.hasOwn(persistedRoom.metadata.archive, 'decisions'), false, 'Room metadata excludes accepted duplicate-decision arrays');
+    assert.deepEqual(persistedRoom.archive, imported.accepted, 'Cold room reads hydrate the complete accepted archive with its decision');
+    results.push({ scenario: 'room metadata stays compact and cold room archive hydration preserves decisions' });
+    const polling = await page.evaluate(async () => {
+        const client = window.__normalizedApp._collaboration;
+        await client.syncDropped(client.epoch, { force: true });
+        window.__normalizedProbe.operations = [];
+        await client.sync({ background: true });
+        await client.syncDropped(client.epoch, { force: true });
+        return window.__normalizedProbe.operations;
+    });
+    assert.equal(polling.filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+        'Healthy polling and unchanged Dropped refreshes perform no writes');
+    assertNoAssetReads(polling, 'Healthy polling');
+    results.push({ scenario: 'unchanged translation and Dropped polling', writes: 0 });
+    const path = i => 'normalized/' + String(i).padStart(5, '0') + '.txt';
+    const field = (inline, filepath) => inline ? page.locator('tr[data-filepath="' + filepath + '"] .textHL input:not([readonly]), tr[data-filepath="'
+        + filepath + '"] .textHL textarea:not([readonly])').first() : page.locator('.editor .textHL input:not([readonly]), .editor .textHL textarea:not([readonly])').first();
+    for (const [i, navigation] of [
+        { key: 'F2', from: 0, to: 1, inline: false }, { key: 'F1', from: 4, to: 3, inline: false },
+        { key: 'Control+ArrowDown', from: 10, to: 11, inline: true }, { key: 'Control+ArrowUp', from: 14, to: 13, inline: true },
+    ].entries()) {
+        const outgoing = path(navigation.from), target = path(navigation.to);
+        await page.evaluate(async ({ inline, outgoing }) => {
+            const vm = window.__normalizedApp; vm._fileTableReturnFocus = false; await vm.editorExit(); await vm.$nextTick();
+            vm.inlineEditor = inline; vm.inlineSidebarVisible = false; await vm.$nextTick();
+            if (!inline) return vm.editFile(outgoing, true);
+            const position = vm.filteredDescs.findIndex(row => row.filepath === outgoing);
+            vm.currentPage = Math.floor(position / vm.pageSize) + 1; vm.selectFileRow(outgoing); await vm.$nextTick();
+        }, { inline: navigation.inline, outgoing });
+        if (navigation.inline) await page.locator('tr[data-filepath="' + outgoing + '"] .inlineSourceCell').click();
+        await field(navigation.inline, outgoing).fill('Saved with ' + navigation.key);
+        await page.evaluate(() => { window.__normalizedProbe.mode = 'hold'; window.__normalizedProbe.operations = [];
+            window.__normalizedProbe.workerOperations = []; window.__normalizedProbe.events = []; });
+        const start = Date.now(); await page.keyboard.press(navigation.key);
+        await page.waitForFunction(filepath => {
+            const vm = window.__normalizedApp;
+            return vm.editorCurrentEditingDesc?.filepath === filepath && !vm.editorLoading && !vm.navigationBusy && !vm.inlineTransitionBusy;
+        }, target);
+        const readyMs = Date.now() - start;
+        assert.equal(await field(navigation.inline, target).evaluate(element => element === document.activeElement), true, navigation.key + ': destination has focus');
+        const typed = 'New target typing ' + i;
+        await field(navigation.inline, target).fill(typed);
+        await page.evaluate(() => window.__normalizedProbe.release());
+        await page.waitForFunction(() => !window.__normalizedApp.pendingLocalSaves && !window.__normalizedApp._pendingSaves?.snapshot().jobs.length);
+        assert.equal(await field(navigation.inline, target).inputValue(), typed, navigation.key + ': incoming typing survives outgoing acknowledgment');
+        await page.waitForFunction(() => !window.__normalizedApp._collaboration?.snapshot({ includeFiles: false }).pending);
+        const operations = await page.evaluate(() => window.__normalizedProbe.workerOperations);
+        const acknowledgments = await page.evaluate(() => window.__normalizedProbe.operations);
+        const timing = await page.evaluate(() => {
+            const events = window.__normalizedProbe.events, started = events.find(event => event.name === 'worker.start'),
+                saved = events.find(event => event.name === 'saved'), applied = saved && events.find(event => event.name === 'applyFiles' && event.at >= saved.at),
+                painted = applied && events.find(event => event.name === 'applyFiles.painted' && event.at >= applied.at);
+            return { localCommitMs: started && saved ? saved.at - started.at : null, ackProcessingMs: applied?.duration ?? null,
+                ackPaintMs: saved && painted ? painted.at - saved.at : null };
+        });
+        assert.deepEqual(aggregateOperations(acknowledgments), [], navigation.key + ': online acknowledgment avoids aggregate KV records');
+        assertNoAssetReads(acknowledgments, navigation.key + ': online acknowledgment');
+        assert.equal(acknowledgments.some(operation => operation.store === 'baseline_files' && operation.method === 'getAll'), false,
+            navigation.key + ': online synchronization never reads the complete source');
+        assert.deepEqual(aggregateOperations(operations), [], navigation.key + ': worker avoids aggregate KV records');
+        assertNoAssetReads(operations, navigation.key + ': worker');
+        const bytes = operations.reduce((total, operation) => total + operation.bytes, 0);
+        assert.ok(bytes < 65536, navigation.key + ': one-file commit payload is bounded with 20,000 unrelated files');
+        const saved = await page.evaluate(async filepath => {
+            const vm = window.__normalizedApp, workspace = await OfflineStore.getWorkspace(vm.managedWorkspaceScope());
+            return workspace.staged.Thai[filepath]?.translations;
+        }, outgoing);
+        assert.deepEqual(saved, ['Saved with ' + navigation.key]);
+        await page.evaluate(async () => {
+            const vm = window.__normalizedApp;
+            vm.editorBlocks[0].translation = vm.editorCurrentEditingDesc.translations.Thai[0]; await vm.flushEditorDraft();
+        });
+        results.push({ scenario: navigation.key, files: count, dictionaryEntries: dictionaryCount, readyMs,
+            saveOperations: operations.length, saveBytes: bytes, ...timing });
+    }
+    // Close without beforeunload after the journal is durable but before the
+    // worker receives the command. The same profile must resume that exact job.
+    const crashPath = path(20), submittedText = 'Submitted before fixture crash';
+    await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp; vm._fileTableReturnFocus = false; await vm.editorExit(); await vm.$nextTick();
+        vm.inlineEditor = false; await vm.$nextTick(); await vm.editFile(filepath, true);
+    }, crashPath);
+    await field(false, crashPath).fill(submittedText);
+    await page.evaluate(() => { window.__normalizedProbe.mode = 'hold'; window.__normalizedProbe.held = []; });
+    await page.keyboard.press('F2');
+    await page.waitForFunction(() => window.__normalizedProbe.held.length > 0);
+    const queued = await page.evaluate(async () => OfflineStore.listSaveSubmissions(window.__normalizedApp.pendingSaveScope()));
+    assert.equal(queued.length, 1, 'Submitted intent is durable before worker dispatch');
+    const originalJobId = queued[0].batch.jobId, context = page.context();
+    await page.close({ runBeforeUnload: false });
+    const restored = await context.newPage();
+    onPage?.(restored);
+    await restored.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+    await restored.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
+        && window.__normalizedApp?.cloudSignedIn && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
+    // Startup intentionally opens the game/version chooser. Return to the
+    // captured workspace just as the user does before replaying its saves.
+    assert.equal(await restored.evaluate(async sourceHash => {
+        const vm = window.__normalizedApp; await vm.activateGameVersion('poe1', { checkMigration: false });
+        return vm.managedActivateWorkspace(sourceHash, 'Thai');
+    }, queued[0].batch.sourceHash), true, 'Reload activates the original submitted-save scope');
+    await restored.waitForFunction(jobId => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.sourceLoaded
+        && window.__normalizedProbe.events.some(event => event.name === 'dispatch' && event.id === jobId)
+        && !window.__normalizedApp.pendingLocalSaves && !window.__normalizedApp._pendingSaves?.snapshot().jobs.length,
+    originalJobId, { timeout: 60000 });
+    const recovery = await restored.evaluate(async ({ filepath, jobId }) => {
+        const vm = window.__normalizedApp, scope = vm.managedWorkspaceScope(), workspace = await OfflineStore.getWorkspace(scope);
+        return { translations: workspace.staged.Thai[filepath]?.translations,
+            jobs: await OfflineStore.listSaveSubmissions(vm.pendingSaveScope()),
+            history: await OfflineStore.listRevisions(filepath, 'Thai', 100, scope),
+            recoveredIds: window.__normalizedProbe.events.filter(event => event.name === 'dispatch').map(event => event.id), jobId };
+    }, { filepath: crashPath, jobId: originalJobId });
+    assert.deepEqual(recovery.translations, [submittedText], 'Reload resumes durably submitted text');
+    assert.deepEqual(recovery.jobs, [], 'Recovered submission has been consumed');
+    assert.equal(recovery.history.filter(row => row.note === 'save').length, 1, 'Recovery produces exactly one saved history revision');
+    assert.ok(recovery.recoveredIds.includes(originalJobId), 'Recovery reuses the original job ID');
+    results.push({ scenario: 'crash before worker dispatch and same-ID reload recovery' });
+    await restored.close();
+}
+
+module.exports = { runFixture, aggregateOperations };
+if (require.main === module) runFixture({ storageOnly: process.argv.includes('--storage-only') }).catch(error => { console.error(error); process.exitCode = 1; });

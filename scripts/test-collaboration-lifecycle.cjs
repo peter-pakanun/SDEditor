@@ -255,6 +255,55 @@ test('startup in German does not adopt Thai Saved or Dropped state from a stored
   assert.deepEqual(plain(window.WorkspaceState.droppedForFile(workspace, source[0].filepath, 'Thai').snapshot.translations), ['แก้ไขแล้ว', 'สอง']);
 });
 
+test('stored sources rederive DNT from a later English entry without changing baseline or saved work', async () => {
+  for (const marker of ['[DNT] Hidden source', 'DNT Hidden source']) {
+    const { editor: e, window } = harness({ realImport: true });
+    const source = [description('later-dnt', ['Ordinary first entry', marker])];
+    source[0].isDNT = false; source[0].hasChanges = false;
+    source[0].translations.Thai = [];
+    const tree = await protocol.buildBaselineTree(source);
+    const archive = await protocol.finalizeArchive({ version: 1,
+      zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+      fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    const baseline = { source, tree, archive }, workspace = { descs: [], status: {},
+      sourceHash: archive.baselineId, importArchive: plain(archive) };
+    window.WorkspaceState.initializeWorkspace(workspace, {
+      game: 'poe1', sourceHash: archive.baselineId, source, language: 'Thai',
+    });
+    window.WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['', ''] }, 'Thai',
+      { source: source[0], sourceHash: archive.baselineId, savedAt: 123 });
+    const baselineBefore = plain(baseline), workspaceBefore = plain(workspace);
+    e.importBaseline = baseline; e._workspaceSourceBaseline = source;
+    e.sourceIdentity = archive.baselineId; e.localDescs = workspace;
+    e.hideDNT = true; e.selectAllFileFilters();
+
+    e.descs = await e.prepareStoredWorkspaceSource(source, workspace, true, () => true);
+    assert.equal(e.descs[0].isDNT, true, 'Startup must replace the old first-entry-only DNT cache.');
+    e.filterDesc();
+    assert.equal(e.filteredDescs.length, 0);
+    assert.equal(e.diagnosticScanDescs.length, 0);
+    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+
+    // Shared baseline selection and language changes also project stored
+    // descriptions, including caches created before the stricter DNT check.
+    e.descs = plain(source); e.applyWorkspaceOverlay(); e.filterDesc();
+    assert.equal(e.descs[0].isDNT, true, 'Workspace overlays must also replace the stale DNT cache.');
+    assert.equal(e.filteredDescs.length, 0); assert.equal(e.diagnosticScanDescs.length, 0);
+    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+
+    e.hideDNT = false; e.filterDesc();
+    assert.deepEqual(Array.from(e.filteredDescs, desc => desc.filepath), [source[0].filepath]);
+    assert.equal(e.diagnosticScanDescs.length, 1);
+    assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 1, isDropped: 0 });
+    assert.equal(e.descs.length, 1, 'Hiding DNT does not remove a loaded description.');
+    assert.deepEqual(plain(e.descs[0].translations.Thai), ['', ''], 'The intentional blank save is retained.');
+    assert.deepEqual(plain(baseline), baselineBefore, 'DNT derivation cannot rewrite immutable ZIP evidence.');
+    assert.deepEqual(plain(workspace), workspaceBefore, 'DNT eligibility cannot rewrite saved work or workspace identity.');
+    assert.equal(e.sourceIdentity, archive.baselineId);
+    assert.equal((await protocol.buildBaselineTree(e.workspaceSource())).root, archive.treeRoot);
+  }
+});
+
 test('joining an empty German sparse room does not publish Thai saved or review metadata', async t => {
   const { editor: e } = harness({ realImport: true });
   const source = [description('saved'), description('review')];

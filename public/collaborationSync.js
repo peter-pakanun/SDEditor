@@ -100,7 +100,7 @@
       if (this.room()?.mode !== 'sparse') return;
       const identity = copy(this.room().identity);
       if (this.store.updateWorkspace) {
-        const desc = this.source.find(desc => desc.filepath === file.filepath);
+        const desc = this.sourceDescriptions?.get(file.filepath) || this.source.find(desc => desc.filepath === file.filepath);
         if (!desc) throw new Error('The dropped translation is missing its source description.');
         return this.registerDroppedCandidate({ game: identity.game, language: identity.language, filepath: file.filepath,
           originSourceHash: status?.reviewCandidates?.[identity.language]?.sourceHash || identity.sourceHash,
@@ -115,7 +115,7 @@
         room.carries ||= {}; room.carryRevisions ||= {};
         room.carries[file.filepath] = candidate;
         room.carryRevisions[file.filepath] = (room.shared[file.filepath] || this.baselineStates[file.filepath]).revision;
-      }, { revisions, projectWorkspace: workspace => {
+      }, { records: this.records('restore-legacy-candidate', [file.filepath], [], { includeDropped: true }), revisions, projectWorkspace: workspace => {
         if (workspace?.sourceHash && workspace.sourceHash !== identity.sourceHash) throw new Error('The local workspace changed before restoring the candidate.');
         const result = this.projectWorkspace(workspace, [candidate], identity.language, this.source, { mutate: true });
         result.sourceHash = identity.sourceHash; result.collaborationAccountId = identity.accountId;
@@ -138,7 +138,7 @@
         const desc = { filepath: candidate.filepath, ...candidate.snapshot, translations: { English: candidate.snapshot.english } };
         registered = W.dropTranslation(current, desc, identity.language, { ...candidate, snapshot: candidate.snapshot });
         return current;
-      }, this.workspaceScope(identity), { revisions });
+      }, this.workspaceScope(identity), { revisions, filepaths: [candidate.filepath], includeDropped: true, command: 'register-dropped' });
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(workspace, [registered], epoch);
       this.lastDroppedSync = 0; await this.retry();
@@ -153,7 +153,7 @@
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         discarded = W.discardDropped(current, filepath, identity.language, expected);
         return current;
-      }, this.workspaceScope(identity));
+      }, this.workspaceScope(identity), { filepaths: [filepath], includeDropped: true, command: 'discard-dropped' });
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(workspace, [{ ...copy(discarded), status: 'discarded' }], epoch);
       this.lastDroppedSync = 0; await this.retry();
@@ -194,26 +194,116 @@
       try { this.notify(); } catch (_) {}
     }
     workspaceScope(identity) { return this.store.captureWorkspaceScope ? identity : identity?.game; }
+    records(command, filepaths = [], operationIds = [], extra = {}) {
+      return { command, filepaths: [...new Set(filepaths)], operationIds: [...new Set(operationIds)],
+        includeOutbox: 'paths', includeConflicts: true, ...extra };
+    }
+    mergeStoredRecords(result, key = this.key) {
+      const delta = result?.room;
+      if (!delta) throw staleError();
+      this.state ||= { version: 1, rooms: {} };
+      const room = this.state.rooms[key] ||= { shared: {}, local: {}, outbox: [], conflicts: [], recovery: [] };
+      const paths = new Set(result.selection?.filepaths || []), ids = new Set(result.selection?.operationIds || []);
+      const fileMaps = new Set(['shared', 'local', 'carries', 'carryRevisions']);
+      for (const [field, value] of Object.entries(delta)) if (!fileMaps.has(field) && !['outbox', 'conflicts', 'recovery', 'placeholderRepairs'].includes(field)) {
+        // The immutable manifest is kept by the active client after cold loading.
+        // Hot metadata intentionally excludes its potentially large file array.
+        if (field === 'manifest' && room.manifest?.files) {
+          const { files, ...metadata } = value || {};
+          Object.assign(room.manifest, copy(metadata));
+        }
+        else if (field === 'archive' && room.archive?.decisions) {
+          const { decisions, ...metadata } = value || {};
+          Object.assign(room.archive, copy(metadata));
+        }
+        else if (field === 'seedUpload' && room.seedUpload?.files && !value?.files) room.seedUpload = { ...copy(value), files: room.seedUpload.files };
+        else room[field] = copy(value);
+      }
+      if (!delta.seedUpload) delete room.seedUpload;
+      for (const field of fileMaps) {
+        if (!room[field] && !delta[field]) continue;
+        room[field] ||= {};
+        for (const filepath of paths) {
+          if (Object.hasOwn(delta[field] || {}, filepath)) room[field][filepath] = copy(delta[field][filepath]);
+          else delete room[field][filepath];
+        }
+      }
+      const before = room.outbox || [], previousOrder = new Map(before.map((item, index) => [item.id, index]));
+      const returnedOrder = new Map((result.selection?.operationOrder || []).map((id, index) => [id, index]));
+      room.outbox = before.filter(operation => !ids.has(operation.id)).concat(copy(delta.outbox || []));
+      room.outbox.sort((left, right) => {
+        if (Number.isFinite(left.localOrder) && Number.isFinite(right.localOrder)) return left.localOrder - right.localOrder;
+        if (returnedOrder.size) return (returnedOrder.get(left.id) ?? Infinity) - (returnedOrder.get(right.id) ?? Infinity);
+        const l = previousOrder.get(left.id) ?? -1, r = previousOrder.get(right.id) ?? -1;
+        return l < 0 || r < 0 ? l < 0 && r >= 0 ? 1 : r < 0 && l >= 0 ? -1 : 0 : l - r;
+      });
+      room.conflicts = (room.conflicts || []).filter(conflict => !ids.has(conflict.mutationId) && !paths.has(conflict.filepath))
+        .concat(copy(delta.conflicts || []));
+      if (delta.recovery) {
+        const identity = entry => entry.localRecordId || entry.id;
+        const groups = [];
+        for (const entry of room.recovery || []) {
+          const files = [], orders = [];
+          for (const [index, file] of (entry.files || []).entries()) if (!paths.has(file.filepath)) {
+            files.push(file); orders.push(entry._storageRecovery?.fileOrders?.[index] ?? index);
+          }
+          if (files.length || !(entry.files || []).length) groups.push({ ...entry, files,
+            ...(entry._storageRecovery ? { _storageRecovery: { ...entry._storageRecovery, fileOrders: orders } } : {}) });
+        }
+        for (const entry of delta.recovery) {
+          const id = identity(entry), previous = id && groups.find(group => identity(group) === id);
+          if (!previous) { groups.push(copy(entry)); continue; }
+          const members = previous.files.map((file, index) => ({ file, order: previous._storageRecovery?.fileOrders?.[index] ?? index }))
+            .concat((entry.files || []).map((file, index) => ({ file: copy(file), order: entry._storageRecovery?.fileOrders?.[index] ?? previous.files.length + index })))
+            .sort((left, right) => left.order - right.order);
+          Object.assign(previous, copy(entry), { files: members.map(item => item.file) });
+          if (entry._storageRecovery) previous._storageRecovery.fileOrders = members.map(item => item.order);
+        }
+        room.recovery = groups.sort((left, right) => (left._storageRecovery?.order ?? Infinity) - (right._storageRecovery?.order ?? Infinity));
+      }
+      if (delta.placeholderRepairs) room.placeholderRepairs = (room.placeholderRepairs || []).filter(repair => !paths.has(repair.filepath))
+        .concat(copy(delta.placeholderRepairs));
+      return room;
+    }
+    async readWorkspace(identity, filepaths, { includeDropped = true } = {}) {
+      if (this.store.getWorkspaceRecords) return this.store.getWorkspaceRecords(this.workspaceScope(identity),
+        { filepaths: filepaths || [], includeDropped, allDropped: filepaths == null && includeDropped });
+      return this.store.getWorkspace ? this.store.getWorkspace(this.workspaceScope(identity)) : null;
+    }
     async update(fn, options = {}, epoch = this.epoch) {
       return this.withLocalWrite(() => this.updateStored(fn, options, epoch));
     }
     async updateStored(fn, options = {}, epoch = this.epoch) {
       const key = this.key;
       if (!this.current(epoch)) throw staleError();
-      const state = await this.store.updateCollaborationState(state => {
+      const apply = state => {
         if (!this.current(epoch) || this.key !== key) throw staleError();
         state ||= { version: 1, rooms: {} };
         fn(state, state.rooms[key]);
         return state;
-      }, { version: this.room()?.identity.game, scope: copy(this.room()?.identity), ...options });
+      };
+      const storageOptions = { roomKey: key, version: this.room()?.identity.game, scope: copy(this.room()?.identity), ...options };
+      const result = options.records && this.store.updateCollaborationRecords
+        ? await this.store.updateCollaborationRecords({ key, scope: copy(this.room()?.identity), ...options.records },
+          (state, room) => { apply(state); return state; }, storageOptions)
+        : await this.store.updateCollaborationState(apply, storageOptions);
       if (!this.current(epoch)) throw staleError();
-      this.state = state; this.notify();
+      if (options.records && this.store.updateCollaborationRecords) this.mergeStoredRecords(result, key);
+      else this.state = result;
+      this.notify();
       return this.room();
     }
-    async refreshStored(epoch = this.epoch) {
+    async refreshStored(epoch = this.epoch, records) {
       const key = this.key;
       if (!this.current(epoch)) throw staleError();
-      const state = await this.store.getCollaborationState();
+      if (this.store.getCollaborationRecords) {
+        const selection = records || { command: 'refresh-room', includeOutbox: true, includeConflicts: true };
+        const result = await this.store.getCollaborationRecords({ key, scope: copy(this.room()?.identity), ...selection });
+        if (!this.current(epoch) || this.key !== key) throw staleError();
+        this.mergeStoredRecords(result, key); this.notify();
+        return this.room();
+      }
+      const state = await this.store.getCollaborationState({ key, scope: copy(this.room()?.identity) });
       if (!this.current(epoch) || this.key !== key || !state?.rooms?.[key]) throw staleError();
       this.state = state; this.notify();
       return this.room();
@@ -251,7 +341,7 @@
       let incoming;
       await this.prepareWork(async () => {
         this.source = await this.prepareItems(source, desc => copy(desc), epoch);
-        this.sourceFiles = new Map(); incoming = {};
+        this.sourceFiles = new Map(); this.sourceDescriptions = new Map(this.source.map(desc => [desc.filepath, desc])); incoming = {};
         await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
         await this.prepareItems(files, file => {
           const original = this.sourceFiles.get(file.filepath);
@@ -309,6 +399,7 @@
       await this.prepareWork(async () => {
         manifest = await P.manifestAsync(baselineSource, { isCancelled: () => epoch !== this.epoch || this.destroyed });
         this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
+        this.sourceDescriptions = new Map(baselineSource.map(desc => [desc.filepath, desc]));
         this.baselineFiles = new Map(); this.sourceFiles = new Map(); this.baselineStates = {};
         await this.prepareItems(baselineSource, file => {
           this.baselineFiles.set(file.filepath, file);
@@ -396,7 +487,7 @@
       const identity = { game: room.identity.game, branchId: room.identity.branchId || 'default', sourceHash: room.identity.sourceHash, language: room.identity.language };
       let snapshot;
       if (room.mode === 'sparse') {
-        snapshot = await this.api('/join', { method: 'POST', body: { ...identity, archive: room.archive } }, epoch);
+        snapshot = await this.api('/join', { method: 'POST', body: { ...identity, archive: this.archive || room.archive } }, epoch);
         if (snapshot.archive && snapshot.archive.baselineId !== room.archive.baselineId) throw Object.assign(new Error('The agreed import configuration changed.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: snapshot.archive });
         await this.acceptSnapshot(snapshot, epoch, !room.initialized || snapshot.sequence < room.sequence);
         this.startPresence(epoch); return;
@@ -444,7 +535,9 @@
         { method: 'PUT', body: { files: chunks[index] } }, epoch);
     }
     projection(files, epoch, stagedWorkspace) {
-      const identity = copy(this.room().identity); const source = this.source;
+      const identity = copy(this.room().identity);
+      const source = files.map(file => this.sourceDescriptions?.get(file.filepath) || this.baselineFiles?.get(file.filepath)
+        || this.source?.find(desc => desc.filepath === file.filepath)).filter(Boolean);
       const statuses = Object.fromEntries(files.filter(file => stagedWorkspace?.status?.[file.filepath])
         .map(file => [file.filepath, copy(stagedWorkspace.status[file.filepath])]));
       return (workspace, state) => {
@@ -565,7 +658,8 @@
             : Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath]
             || (current.mode === 'sparse' && this.baselineStates[yours.filepath]) || null), yours })) }));
         for (const yours of normalized) current.local[yours.filepath] = copy(yours);
-      }, { revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
+      }, { records: this.records('local-save', normalized.map(file => file.filepath), mutationIds, { includeDropped: promoted.length > 0 }),
+        revisions: revisions.map(revision => ({ ...copy(revision), sourceHash: room.identity.sourceHash,
         collaborationAccountId: room.identity.accountId })), projectWorkspace: (stored, state) => {
           const projected = this.projection(normalized, epoch, workspace)(stored, state);
           for (const file of normalized) {
@@ -648,19 +742,22 @@
     async receiveDropped(records, epoch, options = {}) {
       const identity = copy(this.room()?.identity);
       if (!identity || !this.store.updateWorkspace) return;
+      if (!records?.length) return this.droppedWorkspace || this.readWorkspace(identity, undefined, { includeDropped: true });
       const updated = await this.store.updateWorkspace(current => {
         if (!this.current(epoch)) throw staleError();
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         return W.acceptDropped(current, records, { ...options, game: identity.game, language: identity.language });
-      }, this.workspaceScope(identity));
+      }, this.workspaceScope(identity), { filepaths: [...new Set(records.map(record => record.filepath).filter(Boolean))],
+        includeDropped: true, command: 'accept-dropped' });
       if (!this.current(epoch)) throw staleError();
       await this.deliverDropped(updated, records, epoch);
       if (!this.current(epoch)) throw staleError();
-      return updated;
+      return this.droppedWorkspace;
     }
     async deliverDropped(workspace, records, epoch) {
       if (!this.current(epoch)) throw staleError();
+      workspace = this.mergeDroppedWorkspace(workspace);
       this.droppedConflicts = copy(workspace.droppedConflicts?.[this.room().identity.language] || {});
       this.pendingDropped = (workspace.droppedOutbox || []).some(operation => !operation.conflict
         && operation.candidate?.game === this.room().identity.game && operation.candidate?.language === this.room().identity.language);
@@ -668,6 +765,13 @@
         droppedOutbox: workspace.droppedOutbox, droppedAliases: workspace.droppedAliases, droppedConflicts: workspace.droppedConflicts }));
       if (!this.current(epoch)) throw staleError();
       this.notify();
+      return workspace;
+    }
+    mergeDroppedWorkspace(workspace) {
+      if (workspace?._storageSelection && this.store.mergeWorkspaceRecords) {
+        this.droppedWorkspace = this.store.mergeWorkspaceRecords(this.droppedWorkspace || {}, workspace);
+      } else this.droppedWorkspace = workspace;
+      return this.droppedWorkspace;
     }
     coalesceDroppedCopy(workspace, room, conflict, shared) {
       if (!conflict || !shared || conflict.targetSourceHash !== room.identity.sourceHash
@@ -711,9 +815,9 @@
         }
         workspace = current;
         return current;
-      } }, epoch);
+      }, records: this.records('coalesce-dropped', records.map(record => record.filepath), [], { includeDropped: true }) }, epoch);
       if (changed) await this.deliverDropped(workspace, records, epoch);
-      return workspace;
+      return workspace ? this.mergeDroppedWorkspace(workspace) : workspace;
     }
     async retainDroppedConflict(error, operation, kind, epoch) {
       const identity = copy(this.room().identity), shared = error.current?.candidate || error.current;
@@ -740,14 +844,15 @@
       await this.update((state, room) => {
         const pending = room.outbox.find(item => item.id === operation.id);
         if (kind === 'promotion' && pending && ['pending', 'candidate_conflict'].includes(pending.status)) pending.status = 'candidate_conflict';
-      }, { projectWorkspace: record }, epoch);
+      }, { records: this.records('retain-dropped-conflict', [shared.filepath], [operation.id].filter(Boolean), { includeDropped: true }),
+        projectWorkspace: record }, epoch);
       await this.deliverDropped(updated, [], epoch);
-      return updated;
+      return this.droppedWorkspace;
     }
     async resolveDroppedConflict(filepath, choice = 'shared', expected) {
       const epoch = this.epoch, identity = copy(this.room()?.identity);
       if (!identity || !this.store.updateWorkspace || !['shared', 'local'].includes(choice)) throw staleError();
-      const observedWorkspace = await this.store.getWorkspace(this.workspaceScope(identity));
+      const observedWorkspace = await this.readWorkspace(identity, [filepath]);
       const observed = copy(observedWorkspace?.droppedConflicts?.[identity.language]?.[filepath]);
       if (!observed || observed.targetSourceHash !== identity.sourceHash
         || (expected && (expected.id !== observed.shared.id || Number(expected.revision) !== Number(observed.shared.revision)))) throw staleError();
@@ -768,13 +873,13 @@
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         chosen = W.resolveDroppedConflict(current, filepath, identity.language, choice, observed.shared);
         return current;
-      }, this.workspaceScope(identity));
+      }, this.workspaceScope(identity), { filepaths: [filepath], includeDropped: true, command: 'resolve-dropped-conflict' });
       // Choosing an old copy does not approve publishing a previously rejected
       // promotion. Keep its saved text durable until a fresh explicit save.
       if (observed.operationId) await this.update((state, room) => {
         const pending = room.outbox.find(item => item.id === observed.operationId);
         if (pending) pending.status = 'needs_candidate_review';
-      }, {}, epoch);
+      }, { records: this.records('require-dropped-review', [filepath], [observed.operationId]) }, epoch);
       await this.deliverDropped(workspace, [chosen], epoch);
       this.lastDroppedSync = 0; await this.retry();
       return { status: this.droppedConflicts[filepath] ? 'conflict' : this.lastError ? 'pending' : 'resolved' };
@@ -784,9 +889,10 @@
       if (!force && !this.pendingDropped && !Object.keys(this.droppedConflicts).length && Date.now() - this.lastDroppedSync < 20000) return;
       const identity = copy(this.room()?.identity);
       if (!identity) return;
-      let workspace = await this.store.getWorkspace(this.workspaceScope(identity));
+      let workspace = await this.readWorkspace(identity, undefined);
       if (!this.current(epoch)) throw staleError();
       if (!workspace || (workspace.sourceHash && workspace.sourceHash !== identity.sourceHash)) return;
+      workspace = this.mergeDroppedWorkspace(workspace);
       this.droppedConflicts = copy(workspace.droppedConflicts?.[identity.language] || {});
       const pending = (workspace.droppedOutbox || []).filter(operation => !operation.conflict && operation.candidate?.game === identity.game
         && (operation.candidate?.branchId || 'default') === (identity.branchId || 'default')
@@ -899,7 +1005,8 @@
               current.sequence = event.sequence;
             }
             this.rebuild(current);
-          }, { projectWorkspace: this.projection(changed, epoch) }, epoch);
+          }, { records: this.records('remote-events', changed.map(file => file.filepath)),
+            projectWorkspace: this.projection(changed, epoch) }, epoch);
           await this.onRemote(this.remoteFiles(changed));
           if (!this.current(epoch)) throw staleError();
         }
@@ -933,6 +1040,8 @@
     async finishPlaceholderRepairs(completions, epoch, localIds = []) {
       if (!completions.length && !localIds.length) return;
       let completed = [], files = [];
+      const paths = completions.flatMap(item => [item.repair.filepath, ...item.files.map(file => file.filepath)]);
+      for (const repair of this.room().placeholderRepairs || []) if (localIds.includes(repair.id)) paths.push(repair.filepath);
       await this.update((state, room) => {
         // Recheck the durable snapshot: a worker or another tab may have saved
         // an explicit translation after the read-only refresh.
@@ -957,7 +1066,7 @@
         const finished = new Set(completed.map(item => item.repair.id));
         room.placeholderRepairs = (room.placeholderRepairs || []).filter(repair => !finished.has(repair.id));
         this.rebuild(room);
-      }, { projectWorkspace: (workspace, state) => {
+      }, { records: this.records('finish-placeholder-repairs', paths), projectWorkspace: (workspace, state) => {
         if (!completed.length) return undefined;
         const projected = this.projection(files, epoch)(workspace, state);
         for (const item of completed) if (projected?.placeholderRepairArchive?.[item.repair.id]) {
@@ -974,7 +1083,8 @@
       if (!this.room().placeholderRepairs?.length) return;
       // Refresh once without rewriting the full collaboration cache. Migration
       // can queue thousands of local-only repairs, all committed in one batch.
-      await this.withLocalWrite(() => this.refreshStored(epoch));
+      await this.withLocalWrite(() => this.refreshStored(epoch, this.records('refresh-placeholder-repairs',
+        this.room().placeholderRepairs.map(repair => repair.filepath))));
       const ids = (this.room().placeholderRepairs || []).map(item => item.id);
       let index = this.placeholderRepairIndex(this.room());
       const local = ids.filter(id => this.localPlaceholderRepair(index.room, index.byId.get(id), index.blocked));
@@ -1037,7 +1147,7 @@
         if (['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) || paths.some(path => blocked.has(path))) {
           if (!['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) && !op.blockedByConflict) await this.update((state, room) => {
             room.outbox.find(item => item.id === id).blockedByConflict = true;
-          }, {}, epoch);
+          }, { records: this.records('block-operation', paths, [id]) }, epoch);
           paths.forEach(path => blocked.add(path)); continue;
         }
         for (let attempt = 0; attempt < 4; attempt++) {
@@ -1065,7 +1175,8 @@
               // A mutation reply may skip commits by other users, so do not advance
               // the replay cursor here. Only ordered catch-up events can do that.
               this.rebuild(room);
-            }, { projectWorkspace: this.projection(accepted, epoch) }, epoch);
+            }, { records: this.records('acknowledge-operation', accepted.map(file => file.filepath), [id],
+              { includeDropped: !!current.promoteDropped }), projectWorkspace: this.projection(accepted, epoch) }, epoch);
             if (result.candidate) await this.receiveDropped([result.candidate], epoch);
             await this.onRemote(this.remoteFiles(accepted));
             if (!this.current(epoch)) throw staleError();
@@ -1086,7 +1197,8 @@
               const pending = room.outbox.find(item => item.id === id);
               if (pending) { delete pending.wire; delete pending.upload; }
               this.rebuild(room);
-            }, { projectWorkspace: this.projection(latest.files, epoch) }, epoch);
+            }, { records: this.records('revision-conflict', latest.files.map(file => file.filepath), [id]),
+              projectWorkspace: this.projection(latest.files, epoch) }, epoch);
             if (attempt === 3) this.schedule();
           } finally {
             if (epoch === this.epoch) this.onWork({ key: 'upload', active: false });
@@ -1095,13 +1207,22 @@
       }
     }
     async prepare(id, epoch) {
-      const workspace = this.store.getWorkspace ? await this.store.getWorkspace(this.workspaceScope(this.room()?.identity)) : null;
-      if (!this.current(epoch)) throw staleError();
+      if (this.store.getCollaborationRecords) await this.withLocalWrite(() => this.refreshStored(epoch,
+        this.records('read-operation', this.room().outbox.find(op => op.id === id)?.files.map(entry => entry.yours.filepath) || [], [id])));
       const observed = this.room().outbox.find(op => op.id === id);
+      // Prepared requests are immutable retry payloads. Reusing one requires
+      // neither a workspace read nor another IndexedDB write.
+      if (!observed || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(observed.status)) return;
+      if (observed.wire && !observed.promoteDropped) return;
+      const paths = observed.files.map(entry => entry.yours.filepath);
+      const workspace = observed.promoteDropped ? await this.readWorkspace(this.room()?.identity, paths) : null;
+      if (!this.current(epoch)) throw staleError();
       const existingConflict = observed?.promoteDropped && workspace?.droppedConflicts?.[this.room().identity.language]?.[observed.files[0].yours.filepath];
       if (existingConflict && !['candidate_conflict', 'needs_candidate_review'].includes(observed.status)) {
         await this.retainDroppedConflict({ current: existingConflict.shared }, observed, 'promotion', epoch); return;
       }
+      const observedAlias = workspace?.droppedAliases?.[observed.promoteDropped?.id];
+      if (observed.wire && !(observedAlias?.requiresReview && observedAlias.fromRevision === Number(observed.promoteDropped?.revision || 0))) return;
       await this.update((state, room) => {
         const op = room.outbox.find(item => item.id === id);
         if (!op || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status)) return;
@@ -1147,7 +1268,8 @@
             origin: op.historyOrigin || (op.origin === 'save' && incorporatedRemoteEntries ? 'merge' : op.origin), files,
             ...(promotion ? { promoteDropped: { ...copy(promotion), targetSourceHash: room.identity.sourceHash } } : {}) };
         }
-      }, this.store.updateWorkspace ? { projectWorkspace: (latest, state) => {
+      }, { records: this.records('prepare-operation', paths, [id], { includeDropped: !!observed.promoteDropped }),
+        ...(observed.promoteDropped && this.store.updateWorkspace ? { projectWorkspace: (latest, state) => {
         const room = state.rooms[this.key];
         if (!this.current(epoch) || !latest || latest.sourceHash !== room.identity.sourceHash
           || (latest.collaborationAccountId && String(latest.collaborationAccountId) !== room.identity.accountId)) throw staleError();
@@ -1162,7 +1284,7 @@
             : { ...copy(op.promoteDropped), targetSourceHash: room.identity.sourceHash };
         }
         return latest;
-      } } : {}, epoch);
+      } } : {}) }, epoch);
     }
     async sendMutation(op, epoch) {
       const path = '/rooms/' + encodeURIComponent(this.room().roomId);
@@ -1180,15 +1302,18 @@
         const ticket = await this.api(path + '/uploads', { method: 'POST', body: { mutationId: op.id, origin: op.wire.origin, fileCount: op.wire.files.length,
           ...(op.wire.promoteDropped ? { promoteDropped: copy(op.wire.promoteDropped) } : {}) } }, epoch);
         upload = { id: ticket.uploadId || ticket.id, expiresAt: ticket.expiresAt };
-        await this.update((state, room) => { room.outbox.find(item => item.id === op.id).upload = copy(upload); }, {}, epoch);
+        await this.update((state, room) => { room.outbox.find(item => item.id === op.id).upload = copy(upload); },
+          { records: this.records('prepare-upload', op.files.map(entry => entry.yours.filepath), [op.id]) }, epoch);
       }
       if (!upload.complete) {
         try { await this.uploadFiles(upload.id, op.wire.files, epoch); }
         catch (error) {
-          if (error.code === 'UPLOAD_EXPIRED') await this.update((state, room) => { delete room.outbox.find(item => item.id === op.id).upload; }, {}, epoch);
+          if (error.code === 'UPLOAD_EXPIRED') await this.update((state, room) => { delete room.outbox.find(item => item.id === op.id).upload; },
+            { records: this.records('expire-upload', op.files.map(entry => entry.yours.filepath), [op.id]) }, epoch);
           throw error;
         }
-        await this.update((state, room) => { room.outbox.find(item => item.id === op.id).upload.complete = true; }, {}, epoch);
+        await this.update((state, room) => { room.outbox.find(item => item.id === op.id).upload.complete = true; },
+          { records: this.records('complete-upload', op.files.map(entry => entry.yours.filepath), [op.id]) }, epoch);
       }
       return this.api('/uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST' }, epoch);
     }
@@ -1253,7 +1378,8 @@
         } else room.conflicts = room.conflicts.filter(item => item.id !== conflictId);
         op.status = room.conflicts.some(item => item.mutationId === op.id) ? 'conflict' : 'pending';
         this.rebuild(room);
-      }, { projectWorkspace: this.projection([chosen], epoch), revisions: [{ filepath: chosen.filepath,
+      }, { records: this.records('resolve-conflict', [chosen.filepath], [observed.mutationId]),
+        projectWorkspace: this.projection([chosen], epoch), revisions: [{ filepath: chosen.filepath,
         lang: this.room().identity.language, sourceHash: this.room().identity.sourceHash,
         collaborationAccountId: this.room().identity.accountId, savedAt: Date.now(),
         note: 'Resolve shared translation conflict', translations: copy(chosen.translations),
@@ -1395,7 +1521,7 @@
       this.claims.clear(); this.connected = false; this.peers = []; this.sessionId = null; this.notify();
     }
     disconnect() {
-      this.droppedConflicts = {}; this.lastDroppedSync = 0; this.pendingDropped = false;
+      this.droppedConflicts = {}; this.droppedWorkspace = null; this.lastDroppedSync = 0; this.pendingDropped = false;
       this.epoch++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
       this.onWork({ key: 'upload', active: false });

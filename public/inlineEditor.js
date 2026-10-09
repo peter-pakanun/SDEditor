@@ -95,7 +95,11 @@
     },
     methods: {
       editorDraftScope(filepath = this.editorCurrentEditingDesc?.filepath) {
-        return { profile: this._cloud?.context?.().profile || this.cloudProfileId || this.cloudUser?.id || 'guest',
+        // Settings can select a language before the cloud profile has finished
+        // loading. Its context accessor requires initialized state.
+        const cloud = this._cloud;
+        const profile = cloud && (!Object.hasOwn(cloud, 'state') || cloud.state) ? cloud.context?.()?.profile : null;
+        return { profile: profile || this.cloudProfileId || this.cloudUser?.id || 'guest',
           game: this.gameVersion, branchId: this.branchId || 'default', sourceHash: this.sourceIdentity || (this.testMode ? 'test-source' : ''), language: this.lang, filepath };
       },
       editorDraftKey(scope) {
@@ -206,7 +210,7 @@
         const existing = request.draftLoaded ? request.draftRecord : this.inlineDraftRows[scope.filepath];
         const base = copy(existing?.base || this._editorCollabBase || this.collaborationFile?.(request.desc) || { translations: request.desc.translations[this.lang] || [] });
         this._draftSession = { scope, key, record: existing?.state === 'active' ? copy(existing) : null,
-          expectedRevision: existing?.revision || null, base,
+          id: existing?.id || uuid(), expectedRevision: existing?.revision || null, base,
           source: copy(this.workspaceSourceFile?.(scope.filepath) || request.desc), declined: existing?.declined || '',
           original: (request.desc.translations[this.lang] || []).map(String), pendingRecord: null, detached: false };
         this._retainedDraftSessions ||= new Map();
@@ -252,9 +256,12 @@
           && (session.declined || '') === (previousRecord?.declined || '') && !session.writeError && !session.resolveConflicts) {
           await session.write; return !session.writeError;
         }
-        const record = { ...session.scope, key: session.key, id: session.record?.id || session.pendingRecord?.id || uuid(), revision: uuid(),
+        const submissionJobIds = [...new Set([session.record?.submissionJobId, ...(session.record?.submissionJobIds || []),
+          session.acknowledgedRecord?.submissionJobId, ...(session.acknowledgedRecord?.submissionJobIds || [])].filter(Boolean))];
+        const record = { ...session.scope, key: session.key, id: session.id ||= session.record?.id || session.pendingRecord?.id || uuid(), revision: uuid(),
           state: 'active', translations: copy(lines), base: copy(session.base), source: copy(session.source),
-          declined: session.declined || '', updatedAt: Date.now(), conflicts: [] };
+          declined: session.declined || '', updatedAt: Date.now(), conflicts: [],
+          ...(submissionJobIds.length ? { submissionJobIds } : {}) };
         session.pendingRecord = record;
         if (this.draftScopeCurrent(session.scope)) this.inlineDraftRows = { ...this.inlineDraftRows, [record.filepath]: record };
         this.draftWritePending++;
@@ -342,6 +349,11 @@
         const session = this._draftSession;
         if (!session || session.detached || this.editorLoading || this.editorLoadError || this.editorCompareActive) return true;
         const lines = this.serializeEditorTranslations();
+        // A durable submission already protects this exact text. Recovery
+        // checkpoints continue for newer typing and for an explicit failed save.
+        if (!force && session.submission && equal(lines, session.submission.translations)) {
+          await session.write; return !session.writeError;
+        }
         return this.writeEditorDraft(session, lines, force);
       },
       detachEditorSessionForScopeChange() {
@@ -548,8 +560,12 @@
         const current = () => this._draftSession === session && this._editorOpenRun === run && (!session || this.draftScopeCurrent(session.scope));
         this._inlineFinishing = (async () => {
           try {
-            if (!await this.flushEditorDraft() || !current()) return false;
-            if (promote && session?.record && !session.conflict) await this.editorSave({ close: false, automatic: true });
+            if (promote && session && !session.conflict && this.inlineDraftHasChanges) {
+              // A valid inline transition goes directly to the durable save
+              // journal. Invalid or declined work gets its recovery checkpoint
+              // from the shared save guards instead.
+              await this.editorSave({ close: false, automatic: true });
+            } else if (!await this.flushEditorDraft() || !current()) return false;
             if (!current() || !await this.flushEditorDraft() || !current()) return false;
             if (this.inlineDraftError) return false;
             this.inlineActive = false; this.closeHlPopup(); this._collaboration?.leaveEdit(); this.endDictionaryEdit();
@@ -696,6 +712,7 @@
       },
       async editorDraftCommitted(session, submitted, ack, accepted) {
         if (!session) return;
+        if (session.submission && equal(session.submission.translations, submitted)) session.submission = null;
         const committedBase = copy(accepted || this._editorCollabBase || { translations: submitted });
         // Drain writes captured during the worker transaction before reading its consumed revision.
         let pending;

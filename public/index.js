@@ -1247,6 +1247,7 @@ const config = Vue.defineComponent({
         if (!desc) throw new Error('Could not prepare the stored source.');
         const state = window.WorkspaceState.workspaceFile(workspace, this.workspaceSourceFile(desc.filepath) || desc, language);
         desc.translations ||= { English: [] };
+        desc.isDNT = window.StatDescCodec.computeIsDNT(desc.translations.English);
         desc.translations[language] = [...state.translations];
         desc.hasChanges = state.hasChanges;
         desc.isRevised = state.isRevised;
@@ -1667,11 +1668,11 @@ const config = Vue.defineComponent({
             return workspace;
           };
           const workspace = !this.testMode && window.OfflineStore.updateWorkspace
-            ? await window.OfflineStore.updateWorkspace(discard, context.game)
+            ? await window.OfflineStore.updateWorkspace(discard, context.game, { filepaths: [desc.filepath] })
             : discard(this.toPlainForStorage(this.localDescs));
           if (!this.testMode && !window.OfflineStore.updateWorkspace) await window.OfflineStore.saveWorkspaceWithRevisions(workspace, [], context.game);
           if (!this.collaborationContextCurrent(context)) return;
-          this.localDescs = workspace;
+          this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, workspace) || workspace;
         }
         if (!this.collaborationContextCurrent(context)) return;
         this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
@@ -5115,8 +5116,7 @@ const config = Vue.defineComponent({
           if (selected.variables) desc.variables = selected.variables.slice();
           if (selected.remarks) desc.remarks = selected.remarks.slice();
           desc.duplicateLangEntries = (desc.duplicateLangEntries || []).filter(entry => entry.lang !== 'English');
-          const firstLine = String(desc.translations.English?.[0] || '');
-          desc.isDNT = firstLine.indexOf('[DNT') === 0 || firstLine.indexOf('DNT ') === 0;
+          desc.isDNT = window.StatDescCodec.computeIsDNT(desc.translations.English);
         }
         const engLen = Array.isArray(desc?.translations?.English) ? desc.translations.English.length : 0;
         const trLines = Array.isArray(desc?.translations?.[this.lang]) ? desc.translations[this.lang] : [];
@@ -5617,6 +5617,7 @@ const config = Vue.defineComponent({
       for (const desc of this.descs || []) {
         const state = window.WorkspaceState.workspaceFile(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc, this.lang);
         if (!desc.translations) desc.translations = { English: [] };
+        desc.isDNT = window.StatDescCodec.computeIsDNT(desc.translations.English);
         desc.translations[this.lang] = [...state.translations];
         desc.hasChanges = state.hasChanges;
         desc.isRevised = state.isRevised;
@@ -6455,7 +6456,12 @@ const config = Vue.defineComponent({
         const blocksAtSave = this.editorBlocks, baseAtSave = this._editorCollabBase;
         const englishAtSave = JSON.stringify(desc.translations.English);
         const session = this._draftSession;
-        if (this.flushEditorDraft && !await this.flushEditorDraft({ force: true })) return false;
+        // Save journals validated text directly. Only finish a checkpoint write
+        // that already started; creating another checkpoint would duplicate this
+        // submission and delay moving to the next file.
+        clearTimeout(this._draftTimer); this._draftTimer = null;
+        if (session?.write) await session.write;
+        if (session?.writeError && this.flushEditorDraft && !await this.flushEditorDraft({ force: true })) return false;
         if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocksAtSave
           || !this.collaborationContextCurrent(context) || (session && session !== this._draftSession)
           || !arrayEquals(draftAtSave, this.editorBlocks.map(block => block?.translation ?? ''))) return false;
@@ -6472,6 +6478,7 @@ const config = Vue.defineComponent({
           ...findings.confirmations.slice(findings.warnings.length ? 1 : 0).map(message => ({ level: 'warning', message })),
         ] };
         if (findings.errors.length) {
+          if (this.flushEditorDraft && !await this.flushEditorDraft({ force: true })) return false;
           if (!automatic) await this.appAlert('Translation errors found. Please fix them before saving.\n\n' + this.formatDiagnosticsForDisplay(findings.errors, 12));
           return false;
         }
@@ -6479,10 +6486,13 @@ const config = Vue.defineComponent({
         const fingerprint = JSON.stringify([newTranslations, confirmation]);
         if (confirmation) {
           if (automatic && session?.declined === fingerprint) return false;
+          // Until the user accepts a warning this remains unfinished work;
+          // retain its captured text before an asynchronous confirmation.
+          if (this.flushEditorDraft && !await this.flushEditorDraft({ force: true })) return false;
           if (!await this.appConfirm(confirmation + '\n\nDo you want to save anyway?')) {
             if (session && this._draftSession === session && this.collaborationContextCurrent(context)) {
               session.declined = fingerprint;
-              await this.flushEditorDraft?.();
+              await this.flushEditorDraft?.({ force: true });
             }
             return false;
           }
@@ -6496,7 +6506,7 @@ const config = Vue.defineComponent({
           return false;
         }
         const record = session?.record;
-        const deferCommit = !!record && !this.testMode && defer && !!this.initializePendingSaves?.();
+        const deferCommit = !this.testMode && defer && !!this.initializePendingSaves?.();
         const completeDeferredSave = async ack => {
           if (!this.collaborationContextCurrent(context)) return;
           const accepted = context.client?.fileBase(desc.filepath) || this.collaborationFile(desc);
@@ -6511,21 +6521,33 @@ const config = Vue.defineComponent({
         };
         const rejectDeferredSave = error => {
           if (!this.collaborationContextCurrent(context)) return;
-          const message = desc.filepath + ': ' + (error.draftReview ? error.message
+          const message = desc.filepath + ': ' + (error.code === 'DROPPED_PROMOTION_CHANGED'
+            ? error.message + ' Open the full editor to review the current Dropped translation before saving again.'
+            : error.draftReview ? error.message
             : 'The committed translation or local draft changed. Open Local drafts to compare and review before saving.');
           if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings,
             [desc.filepath]: [{ level: 'error', message, deferredSave: true }] };
         };
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
-          context, close, bases: baseAtSave ? { [desc.filepath]: baseAtSave } : undefined,
+          context, close, bases: { [desc.filepath]: this.toPlainForStorage(baseAtSave || session?.base || this.collaborationFile(desc)) },
           promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,
           inline: !!this.inlineActive,
-          ...(record && !this.testMode ? { draft: { key: record.key, id: record.id, revision: record.revision, base: record.base }, awaitDurable: true } : {}),
+          awaitDurable: true,
+          ...(record && !this.testMode ? { draft: { key: record.key, id: record.id, revision: record.revision, base: record.base,
+            ...(record.submissionJobId ? { submissionJobId: record.submissionJobId } : {}),
+            ...(record.submissionJobIds?.length ? { submissionJobIds: [...record.submissionJobIds] } : {}) } } : {}),
+          ...(session && !this.testMode ? { checkpoint: { key: session.key, revision: session.expectedRevision || null,
+            ...(session.id || record?.id ? { id: session.id || record.id } : {}) } } : {}),
           ...(deferCommit ? { deferCommit: true, onCommitted: completeDeferredSave, onRejected: rejectDeferredSave } : {}),
         });
         if (result.stale || result.status === 'conflict') return false;
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
         if (deferCommit && result.status === 'queued') {
+          if (session) session.submission = { jobId: result.jobId, translations: [...newTranslations] };
+          if (!arrayEquals(draftAtSave, this.editorBlocks.map(block => block?.translation ?? ''))) {
+            await this.flushEditorDraft?.({ force: true });
+            return false;
+          }
           this.closeHlPopup();
           if (close) {
             this.editorVisible = false; this.inlineActive = false; this._draftSession = null;
@@ -6549,6 +6571,8 @@ const config = Vue.defineComponent({
         }
         return true;
       } catch (error) {
+        if (!this.collaborationContextCurrent(saveContext) || this._editorSaveToken !== saveToken) return false;
+        await this.flushEditorDraft?.({ force: true });
         if (!this.collaborationContextCurrent(saveContext) || this._editorSaveToken !== saveToken) return false;
         const review = ['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(error.code);
         const message = error.draftReview ? error.message : review ? 'The committed translation or local draft changed. Open Local drafts to compare and review before saving.'

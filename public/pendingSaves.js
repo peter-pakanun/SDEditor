@@ -8,6 +8,9 @@
 
   const plain = value => JSON.parse(JSON.stringify(value));
   const asError = value => value instanceof Error ? value : new Error(value?.message || String(value));
+  const reviewCodes = new Set(['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT', 'SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED',
+    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']);
+  const requiresReview = error => reviewCodes.has(error?.code) && !error?.durableUnknown;
   let fallbackId = 0;
   function scopeKey(batch) {
     const branch = batch.workspaceScope?.branchId || batch.branchId || 'default';
@@ -145,6 +148,12 @@
       notify(); settle(); schedule();
       return true;
     }
+    function discardRejectedSubmission(id) {
+      const index = jobs.findIndex(job => job.id === id), job = jobs[index];
+      if (!job || !job.journaled || job.durable || job.status !== 'failed' || !requiresReview(job.error)) return false;
+      // The durable journal now retains this command for explicit review.
+      jobs.splice(index, 1); notify(); settle(); schedule(); return true;
+    }
     function discardRejectedReset(id) {
       const index = jobs.findIndex(job => job.id === id);
       const job = jobs[index];
@@ -173,8 +182,8 @@
       const error = new Error('The local save queue is closed.');
       for (const waiter of waiters.splice(0)) waiter.reject(error);
     }
-    return { enqueue, retry, drain, hold, discardRejectedDraft, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
+    return { enqueue, retry, drain, hold, discardRejectedDraft, discardRejectedSubmission, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
   }
 
-  return { create, scopeKey };
+  return { create, scopeKey, requiresReview };
 });

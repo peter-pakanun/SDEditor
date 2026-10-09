@@ -141,7 +141,7 @@
                 <select id="uiDensity" v-model="uiDensity"><option value="compact">Compact</option><option value="spacious">Spacious</option></select>
               </div>
             </div>
-            <label class="settingsToggle" for="hideDNT"><input type="checkbox" id="hideDNT" v-model="hideDNT"><span><strong>Hide DNT entries</strong><small>Hide descriptions marked as do not translate.</small></span></label>
+            <label class="settingsToggle" for="hideDNT"><input type="checkbox" id="hideDNT" v-model="hideDNT"><span><strong>Hide DNT entries</strong><small>Hide a file when any English block is marked as do not translate.</small></span></label>
           </section>
           <section id="settings-panel-editor" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-editor" v-show="settingsTab === 'editor'" tabindex="0">
             <label class="settingsToggle" for="inlineEditor"><input type="checkbox" id="inlineEditor" v-model="inlineEditor"><span><strong>Inline editor</strong><small>Edit the focused file in the workspace. Press Enter on a file row to open the full editor.</small></span></label>
@@ -1436,6 +1436,8 @@
   <script src="editorDictionaryIndex.js"></script>
   <script src="translationDiagnostics.js"></script>
   <script src="terminologyDiagnostics.js"></script>
+  <script src="normalizedStore.js"></script>
+  <script src="normalizedRooms.js"></script>
   <script src="offlineStore.js"></script>
   <script src="saveWorkerClient.js"></script>
   <script src="pendingSaves.js"></script>
