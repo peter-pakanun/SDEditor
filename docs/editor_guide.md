@@ -117,6 +117,8 @@ With the file table or an inline translation field focused, **Ctrl + Up Arrow** 
 
 Inside an inline translation field, **Tab** moves to the next translation field, including each table column, then opens the next file at its first translation. **Shift + Tab** moves backward and opens the previous file at its last translation. File transitions follow the same sort, filters, page boundaries, occupied-file skipping and save checks as **Ctrl + Up/Down**, and stop at the ends of the list. Moving between fields in the same file keeps its draft active. Tab navigation in the full editor and file tools keeps its normal browser behavior.
 
+Press **Ctrl + Enter** in an inline translation field to open the full editor with the same draft and focus the same block and table column.
+
 The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **Lookup**, **Preview**, and **Comments**. Dictionary and Lookup are available before opening a file. After focus leaves an editor, the sidebar retains the last file's matches, preview and comments until another file opens or the account, game, source version, branch or language changes. It fills the space between the header and bottom status bar and stays in view while the main scrollbar moves the table. Dictionary matches remain first, Lookup reads committed references, and Preview follows the active draft with frames filling the available width. Clicking anywhere inside the sidebar keeps inline editing active. The right-sidebar icon in the header hides or shows file tools to give the table more room. File selection and editing indicators continue to show other online collaborators.
 
 Typing is retained as a **Local draft** in this browser, separately from staged translations. The inline draft label and **Stage draft** / **Discard draft** controls appear below the translation; errors and warnings stay in the filename column. **Stage draft** appears only when the editor text differs from this file's committed translation: its staged text when available, otherwise its original ZIP text. Opening an untouched row, including a blank translation, does not show it. Reverting all fields to the committed text clears the local draft, including when the translation was originally empty. Competing copies from other tabs still require review. Drafts keep their account/profile, game, source version, language and file identity. They do not enter translated ZIPs, change Saved/Missing/Revised counts or synchronize to other translators. Closing the full editor also keeps its draft. Use **Drafts** to review preserved drafts, including copies from other source versions, or explicitly discard a draft.
@@ -368,6 +370,7 @@ See [Regex Guide](regex_guide.md) for detailed information on how to use Regex r
 | Ctrl + S           | Save; open next file when enabled in settings |
 | Ctrl + Up / Down   | Previous / next file from the table or inline translation text |
 | Tab / Shift + Tab  | Next / previous translation field, continuing across files (inline only) |
+| Ctrl + Enter       | Open full editor at the current translation field (inline only) |
 | Escape             | Close the file, retaining its local draft     |
 | Alt + 1-9 / 0      | Insert highlighted item #1-#10 from English  |
 ```

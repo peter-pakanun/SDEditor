@@ -1885,6 +1885,16 @@ async function dispatchInlineTab(editor, event, index = 0, column = 0) {
   } finally { editor.moveInlineTranslation = navigate; }
 }
 
+async function dispatchInlineFullEditorShortcut(editor, event, index = 0, column = 0) {
+  const open = editor.openInlineFullEditor;
+  let pending;
+  editor.openInlineFullEditor = function (...args) { return pending = open.apply(this, args); };
+  try {
+    editor.translationKeydown(event, index, column);
+    return pending ? await pending : undefined;
+  } finally { editor.openInlineFullEditor = open; }
+}
+
 async function inlineNavigationHarness({ current = 'first', table = false } = {}) {
   const h = harness(), { editor, calls } = h;
   h.rows = [description('first'), description('second'), description('third')];
@@ -2275,6 +2285,139 @@ test('inline Tab retains current text and focus when its recovery checkpoint can
   assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath); assert.equal(editor.inlineActive, true);
   assert.equal(editor.editorBlocks[0].translation, 'retain this failing Tab draft'); assert.match(editor.inlineDraftError, /Quota exceeded/);
   assert.equal(calls.translationFocus.length, 0); assert.equal(calls.promotions.length, 0);
+});
+
+for (const table of [false, true]) test(`inline Ctrl+Enter opens the full editor on the same ${table ? 'table column' : 'translation block'} and shares its unsaved draft`, async () => {
+  const { editor, desc, calls, records } = harness();
+  desc.translations.English = ['First source', table ? 'Left source@Middle source@Right source' : 'Second source\\nline'];
+  desc.translations.Thai = ['first', table ? 'left@middle@right' : 'second\\nline'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  await editor.activateInlineRow(desc.filepath);
+  const blocks = editor.editorBlocks, session = editor._draftSession, column = table ? 2 : 0, focus = [];
+  const field = table ? blocks[1].tableColumns[column] : blocks[1];
+  field.translation = 'not staged before opening full editor';
+  editor.editorFocusedIndex = 0; editor.editorFocusedColumnIndex = 0;
+  editor.getEditorRef = (...args) => ({ focus() { focus.push(args); editor.setEditorFocus(args[1], args[2]); } });
+  editor.hlPopup.visible = true; editor.hlPopup.filter = 'inline autocomplete';
+  editor.hlPopupCtrlEnterAction = () => assert.fail('Ctrl+Enter on translation text must not perform a Dictionary action');
+  const event = inlineArrowEvent(desc.filepath, { key: 'Enter', code: 'Enter' });
+  assert.equal(await dispatchInlineFullEditorShortcut(editor, event, 1, column), true);
+  await tick(); editor.handleKeydown(event);
+  assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+  assert.equal(editor.inlineActive, false); assert.equal(editor.editorVisible, true);
+  assert.equal(editor.editorCurrentEditingDesc, desc); assert.equal(editor.editorBlocks, blocks); assert.equal(editor._draftSession, session);
+  assert.equal(editor.hlPopup.visible, false); assert.equal(field.translation, 'not staged before opening full editor');
+  assert.deepEqual(focus, [['translation', 1, table ? column : null]]);
+  assert.equal(editor.editorFocusedIndex, 1); assert.equal(editor.editorFocusedColumnIndex, column);
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.writes.length, 1);
+  assert.equal(records.get(session.key).state, 'active');
+  assert.deepEqual(desc.translations.Thai, ['first', table ? 'left@middle@right' : 'second\\nline']);
+});
+
+test('inline Ctrl+Enter preserves the requested block and column when focus changes during draft flushing', async () => {
+  const { editor, desc } = harness(), gate = deferred(), focus = [];
+  desc.translations.English = ['First source', 'Left source@Right source'];
+  desc.translations.Thai = ['first', 'left@right']; editor._workspaceSourceBaseline = copy(editor.descs);
+  await editor.activateInlineRow(desc.filepath);
+  editor.flushEditorDraft = async () => { await gate.promise; return true; };
+  editor.getEditorRef = (...args) => ({ focus() { focus.push(args); } });
+  const opening = dispatchInlineFullEditorShortcut(editor, inlineArrowEvent(desc.filepath, { key: 'Enter' }), 1, 1);
+  await tick(); editor.setEditorFocus(0, 0); gate.resolve();
+  assert.equal(await opening, true); await tick();
+  assert.deepEqual(focus, [['translation', 1, 1]]);
+});
+
+test('inline Ctrl+Enter leaves plain Enter, modifiers, IME, unrelated controls and full-editor text alone', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.openInlineFullEditor = () => assert.fail('A native or unrelated key must not open the full editor');
+  for (const changes of [{ ctrlKey: false }, { shiftKey: true }, { altKey: true }, { metaKey: true },
+    { isComposing: true }, { keyCode: 229 }, { key: 'Home' },
+    { target: { tagName: 'INPUT', closest: () => null } },
+    { target: { tagName: 'INPUT', closest: () => ({ dataset: { filepath: 'test/other.txt' } }) } }]) {
+    const event = inlineArrowEvent(desc.filepath, { key: 'Enter', ...changes });
+    editor.translationKeydown(event, 0);
+    assert.equal(!!event.defaultPrevented, false); assert.equal(!!event.propagationStopped, false);
+  }
+  const prevented = inlineArrowEvent(desc.filepath, { key: 'Enter', defaultPrevented: true });
+  editor.translationKeydown(prevented, 0); assert.equal(!!prevented.propagationStopped, false);
+  editor.editorVisible = true;
+  const full = inlineArrowEvent(desc.filepath, { key: 'Enter' }); editor.translationKeydown(full, 0);
+  assert.equal(!!full.defaultPrevented, false); assert.equal(!!full.propagationStopped, false);
+});
+
+test('Ctrl+Enter from the autocomplete filter retains its Dictionary action', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  let dictionaryActions = 0;
+  editor.hlPopup.visible = true;
+  editor.hlPopupCtrlEnterAction = () => { dictionaryActions++; return true; };
+  editor.openInlineFullEditor = () => assert.fail('Autocomplete filter shortcuts must retain the current inline surface');
+  const event = inlineArrowEvent(desc.filepath, { key: 'Enter', code: 'Enter', target: { tagName: 'INPUT', closest: () => null } });
+  assert.equal(editor.inlineTranslationKeydown(event, 0), false);
+  editor.hlPopupFilterKeydown(event); editor.handleKeydown(event);
+  assert.equal(dictionaryActions, 1); assert.equal(event.defaultPrevented, true);
+  assert.equal(!!event.propagationStopped, false); assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+});
+
+test('inline Ctrl+Enter consumes busy and blocked states without opening or promoting', async () => {
+  const changes = [editor => { editor.editorSaving = true; }, editor => { editor.navigationBusy = true; },
+    editor => { editor.inlineTransitionBusy = true; }, editor => { editor._importingSource = true; },
+    editor => { editor.versionStorageLoading = true; }, editor => { editor.draftRecoveryVisible = true; },
+    editor => { editor.editorLoading = true; }, editor => { editor.editorLoadError = 'Load failed'; },
+    editor => { editor.collaborationConflictVisible = true; }, editor => { editor.importDialogVisible = true; },
+    editor => { editor.$refs.diagnosticScanDialog = { open: true }; },
+    editor => { Object.defineProperty(editor, 'editorTranslationReadOnly', { get: () => true }); }];
+  for (const change of changes) {
+    const { editor, desc, calls } = harness(); await editor.activateInlineRow(desc.filepath);
+    const session = editor._draftSession; editor.editorBlocks[0].translation = 'retain blocked inline draft'; change(editor);
+    editor.openInlineFullEditor = () => assert.fail('A blocked shortcut must not open the full editor');
+    const event = inlineArrowEvent(desc.filepath, { key: 'Enter' }); editor.translationKeydown(event, 0);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+    assert.equal(editor._draftSession, session); assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+    assert.equal(calls.promotions.length, 0); assert.equal(calls.focused, 0);
+  }
+});
+
+test('inline Ctrl+Enter retains the inline draft when its flush fails', async () => {
+  const { editor, desc, calls, store } = harness(); await editor.activateInlineRow(desc.filepath);
+  const session = editor._draftSession; editor.editorBlocks[0].translation = 'retain this unstored full-editor draft';
+  store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  const event = inlineArrowEvent(desc.filepath, { key: 'Enter' });
+  assert.equal(await dispatchInlineFullEditorShortcut(editor, event), false); await tick();
+  assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false); assert.equal(editor._draftSession, session);
+  assert.equal(editor.editorBlocks[0].translation, 'retain this unstored full-editor draft'); assert.match(editor.inlineDraftError, /Quota exceeded/);
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.focused, 0);
+});
+
+test('pending inline Ctrl+Enter cannot open or focus after its scope or editing session changes', async () => {
+  const changes = [editor => { editor.lang = 'German'; }, editor => { editor.sourceIdentity = 'another-source'; },
+    editor => { editor.branchId = 'another-branch'; }, editor => { editor._draftSession = { ...editor._draftSession }; },
+    editor => { editor.editorBlocks = editor.editorBlocks.slice(); }, editor => { editor._editorOpenRun++; },
+    editor => { editor._editorOpenCancelRevision = (editor._editorOpenCancelRevision || 0) + 1; },
+    editor => { editor.inlineActive = false; editor._draftSession = null; }];
+  for (const change of changes) {
+    const { editor, desc, calls } = harness(), gate = deferred(); await editor.activateInlineRow(desc.filepath);
+    editor.flushEditorDraft = async () => { await gate.promise; return true; };
+    const opening = dispatchInlineFullEditorShortcut(editor, inlineArrowEvent(desc.filepath, { key: 'Enter' }));
+    await tick(); change(editor); gate.resolve();
+    assert.equal(await opening, false); await tick();
+    assert.equal(editor.editorVisible, false); assert.equal(calls.focused, 0); assert.equal(calls.promotions.length, 0);
+  }
+});
+
+test('inline-to-full focus callbacks cannot focus after exit, scope changes or replacement sessions', async () => {
+  const changes = [async editor => { await editor.editorExit(); }, editor => { editor.lang = 'German'; },
+    editor => { editor.sourceIdentity = 'another-source'; }, editor => { editor._draftSession = { ...editor._draftSession }; },
+    editor => { editor.editorBlocks = editor.editorBlocks.slice(); }, editor => { editor._editorOpenRun++; }];
+  for (const change of changes) {
+    const { editor, desc, calls } = harness(), render = deferred(); await editor.activateInlineRow(desc.filepath);
+    editor.$nextTick = callback => render.promise.then(callback);
+    const opening = dispatchInlineFullEditorShortcut(editor, inlineArrowEvent(desc.filepath, { key: 'Enter' }));
+    await tick(); assert.equal(editor.editorVisible, true);
+    await change(editor); render.resolve(); await opening; await tick();
+    assert.equal(calls.focused, 0, 'A deferred handoff must not steal focus from another surface or session');
+    assert.equal(calls.promotions.length, 0);
+  }
 });
 
 test('inline row shortcuts leave ordinary arrows, IME, other modifiers, popup filters and full-editor text alone', async () => {

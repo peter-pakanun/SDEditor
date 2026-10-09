@@ -432,9 +432,17 @@
           || event.target?.closest?.('tr[data-filepath]')?.dataset.filepath !== this.editorCurrentEditingDesc?.filepath) return false;
         const tab = event.key === 'Tab' && !event.ctrlKey;
         const arrow = event.ctrlKey && !event.shiftKey && ['ArrowUp', 'ArrowDown'].includes(event.key);
-        if (!tab && !arrow) return false;
+        const fullEditor = event.ctrlKey && !event.shiftKey && event.key === 'Enter';
+        if (!tab && !arrow && !fullEditor) return false;
         event.preventDefault(); event.stopPropagation();
-        if (tab) this.moveInlineTranslation(event.shiftKey ? -1 : 1, index, column);
+        if (fullEditor) {
+          if (!this.inlineEditor || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
+            || this.editorTranslationReadOnly || this._importingSource || this.versionStorageLoading
+            || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return true;
+          this.closeHlPopup();
+          this.setEditorFocus(index, column);
+          this.openInlineFullEditor();
+        } else if (tab) this.moveInlineTranslation(event.shiftKey ? -1 : 1, index, column);
         else this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
         return true;
       },
@@ -611,7 +619,14 @@
         if (!filepath) return false;
         const scope = this.editorDraftScope(filepath);
         const context = this.captureCollaborationContext?.();
-        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context));
+        const cancelRevision = this._editorOpenCancelRevision || 0;
+        const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context))
+          && cancelRevision === (this._editorOpenCancelRevision || 0);
+        const handoff = this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError;
+        const desc = this.editorCurrentEditingDesc, blocks = this.editorBlocks, session = this._draftSession, run = this._editorOpenRun;
+        const focus = { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
+        const sameSession = () => this.editorCurrentEditingDesc === desc && this.editorBlocks === blocks
+          && this._draftSession === session && this._editorOpenRun === run;
         if (this.inlineTransitionBusy && this.editorCurrentEditingDesc?.filepath !== filepath) {
           // Preserve the full-surface intent while serialized row claims finish.
           this._inlineRequestedPath = filepath;
@@ -622,13 +637,20 @@
           }
         }
         if (!await this.flushEditorDraft()) return false;
-        if (!current()) return false;
+        if (!current() || (handoff && (!this.inlineActive || !sameSession()))) return false;
         if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError) {
+          const activeDesc = this.editorCurrentEditingDesc, activeBlocks = this.editorBlocks,
+            activeSession = this._draftSession, activeRun = this._editorOpenRun;
+          const targetFocus = handoff ? focus : { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
+          this.closeHlPopup();
           this.inlineActive = false; this.editorVisible = true; this._fileTableReturnFocus = true;
           if (this.sideTab === 'preview') this.sideTab = 'dictionary';
           const candidate = root.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
           this.editorDroppedCandidate = candidate ? copy(candidate) : null;
-          this.$nextTick(() => this.getEditorRef('translation', this.editorFocusedIndex || 0, this.editorBlocks[this.editorFocusedIndex || 0]?.isTable ? 0 : null)?.focus());
+          await this.$nextTick();
+          if (!current() || !this.editorVisible || this.inlineActive || this.editorCurrentEditingDesc !== activeDesc
+            || this.editorBlocks !== activeBlocks || this._draftSession !== activeSession || this._editorOpenRun !== activeRun) return false;
+          this.getEditorRef('translation', targetFocus.index, activeBlocks[targetFocus.index]?.isTable ? targetFocus.column : null)?.focus();
         } else if (await this.editFile(filepath, true) === false) return false;
         if (!current() || this.editorCurrentEditingDesc?.filepath !== filepath) return false;
         if (action === 'regex' || action === 'history') this.sideTab = action;
