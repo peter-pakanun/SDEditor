@@ -210,6 +210,17 @@
               <button @click.stop.prevent="startFromScratch">Start from scratch</button>
             </div>
           </section>
+          <section id="settings-panel-logs" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-logs" v-show="settingsTab === 'logs'" tabindex="0">
+            <h3>Workspace initialization</h3>
+            <p class="settingsHelp">View and copy the latest initialization activity from this tab, including completed steps and elapsed times. The log stays here until another initialization starts or the tab reloads.</p>
+            <template v-if="workspaceInitializationLogText">
+              <div class="settingsActions"><button @click="copyWorkspaceInitializationLog" :disabled="workspaceInitializationCopyBusy">{{ workspaceInitializationCopyBusy ? 'Copying…' : 'Copy log' }}</button></div>
+              <label class="srOnly" for="workspaceInitializationLogText">Workspace initialization log</label>
+              <textarea id="workspaceInitializationLogText" ref="workspaceInitializationLogText" class="settingsLogText" :value="workspaceInitializationLogText" readonly spellcheck="false" wrap="off"></textarea>
+              <p v-if="workspaceInitializationCopyMessage" class="settingsHelp" role="status">{{ workspaceInitializationCopyMessage }}</p>
+            </template>
+            <p v-else class="settingsNotice">No initialization activity has been recorded in this tab yet.</p>
+          </section>
         </div>
         <footer class="settingsFooter">
           <p v-if="settingsMessage" class="settingsMessage" role="alert">{{ settingsMessage }}</p>

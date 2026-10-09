@@ -35,7 +35,9 @@ Settings and Regex rules stay personal to each account. Dictionaries are shared 
 
 ### Settings
 
-Settings is organized into four tabs: **General** for game version, language, theme and density; **Editor & shortcuts** for preview behavior, highlighting and keyboard preferences; **Cloud backup** for account and shared Dictionary controls; and **Data** for importing/exporting settings and starting a workspace from scratch.
+Settings is organized into five tabs: **General** for game version, language, theme and density; **Editor & shortcuts** for preview behavior, highlighting and keyboard preferences; **Cloud backup** for account and shared Dictionary controls; **Data** for importing/exporting settings and starting a workspace from scratch; and **Logs** for viewing and copying the latest workspace initialization activity.
+
+**Logs → Copy log** copies the initialization steps, errors and elapsed times after loading finishes. You can also select the log text and copy it with your keyboard. The log remains available in this tab until the next initialization starts or the tab reloads.
 
 **Hide DNT entries** hides the entire file when any English block starts with `[DNT` or `DNT `, even if its first block has no marker. Hidden DNT files are also excluded from workload counters and manual diagnostic scans.
 

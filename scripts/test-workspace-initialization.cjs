@@ -8,7 +8,23 @@ const deferred = () => {
     return { promise, resolve, reject };
 };
 function app() {
-    return Object.assign(mixin.data(), mixin.methods);
+    const editor = Object.assign(mixin.data(), mixin.methods);
+    for (const [name, getter] of Object.entries(mixin.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+    return editor;
+}
+
+function clipboard(t, writeText) {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
+    t.after(() => original ? Object.defineProperty(globalThis, 'navigator', original) : delete globalThis.navigator);
+}
+
+function completedLog(editor, label = 'Opening selected version') {
+    const owner = editor.beginWorkspaceInitialization({ label });
+    const task = editor.beginWorkspaceInitializationTask('Restoring saved translations', owner);
+    editor.finishWorkspaceInitializationTask(task);
+    editor.finishWorkspaceInitialization(owner);
+    return editor.workspaceInitializationLogText;
 }
 
 test('nested preparation stays active until every owner finishes and retains completed work', async () => {
@@ -99,4 +115,77 @@ test('unmount stops timers and invalidates outstanding callbacks', () => {
     assert.equal(editor.workspaceInitializationActive, false);
     assert.equal(editor._workspaceInitializationTimer, null);
     assert.equal(editor.workspaceInitializationRows[0].status, 'cancelled');
+});
+
+test('the retained text includes total and per-step timings, outcomes and errors after preparation closes', () => {
+    const editor = app();
+    assert.equal(editor.workspaceInitializationLogText, '', 'No artificial log is shown before preparation.');
+    const owner = editor.beginWorkspaceInitialization({ label: 'Opening selected version' });
+    const done = editor.beginWorkspaceInitializationTask('Restoring saved translations', owner);
+    editor.finishWorkspaceInitializationTask(done);
+    const failure = editor.beginWorkspaceInitializationTask('Reading stored baseline', owner);
+    editor.finishWorkspaceInitializationTask(failure, { error: new Error('Stored baseline <unavailable>') });
+    editor.beginWorkspaceInitializationTask('Old source request', owner);
+    editor.finishWorkspaceInitialization(owner);
+    editor.workspaceInitializationStartedAt = 1000;
+    editor.workspaceInitializationNow = 4500;
+    editor.workspaceInitializationRows.forEach((row, index) => { row.startedAt = 1100; row.endedAt = [2100, 4300, 3300][index]; });
+    const text = editor.workspaceInitializationLogText;
+    assert.match(text, /Opening selected version/);
+    assert.match(text, /Total elapsed: \(3\.5s\)/);
+    assert.match(text, /Finished/);
+    assert.match(text, /Completed: Restoring saved translations \(1\.0s\)/);
+    assert.match(text, /Failed: Reading stored baseline \(3\.2s\)/);
+    assert(text.includes('Stored baseline <unavailable>'), 'The error message is retained verbatim for copying.');
+    assert.match(text, /Stopped: Old source request \(2\.2s\)/);
+    editor.disposeWorkspaceInitialization();
+    assert.equal(editor.workspaceInitializationLogText, text, 'Closing the completed preparation retains its final text and times.');
+});
+
+test('copy waits for clipboard acknowledgement, writes the complete retained text and prevents duplicate requests', async t => {
+    const editor = app(), text = completedLog(editor), gate = deferred(), copied = [];
+    clipboard(t, value => { copied.push(value); return gate.promise; });
+    const pending = editor.copyWorkspaceInitializationLog();
+    assert.equal(editor.workspaceInitializationCopyBusy, true);
+    assert.equal(editor.workspaceInitializationCopyMessage, '', 'Success is not shown while clipboard writing is unresolved.');
+    assert.equal(await editor.copyWorkspaceInitializationLog(), false, 'A repeated click does not duplicate pending clipboard writes.');
+    assert.deepEqual(copied, [text]);
+    gate.resolve();
+    assert.equal(await pending, true);
+    assert.equal(editor.workspaceInitializationCopyBusy, false);
+    assert.match(editor.workspaceInitializationCopyMessage, /copied/i);
+});
+
+test('rejected clipboard access selects the retained text for manual copying and keeps success absent', async t => {
+    const editor = app(); completedLog(editor);
+    const fallback = [];
+    editor.$refs = { workspaceInitializationLogText: { focus: () => fallback.push('focus'), select: () => fallback.push('select') } };
+    clipboard(t, async () => { throw new Error('Clipboard permission rejected'); });
+    editor.workspaceInitializationCopyMessage = 'Log copied.';
+    assert.equal(await editor.copyWorkspaceInitializationLog(), false);
+    assert.deepEqual(fallback, ['focus', 'select']);
+    assert.doesNotMatch(editor.workspaceInitializationCopyMessage, /copied/i);
+    assert.match(editor.workspaceInitializationCopyMessage, /Ctrl\+C/);
+    assert.equal(editor.workspaceInitializationCopyBusy, false);
+});
+
+test('a completed old clipboard request cannot publish a message or release a replacement request', async t => {
+    const writes = [];
+    clipboard(t, () => { const gate = deferred(); writes.push(gate); return gate.promise; });
+    for (const outcome of ['resolve', 'reject']) {
+        const editor = app(); completedLog(editor, 'Old version');
+        const fallback = [];
+        editor.$refs = { workspaceInitializationLogText: { focus: () => fallback.push('focus'), select: () => fallback.push('select') } };
+        const oldCopy = editor.copyWorkspaceInitializationLog(), oldGate = writes.at(-1);
+        completedLog(editor, 'New version');
+        const newCopy = editor.copyWorkspaceInitializationLog(), newGate = writes.at(-1);
+        oldGate[outcome](outcome === 'reject' ? new Error('Old permission request rejected') : undefined);
+        await oldCopy;
+        assert.equal(editor.workspaceInitializationCopyBusy, true, outcome + ': old completion does not release the new clipboard request.');
+        assert.equal(editor.workspaceInitializationCopyMessage, '', outcome + ': old completion does not publish a message for the new version.');
+        assert.deepEqual(fallback, [], outcome + ': old failure does not focus or select new text.');
+        newGate.resolve(); await newCopy;
+        assert.match(editor.workspaceInitializationCopyMessage, /copied/i);
+        assert.equal(editor.workspaceInitializationCopyBusy, false);
+    }
 });

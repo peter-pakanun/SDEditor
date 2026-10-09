@@ -9,11 +9,25 @@
     const mixin = {
         data() {
             return { workspaceInitializationActive: false, workspaceInitializationLabel: '',
-                workspaceInitializationRows: [], workspaceInitializationStartedAt: 0, workspaceInitializationNow: 0 };
+                workspaceInitializationRows: [], workspaceInitializationStartedAt: 0, workspaceInitializationNow: 0,
+                workspaceInitializationCopyBusy: false, workspaceInitializationCopyMessage: '' };
         },
         computed: {
             workspaceInitializationElapsed() {
                 return this.workspaceInitializationDuration(this.workspaceInitializationStartedAt, this.workspaceInitializationNow);
+            },
+            workspaceInitializationLogText() {
+                if (!this.workspaceInitializationRows.length) return '';
+                const statuses = { running: 'In progress', done: 'Completed', failed: 'Failed', cancelled: 'Stopped' };
+                const lines = ['Workspace initialization',
+                    this.workspaceInitializationLabel,
+                    'Total elapsed: ' + this.workspaceInitializationElapsed,
+                    this.workspaceInitializationActive ? 'In progress' : 'Finished', ''];
+                for (const row of this.workspaceInitializationRows) {
+                    lines.push(`${statuses[row.status] || row.status}: ${row.label} ${this.workspaceInitializationDuration(row.startedAt, row.endedAt)}`);
+                    if (row.error) lines.push('    ' + row.error);
+                }
+                return lines.join('\n');
             },
         },
         beforeUnmount() { this.disposeWorkspaceInitialization(); },
@@ -26,6 +40,9 @@
                     const startedAt = now();
                     run = this._workspaceInitializationRun = { owners: new Set(), work: new Map(), sequence: 0 };
                     this.workspaceInitializationRows = [];
+                    this.workspaceInitializationCopyMessage = '';
+                    this.workspaceInitializationCopyBusy = false;
+                    this._workspaceInitializationCopyRequest = null;
                     this.workspaceInitializationLabel = label;
                     this.workspaceInitializationStartedAt = startedAt;
                     this.workspaceInitializationNow = startedAt;
@@ -109,6 +126,34 @@
             },
             workspaceInitializationDuration(startedAt, endedAt) {
                 return '(' + (Math.max(0, (endedAt ?? this.workspaceInitializationNow) - startedAt) / 1000).toFixed(1) + 's)';
+            },
+            async copyWorkspaceInitializationLog() {
+                const text = this.workspaceInitializationLogText;
+                if (!text || this.workspaceInitializationCopyBusy) return false;
+                const request = this._workspaceInitializationCopyRequest = {};
+                const rows = this.workspaceInitializationRows;
+                const current = () => this._workspaceInitializationCopyRequest === request && this.workspaceInitializationRows === rows;
+                this.workspaceInitializationCopyBusy = true;
+                this.workspaceInitializationCopyMessage = '';
+                try {
+                    if (!root.navigator?.clipboard?.writeText) throw new Error('Clipboard unavailable');
+                    await root.navigator.clipboard.writeText(text);
+                    if (current()) this.workspaceInitializationCopyMessage = 'Log copied.';
+                    return true;
+                } catch (_) {
+                    if (current()) {
+                        const field = this.$refs?.workspaceInitializationLogText;
+                        field?.focus(); field?.select();
+                        field?.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+                        this.workspaceInitializationCopyMessage = 'Automatic copy is unavailable. Select the log and press Ctrl+C to copy.';
+                    }
+                    return false;
+                } finally {
+                    if (this._workspaceInitializationCopyRequest === request) {
+                        this.workspaceInitializationCopyBusy = false;
+                        this._workspaceInitializationCopyRequest = null;
+                    }
+                }
             },
             disposeWorkspaceInitialization() {
                 const run = this._workspaceInitializationRun;

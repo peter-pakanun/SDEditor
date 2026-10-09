@@ -179,6 +179,7 @@ const config = Vue.defineComponent({
         { id: 'editor', label: 'Editor & shortcuts' },
         { id: 'cloud', label: 'Cloud backup' },
         { id: 'data', label: 'Data' },
+        { id: 'logs', label: 'Logs' },
       ],
       settingsSaving: false,
       settingsMessage: '',

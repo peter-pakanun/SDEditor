@@ -120,6 +120,7 @@
 .settingsFooter p { margin: 0; font-size: 12px; }
 .settingsFooter button { flex: none; }
 .settingsMessage { color: var(--color-diagnostic-error-border); }
+.settingsLogText { display: block; width: 100%; height: clamp(180px, 40vh, 380px); box-sizing: border-box; resize: vertical; padding: 14px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--color-bg); color: var(--color-font); font: 13px/1.7 Consolas, "Cascadia Mono", "Courier New", monospace; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 640px) {
   .settingPage.settingsBackdrop { padding: 10px; }

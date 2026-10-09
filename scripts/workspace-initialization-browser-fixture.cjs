@@ -77,6 +77,100 @@ async function installHarness(page, mode = 'held') {
     }, mode);
 }
 
+async function checkRetainedSettingsLog(page, context, screenshots, results, layouts) {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('.workspace').getByRole('button', { name: 'Settings', exact: true }).click();
+    const logsTab = page.getByRole('tab', { name: 'Logs', exact: true });
+    await logsTab.click();
+    const panel = page.locator('#settings-panel-logs');
+    const text = panel.locator('textarea');
+    const copy = panel.getByRole('button', { name: 'Copy log', exact: true });
+    assert.equal(await text.isVisible(), true, 'Completed preparation remains readable in Settings > Logs.');
+    assert.equal(await text.evaluate(element => element.readOnly), true, 'The retained log is a selectable read-only field.');
+    const frozen = await text.inputValue();
+    assert(frozen.includes('Preserving editor drafts'), 'The completed managed opening is retained.');
+    assert(frozen.includes('New work while reviewing earlier steps'), 'Earlier terminal activity remains in the log.');
+    assert(frozen.includes('A storage error <script>alert(1)</script>'), 'Errors are retained as text.');
+    assert.match(frozen, /Total[^\n]*\(\d+\.\ds\)/i, 'The retained log includes its total elapsed time.');
+    assert.match(frozen, /\(\d+\.\ds\)/, 'Individual phase timings remain available.');
+    assert.equal(await panel.locator('script, img').count(), 0, 'Log labels and error messages stay escaped.');
+    await logsTab.focus();
+    for (const [key, tab] of [['ArrowLeft', 'Data'], ['ArrowRight', 'Logs'], ['Home', 'General'], ['End', 'Logs']]) {
+        await page.keyboard.press(key);
+        assert.equal(await page.getByRole('tab', { name: tab, exact: true }).getAttribute('aria-selected'), 'true', key + ': keyboard selects the expected settings tab.');
+        assert.equal(await page.getByRole('tab', { name: tab, exact: true }).evaluate(element => element === document.activeElement), true, key + ': keyboard focus follows the selected tab.');
+    }
+    await text.focus(); await page.keyboard.press('Control+A');
+    assert.equal(await text.evaluate(element => element.selectionStart === 0 && element.selectionEnd === element.value.length), true,
+        'The complete retained log can be selected with the keyboard.');
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await copy.click();
+    const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(clipboardText.replace(/\r\n/g, '\n'), frozen, 'Copy log writes the complete displayed text (Windows clipboard normalizes line endings).');
+    assert.match(await panel.locator('[role="status"]').innerText(), /copied/i, 'Successful clipboard writing reports completion.');
+    await page.evaluate(() => {
+        window.__fixtureOriginalClipboardWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+        Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async () => { throw new DOMException('Fixture denied clipboard access', 'NotAllowedError'); } });
+    });
+    await copy.click();
+    assert.doesNotMatch(await panel.locator('[role="status"]').innerText(), /copied/i, 'Rejected clipboard access does not claim a successful copy.');
+    assert.equal(await text.evaluate(element => element === document.activeElement && element.selectionStart === 0 && element.selectionEnd === element.value.length), true,
+        'Clipboard rejection focuses and selects the retained text for manual copying.');
+    await page.setViewportSize({ width: 900, height: 420 });
+    await copy.click();
+    await page.waitForFunction(() => {
+        const field = document.querySelector('#settings-panel-logs textarea').getBoundingClientRect();
+        const body = document.querySelector('.settingsBody').getBoundingClientRect();
+        return Math.min(field.bottom, body.bottom) - Math.max(field.top, body.top) >= 100;
+    });
+    assert.equal(await text.evaluate(element => element === document.activeElement && element.selectionStart === 0 && element.selectionEnd === element.value.length), true,
+        'The rejected-copy fallback remains selected and visible in a short desktop window.');
+    await page.evaluate(() => Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: window.__fixtureOriginalClipboardWrite }));
+    for (const viewport of [{ width: 1440, height: 1000 }, { width: 900, height: 650 }, { width: 900, height: 420 }]) {
+        await page.setViewportSize(viewport);
+        for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+            await page.evaluate(theme => { window.__initializationFixtureApp.theme = theme; document.documentElement.setAttribute('data-theme', theme); }, theme);
+            await copy.focus(); await page.keyboard.press('Tab');
+            if (viewport.height < 500) {
+                await page.locator('.settingsBody').hover({ position: { x: 10, y: 10 } });
+                await page.mouse.wheel(0, 600);
+                await page.waitForFunction(() => {
+                    const field = document.querySelector('#settings-panel-logs textarea').getBoundingClientRect();
+                    const body = document.querySelector('.settingsBody').getBoundingClientRect();
+                    return Math.min(field.bottom, body.bottom) - Math.max(field.top, body.top) >= 100;
+                });
+            }
+            const metrics = await text.evaluate(element => {
+                const dialog = element.closest('.settingsDialog').getBoundingClientRect();
+                const field = element.getBoundingClientRect(), body = element.closest('.settingsBody').getBoundingClientRect(), computed = getComputedStyle(element);
+                return { x: dialog.x, y: dialog.y, width: dialog.width, height: dialog.height,
+                    fieldWidth: field.width, fieldRight: field.right, viewportWidth: innerWidth, viewportHeight: innerHeight,
+                    focused: element === document.activeElement, visibleFieldHeight: Math.min(field.bottom, body.bottom) - Math.max(field.top, body.top),
+                    scrollHeight: element.scrollHeight, clientHeight: element.clientHeight,
+                    textContrast: window.__fixtureContrast(computed.color, computed.backgroundColor) };
+            });
+            assert(metrics.x >= 0 && metrics.x + metrics.width <= viewport.width + 1, theme + ': Settings Logs fits desktop width.');
+            assert(metrics.y >= 0 && metrics.y + metrics.height <= viewport.height + 1, theme + ': Settings Logs fits desktop height.');
+            assert(metrics.fieldRight <= viewport.width + 1, theme + ': retained log field fits the dialog.');
+            assert(metrics.focused, theme + ': the retained log remains keyboard accessible.');
+            assert(metrics.visibleFieldHeight >= 100, theme + ': Settings body scrolling keeps the retained log readable in short desktop windows.');
+            assert(metrics.scrollHeight > metrics.clientHeight, theme + ': long retained logs can be scrolled.');
+            assert(metrics.textContrast >= 4.5, theme + ': retained log text has readable contrast.');
+            layouts.push({ section: 'Settings Logs', viewport, theme, ...metrics });
+            await page.screenshot({ path: join(screenshots, 'settings-logs-' + theme + '-' + viewport.width + 'x' + viewport.height + '.png') });
+        }
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('.settingsHeader').getByRole('button', { name: /Close/ }).click();
+    await page.waitForFunction(() => !window.__initializationFixtureApp.showSetting);
+    await page.locator('.workspace').getByRole('button', { name: 'Settings', exact: true }).click();
+    await logsTab.click();
+    assert.equal(await text.inputValue(), frozen, 'Reopening settings preserves the completed log and frozen durations.');
+    await page.locator('.settingsHeader').getByRole('button', { name: /Close/ }).click();
+    await page.waitForFunction(() => !window.__initializationFixtureApp.showSetting);
+    results.push('Completed initialization remains selectable in Settings > Logs; real clipboard copying succeeds, rejected access offers a selected manual fallback, keyboard tabs work, reopening preserves text and all four themes fit resized desktop windows.');
+}
+
 async function run() {
     const fromApi = createRequire(resolve(__dirname, '../../SDEditor-API/package.json'));
     const express = require('express'), frontend = express(), server = createServer(frontend);
@@ -214,6 +308,7 @@ async function run() {
         assert.equal(await page.locator('.workspace').isVisible(), true);
         assert.equal(await terminal.count(), 0);
         assert.equal(await page.evaluate(() => window.__initializationFixtureApp._workspaceInitializationTimer), null);
+        await checkRetainedSettingsLog(page, context, screenshots, results, layouts);
         for (const mode of ['cancel', 'error']) {
             await installHarness(page, mode); await openButton().click();
             await page.waitForFunction(() => !window.__initializationFixtureApp.workspaceInitializationActive && !window.__initializationFixtureApp.managedVersionBusy);
@@ -225,6 +320,11 @@ async function run() {
                 assert(error.includes('Fixture source preparation failed'));
                 assert.equal(await page.locator('.versionCatalog img[src="x"]').count(), 0);
                 assert.equal(await page.evaluate(() => window.__initializationFixtureApp.workspaceInitializationRows.some(row => row.status === 'failed')), true);
+                await page.locator('.versionCatalog').getByRole('button', { name: 'Settings', exact: true }).click();
+                await page.getByRole('tab', { name: 'Logs', exact: true }).click();
+                assert((await page.locator('#settings-panel-logs textarea').inputValue()).includes(error), 'Failed source preparation is retained in Settings > Logs.');
+                await page.locator('.settingsHeader').getByRole('button', { name: /Close/ }).click();
+                await page.waitForFunction(() => !window.__initializationFixtureApp.showSetting);
             }
         }
         results.push('Success reveals the ready workspace; declined confirmation and failed source preparation reveal the chooser and release timers.');
