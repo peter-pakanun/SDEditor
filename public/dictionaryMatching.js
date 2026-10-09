@@ -109,14 +109,21 @@
 
   function* escapeSource(value) {
     const source = String(value ?? ''), chunks = [];
-    let chunk = '';
+    // Plain Dictionary definitions match the original text. Keep their render
+    // coordinates without letting HTML entities become searchable words.
+    const offsets = new Uint32Array(source.length + 1);
+    let chunk = '', length = 0;
     for (let i = 0; i < source.length; i++) {
       if (!(i % 32)) yield;
-      chunk += escapes[source[i]] || source[i];
+      offsets[i] = length;
+      const escaped = escapes[source[i]] || source[i];
+      chunk += escaped;
+      length += escaped.length;
       if (chunk.length >= 2048) { chunks.push(chunk); chunk = ''; }
     }
+    offsets[source.length] = length;
     chunks.push(chunk);
-    return chunks.join('');
+    return { text: chunks.join(''), offsets };
   }
 
   function* literalAt(text, find, at) {
@@ -213,7 +220,9 @@
   }
 
   function* matchUnit(snapshot, english, options = {}) {
-    let modified = yield* escapeSource(english);
+    const source = String(english ?? '');
+    const escaped = yield* escapeSource(source);
+    let modified = escaped.text;
     const highlights = [];
     let nextHlId = 1;
     const add = hl => { hl._hlId = nextHlId++; highlights.push(hl); };
@@ -279,17 +288,17 @@
     }
 
     if (options.highlightDict !== false) {
-      const definitions = yield* findDefinitions(snapshot, modified);
+      const definitions = yield* findDefinitions(snapshot, source);
       for (const definition of definitions) {
         yield;
         const find = definition.pair.find;
-        for (let at = 0; at <= modified.length - find.length; at++) {
+        for (let at = 0; at <= source.length - find.length; at++) {
           if (!(at % 32)) yield;
-          if (modified[at] !== find[0] || !(yield* literalAt(modified, find, at))) continue;
-          if (!(yield* overlaps(highlights, at, at + find.length))) {
-            add({ index: at, find: modified.substring(at, at + find.length), replace: definition.pair.replace,
+          if (source[at] !== find[0] || !(yield* literalAt(source, find, at))) continue;
+          const start = escaped.offsets[at], end = escaped.offsets[at + find.length];
+          if (!(yield* overlaps(highlights, start, end))) {
+            add({ index: start, find: escaped.text.substring(start, end), replace: definition.pair.replace,
               dictId: definition.entry._id, dictDefFind: find });
-            mask(at, find.length);
           }
           // RegExp global matches advance past a match even when it overlaps.
           at += find.length - 1;

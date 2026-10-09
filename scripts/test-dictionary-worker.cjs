@@ -35,8 +35,8 @@ const keywordLookup = vm.runInContext('getKeywordPopupLookupName', engineContext
 const patterns = vm.runInContext('({gggVarTagRegex, keywordPopupTagRegex, textDecorationTagNameRegex})', engineContext);
 const escapePattern = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Independent compatibility oracle: the previous editor's regexp matching,
-// masking, boundaries and insertion order, without its DOM rendering stage.
+// Independent regexp oracle: tags retain the previous editor's escaped-text
+// matching; plain definitions match the source text and map into HTML offsets.
 function legacyHighlights(dictionary, game, english, highlightDict = true) {
   const entries = scope.activeEntries(dictionary, game);
   const HLs = [];
@@ -44,6 +44,8 @@ function legacyHighlights(dictionary, game, english, highlightDict = true) {
   const add = hl => { hl._hlId = nextHlId++; HLs.push(hl); };
   const overlaps = (start, end) => HLs.some(hl => start < hl.index + hl.find.length && hl.index < end);
   const mask = (start, length) => { modified = modified.substring(0, start) + '*'.repeat(length) + modified.substring(start + length); };
+  const escapedOffsets = [0];
+  for (let i = 0; i < english.length; i++) escapedOffsets.push(escapedOffsets[i] + matching.escapeHtml(english[i]).length);
   const decor = new RegExp(`(&lt;(${patterns.textDecorationTagNameRegex})&gt;\\{\\{([\\s\\S]*?)\\}\\})`, 'igm');
   while ((match = decor.exec(modified))) {
     const tagName = match[2], opener = `&lt;${tagName}&gt;`;
@@ -80,10 +82,10 @@ function legacyHighlights(dictionary, game, english, highlightDict = true) {
     defs.sort((a, b) => b.pair.find.length - a.pair.find.length);
     for (const { entry, pair } of defs) {
       const regex = new RegExp(`\\b${escapePattern(pair.find)}\\b`, 'g');
-      while ((match = regex.exec(modified))) {
-        if (overlaps(match.index, match.index + match[0].length)) continue;
-        add({ index: match.index, find: match[0], replace: pair.replace, dictId: entry._id, dictDefFind: pair.find });
-        mask(match.index, match[0].length);
+      while ((match = regex.exec(english))) {
+        const index = escapedOffsets[match.index], end = escapedOffsets[match.index + match[0].length];
+        if (overlaps(index, end)) continue;
+        add({ index, find: matching.escapeHtml(match[0]), replace: pair.replace, dictId: entry._id, dictDefFind: pair.find });
       }
     }
   }
@@ -142,6 +144,80 @@ test('ready snapshot metadata remains immutable and includes all matched alterna
   assert.ok(Object.isFrozen(result.entriesById.fire.alts[1]));
   assert.ok(Object.isFrozen(result.entriesById.fire._pairs[0]));
   assert.ok(Object.isFrozen(result.entriesById.fire._pairs[1]));
+});
+
+test('plain main and alternate definitions with HTML characters use source text and safe escaped coordinates', () => {
+  const entries = [{ _id: 'special', find: 'Main & term', replace: 'MAIN', alts: [
+    { _id: 'apostrophe', find: "Battlemage's Cry", replace: 'CRY' },
+    { _id: 'ampersand', find: 'Fish & Chips', replace: 'FISH' },
+    { _id: 'quotes', find: 'Say "Hello" now', replace: 'HELLO' },
+    { _id: 'brackets', find: 'Use <tag> now', replace: 'TAG' },
+    { _id: 'entity', find: 'A&amp;B', replace: 'LITERAL ENTITY' },
+  ] }];
+  const snapshot = drain(matching.buildSnapshot(entries, 'poe1', 1));
+  const english = '& prefix | Main & term | Battlemage\'s Cry | Fish & Chips | Say "Hello" now | Use <tag> now | A&amp;B';
+  const result = drain(matching.matchSnapshot(snapshot, [{ english }], { highlightDict: true }));
+  assert.deepEqual(result.units[0].HLs.map(({ index, find, replace, dictId, dictDefFind }) =>
+    ({ index, find, replace, dictId, dictDefFind })), [
+    { index: 15, find: 'Main &amp; term', replace: 'MAIN', dictId: 'special', dictDefFind: 'Main & term' },
+    { index: 33, find: 'Battlemage&#039;s Cry', replace: 'CRY', dictId: 'special', dictDefFind: "Battlemage's Cry" },
+    { index: 57, find: 'Fish &amp; Chips', replace: 'FISH', dictId: 'special', dictDefFind: 'Fish & Chips' },
+    { index: 76, find: 'Say &quot;Hello&quot; now', replace: 'HELLO', dictId: 'special', dictDefFind: 'Say "Hello" now' },
+    { index: 104, find: 'Use &lt;tag&gt; now', replace: 'TAG', dictId: 'special', dictDefFind: 'Use <tag> now' },
+    { index: 126, find: 'A&amp;amp;B', replace: 'LITERAL ENTITY', dictId: 'special', dictDefFind: 'A&amp;B' },
+  ]);
+  for (const hl of result.units[0].HLs) {
+    assert.equal(matching.escapeHtml(english).slice(hl.index, hl.index + hl.find.length), hl.find);
+    assert.equal(matching.unescapeHtml(hl.find), hl.dictDefFind);
+  }
+  assert.equal(result.entriesById.special.alts[0]._id, 'apostrophe');
+  assert.equal(result.entriesById.special._pairs[1].find, "Battlemage's Cry");
+  assert.deepEqual(drain(matching.matchSnapshot(snapshot, [{ english }], { highlightDict: false })).units[0].HLs, []);
+});
+
+test('plain highlights never match inside HTML entity expansions or confuse literal entity text', () => {
+  const entries = [
+    { _id: 'amp', find: 'amp', replace: 'AMP' },
+    { _id: 'lt', find: 'lt', replace: 'LT' },
+    { _id: 'gt', find: 'gt', replace: 'GT' },
+    { _id: 'quot', find: 'quot', replace: 'QUOT' },
+    { _id: 'numeric', find: '039', replace: 'NUMERIC' },
+    { _id: 'raw-amp', find: 'A&B', replace: 'RAW AMP' },
+    { _id: 'literal-amp', find: 'A&amp;B', replace: 'LITERAL AMP' },
+    { _id: 'literal-lt', find: 'A&lt;B', replace: 'LITERAL LT' },
+  ];
+  const snapshot = drain(matching.buildSnapshot(entries, 'poe1', 1));
+  const english = '& < > " \' A&B A&amp;B A&lt;B';
+  const HLs = drain(matching.matchSnapshot(snapshot, [{ english }])).units[0].HLs;
+  assert.deepEqual(HLs.map(hl => [hl.find, hl.replace, hl.dictDefFind]), [
+    ['A&amp;B', 'RAW AMP', 'A&B'],
+    ['A&amp;amp;B', 'LITERAL AMP', 'A&amp;B'],
+    ['A&amp;lt;B', 'LITERAL LT', 'A&lt;B'],
+  ]);
+});
+
+test('escaped alternate highlights retain longest overlap, case boundaries and active game scope', () => {
+  const entries = [
+    { _id: 'short', find: 'Cry', replace: 'SHORT' },
+    { _id: 'shared', find: 'Skill & stat', replace: 'SHARED', alts: [{ find: 'Shared & alt', replace: 'SHARED ALT' }] },
+    { _id: 'specific', find: 'Skill & stat', replace: 'SPECIFIC', gameScope: 'poe2', alts: [
+      { find: "Battlemage's Cry", replace: 'LONG' },
+      { find: "Specific's alt", replace: 'SPECIFIC ALT' },
+    ] },
+    { _id: 'foreign', find: 'Foreign & stat', replace: 'FOREIGN', gameScope: 'poe1' },
+  ];
+  const snapshot = drain(matching.buildSnapshot(entries, 'poe2', 1));
+  const english = "Battlemage's Cry Cry Skill & stat Shared & alt Specific's alt Foreign & stat Specific's alternate specific's alt {0}";
+  const HLs = drain(matching.matchSnapshot(snapshot, [{ english }])).units[0].HLs;
+  assert.deepEqual(HLs.map(hl => [hl.find, hl.replace || '', hl.dictId || '']), [
+    ['Battlemage&#039;s Cry', 'LONG', 'specific'],
+    ['Cry', 'SHORT', 'short'],
+    ['Skill &amp; stat', 'SPECIFIC', 'specific'],
+    ['Specific&#039;s alt', 'SPECIFIC ALT', 'specific'],
+    ['{0}', '', ''],
+  ]);
+  assert.deepEqual(drain(matching.matchSnapshot(snapshot, [{ english }], { highlightDict: false })).units[0].HLs
+    .map(hl => hl.find), ['{0}']);
 });
 
 test('seeded mixed markup and malformed-tag combinations retain legacy matching order', () => {

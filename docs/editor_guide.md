@@ -326,6 +326,8 @@ Alternatives:
 
 When you later encounter "[HitDamage|Hit]" in the text, the Autocomplete Popup will show all available replacements, "HitDamage", "Hit", and "Hits" and highlighting the "Hit" as it matches exactly with the source text.
 
+**Highlight Dictionary words** also marks alternate Find text in plain English, including phrases with apostrophes, ampersands or quotes. Clicking the highlight inserts that alternate's replacement. Matching remains case-sensitive.
+
 #### Dictionary Notes
 
 Use the **TL note** field to document why a term is translated a certain way or explain its context. Notes appear when you click on the "TL note" field. With cloud sync enabled, these notes are part of the language's shared Dictionary.

@@ -531,6 +531,85 @@ test('changing Dictionary matching options during constructor yields retries bef
   }
 });
 
+test('escaped Dictionary alternatives render in plain and table editors and option changes preserve editing context', async () => {
+  const { editor, config, calls, document, window } = loadEditor({ dictionary: [
+    { _id: 'special', find: 'SpecialTerms', replace: 'MAIN', alts: [
+      { _id: 'cry', find: "Battlemage's Cry", replace: 'CRY & replacement' },
+      { _id: 'fish', find: 'Fish & Chips', replace: 'FISH "replacement"' },
+    ], tlnote: 'Use the matched alternative.' },
+  ] });
+  editor.descs = [description('escaped-alternatives', ["& prefix Battlemage's Cry", "Battlemage's Cry@Fish & Chips"],
+    ['plain draft', 'left draft@right draft'])];
+  try {
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
+    assert.equal(editor.ensureDictionaryWorker().fallback, true, 'The fixture exercises the shared fallback matching runtime.');
+    const blocks = editor.editorBlocks, plain = blocks[0], table = blocks[1], columns = table.tableColumns;
+    const pack = editor.editorDictionaryMatchPack;
+    assert.equal(pack.highlightDict, true);
+    assert.ok(pack.byEnglish.has(plain.english));
+    assert.ok(pack.byEnglish.has(columns[0].english));
+    assert.ok(pack.byEnglish.has(columns[1].english));
+    assert.deepEqual(Array.from(plain.HLs, hl => [hl.index, hl.find, hl.replace, hl.dictDefFind]), [
+      [13, 'Battlemage&#039;s Cry', 'CRY & replacement', "Battlemage's Cry"],
+    ]);
+    assert.deepEqual(Array.from(columns, column => Array.from(column.HLs, hl => [hl.find, hl.replace, hl.dictDefFind])), [
+      [['Battlemage&#039;s Cry', 'CRY & replacement', "Battlemage's Cry"]],
+      [['Fish &amp; Chips', 'FISH "replacement"', 'Fish & Chips']],
+    ]);
+    assert.ok(plain.englishHLter.startsWith('&amp; prefix <span'));
+    assert.ok(plain.englishHLter.includes('dataValue="CRY &amp; replacement"'));
+    assert.ok(plain.englishHLter.includes('>Battlemage&#039;s Cry</span>'));
+    assert.ok(columns[1].englishHLter.includes('dataValue="FISH &quot;replacement&quot;"'));
+    assert.ok(columns[1].englishHLter.includes('>Fish &amp; Chips</span>'));
+    for (const [index, columnIndex, altId, rawFind, value] of [
+      [0, 0, 'cry', "Battlemage's Cry", 'CRY & replacement'],
+      [1, 0, 'cry', "Battlemage's Cry", 'CRY & replacement'],
+      [1, 1, 'fish', 'Fish & Chips', 'FISH "replacement"'],
+    ]) {
+      const items = editor.buildHlPopupItems(index, columnIndex);
+      const matched = items.find(item => item.dictAltId === altId);
+      assert.ok(matched);
+      assert.equal(matched.dictEntryId, 'special');
+      assert.equal(matched.matchText, rawFind);
+      assert.equal(matched.value, value);
+      assert.equal(matched.exactFromContext, true);
+      assert.equal(matched.mustCreate, undefined);
+      assert.equal(editor.canJumpToDictionaryFromHlPopupItem(matched), true);
+    }
+
+    plain.translation = 'typed plain draft';
+    columns[0].translation = 'typed left draft'; columns[1].translation = 'typed right draft';
+    editor.syncEditorBlockFromTableColumns(table);
+    const input = document.activeElement = { value: columns[1].translation, selectionStart: 5, selectionEnd: 11,
+      scrollTop: 17, scrollLeft: 23, closest() { return null; } };
+    editor.getEditorRef = (kind, index, columnIndex) => kind === 'translation' && index === 1 && columnIndex === 1 ? input : null;
+    editor.editorFocusedIndex = 1; editor.editorFocusedColumnIndex = 1;
+    editor.$refs.editorSide.scrollTop = 275;
+    editor.highlightDict = false;
+    config.watch.highlightDict.call(editor);
+    assert.equal(await refreshDictionary(editor), true);
+    await editor.$nextTick();
+    assert.equal(editor.editorBlocks, blocks);
+    assert.equal(table.tableColumns, columns);
+    assert.equal(editor.editorDictionaryMatchPack.highlightDict, false);
+    assert.notEqual(editor.editorDictionaryMatchPack, pack);
+    assert.deepEqual(Array.from([plain, ...columns], column => column.HLs.length), [0, 0, 0]);
+    assert.deepEqual(Array.from([plain, ...columns], column => column.englishHLter),
+      ['&amp; prefix Battlemage&#039;s Cry', 'Battlemage&#039;s Cry', 'Fish &amp; Chips']);
+    assert.deepEqual(Array.from([plain, ...columns], column => column.translation),
+      ['typed plain draft', 'typed left draft', 'typed right draft']);
+    assert.equal(table.translation, 'typed left draft@typed right draft');
+    assert.equal(document.activeElement, input);
+    assert.deepEqual([input.value, input.selectionStart, input.selectionEnd, input.scrollTop, input.scrollLeft],
+      ['typed right draft', 5, 11, 17, 23]);
+    assert.equal(editor.$refs.editorSide.scrollTop, 275);
+    assert.deepEqual([editor.editorFocusedIndex, editor.editorFocusedColumnIndex], [1, 1]);
+    assert.equal(calls.settings, 1);
+  } finally {
+    window.DictionaryWorkerUI.mixin.beforeUnmount.call(editor);
+  }
+});
+
 test('rapid file selections only publish the latest requested file', async () => {
   const { editor } = loadEditor();
   editor.descs = [description('old', 'Term 1'), description('latest', 'Term 119')];
