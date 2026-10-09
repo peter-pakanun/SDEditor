@@ -122,6 +122,8 @@ function assertSelectedBaselineReads(operations, filepaths, scenario) {
 
 async function runFixture({ storageOnly = false } = {}) {
     if (!executablePath) throw new Error('No installed Edge/Chrome found. Set FIXTURE_BROWSER_PATH.');
+    const legacyFileCount = Number(process.env.NORMALIZED_LEGACY_FILE_COUNT || 700);
+    assert.ok(Number.isInteger(legacyFileCount) && legacyFileCount >= 25, 'Legacy fixture needs at least 25 files');
     const apiRoot = process.env.SDEDITOR_FIXTURE_API_ROOT ? resolve(process.env.SDEDITOR_FIXTURE_API_ROOT) : resolve(__dirname, '../../SDEditor-API');
     const fromApi = createRequire(join(apiRoot, 'package.json'));
     const load = name => import(pathToFileURL(join(apiRoot, 'src', name)).href);
@@ -164,11 +166,13 @@ async function runFixture({ storageOnly = false } = {}) {
         page.on('pageerror', error => { errors.push(error.message); console.error('Fixture browser error: ' + error.stack); });
         await page.goto(origin + '/fixture/storage');
         await page.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
-        const migration = await page.evaluate(async () => {
+        const migration = await page.evaluate(async ({ legacyFileCount }) => {
             const copy = value => JSON.parse(JSON.stringify(value));
+            const migrationEvents = [], unsubscribeMigration = OfflineStore.onMigration(event => migrationEvents.push(copy(event)));
+            const migrationTimings = {};
             const scope = { accountId: 'fixture-owner', game: 'poe1', branchId: 'release', sourceHash: 'fixture-v8' };
             const suffix = JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
-            const source = Array.from({ length: 700 }, (_, i) => ({ filepath: 'storage/' + i + '.txt', filename: i + '.txt', filedir: 'storage',
+            const source = Array.from({ length: legacyFileCount }, (_, i) => ({ filepath: 'storage/' + i + '.txt', filename: i + '.txt', filedir: 'storage',
                 stats: ['stat_' + i], variables: ['#'], remarks: [''], translations: { English: ['English ' + i], Thai: ['Thai ' + i], German: ['German ' + i] } }));
             const workspace = { ...scope, descs: copy(source), status: {} };
             WorkspaceState.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
@@ -271,14 +275,30 @@ async function runFixture({ storageOnly = false } = {}) {
             // Fail after one migration batch has had an opportunity to commit.
             window.__normalizedProbe.fail = { after: 380 };
             let interrupted = false;
+            let timingStarted = performance.now();
             try { await OfflineStore.getVersionWorkspace(scope, 'Thai'); }
             catch (error) { interrupted = /quota|fixture/i.test(error.message) || error.name === 'QuotaExceededError'; }
+            migrationTimings.workspaceInterruptedMs = performance.now() - timingStarted;
             window.__normalizedProbe.fail = null;
+            timingStarted = performance.now();
             const recovered = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            migrationTimings.workspaceResumeMs = performance.now() - timingStarted;
+            migrationTimings.workspaceTotalMs = migrationTimings.workspaceInterruptedMs + migrationTimings.workspaceResumeMs;
             const importedSource = await OfflineStore.getVersionSource(scope);
             const orphanedDrafts = await OfflineStore.listTranslationDrafts({ profile: scope.accountId, game: scope.game,
                 branchId: scope.branchId, language: 'Thai', sourceHash: orphanScope.sourceHash });
+            timingStarted = performance.now();
             const roomState = await OfflineStore.getCollaborationState({ key: roomKey, scope: roomIdentity });
+            migrationTimings.roomConversionMs = performance.now() - timingStarted;
+            const warmEventStart = migrationEvents.length;
+            window.__normalizedProbe.operations = [];
+            timingStarted = performance.now();
+            await OfflineStore.getVersionWorkspace(scope, 'Thai');
+            migrationTimings.warmWorkspaceReadMs = performance.now() - timingStarted;
+            timingStarted = performance.now();
+            await OfflineStore.getCollaborationState({ key: roomKey, scope: roomIdentity });
+            migrationTimings.warmRoomReadMs = performance.now() - timingStarted;
+            const warmMigrationEvents = migrationEvents.slice(warmEventStart), warmMigrationOperations = window.__normalizedProbe.operations.slice();
             window.__storageRoom = { key: roomKey, identity: roomIdentity };
             let missingBlocked = false;
             try { await OfflineStore.getVersionWorkspace(missingScope, 'Thai'); }
@@ -331,14 +351,38 @@ async function runFixture({ storageOnly = false } = {}) {
             const recordFacts = { recoveryHeaderHasFiles: Object.hasOwn(recoveryHeader.value.data, 'files'), recoveryMembers: recoveryMembers.length,
                 recoveryMemberPaths: recoveryMembers.every(record => record.paths.length === 1 && !Object.hasOwn(record.value.data, 'files')),
                 seedMembers: roomRecords.result.filter(record => record.value.field === 'seedUploadFiles').length };
+            const measuredEvents = migrationEvents.filter(event => event.scope.sourceHash === scope.sourceHash);
+            migrationTimings.workspaceInterruptedConversionMs = measuredEvents.find(event => event.kind === 'workspace' && event.state === 'failed').durationMs;
+            migrationTimings.workspaceResumeConversionMs = measuredEvents.find(event => event.kind === 'workspace' && event.state === 'completed').durationMs;
+            migrationTimings.roomConversionOnlyMs = measuredEvents.find(event => event.kind === 'room' && event.state === 'completed').durationMs;
+            unsubscribeMigration();
             return { interrupted, recovered, source: importedSource, originalSource: source, frozen, values, stores,
                 orphanedDrafts, orphanKey, missingBlocked, roomState, roomKey, roomMetadata: roomMetadata.result?.value, recordFacts, tinyWorkspaces, legacyHistory,
                 conversionWorkspace, conversionSource, converted, verificationInjected, verificationFailure,
                 conversionProgress: conversionProgress.result?.value, conversionRows: conversionRows.result, conversionRetryOperations,
-                conversionHistoryBefore, conversionHistoryAfter, conversionFrozen: conversionFrozen.result?.value };
-        });
+                conversionHistoryBefore, conversionHistoryAfter, conversionFrozen: conversionFrozen.result?.value,
+                migrationEvents, migrationTimings, warmMigrationEvents, warmMigrationOperations };
+        }, { legacyFileCount });
         assert.equal(migration.interrupted, true, 'A failed bounded migration remains retryable');
         assert.equal(migration.missingBlocked, true, 'Missing immutable source prevents conversion instead of reconstructing baseline from edited work');
+        assert.deepEqual(migration.warmMigrationEvents, [], 'Warm workspace and room reads never repeat conversion activity');
+        assert.equal(migration.warmMigrationOperations.filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+            'Warm workspace and room materialization perform zero storage writes');
+        const migrationActivity = new Map();
+        for (const event of migration.migrationEvents) {
+            assert.ok(['started', 'completed', 'failed'].includes(event.state), 'Migration activity has an explicit lifecycle state');
+            const activity = migrationActivity.get(event.id) || { started: 0, completed: 0, failed: 0 };
+            activity[event.state]++; migrationActivity.set(event.id, activity);
+            if (event.state !== 'started') assert.ok(event.durationMs >= 0, 'Finished migration events expose measured duration');
+        }
+        for (const activity of migrationActivity.values()) assert.equal(activity.started, activity.completed + activity.failed,
+            'Every conversion attempt completes or fails, including interruption and retry');
+        const schemaEvents = migration.migrationEvents.filter(event => event.kind === 'schema');
+        assert.deepEqual(schemaEvents.map(event => event.state), ['started', 'completed'], 'Real v8-to-v9 schema upgrade emits one balanced activity');
+        const workspaceEvents = migration.migrationEvents.filter(event => event.kind === 'workspace' && event.scope.sourceHash === 'fixture-v8');
+        assert.equal(workspaceEvents.filter(event => event.state === 'started').length, 2, 'Workspace interruption and retry start separate activity attempts');
+        assert.equal(workspaceEvents.filter(event => event.state === 'failed').length, 1, 'Failed workspace conversion ends its activity');
+        assert.equal(workspaceEvents.filter(event => event.state === 'completed').length, 1, 'Successful resume completes workspace conversion activity');
         const byPath = files => files.slice().sort((left, right) => left.filepath.localeCompare(right.filepath));
         assert.deepEqual(byPath(migration.source), byPath(migration.originalSource), 'Immutable source survives migration');
         assert.deepEqual(migration.frozen, migration.values, 'v8 evidence is frozen, including unrelated settings');
@@ -358,8 +402,8 @@ async function runFixture({ storageOnly = false } = {}) {
         const retainedGroup = room.recovery.find(record => record.id === 'retained-many-file-recovery');
         const { localRecordId, _storageRecovery, ...group } = retainedGroup;
         assert.deepEqual(group, originalRoom.recovery.find(record => record.id === 'retained-many-file-recovery'),
-            'Cold room assembly preserves all 700 recovery members, facts and their original order');
-        assert.deepEqual(migration.recordFacts, { recoveryHeaderHasFiles: false, recoveryMembers: 700, recoveryMemberPaths: true, seedMembers: 700 },
+            'Cold room assembly preserves all recovery members, facts and their original order');
+        assert.deepEqual(migration.recordFacts, { recoveryHeaderHasFiles: false, recoveryMembers: legacyFileCount, recoveryMemberPaths: true, seedMembers: legacyFileCount },
             'Native recovery and seed snapshots are physically stored as individually keyed file records');
         assert.equal(Object.hasOwn(migration.roomMetadata.seedUpload, 'files'), false, 'Legacy seed upload files are excluded from room metadata');
         assert.deepEqual(room.seedUpload, originalRoom.seedUpload, 'Cold room adapters hydrate exact seed-upload files and retry ticket');
@@ -401,7 +445,7 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.deepEqual(migration.converted.droppedOutbox.filter(operation => ['z-first', 'a-second'].includes(operation.id)).map(operation => operation.id),
             ['z-first', 'a-second']);
         results.push({ scenario: 'resolved conflict buckets, strict conflict verification retry and preserved Dropped queue order' });
-        results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length });
+        results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length, legacyFileCount, timings: migration.migrationTimings });
         console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
 
         const writes = await page.evaluate(async () => {
@@ -529,10 +573,10 @@ async function runFixture({ storageOnly = false } = {}) {
         });
         assert.deepEqual(aggregateOperations(sharedSave), [], 'Shared save avoids every aggregate');
         assertNoAssetReads(sharedSave, 'Shared save');
-        assertSelectedBaselineReads(sharedSave, ['storage/12.txt'], 'Shared save with a 700-file recovery group');
+        assertSelectedBaselineReads(sharedSave, ['storage/12.txt'], 'Shared save with a complete recovery group');
         const sharedSaveBytes = sharedSave.reduce((sum, operation) => sum + operation.bytes, 0);
         assert.ok(sharedSaveBytes < 65536, 'A one-file shared save never reads or copies unrelated recovery members');
-        results.push({ scenario: 'bounded shared save with a 700-file recovery group', operations: sharedSave.length, bytes: sharedSaveBytes });
+        results.push({ scenario: 'bounded shared save with a ' + legacyFileCount + '-file recovery group', operations: sharedSave.length, bytes: sharedSaveBytes });
         const command = await page.evaluate(async () => {
             const { key, identity } = window.__storageRoom, scope = window.__storageScope, filepath = 'storage/5.txt';
             const options = { key, scope: identity, filepaths: [filepath], operationIds: [], includeOutbox: 'paths',
@@ -562,11 +606,11 @@ async function runFixture({ storageOnly = false } = {}) {
         });
         assert.deepEqual(aggregateOperations(command.operations), [], 'Remote event avoids workspace, source and collaboration aggregates');
         assertNoAssetReads(command.operations, 'Remote event');
-        assertSelectedBaselineReads(command.operations, ['storage/5.txt'], 'Remote event with a 700-file recovery group');
+        assertSelectedBaselineReads(command.operations, ['storage/5.txt'], 'Remote event with a complete recovery group');
         assert.ok(command.operations.reduce((sum, operation) => sum + operation.bytes, 0) < 65536, 'Remote event reads and writes only bounded touched-file records');
         assert.equal(command.unchanged.filter(operation => ['put', 'add', 'delete'].includes(operation.method)).length, 0,
             'Identical accepted state performs no writes');
-        assertSelectedBaselineReads(command.unchanged, ['storage/5.txt'], 'Unchanged event with a 700-file recovery group');
+        assertSelectedBaselineReads(command.unchanged, ['storage/5.txt'], 'Unchanged event with a complete recovery group');
         assert.equal(command.failed, true); assert.equal(command.room.seq, 9, 'Aborted projection cannot advance the replay cursor');
         assert.deepEqual(command.room.shared['storage/5.txt'].translations, ['Remote event text']);
         assert.deepEqual(command.staged, ['Remote event text'], 'Accepted text and cursor commit or abort together');
@@ -596,7 +640,7 @@ async function runFixture({ storageOnly = false } = {}) {
         });
         assert.deepEqual(aggregateOperations(ack.operations), [], 'Operation acknowledgment avoids aggregate reads/writes');
         assertNoAssetReads(ack.operations, 'Operation acknowledgment');
-        assertSelectedBaselineReads(ack.operations, ['storage/4.txt'], 'Operation acknowledgment with a 700-file recovery group');
+        assertSelectedBaselineReads(ack.operations, ['storage/4.txt'], 'Operation acknowledgment with a complete recovery group');
         const ackBytes = ack.operations.reduce((sum, operation) => sum + operation.bytes, 0);
         assert.ok(ackBytes < 65536, 'Acknowledgment is bounded to its touched files');
         assert.equal(ack.room.seq, 9, 'Acknowledging a local mutation leaves the replay cursor intact');
@@ -642,6 +686,58 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
     await page.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
         && window.__normalizedApp?._cloud?.state && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
+    await page.waitForFunction(() => !window.__normalizedApp?._storageMigrations?.size);
+    const fastNotice = await page.evaluate(async () => {
+        const vm = window.__normalizedApp, event = { id: 'fixture-fast-migration', kind: 'workspace', scope: { game: vm.gameVersion } };
+        vm.storageMigrationChanged({ ...event, state: 'started' });
+        vm.storageMigrationChanged({ ...event, state: 'completed', durationMs: 1 });
+        await vm.$nextTick();
+        return { message: vm.storageMigrationMessage, busy: vm.storageMigrationBusy, visible: !!document.querySelector('.storageMigrationNotice') };
+    });
+    assert.deepEqual(fastNotice, { message: '', busy: false, visible: false }, 'Quick conversion never flashes a notice');
+    await page.evaluate(() => {
+        const input = window.__migrationFocusInput = document.createElement('input');
+        input.value = 'Preserved selection'; input.setAttribute('aria-label', 'Migration fixture focus'); document.body.append(input);
+        input.focus(); input.setSelectionRange(2, 8);
+        const vm = window.__normalizedApp;
+        vm.storageMigrationChanged({ id: 'fixture-slow-migration', kind: 'workspace', scope: { game: vm.gameVersion }, state: 'started' });
+    });
+    await page.waitForFunction(() => window.__normalizedApp.storageMigrationBusy && !!document.querySelector('.storageMigrationNotice'));
+    const shownNotice = await page.evaluate(() => {
+        const vm = window.__normalizedApp, element = document.querySelector('.storageMigrationNotice'), input = window.__migrationFocusInput;
+        const themes = ['light', 'grey', 'dark', 'modern-dark'], originalTheme = document.documentElement.getAttribute('data-theme');
+        const styles = themes.map(theme => {
+            document.documentElement.setAttribute('data-theme', theme);
+            const style = getComputedStyle(element);
+            return { theme, color: style.color, background: style.backgroundColor, pointerEvents: style.pointerEvents, display: style.display };
+        });
+        document.documentElement.setAttribute('data-theme', originalTheme);
+        return { text: element.textContent, role: element.getAttribute('role'), busy: vm.storageMigrationBusy,
+            focusRetained: document.activeElement === input, selection: [input.selectionStart, input.selectionEnd],
+            browserWork: vm.browserWorkItems['migration:conversion'], styles };
+    });
+    assert.match(shownNotice.text, /one-time update/); assert.equal(shownNotice.role, 'status'); assert.equal(shownNotice.busy, true);
+    assert.equal(shownNotice.focusRetained, true); assert.deepEqual(shownNotice.selection, [2, 8], 'Slow migration notice preserves selection');
+    assert.equal(shownNotice.browserWork, 'Updating existing local work', 'Slow migration activates the established work indicator');
+    for (const style of shownNotice.styles) {
+        assert.equal(style.pointerEvents, 'none', style.theme + ': migration notice never intercepts pointer input');
+        assert.notEqual(style.display, 'none', style.theme + ': migration notice stays visible');
+        assert.notEqual(style.color, style.background, style.theme + ': migration notice text differs from its background');
+        assert.notEqual(style.background, 'rgba(0, 0, 0, 0)', style.theme + ': migration notice retains its theme background');
+    }
+    const completedNotice = await page.evaluate(async () => {
+        const vm = window.__normalizedApp;
+        vm.storageMigrationChanged({ id: 'fixture-slow-migration', state: 'completed', durationMs: 1000 });
+        await vm.$nextTick();
+        const result = { text: document.querySelector('.storageMigrationNotice').textContent, busy: vm.storageMigrationBusy,
+            focusRetained: document.activeElement === window.__migrationFocusInput, browserWork: vm.browserWorkItems['migration:conversion'] };
+        clearTimeout(vm._storageMigrationHideTimer); vm._storageMigrationHideTimer = null; vm.storageMigrationMessage = '';
+        window.__migrationFocusInput.remove(); delete window.__migrationFocusInput;
+        return result;
+    });
+    assert.match(completedNotice.text, /update complete/); assert.equal(completedNotice.busy, false);
+    assert.equal(completedNotice.focusRetained, true); assert.equal(completedNotice.browserWork, undefined);
+    results.push({ scenario: 'real Vue slow-conversion notice preserves focus and selection in all four themes' });
     const count = Number(process.env.NORMALIZED_FILE_COUNT || 20000), dictionaryCount = Number(process.env.NORMALIZED_DICTIONARY_COUNT || 8000);
     const imported = await page.evaluate(async ({ secret, count, dictionaryCount }) => {
         const vm = window.__normalizedApp;

@@ -306,6 +306,8 @@ const config = Vue.defineComponent({
         maxWidth: 360
       },
       browserWorkItems: {},
+      storageMigrationMessage: '',
+      storageMigrationBusy: false,
       pendingSettingsSaves: 0,
       hlPopupReturnInfo: null,
       editorBlocks: [
@@ -397,6 +399,7 @@ const config = Vue.defineComponent({
 
       this.loadingProgress = 0;
 
+      this._storageMigrationUnsubscribe = window.OfflineStore.onMigration?.(event => this.storageMigrationChanged(event));
       try {
         await window.OfflineStore.migrateFromLocalStorageIfNeeded();
       } catch (error) {
@@ -437,6 +440,7 @@ const config = Vue.defineComponent({
     }
   },
   beforeUnmount() {
+    this.stopStorageMigrationNotice();
     clearTimeout(this._fileSearchTimer);
     this.resetEditorFilePathCopy();
     this._fileSearchTimer = null;
@@ -957,6 +961,60 @@ const config = Vue.defineComponent({
       for (const id of this._browserWorkPending?.keys() || []) {
         if (id.startsWith(scope + ':')) this.setBrowserWork(scope, { key: id.slice(scope.length + 1), active: false });
       }
+    },
+    storageMigrationChanged(event) {
+      if (this._storageMigrationDisposed || !event?.id) return;
+      const active = this._storageMigrations ||= new Set();
+      const message = 'Preparing existing local work for faster saves. This is a one-time update for each stored version; loading may be slower until it finishes.';
+      if (event.state === 'started') {
+        if (active.has(event.id)) return;
+        if (!active.size) {
+          this._storageMigrationFailed = false;
+          this._storageMigrationGeneration = (this._storageMigrationGeneration || 0) + 1;
+        }
+        active.add(event.id);
+        clearTimeout(this._storageMigrationHideTimer);
+        if (this.storageMigrationMessage) {
+          this.storageMigrationMessage = message;
+          this.storageMigrationBusy = true;
+          this.setBrowserWork('migration', { key: 'conversion', label: 'Updating existing local work', active: true, immediate: true });
+        } else if (!this._storageMigrationShowTimer) {
+          const generation = this._storageMigrationGeneration;
+          this._storageMigrationShowTimer = setTimeout(() => {
+            if (this._storageMigrationDisposed || this._storageMigrationGeneration !== generation || !active.size) return;
+            this._storageMigrationShowTimer = null;
+            this.storageMigrationMessage = message;
+            this.storageMigrationBusy = true;
+            this.setBrowserWork('migration', { key: 'conversion', label: 'Updating existing local work', active: true, immediate: true });
+            // Initial activation can convert before mounted() reveals the app.
+            if (!this.startupReady) void this.finishStartup(true);
+          }, 750);
+        }
+        return;
+      }
+      if (!['completed', 'failed'].includes(event.state) || !active.delete(event.id)) return;
+      if (event.state === 'failed') this._storageMigrationFailed = true;
+      if (active.size) return;
+      clearTimeout(this._storageMigrationShowTimer);
+      this._storageMigrationShowTimer = null;
+      this.storageMigrationBusy = false;
+      this.clearBrowserWork('migration');
+      if (!this.storageMigrationMessage) return;
+      if (this._storageMigrationFailed) { this.storageMigrationMessage = ''; return; }
+      this.storageMigrationMessage = 'Local storage update complete. This work will skip the update on future loads and use the faster saves.';
+      const generation = this._storageMigrationGeneration;
+      this._storageMigrationHideTimer = setTimeout(() => {
+        if (!this._storageMigrationDisposed && this._storageMigrationGeneration === generation && !active.size) this.storageMigrationMessage = '';
+      }, 5000);
+    },
+    stopStorageMigrationNotice() {
+      this._storageMigrationDisposed = true;
+      this._storageMigrationUnsubscribe?.();
+      this._storageMigrationUnsubscribe = null;
+      clearTimeout(this._storageMigrationShowTimer);
+      clearTimeout(this._storageMigrationHideTimer);
+      this._storageMigrations?.clear();
+      this.clearBrowserWork('migration');
     },
     appAlert(message, options) {
       return window.AppDialogs.alert(message, options);

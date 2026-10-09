@@ -183,6 +183,30 @@ function loadStore(fixture, worker = false) {
   } else { load('workspaceState.js'); load('offlineStore.js'); }
   return { store: root.OfflineStore, root, messages };
 }
+
+test('schema migration activity includes in-progress subscriptions and stays silent after upgrade', async () => {
+  const fixture = versionedStorage(8), { store } = loadStore(fixture);
+  const events = [], joined = [];
+  let unsubscribeJoined;
+  const unsubscribe = store.onMigration(event => {
+    events.push(copy(event));
+    if (event.state === 'started') unsubscribeJoined = store.onMigration(value => joined.push(copy(value)));
+  });
+  const unsubscribeBroken = store.onMigration(() => { throw new Error('Presentation listener failed'); });
+  await store.getSettings();
+  assert.deepEqual(events.map(event => event.state), ['started', 'completed']);
+  assert.deepEqual(joined, events, 'A late subscription sees current activity once and its completion');
+  assert.equal(events[0].kind, 'schema');
+  assert.equal(events[0].id, events[1].id);
+  assert.ok(events[1].durationMs >= 0);
+  unsubscribe(); unsubscribeJoined(); unsubscribeBroken();
+  await store.getSettings();
+  assert.equal(events.length, 2);
+  const warmEvents = [], reloaded = loadStore(fixture).store;
+  reloaded.onMigration(event => warmEvents.push(event));
+  await reloaded.getSettings();
+  assert.deepEqual(warmEvents, [], 'Persisted schema version prevents repeated upgrade activity after reload');
+});
 function openVersion(fixture, version) {
   return new Promise((resolve, reject) => {
     const request = fixture.indexedDB.open('sdeditor', version);

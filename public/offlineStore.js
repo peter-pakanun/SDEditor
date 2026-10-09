@@ -8,9 +8,20 @@
   // store and durable retry receipt while excluding older editors/workers.
   const DB_VERSION = 9;
   const runtime = typeof window === 'object' ? window : self;
+  const migrationListeners = new Set(), migrationActivities = new Map();
+  function notifyMigration(event) {
+    if (event.state === 'started') migrationActivities.set(event.id, event);
+    else migrationActivities.delete(event.id);
+    for (const listener of [...migrationListeners]) { try { listener(event); } catch (_) {} }
+  }
+  function onMigration(listener) {
+    migrationListeners.add(listener);
+    for (const event of migrationActivities.values()) { try { listener(event); } catch (_) {} }
+    return () => migrationListeners.delete(listener);
+  }
   const normalized = runtime.NormalizedStore?.create({ openDb, W: WorkspaceState, legacyGet: kvGet,
     workspaceKey, sourceKey, receiptKey: receiptScopeKey, revisionStoreName, scopedRevision, normalizeScope: normalizeWorkspaceScope,
-    prepareWorkspace: scope => getLegacyWorkspaceView(scope, undefined, true),
+    onMigration: notifyMigration, prepareWorkspace: (scope, language) => getLegacyWorkspaceView(scope, language, true),
     preparedRoom: (scope, key) => preparedRoomRepairs.get(normalized.scopeKey(scope))?.rooms?.[key],
     legacyBaseline: (workspace, scope) => workspace.importArchive ? kvGet(importedBaselineKey(workspace.importArchive.baselineId, scope.game)) : undefined });
   const normalizedRooms = normalized && runtime.NormalizedRooms?.create(normalized);
@@ -117,11 +128,22 @@
 
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       let blocked = false;
+      let upgradeStarted;
+      const finishUpgrade = state => {
+        if (upgradeStarted == null) return;
+        notifyMigration({ id: 'schema:' + DB_VERSION, kind: 'schema', scope: { storageVersion: DB_VERSION },
+          state, durationMs: Date.now() - upgradeStarted });
+        upgradeStarted = null;
+      };
       req.onblocked = () => {
         blocked = true;
         reject(new Error('Close every other SDEditor tab, then reload this tab to finish the storage upgrade. Your saved translations have been kept.'));
       };
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = event => {
+        if (event?.oldVersion > 0) {
+          upgradeStarted = Date.now();
+          notifyMigration({ id: 'schema:' + DB_VERSION, kind: 'schema', scope: { storageVersion: DB_VERSION }, state: 'started', durationMs: 0 });
+        }
         const db = req.result;
 
         if (!db.objectStoreNames.contains(STORE_KV)) {
@@ -143,12 +165,14 @@
         runtime.NormalizedStore?.upgrade(db, req.transaction);
       };
       req.onsuccess = () => {
+        finishUpgrade('completed');
         if (blocked) { req.result.close(); return; }
         req.result.onversionchange = () => { req.result.close(); _dbPromise = null; };
         console.log('openDb success');
         resolve(req.result);
       };
       req.onerror = () => {
+        finishUpgrade('failed');
         if (req.error?.name === 'VersionError') {
           reject(Object.assign(new Error('This browser storage was upgraded by a newer SDEditor. Open the latest editor and reload this tab before saving again. Your saved translations have been kept.'),
             { name: 'VersionError', code: 'STORAGE_VERSION_OUTDATED', cause: req.error }));
@@ -216,8 +240,7 @@
       const scope = scopedVersion(version);
       const marker = await normalized.transaction([normalized.stores.migration], 'readonly', tx => normalized.get(tx, normalized.stores.migration, normalized.scopeKey(scope)));
       if (marker?.state !== 'ready') {
-        const legacy = await getLegacyWorkspaceView(version, language, true);
-        await normalized.migrate(scope, legacy);
+        await normalized.migrate(scope, undefined, undefined, undefined, language);
         await normalizePreparedRoomRepairs(scope);
       }
       return normalized.workspace(scope);
@@ -1465,6 +1488,7 @@
     setVersionCollectionRequest,
     adoptGuestVersion,
     migrateFromLocalStorageIfNeeded,
+    onMigration,
     getSettings: () => kvGet(KV_SETTINGS),
     setSettings: (settings) => kvSet(KV_SETTINGS, settings),
     getHybridState: () => kvGet('hybrid_v1'),

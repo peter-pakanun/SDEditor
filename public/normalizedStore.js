@@ -40,6 +40,19 @@
   function create(dependencies) {
     const { openDb, W, legacyGet, workspaceKey, sourceKey, receiptKey, revisionStoreName, scopedRevision, normalizeScope, legacyBaseline } = dependencies;
     const migrations = new Map();
+    let migrationSequence = 0;
+    async function trackMigration(kind, identity, scope, action) {
+      const now = () => typeof performance === 'object' ? performance.now() : Date.now();
+      const started = now(), id = key(kind, identity, ++migrationSequence);
+      const emit = (state) => {
+        // A presentation callback must never affect durable conversion.
+        try { dependencies.onMigration?.({ id, kind, scope: copy(scope), state, durationMs: now() - started }); }
+        catch (_) {}
+      };
+      emit('started');
+      try { const result = await action(); emit('completed'); return result; }
+      catch (error) { emit('failed'); throw error; }
+    }
     const row = (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra });
     const get = async (tx, name, id) => (await request(tx.objectStore(name).get(id)))?.value;
     const all = (tx, name, scope) => request(tx.objectStore(name).index('by_scope').getAll(scope));
@@ -53,22 +66,24 @@
       const name = selectedStore || revisionStoreName(game), marker = key('history', name);
       let progress = await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, marker));
       if (progress?.state === 'ready') return;
-      for (;;) {
-        progress = await transaction([name, stores.migration], 'readwrite', async tx => {
-          const current = await get(tx, stores.migration, marker);
-          if (current?.state === 'ready') return current;
-          const range = current?.lastId == null ? undefined : IDBKeyRange.lowerBound(current.lastId, true);
-          const rows = await request(tx.objectStore(name).getAll(range, 128));
-          for (const value of rows) {
-            const normalized = { ...value, accountId: String(value.accountId || value.collaborationAccountId || 'guest'), branchId: value.branchId || 'default', sourceHash: value.sourceHash || '' };
-            if (!same(value, normalized)) tx.objectStore(name).put(normalized);
-          }
-          const next = rows.length < 128 ? { state: 'ready' } : { state: 'converting', lastId: rows[rows.length - 1].id };
-          tx.objectStore(stores.migration).put({ key: marker, scope: marker, value: next });
-          return next;
-        });
-        if (progress.state === 'ready') return;
-      }
+      return trackMigration('history', marker, { game }, async () => {
+        for (;;) {
+          progress = await transaction([name, stores.migration], 'readwrite', async tx => {
+            const current = await get(tx, stores.migration, marker);
+            if (current?.state === 'ready') return current;
+            const range = current?.lastId == null ? undefined : IDBKeyRange.lowerBound(current.lastId, true);
+            const rows = await request(tx.objectStore(name).getAll(range, 128));
+            for (const value of rows) {
+              const normalized = { ...value, accountId: String(value.accountId || value.collaborationAccountId || 'guest'), branchId: value.branchId || 'default', sourceHash: value.sourceHash || '' };
+              if (!same(value, normalized)) tx.objectStore(name).put(normalized);
+            }
+            const next = rows.length < 128 ? { state: 'ready' } : { state: 'converting', lastId: rows[rows.length - 1].id };
+            tx.objectStore(stores.migration).put({ key: marker, scope: marker, value: next });
+            return next;
+          });
+          if (progress.state === 'ready') return;
+        }
+      });
     }
     const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive'];
     const languageMaps = new Set(['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']);
@@ -216,70 +231,72 @@
       await writeDifference(tx, stores.files, oldFiles, parts.files);
       await writeDifference(tx, stores.records, [...new Map(oldRecords.map(r => [r.key, r])).values()], parts.records);
     }
-    async function migrate(scope, legacyWorkspace, legacySource, baseline) {
+    async function migrate(scope, legacyWorkspace, legacySource, baseline, language) {
       const id = scopeKey(scope);
       if (migrations.has(id)) return migrations.get(id);
       const work = (async () => {
         const ready = await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, id));
         if (ready?.state === 'ready') return;
-        const workspace = legacyWorkspace ?? await dependencies.prepareWorkspace?.(scope) ?? await legacyGet(workspaceKey(scope));
-        if (!workspace) return;
-        baseline ||= await legacyBaseline?.(workspace, scope);
-        const source = legacySource ?? baseline?.source ?? await legacyGet(sourceKey(scope));
-        if (!Array.isArray(source)) throw new Error('The original source is unavailable. Reimport its matching ZIP to finish storage conversion. Existing work has been retained.');
-        if (baseline && !same(baseline.source, source)) throw new Error('Retained source records disagree. Existing work has been kept for recovery.');
-        const P = typeof window === 'object' ? window.CollaborationProtocol : typeof self === 'object' ? self.CollaborationProtocol : null;
-        if (workspace.importArchive) {
-          if (!baseline || baseline.archive?.baselineId !== scope.sourceHash || baseline.tree?.root !== baseline.archive.treeRoot)
-            throw new Error('The accepted baseline evidence is incomplete. Reimport the matching original ZIP.');
-          if (P) {
-            const archive = await P.finalizeArchive(baseline.archive), tree = await P.buildBaselineTree(source);
-            if (archive.baselineId !== scope.sourceHash || tree.root !== archive.treeRoot) throw new Error('The retained files do not reproduce their accepted baseline.');
-          }
-        } else if (P && /^[a-f0-9]{64}$/.test(scope.sourceHash) && await P.sourceHash(source) !== scope.sourceHash) {
-          throw new Error('The retained source differs from its saved version identity.');
-        }
-        W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game });
-        W.pruneWorkspaceStatus(workspace);
-        const originals = new Map(source.map(desc => [desc.filepath, desc])), parts = splitWorkspace(scope, workspace, originals);
-        const baseId = baselineKey(scope);
-        const items = [...source.map((desc, order) => [stores.baseline, row(baseId, desc.filepath, desc, { order })]), ...parts.files.map(value => [stores.files, value]), ...parts.records.map(value => [stores.records, value])];
-        const evidenceHash = await fingerprint([source, parts, scope]);
-        let offset = ready?.fingerprint === evidenceHash ? ready.offset || 0 : 0;
-        if (!offset && await transaction([stores.files, stores.records, stores.migration], 'readwrite', async tx => {
-          if ((await get(tx, stores.migration, id))?.state === 'ready') return true;
-          for (const name of [stores.files, stores.records]) for (const item of await all(tx, name, id)) tx.objectStore(name).delete(item.key);
-          tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'converting', offset: 0, fingerprint: evidenceHash } });
-          return false;
-        })) return;
-        for (; offset < items.length; offset += 256) {
-          const batch = items.slice(offset, offset + 256);
-          if (await transaction([...batch.map(item => item[0]), stores.migration], 'readwrite', async tx => {
-            if ((await get(tx, stores.migration, id))?.state === 'ready') return true;
-            for (const [name, value] of batch) if (name === stores.baseline) {
-              const prior = await get(tx, name, value.key);
-              if (prior && !same(prior, value.value)) throw new Error('Retained baselines disagree for one accepted source identity. Original data has been retained.');
+        return trackMigration('workspace', id, scope, async () => {
+          const workspace = legacyWorkspace ?? await dependencies.prepareWorkspace?.(scope, language) ?? await legacyGet(workspaceKey(scope));
+          if (!workspace) return;
+          baseline ||= await legacyBaseline?.(workspace, scope);
+          const source = legacySource ?? baseline?.source ?? await legacyGet(sourceKey(scope));
+          if (!Array.isArray(source)) throw new Error('The original source is unavailable. Reimport its matching ZIP to finish storage conversion. Existing work has been retained.');
+          if (baseline && !same(baseline.source, source)) throw new Error('Retained source records disagree. Existing work has been kept for recovery.');
+          const P = typeof window === 'object' ? window.CollaborationProtocol : typeof self === 'object' ? self.CollaborationProtocol : null;
+          if (workspace.importArchive) {
+            if (!baseline || baseline.archive?.baselineId !== scope.sourceHash || baseline.tree?.root !== baseline.archive.treeRoot)
+              throw new Error('The accepted baseline evidence is incomplete. Reimport the matching original ZIP.');
+            if (P) {
+              const archive = await P.finalizeArchive(baseline.archive), tree = await P.buildBaselineTree(source);
+              if (archive.baselineId !== scope.sourceHash || tree.root !== archive.treeRoot) throw new Error('The retained files do not reproduce their accepted baseline.');
             }
-            for (const [name, value] of batch) tx.objectStore(name).put(value);
-            tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'converting', offset: offset + batch.length, fingerprint: evidenceHash } });
+          } else if (P && /^[a-f0-9]{64}$/.test(scope.sourceHash) && await P.sourceHash(source) !== scope.sourceHash) {
+            throw new Error('The retained source differs from its saved version identity.');
+          }
+          W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game });
+          W.pruneWorkspaceStatus(workspace);
+          const originals = new Map(source.map(desc => [desc.filepath, desc])), parts = splitWorkspace(scope, workspace, originals);
+          const baseId = baselineKey(scope);
+          const items = [...source.map((desc, order) => [stores.baseline, row(baseId, desc.filepath, desc, { order })]), ...parts.files.map(value => [stores.files, value]), ...parts.records.map(value => [stores.records, value])];
+          const evidenceHash = await fingerprint([source, parts, scope]);
+          let offset = ready?.fingerprint === evidenceHash ? ready.offset || 0 : 0;
+          if (!offset && await transaction([stores.files, stores.records, stores.migration], 'readwrite', async tx => {
+            if ((await get(tx, stores.migration, id))?.state === 'ready') return true;
+            for (const name of [stores.files, stores.records]) for (const item of await all(tx, name, id)) tx.objectStore(name).delete(item.key);
+            tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'converting', offset: 0, fingerprint: evidenceHash } });
             return false;
           })) return;
-        }
-        const receipts = await legacyGet(receiptKey(scope)) || [];
-        await normalizeHistory(scope.game);
-        await transaction([stores.meta, stores.assets, stores.migration, stores.receipts, stores.baseline, stores.files, stores.records], 'readwrite', async tx => {
-          if ((await get(tx, stores.migration, id))?.state === 'ready') return;
-          const savedSource = await all(tx, stores.baseline, baseId), savedFiles = await all(tx, stores.files, id), savedRecords = await all(tx, stores.records, id);
-          const restored = assembleWorkspace(parts.meta, savedFiles, savedRecords, new Map(savedSource.map(r => [r.value.filepath, r.value])));
-          if (!same(savedSource.map(r => r.value).sort((a,b) => a.filepath.localeCompare(b.filepath)), source.slice().sort((a,b) => a.filepath.localeCompare(b.filepath))))
-            throw new Error('Baseline conversion verification failed. Original data has been retained.');
-          for (const field of fieldMaps) if (!same(verificationMap(field, restored[field]), verificationMap(field, workspace[field]))) throw new Error('Workspace conversion verification failed: ' + field);
-          if (!same(restored.importRecovery, workspace.importRecovery)) throw new Error('Import recovery conversion verification failed.');
-          tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
-          const assets = baseline ? { ...copy(baseline), source: undefined } : { sourceHash: scope.sourceHash };
-          tx.objectStore(stores.assets).put({ key: baseId, scope: baseId, value: assets });
-          for (const receipt of receipts) tx.objectStore(stores.receipts).put(row(id, receipt.jobId, receipt));
-          tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
+          for (; offset < items.length; offset += 256) {
+            const batch = items.slice(offset, offset + 256);
+            if (await transaction([...batch.map(item => item[0]), stores.migration], 'readwrite', async tx => {
+              if ((await get(tx, stores.migration, id))?.state === 'ready') return true;
+              for (const [name, value] of batch) if (name === stores.baseline) {
+                const prior = await get(tx, name, value.key);
+                if (prior && !same(prior, value.value)) throw new Error('Retained baselines disagree for one accepted source identity. Original data has been retained.');
+              }
+              for (const [name, value] of batch) tx.objectStore(name).put(value);
+              tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'converting', offset: offset + batch.length, fingerprint: evidenceHash } });
+              return false;
+            })) return;
+          }
+          const receipts = await legacyGet(receiptKey(scope)) || [];
+          await normalizeHistory(scope.game);
+          await transaction([stores.meta, stores.assets, stores.migration, stores.receipts, stores.baseline, stores.files, stores.records], 'readwrite', async tx => {
+            if ((await get(tx, stores.migration, id))?.state === 'ready') return;
+            const savedSource = await all(tx, stores.baseline, baseId), savedFiles = await all(tx, stores.files, id), savedRecords = await all(tx, stores.records, id);
+            const restored = assembleWorkspace(parts.meta, savedFiles, savedRecords, new Map(savedSource.map(r => [r.value.filepath, r.value])));
+            if (!same(savedSource.map(r => r.value).sort((a,b) => a.filepath.localeCompare(b.filepath)), source.slice().sort((a,b) => a.filepath.localeCompare(b.filepath))))
+              throw new Error('Baseline conversion verification failed. Original data has been retained.');
+            for (const field of fieldMaps) if (!same(verificationMap(field, restored[field]), verificationMap(field, workspace[field]))) throw new Error('Workspace conversion verification failed: ' + field);
+            if (!same(restored.importRecovery, workspace.importRecovery)) throw new Error('Import recovery conversion verification failed.');
+            tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
+            const assets = baseline ? { ...copy(baseline), source: undefined } : { sourceHash: scope.sourceHash };
+            tx.objectStore(stores.assets).put({ key: baseId, scope: baseId, value: assets });
+            for (const receipt of receipts) tx.objectStore(stores.receipts).put(row(id, receipt.jobId, receipt));
+            tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
+          });
         });
       })();
       migrations.set(id, work);
@@ -468,7 +485,7 @@
       const transferred = await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, key('draft', id)));
       if (transferred) return undefined;
       const legacy = await legacyGet(id);
-      return transaction([stores.drafts, stores.baseline, stores.migration], 'readwrite', async tx => {
+      const transfer = () => transaction([stores.drafts, stores.baseline, stores.migration], 'readwrite', async tx => {
         let current = await get(tx, stores.drafts, id);
         if (legacy && !current) {
           const original = await get(tx, stores.baseline, key(baselineKey(legacy), legacy.filepath));
@@ -479,6 +496,8 @@
         tx.objectStore(stores.migration).put({ key: key('draft', id), scope: key('draft', id), value: { state: 'ready' } });
         return hydrateDraft(tx, current);
       });
+      return legacy ? trackMigration('draft', id, { accountId: legacy.profile, game: legacy.game, branchId: legacy.branchId,
+        sourceHash: legacy.sourceHash, language: legacy.language }, transfer) : transfer();
     }
     async function draftUpdate(id, change) {
       await draftGet(id);
@@ -498,21 +517,23 @@
       const marker = key('drafts', scope.profile, scope.game, scope.branchId || 'default', scope.language);
       await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, marker)).then(async ready => {
         if (ready) return;
-        const prefix = 'translation_draft_v1:', range = typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff');
-        const rows = (await transaction(['kv'], 'readonly', tx => request(tx.objectStore('kv').getAll(range))))
-          .filter(item => item.key.startsWith(prefix) && item.value.profile === scope.profile && item.value.game === scope.game
-            && item.value.language === scope.language && (item.value.branchId || 'default') === (scope.branchId || 'default'));
-        // Bound each transfer transaction. Readiness follows the final batch;
-        // interrupted transfers reuse the rows already copied without rewriting.
-        for (let offset = 0; offset < Math.max(rows.length, 1); offset += 128) {
-          await transaction([stores.drafts, stores.baseline, stores.migration], 'readwrite', async tx => {
-            for (const item of rows.slice(offset, offset + 128)) if (!await get(tx, stores.drafts, item.key)) {
-                const original = await get(tx, stores.baseline, key(baselineKey(item.value), item.value.filepath));
-                tx.objectStore(stores.drafts).put(draftRow(item.value, original));
-              }
-            if (offset + 128 >= rows.length) tx.objectStore(stores.migration).put({ key: marker, scope: marker, value: { state: 'ready' } });
-          });
-        }
+        return trackMigration('drafts', marker, { accountId: scope.profile, game: scope.game, branchId: scope.branchId, language: scope.language }, async () => {
+          const prefix = 'translation_draft_v1:', range = typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff');
+          const rows = (await transaction(['kv'], 'readonly', tx => request(tx.objectStore('kv').getAll(range))))
+            .filter(item => item.key.startsWith(prefix) && item.value.profile === scope.profile && item.value.game === scope.game
+              && item.value.language === scope.language && (item.value.branchId || 'default') === (scope.branchId || 'default'));
+          // Bound each transfer transaction. Readiness follows the final batch;
+          // interrupted transfers reuse the rows already copied without rewriting.
+          for (let offset = 0; offset < Math.max(rows.length, 1); offset += 128) {
+            await transaction([stores.drafts, stores.baseline, stores.migration], 'readwrite', async tx => {
+              for (const item of rows.slice(offset, offset + 128)) if (!await get(tx, stores.drafts, item.key)) {
+                  const original = await get(tx, stores.baseline, key(baselineKey(item.value), item.value.filepath));
+                  tx.objectStore(stores.drafts).put(draftRow(item.value, original));
+                }
+              if (offset + 128 >= rows.length) tx.objectStore(stores.migration).put({ key: marker, scope: marker, value: { state: 'ready' } });
+            });
+          }
+        });
       });
       return transaction([stores.drafts, stores.baseline], 'readonly', async tx => {
         const rows = scope.sourceHash == null
@@ -586,7 +607,7 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, saveWorkspace, transaction, get, all, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory,
+      importScope, assets, hasScope, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same };
   }
   return { stores, names, upgrade, create, scopeKey, baselineKey };

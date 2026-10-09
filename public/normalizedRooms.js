@@ -277,82 +277,85 @@
       const work = (async () => {
         const marker = await transaction([S.migration], 'readonly', tx => get(tx, S.migration, markerKey(roomKey)));
         if (marker?.state === 'ready') { ready.add(roomKey); return; }
-        let legacy = suppliedLegacy === undefined ? (await dependencies.legacyGet('collaboration_v1'))?.rooms?.[roomKey] : suppliedLegacy;
-        if (!legacy) {
-          await transaction([S.migration], 'readwrite', async tx => tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'ready' } }));
-          ready.add(roomKey); return;
-        }
-        identity = legacy.identity || identity;
-        try { await n.ensure(scopeOf(identity)); }
-        catch (error) {
-          if (error.code === 'SOURCE_UNAVAILABLE' || /^(The original source is unavailable\.|The accepted baseline evidence is incomplete\.)/.test(error.message || ''))
-            error.code = 'ROOM_SOURCE_UNAVAILABLE';
-          throw error;
-        }
-        if (n.hasScope && !await n.hasScope(scopeOf(identity))) throw Object.assign(
-          new Error('The matching original source is unavailable for this collaboration cache. Import its original ZIP to finish conversion. Existing recovery data has been retained.'),
-          { code: 'ROOM_SOURCE_UNAVAILABLE' });
-        const prepared = dependencies.preparedRoom?.(scopeOf(identity), roomKey);
-        legacy = prepared || legacy;
-        const room = copy(legacy);
-        // Workspace readiness may have survived a crash before room conversion.
-        // Rebuild the canceled joins and stable repair queue from durable facts.
-        if (!prepared) await restoreDurablePlaceholderRepairs(room, scopeOf(identity));
-        for (let index = 0; index < (room.recovery || []).length; index++) {
-          const recovery = room.recovery[index]; recovery.localRecordId ||= recovery.id || ('legacy:' + index);
-          recovery._storageRecovery = { order: index + 1, fileCount: recovery.files?.length || 0,
-            nextFileOrder: recovery.files?.length || 0, fileOrders: (recovery.files || []).map((file, index) => index) };
-        }
-        room.nextRecoveryOrder = room.recovery?.length || 0;
-        const parts = split(roomKey, room);
-        // In-memory repair preparation and crash recovery can enumerate the
-        // same durable repair IDs in different orders. Batch identities remain
-        // stable across that boundary so unfinished conversion can resume.
-        parts.records.sort((left, right) => left.key.localeCompare(right.key));
-        let ordinal = 0;
-        for (const operation of parts.operations) { operation.value.localOrder ||= ++ordinal; ordinal = Math.max(ordinal, operation.value.localOrder); }
-        parts.meta.nextOperationOrder = ordinal; parts.meta.pendingCount = parts.operations.length;
-        const fingerprint = await n.fingerprint(parts);
-        const entries = [...parts.files.map(value => [S.shared, value]),
-          ...parts.operations.map(value => [S.operations, value]), ...parts.records.map(value => [S.roomRecords, value])];
-        let start = marker?.fingerprint === fingerprint ? marker.offset || 0 : 0;
-        let completedElsewhere = false;
-        if (start === 0) completedElsewhere = await transaction([...roomStores, S.migration], 'readwrite', async tx => {
-          if ((await get(tx, S.migration, markerKey(roomKey)))?.state === 'ready') return true;
-          for (const name of [S.shared, S.operations, S.roomRecords]) for (const item of await all(tx, name, roomKey)) tx.objectStore(name).delete(item.key);
-          tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'converting', offset: 0, fingerprint } });
-        });
-        if (completedElsewhere) { ready.add(roomKey); return; }
-        for (; start < entries.length; start += 64) {
-          const batch = entries.slice(start, start + 64);
-          completedElsewhere = await transaction([...new Set(batch.map(item => item[0])), S.migration], 'readwrite', async tx => {
+        const trackMigration = n.trackMigration || ((kind, id, scope, action) => action());
+        return trackMigration('room', roomKey, identity || identityFromKey(roomKey), async () => {
+          let legacy = suppliedLegacy === undefined ? (await dependencies.legacyGet('collaboration_v1'))?.rooms?.[roomKey] : suppliedLegacy;
+          if (!legacy) {
+            await transaction([S.migration], 'readwrite', async tx => tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'ready' } }));
+            ready.add(roomKey); return;
+          }
+          identity = legacy.identity || identity;
+          try { await n.ensure(scopeOf(identity)); }
+          catch (error) {
+            if (error.code === 'SOURCE_UNAVAILABLE' || /^(The original source is unavailable\.|The accepted baseline evidence is incomplete\.)/.test(error.message || ''))
+              error.code = 'ROOM_SOURCE_UNAVAILABLE';
+            throw error;
+          }
+          if (n.hasScope && !await n.hasScope(scopeOf(identity))) throw Object.assign(
+            new Error('The matching original source is unavailable for this collaboration cache. Import its original ZIP to finish conversion. Existing recovery data has been retained.'),
+            { code: 'ROOM_SOURCE_UNAVAILABLE' });
+          const prepared = dependencies.preparedRoom?.(scopeOf(identity), roomKey);
+          legacy = prepared || legacy;
+          const room = copy(legacy);
+          // Workspace readiness may have survived a crash before room conversion.
+          // Rebuild the canceled joins and stable repair queue from durable facts.
+          if (!prepared) await restoreDurablePlaceholderRepairs(room, scopeOf(identity));
+          for (let index = 0; index < (room.recovery || []).length; index++) {
+            const recovery = room.recovery[index]; recovery.localRecordId ||= recovery.id || ('legacy:' + index);
+            recovery._storageRecovery = { order: index + 1, fileCount: recovery.files?.length || 0,
+              nextFileOrder: recovery.files?.length || 0, fileOrders: (recovery.files || []).map((file, index) => index) };
+          }
+          room.nextRecoveryOrder = room.recovery?.length || 0;
+          const parts = split(roomKey, room);
+          // In-memory repair preparation and crash recovery can enumerate the
+          // same durable repair IDs in different orders. Batch identities remain
+          // stable across that boundary so unfinished conversion can resume.
+          parts.records.sort((left, right) => left.key.localeCompare(right.key));
+          let ordinal = 0;
+          for (const operation of parts.operations) { operation.value.localOrder ||= ++ordinal; ordinal = Math.max(ordinal, operation.value.localOrder); }
+          parts.meta.nextOperationOrder = ordinal; parts.meta.pendingCount = parts.operations.length;
+          const fingerprint = await n.fingerprint(parts);
+          const entries = [...parts.files.map(value => [S.shared, value]),
+            ...parts.operations.map(value => [S.operations, value]), ...parts.records.map(value => [S.roomRecords, value])];
+          let start = marker?.fingerprint === fingerprint ? marker.offset || 0 : 0;
+          let completedElsewhere = false;
+          if (start === 0) completedElsewhere = await transaction([...roomStores, S.migration], 'readwrite', async tx => {
             if ((await get(tx, S.migration, markerKey(roomKey)))?.state === 'ready') return true;
-            for (const [name, value] of batch) tx.objectStore(name).put(value);
-            tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'converting', offset: start + batch.length, fingerprint } });
+            for (const name of [S.shared, S.operations, S.roomRecords]) for (const item of await all(tx, name, roomKey)) tx.objectStore(name).delete(item.key);
+            tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'converting', offset: 0, fingerprint } });
           });
           if (completedElsewhere) { ready.add(roomKey); return; }
-        }
-        await transaction([...roomStores, ...workspaceStores, S.assets, S.migration], 'readwrite', async tx => {
-          if ((await get(tx, S.migration, markerKey(roomKey)))?.state === 'ready') return;
-          const [files, operations, records] = await Promise.all([all(tx, S.shared, roomKey), all(tx, S.operations, roomKey), all(tx, S.roomRecords, roomKey)]);
-          const byKey = values => values.slice().sort((a, b) => a.key.localeCompare(b.key));
-          if (!same(byKey(files), byKey(parts.files)) || !same(byKey(operations), byKey(parts.operations)) || !same(byKey(records), byKey(parts.records)))
-            throw new Error('Collaboration conversion verification failed. Original recovery data has been retained.');
-          tx.objectStore(S.rooms).put({ key: roomKey, scope: roomKey, value: parts.meta });
-          const restored = await readRoom(tx, roomKey);
-          const recoveries = Object.values(legacy.local || {}).filter(file => !same(file.translations, restored.room.local[file.filepath]?.translations));
-          // Divergent cached local text has no independent authority, but must
-          // remain recoverable when converting an older cache.
-          if (recoveries.length) {
-            const recovery = { id: 'normalized-cache:' + roomKey, at: 0, reason: 'Preserved local collaboration cache before storage conversion', files: copy(recoveries) };
-            recovery._storageRecovery = { order: ++parts.meta.nextRecoveryOrder, fileCount: recoveries.length,
-              nextFileOrder: recoveries.length, fileOrders: recoveries.map((file, index) => index) };
-            for (const item of split(roomKey, { recovery: [recovery] }).records) tx.objectStore(S.roomRecords).put(item);
-            tx.objectStore(S.rooms).put({ key: roomKey, scope: roomKey, value: parts.meta });
+          for (; start < entries.length; start += 64) {
+            const batch = entries.slice(start, start + 64);
+            completedElsewhere = await transaction([...new Set(batch.map(item => item[0])), S.migration], 'readwrite', async tx => {
+              if ((await get(tx, S.migration, markerKey(roomKey)))?.state === 'ready') return true;
+              for (const [name, value] of batch) tx.objectStore(name).put(value);
+              tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'converting', offset: start + batch.length, fingerprint } });
+            });
+            if (completedElsewhere) { ready.add(roomKey); return; }
           }
-          tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'ready' } });
+          await transaction([...roomStores, ...workspaceStores, S.assets, S.migration], 'readwrite', async tx => {
+            if ((await get(tx, S.migration, markerKey(roomKey)))?.state === 'ready') return;
+            const [files, operations, records] = await Promise.all([all(tx, S.shared, roomKey), all(tx, S.operations, roomKey), all(tx, S.roomRecords, roomKey)]);
+            const byKey = values => values.slice().sort((a, b) => a.key.localeCompare(b.key));
+            if (!same(byKey(files), byKey(parts.files)) || !same(byKey(operations), byKey(parts.operations)) || !same(byKey(records), byKey(parts.records)))
+              throw new Error('Collaboration conversion verification failed. Original recovery data has been retained.');
+            tx.objectStore(S.rooms).put({ key: roomKey, scope: roomKey, value: parts.meta });
+            const restored = await readRoom(tx, roomKey);
+            const recoveries = Object.values(legacy.local || {}).filter(file => !same(file.translations, restored.room.local[file.filepath]?.translations));
+            // Divergent cached local text has no independent authority, but must
+            // remain recoverable when converting an older cache.
+            if (recoveries.length) {
+              const recovery = { id: 'normalized-cache:' + roomKey, at: 0, reason: 'Preserved local collaboration cache before storage conversion', files: copy(recoveries) };
+              recovery._storageRecovery = { order: ++parts.meta.nextRecoveryOrder, fileCount: recoveries.length,
+                nextFileOrder: recoveries.length, fileOrders: recoveries.map((file, index) => index) };
+              for (const item of split(roomKey, { recovery: [recovery] }).records) tx.objectStore(S.roomRecords).put(item);
+              tx.objectStore(S.rooms).put({ key: roomKey, scope: roomKey, value: parts.meta });
+            }
+            tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'ready' } });
+          });
+          ready.add(roomKey);
         });
-        ready.add(roomKey);
       })();
       migrating.set(roomKey, work);
       try { await work; } finally { migrating.delete(roomKey); }

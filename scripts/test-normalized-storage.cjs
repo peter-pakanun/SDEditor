@@ -2,6 +2,21 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const N = require('../public/normalizedStore.js');
 
+test('migration activity reports outcomes without allowing a presentation failure to change storage results', async () => {
+    const events = [], scope = { accountId: 'owner', game: 'poe1', sourceHash: 'source', branchId: 'default' };
+    const n = N.create({ onMigration(event) { events.push(event); throw new Error('Broken UI listener'); } });
+    assert.equal(await n.trackMigration('workspace', N.scopeKey(scope), scope, async () => 'committed'), 'committed');
+    const failure = new Error('Quota failure');
+    await assert.rejects(n.trackMigration('workspace', N.scopeKey(scope), scope, async () => { throw failure; }), error => error === failure);
+    assert.deepEqual(events.map(event => event.state), ['started', 'completed', 'started', 'failed']);
+    assert.equal(events[0].id, events[1].id);
+    assert.equal(events[2].id, events[3].id);
+    assert.notEqual(events[0].id, events[2].id, 'Retries have distinct presentation tokens');
+    assert.deepEqual(events[1].scope, scope);
+    assert.notEqual(events[1].scope, scope);
+    assert.ok(events[1].durationMs >= 0);
+});
+
 function schema() {
     const stores = new Map(['kv', 'revisions', 'revisions_poe1', 'revisions_poe2'].map(name => [name, { name, indices: new Map() }]));
     const created = [], indexes = [];

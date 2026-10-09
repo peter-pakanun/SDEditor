@@ -41,6 +41,10 @@
 <body>
   <div id="app" v-cloak>
     <div class="appRoot" :data-density="uiDensity">
+    <div v-if="storageMigrationMessage" class="storageMigrationNotice" role="status" aria-live="polite" aria-atomic="true">
+      <span v-if="storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
+      <span>{{ storageMigrationMessage }}</span>
+    </div>
     <div v-if="localSaveError" class="cloudStorageError" role="alert">Could not finish saving your translations. Your edits remain in this tab. {{ localSaveError }} <button @click="retryPendingSaves">Retry saving</button> <button @click="downloadPendingSaves">Download pending edits</button></div>
     <div v-if="cloudStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
     <div v-if="inlineDraftError" class="cloudStorageError" role="alert">{{ inlineDraftError }} <button @click="openDraftRecovery">View local drafts</button></div>
