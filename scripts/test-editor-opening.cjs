@@ -88,7 +88,7 @@ function loadEditor(options = {}) {
       markRaw(value) { return value; }, toRaw(value) { return options.toRaw ? options.toRaw(value) : value; },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [method, counter] of [['create', 'syncIndexes'], ['createAsync', 'asyncIndexes']]) {

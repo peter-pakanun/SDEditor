@@ -6095,7 +6095,7 @@ const config = Vue.defineComponent({
         return this.managedWarnBeforeEdit().then(ok => ok && this.collaborationContextCurrent(context)
           ? this.editFile(filepath, returnToFileList, { ...options, endedAcknowledged: true }) : false);
       }
-      if (this.inlineActive && !options.inline && this.editorCurrentEditingDesc?.filepath === filepath && !this._nextEditorSurface) return this.openInlineFullEditor(filepath);
+      if (this.inlineActive && !options.inline && this.editorCurrentEditingDesc?.filepath === filepath && !this._nextEditorSurface && !this.editorLoadError) return this.openInlineFullEditor(filepath);
       if (this._draftSession && this.editorCurrentEditingDesc?.filepath !== filepath && !options.draftFlushed) {
         return this.flushEditorDraft().then(ok => ok ? this.editFile(filepath, returnToFileList, { ...options, draftFlushed: true }) : false);
       }
@@ -6116,6 +6116,8 @@ const config = Vue.defineComponent({
       this._editorClaimPending = new Promise(resolve => { releaseClaim = resolve; });
       const ctx = this.captureCollaborationContext();
       const client = this._collaboration;
+      const editorCurrent = request.isCurrent;
+      request.isCurrent = () => editorCurrent() && this.collaborationContextCurrent(ctx);
       try {
         await this.yieldEditorPaint();
         if (previousClaim) await previousClaim;
@@ -6134,11 +6136,25 @@ const config = Vue.defineComponent({
         // A claim can bring in newer saved translations. Pair the visible text
         // and the hydration snapshot with the base captured above.
         this.seedEditorOpenSource(request);
-        return await this.openEditorFile(filepath, returnToFileList, request);
+        const opened = await this.openEditorFile(filepath, returnToFileList, request);
+        const failure = this._collaborationOpenFailure;
+        if (opened && request.isCurrent() && failure?.filepath === filepath && this.collaborationContextCurrent(failure.context)) {
+          this._collaborationOpenFailure = null;
+          if (this.collaborationNotice === failure.message) this.collaborationNotice = '';
+          if (this.collaborationState?.error === failure.message) {
+            // Only this file's successful reopen clears its claim failure.
+            // Keep an independent upload or presence failure visible.
+            const status = client.lastStatus;
+            this.collabReceiveState?.({ ...this.collaborationState,
+              status: status?.message || '', error: status?.error ? status.message : '' });
+          }
+        }
+        return opened;
       } catch (error) {
         if (request.isCurrent()) {
           this.editorLoading = false;
           this.editorLoadError = 'Could not open this file. Close it and try again. ' + error.message;
+          this._collaborationOpenFailure = { context: ctx, filepath, message: error.message };
           this.collaborationFailure(error);
         }
         return false;

@@ -497,7 +497,7 @@
         if (!this.draftScopeCurrent(scope) || (context && !this.collaborationContextCurrent(context))) return false;
         this._inlineRequestedPath = filepath;
         if (this.inlineTransitionBusy) return false;
-        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) return true;
+        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError) return true;
         this.inlineTransitionBusy = true;
         const opening = this.runInlineRowActivation(filepath, scope, context, options);
         this._inlineActivationPromise = opening;
@@ -596,7 +596,7 @@
         }
         if (!await this.flushEditorDraft()) return false;
         if (!current()) return false;
-        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath) {
+        if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError) {
           this.inlineActive = false; this.editorVisible = true; this._fileTableReturnFocus = true;
           if (this.sideTab === 'preview') this.sideTab = 'dictionary';
           const candidate = root.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);

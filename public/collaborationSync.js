@@ -1507,7 +1507,8 @@
         const timer = setTimeout(() => { this.claims.delete(requestId); reject(new Error('Could not confirm editing availability. Try again.')); }, 8000);
         timer.unref?.(); this.claims.set(requestId, { resolve, reject, timer, filepath, generation });
         if (!this.send({ type: 'claim', requestId, filepath, force })) {
-          clearTimeout(timer); this.claims.delete(requestId); resolve({ granted: true, peers: [], offline: true });
+          clearTimeout(timer); this.claims.delete(requestId); this.editing = filepath;
+          resolve({ granted: true, peers: [], offline: true });
         }
       });
     }
@@ -1517,12 +1518,20 @@
       const socket = this.socket; this.socket = null;
       if (socket) { socket.onclose = null; socket.close(); }
       clearInterval(this.heartbeat); this.heartbeat = null;
-      for (const claim of this.claims.values()) { clearTimeout(claim.timer); claim.reject(new Error('Collaboration connection closed. Try opening the file again.')); }
+      // Losing ephemeral presence must not block the local editor. Retain the
+      // current file so reconnection can claim it again; cancelled/superseded
+      // requests must not revive their old editing session.
+      for (const claim of this.claims.values()) {
+        clearTimeout(claim.timer);
+        const stale = claim.generation !== this.claimGeneration;
+        if (!stale) this.editing = claim.filepath;
+        claim.resolve({ granted: !stale, peers: [], ...(stale ? { stale: true } : { offline: true }) });
+      }
       this.claims.clear(); this.connected = false; this.peers = []; this.sessionId = null; this.notify();
     }
     disconnect() {
       this.droppedConflicts = {}; this.droppedWorkspace = null; this.lastDroppedSync = 0; this.pendingDropped = false;
-      this.epoch++; clearTimeout(this.timer); this.timer = null;
+      this.epoch++; this.claimGeneration++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
       this.onWork({ key: 'upload', active: false });
       this.onWork({ key: 'placeholder-repair', active: false });

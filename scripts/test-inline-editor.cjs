@@ -69,7 +69,7 @@ function harness({ records = new Map() } = {}) {
   const context = vm.createContext({ window, document, URLSearchParams, console, setTimeout, clearTimeout, performance,
     Vue: { defineComponent(value) { config = value; return value; }, createApp() { return { component() {}, directive() {}, mount() {} }; },
       nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } } });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
     'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'inlineEditor.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
   }
@@ -530,6 +530,89 @@ test('inline row activation prepares the shared editing session without showing 
   assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false); assert.equal(editor.editorSessionActive, true);
   assert.equal(editor.editorBlocks[0].english, 'Source'); assert.equal(editor.editorBlocks[0].translation, 'translation');
   assert.equal(h.calls.focused, 0); assert.equal(editor._draftSession.scope.filepath, desc.filepath);
+});
+
+async function failedInlineClaimFixture() {
+  const h = harness(), { editor, desc, context, window } = h;
+  await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'preserved private draft';
+  await editor.flushEditorDraft();
+  await editor.finishInlineSession({ promote: false });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/collaborationUi.js'), 'utf8'), context);
+  editor.collaborationState = window.CollaborationUI.mixin.data().collaborationState;
+  editor.collabReceiveState = window.CollaborationUI.mixin.methods.collabReceiveState;
+  const claims = [];
+  const failure = 'Could not confirm editing availability. Try again.';
+  const client = editor._collaboration = {
+    lastStatus: { message: '', error: false },
+    isEditing() { return false; }, leaveEdit() {},
+    fileBase(filepath) { return { filepath, translations: ['translation'] }; },
+    snapshot() { return { connected: true, peers: [], conflicts: [], pending: 0 }; },
+    async claim(filepath) {
+      claims.push(filepath);
+      if (claims.length === 1) throw new Error(failure);
+      return { granted: true };
+    },
+  };
+  assert.equal(await editor.activateInlineRow(desc.filepath), false);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.inlineTransitionBusy, false);
+  assert.match(editor.editorLoadError, /Could not confirm editing availability/);
+  assert.equal(editor.collaborationNotice, failure); assert.equal(editor.collaborationState.error, failure);
+  return { ...h, claims, client, failure };
+}
+
+test('selecting the failed inline row again retries its claim and retains its private draft', async () => {
+  const { editor, desc, claims, calls } = await failedInlineClaimFixture();
+  assert.equal(await editor.activateInlineRow(desc.filepath), true, editor.editorLoadError);
+  assert.deepEqual(claims, [desc.filepath, desc.filepath]);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+  assert.equal(editor.editorReady, true); assert.equal(editor.editorLoadError, '');
+  assert.equal(editor.collaborationNotice, ''); assert.equal(editor.collaborationState.error, '');
+  assert.equal(editor.editorBlocks[0].translation, 'preserved private draft');
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('opening the full editor from a failed inline row retries instead of transferring its error', async () => {
+  const { editor, desc, claims, calls } = await failedInlineClaimFixture();
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), true, editor.editorLoadError);
+  assert.deepEqual(claims, [desc.filepath, desc.filepath]);
+  assert.equal(editor.inlineActive, false); assert.equal(editor.editorVisible, true);
+  assert.equal(editor.editorReady, true); assert.equal(editor.editorLoadError, '');
+  assert.equal(editor.collaborationNotice, ''); assert.equal(editor.collaborationState.error, '');
+  assert.equal(editor.editorBlocks[0].translation, 'preserved private draft');
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('a successful inline reopen clears only its own failure and retains a separate sync error', async () => {
+  const { editor, desc, client } = await failedInlineClaimFixture();
+  client.lastStatus = { message: 'Saved translations could not upload.', error: true };
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  assert.equal(editor.editorLoadError, '');
+  assert.equal(editor.collaborationState.error, client.lastStatus.message);
+  assert.equal(editor.collaborationNotice, '');
+});
+
+test('opening another row does not clear the failed file claim before that file succeeds', async () => {
+  const { editor, desc, failure } = await failedInlineClaimFixture();
+  assert.equal(await editor.activateInlineRow(editor.descs[1].filepath), true);
+  assert.equal(editor.collaborationNotice, failure); assert.equal(editor.collaborationState.error, failure);
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  assert.equal(editor.collaborationNotice, ''); assert.equal(editor.collaborationState.error, '');
+});
+
+test('a late inline claim failure cannot publish into a changed account, branch or client', async () => {
+  for (const change of [editor => { editor.cloudUser = { id: 'another-account' }; },
+    editor => { editor.branchId = 'another-branch'; }, editor => { editor._collaboration = null; }]) {
+    const { editor, desc } = harness(), gate = deferred();
+    editor._collaboration = { isEditing() { return false; }, claim() { return gate.promise; }, leaveEdit() {} };
+    const opening = editor.activateInlineRow(desc.filepath); await tick();
+    change(editor); editor.collaborationNotice = 'Current scope warning';
+    gate.reject(new Error('Obsolete connection failure'));
+    assert.equal(await opening, false);
+    assert.equal(editor.collaborationNotice, 'Current scope warning');
+    assert.equal(editor.editorLoadError, ''); assert.equal(editor.editorLoading, false);
+    assert.equal(editor.inlineActive, false);
+  }
 });
 
 test('row Enter opens the full surface, while Enter inside a translation input stays with input handling', async () => {
@@ -1304,6 +1387,18 @@ test('a failed draft read ends loading and presents a recoverable editor error',
   const h = harness(); h.store.getTranslationDraft = async () => { throw new Error('Storage unavailable'); };
   assert.equal(await h.editor.activateInlineRow(h.desc.filepath), false);
   assert.equal(h.editor.editorLoading, false); assert.match(h.editor.editorLoadError, /Storage unavailable/);
+  assert.equal(h.calls.promotions.length, 0);
+});
+
+test('a failed inline preparation retries on the same row without staging its text', async () => {
+  const h = harness(), { editor, desc, store } = h;
+  const get = store.getTranslationDraft;
+  store.getTranslationDraft = async () => { throw new Error('Storage unavailable'); };
+  assert.equal(await editor.activateInlineRow(desc.filepath), false);
+  store.getTranslationDraft = get;
+  assert.equal(await editor.activateInlineRow(desc.filepath), true, editor.editorLoadError);
+  assert.equal(editor.editorLoadError, ''); assert.equal(editor.editorReady, true);
+  assert.equal(editor.editorBlocks[0].translation, 'translation');
   assert.equal(h.calls.promotions.length, 0);
 });
 

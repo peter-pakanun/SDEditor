@@ -869,6 +869,61 @@ test('late reconnect claim replies cannot revive a released row or replace its n
   });
 });
 
+test('a presence disconnect preserves a pending local editing claim and reclaims it after reconnect', async t => {
+  const statuses = [];
+  const { client, sockets, connect } = presenceFixture({ onStatus: status => statuses.push(status) });
+  t.after(() => client.destroy());
+  await connect(); sockets[0].open(); await client.running;
+  const count = statuses.length;
+  const claiming = client.claim('a.txt');
+  const request = sockets[0].sent.at(-1);
+  sockets[0].drop();
+  assert.deepEqual(await claiming, { granted: true, peers: [], offline: true });
+  assert.equal(client.editing, 'a.txt');
+  assert.equal(client.snapshot().disconnected, true, 'The automatic reconnection warning remains visible.');
+  assert.equal(client.claims.size, 0);
+  assert.equal(statuses.length, count, 'A lost presence claim does not create a sticky editor failure.');
+
+  await client.openSocket(client.epoch); sockets[1].open(); await client.running;
+  const reclaimed = sockets[1].sent.find(message => message.type === 'claim');
+  assert.equal(reclaimed.filepath, 'a.txt');
+  sockets[1].receive({ type: 'claim-result', requestId: reclaimed.requestId, granted: true });
+  sockets[0].receive({ type: 'claim-result', requestId: request.requestId, granted: false });
+  await Promise.resolve();
+  assert.equal(client.editing, 'a.txt');
+  assert.equal(client.snapshot().connected, true);
+  assert.equal(client.snapshot().disconnected, false);
+});
+
+test('socket closure cannot revive released, superseded or context-invalidated editing claims', async t => {
+  for (const action of ['release', 'new row', 'disconnect', 'dashboard']) await t.test(action, async t => {
+    let enabled = true;
+    const { client, sockets, connect } = presenceFixture({ presenceEnabled: () => enabled });
+    t.after(() => client.destroy());
+    await connect(); sockets[0].open(); await client.running;
+    const oldClaim = client.claim('a.txt');
+    let newClaim;
+    if (action === 'release') client.leaveEdit();
+    else if (action === 'new row') newClaim = client.claim('b.txt');
+    else if (action === 'disconnect') client.disconnect();
+    else { enabled = false; client.updatePresence(); }
+    if (action === 'release' || action === 'new row') sockets[0].drop();
+    assert.deepEqual(await oldClaim, { granted: false, peers: [], stale: true });
+    if (newClaim) assert.deepEqual(await newClaim, { granted: true, peers: [], offline: true });
+    assert.equal(client.editing, action === 'new row' ? 'b.txt' : null);
+    assert.equal(client.claims.size, 0);
+  });
+});
+
+test('a socket that closes before claim delivery retains the file for reconnection', async t => {
+  const { client, sockets, connect } = presenceFixture(); t.after(() => client.destroy());
+  await connect(); sockets[0].open(); await client.running;
+  sockets[0].readyState = 3;
+  assert.deepEqual(await client.claim('b.txt'), { granted: true, peers: [], offline: true });
+  assert.equal(client.editing, 'b.txt');
+  assert.equal(client.claims.size, 0);
+});
+
 test('collaboration keeps failed sync visible while another durable save retries', async t => {
   const { client, server, store } = await fixture();
   t.after(() => client.destroy());
