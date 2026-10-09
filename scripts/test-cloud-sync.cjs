@@ -25,6 +25,18 @@ test('inline editing defaults on and preserves an explicit disabled preference',
   assert.throws(() => Cloud.validateImport({ inlineEditor: 'false' }), /inlineEditor must be boolean/);
 });
 
+test('new Dictionary game scope defaults to All and validates configurable preferences', () => {
+  assert.equal(Cloud.completeSettings({}).dictionaryDefaultGameScope, 'all');
+  for (const dictionaryDefaultGameScope of ['all', 'poe1', 'poe2']) {
+    assert.equal(Cloud.completeSettings({ dictionaryDefaultGameScope }).dictionaryDefaultGameScope, dictionaryDefaultGameScope);
+    assert.deepEqual(Cloud.preferences({ dictionaryDefaultGameScope }), { dictionaryDefaultGameScope });
+    assert.doesNotThrow(() => Cloud.validateImport({ dictionaryDefaultGameScope }));
+  }
+  for (const dictionaryDefaultGameScope of ['All', 'current', '', null, 1]) {
+    assert.throws(() => Cloud.validateImport({ dictionaryDefaultGameScope }), /dictionaryDefaultGameScope is invalid/);
+  }
+});
+
 // Transactions clone their input and publish only at commit, like structured
 // cloning and atomic read/modify/write in the real IndexedDB adapter.
 class MemoryStore {
@@ -180,6 +192,38 @@ function seedAPI(api, { remote = dictionary([word()]), remoteSettings = settings
   api.settings.set(id, { revision: settingsRevision, settings: clone(remoteSettings) });
   api.dictionaries.set('Thai', clone(remote));
 }
+
+test('new Dictionary game scope persists through cloud backup and remains personal to each account', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api);
+  await h.client.saveLocal(payload([word()], { dictionaryDefaultGameScope: 'poe2' }));
+  assert.equal(h.store.state.profiles.alice.settings.dictionaryDefaultGameScope, 'poe2');
+  await h.client.sync();
+  assert.equal(h.api.writes('/v1/settings').at(-1).body.settings.dictionaryDefaultGameScope, 'poe2');
+  assert.equal(h.api.settings.get('alice').settings.dictionaryDefaultGameScope, 'poe2');
+
+  const reloaded = await harness(t, { store: h.store, api: h.api });
+  assert.equal(reloaded.client.snapshot().settings.dictionaryDefaultGameScope, 'poe2');
+  await reloaded.client.acceptLogin({ token: 'token-bob', user: user('bob'), expiresAt: 1 });
+  assert.equal(Cloud.completeSettings(reloaded.client.snapshot().settings).dictionaryDefaultGameScope, 'all');
+  assert.equal(reloaded.store.state.profiles.alice.settings.dictionaryDefaultGameScope, 'poe2');
+  await reloaded.client.acceptLogin({ token: 'token-alice', user: user(), expiresAt: 1 });
+  assert.equal(reloaded.client.snapshot().settings.dictionaryDefaultGameScope, 'poe2');
+});
+
+test('imported new Dictionary game scope is retained and invalid values fail before persistence', async t => {
+  const h = await harness(t);
+  const before = clone(h.store.state);
+  for (const dictionaryDefaultGameScope of ['All', 'current', null, 1]) {
+    await assert.rejects(h.client.importLocal(payload([word()], { dictionaryDefaultGameScope })), /dictionaryDefaultGameScope is invalid/);
+    assert.deepEqual(h.store.state, before);
+  }
+  await h.client.importLocal(payload([word()], { dictionaryDefaultGameScope: 'poe1' }));
+  assert.equal(h.client.snapshot().settings.dictionaryDefaultGameScope, 'poe1');
+  await h.client.importLocal(payload([word()]));
+  assert.equal(Cloud.completeSettings(h.client.snapshot().settings).dictionaryDefaultGameScope, 'all');
+  assert.equal(h.client.recoveryExport().copies.at(-1).settings.dictionaryDefaultGameScope, 'poe1');
+});
 
 test('preferences and exported recovery exclude dictionary, clipboard, and bearer tokens', async t => {
   const legacy = payload([word()], { token: 'must-not-export', editorClipboard: 'private clipboard' });

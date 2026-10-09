@@ -154,6 +154,11 @@
             <label class="settingsToggle" for="hideSourceInPreviewPanel"><input type="checkbox" id="hideSourceInPreviewPanel" v-model="hideSourceInPreviewPanel"><span><strong>Hide source in preview panel</strong><small>Show only the translation in the game preview.</small></span></label>
             <label class="settingsToggle" for="highlightDict"><input type="checkbox" id="highlightDict" v-model="highlightDict"><span><strong>Highlight Dictionary words</strong><small>Mark words matched by your Dictionary.</small></span></label>
             <label class="settingsToggle" for="autoOpenNextFile"><input type="checkbox" id="autoOpenNextFile" v-model="autoOpenNextFile"><span><strong>Open the next file after saving</strong><small>Continue translating without returning to the file list.</small></span></label>
+            <div class="settingsField">
+              <label for="dictionaryDefaultGameScope">Default game version for new Dictionary entries</label>
+              <select id="dictionaryDefaultGameScope" v-model="dictionaryDefaultGameScope"><option value="all">All</option><option value="poe1">PoE1</option><option value="poe2">PoE2</option></select>
+              <small>Used when adding an entry manually or from autocomplete. Existing entries keep their game version.</small>
+            </div>
             <h3 class="settingsSubheading">Keyboard shortcuts</h3>
             <div class="settingsField">
               <label for="autocompleteShortcut">Open autocomplete</label>

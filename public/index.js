@@ -238,6 +238,7 @@ const config = Vue.defineComponent({
       autoOpenNextFile: true,
       filterShortcutCtrlD: false,
       autocompleteShortcut: 'ctrl-space',
+      dictionaryDefaultGameScope: 'all',
       uiDensity: 'compact',
 
       sideTab: 'dictionary',
@@ -527,6 +528,9 @@ const config = Vue.defineComponent({
     autocompleteShortcut() {
       this.saveSettings();
     },
+    dictionaryDefaultGameScope() {
+      this.saveSettings();
+    },
     lang(language, previous) {
       window.WorkspaceState.scopeWorkspace(this.localDescs, previous);
       this.endDictionaryEdit();
@@ -714,6 +718,7 @@ const config = Vue.defineComponent({
       const positions = new Map();
       const entryPositions = new WeakMap();
       const keywords = new Map();
+      const scopedKeywords = new Map();
       for (const entry of active) {
         const key = window.DictionaryScope.findKey(entry);
         if (!keywords.has(key)) keywords.set(key, []);
@@ -722,9 +727,13 @@ const config = Vue.defineComponent({
       entries.forEach((entry, index) => {
         const id = String(entry?._id);
         if (!positions.has(id)) positions.set(id, index);
-        if (entry && typeof entry === 'object') entryPositions.set(entry, index);
+        if (entry && typeof entry === 'object') {
+          entryPositions.set(entry, index);
+          const key = window.DictionaryScope.normalize(entry) + ':' + window.DictionaryScope.findKey(entry);
+          if (!scopedKeywords.has(key)) scopedKeywords.set(key, entry);
+        }
       });
-      return { source, revision, entries, active, positions, entryPositions, keywords,
+      return { source, revision, entries, active, positions, entryPositions, keywords, scopedKeywords,
         activeIds: new Set(active.map(entry => String(entry?._id || ''))) };
     },
     activeDictionaryIds() {
@@ -3579,6 +3588,14 @@ const config = Vue.defineComponent({
     dictionaryEntryScope(word) {
       return window.DictionaryScope.normalize(word);
     },
+    createDictionaryEntry(fields = {}) {
+      const scope = this.dictionaryEntryScope(this.dictionaryDefaultGameScope);
+      return {
+        _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        find: '', replace: '', alts: [], tlnote: '', ...fields,
+        ...(scope === 'all' ? {} : { gameScope: scope }),
+      };
+    },
     setDictionaryEntryScope(word, scope) {
       if (!word || !this.dictionary.includes(word)) return;
       this.beginDictionaryEdit(word._id);
@@ -3596,6 +3613,18 @@ const config = Vue.defineComponent({
     findActiveDictionaryKeywordEntry(tagName) {
       const key = getKeywordPopupLookupName(tagName).toLowerCase();
       const entry = this.dictionaryScopeView.keywords.get(key)?.[0];
+      return entry ? this.getLiveDictionaryEntry(entry) : undefined;
+    },
+    findDictionaryKeywordCreationEntry(tagName) {
+      const key = getKeywordPopupLookupName(tagName).toLowerCase();
+      if (!key) return undefined;
+      const active = this.findActiveDictionaryKeywordEntry(tagName);
+      if (active) return active;
+      // Explicit Add/Edit actions may reuse the configured game's row. This
+      // fallback does not participate in matches or translation insertion.
+      const scope = this.dictionaryEntryScope(this.dictionaryDefaultGameScope);
+      if (scope === 'all' || scope === this.gameVersion) return undefined;
+      const entry = this.dictionaryScopeView.scopedKeywords.get(scope + ':' + key);
       return entry ? this.getLiveDictionaryEntry(entry) : undefined;
     },
     isDictionaryHighlightActive(highlight) {
@@ -4153,6 +4182,10 @@ const config = Vue.defineComponent({
           kwDynamicContent: kw?.dynamicContent || "",
           mustCreate
         };
+        if (mustCreate && this.findDictionaryKeywordCreationEntry(kw?.tagName)) {
+          item.label = `${hl.find} → ${this.canCreateDictionaryEntryFromHlPopupItem(item)
+            ? 'create a new alternative...' : 'edit Dictionary entry...'}`;
+        }
         seenValue.set(value, item);
         items.push(item);
       }
@@ -4336,14 +4369,16 @@ const config = Vue.defineComponent({
       this.sideTab = "dictionary";
       this.dictionaryFilter = "";
 
-      let existing = this.findActiveDictionaryKeywordEntry(tn);
+      let existing = this.findDictionaryKeywordCreationEntry(tn);
       if (existing) {
         let addedAlt = false;
-        let createdAltId = "";
+        let focusAltId = "";
         if (alt) {
           let pairs = this.getDictionaryDefinitionPairs(existing);
-          if (!pairs.some(p => String(p?.find || "").trim().toLowerCase() === alt.toLowerCase())) {
-            createdAltId = this.addDictionaryAltPair(existing, alt, replace || existing?.replace || "");
+          const match = pairs.find(p => String(p?.find || "").trim().toLowerCase() === alt.toLowerCase());
+          if (match) focusAltId = match._id || "";
+          else {
+            focusAltId = this.addDictionaryAltPair(existing, alt, replace || existing?.replace || "");
             addedAlt = true;
           }
         }
@@ -4353,20 +4388,18 @@ const config = Vue.defineComponent({
           if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
         }, 320);
         this.syncEditorHlterWithDictionaryNow(existing._id);
-        if (addedAlt && createdAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: createdAltId });
+        if (focusAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: focusAltId });
         else this.focusDictionaryEntryReplaceInput(existing._id);
         return { dictId: existing._id || "", created: false, addedAlt };
       }
 
       let createdAltId = "";
-      let entry = {
-        _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+      let entry = this.createDictionaryEntry({
         find: tn,
-        gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1',
         replace: replace || tn,
         alts: alt ? [{ _id: (createdAltId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`), find: alt, replace: replace || tn }] : [],
         tlnote: ""
-      };
+      });
       this.dictionary.unshift(entry);
       this.invalidateEditorDictionaryIndex(entry._id, { membership: true });
       this.beginDictionaryEdit(entry._id, { newEntry: true });
@@ -4382,6 +4415,7 @@ const config = Vue.defineComponent({
     },
     canCreateDictionaryEntryFromHlPopupItem(item) {
       if (!item) return false;
+      if (item.dictEntryId && !this.isDictionaryEntryActive(this.getDictionaryEntryById(item.dictEntryId))) return false;
       let info = this.getHlPopupKeywordInfo(item);
       if (!info) return false;
       let tagNameLower = info.tagName.toLowerCase();
@@ -4389,7 +4423,7 @@ const config = Vue.defineComponent({
 
       let alt = String(info.dynamicContent ?? "").trim();
 
-      let existing = this.findActiveDictionaryKeywordEntry(tagNameLower);
+      let existing = this.findDictionaryKeywordCreationEntry(tagNameLower);
       if (!existing) return true;
       if (!alt) return false;
 
@@ -4442,6 +4476,7 @@ const config = Vue.defineComponent({
       if (this.canJumpToDictionaryFromHlPopupItem(item)) {
         return this.jumpToDictionaryFromHlPopupItem(item);
       }
+      if (item.mustCreate && !item.dictEntryId) return this.createDictionaryEntryFromHlPopupSelection();
       return false;
     },
     hlPopupCtrlEnterPillText(item) {
@@ -4449,10 +4484,14 @@ const config = Vue.defineComponent({
       if (this.canCreateDictionaryEntryFromHlPopupItem(item)) {
         let info = this.getHlPopupKeywordInfo(item);
         if (!info) return "";
-        let existing = this.findActiveDictionaryKeywordEntry(info.tagName);
+        let existing = this.findDictionaryKeywordCreationEntry(info.tagName);
         return existing ? "Ctrl+Enter Add alt" : "Ctrl+Enter Add";
       }
       if (this.canJumpToDictionaryFromHlPopupItem(item)) {
+        return "Ctrl+Enter Edit";
+      }
+      if (item.mustCreate && !item.dictEntryId
+        && this.findDictionaryKeywordCreationEntry(this.getHlPopupKeywordInfo(item)?.tagName)) {
         return "Ctrl+Enter Edit";
       }
       return "";
@@ -4538,15 +4577,16 @@ const config = Vue.defineComponent({
     },
     createDictionaryEntryFromHlPopupSelection() {
       let item = this.hlPopup.filtered?.[this.hlPopup.selectedIndex];
-      if (!this.canCreateDictionaryEntryFromHlPopupItem(item)) return false;
       let info = this.getHlPopupKeywordInfo(item);
       if (!info) return false;
+      if (!this.canCreateDictionaryEntryFromHlPopupItem(item)
+        && !(item.mustCreate && !item.dictEntryId && this.findDictionaryKeywordCreationEntry(info.tagName))) return false;
 
       let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
       this.hlPopupReturnInfo = item;
       this.closeHlPopup();
       let r = this.ensureDictionaryKeywordTag(info.tagName, info.dynamicContent, selectedText);
-      return r.created || r.addedAlt;
+      return r.created || r.addedAlt || !!r.dictId;
     },
     moveHlPopupSelection(delta) {
       let len = this.hlPopup.filtered.length;
@@ -7089,6 +7129,7 @@ const config = Vue.defineComponent({
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
         autocompleteShortcut: this.autocompleteShortcut,
+        dictionaryDefaultGameScope: this.dictionaryEntryScope(this.dictionaryDefaultGameScope),
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -7182,6 +7223,7 @@ const config = Vue.defineComponent({
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
         autocompleteShortcut: this.autocompleteShortcut,
+        dictionaryDefaultGameScope: this.dictionaryEntryScope(this.dictionaryDefaultGameScope),
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
@@ -7220,6 +7262,7 @@ const config = Vue.defineComponent({
         this.markDictionarySnapshotDirty?.(null, { replace: true });
       }
       this.editorClipboard = settings.editorClipboard || "";
+      this.dictionaryDefaultGameScope = this.dictionaryEntryScope(settings.dictionaryDefaultGameScope);
       this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
       if (['light', 'grey', 'dark', 'modern-dark'].includes(settings.theme)) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
@@ -7352,7 +7395,7 @@ const config = Vue.defineComponent({
       }
     },
     addVocab() {
-      const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1', find: "", replace: "", alts: [], tlnote: "" };
+      const entry = this.createDictionaryEntry();
       this.dictionary.unshift(entry);
       this.invalidateEditorDictionaryIndex(entry._id, { membership: true });
       this.beginDictionaryEdit(entry._id, { newEntry: true });

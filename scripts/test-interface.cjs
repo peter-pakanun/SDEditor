@@ -1415,6 +1415,195 @@ test('selection stays visible after sorting, page changes, or a search, and clea
   }
 });
 
+test('new Dictionary entries default to All and use the configured scope in either game', () => {
+  assert.equal(loadEditor().editor.dictionaryDefaultGameScope, 'all');
+  for (const game of ['poe1', 'poe2']) {
+    for (const scope of ['all', 'poe1', 'poe2']) {
+      const { editor } = loadEditor();
+      editor.gameVersion = game;
+      editor.dictionaryDefaultGameScope = scope;
+      editor.focusDictionaryEntryReplaceInput = () => {};
+      editor.sideAddClicked();
+      const entry = editor.dictionary[0];
+      assert.equal(editor.dictionaryEntryScope(entry), scope, `Manual creation in ${game} uses ${scope}.`);
+      assert.equal(Object.hasOwn(entry, 'gameScope'), scope !== 'all', 'All keeps its legacy omitted representation.');
+      assert.equal(entry.find, ''); assert.equal(entry.replace, '');
+      assert.equal(editor.dictionaryEditingId, entry._id, 'The newly created row remains the active editing row.');
+    }
+  }
+});
+
+test('autocomplete Enter and Ctrl+Enter create Dictionary entries with the configured scope', () => {
+  for (const game of ['poe1', 'poe2']) {
+    for (const scope of ['all', 'poe1', 'poe2']) {
+      for (const action of ['hlPopupEnterAction', 'hlPopupCtrlEnterAction']) {
+        const { editor } = loadEditor();
+        editor.gameVersion = game;
+        editor.dictionaryDefaultGameScope = scope;
+        editor.syncEditorHlterWithDictionaryNow = () => {};
+        editor.focusDictionaryEntryReplaceInput = () => {};
+        editor.closeHlPopup = () => {};
+        editor.hlPopup.filtered = [{ kwTagName: 'NewKeyword', kwDynamicContent: 'Display', mustCreate: true }];
+        editor.hlPopup.selectedIndex = 0;
+        editor.hlPopup.selectedTranslationText = 'Selected translation';
+        assert.equal(editor[action](), true);
+        const entry = editor.dictionary[0];
+        assert.equal(editor.dictionaryEntryScope(entry), scope, `${action} in ${game} uses ${scope}.`);
+        assert.equal(Object.hasOwn(entry, 'gameScope'), scope !== 'all');
+        assert.equal(entry.find, 'NewKeyword'); assert.equal(entry.replace, 'Selected translation');
+        assert.equal(entry.alts[0].find, 'Display'); assert.equal(entry.alts[0].replace, 'Selected translation');
+        assert.equal(editor.dictionaryEditingId, entry._id);
+      }
+    }
+  }
+});
+
+test('missing or invalid Dictionary creation defaults fall back to All without reusing entry identity', () => {
+  for (const game of ['poe1', 'poe2']) {
+    for (const value of [undefined, null, '', 'invalid']) {
+      const { editor } = loadEditor();
+      editor.gameVersion = game;
+      editor.dictionaryDefaultGameScope = value;
+      const first = editor.createDictionaryEntry({ find: 'First', replace: 'Translation' });
+      const second = editor.createDictionaryEntry({ find: 'Second' });
+      assert.equal(editor.dictionaryEntryScope(first), 'all');
+      assert.equal(Object.hasOwn(first, 'gameScope'), false);
+      assert.equal(Object.hasOwn(second, 'gameScope'), false);
+      assert.notEqual(first._id, second._id);
+      assert.equal(first.find, 'First'); assert.equal(first.replace, 'Translation');
+    }
+  }
+});
+
+test('autocomplete alternate creation keeps the active parent scope regardless of the new-entry default', () => {
+  for (const game of ['poe1', 'poe2']) {
+    for (const scope of ['all', 'poe1', 'poe2']) {
+      for (const specific of [false, true]) {
+        const { editor } = loadEditor();
+        editor.gameVersion = game;
+        editor.dictionaryDefaultGameScope = scope;
+        editor.syncEditorHlterWithDictionaryNow = () => {};
+        editor.focusDictionaryEntryReplaceInput = () => {};
+        const fallback = { _id: 'all', find: 'Fire', replace: 'All wording', alts: [] };
+        const foreign = { _id: 'foreign', find: 'Fire', replace: 'Other game', gameScope: game === 'poe1' ? 'poe2' : 'poe1', alts: [] };
+        const active = { _id: 'active', find: 'Fire', replace: 'Current game', gameScope: game, alts: [] };
+        editor.dictionary = specific ? [foreign, fallback, active] : [foreign, fallback];
+        const expected = specific ? active : fallback;
+        const previous = JSON.stringify(editor.dictionary.map(entry => ({ _id: entry._id, gameScope: entry.gameScope })));
+        const result = editor.ensureDictionaryKeywordTag('Fire', 'Burning', 'Alternate translation');
+        assert.equal(result.created, false); assert.equal(result.addedAlt, true); assert.equal(result.dictId, expected._id);
+        assert.equal(expected.alts[0].find, 'Burning'); assert.equal(expected.alts[0].replace, 'Alternate translation');
+        assert.equal(foreign.alts.length, 0);
+        if (specific) assert.equal(fallback.alts.length, 0, 'A current-game parent still shadows All.');
+        assert.equal(JSON.stringify(editor.dictionary.map(entry => ({ _id: entry._id, gameScope: entry.gameScope }))), previous,
+          'Adding an alternate does not change any parent scope or create another row.');
+      }
+    }
+  }
+});
+
+test('repeated foreign-default autocomplete creation edits one parent and preserves matching scope guards', () => {
+  for (const game of ['poe1', 'poe2']) {
+    for (const action of ['hlPopupEnterAction', 'hlPopupCtrlEnterAction']) {
+      const { editor } = loadEditor();
+      editor.gameVersion = game;
+      editor.dictionaryDefaultGameScope = game === 'poe1' ? 'poe2' : 'poe1';
+      editor.dictionary = [];
+      editor.syncEditorHlterWithDictionaryNow = () => {};
+      const focused = [];
+      editor.focusDictionaryEntryReplaceInput = (id, options) => focused.push({ id, altId: options?.altId || '' });
+      editor.closeHlPopup = () => {};
+      const perform = (display, pill) => {
+        const item = { kwTagName: ' Fire ', kwDynamicContent: display, mustCreate: true };
+        editor.hlPopup.filtered = [item]; editor.hlPopup.selectedIndex = 0;
+        assert.equal(editor.hlPopupCtrlEnterPillText(item), pill);
+        assert.equal(editor[action](), true, `${action} must focus the existing target when no creation is needed.`);
+        assert.equal(editor.dictionary.length, 1);
+        assert.equal(editor.dictionary[0].gameScope, editor.dictionaryDefaultGameScope);
+      };
+      perform('', 'Ctrl+Enter Add');
+      const entry = editor.dictionary[0];
+      perform('', 'Ctrl+Enter Edit');
+      editor.hlPopup.selectedTranslationText = 'Selected translation';
+      perform('Burning', 'Ctrl+Enter Add alt');
+      perform(' burning ', 'Ctrl+Enter Edit');
+      assert.equal(focused.at(-1).altId, entry.alts[0]._id, 'Repeated creation focuses the existing alternate.');
+      perform('Scorched', 'Ctrl+Enter Add alt');
+      perform('', 'Ctrl+Enter Edit');
+      assert.equal(focused.at(-1).altId, '');
+      assert.equal(entry.replace, 'Fire', 'Focusing an existing parent does not overwrite its translation.');
+      assert.equal(entry.alts.length, 2);
+      assert.equal(entry.alts[0].replace, 'Selected translation');
+      assert.equal(editor.isDictionaryEntryActive(entry), false);
+      assert.equal(editor.getActiveDictionaryEntries().length, 0);
+      const staleSuggestion = { dictEntryId: entry._id, kwTagName: 'Fire', kwDynamicContent: 'Fresh display' };
+      assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(staleSuggestion), false);
+      assert.equal(editor.canJumpToDictionaryFromHlPopupItem(staleSuggestion), false);
+      editor.hlPopup.filtered = [staleSuggestion];
+      assert.equal(editor.hlPopupCtrlEnterAction(), false, 'Normal stale suggestions keep their active-entry guard.');
+      staleSuggestion.mustCreate = true;
+      assert.equal(editor.hlPopupCtrlEnterPillText(staleSuggestion), '');
+      assert.equal(editor.hlPopupCtrlEnterAction(), false);
+      assert.equal(editor.hlPopupEnterAction(), false, 'A stale entry ID cannot bypass its scope guard with mustCreate.');
+      editor.insertTranslationText = () => assert.fail('A foreign Dictionary replacement must not be inserted.');
+      editor.onDictionaryReplaceEnter({
+        preventDefault() { assert.fail('Foreign replacement Enter keeps its native behavior.'); },
+        target: { value: 'Foreign wording', closest() { return { getAttribute() { return entry._id; } }; } },
+      });
+    }
+  }
+});
+
+test('foreign keyword creation reuses its configured scope without merging existing duplicate Find rows', () => {
+  const { editor } = loadEditor();
+  editor.gameVersion = 'poe1'; editor.dictionaryDefaultGameScope = 'poe2';
+  const first = { _id: 'first', find: ' Fire ', replace: 'First wording', gameScope: 'poe2', alts: [] };
+  const second = { _id: 'second', find: 'FIRE', replace: 'Second wording', gameScope: 'poe2', alts: [] };
+  editor.dictionary = [first, second];
+  editor.syncEditorHlterWithDictionaryNow = () => {};
+  editor.focusDictionaryEntryReplaceInput = () => {};
+  const result = editor.ensureDictionaryKeywordTag('fire', 'Burning');
+  assert.equal(result.created, false); assert.equal(result.addedAlt, true); assert.equal(result.dictId, 'first');
+  assert.equal(editor.dictionary.length, 2); assert.equal(first.alts.length, 1); assert.equal(second.alts.length, 0);
+  editor.dictionaryDefaultGameScope = 'all';
+  const created = editor.ensureDictionaryKeywordTag('Fire', 'Burning');
+  assert.equal(created.created, true, 'A foreign row outside the configured scope does not become the creation target.');
+  assert.equal(editor.dictionaryEntryScope(editor.dictionary[0]), 'all');
+});
+
+test('foreign keyword creation keeps parameter identities and strips only valid trailing gemlevel metadata', () => {
+  const { editor } = loadEditor();
+  editor.gameVersion = 'poe1'; editor.dictionaryDefaultGameScope = 'poe2';
+  editor.dictionary = [];
+  editor.syncEditorHlterWithDictionaryNow = () => {};
+  editor.focusDictionaryEntryReplaceInput = () => {};
+  const identity = 'TentacleSmash::{1}';
+  const first = editor.ensureDictionaryKeywordTag(identity, 'Display');
+  const repeated = editor.ensureDictionaryKeywordTag(' tentaclesmash::{1}<gemlevel={0}> ', ' display ');
+  assert.equal(repeated.dictId, first.dictId); assert.equal(repeated.created, false); assert.equal(repeated.addedAlt, false);
+  assert.equal(editor.dictionary.length, 1); assert.equal(editor.dictionary[0].find, identity);
+  assert.equal(editor.ensureDictionaryKeywordTag('TentacleSmash::{2}', 'Display').created, true);
+  assert.equal(editor.ensureDictionaryKeywordTag('TentacleSmash::{1}<gemlevel={x}>', 'Display').created, true);
+  assert.equal(editor.ensureDictionaryKeywordTag('TentacleSmash::{1}<other={0}>', 'Display').created, true);
+  assert.equal(editor.dictionary.length, 4);
+});
+
+test('imported Dictionary scopes stay intact while absent or invalid creation preferences reset to All', () => {
+  for (const value of [undefined, null, '', 'invalid', 'all', 'poe1', 'poe2']) {
+    const { editor } = loadEditor();
+    editor.dictionaryDefaultGameScope = 'poe2';
+    const entries = [
+      { _id: 'legacy', find: 'Fire', replace: 'All wording' },
+      { _id: 'one', find: 'Fire', replace: 'PoE1 wording', gameScope: 'poe1' },
+      { _id: 'two', find: 'Fire', replace: 'PoE2 wording', gameScope: 'poe2' },
+    ];
+    editor.importSettings({ lang: 'Thai', dictionary: entries, ...(value === undefined ? {} : { dictionaryDefaultGameScope: value }) });
+    assert.equal(editor.dictionaryDefaultGameScope, ['poe1', 'poe2'].includes(value) ? value : 'all');
+    assert.equal(Object.hasOwn(editor.dictionary[0], 'gameScope'), false);
+    assert.equal(editor.dictionary[1].gameScope, 'poe1'); assert.equal(editor.dictionary[2].gameScope, 'poe2');
+  }
+});
+
 test('autocomplete TL notes follow the selected dictionary ID and remain pinned with alternate translations', async () => {
   const { editor } = loadEditor();
   editor.dictionary = [

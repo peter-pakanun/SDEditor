@@ -7,22 +7,59 @@ const vm = require('node:vm');
 const plain = value => JSON.parse(JSON.stringify(value));
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 function harness() {
-  let config; const timers = new Map(), listeners = new Map(), writes = []; let nextTimer = 0;
+  let config; const timers = new Map(), listeners = new Map(), writes = [], downloads = []; let nextTimer = 0;
   const window = { location: { search: '' }, addEventListener(name, handler) { listeners.set(name, handler); },
     removeEventListener(name) { listeners.delete(name); }, OfflineStore: { async setSettings(value) { writes.push(plain(value)); } } };
-  const context = vm.createContext({ window, document: {}, URLSearchParams, console,
+  const context = vm.createContext({ window, document: {}, URLSearchParams, console, Blob,
+    saveAs(blob, filename) { downloads.push({ blob, filename }); },
     setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout(id) { timers.delete(id); },
     Vue: { defineComponent(value) { config = value; return value; }, toRaw(value) { return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; } } });
-  for (const file of ['workspaceState.js', 'cloudUi.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context);
+  for (const file of ['workspaceState.js', 'dictionaryScope.js', 'cloudUi.js', 'index.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context);
   vm.runInContext('offlineStoreReady = true', context);
   const e = Object.assign({}, ...config.mixins.map(m => m.data?.() || {}), config.data(),
     ...config.mixins.map(m => m.methods || {}), config.methods, {
       lang: 'Thai', dictionary: [{ _id: 'one', find: 'Fire', replace: 'ไฟ', alts: [], tlnote: '' }],
       yieldEditorWork: async () => {}, $nextTick: async () => {},
     });
-  return { e, writes, timers, listeners, context, window, config };
+  return { e, writes, downloads, timers, listeners, context, window, config };
 }
+
+test('new Dictionary game scope defaults to All and survives local save, export, and import', async () => {
+  const { e, writes, downloads } = harness();
+  assert.equal(e.dictionaryDefaultGameScope, 'all');
+  e.dictionary[0].gameScope = 'poe1';
+  for (const dictionaryDefaultGameScope of ['all', 'poe1', 'poe2']) {
+    e.dictionaryDefaultGameScope = dictionaryDefaultGameScope;
+    assert.equal(await e.saveSettings(), true);
+    assert.equal(writes.at(-1).dictionaryDefaultGameScope, dictionaryDefaultGameScope);
+    assert.equal(writes.at(-1).dictionary[0].gameScope, 'poe1');
+    e.exportSettingsClicked();
+    const download = downloads.at(-1);
+    assert.equal(download.filename, 'sdeditor_settings.json');
+    const imported = JSON.parse(await download.blob.text());
+    assert.equal(imported.dictionaryDefaultGameScope, dictionaryDefaultGameScope);
+    const restored = harness().e;
+    restored.importSettings(imported);
+    assert.equal(restored.dictionaryDefaultGameScope, dictionaryDefaultGameScope);
+    assert.equal(restored.dictionary[0].gameScope, 'poe1');
+  }
+});
+
+test('legacy or invalid new Dictionary defaults reset to All while existing entry scopes are retained', () => {
+  const { e } = harness();
+  e.dictionaryDefaultGameScope = 'poe2';
+  e.dictionary[0].gameScope = 'poe1';
+  const legacy = e.settingsSavePayload();
+  delete legacy.dictionaryDefaultGameScope;
+  e.importSettings(legacy);
+  assert.equal(e.dictionaryDefaultGameScope, 'all');
+  assert.equal(e.dictionary[0].gameScope, 'poe1');
+  e.dictionaryDefaultGameScope = 'poe2';
+  e.importSettings({ ...legacy, dictionaryDefaultGameScope: 'current' });
+  assert.equal(e.dictionaryDefaultGameScope, 'all');
+  assert.equal(e.dictionary[0].gameScope, 'poe1');
+});
 
 test('rapid Dictionary typing coalesces before copying and commits the latest note and alternates', async () => {
   const { e, writes, listeners } = harness(); let snapshots = 0;

@@ -5,8 +5,8 @@
   else root.CloudSync = api;
 })(typeof window === 'object' ? window : this, function () {
   'use strict';
-  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideSourceInPreviewPanel', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'inlineEditor', 'filterShortcutCtrlD', 'autocompleteShortcut', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
-  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideSourceInPreviewPanel: false, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, inlineEditor: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
+  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideSourceInPreviewPanel', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'inlineEditor', 'filterShortcutCtrlD', 'autocompleteShortcut', 'dictionaryDefaultGameScope', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
+  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideSourceInPreviewPanel: false, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, inlineEditor: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', dictionaryDefaultGameScope: 'all', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
   const LANGUAGES = ['French', 'German', 'Japanese', 'Korean', 'Polish', 'Portuguese', 'Russian', 'Simplified Chinese', 'Spanish', 'Thai', 'Traditional Chinese', 'Turkish'];
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
@@ -25,7 +25,7 @@
       if (!Object.hasOwn(value, key)) continue;
       if (typeof DEFAULT_SETTINGS[key] === 'boolean') assert(typeof value[key] === 'boolean', key + ' must be boolean.');
     }
-    const enums = { theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
+    const enums = { theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], dictionaryDefaultGameScope: ['all', 'poe1', 'poe2'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
     for (const [key, allowed] of Object.entries(enums)) if (Object.hasOwn(value, key)) assert(allowed.includes(value[key]), key + ' is invalid.');
     if (value.gamePreviewFonts != null) assert(object(value.gamePreviewFonts) && Object.entries(value.gamePreviewFonts).every(([lang, font]) => LANGUAGES.includes(lang) && string(font)), 'preview fonts must map languages to strings.');
     if (value.editorClipboard != null) assert(string(value.editorClipboard), 'clipboard must be text.');

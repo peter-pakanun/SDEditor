@@ -1338,7 +1338,7 @@ test('changing an entry scope holds its row and retains snapshot suggestions unt
   assert.equal(Object.hasOwn(entry, 'gameScope'), false, 'All remains compatible with the legacy representation.');
 });
 
-test('new entries use the current game and keyword creation does not modify the other game entry', () => {
+test('new entries default to All and keyword creation does not modify the other game entry', () => {
   const { editor } = loadEditor({ dictionary: [
     { _id: 'foreign', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
   ] });
@@ -1350,12 +1350,66 @@ test('new entries use the current game and keyword creation does not modify the 
   assert.equal(editor.hlPopupCtrlEnterPillText(item), 'Ctrl+Enter Add');
   const created = editor.ensureDictionaryKeywordTag('Fire', 'Burning', 'two');
   assert.equal(created.created, true);
-  assert.equal(editor.dictionary[0].gameScope, 'poe2');
+  assert.equal(editor.dictionaryEntryScope(editor.dictionary[0]), 'all');
+  assert.equal(Object.hasOwn(editor.dictionary[0], 'gameScope'), false);
   assert.notEqual(created.dictId, 'foreign');
   assert.equal(editor.dictionary[1].alts.length, 0);
   assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
   editor.addVocab();
-  assert.equal(editor.dictionary[0].gameScope, 'poe2');
+  assert.equal(editor.dictionaryEntryScope(editor.dictionary[0]), 'all');
+  assert.equal(Object.hasOwn(editor.dictionary[0], 'gameScope'), false);
+});
+
+test('Ctrl+Click keyword creation uses the configured Dictionary scope in either game', () => {
+  for (const game of ['poe1', 'poe2']) {
+    for (const scope of ['all', 'poe1', 'poe2']) {
+      const { editor } = loadEditor({ dictionary: [] });
+      editor.gameVersion = game;
+      editor.dictionaryDefaultGameScope = scope;
+      editor.syncEditorHlterWithDictionaryNow = () => {};
+      editor.focusDictionaryEntryReplaceInput = () => {};
+      editor.altClickHighlight({ target: { getAttribute(name) { return name === 'data-hl-id' ? 'new-keyword' : null; } } }, {
+        HLs: [{ _hlId: 'new-keyword', isKeywordPopup: true, tagName: 'NewKeyword', dynamicContent: 'Display' }],
+      });
+      const entry = editor.dictionary[0];
+      assert.equal(editor.dictionaryEntryScope(entry), scope, `Ctrl+Click in ${game} uses ${scope}.`);
+      assert.equal(Object.hasOwn(entry, 'gameScope'), scope !== 'all');
+      assert.equal(entry.find, 'NewKeyword'); assert.equal(entry.replace, 'NewKeyword');
+      assert.equal(entry.alts[0].find, 'Display'); assert.equal(entry.alts[0].replace, 'NewKeyword');
+    }
+  }
+});
+
+test('foreign-default keyword targets use cached raw scope indexes and refresh after Find or scope changes', () => {
+  const entries = dictionary(20000).map(entry => ({ ...entry, gameScope: 'poe2' }));
+  entries[19999].find = 'ForeignKeyword';
+  const tracked = trackedDictionary(entries);
+  const { editor } = loadEditor({ dictionary: tracked.dictionary, toRaw: tracked.toRaw, cacheDictionaryScope: true });
+  editor.dictionaryDefaultGameScope = 'poe2';
+  const live = editor.findDictionaryKeywordCreationEntry('ForeignKeyword');
+  assert.equal(live, tracked.wrap(entries[19999]));
+  entries.find = () => assert.fail('Foreign keyword action hints must not scan the complete Dictionary.');
+  const before = tracked.counts.reads;
+  for (let index = 0; index < 200; index++) {
+    assert.equal(editor.findDictionaryKeywordCreationEntry(' foreignkeyword<gemlevel=20> '), live);
+  }
+  assert.ok(tracked.counts.reads - before <= 200, 'Cached foreign lookups resolve only their live row.');
+  editor.dictionaryDefaultGameScope = 'all';
+  assert.equal(editor.findDictionaryKeywordCreationEntry('ForeignKeyword'), undefined);
+  editor.dictionaryDefaultGameScope = 'poe1';
+  assert.equal(editor.findDictionaryKeywordCreationEntry('ForeignKeyword'), undefined);
+  editor.dictionaryDefaultGameScope = 'poe2';
+  live.find = 'RenamedKeyword';
+  editor.dictionaryEntryInput(live);
+  assert.equal(editor.findDictionaryKeywordCreationEntry('ForeignKeyword'), undefined);
+  assert.equal(editor.findDictionaryKeywordCreationEntry('RenamedKeyword'), live);
+  for (const scope of ['poe1', 'all', 'poe2']) {
+    editor.setDictionaryEntryScope(live, scope);
+    assert.equal(editor.findDictionaryKeywordCreationEntry('RenamedKeyword'), live);
+    assert.equal(editor.isDictionaryEntryActive(live), scope !== 'poe2');
+  }
+  editor.dictionary = [];
+  assert.equal(editor.findDictionaryKeywordCreationEntry('RenamedKeyword'), undefined);
 });
 
 test('imported duplicate IDs are repaired without losing either Find or overwriting a reserved identity', () => {
