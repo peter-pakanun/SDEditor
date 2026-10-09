@@ -1,6 +1,8 @@
 /* Collaboration lifecycle and durable editor commands. UI and transport stay separate. */
 (() => {
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const initializationTask = (app, label, callback, session) => typeof app.runWorkspaceInitializationTask === 'function'
+    ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
   const mixin = {
     data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', importBaseline: null, importBaselineHashing: false, pendingLocalSaves: 0, localSaveError: '' }; },
     watch: {
@@ -96,14 +98,15 @@
           });
           this._importZipIdentities.set(file, pending);
         }
-        const identity = await pending;
+        const identity = await initializationTask(this, 'Verifying original ZIP identity', () => pending);
         if (zip) identity.fileCount = Object.values(zip.files || {}).filter(entry => !entry.dir).length;
         return { ...identity };
       },
       async lookupImportArchive(identity, game = this.gameVersion) {
         if (!identity || !this.cloudSignedIn || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !this._cloud?.request) return null;
         try {
-          const result = await this._cloud.request('/v1/collaboration/archives/' + game + '/' + identity.zipHash);
+          const result = await initializationTask(this, 'Checking agreed import configuration', () =>
+            this._cloud.request('/v1/collaboration/archives/' + game + '/' + identity.zipHash));
           return result?.archive || result;
         } catch (error) {
           if (error.stale || (error.status && ![404, 408, 429].includes(error.status) && error.status < 500)) throw error;
@@ -142,15 +145,21 @@
       async buildImportedBaseline(identity, rawSource, decisions = [], acceptedArchive) {
         if (!identity) return null;
         if (acceptedArchive && acceptedArchive.parserVersion !== 1) throw new Error('This shared import requires a different importer version.');
+        const initializationSession = { run: this._workspaceInitializationRun };
         const selectedDecisions = acceptedArchive?.decisions || decisions;
-        const source = await this.sourceWithImportDecisions(rawSource, selectedDecisions);
-        const tree = await window.CollaborationProtocol.buildBaselineTree(source);
-        const archive = await window.CollaborationProtocol.finalizeArchive({ version: 1, zipHash: identity.zipHash,
-          zipSize: identity.zipSize, fileCount: identity.fileCount,
-          descriptionCount: source.length, parserVersion: 1, decisions: selectedDecisions, treeRoot: tree.root });
-        if (acceptedArchive && JSON.stringify(archive) !== JSON.stringify(await window.CollaborationProtocol.finalizeArchive(acceptedArchive))) {
-          throw new Error('The local ZIP does not reproduce the shared import baseline.');
-        }
+        const source = await initializationTask(this, 'Applying agreed language choices', () =>
+          this.sourceWithImportDecisions(rawSource, selectedDecisions), initializationSession);
+        const tree = await initializationTask(this, 'Building original source baseline proofs', () =>
+          window.CollaborationProtocol.buildBaselineTree(source), initializationSession);
+        const archive = await initializationTask(this, 'Verifying accepted source baseline identity', async () => {
+          const descriptor = await window.CollaborationProtocol.finalizeArchive({ version: 1, zipHash: identity.zipHash,
+            zipSize: identity.zipSize, fileCount: identity.fileCount,
+            descriptionCount: source.length, parserVersion: 1, decisions: selectedDecisions, treeRoot: tree.root });
+          if (acceptedArchive && JSON.stringify(descriptor) !== JSON.stringify(await window.CollaborationProtocol.finalizeArchive(acceptedArchive))) {
+            throw new Error('The local ZIP does not reproduce the shared import baseline.');
+          }
+          return descriptor;
+        }, initializationSession);
         return { archive, source, rawSource: copy(rawSource), tree };
       },
       async reconcileImportArchive(archive) {
@@ -467,11 +476,36 @@
         this.collaborationNotice = error?.message || String(error);
         this.collabReceiveState?.({ ...(this._collaboration?.snapshot({ includeFiles: false }) || {}), status: 'Saved locally · collaboration unavailable', error: this.collaborationNotice });
       },
-      async initializeCollaboration() {
-        if (window.OfflineStore?.listSaveSubmissions) await this.recoverPendingSaves();
+      collaborationInitializationKey() {
+        return [this.cloudUser?.id, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages,
+          this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|');
+      },
+      initializeCollaboration() {
+        const key = this.collaborationInitializationKey();
+        // Source watchers and an explicit initialization gate must await the
+        // same first connection. A newer scope starts independently; only its
+        // own completion can clear the active promise.
+        const previous = this._collabInitialization;
+        if (previous?.key === key && previous.source === this.descs && previous.workspace === this.localDescs
+          && previous.client === this._collaboration) return previous.promise;
+        const request = { key, source: this.descs, workspace: this.localDescs, client: this._collaboration };
+        const pending = this.initializeCollaborationForScope(request);
+        const tracked = pending.finally(() => {
+          if (this._collabInitialization?.promise === tracked) this._collabInitialization = null;
+        });
+        request.promise = tracked;
+        this._collabInitialization = request;
+        return tracked;
+      },
+      async initializeCollaborationForScope(request) {
+        const current = () => request.key === this.collaborationInitializationKey() && request.source === this.descs
+          && request.workspace === this.localDescs && request.client === this._collaboration;
+        if (window.OfflineStore?.listSaveSubmissions) await initializationTask(this, 'Recovering queued local saves', () => this.recoverPendingSaves());
+        if (!current()) return;
         if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+        if (!current()) return;
         if (this._importingSource || this._reconcilingImport || this.pendingDuplicateLangImport?.mode === 'update') return;
         const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|');
         if (this._collabKey === key && this._collaboration) return;
@@ -502,9 +536,11 @@
             if (isCurrent()) return this.claimCollaborationFile(filepath, false, isCurrent);
           },
         });
+        request.client = client;
         this._collaboration = client; this._collabKey = key;
         managedContext = this.captureCollaborationContext();
         this.updateCollaborationActivity();
+        const initializationTaskToken = this.beginWorkspaceInitializationTask?.('Connecting shared translations and reconciling saved status');
         try {
           const activeSource = this.descs, activeWorkspace = this.localDescs;
           const source = Vue.toRaw ? Vue.toRaw(activeSource) : activeSource;
@@ -520,12 +556,17 @@
                 if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
               }
             }
-          } finally { this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
+          } finally { if (this._collaboration === client) this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
           if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
           await client.connect({ ...ctx, source,
             ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
             files, workspace });
+          this.finishWorkspaceInitializationTask?.(initializationTaskToken, {
+            error: client.lastError,
+            cancelled: this._collaboration !== client,
+          });
         } catch (error) {
+          this.finishWorkspaceInitializationTask?.(initializationTaskToken, { error, cancelled: !!error.stale || this._collaboration !== client });
           if (this._collaboration !== client) return;
           if (error.code === 'ARCHIVE_CONFIG_MISMATCH' && this._collaboration === client && error.archive) {
             if (!await this.reconcileImportArchive(error.archive) && this._collaboration === client) {

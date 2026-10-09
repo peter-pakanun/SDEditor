@@ -41,7 +41,7 @@
 <body>
   <div id="app" v-cloak>
     <div class="appRoot" :data-density="uiDensity">
-    <div v-if="storageMigrationMessage" class="storageMigrationNotice" role="status" aria-live="polite" aria-atomic="true">
+    <div v-if="storageMigrationMessage && !workspaceInitializationActive" class="storageMigrationNotice" role="status" aria-live="polite" aria-atomic="true">
       <span v-if="storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
       <span>{{ storageMigrationMessage }}</span>
     </div>
@@ -77,7 +77,7 @@
       </div>
     </div>
 
-    <div class="multiInstanceGate versionGate" v-if="pendingSingleVersionMigration">
+    <div class="multiInstanceGate versionGate" v-if="pendingSingleVersionMigration" v-show="!workspaceInitializationActive || !migrationInProgress">
       <div class="multiInstanceGateContent versionGateContent">
         <h2>Move Existing Data?</h2>
         <p>
@@ -285,7 +285,7 @@
       </div>
     </div>
 
-    <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" class="versionCatalog" :inert="showSetting" aria-label="Source versions">
+    <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="versionCatalog" :inert="showSetting || workspaceInitializationActive" aria-label="Source versions">
       <header class="versionCatalogHeader">
         <div><h1>{{ cloudCanAccessAllLanguages ? 'Manage version' : 'Choose a source version' }}</h1><p><a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#select-game-version" @click.prevent="showGameVersionSelector" :aria-disabled="managedVersionBusy ? 'true' : undefined" title="Return to game version selection" :aria-label="'Return to game version selection from ' + gameVersionLabel">{{ gameVersionLabel }}</a><span v-else>{{ gameVersionLabel }}</span> · {{ cloudCanAccessAllLanguages ? (cloudUser?.isAdmin ? 'Admin' : 'Manager') : (cloudUser?.language || lang) }}</p></div>
         <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="openManagedUpload" :disabled="managedVersionBusy">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
@@ -417,8 +417,24 @@
       <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
       <div class="versionActions"><button @click="saveManagedMetadata" :disabled="managedVersionBusy">Save details</button><button @click="managedMetadataVisible = false" :disabled="managedVersionBusy">Cancel</button></div>
     </section></div>
-    <div v-if="managedRecoveryVisible && managedVisibleRecoveryTeam" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedVisibleRecoveryTeam.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies include removed files and alternatives to existing room or Dropped work. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedVisibleRecoveryTeam.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy">Open current file and history</button></article></section></div>
-    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="gameVersionSelected && !versionChooserVisible && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
+    <div v-if="managedRecoveryVisible && managedVisibleRecoveryTeam" v-show="!workspaceInitializationActive" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedVisibleRecoveryTeam.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies include removed files and alternatives to existing room or Dropped work. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedVisibleRecoveryTeam.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy">Open current file and history</button></article></section></div>
+    <section v-if="workspaceInitializationActive && !needsInitialSettings && !showSetting" class="workspaceInitialization centerContainer loadingPage" aria-labelledby="workspaceInitializationTitle" aria-busy="true">
+      <div class="workspaceInitializationPanel">
+        <header class="workspaceInitializationHeading">
+          <div><h1 id="workspaceInitializationTitle">Initializing workspace</h1><p>{{ workspaceInitializationLabel }}</p></div>
+          <span class="workspaceInitializationTotal" aria-label="Total elapsed time">{{ workspaceInitializationElapsed }}</span>
+        </header>
+        <div ref="workspaceInitializationLog" class="workspaceInitializationTerminal" role="log" aria-label="Workspace initialization activity" aria-live="polite" aria-relevant="additions" tabindex="0">
+          <div v-for="row in workspaceInitializationRows" :key="row.id" class="workspaceInitializationRow" :class="row.status">
+            <span class="workspaceInitializationMarker" aria-hidden="true">{{ row.status === 'running' ? '›' : row.status === 'done' ? '✓' : row.status === 'failed' ? '!' : '–' }}</span>
+            <span class="workspaceInitializationTask"><span class="srOnly">{{ row.status === 'running' ? 'In progress: ' : row.status === 'done' ? 'Completed: ' : row.status === 'failed' ? 'Failed: ' : 'Stopped: ' }}</span>{{ row.label }}<span v-if="row.error" class="workspaceInitializationError">{{ row.error }}</span></span>
+            <span class="workspaceInitializationTime" aria-hidden="true">{{ workspaceInitializationDuration(row.startedAt, row.endedAt) }}</span>
+          </div>
+        </div>
+        <p class="workspaceInitializationHint">Completed steps stay above while the remaining work finishes.</p>
+      </div>
+    </section>
+    <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="!workspaceInitializationActive && gameVersionSelected && !versionChooserVisible && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
       <div class="box">
         <div class="spinnerCon" v-if="loadingProgress > 0 && loadingProgress < 100">
           <div class="lds-spinner"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
@@ -462,7 +478,7 @@
     </div>
 
 
-    <div class="workspace" :class="{ inlineEditorMode: inlineEditor }" v-if="gameVersionSelected && !versionChooserVisible && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" :inert="showSetting">
+    <div class="workspace" :class="{ inlineEditorMode: inlineEditor }" v-if="gameVersionSelected && !versionChooserVisible && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" :inert="showSetting || workspaceInitializationActive">
       <header class="workspaceHeader">
         <div class="workspaceBrand">
           <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
@@ -684,7 +700,7 @@
       </aside>
     </div>
 
-    <div class="editor" v-if="editorVisible" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
+    <div class="editor" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div id="fullEditorPreviewHost"></div>
         <div class="twoSided editorActions">
@@ -1433,6 +1449,7 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
   <script src="appDialog.js"></script>
+  <script src="workspaceInitialization.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/8.0.1/diff.min.js"></script>
   <script src="FileSaver.js"></script>

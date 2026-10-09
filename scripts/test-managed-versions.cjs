@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const Managed = require('../public/managedVersions.js');
+const WorkspaceInitialization = require('../public/workspaceInitialization.js');
 const codec = require('../public/statDescCodec.js');
 const JSZip = require('../../SDEditor-API/node_modules/jszip');
 
@@ -71,6 +72,15 @@ function harness(options = {}) {
   app.managedVersions = [version()]; app.selectedManagedVersionId = 'weekly-1';
   app.managedVersionDetails = { version: version(), teams: [team()] };
   return { app, events, requests, storage, window };
+}
+
+function withInitialization(app) {
+  Object.assign(app, WorkspaceInitialization.mixin.data());
+  for (const [name, method] of Object.entries(WorkspaceInitialization.mixin.methods)) app[name] = method.bind(app);
+  for (const [name, method] of Object.entries(WorkspaceInitialization.mixin.computed)) Object.defineProperty(app, name,
+    { configurable: true, get: () => method.call(app) });
+  app.$nextTick = async () => {};
+  return app;
 }
 
 // Record which payloads the real storage module requests. The browser fixture
@@ -560,6 +570,142 @@ test('cancelling older ended version entry preserves active drafts, workspace an
   assert.equal(app._draftSession, draft); assert.equal(app.editorVisible, true); assert.equal(app.versionChooserVisible, true);
   assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
   assert.equal(app.managedVersionBusy, false);
+});
+
+test('managed opening keeps one initialization active through drafts, cached source and the final team-details request', async () => {
+  const draft = deferred(), source = deferred(), finalDetails = deferred(); let detailReads = 0;
+  const { app } = harness({ storage: { getVersionSource: () => source.promise }, request: async () => {
+    if (++detailReads === 1) return { version: version(), teams: [team()] };
+    return finalDetails.promise;
+  } });
+  withInitialization(app); app.versionChooserVisible = true;
+  app.flushEditorDraft = () => draft.promise;
+  let loadedSession;
+  app.loadVersionedStorage = async session => { loadedSession = session; assert.equal(app.workspaceInitializationActive, true); };
+  try {
+    const pending = app.continueManagedVersion(version(), 'Thai');
+    assert.equal(app.workspaceInitializationActive, true);
+    const run = app._workspaceInitializationRun;
+    await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Preserving editor drafts');
+    assert.equal(app.workspaceInitializationRows.at(-1).status, 'running');
+    draft.resolve(true); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Reading the cached source version');
+    assert.equal(app.versionChooserVisible, true);
+    source.resolve([{ filepath: 'source/test.txt' }]); await new Promise(setImmediate);
+    assert.equal(loadedSession.run, run);
+    assert.equal(detailReads, 2);
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Refreshing active version and team details');
+    assert.equal(app.versionChooserVisible, false);
+    finalDetails.resolve({ version: version(), teams: [team()] });
+    assert.equal(await pending, true);
+    assert.equal(app.workspaceInitializationActive, false);
+    assert.equal(app.managedVersionBusy, false);
+    assert.ok(app.workspaceInitializationRows.every(row => row.status === 'done'));
+  } finally { app.disposeWorkspaceInitialization(); }
+});
+
+test('uncached opening stays under initialization while source parsing and its durable local commit are pending', async () => {
+  const parsing = deferred(), committing = deferred();
+  const sourceFile = { filepath: 'source/test.txt', English: ['Original'], Thai: ['Translation'], entryMeta: [{}] };
+  const { app, events } = harness({ storage: {
+    async getVersionSource() { return []; },
+    async saveSourceWorkspaceWithRevisions(source, workspace, revisions, scope) {
+      assert.equal(app.workspaceInitializationActive, true);
+      assert.equal(scope.accountId, 'alice'); assert.equal(scope.sourceHash, hash('a'));
+      assert.deepEqual(copy(source), [sourceFile]);
+      await committing.promise; events.push({ type: 'import' });
+    },
+  }, window: {
+    WorkspaceState: require('../public/workspaceState.js'),
+    async parseFile(filepath, entry, language, options) {
+      assert.equal(app.workspaceInitializationActive, true); assert.equal(language, 'Thai'); assert.equal(options.strict, true);
+      await parsing.promise; return copy(sourceFile);
+    },
+  }, request: async route => {
+    if (route.endsWith('/original')) return { downloaded: true };
+    if (route.includes('/archives/')) return { archive: { zipHash: hash('b') } };
+    return { version: version(), teams: [team()] };
+  } });
+  withInitialization(app); app.versionChooserVisible = true;
+  app.readImportZipIdentity = async () => ({ zipHash: hash('b') });
+  app.buildImportedBaseline = async (identity, source) => ({ archive: identity, source });
+  try {
+    const pending = app.continueManagedVersion(version(), 'Thai'); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Parsing source description files');
+    assert.equal(app.versionChooserVisible, true);
+    assert.equal(events.some(event => event.type === 'activate' || event.type === 'import'), false);
+    parsing.resolve(); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Storing the verified source version locally');
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(events.some(event => event.type === 'activate' || event.type === 'import'), false);
+    committing.resolve(); assert.equal(await pending, true);
+    assert.equal(app.workspaceInitializationActive, false);
+    const imported = events.findIndex(event => event.type === 'import'), activated = events.findIndex(event => event.type === 'activate');
+    assert.ok(imported >= 0 && activated > imported);
+    const labels = app.workspaceInitializationRows.map(row => row.label);
+    assert.ok(labels.includes('Downloading the original source ZIP'));
+    assert.ok(labels.includes('Unpacking the source ZIP'));
+    assert.ok(labels.includes('Verifying the source ZIP identity'));
+    assert.ok(labels.includes('Applying import choices and verifying baseline proofs'));
+  } finally { app.disposeWorkspaceInitialization(); }
+});
+
+test('initialization leaves an older-version confirmation reachable and releases its owner on cancellation', async () => {
+  const older = version({ isHead: false }), confirmation = deferred();
+  const { app, events } = harness({ request: async () => ({ version: older, teams: [team({ ended: true })] }) });
+  withInitialization(app); app.versionChooserVisible = true; app.editorVisible = true; app.editorSessionActive = true;
+  const draft = app._draftSession = { text: 'Unfinished typing' };
+  app.appConfirm = () => confirmation.promise;
+  try {
+    const pending = app.continueManagedVersion(older, 'Thai'); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Waiting for source version confirmation');
+    assert.equal(app.versionChooserVisible, true);
+    confirmation.resolve(false); assert.equal(await pending, false);
+    assert.equal(app.workspaceInitializationActive, false);
+    assert.equal(app.versionChooserVisible, true); assert.equal(app.editorVisible, true); assert.equal(app._draftSession, draft);
+    assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+  } finally { app.disposeWorkspaceInitialization(); }
+});
+
+test('a stale managed opening cannot add activity to or release a newer initialization', async () => {
+  const source = deferred(), { app, events } = harness({ storage: { getVersionSource: () => source.promise } });
+  withInitialization(app); app.versionChooserVisible = true;
+  try {
+    const pending = app.continueManagedVersion(version(), 'Thai'); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Reading the cached source version');
+    app.cloudProfileId = 'bob';
+    const newer = app.beginWorkspaceInitialization({ label: 'Opening Bob workspace', force: true });
+    const newerTask = app.beginWorkspaceInitializationTask('Loading Bob saved work', newer);
+    source.resolve([{ filepath: 'source/test.txt' }]); await pending;
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app._workspaceInitializationRun, newer.run);
+    assert.equal(app.workspaceInitializationRows.length, 1);
+    assert.equal(app.workspaceInitializationRows[0].status, 'running');
+    assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+    app.finishWorkspaceInitializationTask(newerTask); app.finishWorkspaceInitialization(newer);
+    assert.equal(app.workspaceInitializationActive, false);
+  } finally { app.disposeWorkspaceInitialization(); }
+});
+
+test('offline activation uses initialization while a failed local activation preserves the actionable chooser and draft', async () => {
+  const activation = deferred(), { app } = harness({ storage: { activateVersion: () => activation.promise } });
+  withInitialization(app); app._cloud = null; app.managedVersions = []; app.versionChooserVisible = true;
+  app.localVersions = [{ ...storageScope(), hasSource: true, name: 'Offline work' }];
+  app.editorVisible = true; app.editorSessionActive = true; const draft = app._draftSession = { text: 'Draft to preserve' };
+  try {
+    const pending = app.continueOfflineVersion(); await new Promise(setImmediate);
+    assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Activating the selected local workspace');
+    activation.reject(new Error('IndexedDB activation failed')); assert.equal(await pending, false);
+    assert.equal(app.workspaceInitializationActive, false);
+    assert.equal(app.versionChooserVisible, true); assert.equal(app.editorVisible, true); assert.equal(app._draftSession, draft);
+    assert.match(app.managedVisibleError, /IndexedDB activation failed/);
+    assert.equal(app.workspaceInitializationRows.at(-1).status, 'failed');
+  } finally { app.disposeWorkspaceInitialization(); }
 });
 
 test('accepted ended entry covers the same editing session but a new collection warns again', async () => {

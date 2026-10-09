@@ -266,6 +266,24 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .storageMigrationNotice .browserWorkSpinner { flex: 0 0 13px; }
 @keyframes browserWorkSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .browserWorkSpinner { animation: none; border-right-color: var(--ui-accent); } }
+.workspaceInitialization { padding: 32px; box-sizing: border-box; }
+.workspaceInitializationPanel { display: flex; flex-direction: column; width: min(820px, 100%); min-width: 0; max-height: calc(100vh - 64px); }
+.workspaceInitializationHeading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+.workspaceInitializationHeading h1 { margin: 0; font-size: 26px; }
+.workspaceInitializationHeading p { margin: 6px 0 0; color: var(--ui-muted); }
+.workspaceInitializationTotal, .workspaceInitializationTerminal { font-family: Consolas, "Cascadia Mono", "Courier New", monospace; font-variant-numeric: tabular-nums; }
+.workspaceInitializationTotal { color: var(--ui-muted); font-size: 18px; white-space: nowrap; }
+.workspaceInitializationTerminal { min-height: min(200px, 30vh); max-height: min(55vh, 560px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--color-element); color: var(--color-font); box-shadow: var(--ui-shadow); font-size: 13px; line-height: 1.7; box-sizing: border-box; }
+.workspaceInitializationTerminal:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+.workspaceInitializationRow { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; padding: 4px 0; align-items: start; }
+.workspaceInitializationMarker { color: var(--ui-muted); font-weight: bold; }
+.workspaceInitializationRow.running .workspaceInitializationMarker { color: var(--ui-accent); }
+.workspaceInitializationRow.done .workspaceInitializationMarker { color: var(--ui-saved); }
+.workspaceInitializationRow.failed .workspaceInitializationMarker, .workspaceInitializationError { color: var(--ui-missing); }
+.workspaceInitializationTask { overflow-wrap: anywhere; }
+.workspaceInitializationError { display: block; }
+.workspaceInitializationTime { color: var(--ui-muted); white-space: nowrap; }
+.workspaceInitializationHint { margin: 12px 0 0; color: var(--ui-muted); font-size: 13px; }
 .workspaceStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; color: var(--ui-muted); }
 .workspaceLoaded { font-size: 12px; white-space: nowrap; }
 .workspaceLoaded strong { color: var(--color-font); font-variant-numeric: tabular-nums; }

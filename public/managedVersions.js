@@ -58,6 +58,8 @@
     return `${hours} ${hours === 1 ? 'hour' : 'hours'} until import deadline`;
   }
   const filename = value => String(value || 'StatDescriptions').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '') || 'StatDescriptions';
+  const initializationTask = (app, label, callback, session) => app.runWorkspaceInitializationTask
+    ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
   const mixin = {
     data() { return { branchId: DEFAULT_BRANCH, versionChooserVisible: false, managedVersions: [], managedBranch: null,
       managedTeamSort: 'progress', managedTeamSortDir: 'desc',
@@ -536,32 +538,42 @@
           this.managedSetOperationError('offline-entry', ''); return true;
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError('offline-entry', error); return false; }
       },
-      async managedActivateWorkspace(sourceHash, language) {
+      async managedActivateWorkspace(sourceHash, language, initializationSession) {
         const key = this.managedCatalogScope; let scope = this.managedWorkspaceScope(sourceHash);
         const activation = this._managedActivation = {};
         const current = () => key === this.managedCatalogScope && this._managedActivation === activation;
-        if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
-        if (!current()) return false;
-        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return false;
-        if (!current()) return false;
-        const adopted = await this.managedAdoptGuestOnOpen(scope);
-        if (!current()) return false;
-        if (adopted) scope = adopted;
-        if (root.OfflineStore.resolveVersionScope) scope = await root.OfflineStore.resolveVersionScope(scope);
-        if (!current()) return false;
-        if (!scope.sourceHash && !scope.legacyWorkspacePending) throw new Error('This stored workspace is not available for the current account. Switch to the account or local profile that created it. Its stored work has been preserved.');
-        const activated = scope.sourceHash ? await root.OfflineStore.activateVersion(scope) : null;
-        if (!current()) return false;
-        if (activated?.metadata?.details) this.managedActiveDetails = this.managedScopedDetails(activated.metadata.details);
-        if (this.editorSessionActive) { this.editorVisible = false; this.inlineActive = false; }
-        this._managedEditAcknowledged = '';
-        if (language) this.lang = language;
-        root.OfflineStore.setWorkspaceContext(scope); this.versionChooserVisible = false;
-        await this.loadVersionedStorage();
-        if (!current()) return false;
-        this._managedWorkspaceOwner = JSON.stringify([scope.accountId, scope.game, scope.branchId]);
-        if (!this.sourceLoaded || this.sourceIdentity !== scope.sourceHash) return false;
-        await this.managedAssociateActive(); await this.managedRefreshActive(); return true;
+        const initialization = this.beginWorkspaceInitialization?.({ label: 'Initializing workspace', session: initializationSession });
+        if (initializationSession && !initialization) return false;
+        const task = (label, callback) => initializationTask(this, label, callback, initialization);
+        try {
+          await this.$nextTick?.();
+          if (!current()) return false;
+          if (this.flushEditorDraft && !await task('Preserving editor drafts', () => this.flushEditorDraft())) return false;
+          if (!current()) return false;
+          if (this._pendingSaves?.snapshot().jobs.length && !await task('Waiting for pending local saves', () => this.waitForPendingSaves())) return false;
+          if (!current()) return false;
+          const adopted = await task('Checking local workspace ownership', () => this.managedAdoptGuestOnOpen(scope));
+          if (!current()) return false;
+          if (adopted) scope = adopted;
+          if (root.OfflineStore.resolveVersionScope) scope = await task('Resolving the stored source version', () => root.OfflineStore.resolveVersionScope(scope));
+          if (!current()) return false;
+          if (!scope.sourceHash && !scope.legacyWorkspacePending) throw new Error('This stored workspace is not available for the current account. Switch to the account or local profile that created it. Its stored work has been preserved.');
+          const activated = scope.sourceHash ? await task('Activating the selected local workspace', () => root.OfflineStore.activateVersion(scope)) : null;
+          if (!current()) return false;
+          if (activated?.metadata?.details) this.managedActiveDetails = this.managedScopedDetails(activated.metadata.details);
+          if (this.editorSessionActive) { this.editorVisible = false; this.inlineActive = false; }
+          this._managedEditAcknowledged = '';
+          if (language) this.lang = language;
+          root.OfflineStore.setWorkspaceContext(scope); this.versionChooserVisible = false;
+          await this.loadVersionedStorage(initialization);
+          if (!current()) return false;
+          this._managedWorkspaceOwner = JSON.stringify([scope.accountId, scope.game, scope.branchId]);
+          if (!this.sourceLoaded || this.sourceIdentity !== scope.sourceHash) return false;
+          await task('Updating the active source version', () => this.managedAssociateActive());
+          if (!current()) return false;
+          if (this.managedOnlineAvailable && this.managedActiveVersion) await task('Refreshing active version and team details', () => this.managedRefreshActive());
+          return current();
+        } finally { this.finishWorkspaceInitialization?.(initialization); }
       },
       async continueManagedVersion(version = this.managedSelectedVersion, language) {
         if (!this.managedCatalogAccess || !version || this.managedVersionBusy) return false;
@@ -573,26 +585,30 @@
           this.managedSetOperationError('open', 'Select a language you have access to.'); return false;
         }
         const scope = this.managedWorkspaceScope(version.sourceHash), key = this.managedCatalogScope;
+        const initialization = this.beginWorkspaceInitialization?.({ label: 'Opening selected source version' });
         const operation = this.managedBeginOperation({ key: 'open', label: 'Preparing selected source version' });
         const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && operation === this._managedOperation;
+        const task = (label, callback) => initializationTask(this, label, callback, initialization);
         try {
-          if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
+          await this.$nextTick?.();
           if (!current()) return;
-          if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
+          if (this.flushEditorDraft && !await task('Preserving editor drafts', () => this.flushEditorDraft())) return;
           if (!current()) return;
-          await this.managedAdoptGuestOnOpen(scope);
+          if (this._pendingSaves?.snapshot().jobs.length && !await task('Waiting for pending local saves', () => this.waitForPendingSaves())) return;
           if (!current()) return;
-          const source = await root.OfflineStore.getVersionSource(scope);
+          await task('Checking local workspace ownership', () => this.managedAdoptGuestOnOpen(scope));
+          if (!current()) return;
+          const source = await task('Reading the cached source version', () => root.OfflineStore.getVersionSource(scope));
           if (!current()) return;
           let details = this.managedDetailsForVersion(version);
           if (!details && root.OfflineStore.getVersionMetadata) {
-            const metadata = await root.OfflineStore.getVersionMetadata(scope);
+            const metadata = await task('Reading cached version and team details', () => root.OfflineStore.getVersionMetadata(scope));
             if (!current()) return;
             if (this.managedDetailsMatchVersion(metadata?.details, version)) details = this.managedScopedDetails(metadata.details);
           }
           if (this.managedOnlineAvailable) {
             try {
-              const result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id));
+              const result = await task('Checking published version and team details', () => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id)));
               if (!current()) return;
               if (result.version?.id !== version.id || result.version.sourceHash !== scope.sourceHash
                 || result.version.game !== scope.game || (result.version.branchId || DEFAULT_BRANCH) !== scope.branchId) {
@@ -611,34 +627,37 @@
           const warning = this.managedVersionOpenWarning(version, targetTeam, targetLanguage);
           const acknowledgedWindow = targetTeam?.ended || version.status === 'withdrawn'
             ? this.managedEditWarningKey(version, targetLanguage, targetTeam) : '';
-          if (warning && !await this.appConfirm(warning, { title: 'Open source version?', confirmLabel: 'Open editor', danger: false })) return false;
+          if (warning && !await task('Waiting for source version confirmation', () => this.appConfirm(warning, { title: 'Open source version?', confirmLabel: 'Open editor', danger: false }))) return false;
           if (!current()) return;
           if (!source?.length) {
             if (!this.managedOnlineAvailable) throw new Error('Download this source version once while connected before working offline.');
-            const blob = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000 });
+            const blob = await task('Downloading the original source ZIP', () => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000 }));
             if (!current()) return;
-            const zip = await root.JSZip.loadAsync(blob), rawSource = [];
+            const zip = await task('Unpacking the source ZIP', () => root.JSZip.loadAsync(blob)), rawSource = [];
             if (!current()) return;
-            const archive = (await this._cloud.request('/v1/collaboration/archives/' + version.game + '/' + version.zipHash)).archive;
+            const archive = (await task('Reading published baseline metadata', () => this._cloud.request('/v1/collaboration/archives/' + version.game + '/' + version.zipHash))).archive;
             if (!current()) return;
-            for (const entry of Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith('.txt'))) {
-              const desc = await root.parseFile(entry.name, entry, targetLanguage, { strict: true });
-              if (desc) rawSource.push(desc);
-              if (!current()) return;
-            }
-            const identity = await this.readImportZipIdentity(blob, zip);
+            await task('Parsing source description files', async () => {
+              for (const entry of Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith('.txt'))) {
+                const desc = await root.parseFile(entry.name, entry, targetLanguage, { strict: true });
+                if (desc) rawSource.push(desc);
+                if (!current()) return;
+              }
+            });
+            if (!current()) return;
+            const identity = await task('Verifying the source ZIP identity', () => this.readImportZipIdentity(blob, zip));
             if (!current()) return;
             if (identity.zipHash !== version.zipHash) throw new Error('The downloaded ZIP does not match this published version. Existing work has been preserved.');
-            const baseline = await this.buildImportedBaseline(identity, rawSource, [], archive);
+            const baseline = await task('Applying import choices and verifying baseline proofs', () => this.buildImportedBaseline(identity, rawSource, [], archive));
             if (!current()) return;
             const workspace = { descs: [], status: {}, branchId: scope.branchId, sourceHash: version.sourceHash, importArchive: baseline.archive, catalogVersionId: version.id };
             root.WorkspaceState.initializeWorkspace(workspace, { game: version.game, branchId: scope.branchId, sourceHash: version.sourceHash, source: baseline.source, language: targetLanguage });
-            await root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline);
+            await task('Storing the verified source version locally', () => root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline));
           }
           if (!current()) return;
-          await root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) });
+          await task('Storing selected version and team details', () => root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) }));
           if (!current()) return;
-          const opened = await this.managedActivateWorkspace(version.sourceHash, targetLanguage);
+          const opened = await this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization);
           if (opened && current()) {
             this.managedSetOperationError('open', '');
             if (acknowledgedWindow && this.managedActiveVersion?.id === version.id
@@ -648,7 +667,7 @@
           }
           return opened;
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError('open', error); return false; }
-        finally { this.managedFinishOperation(operation); }
+        finally { this.managedFinishOperation(operation); this.finishWorkspaceInitialization?.(initialization); }
       },
       async managedOpenDropped(team) {
         if (!this.managedCatalogAccess || !team) return false;

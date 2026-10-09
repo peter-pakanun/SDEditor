@@ -174,6 +174,118 @@ test('dashboard suppresses team presence while keeping saved translation collabo
   assert.equal(disconnects, 0, 'Screen transitions preserve the client needed by durable saves.');
 });
 
+test('explicit workspace initialization waits for the connection already started by a source watcher', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.cloudSignedIn = true; e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  const connecting = deferred(); let joins = 0, finished = false;
+  window.CollaborationSync = { Client: class {
+    async connect() { joins++; await connecting.promise; }
+    select() {} setAway() {} disconnect() {}
+  } };
+  const watcher = e.initializeCollaboration();
+  const initialization = e.initializeCollaboration();
+  initialization.then(() => { finished = true; });
+  assert.equal(watcher, initialization, 'The workspace gate joins the actual in-flight connection.');
+  await tick();
+  assert.equal(joins, 1); assert.equal(finished, false);
+  connecting.resolve(); await initialization;
+  assert.equal(finished, true); assert.equal(e._collabInitialization, null);
+});
+
+test('a superseded connection cannot clear a newer version initialization or mark its phase complete', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.cloudSignedIn = true; e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  const connections = [], phases = [];
+  e.beginWorkspaceInitializationTask = label => { const phase = { label }; phases.push(phase); return phase; };
+  e.finishWorkspaceInitializationTask = (phase, result) => { phase.result = result; };
+  window.CollaborationSync = { Client: class {
+    async connect() { const gate = deferred(); connections.push(gate); await gate.promise; }
+    select() {} setAway() {} disconnect() {}
+  } };
+  const old = e.initializeCollaboration(); await tick();
+  e.sourceIdentity = 'new-source';
+  const next = e.initializeCollaboration(); await tick();
+  assert.equal(connections.length, 2, 'A new source can prepare without waiting for an old request.');
+  connections[0].resolve(); await old;
+  assert.equal(e.initializeCollaboration(), next, 'Completion from the old source leaves the new gate intact.');
+  assert.equal(phases[0].result.cancelled, true); assert.equal(phases[1].result, undefined);
+  connections[1].resolve(); await next;
+  assert.equal(phases[1].result.cancelled, false); assert.equal(e._collabInitialization, null);
+});
+
+test('reopening the same source awaits its replacement connection after the previous client was retired', async t => {
+  for (const reload of [false, true]) await t.test(reload ? 'reloaded source and workspace' : 'retired client with retained local source', async () => {
+    const { editor: e, window } = harness();
+    e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+    e.cloudSignedIn = true; e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+    e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+    const connections = [];
+    window.CollaborationSync = { Client: class {
+      async connect() { const gate = deferred(); connections.push(gate); await gate.promise; }
+      select() {} setAway() {} disconnect() {}
+    } };
+    const old = e.initializeCollaboration(); await tick();
+    e._collaboration.disconnect(); e._collaboration = null; e._collabKey = '';
+    if (reload) { e.descs = plain(e.descs); e.localDescs = plain(e.localDescs); }
+    const replacement = e.initializeCollaboration(); let complete = false;
+    replacement.then(() => { complete = true; }); await tick();
+    assert.notEqual(old, replacement); assert.equal(connections.length, 2);
+    connections[0].resolve(); await old; await tick();
+    assert.equal(complete, false, 'Finishing the retired same-source request cannot release the replacement gate.');
+    assert.equal(e.initializeCollaboration(), replacement);
+    connections[1].resolve(); await replacement; assert.equal(complete, true);
+  });
+});
+
+test('superseded collaboration preparation does not clear the replacement source work indicator', async () => {
+  const { editor: e, window, context } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.cloudSignedIn = true; e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  e.descs = Array.from({ length: 64 }, (_, index) => description('row-' + index));
+  e.localDescs = { descs: plain(e.descs), status: {}, sourceHash: e.sourceIdentity };
+  const yielded = [], work = [];
+  context.setTimeout = callback => { yielded.push(callback); return yielded.length; };
+  vm.runInContext('Date.now = (() => { let clock = 0; return () => clock += 9; })()', context);
+  e.setBrowserWork = (scope, activity) => { if (scope === 'collaboration' && activity.key === 'source') work.push(activity.active); };
+  window.CollaborationSync = { Client: class {
+    async connect() {}
+    select() {} setAway() {} disconnect() {}
+  } };
+  const old = e.initializeCollaboration();
+  e._collaboration.disconnect(); e._collaboration = null; e._collabKey = '';
+  e.descs = plain(e.descs); e.localDescs = plain(e.localDescs);
+  const replacement = e.initializeCollaboration();
+  assert.equal(yielded.length, 2); assert.deepEqual(work, [true, true]);
+  yielded[0](); await old;
+  assert.deepEqual(work, [true, true], 'The cancelled preparation leaves the replacement work indicator active.');
+  yielded[1](); await replacement;
+  assert.deepEqual(work, [true, true, false]);
+});
+
+test('a changed access scope during queued-save recovery cannot join from the stale initialization', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.cloudSignedIn = true; e.cloudUser = { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  const recovering = deferred(); let joins = 0;
+  window.OfflineStore.listSaveSubmissions = async () => [];
+  e.recoverPendingSaves = () => recovering.promise;
+  window.CollaborationSync = { Client: class {
+    async connect() { joins++; }
+    select() {} setAway() {} disconnect() {}
+  } };
+  const old = e.initializeCollaboration(); await tick();
+  e.cloudUser.assignmentVersion = 2;
+  recovering.resolve(); await old;
+  assert.equal(joins, 0, 'The old access capture does not establish a room after queued work yields.');
+  await e.initializeCollaboration(); assert.equal(joins, 1);
+});
+
 test('manager archive lookup uses shared import decisions across languages', async () => {
   const { editor: e } = harness();
   e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
@@ -378,6 +490,63 @@ test('switching game during getSource cannot activate the older source or clear 
   newSource.resolve([description('new')]); await newLoad;
   assert.equal(e.sourceIdentity, 'hash-new.txt'); assert.equal(e.descs[0].filepath, 'source/new.txt');
   assert.equal(e.versionStorageLoading, false);
+});
+
+test('an old initialization waiting for editor draft preservation cannot start loading into a replacement session', async () => {
+  const { editor: e, window } = harness();
+  const initialization = require('../public/workspaceInitialization.js').mixin;
+  Object.assign(e, initialization.data(), initialization.methods);
+  const flushing = deferred(); e.flushEditorDraft = () => flushing.promise;
+  e._versionLoadGeneration = 41;
+  const source = e.descs, workspace = e.localDescs;
+  e.resetVersionedState = () => assert.fail('A superseded initialization must not reset the newer workspace.');
+  window.OfflineStore.getWorkspace = () => assert.fail('A superseded initialization must not start a workspace read.');
+  window.OfflineStore.getSource = () => assert.fail('A superseded initialization must not start a source read.');
+  const oldOwner = e.beginWorkspaceInitialization({ label: 'Opening old workspace' });
+  const pending = e.loadVersionedStorage(oldOwner); await tick();
+  const newerOwner = e.beginWorkspaceInitialization({ label: 'Opening replacement workspace', force: true });
+  const task = e.beginWorkspaceInitializationTask('Loading replacement work', newerOwner);
+  e._versionLoadGeneration = 42; e.versionStorageLoading = true;
+  try {
+    flushing.resolve(true); await pending;
+    assert.equal(e._versionLoadGeneration, 42, 'Finishing an old draft flush cannot invalidate the replacement loader.');
+    assert.equal(e.descs, source); assert.equal(e.localDescs, workspace);
+    assert.equal(e.versionStorageLoading, true); assert.equal(e.workspaceInitializationActive, true);
+    assert.equal(e._workspaceInitializationRun, newerOwner.run);
+    assert.equal(e.workspaceInitializationRows.length, 1);
+    assert.equal(e.workspaceInitializationRows[0].label, 'Loading replacement work');
+    assert.equal(e.workspaceInitializationRows[0].status, 'running');
+    e.finishWorkspaceInitializationTask(task); e.finishWorkspaceInitialization(newerOwner);
+  } finally { e.disposeWorkspaceInitialization(); }
+});
+
+test('a superseded initial connection cannot keep the replacement workspace hidden after its own initialization finishes', async () => {
+  const { editor: e, window } = harness();
+  const initialization = require('../public/workspaceInitialization.js').mixin;
+  Object.assign(e, initialization.data(), initialization.methods);
+  let sourceReads = 0;
+  window.OfflineStore.getSource = async () => [description(++sourceReads === 1 ? 'old' : 'replacement')];
+  const connections = [];
+  e.initializeCollaboration = () => {
+    const gate = deferred(); connections.push({ gate, run: e._workspaceInitializationRun }); return gate.promise;
+  };
+  const oldLoad = e.loadVersionedStorage(); await tick();
+  assert.equal(connections.length, 1); assert.equal(e.versionStorageLoading, false);
+  assert.equal(e.workspaceInitializationActive, true);
+  const oldRun = connections[0].run;
+  const replacementLoad = e.loadVersionedStorage(); await tick();
+  assert.equal(connections.length, 2);
+  assert.notEqual(connections[1].run, oldRun, 'A replacement load gets its own activity session while the old network request is pending.');
+  try {
+    connections[1].gate.resolve(); await replacementLoad;
+    assert.equal(e.workspaceInitializationActive, false, 'The replacement workspace is available before the old request completes.');
+    assert.equal(e.descs[0].filename, 'replacement.txt');
+    const rows = plain(e.workspaceInitializationRows);
+    connections[0].gate.resolve(); await oldLoad;
+    assert.equal(e.workspaceInitializationActive, false);
+    assert.equal(e.descs[0].filename, 'replacement.txt');
+    assert.deepEqual(plain(e.workspaceInitializationRows), rows, 'Old completion cannot alter the replacement activity history.');
+  } finally { e.disposeWorkspaceInitialization(); }
 });
 
 test('switching game while source hashing is pending keeps only the new game source', async () => {
@@ -1392,8 +1561,15 @@ function prepareSourceImportCollaboration(editor, window, join = async () => {})
 test('source import survives an old join 404 throughout parsing and archive preparation', async t => {
   for (const stage of ['parse', 'zipHash', 'archiveLookup', 'baselineTree']) await t.test(stage, async () => {
     const { editor: e, window, writes, alerts } = harness({ realImport: true });
+    const initialization = require('../public/workspaceInitialization.js').mixin;
+    Object.assign(e, initialization.data(), initialization.methods);
     const oldJoin = deferred(), entered = deferred(), release = deferred();
-    const activity = prepareSourceImportCollaboration(e, window, () => oldJoin.promise);
+    const joinSources = [];
+    const activity = prepareSourceImportCollaboration(e, window, input => {
+      joinSources.push(input.source);
+      if (joinSources.length > 1) assert.equal(e.workspaceInitializationActive, true, 'The replacement join stays behind workspace initialization.');
+      return joinSources.length === 1 ? oldJoin.promise : Promise.resolve();
+    });
     let joinError;
     const joining = e.initializeCollaboration().catch(error => { joinError = error; });
     assert.equal(activity.joins, 1);
@@ -1427,6 +1603,9 @@ test('source import survives an old join 404 throughout parsing and archive prep
     assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(e.importBaselineHashing, false);
     assert.equal(!!e._importingSource, false); assert.notEqual(e.descs, previousSource); assert.notEqual(e.localDescs, previousWorkspace);
     assert.equal(e.sourceIdentity, e.importBaseline.archive.baselineId); assert.deepEqual(alerts, []);
+    assert.equal(activity.joins, 2, 'Successful import awaits a new room connection after retiring the old join.');
+    assert.equal(joinSources[1], e.descs, 'The fresh connection uses the newly imported source.');
+    assert.equal(e.workspaceInitializationActive, false);
   });
 });
 

@@ -3,6 +3,8 @@
   const API = 'https://sdeditor-api.poemaid.com';
   const clone = value => JSON.parse(JSON.stringify(value));
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const initializationTask = (app, label, callback, session) => typeof app.runWorkspaceInitializationTask === 'function'
+    ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
   function sameDictionary(left, right) {
     if (same(left, right)) return true;
     // Sync and the editor can serialize identical entries in different field
@@ -127,6 +129,7 @@
       },
       async initializeCloud(legacy) {
         if (this.testMode) return;
+        const initializationSession = { run: this._workspaceInitializationRun };
         this._cloudInitializing = true;
         const loginFragment = new URLSearchParams(location.hash.slice(1));
         if (loginFragment.has('cloudCode') || loginFragment.has('cloudError')) {
@@ -153,8 +156,10 @@
           onStatus: status => { this.cloudStatus = status.message; this.cloudError = status.error; this.cloudWarning = !!status.warning; },
         });
         try {
-          await this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] });
-          await (this._cloudApplyPending || this.cloudApply(this._cloud.snapshot()));
+          await initializationTask(this, 'Restoring local profile, settings and Dictionary', () =>
+            this._cloud.initialize(legacy || { ...this.cloudPayload(), dictionary: [] }), initializationSession);
+          await initializationTask(this, 'Applying local settings and restoring editor drafts', () =>
+            this._cloudApplyPending || this.cloudApply(this._cloud.snapshot()), initializationSession);
           await this.$nextTick();
           // Show the restored local profile before any authentication/network request.
           await this.finishStartup?.();
@@ -173,12 +178,24 @@
         const fragment = new URLSearchParams(location.hash.slice(1));
         if (fragment.has('cloudCode')) {
           history.replaceState(null, '', location.pathname + location.search);
-          await this.cloudFinishLogin(fragment.get('cloudCode'), fragment.get('cloudState'));
+          await initializationTask(this, 'Completing Google sign-in', () =>
+            this.cloudFinishLogin(fragment.get('cloudCode'), fragment.get('cloudState')), initializationSession);
         } else if (fragment.has('cloudError')) {
           history.replaceState(null, '', location.pathname + location.search);
           this.cloudStatus = 'Google sign-in could not be completed. Please try again.';
           this.cloudError = true;
-        } else await this._cloud.refreshSession(true);
+        } else {
+          // Authentication failure remains an actionable cloud issue while the
+          // restored local workspace is usable. Routine refreshes stay silent.
+          const task = this.beginWorkspaceInitializationTask?.('Checking cloud session and account access', initializationSession);
+          try {
+            await this._cloud.refreshSession(true);
+            this.finishWorkspaceInitializationTask?.(task, { error: this.cloudError ? this.cloudStatus : undefined });
+          } catch (error) {
+            this.finishWorkspaceInitializationTask?.(task, { error });
+            throw error;
+          }
+        }
       },
       async cloudReloadAccount() {
         if (await this.flushScheduledSettingsSave?.() === false) return false;
