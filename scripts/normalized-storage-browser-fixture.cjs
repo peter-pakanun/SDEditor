@@ -146,7 +146,7 @@ async function runFixture({ storageOnly = false } = {}) {
     frontend.post('/fixture/session', (req, res) => req.get('X-Fixture-Key') === secret
         ? res.json(cloudStore.createSession('normalized-translator')) : res.sendStatus(403));
     frontend.get('/fixture/storage', (req, res) => res.type('html').send('<!doctype html><script>(' + browserProbe.toString()
-        + ')();</script><script src="/workspaceState.js"></script><script src="/collaborationProtocol.js"></script><script src="/normalizedStore.js"></script><script src="/normalizedRooms.js"></script><script src="/offlineStore.js"></script>'));
+        + ')();</script><script src="/workspaceState.js"></script><script src="/statDescCodec.js"></script><script src="/collaborationProtocol.js"></script><script src="/normalizedStore.js"></script><script src="/normalizedRooms.js"></script><script src="/offlineStore.js"></script><script src="/fixture/jszip.min.js"></script>'));
     frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(publicDir, 'index.html'), 'utf8')
         .replace('<head>', '<head><script>(' + browserProbe.toString() + ')();</script>')
         .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
@@ -448,6 +448,8 @@ async function runFixture({ storageOnly = false } = {}) {
         results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length, legacyFileCount, timings: migration.migrationTimings });
         console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
 
+        await sameBaselineImportChecks(page, results);
+
         const writes = await page.evaluate(async () => {
             const scope = window.__storageScope, filepath = 'storage/2.txt';
             const batch = { jobId: 'one-file-save', ...scope, workspaceScope: scope, language: 'Thai',
@@ -680,6 +682,166 @@ async function runFixture({ storageOnly = false } = {}) {
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
         rmSync(absolute, { recursive: true, force: true });
     }
+}
+
+async function sameBaselineImportChecks(page, results) {
+    const repeated = await page.evaluate(async () => {
+        const copy = value => JSON.parse(JSON.stringify(value));
+        const readRows = async names => {
+            const opening = indexedDB.open('sdeditor', 9);
+            const db = await new Promise((resolve, reject) => { opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error); });
+            const tx = db.transaction(names, 'readonly'), rows = {};
+            for (const name of names) {
+                const request = tx.objectStore(name).getAll();
+                request.onsuccess = () => { rows[name] = request.result; };
+            }
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => { db.close(); resolve(rows); };
+                tx.onabort = tx.onerror = () => { db.close(); reject(tx.error); };
+            });
+        };
+        const seedSource = Array.from({ length: 3 }, (_, index) => ({
+            filepath: 'metadata/statdescriptions/same-baseline-' + index + '.txt',
+            name: index ? 'SameBaseline' + index : '', stats: ['same_baseline_stat_' + index], variables: ['#'], remarks: [''],
+            translations: { English: ['Damage # ' + index], Thai: ['Thai damage ' + index], German: [''] },
+        }));
+        const zip = new JSZip(), entries = seedSource.map(desc => ({ filepath: desc.filepath, bytes: StatDescCodec.descEncode(desc) }));
+        for (const entry of entries) zip.file(entry.filepath, entry.bytes, { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+        const zipBytes = await zip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+        const parse = language => entries.map(entry => StatDescCodec.parseDesc(entry.filepath, StatDescCodec.decodeUTF16(entry.bytes), language, { strict: true }));
+        const onlineSource = parse('Thai'), offlineSource = parse('German'), tree = await CollaborationProtocol.buildBaselineTree(onlineSource);
+        const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+            zipHash: await CollaborationProtocol.zipHash(zipBytes), zipSize: zipBytes.byteLength,
+            fileCount: entries.length, descriptionCount: entries.length, decisions: [], treeRoot: tree.root });
+        const baseline = { source: copy(onlineSource), rawSource: copy(onlineSource), archive, tree };
+        const onlineScope = { accountId: 'same-baseline-online', game: 'poe2', branchId: 'release', sourceHash: archive.baselineId };
+        const offlineScope = { ...onlineScope, accountId: 'guest', branchId: 'default' };
+        const legacyScope = { ...onlineScope, accountId: 'same-baseline-legacy', branchId: 'default' };
+        const makeWorkspace = (scope, source, language) => {
+            const workspace = { ...scope, descs: copy(source), status: {}, importArchive: copy(archive) };
+            WorkspaceState.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game, language });
+            return workspace;
+        };
+        const filepath = onlineSource[0].filepath, onlineWorkspace = makeWorkspace(onlineScope, onlineSource, 'Thai');
+        WorkspaceState.stageTranslation(onlineWorkspace, { filepath, translations: ['Online Saved Thai'] }, 'Thai', { source: onlineSource[0] });
+        await OfflineStore.saveSourceWorkspaceWithRevisions(copy(onlineSource), onlineWorkspace,
+            [{ filepath, lang: 'Thai', savedAt: 111, translations: ['Online Saved Thai'] }], onlineScope, baseline);
+        const draft = { profile: onlineScope.accountId, game: onlineScope.game, branchId: onlineScope.branchId,
+            sourceHash: onlineScope.sourceHash, language: 'Thai', filepath, id: 'same-baseline-draft', revision: 'same-baseline-revision',
+            translations: ['Unfinished online text'], base: { translations: ['Online Saved Thai'] }, source: copy(onlineSource[0]), updatedAt: 222 };
+        await OfflineStore.putTranslationDraft(draft);
+        const checkpoint = await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey(draft));
+        const preservedOnline = await OfflineStore.getVersionWorkspace(onlineScope, 'Thai');
+        const preservedHistory = await OfflineStore.listRevisions(filepath, 'Thai', 100, onlineScope);
+        const firstRows = await readRows(['baseline_files']), baseKey = NormalizedStore.baselineKey(onlineScope);
+        const initialBaselineRows = firstRows.baseline_files.filter(row => row.scope === baseKey);
+        // Different selected languages produce different parser status flags.
+        // Null and empty names and language object order share the same witness.
+        offlineSource[0].name = null;
+        for (const desc of offlineSource) {
+            desc.translations = Object.fromEntries(Object.entries(desc.translations).reverse());
+            delete desc.tempTranslations;
+            desc.hasChanges = true; desc.needsReview = true;
+        }
+        const offlineWorkspace = makeWorkspace(offlineScope, offlineSource, 'German');
+        WorkspaceState.stageTranslation(offlineWorkspace, { filepath, translations: [''] }, 'German', { source: offlineSource[0] });
+        window.__normalizedProbe.operations = [];
+        await OfflineStore.saveSourceWorkspaceWithRevisions(copy(offlineSource), offlineWorkspace,
+            [{ filepath, lang: 'German', savedAt: 333, translations: [''] }], offlineScope, { ...copy(baseline), source: copy(offlineSource), rawSource: copy(offlineSource) });
+        const reimportOperations = copy(window.__normalizedProbe.operations);
+        const offline = await OfflineStore.getVersionWorkspace(offlineScope, 'German');
+        const afterImport = await readRows(['baseline_files']);
+
+        const legacySource = parse('German'), legacyWorkspace = makeWorkspace(legacyScope, legacySource, 'Thai');
+        WorkspaceState.stageTranslation(legacyWorkspace, { filepath, translations: ['Legacy Saved Thai'] }, 'Thai', { source: legacySource[0] });
+        const suffix = NormalizedStore.scopeKey(legacyScope), legacyEvidence = {
+            ['workspace_version_v1:' + suffix]: legacyWorkspace,
+            ['source_version_v1:' + suffix]: legacySource,
+            ['version_metadata_v1:' + suffix]: { ...legacyScope, name: 'Legacy same-baseline workspace' },
+            ['import_baseline_poe2_' + archive.baselineId]: { ...copy(baseline), source: copy(legacySource), rawSource: copy(legacySource) },
+        };
+        const opening = indexedDB.open('sdeditor', 9);
+        const db = await new Promise((resolve, reject) => { opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error); });
+        const write = db.transaction('kv', 'readwrite');
+        for (const [key, value] of Object.entries(legacyEvidence)) write.objectStore('kv').put({ key, value });
+        await new Promise((resolve, reject) => { write.oncomplete = resolve; write.onabort = () => reject(write.error); }); db.close();
+        window.__normalizedProbe.operations = [];
+        const migrated = await OfflineStore.getVersionWorkspace(legacyScope, 'Thai'), migrationOperations = copy(window.__normalizedProbe.operations);
+        const afterMigration = await readRows(['baseline_files', 'kv']);
+        const affectedStores = ['baseline_files', 'baseline_assets', 'translation_workspaces', 'workspace_files', 'workspace_records',
+            'translation_drafts', 'storage_migrations', 'revisions_poe2', 'kv'];
+        const mutations = [
+            ['stats', source => { source[1].stats[0] += '_changed'; }],
+            ['variables', source => { source[1].variables[0] += ' 1'; }],
+            ['remarks', source => { source[1].remarks[0] = 'real changed remark'; }],
+            ['name', source => { source[1].name += '_changed'; }],
+            ['filepath', source => { source[1].filepath += '.changed'; }],
+            ['English translation', source => { source[1].translations.English[0] += ' changed'; }],
+            ['Thai translation', source => { source[1].translations.Thai[0] += ' changed'; }],
+            ['German translation', source => { source[1].translations.German[0] = 'Real German change'; }],
+            ['removed language', source => { delete source[1].translations.German; }],
+            ['removed file', source => { source.pop(); }],
+            ['duplicate filepath', source => { source[1].filepath = source[0].filepath; }],
+        ];
+        const rejected = [];
+        for (const [fact, mutate] of mutations) {
+            const changedSource = copy(offlineSource); mutate(changedSource);
+            const before = await readRows(affectedStores);
+            let message;
+            try {
+                await OfflineStore.saveSourceWorkspaceWithRevisions(changedSource, makeWorkspace(offlineScope, changedSource, 'German'),
+                    [{ filepath, lang: 'German', savedAt: 444, translations: ['Must abort'] }], offlineScope,
+                    { ...copy(baseline), source: copy(changedSource), rawSource: copy(changedSource) });
+            } catch (error) { message = error.message; }
+            const after = await readRows(affectedStores);
+            rejected.push({ fact, message, unchanged: JSON.stringify(before) === JSON.stringify(after) });
+        }
+        const offlineMetadataListing = await OfflineStore.listLocalVersions(offlineScope, { metadataOnly: true });
+        const offlineFullListing = await OfflineStore.listLocalVersions(offlineScope);
+        const legacyBeforeClear = await OfflineStore.listLocalVersions(legacyScope, { metadataOnly: true });
+        await OfflineStore.clearWorkspace(legacyScope);
+        const legacyMetadataAfterClear = await OfflineStore.listLocalVersions(legacyScope, { metadataOnly: true });
+        const legacyFullAfterClear = await OfflineStore.listLocalVersions(legacyScope);
+        const afterClear = await readRows(['kv']);
+        return {
+            languageStatusChanged: onlineSource[0].isMissing !== parse('German')[0].isMissing,
+            initialBaselineRows, importedBaselineRows: afterImport.baseline_files.filter(row => row.scope === baseKey),
+            migratedBaselineRows: afterMigration.baseline_files.filter(row => row.scope === baseKey), reimportOperations, migrationOperations,
+            offlineSaved: offline.staged.German[filepath].translations, migratedSaved: migrated.staged.Thai[filepath].translations,
+            preservedOnline, onlineAfter: await OfflineStore.getVersionWorkspace(onlineScope, 'Thai'), preservedHistory,
+            historyAfter: await OfflineStore.listRevisions(filepath, 'Thai', 100, onlineScope), checkpoint,
+            checkpointAfter: await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey(draft)),
+            legacyEvidence, frozen: Object.fromEntries(afterMigration.kv.filter(row => Object.hasOwn(legacyEvidence, row.key)).map(row => [row.key, row.value])), rejected,
+            offlineMetadataListing, offlineFullListing, legacyBeforeClear, legacyMetadataAfterClear, legacyFullAfterClear,
+            frozenAfterClear: Object.fromEntries(afterClear.kv.filter(row => Object.hasOwn(legacyEvidence, row.key)).map(row => [row.key, row.value])),
+        };
+    });
+    assert.equal(repeated.languageStatusChanged, true, 'The real parser reproduces the selected-language decoration difference');
+    assert.deepEqual(repeated.importedBaselineRows, repeated.initialBaselineRows, 'Offline same-archive reimport retains first accepted baseline bytes');
+    assert.deepEqual(repeated.migratedBaselineRows, repeated.initialBaselineRows, 'Another legacy profile reuses immutable baseline bytes');
+    for (const [label, operations] of [['same-baseline import', repeated.reimportOperations], ['same-baseline legacy conversion', repeated.migrationOperations]]) {
+        assert.equal(operations.filter(operation => operation.store === 'baseline_files' && ['put', 'add', 'delete'].includes(operation.method)).length, 0,
+            label + ' never overwrites an existing baseline row');
+    }
+    assert.deepEqual(repeated.offlineSaved, [''], 'Explicit blank German Saved presence survives a same-archive offline import');
+    assert.deepEqual(repeated.migratedSaved, ['Legacy Saved Thai'], 'Legacy staged work survives reuse of the online baseline');
+    assert.deepEqual(repeated.onlineAfter, repeated.preservedOnline, 'Other-profile imports cannot change online Saved facts');
+    assert.deepEqual(repeated.historyAfter, repeated.preservedHistory, 'Other-profile imports and rejected identity changes preserve original history');
+    assert.deepEqual(repeated.checkpointAfter, repeated.checkpoint, 'The first profile retains its exact checkpoint ID, revision and text');
+    assert.deepEqual(repeated.frozen, repeated.legacyEvidence, 'Conversion retains frozen legacy evidence exactly');
+    assert.equal(repeated.offlineMetadataListing[0].hasSource, true, 'Metadata listing recognizes a normalized-only offline source');
+    assert.equal(repeated.offlineFullListing[0].hasSource, true, 'Full listing recognizes a normalized-only offline source');
+    assert.equal(repeated.legacyBeforeClear[0].hasSource, true, 'Converted legacy scope remains selectable before deletion');
+    assert.equal(repeated.legacyMetadataAfterClear[0].hasSource, false, 'Metadata listing honors normalized ready absence over frozen legacy source');
+    assert.equal(repeated.legacyFullAfterClear[0].hasSource, false, 'Full listing honors normalized ready absence over frozen legacy source');
+    assert.deepEqual(repeated.frozenAfterClear, repeated.legacyEvidence, 'Clearing normalized work retains frozen legacy recovery evidence');
+    for (const rejected of repeated.rejected) {
+        assert.match(rejected.message || '', /accepted baseline|baseline identity/, rejected.fact + ' changes must reject the claimed accepted identity');
+        assert.equal(rejected.unchanged, true, rejected.fact + ' rejection atomically preserves active pointers, history, work, drafts and baseline');
+    }
+    results.push({ scenario: 'same PoE2 archive reimport and legacy conversion across profiles and selected languages preserve immutable rows',
+        files: repeated.initialBaselineRows.length, rejectedChangedFacts: repeated.rejected.map(result => result.fact) });
+    console.log('Validated same-archive offline import, selected-language decorations and atomic rejection of changed immutable facts.');
 }
 
 async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage }) {
@@ -941,7 +1103,68 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     assert.equal(recovery.history.filter(row => row.note === 'save').length, 1, 'Recovery produces exactly one saved history revision');
     assert.ok(recovery.recoveredIds.includes(originalJobId), 'Recovery reuses the original job ID');
     results.push({ scenario: 'crash before worker dispatch and same-ID reload recovery' });
+    await associatedCachedWorkspaceCheck(restored, results, { filepath: crashPath });
     await restored.close();
+}
+
+async function associatedCachedWorkspaceCheck(page, results, { filepath }) {
+    await page.waitForFunction(() => window.__normalizedApp._collaboration?.connected
+        && !window.__normalizedApp._collaboration.snapshot({ includeFiles: false }).pending,
+        null, { timeout: 60000 });
+    await page.context().setOffline(true);
+    await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp, scope = vm.managedWorkspaceScope();
+        const copy = value => JSON.parse(JSON.stringify(value));
+        await OfflineStore.setVersionMetadata(scope, { catalogVersionId: 'fixture-cached-published', officialName: 'Cached fixture HEAD' });
+        if (!await vm.showVersionChooser()) throw new Error('Fixture could not show source chooser.');
+        const probe = window.__cachedContinueProbe = { scope, requests: [], importCount: 0,
+            beforeWorkspace: copy(await OfflineStore.getWorkspace(scope)), beforeHistory: copy(await OfflineStore.listRevisions(filepath, 'Thai', 100, scope)) };
+        const importSource = probe.originalImportSource = OfflineStore.saveSourceWorkspaceWithRevisions;
+        OfflineStore.saveSourceWorkspaceWithRevisions = (...args) => { probe.importCount++; return importSource(...args); };
+        probe.originalCloudRequest = vm._cloud.request;
+        vm._cloud.request = function (path, ...args) { probe.requests.push(path); return probe.originalCloudRequest.call(this, path, ...args); };
+        window.__normalizedProbe.operations = [];
+        await vm.$nextTick();
+    }, filepath);
+    const panel = page.getByRole('region', { name: 'Offline workspace' });
+    assert.match(await panel.innerText(), /matches a published version/,
+        'The Offline panel explains why the matching imported workspace appears under Online');
+    assert.doesNotMatch(await panel.innerText(), /No offline workspace is stored/,
+        'A locally cached associated workspace is not described as absent');
+    const start = Date.now();
+    await panel.getByRole('button', { name: 'Continue cached workspace', exact: true }).click();
+    await page.waitForFunction(() => {
+        const vm = window.__normalizedApp, scope = window.__cachedContinueProbe.scope;
+        return !vm.versionChooserVisible && !vm.versionStorageLoading && vm.sourceLoaded && vm.sourceIdentity === scope.sourceHash;
+    });
+    const readyMs = Date.now() - start;
+    const continuation = await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp, probe = window.__cachedContinueProbe, copy = value => JSON.parse(JSON.stringify(value));
+        const result = { beforeWorkspace: probe.beforeWorkspace, afterWorkspace: copy(await OfflineStore.getWorkspace(probe.scope)),
+            beforeHistory: probe.beforeHistory, afterHistory: copy(await OfflineStore.listRevisions(filepath, 'Thai', 100, probe.scope)),
+            originalScope: probe.scope, activeScope: vm.managedWorkspaceScope(), imports: probe.importCount, requests: probe.requests,
+            operations: copy(window.__normalizedProbe.operations) };
+        OfflineStore.saveSourceWorkspaceWithRevisions = probe.originalImportSource;
+        vm._cloud.request = probe.originalCloudRequest; delete window.__cachedContinueProbe;
+        return result;
+    }, filepath);
+    assert.deepEqual(continuation.activeScope, continuation.originalScope, 'Continue cached workspace retains the original account/game/branch/source');
+    const workspaceFacts = workspace => {
+        const facts = JSON.parse(JSON.stringify(workspace));
+        // Applying accepted collaboration state can refresh a staged save's
+        // server timestamp. Every other committed and recovery fact is stable.
+        for (const files of Object.values(facts.staged || {})) for (const file of Object.values(files)) delete file.savedAt;
+        return facts;
+    };
+    assert.deepEqual(workspaceFacts(continuation.afterWorkspace), workspaceFacts(continuation.beforeWorkspace),
+        'Offline cached continuation retains every Saved presence/text/base and recovery/provenance fact');
+    assert.deepEqual(continuation.afterHistory, continuation.beforeHistory, 'Cached continuation creates no duplicate or changed history');
+    assert.equal(continuation.imports, 0, 'Continue cached workspace never reimports the source');
+    assert.equal(continuation.requests.some(path => /\/original(?:$|\?)/.test(path)), false, 'Continue cached workspace never downloads the original ZIP');
+    assert.equal(continuation.operations.some(operation => operation.store === 'baseline_files' && ['put', 'add', 'delete'].includes(operation.method)), false,
+        'Continue cached workspace never rewrites immutable baseline rows');
+    results.push({ scenario: 'authenticated associated cached workspace button resumes exact Saved work and history without reimport or ZIP download', readyMs });
+    await page.context().setOffline(false);
 }
 
 module.exports = { runFixture, aggregateOperations };

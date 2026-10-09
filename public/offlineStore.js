@@ -719,7 +719,8 @@
     const records = [...selected.values()];
     const availability = await withStore(STORE_KV, 'readonly', store => Promise.all(records.map(row =>
       store.count ? requestToPromise(store.count(sourceKey(row))).then(Boolean) : requestToPromise(store.getKey(sourceKey(row))).then(Boolean))));
-    if (normalized && await normalized.available()) for (let index = 0; index < records.length; index++) if (await normalized.hasScope(records[index])) availability[index] = true;
+    if (normalized && await normalized.available()) for (let index = 0; index < records.length; index++)
+      availability[index] = await normalized.scopeAvailable(records[index], availability[index]);
     const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
       && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash
       || (active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active.sourceHash : '');
@@ -748,7 +749,8 @@
     });
     const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
       && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash || active?.sourceHash;
-    if (normalized && await normalized.available()) for (let index = 0; index < selected.length; index++) if (await normalized.hasScope(selected[index])) availability[index] = true;
+    if (normalized && await normalized.available()) for (let index = 0; index < selected.length; index++)
+      availability[index] = await normalized.scopeAvailable(selected[index], availability[index]);
     return selected.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
         hasSource: availability[index], current: row.sourceHash === selectedHash }))
       .sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));

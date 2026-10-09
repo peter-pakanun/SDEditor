@@ -443,7 +443,7 @@ test('managed chooser templates gate cached tables, team details and recovery di
   assert.match(html, /<template v-if="managedCatalogAccess">[\s\S]*?onlineVersionTable/);
   assert.match(html, /v-else-if="!managedCatalogAccess"[^>]*>Your account needs a team language assignment/);
   assert.match(html, /v-if="managedCatalogAccess && managedSelectedVersion"/);
-  assert.match(html, /v-for="team in managedSelectedDetails\.teams"/);
+  assert.match(html, /v-for="team in managedSortedTeams"/);
   assert.match(html, /v-if="managedManagerAccess && managedUploadVisible"/);
   assert.match(html, /v-if="managedRecoveryVisible && managedVisibleRecoveryTeam"/);
 });
@@ -620,7 +620,7 @@ test('deadline reminders stay passive and progress uses Missing plus Saved with 
   assert.match(app.managedProgressTooltip(team()), /counts can overlap/);
 });
 
-test('teams with the same displayed progress sort by lowest workload denominator first', () => {
+test('displayed teams sort by descending progress and lowest workload denominator for ties', () => {
   const { app } = harness();
   app.managedVersionDetails.teams = [
     team({ language: 'Larger zero progress', counts: { missing: 200, saved: 0 } }),
@@ -630,9 +630,11 @@ test('teams with the same displayed progress sort by lowest workload denominator
     team({ language: 'Higher progress', counts: { missing: 3, saved: 1 } }),
   ];
 
-  assert.deepEqual(app.managedSelectedDetails.teams.map(item => item.language), [
+  const retained = copy(app.managedSelectedDetails.teams);
+  assert.deepEqual(app.managedSortedTeams.map(item => item.language), [
     'Higher progress', 'Smaller rounded tie', 'Larger rounded tie', 'Smaller zero progress', 'Larger zero progress',
   ]);
+  assert.deepEqual(app.managedSelectedDetails.teams, retained, 'Rendering the sort preserves cached team details.');
 });
 
 test('pre-check tooltips describe existing standalone accepted work and disclose unavailable offline drafts', () => {
@@ -699,6 +701,63 @@ test('matching published baseline adopts only metadata while retaining active dr
   assert.equal(app.editorVisible, true); assert.equal(app.editorSessionActive, true);
   assert.deepEqual(events.map(event => event.type), ['metadata']);
   assert.deepEqual(events[0].values, { catalogVersionId: 'weekly-1', officialName: '2026-10-05_POE2' });
+});
+
+test('an associated cached baseline remains available for local Continue without becoming a standalone workspace', async () => {
+  const { app, events } = harness();
+  const local = { ...storageScope(), name: 'My previous offline ZIP', hasSource: true, current: true,
+    catalogVersionId: 'weekly-1' };
+  app.localVersions = [local]; app.versionChooserVisible = true;
+  assert.equal(app.managedOfflineVersion, null);
+  assert.equal(app.managedOfflineAssociatedVersion, local);
+  assert.equal(await app.continueAssociatedOfflineVersion(), true);
+  assert.equal(app.versionChooserVisible, false);
+  assert.equal(events.filter(event => event.type === 'activate').length, 1);
+  assert.deepEqual(events.find(event => event.type === 'activate').scope, storageScope());
+  assert.equal(events.some(event => event.type === 'import'), false);
+  assert.equal(app.localVersions[0].catalogVersionId, 'weekly-1');
+  assert.equal(app.localVersions[0].name, 'My previous offline ZIP');
+  assert.equal(app.managedImportZipDisabled, true, 'Local Continue preserves the published source import policy.');
+});
+
+test('the Offline chooser explains published cache association and offers local Continue', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  const associated = html.match(/<template v-else-if="managedOfflineAssociatedVersion">[\s\S]*?<\/template>/)?.[0];
+  assert.ok(associated, 'The associated cache has its own fallback after standalone workspace selection.');
+  assert.match(associated, /matches a published version/);
+  assert.match(associated, /remains available offline/);
+  assert.match(associated, /saved work and history/);
+  assert.match(associated, /@click="continueAssociatedOfflineVersion"[^>]*>Continue cached workspace/);
+  assert.ok(html.indexOf('v-if="managedOfflineVersion"') < html.indexOf('v-else-if="managedOfflineAssociatedVersion"'));
+});
+
+test('associated local Continue excludes unavailable source and caches from another account, game or branch', async () => {
+  const { app, events } = harness();
+  const local = { ...storageScope(), hasSource: true, catalogVersionId: 'weekly-1' };
+  app.localVersions = [{ ...local, hasSource: false }, { ...local, sourceHash: '' },
+    { ...local, accountId: 'bob' }, { ...local, game: 'poe1' }, { ...local, branchId: 'release' }];
+  assert.equal(app.managedOfflineAssociatedVersion, null);
+  assert.equal(await app.continueAssociatedOfflineVersion(), false);
+  assert.equal(events.length, 0);
+  app.localVersions.push({ ...local, catalogVersionId: undefined });
+  assert.equal(app.managedOfflineAssociatedVersion.sourceHash, local.sourceHash,
+    'A matching accepted published source is available before association metadata is persisted.');
+  app.managedVersions = [version({ game: 'poe1' }), version({ branchId: 'release' })];
+  assert.equal(app.managedOfflineAssociatedVersion, null);
+});
+
+test('associated local Continue prefers the current scope and rejects late account changes', async () => {
+  const gate = deferred(), { app, events } = harness();
+  app.localVersions = [{ ...storageScope({ sourceHash: hash('c') }), hasSource: true,
+    catalogVersionId: 'weekly-2', updatedAt: 200 }, { ...storageScope(), hasSource: true,
+    catalogVersionId: 'weekly-1', current: true, updatedAt: 100 }];
+  assert.equal(app.managedOfflineAssociatedVersion.sourceHash, hash('a'));
+  app.flushEditorDraft = () => gate.promise;
+  const pending = app.continueAssociatedOfflineVersion(); app.cloudProfileId = 'bob'; gate.resolve(true);
+  assert.equal(await pending, false);
+  assert.equal(events.some(event => ['activate', 'context', 'load', 'metadata', 'import'].includes(event.type)), false);
+  app.cloudUser.role = 'translator'; app.cloudUser.language = null; app.cloudCanAccessAllLanguages = false;
+  assert.equal(app.managedOfflineAssociatedVersion, null);
 });
 
 test('a differing canonical baseline is not adopted solely because the raw ZIP hash matches', async () => {

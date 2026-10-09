@@ -75,9 +75,14 @@ function harness({ realImport = false } = {}) {
   const editor = Object.assign(mixin.data(), config.data(), mixin.methods, config.methods, {
     lang: 'Thai', gameVersion: 'poe1', sourceIdentity: 'old-hash', sourceLoaded: true,
     loadingProgress: 100,
+    cloudStorageError: '',
     cloudUser: { id: 'account-one' }, dictionary: [], $refs: {}, $nextTick: fn => { fn?.(); return Promise.resolve(); },
     appAlert: async value => { alerts.push(value); },
     appConfirm: async value => { confirmations.push(value); return approved; },
+    // Dictionary worker preparation has its own fixtures; this harness tests
+    // translation storage, import and scope changes without that UI mixin.
+    ensureDictionaryWorker() {},
+    async ensureDictionarySnapshot() {},
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {}, scheduleCollaboration() {},
   });
   for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });

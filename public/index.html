@@ -336,7 +336,12 @@
           <h2>Offline</h2><p class="versionMuted">Your local import workflow. Start with the previous ZIP, then import the next update as usual.</p>
           <template v-if="managedOfflineVersion"><label for="offlineVersionName">Version name</label><div class="versionNameField"><input id="offlineVersionName" v-model="offlineVersionName" @keydown.enter.prevent="saveOfflineVersionName" placeholder="Name this local version"><button @click="saveOfflineVersionName">Save name</button></div><p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineVersion.sourceHash">{{ managedOfflineVersion.sourceHash?.slice(0, 16) }}</p><button class="primaryAction" @click="continueOfflineVersion" :disabled="managedVersionBusy">Continue offline workspace</button></template>
           <p v-else-if="managedLocalVersionsLoading && !managedLocalVersionsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading offline workspace…</p>
-          <p v-else-if="managedLocalVersionsLoaded" class="versionMuted">No standalone offline workspace is stored for this game.</p>
+          <template v-else-if="managedOfflineAssociatedVersion">
+            <p class="versionMuted">Your imported source matches a published version. Its local workspace is listed under Online and remains available offline; your saved work and history are shared between both views.</p>
+            <p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineAssociatedVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineAssociatedVersion.sourceHash">{{ managedOfflineAssociatedVersion.sourceHash?.slice(0, 16) }}</p>
+            <button class="primaryAction" @click="continueAssociatedOfflineVersion" :disabled="managedVersionBusy">Continue cached workspace</button>
+          </template>
+          <p v-else-if="managedLocalVersionsLoaded" class="versionMuted">No offline workspace is stored for this game.</p>
           <div class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">{{ managedOfflineVersion ? 'Import next/update' : 'Import previous version' }}</button><button v-if="managedOfflineVersion" @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
         </section>
       </div>

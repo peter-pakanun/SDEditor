@@ -155,6 +155,17 @@
       managedOfflineVersion() { return this.localVersions.filter(v => this.managedCatalogAccess
         ? !v.catalogVersionId && !this.managedVersions.some(m => m.sourceHash === v.sourceHash)
         : !v.catalogVersionId || v.hasSource).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null; },
+      managedOfflineAssociatedVersion() {
+        if (!this.managedCatalogAccess) return null;
+        const scope = this.managedWorkspaceScope('');
+        return this.localVersions.filter(v => v.hasSource && v.sourceHash
+          && (!v.accountId || v.accountId === scope.accountId) && (!v.game || v.game === scope.game)
+          && (v.branchId || DEFAULT_BRANCH) === scope.branchId
+          && (v.catalogVersionId || this.managedVersions.some(m => m.sourceHash === v.sourceHash
+            && m.game === scope.game && (m.branchId || DEFAULT_BRANCH) === scope.branchId)))
+          .sort((a, b) => Number(!!b.current) - Number(!!a.current)
+            || Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))[0] || null;
+      },
       managedUploadGroups() { return this.managedUpload?.duplicateGroups || []; },
       managedVisibleError() { return [this.managedVersionError, ...Object.values(this.managedOperationErrors)].filter(Boolean).join('\n'); },
     },
@@ -497,8 +508,13 @@
         if (this._managedGuestAdoptionScope !== owner || (scope.sourceHash && !candidate)) return null;
         return root.OfflineStore.adoptGuestVersion?.(scope);
       },
-      async continueOfflineVersion() {
-        const version = this.managedOfflineVersion, key = this.managedCatalogScope, run = this._managedScopeRun;
+      continueOfflineVersion() { return this.managedContinueLocalVersion(this.managedOfflineVersion); },
+      continueAssociatedOfflineVersion() {
+        const version = this.managedOfflineAssociatedVersion;
+        return version ? this.managedContinueLocalVersion(version) : Promise.resolve(false);
+      },
+      async managedContinueLocalVersion(version) {
+        const key = this.managedCatalogScope, run = this._managedScopeRun;
         const request = this._managedOfflineEntry = {};
         const current = () => key === this.managedCatalogScope && run === this._managedScopeRun && request === this._managedOfflineEntry;
         try {

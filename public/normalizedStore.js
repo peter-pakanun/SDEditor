@@ -16,6 +16,17 @@
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(name => [name, canonical(value[name])])) : value;
   const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+  // Accepted file identity contains every original language and entry field.
+  // Parser/UI decorations such as isMissing depend on the selected language.
+  const baselineFile = file => ({ filepath: file?.filepath, name: file?.name == null ? '' : file.name,
+    stats: file?.stats, variables: file?.variables, remarks: file?.remarks, translations: file?.translations });
+  const sameBaselineFile = (a, b) => same(baselineFile(a), baselineFile(b));
+  function sameBaselineSource(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    if (new Set(a.map(file => file.filepath)).size !== a.length || new Set(b.map(file => file.filepath)).size !== b.length) return false;
+    const files = source => source.map(baselineFile).sort((left, right) => left.filepath < right.filepath ? -1 : left.filepath > right.filepath ? 1 : 0);
+    return same(files(a), files(b));
+  }
   async function fingerprint(value) {
     const bytes = new TextEncoder().encode(JSON.stringify(canonical(value)));
     const hash = await crypto.subtle.digest('SHA-256', bytes);
@@ -243,7 +254,7 @@
           baseline ||= await legacyBaseline?.(workspace, scope);
           const source = legacySource ?? baseline?.source ?? await legacyGet(sourceKey(scope));
           if (!Array.isArray(source)) throw new Error('The original source is unavailable. Reimport its matching ZIP to finish storage conversion. Existing work has been retained.');
-          if (baseline && !same(baseline.source, source)) throw new Error('Retained source records disagree. Existing work has been kept for recovery.');
+          if (baseline && !sameBaselineSource(baseline.source, source)) throw new Error('Retained source records disagree. Existing work has been kept for recovery.');
           const P = typeof window === 'object' ? window.CollaborationProtocol : typeof self === 'object' ? self.CollaborationProtocol : null;
           if (workspace.importArchive) {
             if (!baseline || baseline.archive?.baselineId !== scope.sourceHash || baseline.tree?.root !== baseline.archive.treeRoot)
@@ -259,6 +270,12 @@
           W.pruneWorkspaceStatus(workspace);
           const originals = new Map(source.map(desc => [desc.filepath, desc])), parts = splitWorkspace(scope, workspace, originals);
           const baseId = baselineKey(scope);
+          const acceptedMatches = await transaction([stores.assets, stores.baseline], 'readonly', async tx => {
+            const assets = tx.objectStore(stores.assets);
+            const accepted = await request(assets.getKey ? assets.getKey(baseId) : assets.get(baseId));
+            return !accepted || sameBaselineSource((await all(tx, stores.baseline, baseId)).map(item => item.value), source);
+          });
+          if (!acceptedMatches) throw new Error('Retained baselines disagree for one accepted source identity. Original data has been retained.');
           const items = [...source.map((desc, order) => [stores.baseline, row(baseId, desc.filepath, desc, { order })]), ...parts.files.map(value => [stores.files, value]), ...parts.records.map(value => [stores.records, value])];
           const evidenceHash = await fingerprint([source, parts, scope]);
           let offset = ready?.fingerprint === evidenceHash ? ready.offset || 0 : 0;
@@ -272,11 +289,16 @@
             const batch = items.slice(offset, offset + 256);
             if (await transaction([...batch.map(item => item[0]), stores.migration], 'readwrite', async tx => {
               if ((await get(tx, stores.migration, id))?.state === 'ready') return true;
-              for (const [name, value] of batch) if (name === stores.baseline) {
-                const prior = await get(tx, name, value.key);
-                if (prior && !same(prior, value.value)) throw new Error('Retained baselines disagree for one accepted source identity. Original data has been retained.');
+              for (const [name, value] of batch) {
+                if (name === stores.baseline) {
+                  const prior = await get(tx, name, value.key);
+                  if (prior) {
+                    if (!sameBaselineFile(prior, value.value)) throw new Error('Retained baselines disagree for one accepted source identity. Original data has been retained.');
+                    continue;
+                  }
+                }
+                tx.objectStore(name).put(value);
               }
-              for (const [name, value] of batch) tx.objectStore(name).put(value);
               tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'converting', offset: offset + batch.length, fingerprint: evidenceHash } });
               return false;
             })) return;
@@ -287,7 +309,7 @@
             if ((await get(tx, stores.migration, id))?.state === 'ready') return;
             const savedSource = await all(tx, stores.baseline, baseId), savedFiles = await all(tx, stores.files, id), savedRecords = await all(tx, stores.records, id);
             const restored = assembleWorkspace(parts.meta, savedFiles, savedRecords, new Map(savedSource.map(r => [r.value.filepath, r.value])));
-            if (!same(savedSource.map(r => r.value).sort((a,b) => a.filepath.localeCompare(b.filepath)), source.slice().sort((a,b) => a.filepath.localeCompare(b.filepath))))
+            if (!sameBaselineSource(savedSource.map(r => r.value), source))
               throw new Error('Baseline conversion verification failed. Original data has been retained.');
             for (const field of fieldMaps) if (!same(verificationMap(field, restored[field]), verificationMap(field, workspace[field]))) throw new Error('Workspace conversion verification failed: ' + field);
             if (!same(restored.importRecovery, workspace.importRecovery)) throw new Error('Import recovery conversion verification failed.');
@@ -331,15 +353,18 @@
       await transaction([stores.meta, stores.baseline, stores.assets, stores.files, stores.records, stores.migration, 'kv', revisionStoreName(scope.game)], 'readwrite', async tx => {
         // Existing identities are immutable. An import may update staged facts,
         // but cannot change an accepted source under the same identity.
+        const previousAssets = await get(tx, stores.assets, baseId);
+        const retainedFiles = await all(tx, stores.baseline, baseId);
+        if (previousAssets && !sameBaselineSource(retainedFiles.map(item => item.value), source))
+          throw new Error('The imported source differs from its accepted baseline identity.');
         for (const [order, file] of source.entries()) {
           const previous = await get(tx, stores.baseline, key(baseId, file.filepath));
-          if (previous && !same(previous, file)) throw new Error('The imported source differs from its accepted baseline identity.');
+          if (previous && !sameBaselineFile(previous, file)) throw new Error('The imported source differs from its accepted baseline identity.');
           if (!previous) tx.objectStore(stores.baseline).put(row(baseId, file.filepath, file, { order }));
         }
         await writeDifference(tx, stores.files, await all(tx, stores.files, id), parts.files);
         await writeDifference(tx, stores.records, await all(tx, stores.records, id), parts.records);
         tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
-        const previousAssets = await get(tx, stores.assets, baseId);
         if (workspace.importArchive && !assets?.archive && !previousAssets?.archive) throw new Error('The accepted archive assets are required for an atomic source import.');
         const retained = assets ? { ...copy(assets) } : previousAssets || { sourceHash: scope.sourceHash };
         delete retained.source;
@@ -358,6 +383,13 @@
     }
     async function hasScope(scope) {
       return transaction([stores.meta], 'readonly', async tx => !!await get(tx, stores.meta, scopeKey(scope)));
+    }
+    async function scopeAvailable(scope, legacyAvailable) {
+      const id = scopeKey(scope);
+      return transaction([stores.meta, stores.migration], 'readonly', async tx => {
+        const [meta, marker] = await Promise.all([get(tx, stores.meta, id), get(tx, stores.migration, id)]);
+        return marker?.state === 'ready' ? !!meta : !!meta || legacyAvailable;
+      });
     }
     async function clearScope(scope) {
       await ensure(scope);
@@ -607,8 +639,8 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, saveWorkspace, transaction, get, all, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
+      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same };
   }
-  return { stores, names, upgrade, create, scopeKey, baselineKey };
+  return { stores, names, upgrade, create, scopeKey, baselineKey, baselineFile, sameBaselineFile, sameBaselineSource };
 });
