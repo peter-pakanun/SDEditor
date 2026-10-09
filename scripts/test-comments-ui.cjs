@@ -894,9 +894,10 @@ test('polling and list requests do not overlap, and background tabs do not poll'
   assert.equal(calls.length, 2);
 });
 
-test('inline comments use the active file session and stop reads when the session closes', async () => {
-  const { app, observers } = fixture(async () => ({ items: [comment(7)], nextCursor: null }));
-  app.editorVisible = false; app.editorSessionActive = true;
+test('visible sidebar keeps file comments and reads when the inline editor loses focus', async () => {
+  const { app, observers, calls } = fixture(async () => ({ items: [comment(7)], nextCursor: null }));
+  app.editorVisible = false; app.editorSessionActive = true; app.editorToolsVisible = true;
+  app.commentsFileDraft = 'Keep this draft';
   app.$refs.commentsFileList = { querySelectorAll: () => [node(7)] };
   assert.equal(app.commentsSurfaceVisible('file'), true);
   await app.commentsRefreshFile();
@@ -904,7 +905,39 @@ test('inline comments use the active file session and stop reads when the sessio
   await app.commentsObserveVisible();
   assert.equal(observers.at(-1).nodes.length, 1);
   app.editorSessionActive = false;
+  assert.equal(app.commentsSurfaceVisible('file'), true);
+  await app.commentsRefreshFile();
+  assert.equal(calls.length, 2);
+  assert.equal(app.commentsFileItems.length, 1);
+  assert.equal(app.commentsFileDraft, 'Keep this draft');
+  app.editorToolsVisible = false;
   assert.equal(app.commentsSurfaceVisible('file'), false);
+  await app.commentsRefreshFile();
+  await app.commentsObserveVisible();
+  assert.equal(calls.length, 2);
+  assert.equal(observers.at(-1).nodes.length, 0);
+  assert.equal(app.commentsFileItems.length, 1);
+  assert.equal(app.commentsFileDraft, 'Keep this draft');
+});
+
+test('visible comments require a file and retain access and blocking guards without an editor session', async () => {
+  const { app, calls, document } = fixture();
+  app.editorVisible = false; app.editorSessionActive = false; app.editorToolsVisible = true;
+  app.editorCurrentEditingDesc = null;
+  assert.equal(app.commentsSurfaceVisible('file'), false);
+  await app.commentsRefreshFile();
+  assert.equal(calls.length, 0);
+  app.editorCurrentEditingDesc = { filepath: 'Metadata/test.txt' };
+  assert.equal(app.commentsSurfaceVisible('file'), true);
+  for (const [owner, field] of [[app, 'showSetting'], [document, 'hidden']]) {
+    owner[field] = true;
+    assert.equal(app.commentsSurfaceVisible('file'), false);
+    owner[field] = false;
+  }
+  app.cloudSignedIn = false;
+  assert.equal(app.commentsSurfaceVisible('file'), false);
+  await app.commentsRefreshFile();
+  assert.equal(calls.length, 0);
 });
 
 test('unmount invalidates pending responses and disconnects the visibility observer', async () => {

@@ -633,7 +633,6 @@
       </div>
       <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="inlineEditorSidebar" tabindex="-1" data-inline-focus-surface @pointerdown="inlineFocusSurfacePointerDown" @focusout="inlineRowFocusOut" aria-label="Selected file tools">
         <div id="inlineEditorSidebarHost"></div>
-        <p v-if="!editorSessionActive" class="inlineSidebarEmpty">Select a file to use its Dictionary, Lookup, Preview and Comments.</p>
       </aside>
       </main>
 
@@ -845,7 +844,7 @@
 
     </div>
 
-    <editor-assistance v-if="editorSessionActive" :target="editorVisible ? '#fullEditorSidebarHost' : '#inlineEditorSidebarHost'">
+    <editor-assistance v-if="editorToolsMounted" :target="editorVisible ? '#fullEditorSidebarHost' : '#inlineEditorSidebarHost'">
       <div class="side sharedEditorSidebar" ref="editorSide" data-inline-focus-surface @focusout="inlineRowFocusOut" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup' }">
         <div class="sideHeader">
           <div class="sideTabs">
@@ -859,7 +858,7 @@
           <div v-if="sideTab === 'dictionary'" class="dictionaryControls sideControls">
             <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
             <div class="dictionaryPagination sidePagination" aria-label="Dictionary pages">
-              <span><template v-if="editorReady">{{ dictionaryRangeLabel }} · Matches in this file first</template><template v-else>&nbsp;</template></span>
+              <span><template v-if="editorReady">{{ dictionaryRangeLabel }}<template v-if="editorCurrentEditingDesc"> · Matches in this file first</template></template><template v-else>&nbsp;</template></span>
               <button type="button" @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="!editorReady || dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
               <button type="button" @click="setDictionaryPage(dictionaryPage + 1)" :disabled="!editorReady || dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
             </div>
@@ -1022,7 +1021,7 @@
       </div>
 
     </editor-assistance>
-    <editor-preview v-if="editorSessionActive" :target="editorVisible ? '#fullEditorPreviewHost' : '#inlineEditorPreviewHost'">
+    <editor-preview v-if="editorToolsMounted" :target="editorVisible ? '#fullEditorPreviewHost' : '#inlineEditorPreviewHost'">
         <div class="gamePreviewStrip">
           <div v-if="editorVisible" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>

@@ -7,7 +7,7 @@
   const caches = new WeakMap();
   const languageCaches = new WeakMap();
   const raw = value => typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(value) : value;
-  const lookupActive = model => !!(model.editorSessionActive ?? model.editorVisible) && model.sideTab === 'lookup';
+  const lookupActive = model => !!(model.editorToolsVisible ?? model.editorSessionActive ?? model.editorVisible) && model.sideTab === 'lookup';
   const asLines = value => Array.isArray(value) ? value.map(line => String(line ?? '')) : [];
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
   const compactText = value => readableText(value).replace(/\s+/gu, ' ').trim();
@@ -194,7 +194,7 @@
       },
       lookupResults() {
         // Wait for an applied nonempty query before indexing the corpus.
-        if (!(this.editorSessionActive ?? this.editorVisible) || this.sideTab !== 'lookup' || !this.lookupHasAppliedQuery) return [];
+        if (!lookupActive(this) || !this.lookupHasAppliedQuery) return [];
         const revision = this.lookupRevision;
         const lang = this.lookupActiveLanguage;
         const source = this.descs;
@@ -240,7 +240,7 @@
         });
       },
       lookupSelectedReference() {
-        if (!(this.editorSessionActive ?? this.editorVisible) || this.sideTab !== 'lookup' || !this.lookupSelectedFilepath) return null;
+        if (!lookupActive(this) || !this.lookupSelectedFilepath) return null;
         // Depend on the active index as well as the live text, so refreshed saved
         // translations update both matching results and the selected reference.
         this.lookupResults;
@@ -255,13 +255,13 @@
       lookupLanguage() { this.lookupApplySearch(); },
       lookupScope() { this.lookupApplySearch(); },
       lookupPageCount(count) {
-        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup') this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
+        if (lookupActive(this)) this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
       },
       lookupLanguages(languages) {
         if (lookupActive(this) && this.lookupLanguage && !languages.includes(this.lookupLanguage)) this.lookupLanguage = '';
       },
       lookupResults(results) {
-        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup' && this.lookupSelectedFilepath
+        if (lookupActive(this) && this.lookupSelectedFilepath
           && !results.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
@@ -284,7 +284,7 @@
         this._editorLookupSearchTimer = null;
         this.lookupAppliedQuery = this.lookupQuery;
         this.lookupPage = 1;
-        if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup' && this.lookupSelectedFilepath
+        if (lookupActive(this) && this.lookupSelectedFilepath
           && !this.lookupResults.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
         this.$nextTick(() => { if (this.$refs.lookupResultsList) this.$refs.lookupResultsList.scrollTop = 0; });
       },

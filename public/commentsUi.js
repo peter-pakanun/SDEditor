@@ -73,7 +73,7 @@
       commentsFilepath() { this.commentsResetFile(); },
       sideTab() { this.commentsSurfaceChanged(); },
       editorVisible() { this.commentsSurfaceChanged(); },
-      editorSessionActive() { this.commentsSurfaceChanged(); },
+      editorToolsVisible() { this.commentsSurfaceChanged(); },
       commentsAllVisible() { this.commentsSurfaceChanged(); },
       commentsUiBlocked() { this.commentsSurfaceChanged(); },
     },
@@ -128,7 +128,7 @@
       },
       commentsSurfaceVisible(surface) {
         if (document.hidden || this.commentsUiBlocked || this.$refs.diagnosticScanDialog?.open || !this.commentsEligible) return false;
-        return surface === 'file' ? !!(this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'comments' && !!this.commentsFilepath
+        return surface === 'file' ? !!(this.editorToolsVisible ?? this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'comments' && !!this.commentsFilepath
           : this.commentsAllVisible && !this.editorVisible;
       },
       commentsSurfaceChanged() {

@@ -47,16 +47,24 @@ function search(model, query, scope = 'all') {
 }
 
 const plain = value => JSON.parse(JSON.stringify(value));
-test('inline editor sessions share Lookup search and references without including unsaved drafts', () => {
+test('visible sidebar keeps Lookup search and references when the inline editor loses focus', () => {
   const desc = description('inline', 'Fire damage', 'Saved fire');
-  const { model } = loadLookup({ editorVisible: false, editorSessionActive: true, descs: [desc],
+  const { model } = loadLookup({ editorVisible: false, editorSessionActive: true, editorToolsVisible: true, descs: [desc],
     editorBlocks: [{ translation: 'Unsaved cold draft' }] });
   assert.deepEqual(search(model, 'Fire'), [desc.filepath]);
   model.lookupSelectedFilepath = desc.filepath;
   assert.equal(model.lookupSelectedReference.filepath, desc.filepath);
   assert.deepEqual(search(model, 'Unsaved'), []);
   model.editorSessionActive = false;
+  assert.deepEqual(search(model, 'Fire'), [desc.filepath]);
+  model.lookupSelect(desc.filepath);
+  assert.equal(model.lookupSelectedReference.filepath, desc.filepath);
+  model.editorToolsVisible = false;
   assert.deepEqual(search(model, 'Fire'), []);
+  assert.equal(model.lookupSelectedReference, null);
+  assert.equal(model.lookupSelectedFilepath, desc.filepath);
+  model.editorToolsVisible = true;
+  assert.equal(model.lookupSelectedReference.filepath, desc.filepath);
 });
 function deepFreeze(value) {
   if (value && typeof value === 'object') {
@@ -75,6 +83,17 @@ test('lookup searches all loaded descriptions independently of workspace filters
   assert.equal(model.lookupVisibleResults[0].isDNT, true);
   assert.equal(model.selectedFilepath, one.filepath);
   assert.equal(model.searchText, 'one');
+});
+
+test('visible Lookup searches references before any file is opened', () => {
+  const one = description('one', 'Reference English', 'Saved translation', { French: ['Français'] });
+  const { model } = loadLookup({ descs: [one], editorVisible: false, editorSessionActive: false,
+    editorToolsVisible: true, editorCurrentEditingDesc: null });
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai', 'French']);
+  assert.deepEqual(search(model, 'Reference English'), [one.filepath]);
+  model.lookupSelect(one.filepath);
+  assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Saved translation');
+  assert.equal(model.editorCurrentEditingDesc, null);
 });
 
 test('plain case-insensitive lookup supports paths, stat codes, English and translation scopes', () => {
@@ -154,6 +173,11 @@ test('hidden Lookup language getter and its watcher never traverse the corpus', 
   }
   assert.equal(corpusReads, 0);
   assert.equal(model.lookupLanguage, 'French', 'Hiding Lookup must not clear its selected language.');
+  model.sideTab = 'lookup'; model.editorToolsVisible = false; model.lookupQuery = 'English';
+  model.lookupApplySearch();
+  api.mixin.watch.lookupLanguages.call(model, model.lookupLanguages);
+  assert.equal(model.lookupResults.length, 0);
+  assert.equal(corpusReads, 0, 'A hidden sidebar must not index reference files.');
 });
 
 test('Lookup language enumeration is cached, deferred while hidden, and refreshed on activation', () => {

@@ -362,7 +362,7 @@
         this._draftSession = null; this.inlineActive = false; this.editorVisible = false;
         this.inlineDraftFindings = {}; this.draftRecoveryCandidate = null;
         this._editorOpenRun = (this._editorOpenRun || 0) + 1;
-        this.closeHlPopup?.(); this._collaboration?.leaveEdit(); this.editorBlocks = [];
+        this.closeHlPopup?.(); this._collaboration?.leaveEdit(); this.clearEditorToolsFile();
         return pending;
       },
       inlineDraftFor(filepath) { return this.inlineDraftRows[filepath] || null; },

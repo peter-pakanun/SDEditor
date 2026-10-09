@@ -1286,6 +1286,77 @@ test('failed local draft persistence keeps editing open and leaves committed dat
   assert.deepEqual(desc.translations.Thai, ['translation']); assert.equal(h.calls.promotions.length, 0);
 });
 
+test('file tools show Dictionary before opening a file and retain file content after inline focus ends', async () => {
+  const { editor, desc } = harness();
+  Object.assign(editor, { gameVersionSelected: true, loadingProgress: 100, needsInitialSettings: false });
+  editor.dictionary = [{ _id: 'source', find: 'Source', replace: 'translation', alts: [] }];
+  assert.equal(editor.editorSessionActive, false);
+  assert.equal(editor.editorToolsMounted, true);
+  assert.equal(editor.editorToolsVisible, true);
+  assert.equal(editor.visibleDictionary.length, 1);
+  await editor.activateInlineRow(desc.filepath);
+  editor.gamePreviewSourceSegments = [{ type: 'text', text: 'Source' }];
+  editor.gamePreviewSegments = [{ type: 'text', text: 'translation' }];
+  editor.sideTab = 'preview';
+  const blocks = editor.editorBlocks, preview = editor.gamePreviewSegments;
+  assert.equal(editor.foundDictionarySet.has('source'), true);
+  await editor.finishInlineSession({ promote: false });
+  assert.equal(editor.editorSessionActive, false);
+  assert.equal(editor.editorToolsVisible, true);
+  assert.equal(editor.editorCurrentEditingDesc, desc);
+  assert.equal(editor.editorBlocks, blocks);
+  assert.equal(editor.gamePreviewSegments, preview);
+  assert.equal(editor.foundDictionarySet.has('source'), true);
+  assert.equal(editor.sideTab, 'preview');
+  editor.inlineSidebarVisible = false;
+  assert.equal(editor.editorToolsMounted, true, 'Hiding the sidebar keeps its controls mounted.');
+  assert.equal(editor.editorToolsVisible, false);
+});
+
+test('retained file tools clear their file context on account, game, branch, source and language changes', async () => {
+  for (const [property, value] of [['cloudProfileId', 'another-user'], ['gameVersion', 'poe2'],
+    ['branchId', 'another-branch'], ['sourceIdentity', 'another-source'], ['lang', 'German']]) {
+    const { editor, desc, config } = harness();
+    await editor.activateInlineRow(desc.filepath);
+    await editor.finishInlineSession({ promote: false });
+    editor.gamePreviewSegments = [{ type: 'text', text: 'old translation' }];
+    editor.gamePreviewSourceSegments = [{ type: 'text', text: 'old source' }];
+    editor.previewGggVars = { '0': '123' };
+    editor.editorLoading = true; editor.editorLoadError = 'Previous file failed';
+    const previous = editor.editorToolsScope;
+    editor[property] = value;
+    assert.notEqual(editor.editorToolsScope, previous);
+    config.watch.editorToolsScope.call(editor);
+    assert.equal(editor.editorCurrentEditingDesc, null);
+    assert.equal(editor.editorReady, true);
+    assert.equal(editor.editorBlocks.length, 0);
+    assert.equal(editor.editorDictionaryMatchPack, null);
+    assert.equal(editor.gamePreviewSourceSegments.length, 0);
+    assert.equal(editor.gamePreviewSegments.length, 0);
+    assert.equal(Object.keys(editor.previewGggVars).length, 0);
+  }
+});
+
+test('file tools mount only when their workspace or full-editor hosts exist', () => {
+  const { editor } = harness();
+  Object.assign(editor, { gameVersionSelected: true, loadingProgress: 100, needsInitialSettings: false });
+  for (const [property, value] of [['gameVersionSelected', false], ['versionChooserVisible', true],
+    ['loadingProgress', 50], ['needsInitialSettings', true], ['inlineEditor', false]]) {
+    const previous = editor[property];
+    editor[property] = value;
+    assert.equal(editor.editorToolsMounted, false);
+    editor[property] = previous;
+  }
+  editor.inlineEditor = false; editor.editorVisible = true;
+  assert.equal(editor.editorToolsMounted, true);
+  editor.sideTab = 'history'; editor.inlineEditor = true; editor.editorVisible = false;
+  editor.$refs.rawFileDialog = { open: false };
+  editor.endDictionaryEdit = editor.closeRawFileDialog = editor.resetEditorFilePathCopy = () => {};
+  const { editorVisible } = harness().config.watch;
+  editorVisible.call(editor, false);
+  assert.equal(editor.sideTab, 'dictionary');
+});
+
 test('focus within the active row, sidebar or confirmation belongs to the same session', async () => {
   const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
   const target = kind => ({ closest(selector) {

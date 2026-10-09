@@ -553,7 +553,11 @@ const config = Vue.defineComponent({
         this.resetEditorFilePathCopy();
         this.endDictionaryEdit();
         this.closeRawFileDialog();
+        if (this.inlineEditor && ['regex', 'history'].includes(this.sideTab)) this.sideTab = 'dictionary';
       }
+    },
+    editorToolsScope() {
+      if (!this.editorSessionActive) this.clearEditorToolsFile();
     },
     editorSessionActive(active) {
       if (active) return;
@@ -608,6 +612,17 @@ const config = Vue.defineComponent({
   },
   computed: {
     editorSessionActive() { return this.editorVisible || !!this.inlineActive; },
+    editorToolsMounted() {
+      return this.editorVisible || (this.inlineEditor && this.gameVersionSelected && !this.versionChooserVisible
+        && this.loadingProgress >= 100 && !this.needsInitialSettings);
+    },
+    editorToolsVisible() {
+      return this.editorToolsMounted && (this.editorVisible || (this.inlineSidebarVisible && !this.workspaceInitializationActive));
+    },
+    editorToolsScope() {
+      return JSON.stringify([this.cloudProfileId || this.cloudUser?.id || 'guest', this.gameVersion,
+        this.branchId || 'default', this.sourceIdentity, this.lang]);
+    },
     rawFileText() {
       return this.rawFilePreview?.[this.rawFileMode] || '';
     },
@@ -829,7 +844,7 @@ const config = Vue.defineComponent({
       return String(entry?.tlnote ?? '').trim();
     },
     foundDictionarySet() {
-      if (!this.editorSessionActive || !this.getEditorDictionaryMatchPack()) return new Set();
+      if (!(this.editorSessionActive || this.editorCurrentEditingDesc) || !this.getEditorDictionaryMatchPack()) return new Set();
       let set = new Set();
       for (const editorBlock of this.editorBlocks || []) {
         const highlights = editorBlock?.isTable
@@ -846,7 +861,7 @@ const config = Vue.defineComponent({
       return set;
     },
     foundDictionaryDefMap() {
-      if (!this.editorSessionActive || !this.getEditorDictionaryMatchPack()) return new Map();
+      if (!(this.editorSessionActive || this.editorCurrentEditingDesc) || !this.getEditorDictionaryMatchPack()) return new Map();
       let map = new Map();
       for (const editorBlock of this.editorBlocks || []) {
         const highlights = editorBlock?.isTable
@@ -1090,6 +1105,18 @@ const config = Vue.defineComponent({
     detectGameVersionFromZip(zip) {
       return this.detectGameVersionFromFilepaths(getZipTxtFilepaths(zip));
     },
+    clearEditorToolsFile() {
+      this.editorLoading = false;
+      this.editorLoadError = '';
+      this.editorCurrentEditingDesc = null;
+      this.editorBlocks = [];
+      this.editorOriginalTranslations = [];
+      this.editorDictionaryMatchPack = null;
+      this.editorDroppedCandidate = null;
+      this.gamePreviewSourceSegments = [];
+      this.gamePreviewSegments = [];
+      this.previewGggVars = {};
+    },
     resetVersionedState() {
       this.inlineActive = false;
       this._draftSession = null;
@@ -1108,7 +1135,7 @@ const config = Vue.defineComponent({
       this.localDescs = { descs: [], lastModified: 0, size: 0, status: {} };
       this.sourceLoaded = false;
       this.editorVisible = false;
-      this.editorCurrentEditingDesc = null;
+      this.clearEditorToolsFile();
       this.historyItems = [];
       this.historySelectedA = null;
       this.historySelectedB = null;
@@ -3631,7 +3658,7 @@ const config = Vue.defineComponent({
       return this.$nextTick(() => {
         if (editingId !== this.dictionaryEditingId) return;
         const id = document.activeElement?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
-        if (id && (this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'dictionary') this.beginDictionaryEdit(id);
+        if (id && (this.editorToolsVisible || this.editorSessionActive) && this.sideTab === 'dictionary') this.beginDictionaryEdit(id);
         else this.endDictionaryEdit();
       });
     },
