@@ -4634,6 +4634,8 @@ const config = Vue.defineComponent({
       if (!this.hlPopupReturnInfo) return;
       const entryId = e.target?.closest?.('[data-dict-id]')?.getAttribute?.('data-dict-id');
       if (entryId && !this.isDictionaryEntryActive(this.dictionary.find(entry => String(entry?._id) === entryId))) return;
+      // Consume Enter before moving focus, or its default edit can reach the translation textarea.
+      e.preventDefault();
       let returnInfo = this.hlPopupReturnInfo;
       this.hlPopupReturnInfo = null;
       this.insertTranslationText(this.hlPopup.editorIndex, `[${returnInfo.kwTagName}|${e.target.value}]`, { deleteOpeningBracket: true, columnIndex: this.hlPopup.columnIndex || 0 });

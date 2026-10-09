@@ -1452,6 +1452,115 @@ test('rendering autocomplete action hints does not create a Dictionary return ac
   assert.equal(editor.hlPopupReturnInfo, item, 'An explicit create action still remembers its insertion target.');
 });
 
+test('missing-keyword creation returns a typed replacement without native Enter before worker publication', async () => {
+  for (const table of [false, true]) {
+    const { editor, document, context, window } = loadEditor({ dictionary: [] });
+    context.Event = Event;
+    const english = table ? 'Left@[NewKeyword|Unknown display]\\nExtra source' : '[NewKeyword]\\nExtra source';
+    const translation = table ? 'left draft@prefix\\n[' : 'prefix\\n[';
+    editor.descs = [description('keyword-create-return', english, translation)];
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+    const block = editor.editorBlocks[0], origin = table ? block.tableColumns[1] : block;
+    assert.equal(origin.isMultiline, true);
+    const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
+    const submitSnapshot = client.submitSnapshot, heldSnapshots = [];
+    let submissionArrived = deferred();
+    client.submitSnapshot = snapshot => {
+      heldSnapshots.push(snapshot); submissionArrived.resolve();
+      return snapshot.generation;
+    };
+    let prevented = false, pasteStarted = false, originFocused = 0, replacementFocused = 0, replacementSelected = 0, row;
+    const input = {
+      value: origin.translation, selectionStart: origin.translation.length, selectionEnd: origin.translation.length,
+      focus() {
+        if (pasteStarted) assert.equal(prevented, true, 'Consume Enter before moving focus into the origin textarea.');
+        originFocused++; document.activeElement = this;
+      },
+      setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+      setRangeText(text, start, end) {
+        this.value = this.value.slice(0, start) + text + this.value.slice(end);
+        this.setSelectionRange(start + text.length, start + text.length);
+      },
+      dispatchEvent() {},
+    };
+    const replacementInput = {
+      value: '',
+      focus() { replacementFocused++; document.activeElement = this; },
+      select() { replacementSelected++; },
+      closest() { return { getAttribute() { return row._id; } }; },
+    };
+    editor.getEditorRef = kind => kind === 'translation' ? input : null;
+    document.querySelector = selector => selector.includes('.dictRow') || selector.includes('.dictAltRow')
+      ? { querySelector() { return replacementInput; } } : null;
+    document.activeElement = input;
+    editor.hlPopup.editorIndex = 0; editor.hlPopup.columnIndex = table ? 1 : 0;
+    editor._hlPopupDictionaryPack = editor.editorDictionaryMatchPack;
+    editor.hlPopup.items = editor.buildHlPopupItems(0, table ? 1 : 0);
+    editor.hlPopup.filtered = editor.hlPopup.items; editor.hlPopup.selectedIndex = 0; editor.hlPopup.visible = true;
+    const item = editor.hlPopup.filtered[0];
+    assert.equal(item.mustCreate, true);
+    try {
+      assert.equal(editor.hlPopupEnterAction(), true);
+      row = editor.dictionary[0];
+      await editor.$nextTick(); await editor.$nextTick(); await editor.$nextTick();
+      editor.scheduleDictionarySnapshot({ immediate: true });
+      await submissionArrived.promise;
+      assert.equal(row.find, 'NewKeyword');
+      assert.equal(replacementFocused, 1); assert.equal(replacementSelected, 1);
+      assert.equal(document.activeElement, replacementInput);
+      assert.equal(editor.hlPopupReturnInfo, item);
+      submissionArrived = deferred();
+      const typed = table ? 'Translated alternate' : 'Translated keyword';
+      if (table) row.alts[0].replace = typed;
+      else row.replace = typed;
+      replacementInput.value = typed;
+      editor.dictionaryEntryInput(row);
+      editor.scheduleDictionarySnapshot({ immediate: true });
+      await submissionArrived.promise;
+      assert.ok(heldSnapshots.length >= 2, 'Hold both creation and replacement snapshots before they enter the worker.');
+      assert.equal(client.readyGeneration, generation);
+      const insert = editor.insertTranslationText;
+      editor.insertTranslationText = function (...args) {
+        assert.equal(prevented, true, 'Consume Enter before starting the paste action.');
+        pasteStarted = true;
+        return insert.apply(this, args);
+      };
+      let preventCalls = 0;
+      editor.onDictionaryReplaceEnter({ target: replacementInput, key: 'Enter', preventDefault() { preventCalls++; prevented = true; } });
+      await editor.$nextTick(); await editor.$nextTick();
+      assert.equal(preventCalls, 1);
+      assert.equal(origin.translation, `prefix\n[NewKeyword|${typed}]`);
+      assert.equal(input.value, origin.translation);
+      assert.equal(input.value.endsWith('\n'), false, 'Return Enter must not append a newline to the origin text.');
+      assert.equal(document.activeElement, input); assert.ok(originFocused > 0);
+      assert.equal(editor.hlPopupReturnInfo, null);
+      assert.equal(client.readyGeneration, generation, 'Pasting the live replacement cannot depend on cache publication.');
+      if (table) assert.equal(block.tableColumns[0].translation, 'left draft');
+    } finally {
+      client.submitSnapshot = submitSnapshot;
+      clearTimeout(editor._dictFlashTimer);
+      window.DictionaryWorkerUI.mixin.beforeUnmount.call(editor);
+    }
+  }
+});
+
+test('Dictionary replacement Enter preserves native input and composition without an active return action', () => {
+  const { editor } = loadEditor({ dictionary: [] });
+  let prevented = 0, pasted = 0;
+  editor.insertTranslationText = () => { pasted++; };
+  const target = { value: 'typed replacement' };
+  editor.onDictionaryReplaceEnter({ target, key: 'Enter', preventDefault() { prevented++; } });
+  assert.equal(editor.hlPopupReturnInfo, null);
+  const returnInfo = { kwTagName: 'NewKeyword' };
+  editor.hlPopupReturnInfo = returnInfo;
+  for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
+    editor.onDictionaryReplaceEnter({ target, key: 'Enter', ...composition, preventDefault() { prevented++; } });
+    assert.equal(editor.hlPopupReturnInfo, returnInfo, 'Composition cannot consume the saved return action.');
+  }
+  assert.equal(prevented, 0);
+  assert.equal(pasted, 0);
+});
+
 test('autocomplete Dictionary page lookup reuses positions and refreshes on ordering changes', () => {
   const { editor } = loadEditor();
   const first = dictionary(120);
