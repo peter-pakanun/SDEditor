@@ -228,11 +228,43 @@ async function runFixture({ storageOnly = false } = {}) {
                 values['workspace_version_v1:' + suffix] = tinyWorkspace;
                 values['source_version_v1:' + suffix] = tinySource;
             }
+            const conversionScope = { ...scope, sourceHash: 'legacy-resolved-conflict-buckets' };
+            const conversionSuffix = JSON.stringify([conversionScope.accountId, conversionScope.game, conversionScope.branchId, conversionScope.sourceHash]);
+            const conversionSource = copy(source.slice(20, 25)), conversionWorkspace = { ...conversionScope, descs: copy(conversionSource), status: {} };
+            WorkspaceState.initializeWorkspace(conversionWorkspace, { source: conversionSource, sourceHash: conversionScope.sourceHash,
+                game: conversionScope.game, language: 'Thai' });
+            const resolved = WorkspaceState.dropTranslation(conversionWorkspace, conversionSource[0], 'Thai', { id: 'resolved-local',
+                originSourceHash: 'predecessor', targetSourceHash: conversionScope.sourceHash, translations: ['Resolved local text'] });
+            const resolvedShared = { ...copy(resolved), id: 'resolved-shared', revision: 2, status: 'promoted' };
+            WorkspaceState.recordDroppedConflict(conversionWorkspace, { language: 'Thai', filepath: conversionSource[0].filepath,
+                yours: copy(resolved), shared: resolvedShared });
+            WorkspaceState.resolveDroppedConflict(conversionWorkspace, conversionSource[0].filepath, 'Thai', 'shared', { id: resolvedShared.id, revision: 2 });
+            // Conflict/stage cleanup leaves these empty language containers in
+            // legacy aggregates. They do not denote a translation or candidate.
+            for (const field of ['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']) (conversionWorkspace[field] ||= {}).French = {};
+            const unresolved = WorkspaceState.dropTranslation(conversionWorkspace, conversionSource[1], 'German', { id: 'unresolved-local',
+                originSourceHash: 'predecessor', targetSourceHash: conversionScope.sourceHash, translations: ['Unresolved local text'] });
+            WorkspaceState.recordDroppedConflict(conversionWorkspace, { language: 'German', filepath: conversionSource[1].filepath,
+                yours: copy(unresolved), shared: { ...copy(unresolved), id: 'unresolved-shared', revision: 3,
+                    snapshot: { ...copy(unresolved.snapshot), translations: ['Unresolved shared text'] } },
+                recoveryEvidence: { emptySnapshotMetadata: {}, decisions: [] } });
+            WorkspaceState.stageTranslation(conversionWorkspace, { filepath: conversionSource[2].filepath, translations: [''] }, 'German',
+                { source: conversionSource[2], savedAt: 1, saveOrigin: 'save' });
+            WorkspaceState.stageTranslation(conversionWorkspace, { filepath: conversionSource[3].filepath, translations: copy(conversionSource[3].translations.Thai) },
+                'Thai', { source: conversionSource[3], savedAt: 2, saveOrigin: 'save' });
+            WorkspaceState.dropTranslation(conversionWorkspace, conversionSource[4], 'Thai', { id: 'z-first',
+                originSourceHash: 'predecessor', targetSourceHash: conversionScope.sourceHash, translations: ['First queued copy'] });
+            WorkspaceState.dropTranslation(conversionWorkspace, conversionSource[4], 'German', { id: 'a-second',
+                originSourceHash: 'predecessor', targetSourceHash: conversionScope.sourceHash, translations: ['Second queued copy'] });
+            values['workspace_version_v1:' + conversionSuffix] = conversionWorkspace;
+            values['source_version_v1:' + conversionSuffix] = conversionSource;
             const tx = db.transaction(['kv', 'revisions_poe1'], 'readwrite');
             for (const [key, value] of Object.entries(values)) tx.objectStore('kv').put({ key, value });
             tx.objectStore('revisions_poe1').add({ filepath: source[0].filepath, lang: 'Thai', savedAt: 1, translations: ['Saved Thai'], ...scope });
             tx.objectStore('revisions_poe1').add({ id: 51, filepath: source[0].filepath, lang: 'Thai', savedAt: 1,
                 translations: ['Legacy owned history'], collaborationAccountId: historyScope.accountId, sourceHash: historyScope.sourceHash });
+            tx.objectStore('revisions_poe1').add({ id: 61, filepath: conversionSource[2].filepath, lang: 'German', savedAt: 1,
+                translations: [''], ...conversionScope });
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); }); db.close();
             window.__storageScope = scope; window.__storageSource = source; window.__legacyValues = values;
             OfflineStore.setWorkspaceContext(scope);
@@ -253,25 +285,57 @@ async function runFixture({ storageOnly = false } = {}) {
             catch (error) { missingBlocked = /source.*unavailable|matching ZIP|retained/i.test(error.message); }
             const tinyWorkspaces = [];
             for (const tinyScope of tinyScopes) tinyWorkspaces.push(await OfflineStore.getVersionWorkspace(tinyScope, 'Thai'));
+            // Omit one actual conflict only from a verifier's returned read,
+            // preserving its native persisted row and all legacy evidence.
+            // Conversion must reject this loss and keep the scope unready.
+            const originalGetAll = IDBIndex.prototype.getAll;
+            let verificationInjected = false, verificationFailure;
+            IDBIndex.prototype.getAll = function (...args) {
+                const request = originalGetAll.apply(this, args);
+                if (this.objectStore.name === 'workspace_records' && this.name === 'by_scope'
+                    && this.objectStore.transaction.mode === 'readwrite' && args[0] === conversionSuffix) request.addEventListener('success', () => {
+                    if (verificationInjected) return;
+                    const index = request.result.findIndex(row => row.value.field === 'droppedConflicts' && row.value.language === 'German');
+                    if (index >= 0) { request.result.splice(index, 1); verificationInjected = true; }
+                });
+                return request;
+            };
+            try { await OfflineStore.getVersionWorkspace(conversionScope, 'Thai'); }
+            catch (error) { verificationFailure = error.message; }
+            finally { IDBIndex.prototype.getAll = originalGetAll; }
+            const conversionHistoryBefore = await OfflineStore.listRevisions(conversionSource[2].filepath, 'German', 100, conversionScope);
             const legacyHistory = await OfflineStore.listRevisions(source[0].filepath, 'Thai', 100, historyScope);
             const read = indexedDB.open('sdeditor', 9), upgraded = await new Promise((resolve, reject) => {
                 read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error);
             });
-            const frozen = {}, inspect = upgraded.transaction(['kv', 'collaboration_rooms', 'collaboration_records'], 'readonly');
+            const frozen = {}, inspect = upgraded.transaction(['kv', 'collaboration_rooms', 'collaboration_records', 'storage_migrations', 'workspace_records'], 'readonly');
             const roomMetadata = inspect.objectStore('collaboration_rooms').get(roomKey);
             const roomRecords = inspect.objectStore('collaboration_records').index('by_scope').getAll(roomKey);
+            const conversionProgress = inspect.objectStore('storage_migrations').get(conversionSuffix);
+            const conversionRows = inspect.objectStore('workspace_records').index('by_scope').getAll(conversionSuffix);
             for (const key of Object.keys(values)) {
                 const get = inspect.objectStore('kv').get(key); get.onsuccess = () => { frozen[key] = get.result?.value; };
             }
             await new Promise(resolve => { inspect.oncomplete = resolve; });
             const stores = [...upgraded.objectStoreNames]; upgraded.close();
+            window.__normalizedProbe.operations = [];
+            const converted = await OfflineStore.getVersionWorkspace(conversionScope, 'Thai'), conversionRetryOperations = window.__normalizedProbe.operations.slice();
+            const conversionHistoryAfter = await OfflineStore.listRevisions(conversionSource[2].filepath, 'German', 100, conversionScope);
+            const finalRead = indexedDB.open('sdeditor', 9), finalDb = await new Promise((resolve, reject) => {
+                finalRead.onsuccess = () => resolve(finalRead.result); finalRead.onerror = () => reject(finalRead.error);
+            });
+            const finalEvidence = finalDb.transaction(['kv'], 'readonly'), conversionFrozen = finalEvidence.objectStore('kv').get('workspace_version_v1:' + conversionSuffix);
+            await new Promise(resolve => { finalEvidence.oncomplete = resolve; }); finalDb.close();
             const recoveryHeader = roomRecords.result.find(record => record.value.field === 'recovery' && record.value.entry === 'retained-many-file-recovery');
             const recoveryMembers = roomRecords.result.filter(record => record.value.field === 'recoveryFiles' && record.value.groupId === 'retained-many-file-recovery');
             const recordFacts = { recoveryHeaderHasFiles: Object.hasOwn(recoveryHeader.value.data, 'files'), recoveryMembers: recoveryMembers.length,
                 recoveryMemberPaths: recoveryMembers.every(record => record.paths.length === 1 && !Object.hasOwn(record.value.data, 'files')),
                 seedMembers: roomRecords.result.filter(record => record.value.field === 'seedUploadFiles').length };
             return { interrupted, recovered, source: importedSource, originalSource: source, frozen, values, stores,
-                orphanedDrafts, orphanKey, missingBlocked, roomState, roomKey, roomMetadata: roomMetadata.result?.value, recordFacts, tinyWorkspaces, legacyHistory };
+                orphanedDrafts, orphanKey, missingBlocked, roomState, roomKey, roomMetadata: roomMetadata.result?.value, recordFacts, tinyWorkspaces, legacyHistory,
+                conversionWorkspace, conversionSource, converted, verificationInjected, verificationFailure,
+                conversionProgress: conversionProgress.result?.value, conversionRows: conversionRows.result, conversionRetryOperations,
+                conversionHistoryBefore, conversionHistoryAfter, conversionFrozen: conversionFrozen.result?.value };
         });
         assert.equal(migration.interrupted, true, 'A failed bounded migration remains retryable');
         assert.equal(migration.missingBlocked, true, 'Missing immutable source prevents conversion instead of reconstructing baseline from edited work');
@@ -305,6 +369,38 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.deepEqual(migration.legacyHistory.map(row => row.id), [51], 'Scoped history index preserves the original legacy revision ID');
         assert.equal(migration.legacyHistory[0].accountId, 'fixture-history-owner');
         assert.equal(migration.legacyHistory[0].branchId, 'default');
+        assert.equal(migration.verificationInjected, true, 'Final native verification examined converted conflict records');
+        assert.match(migration.verificationFailure, /Workspace conversion verification failed: droppedConflicts/,
+            'An omitted nonempty conflict must still block conversion');
+        assert.equal(migration.conversionProgress.state, 'converting', 'Failed verification cannot mark incomplete conversion ready');
+        assert.ok(migration.conversionProgress.offset > 0, 'Failed final verification retains durable migration progress');
+        assert.ok(migration.conversionRows.some(row => row.value.field === 'droppedConflicts' && row.value.language === 'German'),
+            'Failed verification retains the actual persisted conflict for a safe retry');
+        assert.equal(migration.conversionRetryOperations.filter(operation => operation.store === 'workspace_records' && operation.method === 'put').length, 0,
+            'Final verification retry resumes existing batches instead of rebuilding converted recovery rows');
+        assert.equal(migration.conversionRetryOperations.some(operation => operation.store === 'kv' && ['put', 'add', 'delete'].includes(operation.method)), false,
+            'Final verification retry never mutates frozen legacy aggregates');
+        assert.deepEqual(migration.conversionFrozen, migration.conversionWorkspace, 'Frozen recovery evidence remains exact after successful retry');
+        assert.deepEqual(migration.converted.droppedArchive, migration.conversionWorkspace.droppedArchive,
+            'Conversion retry preserves recovery identities, revisions and generations without creating additional copies');
+        assert.deepEqual(migration.conversionHistoryBefore.map(revision => revision.id), [61], 'Original conversion-scope history ID remains available after failure');
+        assert.deepEqual(migration.conversionHistoryAfter, migration.conversionHistoryBefore, 'Retry cannot duplicate or alter original history');
+        assert.deepEqual(migration.conversionWorkspace.droppedConflicts.Thai, {}, 'Resolved legacy conflict leaves the reproducible empty language bucket');
+        for (const field of ['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']) {
+            assert.deepEqual(migration.conversionWorkspace[field].French, {}, 'Legacy input includes an empty ' + field + ' language bucket');
+            assert.equal(migration.converted[field].French, undefined, 'Empty ' + field + ' language buckets have no normalized facts');
+        }
+        const unresolvedPath = migration.conversionSource[1].filepath;
+        assert.deepEqual(migration.converted.droppedConflicts.German[unresolvedPath], migration.conversionWorkspace.droppedConflicts.German[unresolvedPath],
+            'The unresolved conflict and its nested empty recovery evidence survive exactly');
+        assert.deepEqual(migration.converted.staged.German[migration.conversionSource[2].filepath].translations, [''], 'Explicit blank Saved presence survives conversion');
+        assert.deepEqual(migration.converted.staged.Thai[migration.conversionSource[3].filepath].translations,
+            migration.conversionSource[3].translations.Thai, 'Explicit unchanged Saved presence survives conversion');
+        assert.deepEqual(migration.converted.droppedOutbox, migration.conversionWorkspace.droppedOutbox,
+            'Dropped queue preserves authored order and complete payloads instead of IndexedDB primary-key order');
+        assert.deepEqual(migration.converted.droppedOutbox.filter(operation => ['z-first', 'a-second'].includes(operation.id)).map(operation => operation.id),
+            ['z-first', 'a-second']);
+        results.push({ scenario: 'resolved conflict buckets, strict conflict verification retry and preserved Dropped queue order' });
         results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length });
         console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
 

@@ -72,6 +72,15 @@
     }
     const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive'];
     const languageMaps = new Set(['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']);
+    function verificationMap(field, value) {
+      const map = value || {};
+      if (!languageMaps.has(field) || typeof map !== 'object' || Array.isArray(map)) return map;
+      // Resolving the final file leaves an empty language bucket in older
+      // workspaces. It has no per-file record; retain strict checks for every
+      // actual entry and its nested recovery evidence.
+      return Object.fromEntries(Object.entries(map).filter(([, entries]) =>
+        !entries || typeof entries !== 'object' || Array.isArray(entries) || Object.keys(entries).length));
+    }
     function splitWorkspace(scope, workspace, originals = new Map()) {
       const id = scopeKey(scope), meta = {}, files = [], records = [];
       for (const [field, value] of Object.entries(workspace || {})) if (!['_storageSelection', '_storageArchiveKinds', 'descs', 'importRecovery'].includes(field) && !fieldMaps.includes(field)) meta[field] = value;
@@ -118,14 +127,15 @@
       if (!meta) return undefined;
       const workspace = { ...copy(meta), descs: [] };
       for (const field of fieldMaps) workspace[field] = field === 'droppedOutbox' ? [] : {};
-      const archives = [];
+      const archives = [], outbox = [];
       for (const item of recordRows) {
         const { field, language, entry, data } = item.value;
         if (field === 'importRecovery') archives.push(item.value);
-        else if (field === 'droppedOutbox') workspace[field].push(copy(data));
+        else if (field === 'droppedOutbox') outbox.push(item.value);
         else if (language != null) (workspace[field][language] ||= {})[entry] = copy(data);
         else workspace[field][entry] = copy(data);
       }
+      workspace.droppedOutbox = outbox.sort((a, b) => (a.order || 0) - (b.order || 0)).map(item => copy(item.data));
       for (const item of fileRows) {
         const file = item.value, original = originals.get(file.filepath);
         const desc = { ...copy(original || file.fallback || { filepath: file.filepath, translations: {} }), ...copy(file.overrides) };
@@ -263,7 +273,7 @@
           const restored = assembleWorkspace(parts.meta, savedFiles, savedRecords, new Map(savedSource.map(r => [r.value.filepath, r.value])));
           if (!same(savedSource.map(r => r.value).sort((a,b) => a.filepath.localeCompare(b.filepath)), source.slice().sort((a,b) => a.filepath.localeCompare(b.filepath))))
             throw new Error('Baseline conversion verification failed. Original data has been retained.');
-          for (const field of fieldMaps) if (!same(restored[field] || {}, workspace[field] || {})) throw new Error('Workspace conversion verification failed: ' + field);
+          for (const field of fieldMaps) if (!same(verificationMap(field, restored[field]), verificationMap(field, workspace[field]))) throw new Error('Workspace conversion verification failed: ' + field);
           if (!same(restored.importRecovery, workspace.importRecovery)) throw new Error('Import recovery conversion verification failed.');
           tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
           const assets = baseline ? { ...copy(baseline), source: undefined } : { sourceHash: scope.sourceHash };
