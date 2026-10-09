@@ -8,24 +8,32 @@ function harness() {
   let config;
   const writes = [], alerts = [];
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} },
+    setTimeout, clearTimeout, performance: require('node:perf_hooks').performance,
     CollaborationProtocol: require('../public/collaborationProtocol.js'),
     OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(structuredClone({ workspace, revisions, game })); } } };
   const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto,
     alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
-    document: { activeElement: null, body: {}, querySelector: () => null },
+    document: { activeElement: null, body: {}, querySelector: () => null,
+      createElement(tag) {
+        assert.equal(tag, 'textarea');
+        return { set innerHTML(value) { this.value = String(value).replace(/&(lt|gt|quot|#039|amp);/g,
+          (_, entity) => ({ lt: '<', gt: '>', quot: '"', '#039': "'", amp: '&' })[entity]); } };
+      },
+    },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
-  const mixin = window.CollaborationIntegration.mixin;
-  const editor = Object.assign(mixin.data(), config.data(), mixin.methods, config.methods, {
+  const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
+    ...config.mixins.map(mixin => mixin.methods || {}), config.methods, {
     lang: 'Thai', gameVersion: 'poe1', sourceIdentity: 'source-one', sourceLoaded: true,
     dictionary: [], $refs: {}, $nextTick: fn => { fn?.(); return Promise.resolve(); },
     appAlert: async message => { alerts.push(message); }, appConfirm: async () => true,
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {},
   });
-  for (const [name, getter] of Object.entries(config.computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
+  const computed = Object.assign({}, ...config.mixins.map(mixin => mixin.computed || {}), config.computed);
+  for (const [name, getter] of Object.entries(computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   return { editor, window, writes, alerts, context, config };
 }
 function description(index, translations = ['เดิม', 'สอง']) {

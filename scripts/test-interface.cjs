@@ -3,6 +3,24 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const dictionaryMatching = require('../public/dictionaryMatching.js');
+const dictionaryWorkerClient = require('../public/dictionaryWorkerClient.js');
+
+async function prepareAutocompleteSnapshot(editor, english, generation = 1) {
+  const scopeKey = 'interface/Thai/poe1';
+  editor.dictionaryWorkerScopeKey = () => scopeKey;
+  const client = dictionaryWorkerClient.create({ Worker: null, engine: dictionaryMatching });
+  client.setScope(scopeKey);
+  try {
+    client.submitSnapshot({ generation, game: 'poe1', entries: structuredClone(editor.dictionary) });
+    await client.waitReady();
+    const result = await client.match([{ key: 'english', english }], { highlightDict: true });
+    const pack = { ...result, scopeKey, highlightDict: true,
+      byEnglish: new Map(result.units.map(unit => [unit.english, unit])) };
+    assert.equal(editor.adoptEditorDictionaryMatchPack(pack), true);
+    return pack;
+  } finally { client.dispose(); }
+}
 
 function fakeTimers() {
   const pending = new Map();
@@ -1397,7 +1415,7 @@ test('selection stays visible after sorting, page changes, or a search, and clea
   }
 });
 
-test('autocomplete TL notes follow the selected dictionary ID, including alternate translations', () => {
+test('autocomplete TL notes follow the selected dictionary ID and remain pinned with alternate translations', async () => {
   const { editor } = loadEditor();
   editor.dictionary = [
     { _id: 'first', find: 'Evasion', tlnote: 'First definition note' },
@@ -1405,6 +1423,7 @@ test('autocomplete TL notes follow the selected dictionary ID, including alterna
   ];
   const mainItem = { dictEntryId: 'first', label: 'Evasion', value: 'การหลบหลีก' };
   const alternateItem = { dictEntryId: 'second', dictAltId: 'alt-second', label: 'Evasion Rating', value: 'อัตราการหลบหลีก' };
+  editor._hlPopupDictionaryPack = await prepareAutocompleteSnapshot(editor, '[Evasion|Evasion Rating]');
   editor.hlPopup.filtered = [mainItem, alternateItem];
   editor.hlPopup.visible = true;
   editor.hlPopup.selectedIndex = 0;
@@ -1414,12 +1433,19 @@ test('autocomplete TL notes follow the selected dictionary ID, including alterna
   assert.equal(editor.hlPopupSelectedItem, alternateItem);
   assert.equal(editor.hlPopupTlnote, 'หลบหลีก\nKeep the second definition.', 'Alternates inherit their own parent entry note, even when another entry has the same Find.');
   editor.dictionary[1].tlnote = 'Updated while the popup is open';
-  assert.equal(editor.hlPopupTlnote, 'Updated while the popup is open', 'Notes must reflect current dictionary edits rather than the popup opening snapshot.');
+  const latest = await prepareAutocompleteSnapshot(editor, '[Evasion|Evasion Rating]', 2);
+  assert.equal(editor.hlPopupTlnote, 'หลบหลีก\nKeep the second definition.', 'An open popup retains the complete matching snapshot, including notes.');
+  editor.closeHlPopup();
+  editor._hlPopupDictionaryPack = latest;
+  editor.hlPopup.filtered = [alternateItem];
+  editor.hlPopup.visible = true;
+  assert.equal(editor.hlPopupTlnote, 'Updated while the popup is open', 'Reopening can display notes from the newly completed snapshot.');
 });
 
-test('autocomplete hides TL notes for missing entries, create-new items, blank notes, and a closed popup', () => {
+test('autocomplete hides TL notes for missing entries, create-new items, blank notes, and a closed popup', async () => {
   const { editor } = loadEditor();
   editor.dictionary = [{ _id: 'blank', find: 'Armour', tlnote: ' \n\t ' }];
+  await prepareAutocompleteSnapshot(editor, 'Armour');
   editor.hlPopup.visible = true;
   for (const item of [
     { dictEntryId: 'blank' },
@@ -1431,7 +1457,8 @@ test('autocomplete hides TL notes for missing entries, create-new items, blank n
     editor.hlPopup.selectedIndex = 0;
     assert.equal(editor.hlPopupTlnote, '');
   }
-  editor.dictionary.push({ _id: 'has-note', tlnote: 'A visible note' });
+  editor.dictionary.push({ _id: 'has-note', find: 'Evasion', tlnote: 'A visible note' });
+  await prepareAutocompleteSnapshot(editor, 'Armour Evasion', 2);
   editor.hlPopup.filtered = [{ dictEntryId: 'has-note' }];
   assert.equal(editor.hlPopupTlnote, 'A visible note');
   editor.hlPopup.visible = false;
@@ -1442,7 +1469,7 @@ test('autocomplete hides TL notes for missing entries, create-new items, blank n
   assert.equal(editor.hlPopupTlnote, '');
 });
 
-function attachAutocompleteGeometry(harness, options = {}) {
+async function attachAutocompleteGeometry(harness, options = {}) {
   const { editor, context } = harness;
   const viewportWidth = options.viewportWidth ?? 1600;
   const viewportHeight = options.viewportHeight ?? 800;
@@ -1462,7 +1489,8 @@ function attachAutocompleteGeometry(harness, options = {}) {
   editor.getEditorRef = name => name === 'translation' ? translation : name === 'english' ? source : null;
   editor.$refs.hlPopupPanel = { querySelector(selector) { return selector === '.hlPopupList' ? { scrollHeight: 220 } : null; } };
   editor.$refs.hlPopupFilter = { getBoundingClientRect() { return { height: 42 }; } };
-  editor.dictionary = [{ _id: 'note-entry', tlnote: options.note === false ? '' : 'Keep this term consistent.' }];
+  editor.dictionary = [{ _id: 'note-entry', find: 'Evasion', tlnote: options.note === false ? '' : 'Keep this term consistent.' }];
+  editor._hlPopupDictionaryPack = await prepareAutocompleteSnapshot(editor, 'Evasion');
   editor.hlPopup.filtered = [{ dictEntryId: 'note-entry' }];
   editor.hlPopup.visible = true;
   editor.hlPopup.selectedIndex = 0;
@@ -1481,10 +1509,10 @@ function assertAutocompleteWithinViewport(popup, viewport) {
   }
 }
 
-test('inline autocomplete places the TL note left of the suggestion list while full editor retains right placement', () => {
+test('inline autocomplete places the TL note left of the suggestion list while full editor retains right placement', async () => {
   for (const inline of [true, false]) {
     const harness = loadEditor();
-    const viewport = attachAutocompleteGeometry(harness, { inline });
+    const viewport = await attachAutocompleteGeometry(harness, { inline });
     harness.editor.positionHlPopup(0);
     const popup = harness.editor.hlPopup;
     if (inline) {
@@ -1496,10 +1524,10 @@ test('inline autocomplete places the TL note left of the suggestion list while f
   }
 });
 
-test('inline autocomplete shifts the suggestion list near viewport edges to keep its TL note on the left', () => {
+test('inline autocomplete shifts the suggestion list near viewport edges to keep its TL note on the left', async () => {
   for (const translationLeft of [80, 1360]) {
     const harness = loadEditor();
-    const viewport = attachAutocompleteGeometry(harness, { viewportWidth: 1440, translationLeft });
+    const viewport = await attachAutocompleteGeometry(harness, { viewportWidth: 1440, translationLeft });
     harness.editor.positionHlPopup(0);
     const popup = harness.editor.hlPopup;
     assert.notEqual(popup.x, translationLeft, 'The popup should move when its anchor would clip the note or suggestion list.');
@@ -1509,9 +1537,9 @@ test('inline autocomplete shifts the suggestion list near viewport edges to keep
   }
 });
 
-test('inline autocomplete stacks its TL note below in a compact desktop window without clipping', () => {
+test('inline autocomplete stacks its TL note below in a compact desktop window without clipping', async () => {
   const harness = loadEditor();
-  const viewport = attachAutocompleteGeometry(harness, { viewportWidth: 600, translationLeft: 80 });
+  const viewport = await attachAutocompleteGeometry(harness, { viewportWidth: 600, translationLeft: 80 });
   harness.editor.positionHlPopup(0);
   const popup = harness.editor.hlPopup;
   assert.equal(popup.noteX, popup.x);
@@ -1520,10 +1548,10 @@ test('inline autocomplete stacks its TL note below in a compact desktop window w
   assertAutocompleteWithinViewport(popup, viewport);
 });
 
-test('inline autocomplete reserves no horizontal or stacked space when the selected entry has no TL note', () => {
+test('inline autocomplete reserves no horizontal or stacked space when the selected entry has no TL note', async () => {
   for (const viewportWidth of [600, 1440]) {
     const harness = loadEditor();
-    attachAutocompleteGeometry(harness, { viewportWidth, translationLeft: 80, note: false });
+    await attachAutocompleteGeometry(harness, { viewportWidth, translationLeft: 80, note: false });
     harness.editor.positionHlPopup(0);
     const popup = harness.editor.hlPopup;
     assert.equal(harness.editor.hlPopupTlnote, '');

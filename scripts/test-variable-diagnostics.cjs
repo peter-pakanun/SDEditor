@@ -8,7 +8,8 @@ function loadEditor() {
   let config;
   const alerts = [];
   const confirmations = [];
-  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
+  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} }, OfflineStore: {},
+    setTimeout, clearTimeout, performance: require('node:perf_hooks').performance };
   const context = vm.createContext({
     window, URLSearchParams, console, setTimeout, clearTimeout,
     document: { activeElement: null, body: {}, querySelector: () => null,
@@ -26,18 +27,20 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
-  const integration = window.CollaborationIntegration.mixin;
-  const editor = Object.assign(integration.data(), config.data(), integration.methods, config.methods, {
-    lang: 'Thai', dictionary: [],
+  const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
+    ...config.mixins.map(mixin => mixin.methods || {}), config.methods, {
+    lang: 'Thai', gameVersion: 'poe1', dictionary: [],
     appAlert: async message => { alerts.push(message); },
     appConfirm: async message => { confirmations.push(message); return false; },
     // List rendering is unrelated to the diagnostic scan and save guard.
     filterDesc() {},
+    $nextTick(callback) { callback?.(); return Promise.resolve(); },
   });
-  for (const [name, getter] of Object.entries(config.computed)) {
+  const computed = Object.assign({}, ...config.mixins.map(mixin => mixin.computed || {}), config.computed);
+  for (const [name, getter] of Object.entries(computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
   return { editor, alerts, confirmations, context };
@@ -267,11 +270,13 @@ test('keyword ID braces cannot substitute for missing ordinary variables or hide
   }
 });
 
-test('autocomplete, preview and generated Regex preserve the complete numeric keyword ID', () => {
+test('autocomplete, preview and generated Regex preserve the complete numeric keyword ID', async () => {
   const { editor, context } = loadEditor();
   for (const index of [1, 12]) {
     const keyword = `[TentacleSmash::{${index}}|Tentacle Whip]`;
     const english = `Trigger ${keyword}`;
+    const pack = await editor.prepareEditorDictionaryMatches([{ english }]);
+    assert.equal(editor.adoptEditorDictionaryMatchPack(pack), true);
     const { HLs } = editor.buildEnglishHLter(english);
     assert.equal(HLs.length, 1);
     assert.equal(HLs[0].isKeywordPopup, true);

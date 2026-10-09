@@ -3,6 +3,23 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const dictionaryMatching = require('../public/dictionaryMatching.js');
+const dictionaryWorkerClient = require('../public/dictionaryWorkerClient.js');
+
+async function prepareDictionaryMatches(editor, english) {
+  const scopeKey = 'render-safety/Thai/poe1';
+  editor.dictionaryWorkerScopeKey = () => scopeKey;
+  const client = dictionaryWorkerClient.create({ Worker: null, engine: dictionaryMatching });
+  client.setScope(scopeKey);
+  try {
+    client.submitSnapshot({ generation: 1, game: 'poe1', entries: structuredClone(editor.dictionary) });
+    await client.waitReady();
+    const result = await client.match([{ key: 'english', english }], { highlightDict: !!editor.highlightDict });
+    const pack = { ...result, scopeKey, highlightDict: !!editor.highlightDict,
+      byEnglish: new Map(result.units.map(unit => [unit.english, unit])) };
+    assert.equal(editor.adoptEditorDictionaryMatchPack(pack), true);
+  } finally { client.dispose(); }
+}
 
 function loadEditor() {
   let config;
@@ -101,11 +118,12 @@ test('cached file-list text stays escaped and fresh after edits, array replaceme
   assert.equal(editor.filteredDescs[0].translation, 'replacement');
 });
 
-test('dictionary replacement cannot escape highlight attributes or insert markup', () => {
+test('dictionary replacement cannot escape highlight attributes or insert markup', async () => {
   const { editor } = loadEditor();
   const attack = '"><img src=x onerror="window.highlightAttack=1"><span data-x="';
   editor.highlightDict = true;
   editor.dictionary = [{ _id: 'd_fire', find: 'Fire', replace: attack, alts: [], tlnote: '<script>noteAttack()</script>' }];
+  await prepareDictionaryMatches(editor, 'Fire');
   const result = editor.buildEnglishHLter('Fire');
   const attribute = /dataValue="([^"]*)"/.exec(result.englishHLter);
   assert.ok(attribute);

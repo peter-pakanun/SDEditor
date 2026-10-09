@@ -144,7 +144,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}],
+  mixins: [window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -268,6 +268,7 @@ const config = Vue.defineComponent({
       rawFilePreview: null,
       rawFileMode: 'original',
       editorDictionaryRevision: 0,
+      editorDictionaryMatchPack: null,
       editorCurrentEditingDesc: null,
       editorFilePathCopied: false,
       editorFocusedIndex: 0,
@@ -440,6 +441,7 @@ const config = Vue.defineComponent({
     }
   },
   beforeUnmount() {
+    this._dictionaryAssistanceDisposed = true;
     this.stopStorageMigrationNotice();
     clearTimeout(this._fileSearchTimer);
     this.resetEditorFilePathCopy();
@@ -449,6 +451,7 @@ const config = Vue.defineComponent({
     clearTimeout(this._settingsSaveTimer);
     window.removeEventListener('beforeunload', this._settingsSaveBeforeUnload);
     this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
+    this.cancelDictionaryMatchRequests();
     clearTimeout(this._hlterRefreshTimer);
     for (const task of this._browserWorkPending?.values() || []) clearTimeout(task.timer);
     this._browserWorkPending?.clear();
@@ -548,6 +551,13 @@ const config = Vue.defineComponent({
         this.closeRawFileDialog();
       }
     },
+    editorSessionActive(active) {
+      if (active) return;
+      this.cancelDictionaryMatchRequests();
+      this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
+      clearTimeout(this._hlterRefreshTimer);
+      this._hlterRefreshTimer = null;
+    },
     rawFileScope(scope) {
       this.resetEditorFilePathCopy();
       if (this.rawFilePreview && scope !== this._rawFileScope) this.closeRawFileDialog();
@@ -578,11 +588,11 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     dictionary: {
-      deep: true,
+      // Field and membership actions journal changes explicitly. A deep watch
+      // traverses every Dictionary row on each keystroke in a large dictionary.
       handler() {
-        this.invalidateEditorDictionaryIndex();
+        this.invalidateEditorDictionaryIndex(null, { observed: true });
         this.scheduleSettingsSave();
-        this.scheduleEditorHLterRefresh();
         this.scheduleDictionaryDiagnosticScan();
       }
     },
@@ -676,7 +686,7 @@ const config = Vue.defineComponent({
     },
     dictionaryScopeView() {
       const source = this.dictionary || [];
-      // The deep Dictionary watcher advances this revision for in-place edits.
+      // Journaled Dictionary mutations advance this revision for in-place edits.
       // Read-only indexing and ordering must not subscribe to every field of
       // every reactive entry; only the visible page is resolved to live proxies.
       const revision = this.editorDictionaryRevision;
@@ -684,12 +694,18 @@ const config = Vue.defineComponent({
       const active = window.DictionaryScope.activeEntries(entries, this.gameVersion);
       const positions = new Map();
       const entryPositions = new WeakMap();
+      const keywords = new Map();
+      for (const entry of active) {
+        const key = window.DictionaryScope.findKey(entry);
+        if (!keywords.has(key)) keywords.set(key, []);
+        keywords.get(key).push(entry);
+      }
       entries.forEach((entry, index) => {
         const id = String(entry?._id);
         if (!positions.has(id)) positions.set(id, index);
         if (entry && typeof entry === 'object') entryPositions.set(entry, index);
       });
-      return { source, revision, entries, active, positions, entryPositions,
+      return { source, revision, entries, active, positions, entryPositions, keywords,
         activeIds: new Set(active.map(entry => String(entry?._id || ''))) };
     },
     activeDictionaryIds() {
@@ -805,11 +821,11 @@ const config = Vue.defineComponent({
     hlPopupTlnote() {
       const dictId = this.hlPopupSelectedItem?.dictEntryId;
       if (!dictId) return '';
-      const entry = this.getDictionaryEntryById(dictId);
+      const entry = this.getDictionaryAssistanceEntry(dictId, true);
       return String(entry?.tlnote ?? '').trim();
     },
     foundDictionarySet() {
-      if (!this.editorSessionActive) return new Set();
+      if (!this.editorSessionActive || !this.getEditorDictionaryMatchPack()) return new Set();
       let set = new Set();
       for (const editorBlock of this.editorBlocks || []) {
         const highlights = editorBlock?.isTable
@@ -826,7 +842,7 @@ const config = Vue.defineComponent({
       return set;
     },
     foundDictionaryDefMap() {
-      if (!this.editorSessionActive) return new Map();
+      if (!this.editorSessionActive || !this.getEditorDictionaryMatchPack()) return new Map();
       let map = new Map();
       for (const editorBlock of this.editorBlocks || []) {
         const highlights = editorBlock?.isTable
@@ -863,9 +879,8 @@ const config = Vue.defineComponent({
       }
       const foundSet = this.foundDictionarySet;
       if (!foundSet || foundSet.size <= 0) return dictionary;
-      const activeIds = this.activeDictionaryIds;
       const found = [], rest = [];
-      for (const entry of dictionary) (activeIds.has(String(entry?._id || '')) && foundSet.has(entry?._id) ? found : rest).push(entry);
+      for (const entry of dictionary) (foundSet.has(entry?._id) ? found : rest).push(entry);
       return found.concat(rest);
     },
     filteredDictionary() {
@@ -1121,6 +1136,8 @@ const config = Vue.defineComponent({
         return;
       }
 
+      this.ensureDictionaryWorker();
+
       const catalogOnly = !!window.ManagedVersions;
       if (catalogOnly) {
         // Choosing a game needs catalog metadata, not the active translation files.
@@ -1229,6 +1246,7 @@ const config = Vue.defineComponent({
       this.resetVersionedState();
       this.loadingProgress = 0.001;
       try {
+        this.ensureDictionaryWorker();
         const [workspace, storedSource] = await Promise.all([
           window.OfflineStore.getWorkspace(game, this.lang), window.OfflineStore.getSource(game),
         ]);
@@ -1278,13 +1296,15 @@ const config = Vue.defineComponent({
         this.sourceIdentity = sourceHash;
         if (sourceHash) this.localDescs.sourceHash = sourceHash;
         if (Array.isArray(source) && source.length) {
+          await this.ensureDictionarySnapshot();
+          if (!current()) return;
           this.descs = prepared; this.sourceLoaded = true;
           this.filterDesc(); this.loadingProgress = 100;
         } else this.loadingProgress = 0;
       } catch (error) {
         if (current()) {
           this.loadingProgress = 0;
-          this.cloudStorageError = 'Could not load this workspace. ' + error.message;
+          if (this.cloudStorageError !== this._dictionaryWorkerStorageError) this.cloudStorageError = 'Could not load this workspace. ' + error.message;
         }
       } finally {
         this.setBrowserWork('workspace', { key: workKey, active: false });
@@ -1942,7 +1962,7 @@ const config = Vue.defineComponent({
         : 0;
       return Math.max(1, tableCount, compareCount);
     },
-    makeEditorTableColumn(english, translation, englishExists = true, translationExists = true, hydrate = true) {
+    makeEditorTableColumn(english, translation, englishExists = true, translationExists = true, hydrate = true, pack = this.getEditorDictionaryMatchPack()) {
       let column = {
         english: String(english ?? ""),
         translation: String(translation ?? ""),
@@ -1959,10 +1979,10 @@ const config = Vue.defineComponent({
         englishExists,
         translationExists
       };
-      if (hydrate) this.refreshEditorTableColumnHLter(column);
+      if (hydrate) this.refreshEditorTableColumnHLter(column, pack);
       return column;
     },
-    buildEditorTableColumns(english, translation, hydrate = true) {
+    buildEditorTableColumns(english, translation, hydrate = true, pack = this.getEditorDictionaryMatchPack()) {
       let englishColumns = this.splitTableColumns(english);
       let translationColumns = this.splitTableColumns(translation);
       let count = Math.max(englishColumns.length, translationColumns.length);
@@ -1973,16 +1993,16 @@ const config = Vue.defineComponent({
           translationColumns[i] ?? "",
           i < englishColumns.length,
           i < translationColumns.length,
-          hydrate
+          hydrate, pack
         ));
       }
       return columns;
     },
-    refreshEditorTableColumnHLter(column) {
+    refreshEditorTableColumnHLter(column, pack = this.getEditorDictionaryMatchPack()) {
       if (!column) return;
       column.isMultiline = this.isMultilineText(column.english ?? "") || this.isMultilineText(column.translation ?? "");
       const diagnostics = this.refreshTranslationDiagnostics(column);
-      let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(column.english);
+      let { englishHLter: baseEnglishHLter, HLs } = this.buildEnglishHLter(column.english, pack);
       column.HLs = HLs;
       if (!column.isMultiline) {
         column.englishHLter = baseEnglishHLter;
@@ -2042,6 +2062,7 @@ const config = Vue.defineComponent({
         find: "",
         replace: String(word?.replace ?? "")
       });
+      this.markDictionarySnapshotDirty?.(word._id);
     },
     async removeDictionaryAltRow(word, alt) {
       if (!word || !Array.isArray(word.alts)) return;
@@ -2056,6 +2077,7 @@ const config = Vue.defineComponent({
       } else {
         word.alts = word.alts.filter(a => a !== alt);
       }
+      this.markDictionarySnapshotDirty?.(word._id);
     },
     addDictionaryAltPair(word, find, replace) {
       if (!word) return "";
@@ -2070,6 +2092,7 @@ const config = Vue.defineComponent({
         find: f,
         replace: String(replace ?? word?.replace ?? "")
       });
+      this.markDictionarySnapshotDirty?.(word._id);
       return id;
     },
     computeTextStats(text) {
@@ -3335,14 +3358,112 @@ const config = Vue.defineComponent({
           return { _id: a._id || `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, find: f, replace: r };
         }).filter(Boolean);
       }
+      this.markDictionarySnapshotDirty?.(null, { replace: true });
     },
     getActiveDictionaryEntries() {
       return this.dictionaryScopeView.active;
     },
     getPreparedEditorDictionaryIndex() {
-      return this._editorDictionaryIndexRevision === this.editorDictionaryRevision
-        && this._editorDictionarySource === this.dictionary && this._editorDictionaryGame === this.gameVersion
-        ? this._editorDictionaryIndex : null;
+      return this.getEditorDictionaryMatchPack();
+    },
+    getEditorDictionaryMatchPack(popup = false) {
+      const pack = popup && this._hlPopupDictionaryPack || this.editorDictionaryMatchPack;
+      return pack && pack.scopeKey === this.dictionaryWorkerScopeKey?.() ? pack : null;
+    },
+    getDictionaryAssistanceEntry(dictId, popup = false) {
+      return this.getEditorDictionaryMatchPack(popup)?.entriesById?.[String(dictId)];
+    },
+    resetDictionaryAssistanceScope() {
+      this.cancelDictionaryMatchRequests();
+      this.editorDictionaryMatchPack = null;
+      this._pendingDictionaryMatchPack = null;
+      this._hlPopupDictionaryPack = null;
+      this.closeHlPopup();
+      for (const block of this.editorBlocks || []) {
+        for (const column of block.isTable ? block.tableColumns || [] : [block]) {
+          column.HLs = [];
+          column.englishHLter = escapeHtml(String(column.english ?? ''));
+        }
+      }
+    },
+    cancelDictionaryMatchRequests() {
+      for (const request of this._dictionaryMatchRequests || []) request.cancel?.();
+      this._dictionaryMatchRequests?.clear();
+      this._pendingDictionaryMatchPack = null;
+    },
+    dictionaryEditorContext() {
+      return JSON.stringify([this.dictionaryWorkerScopeKey?.(), this.branchId || 'default', this.sourceIdentity,
+        this.editorCurrentEditingDesc?.filepath, this._editorOpenRun]);
+    },
+    async prepareEditorDictionaryMatches(blocks, isCurrent = () => true) {
+      const scopeKey = this.dictionaryWorkerScopeKey();
+      const client = this.ensureDictionaryWorker();
+      try { await this.ensureDictionarySnapshot(); }
+      catch (error) {
+        if (!isCurrent() || scopeKey !== this.dictionaryWorkerScopeKey() || error?.name === 'AbortError') return null;
+        throw error;
+      }
+      if (!isCurrent() || scopeKey !== this.dictionaryWorkerScopeKey()) return null;
+      const texts = new Set();
+      for (const block of blocks || []) {
+        if (block?.isTable) for (const column of block.tableColumns || []) texts.add(String(column.english ?? ''));
+        else texts.add(String(block?.english ?? ''));
+      }
+      texts.add('');
+      const cached = this.getEditorDictionaryMatchPack();
+      if (cached?.generation === client.readyGeneration && cached.highlightDict === !!this.highlightDict
+        && Array.from(texts).every(text => cached.byEnglish.has(text))) return cached;
+      const units = Array.from(texts, (english, index) => ({ key: String(index), english }));
+      const highlightDict = !!this.highlightDict;
+      const request = client.match(units, { highlightDict });
+      const requests = this._dictionaryMatchRequests ||= new Set();
+      requests.add(request);
+      try {
+        const result = await request;
+        if (!isCurrent() || scopeKey !== this.dictionaryWorkerScopeKey() || highlightDict !== !!this.highlightDict) return null;
+        const pack = { ...result, scopeKey, highlightDict,
+          byEnglish: new Map(result.units.map(unit => [unit.english, unit])) };
+        return Vue.markRaw ? Vue.markRaw(pack) : pack;
+      } catch (error) {
+        if (!isCurrent() || scopeKey !== this.dictionaryWorkerScopeKey() || error?.code === 'CANCELLED' || error?.name === 'AbortError') return null;
+        throw error;
+      } finally { requests.delete(request); }
+    },
+    adoptEditorDictionaryMatchPack(pack) {
+      if (!pack || pack.scopeKey !== this.dictionaryWorkerScopeKey() || pack.highlightDict !== !!this.highlightDict) return false;
+      const previous = this.getEditorDictionaryMatchPack();
+      if (previous && previous.generation > pack.generation) return false;
+      this.editorDictionaryMatchPack = Vue.markRaw ? Vue.markRaw(pack) : pack;
+      return true;
+    },
+    async prepareMatchedEditorBlocks(english, translations, isCurrent = () => true, minimumLength = 0) {
+      const englishSource = Array.from(english, text => String(text ?? ''));
+      const translationSource = Array.from(translations, text => String(text ?? ''));
+      const seeds = Array.from({ length: Math.max(englishSource.length, translationSource.length, minimumLength) }, (_, index) =>
+        this.makeEditorBlock(englishSource[index] || '', translationSource[index] || ''));
+      const pack = await this.prepareEditorDictionaryMatches(seeds, isCurrent);
+      if (!isCurrent()) return null;
+      if (!pack) return this.prepareMatchedEditorBlocks(englishSource, translationSource, isCurrent, minimumLength);
+      const blocks = [];
+      let started = Date.now();
+      for (let index = 0; index < seeds.length; index++) {
+        if (!isCurrent() || pack.scopeKey !== this.dictionaryWorkerScopeKey()) return null;
+        if (pack.highlightDict !== !!this.highlightDict) return this.prepareMatchedEditorBlocks(englishSource, translationSource, isCurrent, minimumLength);
+        blocks.push(this.makeEditorBlock(englishSource[index] || '', translationSource[index] || '', true, pack));
+        if (Date.now() - started >= 4) { await this.yieldEditorWork(); started = Date.now(); }
+      }
+      if (!isCurrent() || pack.scopeKey !== this.dictionaryWorkerScopeKey()) return null;
+      if (pack.highlightDict !== !!this.highlightDict) return this.prepareMatchedEditorBlocks(englishSource, translationSource, isCurrent, minimumLength);
+      blocks.dictionaryPack = pack;
+      return blocks;
+    },
+    scheduleMissingDictionaryMatches() {
+      if (this._missingDictionaryMatchScheduled || !this.editorSessionActive || this.editorLoading || this.editorLoadError) return;
+      this._missingDictionaryMatchScheduled = true;
+      this.$nextTick(() => {
+        this._missingDictionaryMatchScheduled = false;
+        this.scheduleEditorHLterRefresh();
+      });
     },
     getDictionaryEntryById(dictId) {
       // Resolve only the requested entry through Vue's array so v-model, notes,
@@ -3371,7 +3492,7 @@ const config = Vue.defineComponent({
       const normalized = window.DictionaryScope.normalize(scope);
       if (normalized === 'all') delete word.gameScope;
       else word.gameScope = normalized;
-      this.invalidateEditorDictionaryIndex();
+      this.invalidateEditorDictionaryIndex(word._id);
     },
     dictionaryEntryScopeWarning(word) {
       if (window.DictionaryScope.available(word, this.gameVersion)) return '';
@@ -3381,16 +3502,14 @@ const config = Vue.defineComponent({
     },
     findActiveDictionaryKeywordEntry(tagName) {
       const key = getKeywordPopupLookupName(tagName).toLowerCase();
-      const index = this.getPreparedEditorDictionaryIndex();
-      const entry = index && key ? index.keywordEntries(key)[0]
-        : this.getActiveDictionaryEntries().find(entry => window.DictionaryScope.findKey(entry) === key);
+      const entry = this.dictionaryScopeView.keywords.get(key)?.[0];
       return entry ? this.getLiveDictionaryEntry(entry) : undefined;
     },
     isDictionaryHighlightActive(highlight) {
-      return !highlight?.dictId || this.isDictionaryEntryActive(this.getDictionaryEntryById(highlight.dictId));
+      return !highlight?.dictId || !!this.getDictionaryAssistanceEntry(highlight.dictId);
     },
     isDictionaryEntryFound(word) {
-      return this.isDictionaryEntryActive(word) && (this.foundDictionarySet?.has?.(word?._id) || false);
+      return this.foundDictionarySet?.has?.(word?._id) || false;
     },
     isDictionaryEntryFindMatched(word) {
       let id = word?._id;
@@ -3450,44 +3569,25 @@ const config = Vue.defineComponent({
         else this.endDictionaryEdit();
       });
     },
-    invalidateEditorDictionaryIndex() {
+    invalidateEditorDictionaryIndex(dictId, options = {}) {
+      this.markDictionarySnapshotDirty?.(dictId, options);
+      this.scheduleDictionarySnapshot?.();
+    },
+    dictionaryMutationObserved() {
       this.editorDictionaryRevision = (this.editorDictionaryRevision || 0) + 1;
-      this._editorDictionaryIndex = null;
+      this.scheduleSettingsSave();
+      this.scheduleDictionaryDiagnosticScan();
+    },
+    dictionaryEntryInput(word) {
+      this.markDictionarySnapshotDirty?.(word?._id);
     },
     getEditorDictionaryIndex() {
-      if (!window.EditorDictionaryIndex) return null;
-      if (!this._editorDictionaryIndex || this._editorDictionarySource !== this.dictionary || this._editorDictionaryGame !== this.gameVersion) {
-        const active = this.getActiveDictionaryEntries();
-        const dictionary = Vue.toRaw ? Vue.toRaw(active) : active;
-        const index = window.EditorDictionaryIndex.create(dictionary, entry => this.getDictionaryDefinitionPairs(entry));
-        this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
-        this._editorDictionarySource = this.dictionary;
-        this._editorDictionaryGame = this.gameVersion;
-        this._editorDictionaryIndexRevision = this.editorDictionaryRevision;
-      }
-      return this._editorDictionaryIndex;
+      // Compatibility accessor; ordinary rendering never constructs a trie.
+      return this.getPreparedEditorDictionaryIndex();
     },
-    async prepareEditorDictionaryIndex(isCurrent) {
-      if (!window.EditorDictionaryIndex) return true;
-      while (isCurrent()) {
-        if (this._editorDictionaryIndex && this._editorDictionarySource === this.dictionary && this._editorDictionaryGame === this.gameVersion) return true;
-        const source = this.dictionary;
-        const game = this.gameVersion;
-        const revision = this.editorDictionaryRevision || 0;
-        const active = this.getActiveDictionaryEntries();
-        const dictionary = Vue.toRaw ? Vue.toRaw(active) : active;
-        const stale = () => !isCurrent() || source !== this.dictionary || game !== this.gameVersion || revision !== (this.editorDictionaryRevision || 0);
-        const index = await window.EditorDictionaryIndex.createAsync(dictionary, entry => this.getDictionaryDefinitionPairs(entry), {
-          yieldTask: () => this.yieldEditorWork(), isCancelled: stale,
-        });
-        if (stale() || !index) continue;
-        this._editorDictionaryIndex = Vue.markRaw ? Vue.markRaw(index) : index;
-        this._editorDictionarySource = source;
-        this._editorDictionaryGame = game;
-        this._editorDictionaryIndexRevision = revision;
-        return true;
-      }
-      return false;
+    async prepareEditorDictionaryIndex(isCurrent = () => true) {
+      await this.ensureDictionarySnapshot();
+      return isCurrent();
     },
     setDictionaryPage(page) {
       this.endDictionaryEdit();
@@ -3510,135 +3610,14 @@ const config = Vue.defineComponent({
       const index = this._popupDictionaryPositions.get(String(dictId));
       if (index >= 0) this.dictionaryPage = Math.floor(index / this.dictionaryPageSize) + 1;
     },
-    buildEnglishHLter(english) {
-      const dictionaryIndex = this.getEditorDictionaryIndex();
-      const activeDictionary = dictionaryIndex ? null : this.getActiveDictionaryEntries();
-      let escapedEnglish = escapeHtml(english);
-      let englishHLter = escapedEnglish;
-      let modifiedEnglish = escapedEnglish;
-      let HLs = [];
-      let nextHlId = 1;
-      let addHL = (hl) => {
-        hl._hlId = nextHlId++;
-        HLs.push(hl);
-      };
-      let overlapsExistingHL = (start, end) => {
-        return HLs.some(hl => start < hl.index + hl.find.length && hl.index < end);
-      };
-      let maskRange = (value, start, end) => {
-        return value.substring(0, start) + '*'.repeat(Math.max(0, end - start)) + value.substring(end);
-      };
-      let addMatchingDictIds = (set, text, restrictMainFindLower = "") => {
-        if (!text) return;
-        const entries = dictionaryIndex && restrictMainFindLower
-          ? dictionaryIndex.keywordEntries(restrictMainFindLower) : activeDictionary || this.getActiveDictionaryEntries();
-        for (const dictEntry of entries) {
-          if (!dictEntry?._id) continue;
-          if (restrictMainFindLower && String(dictEntry?.find || "").trim().toLowerCase() !== restrictMainFindLower) continue;
-          for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
-            let escapedFind = escapeRegExp(pair.find);
-            let regex = new RegExp(`\\b${escapedFind}\\b`, "g");
-            if (!regex.test(text)) continue;
-            set.add(dictEntry._id);
-            break;
-          }
-        }
-      };
-      let m;
-
-      // highlight text decoration tag names <tagName>{{text}}, but keep the body unhighlighted
-      let escapedTextDecorationRegex = new RegExp(`(&lt;(${textDecorationTagNameRegex})&gt;\\{\\{([\\s\\S]*?)\\}\\})`, 'igm');
-      while (m = escapedTextDecorationRegex.exec(modifiedEnglish)) {
-        let tagName = m[2];
-        let opener = `&lt;${tagName}&gt;`;
-        let value = `<${tagName}>{{}}`;
-        addHL({
-          index: m.index,
-          find: opener,
-          tagName,
-          isTextDecoration: true,
-          replace: value,
-          label: `<${tagName}>{{_}}`,
-          caretOffset: `<${tagName}>{{`.length
-        });
-        modifiedEnglish = maskRange(modifiedEnglish, m.index, m.index + opener.length);
-      }
-
-      // highlight KeywordPopup tags [TagName|format] or [TagName]
-      let keywordPopupRegex = new RegExp(keywordPopupTagRegex, 'igm');
-      while (m = keywordPopupRegex.exec(modifiedEnglish)) {
-        let tagName = m[2];
-        let dynamicContent = m[3] || '';
-        let rawTagName = unescapeHtml(tagName || "");
-        let lookupName = getKeywordPopupLookupName(rawTagName);
-        let tagLower = lookupName.toLowerCase();
-        let rawDynamicContent = unescapeHtml(dynamicContent || "");
-        let hasDynamicContent = /<[^>]*>/.test(rawDynamicContent);
-        let staticDynamicContent = rawDynamicContent
-          .replace(/<[^>]*>/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
-        let dictIdSet = new Set();
-        addMatchingDictIds(dictIdSet, lookupName, tagLower);
-        addMatchingDictIds(dictIdSet, staticDynamicContent, tagLower);
-        let kwInfo = lookupKeywordPopupReplacementInfo(rawTagName, hasDynamicContent ? '' : rawDynamicContent,
-          dictionaryIndex && tagLower ? dictionaryIndex.keywordEntries(tagLower) : activeDictionary || this.getActiveDictionaryEntries());
-        addHL({
-          index: m.index,
-          find: m[0],
-          tagName: tagName,
-          dynamicContent: hasDynamicContent ? '' : dynamicContent,
-          isKeywordPopup: true,
-          replace: kwInfo.text,
-          dictId: kwInfo.dictEntry?._id,
-          dictDefFind: kwInfo.matchedFind || '',
-          dictIds: Array.from(dictIdSet)
-        });
-      }
-
-      // highlight ggg var tag
-      let regex = new RegExp(gggVarTagRegex, 'igm');
-      while (m = regex.exec(modifiedEnglish)) {
-        const found = m[1] || m[0];
-        if (overlapsExistingHL(m.index, m.index + found.length)) continue;
-        addHL({
-          index: m.index,
-          find: found
-        });
-      }
-
-      // highlight word from dictionary
-      if (this.highlightDict) {
-        let defs = dictionaryIndex ? dictionaryIndex.definitionsFor(modifiedEnglish) : [];
-        if (!dictionaryIndex) for (const dictEntry of activeDictionary) {
-          if (!dictEntry?._id) continue;
-          for (const pair of this.getDictionaryDefinitionPairs(dictEntry)) {
-            if (!pair?.find) continue;
-            defs.push({ pair, dictEntry });
-          }
-        }
-        if (!dictionaryIndex) defs.sort((a, b) => (b.pair.find || '').length - (a.pair.find || '').length);
-
-        for (const d of defs) {
-          if (!d.pair.find || d.pair.find.length <= 0) continue;
-          let escapedFind = escapeRegExp(d.pair.find);
-          let regex = d.regex || new RegExp(`\\b${escapedFind}\\b`, "g");
-          regex.lastIndex = 0;
-          while (m = regex.exec(modifiedEnglish)) {
-            // skip if it overlaps a tag highlight
-            if (overlapsExistingHL(m.index, m.index + m[0].length)) continue;
-            addHL({
-              index: m.index,
-              find: m[0],
-              replace: d.pair.replace,
-              dictId: d.dictEntry._id,
-              dictDefFind: d.pair.find
-            });
-            let asterisks = '*'.repeat(m[0].length);
-            modifiedEnglish = modifiedEnglish.substring(0, m.index) + asterisks + modifiedEnglish.substring(m.index + m[0].length);
-          }
-        }
-      }
+    buildEnglishHLter(english, preparedPack = this.getEditorDictionaryMatchPack()) {
+      const text = String(english ?? '');
+      const pack = preparedPack;
+      const unit = pack?.highlightDict === !!this.highlightDict ? pack.byEnglish.get(text) : null;
+      let englishHLter = escapeHtml(text);
+      // Rendering owns its array; the published matches stay immutable.
+      const HLs = unit ? unit.HLs.map(highlight => ({ ...highlight })) : [];
+      if (!unit) this.scheduleMissingDictionaryMatches();
 
       // construct HLter
       HLs.sort((a, b) => b.index - a.index); // sort deacending
@@ -3827,89 +3806,65 @@ const config = Vue.defineComponent({
         this.$nextTick(() => this.syncHlPopupEnglishHighlight());
       }
     },
+    dictionaryEditorEnglishKey(blocks = this.editorBlocks) {
+      return JSON.stringify((blocks || []).map(block => block.isTable
+        ? (block.tableColumns || []).map(column => String(column.english ?? '')) : String(block.english ?? '')));
+    },
     scheduleEditorHLterRefresh() {
       const run = this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
       if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
-      if (!this.editorSessionActive || this.editorLoading || this.editorLoadError) return;
+      if (this._dictionaryAssistanceDisposed || !this.editorSessionActive || this.editorLoading || this.editorLoadError) return;
       this._hlterRefreshTimer = setTimeout(() => {
         this._hlterRefreshTimer = null;
         this._dictionaryRefreshPending = this.refreshEditorDictionaryHighlights(run);
-      }, 150);
+      }, 0);
     },
     async refreshEditorDictionaryHighlights(run) {
-      const blocks = this.editorBlocks, desc = this.editorCurrentEditingDesc;
-      const lang = this.lang, game = this.gameVersion, source = this.sourceIdentity;
-      const isCurrent = () => this._editorDictionaryRefreshRun === run && this.editorSessionActive && !this.editorLoading
-        && !this.editorLoadError && this.editorBlocks === blocks && this.editorCurrentEditingDesc === desc
-        && this.lang === lang && this.gameVersion === game && this.sourceIdentity === source;
-      const key = 'dictionary-highlights-' + run;
+      const blocks = this.editorBlocks, context = this.dictionaryEditorContext();
+      const englishKey = this.dictionaryEditorEnglishKey(blocks);
+      const isCurrent = () => !this._dictionaryAssistanceDisposed && this.editorSessionActive && !this.editorLoading
+        && !this.editorLoadError && this.editorBlocks === blocks && this.dictionaryEditorContext() === context
+        && this.dictionaryEditorEnglishKey(blocks) === englishKey;
       if (!isCurrent()) return false;
-      this.setBrowserWork('editor', { key, label: 'Updating Dictionary matches', active: true });
       try {
-        // Let a newly added row receive focus and paint before expanding the
-        // Dictionary index. Fields stay editable throughout this refresh.
-        await this.$nextTick();
-        await this.yieldEditorWork();
-        if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
-        const revision = this.editorDictionaryRevision || 0;
-        const matchesCurrent = () => isCurrent() && revision === (this.editorDictionaryRevision || 0);
-        const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
-        let batchStarted = now();
-        const preserveFocus = () => {
-          const id = document.activeElement?.closest?.('[data-dict-id]')?.getAttribute?.('data-dict-id');
-          if (id) this.revealDictionaryEntry(id);
-        };
-        for (let i = 0; i < blocks.length; i++) {
-          if (!matchesCurrent()) return false;
-          const block = blocks[i];
-          if (block.isTable) {
-            for (let col = 0; col < (block.tableColumns || []).length; col++) {
-              if (!matchesCurrent()) return false;
-              this.refreshEditorTableColumnHLter(block.tableColumns[col]);
-              this.$nextTick(() => {
-                if (!matchesCurrent()) return;
-                this.syncHlScroll('english', i, col);
-                this.syncHlScroll('translation', i, col);
-              });
-              if (now() - batchStarted >= 6) {
-                preserveFocus();
-                await this.yieldEditorWork(); batchStarted = now();
-              }
-            }
-            if (!matchesCurrent()) return false;
-            this.syncEditorBlockFromTableColumns(block);
-            this.refreshEditorBlockMeta(block, i);
-          } else {
-            this.refreshEditorBlockHLter(i);
-            this.$nextTick(() => {
-              if (!matchesCurrent()) return;
-              this.syncHlScroll('english', i);
-              this.syncHlScroll('translation', i);
-            });
+        const pack = await this.prepareEditorDictionaryMatches(blocks, isCurrent);
+        if (!pack || !isCurrent()) return false;
+        // A popup and its notes/actions keep one captured generation until close.
+        if (this.hlPopup.visible) {
+          if (!this._pendingDictionaryMatchPack || pack.generation >= this._pendingDictionaryMatchPack.pack.generation) {
+            this._pendingDictionaryMatchPack = { pack, context, englishKey, blocks };
           }
-          if (now() - batchStarted >= 6) {
-            preserveFocus();
-            await this.yieldEditorWork(); batchStarted = now();
-          }
+          return true;
         }
-        if (!matchesCurrent()) return false;
-        preserveFocus();
-        if (this.hlPopup.visible) this.$nextTick(() => { if (matchesCurrent()) this.syncHlPopupEnglishHighlight(); });
-        return true;
+        return this.applyDictionaryAssistancePack(pack, isCurrent);
       } catch (error) {
         console.error('Could not update Dictionary matches:', error);
         return false;
-      } finally {
-        this.setBrowserWork('editor', { key, active: false });
       }
     },
-    /** Refresh matches cooperatively while keeping the focused Dictionary row visible. */
-    syncEditorHlterWithDictionaryNow() {
-      this.invalidateEditorDictionaryIndex();
-      if (this._hlterRefreshTimer) clearTimeout(this._hlterRefreshTimer);
-      this._hlterRefreshTimer = null;
-      const run = this._editorDictionaryRefreshRun = (this._editorDictionaryRefreshRun || 0) + 1;
-      this._dictionaryRefreshPending = this.refreshEditorDictionaryHighlights(run);
+    applyDictionaryAssistancePack(pack, isCurrent = () => true) {
+      if (!isCurrent() || !this.adoptEditorDictionaryMatchPack(pack)) return false;
+      for (let index = 0; index < this.editorBlocks.length; index++) {
+        const block = this.editorBlocks[index];
+        const columns = block.isTable ? block.tableColumns || [] : [block];
+        for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+          const column = columns[columnIndex];
+          const rendered = this.buildEnglishHLter(column.english, pack);
+          column.HLs = rendered.HLs;
+          column.englishHLter = column.isMultiline
+            ? this.wrapHlterByLines(rendered.englishHLter, this.computeMultilineLineMismatch(column.english, column.translation).engMismatch)
+            : rendered.englishHLter;
+          this.$nextTick(() => {
+            if (isCurrent()) this.syncHlScroll('english', index, block.isTable ? columnIndex : null);
+          });
+        }
+      }
+      return true;
+    },
+    /** Dictionary mutations publish assistance only after their replacement is ready. */
+    syncEditorHlterWithDictionaryNow(dictId) {
+      this.invalidateEditorDictionaryIndex(dictId);
+      this._dictionaryRefreshPending = this.scheduleDictionarySnapshot({ immediate: true });
       return this._dictionaryRefreshPending;
     },
     setEditorFocus(index, columnIndex = 0) {
@@ -3987,8 +3942,8 @@ const config = Vue.defineComponent({
           let itemToAdds = [];
           let exactMatchItem = null;
           for (const dictId of uniqueDictIds) {
-            let dictEntry = this.getDictionaryEntryById(dictId);
-            if (!dictEntry || !this.isDictionaryEntryActive(dictEntry)) continue;
+            let dictEntry = this.getDictionaryAssistanceEntry(dictId, true);
+            if (!dictEntry) continue;
             if (keywordTagNameLower && String(dictEntry?.find || "").trim().toLowerCase() !== keywordTagNameLower) continue;
             let pairs = this.getDictionaryDefinitionPairs(dictEntry);
             for (const p of pairs) {
@@ -4215,6 +4170,7 @@ const config = Vue.defineComponent({
       this.hlPopup.openedByBracket = !!options.openedByBracket;
       this.hlPopup.openedByChar = String(options.openedByChar || "");
       this.hlPopup.selectedTranslationText = this.getTranslationSelectionText(editorIndex, columnIndex);
+      this._hlPopupDictionaryPack = this.getEditorDictionaryMatchPack();
       this.hlPopup.items = this.buildHlPopupItems(editorIndex, columnIndex);
       this.hlPopup.filter = "";
       this.applyHlPopupFilter();
@@ -4238,6 +4194,13 @@ const config = Vue.defineComponent({
       this.hlPopup.selectedIndex = 0;
       this.hlPopup.maxHeight = 0;
       this.hlPopup.selectedTranslationText = "";
+      this._hlPopupDictionaryPack = null;
+      const pending = this._pendingDictionaryMatchPack;
+      this._pendingDictionaryMatchPack = null;
+      if (pending && this.editorSessionActive && pending.context === this.dictionaryEditorContext()
+        && pending.blocks === this.editorBlocks && pending.englishKey === this.dictionaryEditorEnglishKey()) {
+        this.applyDictionaryAssistancePack(pending.pack);
+      }
       if (options.refocus && this.editorSessionActive) {
         this.$nextTick(() => {
           let editorBlock = this.editorBlocks?.[editorIndex];
@@ -4296,7 +4259,7 @@ const config = Vue.defineComponent({
         this._dictFlashTimer = setTimeout(() => {
           if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
         }, 320);
-        this.syncEditorHlterWithDictionaryNow();
+        this.syncEditorHlterWithDictionaryNow(existing._id);
         if (addedAlt && createdAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: createdAltId });
         else this.focusDictionaryEntryReplaceInput(existing._id);
         return { dictId: existing._id || "", created: false, addedAlt };
@@ -4312,14 +4275,14 @@ const config = Vue.defineComponent({
         tlnote: ""
       };
       this.dictionary.unshift(entry);
-      this.invalidateEditorDictionaryIndex();
+      this.invalidateEditorDictionaryIndex(entry._id, { membership: true });
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.dictionaryFlashId = entry._id;
       if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
       this._dictFlashTimer = setTimeout(() => {
         if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
       }, 320);
-      this.syncEditorHlterWithDictionaryNow();
+      this.syncEditorHlterWithDictionaryNow(entry._id);
       if (createdAltId) this.focusDictionaryEntryReplaceInput(entry._id, { altId: createdAltId });
       else this.focusDictionaryEntryReplaceInput(entry._id);
       return { dictId: entry._id, created: true, addedAlt: !!alt };
@@ -4343,7 +4306,9 @@ const config = Vue.defineComponent({
     },
     canJumpToDictionaryFromHlPopupItem(item) {
       if (!item) return false;
-      return this.isDictionaryEntryActive(this.getDictionaryEntryById(item.dictEntryId));
+      const entry = this.getDictionaryEntryById(item.dictEntryId);
+      return this.isDictionaryEntryActive(entry) && (!item.dictAltId
+        || (entry.alts || []).some(alt => String(alt?._id) === String(item.dictAltId)));
     },
     jumpToDictionaryFromHlPopupItem(item) {
       let dictId = String(item?.dictEntryId || "");
@@ -4351,6 +4316,7 @@ const config = Vue.defineComponent({
       let entry = this.getDictionaryEntryById(dictId);
       if (!entry || !this.isDictionaryEntryActive(entry)) return false;
       let altId = String(item?.dictAltId || "");
+      if (altId && !(entry.alts || []).some(alt => String(alt?._id) === altId)) return false;
       let selectedText = String(this.hlPopup.selectedTranslationText ?? "");
       if (selectedText) {
         if (altId) {
@@ -4359,7 +4325,7 @@ const config = Vue.defineComponent({
         } else {
           entry.replace = selectedText;
         }
-        this.syncEditorHlterWithDictionaryNow();
+        this.syncEditorHlterWithDictionaryNow(entry._id);
       }
       this.hlPopupReturnInfo = item;
       this.closeHlPopup();
@@ -4647,7 +4613,7 @@ const config = Vue.defineComponent({
       });
     },
     insertHlPopupItem(item) {
-      if (item.dictEntryId && !this.isDictionaryEntryActive(this.getDictionaryEntryById(item.dictEntryId))) {
+      if (item.dictEntryId && !this.getDictionaryAssistanceEntry(item.dictEntryId, true)) {
         this.closeHlPopup({ refocus: true });
         return;
       }
@@ -6179,6 +6145,7 @@ const config = Vue.defineComponent({
       });
     },
     cancelEditorOpen() {
+      this.cancelDictionaryMatchRequests();
       this._editorOpenRun = (this._editorOpenRun || 0) + 1;
       this._openingFile = false;
       this.editorLoading = false;
@@ -6191,6 +6158,7 @@ const config = Vue.defineComponent({
       this.restoreFileTableFocusAfterEditor();
     },
     applyPreparedEditorBlocks(blocks) {
+      if (blocks.dictionaryPack) this.adoptEditorDictionaryMatchPack(blocks.dictionaryPack);
       // Keep the existing fields mounted, including their focus, selection and
       // scroll positions. Only their highlight/diagnostic data needs replacing.
       for (let i = 0; i < blocks.length; i++) {
@@ -6207,6 +6175,8 @@ const config = Vue.defineComponent({
         } else Object.assign(current, next);
       }
       this.editorBlocks.length = blocks.length;
+      const latest = this.getEditorDictionaryMatchPack();
+      if (blocks.dictionaryPack && latest?.generation > blocks.dictionaryPack.generation) this.applyDictionaryAssistancePack(latest);
     },
     seedEditorOpenSource(request) {
       const desc = request.desc;
@@ -6230,21 +6200,21 @@ const config = Vue.defineComponent({
       this.beginEditorDraftSession?.(request);
       this.refreshGamePreview();
     },
-    makeEditorBlock(englishRaw, translationRaw, hydrate = false) {
+    makeEditorBlock(englishRaw, translationRaw, hydrate = false, pack = this.getEditorDictionaryMatchPack()) {
       let decodedEnglish = this.decodeEscapedNewlines(englishRaw);
       let decodedTranslation = this.decodeEscapedNewlines(translationRaw);
       let isTable = this.isTableText(decodedEnglish) || this.isTableText(decodedTranslation);
       let isMultiline = this.isMultilineText(englishRaw) || this.isMultilineText(translationRaw);
       let english = (isTable || isMultiline) ? decodedEnglish : englishRaw;
       let translation = (isTable || isMultiline) ? decodedTranslation : translationRaw;
-      let { englishHLter: baseEnglishHLter, HLs } = !hydrate || isTable ? { englishHLter: '', HLs: [] } : this.buildEnglishHLter(english);
+      let { englishHLter: baseEnglishHLter, HLs } = !hydrate || isTable ? { englishHLter: '', HLs: [] } : this.buildEnglishHLter(english, pack);
       let englishHLter = baseEnglishHLter;
       let translationDiagnosticResult = !hydrate || isTable ? { diagnostics: [], warningCount: 0, errorCount: 0 } : this.analyzeTranslationDiagnostics(translation ?? "", english ?? "");
       let translationHLter = !hydrate || isTable ? '' : this.buildTagHLter(translation ?? "", translationDiagnosticResult.diagnostics);
       let multilineLineMismatch = false;
       let tableColumns = [];
       if (isTable) {
-        tableColumns = this.buildEditorTableColumns(english, translation, hydrate);
+        tableColumns = this.buildEditorTableColumns(english, translation, hydrate, pack);
         isMultiline = tableColumns.some(col => col.isMultiline);
         multilineLineMismatch = tableColumns.some(col => col.multilineLineMismatch);
         let tableDiagnostics = [];
@@ -6317,7 +6287,9 @@ const config = Vue.defineComponent({
       if (!this.editorVisible) this._fileTableReturnFocus = returnToFileList || !!document.activeElement?.closest?.('.fileTableScroll');
       this.selectFileRow(filepath);
 
+      this.cancelDictionaryMatchRequests();
       this.closeHlPopup();
+      this.editorDictionaryMatchPack = null;
       this.editorBlocks = [];
       this.editorOriginalTranslations = [];
       this.editorDroppedCandidate = null;
@@ -6337,9 +6309,11 @@ const config = Vue.defineComponent({
       this.dictionaryPage = 1;
       const run = this._editorOpenRun = (this._editorOpenRun || 0) + 1;
       const lang = this.lang, version = this.gameVersion, sourceIdentity = this.sourceIdentity;
-      const isCurrent = () => this._editorOpenRun === run && this.editorSessionActive
+      const dictionaryScope = this.dictionaryWorkerScopeKey(), branch = this.branchId || 'default';
+      const isCurrent = () => !this._dictionaryAssistanceDisposed && this._editorOpenRun === run && this.editorSessionActive
         && this.editorCurrentEditingDesc === desc && this.lang === lang && this.gameVersion === version
-        && this.sourceIdentity === sourceIdentity;
+        && this.sourceIdentity === sourceIdentity && dictionaryScope === this.dictionaryWorkerScopeKey()
+        && branch === (this.branchId || 'default');
       const request = { desc, run, isCurrent };
       this.seedEditorOpenSource(request);
       this.$nextTick(() => {
@@ -6358,25 +6332,22 @@ const config = Vue.defineComponent({
         if (this.hydrateEditorDraft) await this.hydrateEditorDraft(request);
         if (!isCurrent()) return false;
         const source = request.source;
+        const seededBlocks = this.editorBlocks, englishKey = this.dictionaryEditorEnglishKey(seededBlocks);
+        const preparationCurrent = () => isCurrent() && this.editorBlocks === seededBlocks
+          && this.dictionaryEditorEnglishKey(seededBlocks) === englishKey;
         await this.yieldEditorPaint();
-        if (!isCurrent() || !await this.prepareEditorDictionaryIndex(isCurrent)) return false;
-        const blocks = [];
-        const dictionaryRevision = this.editorDictionaryRevision || 0;
-        let sliceStart = Date.now();
-        for (let i = 0; i < Math.max(source.english.length, source.translations.length); i++) {
-          if (!isCurrent()) return false;
-          if (dictionaryRevision !== (this.editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
-          blocks.push(this.makeEditorBlock(source.english[i] || "", source.translations[i] || "", true));
-          if (Date.now() - sliceStart >= 8) {
-            await this.yieldEditorWork();
-            sliceStart = Date.now();
-          }
+        if (!preparationCurrent()) {
+          if (isCurrent()) this.cancelEditorOpen();
+          return false;
         }
-        if (!isCurrent()) return false;
-        // A cloud dictionary update during preparation must not publish mixed matches.
-        if (dictionaryRevision !== (this.editorDictionaryRevision || 0)) return this.openEditorFile(filepath, returnToFileList, request);
+        const blocks = await this.prepareMatchedEditorBlocks(source.english, source.translations, preparationCurrent);
+        if (!blocks || !preparationCurrent()) {
+          if (isCurrent()) this.cancelEditorOpen();
+          return false;
+        }
         this.applyPreparedEditorBlocks(blocks);
         this.editorLoading = false;
+        if (this._dictionaryWorkerClient?.readyGeneration > this.editorDictionaryMatchPack?.generation) this.scheduleEditorHLterRefresh();
         this.$nextTick(() => {
           if (!isCurrent()) return;
           for (let i = 0; i < (this.editorBlocks || []).length; i++) {
@@ -6963,6 +6934,14 @@ const config = Vue.defineComponent({
     },
     async finishStartup(preserveBootTheme = false) {
       if (this.startupReady) return;
+      // The restored local profile is ready here; network authentication starts
+      // after this screen. The first local cache is the only blocking generation.
+      if (this.lang && this.gameVersion) {
+        try { await this.ensureDictionarySnapshot(); }
+        catch (error) {
+          if (!this.cloudStorageError) this.cloudStorageError = 'Could not prepare Dictionary matches. Reload to retry: ' + error.message;
+        }
+      }
       if (preserveBootTheme) this.theme = document.documentElement.getAttribute('data-theme') || this.theme;
       this.applyTheme(this.theme);
       this.startupReady = true;
@@ -7112,6 +7091,7 @@ const config = Vue.defineComponent({
       if (dictionary !== this.dictionary) {
         this.dictionary = dictionary;
         this.ensureDictionaryIds();
+        this.markDictionarySnapshotDirty?.(null, { replace: true });
       }
       this.editorClipboard = settings.editorClipboard || "";
       this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
@@ -7248,7 +7228,7 @@ const config = Vue.defineComponent({
     addVocab() {
       const entry = { _id: `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`, gameScope: this.gameVersion === 'poe2' ? 'poe2' : 'poe1', find: "", replace: "", alts: [], tlnote: "" };
       this.dictionary.unshift(entry);
-      this.invalidateEditorDictionaryIndex();
+      this.invalidateEditorDictionaryIndex(entry._id, { membership: true });
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.focusDictionaryEntryReplaceInput(entry._id);
     },
@@ -7260,6 +7240,7 @@ const config = Vue.defineComponent({
       if (this.dictionary !== dictionary) return;
       if (String(word?._id) === this.dictionaryEditingId) this.endDictionaryEdit();
       this.dictionary = this.dictionary.filter(o => o !== word);
+      this.markDictionarySnapshotDirty?.(null, { replace: true });
       this.saveSettings();
     },
     async exportZip(doFullExport) {

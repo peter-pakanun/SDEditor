@@ -13,7 +13,8 @@ function loadEditor() {
   const calls = { terminology: 0, consistencyIndex: 0, consistency: 0 };
   const timers = [];
   const dialog = { open: false, showModal() { this.open = true; }, close() { this.open = false; } };
-  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
+  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} },
+    setTimeout, clearTimeout, performance: require('node:perf_hooks').performance };
   const context = vm.createContext({
     window, URLSearchParams, console, clearTimeout,
     setTimeout(callback, delay) { timers.push(delay); return setTimeout(callback, delay); },
@@ -26,7 +27,7 @@ function loadEditor() {
       nextTick() { return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [api, name, counter] of [
@@ -37,7 +38,8 @@ function loadEditor() {
     const original = api[name];
     api[name] = function (...args) { calls[counter]++; return original.apply(this, args); };
   }
-  const editor = Object.assign(config.data(), config.methods, {
+  const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
+    ...config.mixins.map(mixin => mixin.methods || {}), config.methods, {
     lang: 'Thai', gameVersion: 'poe1',
     dictionary: [{ find: 'Fire', replace: 'ไฟ' }],
     // Exercise opening, scanning, and validation without DOM layout or persistence.
@@ -45,7 +47,8 @@ function loadEditor() {
     buildEnglishHLter(english) { return { englishHLter: english, HLs: [] }; },
     $nextTick() { return Promise.resolve(); }, $refs: { diagnosticScanDialog: dialog },
   });
-  for (const [name, getter] of Object.entries(config.computed)) {
+  const computed = Object.assign({}, ...config.mixins.map(mixin => mixin.computed || {}), config.computed);
+  for (const [name, getter] of Object.entries(computed)) {
     Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   }
   return { editor, config, calls, timers, dialog };

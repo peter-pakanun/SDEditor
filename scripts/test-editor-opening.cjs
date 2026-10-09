@@ -57,11 +57,58 @@ function trackedDictionary(entries) {
   return { entries, dictionary: wrap(entries), toRaw, wrap, counts };
 }
 
+async function prepareHighlights(editor, texts) {
+  const blocks = [].concat(texts).map(english => ({ english, isTable: false }));
+  const pack = await editor.prepareEditorDictionaryMatches(blocks, () => true);
+  editor.adoptEditorDictionaryMatchPack(pack);
+  return blocks.map(block => editor.buildEnglishHLter(block.english));
+}
+
+function holdMatchBatch(editor) {
+  const entered = deferred(), resume = deferred();
+  const prepare = editor.prepareEditorDictionaryMatches;
+  editor.prepareEditorDictionaryMatches = async function (...args) {
+    entered.resolve(); await resume.promise;
+    return prepare.apply(this, args);
+  };
+  return { entered, resume, restore() { editor.prepareEditorDictionaryMatches = prepare; } };
+}
+
+async function waitForDictionaryUpdate(editor, generation) {
+  await editor.ensureDictionaryWorker().waitReady({ generation: generation + 1 });
+  if (editor.editorVisible && !editor.editorLoading) await refreshDictionary(editor);
+}
+
+function refreshDictionary(editor) {
+  const run = editor._editorDictionaryRefreshRun = (editor._editorDictionaryRefreshRun || 0) + 1;
+  return editor.refreshEditorDictionaryHighlights(run);
+}
+
+function holdCompletedQueries(client) {
+  const match = client.match, responses = [], arrivals = [];
+  let request = 0;
+  client.match = function (...args) {
+    const index = request++, query = match.apply(this, args), release = deferred();
+    const arrival = arrivals[index] ||= deferred();
+    const pending = query.then(async result => {
+      responses[index] = { result, release };
+      arrival.resolve(); await release.promise;
+      return result;
+    });
+    pending.cancel = () => { query.cancel(); release.resolve(); };
+    return pending;
+  };
+  return {
+    async completed(index) { await (arrivals[index] ||= deferred()).promise; return responses[index]; },
+    restore() { client.match = match; },
+  };
+}
+
 function loadEditor(options = {}) {
   let config;
   let clock = 0;
   const calls = { asyncIndexes: 0, syncIndexes: 0, definitions: 0, highlights: 0, diagnostics: 0, focused: 0, selected: 0, settings: 0 };
-  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
+  const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} }, setTimeout, clearTimeout, performance };
   const document = {
     hidden: false,
     activeElement: null,
@@ -88,7 +135,7 @@ function loadEditor(options = {}) {
       markRaw(value) { return value; }, toRaw(value) { return options.toRaw ? options.toRaw(value) : value; },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   for (const [method, counter] of [['create', 'syncIndexes'], ['createAsync', 'asyncIndexes']]) {
@@ -109,7 +156,8 @@ function loadEditor(options = {}) {
     editor[method] = function (...args) { calls[counter]++; return original.apply(this, args); };
   }
   let dictionaryViewCache;
-  for (const [name, getter] of Object.entries(config.computed)) {
+  const computed = Object.assign({}, ...config.mixins.map(mixin => mixin.computed || {}), config.computed);
+  for (const [name, getter] of Object.entries(computed)) {
     Object.defineProperty(editor, name, { get: () => {
       if (name !== 'dictionaryScopeView' || !options.cacheDictionaryScope) return getter.call(editor);
       // Model Vue's computed caching for tests that measure reactive array reads.
@@ -120,7 +168,7 @@ function loadEditor(options = {}) {
       return dictionaryViewCache.value;
     } });
   }
-  return { editor, config, calls, document, window };
+  return { editor, config, calls, document, window, context };
 }
 
 test('opening a missing translation with a Dropped copy seeds its candidate draft without changing current text', async () => {
@@ -335,24 +383,152 @@ test('cached manual warnings remain visible during hydration without rescanning 
   assert.equal(editor.consistencyResolver.versions.length, 2, 'The same action is available once hydration finishes.');
 });
 
-test('closing during index construction prevents publication and allows reopening', async () => {
-  const { editor } = loadEditor({ controlledClock: true });
+test('closing during match preparation prevents editor publication and allows reopening', async () => {
+  const { editor } = loadEditor();
   editor.descs = [description('close', 'Term 119')];
-  const reachedSlice = deferred(), resume = deferred();
+  const hold = holdMatchBatch(editor);
   editor.yieldEditorPaint = async () => {};
-  editor.yieldEditorWork = () => { reachedSlice.resolve(); return resume.promise; };
   const opening = editor.editFile(editor.descs[0].filepath);
-  await reachedSlice.promise;
+  await hold.entered.promise;
   assert.equal(editor.editorLoading, true);
   editor.editorExit();
-  resume.resolve();
+  hold.resume.resolve();
   assert.equal(await opening, false);
   assert.equal(editor.editorVisible, false);
   assert.equal(editor.editorBlocks.length, 0);
-  assert.equal(editor._editorDictionaryIndex, undefined, 'A cancelled partial index cannot be cached.');
-  editor.yieldEditorWork = async () => {};
+  assert.equal(editor.editorDictionaryMatchPack, null, 'A closed editor must not adopt its pending match pack.');
+  hold.restore();
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'word-119');
+});
+
+test('the shared session watcher cancels full and inline queries while retaining the worker cache', async () => {
+  for (const surface of ['full', 'inline']) {
+    const { editor, config } = loadEditor();
+    editor.descs = [description('query-cancellation', 'Term 119')];
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+    if (surface === 'inline') { editor.editorVisible = false; editor.inlineActive = true; }
+    editor.editorBlocks = [editor.makeEditorBlock('Uncached English query', 'retained draft')];
+    const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
+    const match = client.match, entered = deferred();
+    let rejected, cancellations = 0;
+    client.match = () => {
+      const pending = new Promise((_resolve, reject) => { rejected = reject; });
+      pending.cancel = () => {
+        cancellations++;
+        rejected(Object.assign(new Error('Fixture query cancelled'), { name: 'AbortError' }));
+      };
+      entered.resolve(); return pending;
+    };
+    const refreshing = refreshDictionary(editor);
+    await entered.promise;
+    editor.editorVisible = false; editor.inlineActive = false;
+    config.watch.editorSessionActive.call(editor, false);
+    assert.equal(cancellations, 1, surface);
+    assert.equal(await refreshing, false, surface);
+    assert.equal(editor.ensureDictionaryWorker(), client, surface);
+    assert.equal(client.readyGeneration, generation, surface);
+    client.match = match;
+    const result = await client.match([{ key: 'still-alive', english: 'Term 119' }]);
+    assert.equal(result.generation, generation, surface);
+    assert.equal(result.units[0].HLs[0].dictId, 'word-119', surface);
+    editor.dictionary[119].replace = 'Changed while the editor is closed';
+    editor.dictionaryEntryInput(editor.dictionary[119]);
+    await client.waitReady({ generation: generation + 1 });
+    assert.ok(client.readyGeneration > generation, 'Closing a surface must not stop background cache construction.');
+  }
+});
+
+test('changing seeded English during a held query rejects its late pack and ends the owned loading view', async () => {
+  for (const table of [false, true]) {
+    const { editor } = loadEditor();
+    editor.descs = [description('changed-seed', table ? 'Term 119@Term 118' : 'Term 119')];
+    const prepare = editor.prepareEditorDictionaryMatches, entered = deferred(), resume = deferred();
+    let captured;
+    editor.prepareEditorDictionaryMatches = async function (...args) {
+      captured = await prepare.apply(this, args);
+      entered.resolve(); await resume.promise;
+      return captured;
+    };
+    const opening = editor.editFile(editor.descs[0].filepath);
+    await entered.promise;
+    assert.ok(captured, 'The old English query completed before its reply is released.');
+    const seed = table ? editor.editorBlocks[0].tableColumns[0] : editor.editorBlocks[0];
+    seed.english = 'English changed after the query';
+    resume.resolve();
+    assert.equal(await opening, false, table ? 'table' : 'plain');
+    assert.equal(editor.editorLoading, false);
+    assert.equal(editor.editorVisible, false);
+    assert.equal(editor.editorBlocks.length, 0);
+    assert.equal(editor.editorDictionaryMatchPack, null, 'The stale English pack cannot be adopted.');
+    assert.equal(editor.editorLoadError, '');
+  }
+});
+
+test('draft and recovery block construction pins one pack through publication and clones its input arrays', async () => {
+  const { editor, context } = loadEditor({ dictionary: [
+    { _id: 'fire', find: 'Fire', replace: 'old fire', alts: [], tlnote: 'old note' },
+    { _id: 'cold', find: 'Cold', replace: 'old cold', alts: [] },
+  ] });
+  await prepareHighlights(editor, ['Fire', 'Cold']);
+  const originalPack = editor.editorDictionaryMatchPack;
+  const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
+  const english = ['Fire', 'Fire@Cold', 'Cold'], translations = ['plain draft', 'left draft@right draft', 'last draft'];
+  let clock = 0;
+  context.Date = class FixtureDate extends Date { static now() { return clock += 4; } };
+  const entered = deferred(), resume = deferred();
+  let yields = 0;
+  editor.yieldEditorWork = () => { if (++yields === 1) { entered.resolve(); return resume.promise; } return Promise.resolve(); };
+  const preparing = editor.prepareMatchedEditorBlocks(english, translations);
+  await entered.promise;
+  english[1] = 'Changed input source@Cold'; translations[1] = 'changed input draft@changed right';
+  editor.dictionary[0].replace = 'new fire'; editor.dictionary[1].replace = 'new cold';
+  editor.dictionaryEntryInput(editor.dictionary[0]); editor.dictionaryEntryInput(editor.dictionary[1]);
+  await client.waitReady({ generation: generation + 1 });
+  await prepareHighlights(editor, ['Fire', 'Cold']);
+  assert.ok(editor.editorDictionaryMatchPack.generation > originalPack.generation);
+  resume.resolve();
+  const blocks = await preparing;
+  assert.equal(blocks.dictionaryPack, originalPack);
+  assert.equal(blocks[0].HLs[0].replace, 'old fire');
+  assert.equal(blocks[1].tableColumns[0].HLs[0].replace, 'old fire');
+  assert.equal(blocks[1].tableColumns[1].HLs[0].replace, 'old cold');
+  assert.equal(blocks[2].HLs[0].replace, 'old cold');
+  assert.equal(blocks[1].english, 'Fire@Cold');
+  assert.equal(blocks[1].tableColumns[0].translation, 'left draft');
+  assert.equal(blocks[1].tableColumns[1].translation, 'right draft');
+});
+
+test('changing Dictionary matching options during constructor yields retries before publishing assistance', async () => {
+  for (const enabled of [true, false]) for (const heldYield of [1, 3]) {
+    const { editor, context, config } = loadEditor({ dictionary: [
+      { _id: 'fire', find: 'Fire', replace: 'translated fire', alts: [] },
+    ] });
+    editor.highlightDict = enabled;
+    editor.descs = [description('option-during-preparation', ['Fire', 'Fire', 'Fire'], ['first draft', 'second draft', 'last draft'])];
+    editor.scheduleEditorHLterRefresh = config.methods.scheduleEditorHLterRefresh;
+    let clock = 0;
+    context.Date = class FixtureDate extends Date { static now() { return clock += 4; } };
+    const entered = deferred(), resume = deferred();
+    let yields = 0;
+    editor.yieldEditorWork = () => {
+      if (++yields === heldYield) { entered.resolve(); return resume.promise; }
+      return Promise.resolve();
+    };
+    const opening = editor.editFile(editor.descs[0].filepath);
+    await entered.promise;
+    assert.equal(editor.editorLoading, true);
+    editor.highlightDict = !enabled;
+    config.watch.highlightDict.call(editor);
+    resume.resolve();
+    assert.equal(await opening, true, editor.editorLoadError);
+    assert.equal(editor.editorDictionaryMatchPack.highlightDict, !enabled);
+    assert.deepEqual(Array.from(editor.editorBlocks, block => block.HLs.length), Array(3).fill(enabled ? 0 : 1),
+      'Both partially constructed blocks and a completed pack awaiting its final yield must use the current option.');
+    assert.deepEqual(Array.from(editor.editorBlocks, block => block.translation), ['first draft', 'second draft', 'last draft']);
+    assert.equal(editor.editorLoading, false);
+    assert.equal(editor.editorTranslationReadOnly, false);
+  }
 });
 
 test('rapid file selections only publish the latest requested file', async () => {
@@ -371,10 +547,10 @@ test('rapid file selections only publish the latest requested file', async () =>
 });
 
 test('preparation errors retain read-only text and a later open can recover', async () => {
-  const { editor, window } = loadEditor();
+  const { editor } = loadEditor();
   editor.descs = [description('failure', 'Term 119')];
-  const createAsync = window.EditorDictionaryIndex.createAsync;
-  window.EditorDictionaryIndex.createAsync = async () => { throw new Error('Fixture indexing failure'); };
+  const prepare = editor.prepareEditorDictionaryMatches;
+  editor.prepareEditorDictionaryMatches = async () => { throw new Error('Fixture indexing failure'); };
   assert.equal(await editor.editFile(editor.descs[0].filepath), false);
   assert.equal(editor.editorVisible, true);
   assert.equal(editor.editorLoading, false);
@@ -386,7 +562,7 @@ test('preparation errors retain read-only text and a later open can recover', as
   assert.equal(await editor.editorSave(), false);
   editor.editorExit();
   assert.equal(editor.editorVisible, false);
-  window.EditorDictionaryIndex.createAsync = createAsync;
+  editor.prepareEditorDictionaryMatches = prepare;
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
   assert.equal(editor.editorLoadError, '');
 });
@@ -557,15 +733,14 @@ test('a successful claim refreshes the visible text and freezes the matching col
 
 test('changing language or source during preparation dismisses the still-owned loading view', async () => {
   for (const [property, value] of [['lang', 'French'], ['sourceIdentity', 'replacement-source']]) {
-    const { editor } = loadEditor({ controlledClock: true });
+    const { editor } = loadEditor();
     editor.descs = [description('context', 'Term 119')];
-    const preparing = deferred(), resume = deferred();
+    const hold = holdMatchBatch(editor);
     editor.yieldEditorPaint = async () => {};
-    editor.yieldEditorWork = () => { preparing.resolve(); return resume.promise; };
     const opening = editor.editFile(editor.descs[0].filepath);
-    await preparing.promise;
+    await hold.entered.promise;
     editor[property] = value;
-    resume.resolve();
+    hold.resume.resolve();
     assert.equal(await opening, false, property);
     assert.equal(editor.editorVisible, false, property);
     assert.equal(editor.editorLoading, false, property);
@@ -574,37 +749,73 @@ test('changing language or source during preparation dismisses the still-owned l
   }
 });
 
-test('dictionary edits and replacements invalidate cached definitions', async () => {
+test('dictionary edits and replacements keep the ready snapshot until the replacement publishes', async () => {
   const { editor, config, calls } = loadEditor();
   editor.descs = [description('first', 'Term 119')];
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
-  const firstIndex = editor._editorDictionaryIndex;
+  const firstPack = editor.editorDictionaryMatchPack;
+  const client = editor.ensureDictionaryWorker(), firstGeneration = client.readyGeneration;
   editor.dictionary[119].replace = 'แก้ไข';
   config.watch.dictionary.handler.call(editor);
-  assert.equal(editor._editorDictionaryIndex, null);
+  assert.equal(editor.editorDictionaryMatchPack, firstPack);
+  assert.equal(editor.editorBlocks[0].HLs[0].replace, 'คำ 119', 'Invalidation keeps completed assistance usable.');
+  await waitForDictionaryUpdate(editor, firstGeneration);
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
-  assert.notEqual(editor._editorDictionaryIndex, firstIndex);
+  assert.notEqual(editor.editorDictionaryMatchPack, firstPack);
   assert.equal(editor.editorBlocks[0].HLs[0].replace, 'แก้ไข');
   editor.dictionary = [{ _id: 'imported', find: 'Term 119', replace: 'นำเข้า', alts: [] }];
+  const replacementGeneration = client.readyGeneration;
+  config.watch.dictionary.handler.call(editor);
+  assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'word-119', 'Wholesale replacement also retains the same-scope ready snapshot.');
+  await waitForDictionaryUpdate(editor, replacementGeneration);
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, 'imported');
-  assert.equal(calls.asyncIndexes, 3);
+  assert.equal(calls.asyncIndexes, 0, 'Ordinary editor work uses the matching worker engine.');
   assert.equal(calls.syncIndexes, 0);
 });
 
-test('dictionary mutations during a yielded build restart before publishing matches', async () => {
-  const { editor, config, calls } = loadEditor({ controlledClock: true });
+test('Dictionary field input journals its row and refreshes live actions without a deep watcher', async () => {
+  const { editor } = loadEditor({ cacheDictionaryScope: true });
+  editor.descs = [description('journaled-input', 'Term 119 Renamed term')];
+  assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+  const entry = editor.dictionary[119], pack = editor.editorDictionaryMatchPack;
+  const generation = editor.ensureDictionaryWorker().readyGeneration;
+  entry.find = 'Renamed term'; entry.replace = 'New field replacement'; entry.tlnote = 'New field note';
+  editor.dictionaryEntryInput(entry);
+  assert.equal(editor.editorDictionaryMatchPack, pack);
+  assert.equal(editor.findActiveDictionaryKeywordEntry('Renamed term'), entry, 'Explicit live actions follow the input journal immediately.');
+  await waitForDictionaryUpdate(editor, generation);
+  assert.equal(editor.editorBlocks[0].HLs[0].dictDefFind, 'Renamed term');
+  assert.equal(editor.editorBlocks[0].HLs[0].replace, 'New field replacement');
+  assert.equal(editor.getDictionaryAssistanceEntry(entry._id).tlnote, 'New field note');
+});
+
+test('a same-scope dictionary mutation does not restart an in-flight file preparation', async () => {
+  const { editor, config, calls } = loadEditor();
   editor.descs = [description('changing', 'Term 119')];
-  editor.yieldEditorPaint = async () => {};
-  let changed = false;
-  editor.yieldEditorWork = async () => {
-    if (changed) return;
-    changed = true;
-    editor.dictionary[119].replace = 'ล่าสุด';
-    config.watch.dictionary.handler.call(editor);
+  assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+  const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
+  const prepare = editor.prepareEditorDictionaryMatches;
+  let preparations = 0;
+  const entered = deferred(), resume = deferred();
+  editor.prepareEditorDictionaryMatches = async function (...args) {
+    preparations++;
+    const pending = prepare.apply(this, args);
+    entered.resolve(); await resume.promise;
+    return pending;
   };
-  assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
-  assert.equal(calls.asyncIndexes, 2);
+  editor.yieldEditorPaint = async () => {};
+  const opening = editor.editFile(editor.descs[0].filepath);
+  await entered.promise;
+  editor.dictionary[119].replace = 'ล่าสุด';
+  config.watch.dictionary.handler.call(editor);
+  resume.resolve();
+  assert.equal(await opening, true, editor.editorLoadError);
+  assert.equal(preparations, 1, 'A pending Dictionary update must not restart file preparation.');
+  assert.equal(calls.asyncIndexes, 0);
+  assert.equal(editor.editorBlocks[0].HLs[0].replace, 'คำ 119');
+  editor.prepareEditorDictionaryMatches = prepare;
+  await waitForDictionaryUpdate(editor, generation);
   assert.equal(editor.editorBlocks[0].HLs[0].replace, 'ล่าสุด');
 });
 
@@ -632,10 +843,12 @@ test('large dictionaries match all blocks and table cells while reusing the prep
   assert.equal(editor.dictionaryPageCount, 500);
   assert.equal(editor.filteredDictionary[0]._id, 'word-19950');
   const definitions = calls.definitions;
-  assert.equal(definitions, 20000, 'Each entry is normalized once, not once per block.');
+  assert.equal(definitions, 0, 'Dictionary normalization belongs to the DOM-free engine.');
+  const generation = editor.ensureDictionaryWorker().readyGeneration;
   assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
   assert.equal(calls.definitions, definitions, 'A second open reuses the same index.');
-  assert.equal(calls.asyncIndexes, 1);
+  assert.equal(editor.ensureDictionaryWorker().readyGeneration, generation, 'A second open reuses the published snapshot.');
+  assert.equal(calls.asyncIndexes, 0);
   assert.equal(calls.syncIndexes, 0);
   console.log(`20,000-entry dictionary with 46 blocks, including a table: ${Math.round(performance.now() - started)} ms for two opens (VM fixture).`);
 });
@@ -705,9 +918,11 @@ test('typing a dictionary Find keeps its row, page and scroll stable while sourc
   const order = dictionaryIds(editor.filteredDictionary);
   editor.$refs.editorSide.scrollTop = 275;
   for (const find of ['New term', 'Unmatched term', 'New term']) {
+    const generation = editor.ensureDictionaryWorker().readyGeneration;
     entry.find = find;
     await editor.syncEditorHlterWithDictionaryNow();
-    assert.equal(editor.foundDictionarySet.has(entry._id), find === 'New term', 'Highlight matches must remain live while ordering is held.');
+    await waitForDictionaryUpdate(editor, generation);
+    assert.equal(editor.foundDictionarySet.has(entry._id), find === 'New term', 'Published matches refresh while ordering is held.');
     assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
     assert.equal(editor.dictionaryPage, 3);
     assert.equal(editor.visibleDictionary[39], entry);
@@ -739,9 +954,11 @@ test('a new blank dictionary entry stays first while typing despite existing sou
   await editor.$nextTick(); await editor.$nextTick();
   const order = dictionaryIds(editor.filteredDictionary);
   for (const find of ['New term', 'Not in this file']) {
+    const generation = editor.ensureDictionaryWorker().readyGeneration;
     entry.find = find;
     entry.replace = 'Typed replacement';
     await editor.syncEditorHlterWithDictionaryNow();
+    await waitForDictionaryUpdate(editor, generation);
     assert.equal(editor.foundDictionarySet.has(entry._id), find === 'New term');
     assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
     assert.equal(editor.visibleDictionary[0], entry);
@@ -759,8 +976,10 @@ test('other rows gaining matches cannot push the edited row across a dictionary 
   editor.dictionaryEntryFocusIn({ target: field });
   assert.equal(editor.visibleDictionary[39], entry);
   const order = dictionaryIds(editor.filteredDictionary);
+  const generation = editor.ensureDictionaryWorker().readyGeneration;
   editor.dictionary[119].find = 'New term';
   await editor.syncEditorHlterWithDictionaryNow();
+  await waitForDictionaryUpdate(editor, generation);
   assert.equal(editor.foundDictionarySet.has('word-119'), true);
   assert.deepEqual(dictionaryIds(editor.filteredDictionary), order);
   assert.equal(editor.dictionaryPage, 2);
@@ -897,8 +1116,7 @@ test('Dictionary creation paints and focuses its row before preparing matches, k
   editor.descs = [description('keyword', '[FreshTerm] Term 19999')];
   await editor.editFile(editor.descs[0].filepath);
   assert.equal(editor.filteredDictionary[0]._id, 'word-19999');
-  const pause = deferred();
-  editor.yieldEditorWork = () => pause.promise;
+  const generation = editor.ensureDictionaryWorker().readyGeneration;
   document.querySelector = () => ({ querySelector() { return { focus() { calls.focused++; }, select() { calls.selected++; } }; } });
   const prior = { sync: calls.syncIndexes, async: calls.asyncIndexes, focus: calls.focused };
   const entry = editor.ensureDictionaryKeywordTag('FreshTerm', '', 'ใหม่');
@@ -910,43 +1128,42 @@ test('Dictionary creation paints and focuses its row before preparing matches, k
   assert.equal(calls.asyncIndexes, prior.async, 'The new row gets a paint opportunity before index preparation.');
   assert.equal(editor.editorLoading, false);
   assert.equal(editor.editorTranslationReadOnly, false);
-  pause.resolve();
-  assert.equal(await editor._dictionaryRefreshPending, true);
+  await waitForDictionaryUpdate(editor, generation);
   assert.equal(calls.syncIndexes, prior.sync);
-  assert.equal(calls.asyncIndexes, prior.async + 1);
+  assert.equal(calls.asyncIndexes, prior.async, 'Replacement preparation belongs to the worker engine.');
   assert.equal(editor.editorBlocks[0].HLs[0].dictId, entry.dictId);
   assert.equal(editor.filteredDictionary[0]._id, entry.dictId);
   assert.equal(editor.browserWorkTooltip, '');
 });
 
 test('Dictionary refresh cancels when the file closes without publishing highlights into another editor', async () => {
-  const { editor, calls } = loadEditor({ controlledClock: true });
+  const { editor, calls } = loadEditor();
   editor.descs = [description('original', 'Term 119'), description('next', 'Term 0')];
   await editor.editFile(editor.descs[0].filepath);
-  const pause = deferred();
-  editor.yieldEditorWork = () => pause.promise;
+  const hold = holdMatchBatch(editor);
   const highlights = calls.highlights;
-  const pending = editor.syncEditorHlterWithDictionaryNow();
-  await editor.$nextTick();
+  const pending = refreshDictionary(editor);
+  await hold.entered.promise;
   editor.editorVisible = false;
   editor.editorBlocks = [];
-  pause.resolve();
+  hold.resume.resolve();
   assert.equal(await pending, false);
   assert.equal(calls.highlights, highlights);
   assert.equal(editor.browserWorkTooltip, '');
 });
 
-test('Dictionary refresh yields between blocks, reads newer translation input, and replaces only the matches', async () => {
-  const { editor } = loadEditor({ controlledClock: true });
+test('Dictionary refresh reads newer translation input and replaces only the matches', async () => {
+  const { editor } = loadEditor();
   editor.descs = [description('many', Array.from({ length: 8 }, () => 'Term 119'))];
   await editor.editFile(editor.descs[0].filepath);
   const blocks = editor.editorBlocks, last = blocks.at(-1);
-  let yields = 0;
-  editor.yieldEditorWork = async () => {
-    if (++yields === 3) last.translation = 'Typed during match refresh';
-  };
-  await editor.syncEditorHlterWithDictionaryNow();
-  assert.ok(yields > 3, 'Both index preparation and block refresh should give other input work a turn.');
+  const hold = holdMatchBatch(editor);
+  const refresh = refreshDictionary(editor);
+  await hold.entered.promise;
+  last.translation = 'Typed during match refresh';
+  editor.translationInput(last, blocks.length - 1);
+  hold.resume.resolve();
+  assert.equal(await refresh, true);
   assert.equal(editor.editorBlocks, blocks);
   assert.equal(editor.editorBlocks.at(-1), last);
   assert.equal(last.translation, 'Typed during match refresh');
@@ -954,7 +1171,92 @@ test('Dictionary refresh yields between blocks, reads newer translation input, a
   assert.equal(editor.editorTranslationReadOnly, false);
 });
 
-test('game-scoped entries and All fallback control indexed and fallback highlights, autocomplete and ranking', () => {
+test('publication accepts older same-scope replies until newer assistance applies and keeps popup deferral monotonic', async () => {
+  for (const order of ['older first', 'newer first', 'popup']) {
+    const { editor } = loadEditor({ dictionary: [{ _id: 'fire', find: 'Fire', replace: 'old fire', alts: [] }] });
+    editor.descs = [description('publication-order', 'Fire', 'saved translation')];
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+    const blocks = editor.editorBlocks, originalPack = editor.editorDictionaryMatchPack;
+    blocks[0].english = 'Fire Fire'; blocks[0].translation = 'typed draft';
+    if (order === 'popup') {
+      editor.hlPopup.visible = true;
+      editor._hlPopupDictionaryPack = originalPack;
+    }
+    const client = editor.ensureDictionaryWorker(), hold = holdCompletedQueries(client);
+    const olderRefresh = refreshDictionary(editor), older = await hold.completed(0);
+    assert.equal(older.result.generation, originalPack.generation);
+    editor.dictionary[0].replace = 'new fire'; editor.dictionaryEntryInput(editor.dictionary[0]);
+    await client.waitReady({ generation: originalPack.generation + 1 });
+    const newerRefresh = refreshDictionary(editor), newer = await hold.completed(1);
+    assert.ok(newer.result.generation > older.result.generation);
+    if (order === 'older first') {
+      older.release.resolve();
+      assert.equal(await olderRefresh, true, 'A published/requested newer generation must not discard valid completed older work.');
+      assert.equal(editor.editorDictionaryMatchPack.generation, older.result.generation);
+      assert.equal(blocks[0].HLs[0].replace, 'old fire');
+      newer.release.resolve(); assert.equal(await newerRefresh, true);
+    } else {
+      newer.release.resolve(); assert.equal(await newerRefresh, true);
+      const pending = editor._pendingDictionaryMatchPack;
+      older.release.resolve();
+      assert.equal(await olderRefresh, order === 'popup', 'Applied newer assistance rejects late older replies; an open popup retains its newest pending pack.');
+      if (order === 'popup') {
+        assert.equal(editor.editorDictionaryMatchPack, originalPack);
+        assert.equal(editor.getEditorDictionaryMatchPack(true), originalPack);
+        assert.equal(editor._pendingDictionaryMatchPack, pending);
+        assert.equal(pending.pack.generation, newer.result.generation);
+        editor.closeHlPopup();
+      }
+    }
+    assert.equal(editor.editorDictionaryMatchPack.generation, newer.result.generation);
+    assert.equal(blocks[0].HLs[0].replace, 'new fire');
+    assert.equal(editor.editorBlocks, blocks); assert.equal(blocks[0].translation, 'typed draft');
+    hold.restore();
+  }
+});
+
+test('held refresh replies still reject changed scope, file, exact English and matching options', async () => {
+  for (const guard of ['scope', 'file', 'English', 'options']) {
+    const { editor } = loadEditor({ dictionary: [{ _id: 'fire', find: 'Fire', replace: 'old fire', alts: [] }] });
+    editor.descs = [description('refresh-guards', 'Fire'), description('other-file', 'Fire')];
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+    editor.editorBlocks[0].english = 'Fire Fire';
+    const pack = editor.editorDictionaryMatchPack, hold = holdCompletedQueries(editor.ensureDictionaryWorker());
+    const refreshing = refreshDictionary(editor), reply = await hold.completed(0);
+    if (guard === 'scope') editor.lang = 'German';
+    if (guard === 'file') editor.editorCurrentEditingDesc = editor.descs[1];
+    if (guard === 'English') editor.editorBlocks[0].english = 'Different English';
+    if (guard === 'options') editor.highlightDict = false;
+    reply.release.resolve();
+    assert.equal(await refreshing, false, guard);
+    assert.equal(editor.editorDictionaryMatchPack, pack, 'An invalid reply cannot replace the captured assistance pack.');
+    hold.restore();
+  }
+});
+
+test('closing a popup rejects a deferred pack whose matching option changed', async () => {
+  const { editor } = loadEditor({ dictionary: [{ _id: 'fire', find: 'Fire', replace: 'old fire', alts: [] }] });
+  editor.descs = [description('popup-option-change', 'Fire', 'typed draft')];
+  assert.equal(await editor.editFile(editor.descs[0].filepath), true);
+  const originalPack = editor.editorDictionaryMatchPack, blocks = editor.editorBlocks;
+  editor.hlPopup.visible = true;
+  editor._hlPopupDictionaryPack = originalPack;
+  blocks[0].english = 'Fire Fire';
+  assert.equal(await refreshDictionary(editor), true);
+  const deferredPack = editor._pendingDictionaryMatchPack.pack;
+  assert.equal(deferredPack.highlightDict, true);
+  editor.highlightDict = false;
+  editor.closeHlPopup();
+  assert.equal(editor.editorDictionaryMatchPack, originalPack, 'Closing must not adopt option-stale pending assistance.');
+  assert.equal(editor._pendingDictionaryMatchPack, null);
+  assert.equal(await refreshDictionary(editor), true);
+  assert.equal(editor.editorDictionaryMatchPack.highlightDict, false);
+  assert.equal(blocks[0].HLs.length, 0);
+  assert.equal(editor.editorBlocks, blocks);
+  assert.equal(blocks[0].translation, 'typed draft');
+});
+
+test('game-scoped entries and All fallback control worker highlights, autocomplete and ranking', async () => {
   const entries = [
     { _id: 'foreign', find: 'Fire', replace: 'PoE1 fire', gameScope: 'poe1', alts: [] },
     { _id: 'fallback', find: ' Fire ', replace: 'All fire', alts: [{ find: 'SharedFlame', replace: 'All alternate' }] },
@@ -962,15 +1264,13 @@ test('game-scoped entries and All fallback control indexed and fallback highligh
     { _id: 'specific', find: 'Fire', replace: 'PoE2 fire', gameScope: 'poe2', alts: [{ find: 'Burning', replace: 'PoE2 alternate' }] },
     { _id: 'foreign-only', find: 'PoE1Only', replace: 'Foreign', gameScope: 'poe1', alts: [] },
   ];
-  const { editor, window } = loadEditor({ dictionary: entries });
+  const { editor, calls } = loadEditor({ dictionary: entries });
   editor.gameVersion = 'poe2'; editor.editorVisible = true;
-  for (const indexed of [true, false]) {
-    if (!indexed) window.EditorDictionaryIndex = null;
-    const plain = editor.buildEnglishHLter('Fire SharedFlame Burning PoE1Only Cold');
+  {
+    const [plain, keyword] = await prepareHighlights(editor, ['Fire SharedFlame Burning PoE1Only Cold', '[Fire]']);
     assert.deepEqual(Array.from(plain.HLs, hl => [hl.dictId, hl.replace]), [
       ['specific', 'PoE2 fire'], ['specific', 'PoE2 alternate'], ['cold', 'All cold'],
-    ], indexed ? 'Indexed' : 'Fallback');
-    const keyword = editor.buildEnglishHLter('[Fire]');
+    ]);
     assert.equal(keyword.HLs[0].replace, '[Fire|PoE2 fire]');
     assert.deepEqual(Array.from(keyword.HLs[0].dictIds), ['specific']);
     editor.editorBlocks = [{ HLs: plain.HLs.concat(keyword.HLs) }];
@@ -984,54 +1284,53 @@ test('game-scoped entries and All fallback control indexed and fallback highligh
     assert.deepEqual(dictionaryIds(editor.filteredDictionary), ['foreign-only'], 'Other-game entries remain searchable.');
     editor.dictionaryFilter = '';
   }
+  assert.equal(calls.syncIndexes, 0);
 });
 
-test('changing games rebuilds a cached index and cancels an asynchronously built old-game index', async () => {
+test('changing games fences the prepared pack and prepares the selected game snapshot', async () => {
   const entries = [
     { _id: 'one', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
     { _id: 'two', find: 'Fire', replace: 'two', gameScope: 'poe2', alts: [] },
     ...dictionary(30),
   ];
-  const { editor, calls, config } = loadEditor({ dictionary: entries, controlledClock: true });
-  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'one');
-  const firstIndex = editor._editorDictionaryIndex;
+  const { editor, calls } = loadEditor({ dictionary: entries });
+  assert.equal((await prepareHighlights(editor, 'Fire'))[0].HLs[0].dictId, 'one');
+  const firstPack = editor.editorDictionaryMatchPack;
   editor.gameVersion = 'poe2';
-  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'two');
-  assert.notEqual(editor._editorDictionaryIndex, firstIndex, 'The game belongs in cache identity even if no watcher ran.');
-  editor.gameVersion = 'poe1'; config.watch.gameVersion.call(editor);
-  let switched = false;
-  editor.yieldEditorWork = async () => {
-    if (!switched) { switched = true; editor.gameVersion = 'poe2'; }
-  };
-  assert.equal(await editor.prepareEditorDictionaryIndex(() => true), true);
-  assert.ok(calls.asyncIndexes >= 2, 'Discard the old game snapshot after a yield.');
-  assert.equal(editor._editorDictionaryGame, 'poe2');
-  assert.equal(editor.buildEnglishHLter('Fire').HLs[0].dictId, 'two');
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), null, 'Assistance from another game cannot be reused.');
+  assert.equal((await prepareHighlights(editor, 'Fire'))[0].HLs[0].dictId, 'two');
+  assert.notEqual(editor.editorDictionaryMatchPack, firstPack, 'The game belongs in cache identity even if no watcher ran.');
+  assert.equal(calls.syncIndexes, 0);
+  assert.equal(calls.asyncIndexes, 0);
 });
 
-test('changing an entry scope holds its row and excludes stale suggestions and paste actions immediately', () => {
+test('changing an entry scope holds its row and retains snapshot suggestions until publication', async () => {
   const { editor, document } = loadEditor({ dictionary: [
     { _id: 'cold', find: 'Cold', replace: 'cold', alts: [] },
     { _id: 'fire', find: 'Fire', replace: 'fire', alts: [] },
   ] });
   editor.editorVisible = true;
-  const result = editor.buildEnglishHLter('Fire');
+  const result = (await prepareHighlights(editor, 'Fire'))[0];
   editor.editorBlocks = [{ HLs: result.HLs }];
   const entry = editor.dictionary[1];
   document.activeElement = dictionaryField(entry._id);
   editor.dictionaryEntryFocusIn({ target: document.activeElement });
   const order = dictionaryIds(editor.filteredDictionary);
   const oldSuggestion = editor.buildHlPopupItems(0)[0];
+  const generation = editor.ensureDictionaryWorker().readyGeneration;
   editor.setDictionaryEntryScope(entry, 'poe2');
   assert.deepEqual(dictionaryIds(editor.filteredDictionary), order, 'A selector change keeps the current editing order.');
-  assert.equal(editor.isDictionaryEntryFound(entry), false);
-  assert.equal(editor.buildHlPopupItems(0).length, 0, 'Old highlights cannot reintroduce a foreign suggestion.');
+  assert.equal(editor.isDictionaryEntryFound(entry), true, 'Matched-row assistance also retains its completed snapshot until publication.');
+  assert.equal(editor.buildHlPopupItems(0).length, 1, 'Same-scope invalidation leaves the completed suggestion available.');
   let inserts = 0;
   editor.insertTranslationText = () => { inserts++; };
   editor.insertHlPopupItem(oldSuggestion);
   editor.copySpanToTranslation({ target: { getAttribute(name) { return name === 'data-hl-id' ? result.HLs[0]._hlId : 'fire'; } } }, editor.editorBlocks[0], 0);
   editor.hotkeyPasteHL({ code: 'Digit1' }, editor.editorBlocks[0], 0);
-  assert.equal(inserts, 0);
+  assert.equal(inserts, 3, 'Paste actions use the same completed snapshot as their displayed suggestion.');
+  await waitForDictionaryUpdate(editor, generation);
+  assert.equal(editor.buildHlPopupItems(0).length, 0, 'The published replacement removes the foreign-game assistance.');
+  assert.equal(editor.isDictionaryEntryFound(entry), false);
   editor.endDictionaryEdit();
   assert.deepEqual(dictionaryIds(editor.filteredDictionary), ['cold', 'fire']);
   editor.setDictionaryEntryScope(entry, 'all');
@@ -1074,56 +1373,67 @@ test('imported duplicate IDs are repaired without losing either Find or overwrit
   assert.equal(editor.visibleDictionary.length, 3);
 });
 
-test('autocomplete reuses the prepared Dictionary index without scans and keeps live TL notes', async () => {
+test('autocomplete reuses matched snapshot metadata without scans and pins TL notes through publication', async () => {
   const entries = dictionary(20000);
-  const { editor, calls } = loadEditor({ dictionary: entries, cacheDictionaryScope: true });
-  await editor.prepareEditorDictionaryIndex(() => true);
+  entries[19999].tlnote = 'Snapshot selected note';
+  const { editor, calls, config } = loadEditor({ dictionary: entries, cacheDictionaryScope: true });
+  const english = 'Term 19999 Term 19998';
+  const matches = (await prepareHighlights(editor, english))[0];
+  editor.editorVisible = true;
+  editor.editorBlocks = [{ english, translation: '', HLs: matches.HLs }];
   const indexes = calls.asyncIndexes + calls.syncIndexes;
+  const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
   let scans = 0;
   entries.find = () => { scans++; assert.fail('Autocomplete must not scan the full Dictionary.'); };
   editor.getActiveDictionaryEntries = () => { scans++; assert.fail('Keyword selection must reuse the prepared index.'); };
   editor.hlPopup.visible = true;
-  editor.hlPopup.filtered = [
-    { dictEntryId: 'word-19999', kwTagName: 'Term 19999', value: '[Term 19999]' },
-    { dictEntryId: 'word-19998', kwTagName: 'Term 19998', value: '[Term 19998]' },
-  ];
-  entries[19999].tlnote = 'Live selected note';
+  editor.hlPopup.filtered = editor.buildHlPopupItems(0);
+  editor.hlPopup.items = editor.hlPopup.filtered;
+  assert.equal(editor.hlPopup.filtered.length, 2);
+  entries[19999].tlnote = 'Changed note';
   const started = performance.now();
   for (let index = 0; index < 200; index++) {
     editor.moveHlPopupSelection(1);
     const item = editor.hlPopupSelectedItem;
     assert.equal(editor.getDictionaryEntryById(item.dictEntryId), entries[19999 - editor.hlPopup.selectedIndex]);
-    assert.equal(editor.findActiveDictionaryKeywordEntry(item.kwTagName), editor.getDictionaryEntryById(item.dictEntryId));
+    const liveEntry = editor.getDictionaryEntryById(item.dictEntryId);
+    assert.equal(editor.findActiveDictionaryKeywordEntry(liveEntry.find), liveEntry);
     assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
-    assert.equal(editor.hlPopupTlnote, editor.hlPopup.selectedIndex ? '' : 'Live selected note');
+    assert.equal(editor.hlPopupTlnote, item.dictEntryId === 'word-19999' ? 'Snapshot selected note' : '');
   }
   console.log(`20,000-entry Dictionary: 200 cached autocomplete selections in ${Math.round(performance.now() - started)} ms (VM fixture).`);
-  entries[19999].tlnote = 'Changed note';
+  config.watch.dictionary.handler.call(editor);
+  await client.waitReady({ generation: generation + 1 });
   editor.hlPopup.selectedIndex = 0;
-  assert.equal(editor.hlPopupTlnote, 'Changed note');
+  assert.equal(editor.hlPopupTlnote, 'Snapshot selected note', 'An open popup retains its captured note after publication.');
   assert.equal(scans, 0);
   assert.equal(calls.asyncIndexes + calls.syncIndexes, indexes, 'Arrow navigation must not rebuild the Dictionary index.');
+  editor.closeHlPopup();
+  await refreshDictionary(editor);
+  editor.hlPopup.filtered = editor.buildHlPopupItems(0);
+  editor.hlPopup.visible = true; editor.hlPopup.selectedIndex = 0;
+  assert.equal(editor.hlPopupTlnote, 'Changed note', 'The next popup uses the replacement snapshot.');
 });
 
-test('autocomplete lookup rejects replaced, invalidated, and other-game prepared indexes', () => {
+test('live Dictionary actions follow edits while assistance retains only same-scope prepared packs', async () => {
   const { editor } = loadEditor({ dictionary: [
     { _id: 'one', find: 'Fire', replace: 'one', gameScope: 'poe1', alts: [] },
     { _id: 'two', find: 'Fire', replace: 'two', gameScope: 'poe2', alts: [] },
   ] });
-  editor.getEditorDictionaryIndex();
+  await prepareHighlights(editor, 'Fire');
   assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'one');
   editor.gameVersion = 'poe2';
   assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
   assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'two');
-  editor.getEditorDictionaryIndex();
+  await prepareHighlights(editor, 'Fire');
+  const pack = editor.editorDictionaryMatchPack;
   editor.dictionary = [{ _id: 'replacement', find: 'Fire', replace: 'new', alts: [] }];
-  assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), pack, 'A same-scope replacement does not discard completed assistance.');
   assert.equal(editor.getDictionaryEntryById('two'), undefined);
   assert.equal(editor.findActiveDictionaryKeywordEntry('Fire')._id, 'replacement');
-  editor.getEditorDictionaryIndex();
   editor.dictionary[0].find = 'Cold';
   editor.invalidateEditorDictionaryIndex();
-  assert.equal(editor.getPreparedEditorDictionaryIndex(), null);
+  assert.equal(editor.getPreparedEditorDictionaryIndex(), pack);
   assert.equal(editor.findActiveDictionaryKeywordEntry('Fire'), undefined);
   assert.equal(editor.findActiveDictionaryKeywordEntry('Cold')._id, 'replacement');
 });
@@ -1162,11 +1472,14 @@ test('autocomplete Dictionary page lookup reuses positions and refreshes on orde
   assert.equal(view.dictionaryPage, 1);
 });
 
-test('Dictionary scope, matches-first ordering and filtering scan raw entries while visible edits stay reactive', () => {
+test('Dictionary scope, matches-first ordering and filtering scan raw entries while visible edits stay reactive', async () => {
   const fixture = trackedDictionary(dictionary(20000));
   const { editor } = loadEditor({ dictionary: fixture.dictionary, toRaw: fixture.toRaw, cacheDictionaryScope: true });
   editor.editorVisible = true;
-  editor.editorBlocks = [{ HLs: [{ dictId: 'word-19999' }, { dictId: 'word-19998' }] }];
+  const english = 'Term 19999 Term 19998';
+  const matches = (await prepareHighlights(editor, english))[0];
+  editor.editorBlocks = [{ english, translation: '', HLs: matches.HLs }];
+  fixture.counts.reads = fixture.counts.writes = 0;
   const view = editor.dictionaryScopeView;
   assert.equal(editor.getActiveDictionaryEntries()[0], fixture.entries[0]);
   assert.equal(editor.activeDictionaryIds.has('word-19999'), true);
@@ -1235,23 +1548,17 @@ test('visible and keyword Dictionary rows preserve exact identity before importe
   assert.equal(editor.findActiveDictionaryKeywordEntry('Flame'), fixture.dictionary[3]);
 });
 
-test('gemlevel links reuse base Dictionary Find and autocomplete preserves every level', () => {
-  for (const indexed of [false, true]) {
+test('gemlevel links reuse base Dictionary Find and worker autocomplete preserves every level', async () => {
+  {
     const entries = [{ _id: 'cry', find: 'BattlemagesCry', replace: 'คำรามนักรบเวท', alts: [
       { _id: 'cry-alt', find: "Battlemage's Cry", replace: "คำรามนักรบเวท (Battlemage's Cry)" },
     ] }];
     const { editor } = loadEditor({ dictionary: entries });
-    if (!indexed) {
-      editor.getEditorDictionaryIndex = () => null;
-      editor.getPreparedEditorDictionaryIndex = () => null;
-    } else {
-      editor.getEditorDictionaryIndex();
-    }
     for (const level of ['{0}', '{1}', '20']) {
       const identity = `BattlemagesCry<gemlevel=${level}>`;
       assert.equal(editor.findActiveDictionaryKeywordEntry(identity), entries[0]);
       const english = `[${identity}|Battlemage's Cry]`;
-      const { HLs, englishHLter } = editor.buildEnglishHLter(english);
+      const { HLs, englishHLter } = (await prepareHighlights(editor, english))[0];
       assert.equal(HLs.length, 1);
       assert.equal(HLs[0].dictId, 'cry');
       assert.deepEqual(Array.from(HLs[0].dictIds), ['cry']);
@@ -1268,7 +1575,7 @@ test('gemlevel links reuse base Dictionary Find and autocomplete preserves every
       assert.equal(items.every(item => item.value.startsWith(`[${identity}|`)), true);
       assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(items[0]), false);
 
-      const noDisplay = editor.buildEnglishHLter(`[${identity}]`);
+      const noDisplay = (await prepareHighlights(editor, `[${identity}]`))[0];
       editor.editorBlocks = [{ english: `[${identity}]`, translation: '', HLs: noDisplay.HLs }];
       const noDisplayItems = editor.buildHlPopupItems(0);
       assert.equal(noDisplayItems[0].value, `[${identity}|คำรามนักรบเวท]`);

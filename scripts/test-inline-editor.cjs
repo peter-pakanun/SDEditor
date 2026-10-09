@@ -61,7 +61,7 @@ function harness({ records = new Map() } = {}) {
     },
   };
   const window = { location: { search: '?lang=Thai' }, CloudUI: { mixin: {} }, OfflineStore: store,
-    crypto: { randomUUID: () => 'test-id-' + (++nextId) }, addEventListener() {}, removeEventListener() {} };
+    crypto: { randomUUID: () => 'test-id-' + (++nextId) }, addEventListener() {}, removeEventListener() {}, setTimeout, clearTimeout, performance };
   const document = { hidden: false, activeElement: null, querySelectorAll() { return []; }, querySelector() { return null; },
     addEventListener() {}, removeEventListener() {}, createElement() { return { set innerHTML(html) {
       this.value = html.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&');
@@ -70,7 +70,7 @@ function harness({ records = new Map() } = {}) {
     Vue: { defineComponent(value) { config = value; return value; }, createApp() { return { component() {}, directive() {}, mount() {} }; },
       nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } } });
   for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
-    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'collaborationIntegration.js', 'inlineEditor.js', 'index.js']) {
+    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -530,6 +530,33 @@ test('inline row activation prepares the shared editing session without showing 
   assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false); assert.equal(editor.editorSessionActive, true);
   assert.equal(editor.editorBlocks[0].english, 'Source'); assert.equal(editor.editorBlocks[0].translation, 'translation');
   assert.equal(h.calls.focused, 0); assert.equal(editor._draftSession.scope.filepath, desc.filepath);
+});
+
+test('a Dictionary replacement refreshes assistance after inline-to-full handoff without replacing the draft', async () => {
+  const { editor, desc, config, calls } = harness();
+  editor.dictionary = [{ _id: 'source-term', find: 'Source', replace: 'original suggestion', alts: [], tlnote: 'original note' }];
+  assert.equal(await editor.activateInlineRow(desc.filepath), true, editor.editorLoadError);
+  const blocks = editor.editorBlocks, session = editor._draftSession, pack = editor.editorDictionaryMatchPack;
+  const client = editor.ensureDictionaryWorker(), generation = client.readyGeneration;
+  blocks[0].translation = 'draft typed before publication';
+  editor.dictionary[0].replace = 'replacement suggestion';
+  editor.dictionary[0].tlnote = 'replacement note';
+  config.watch.dictionary.handler.call(editor);
+  assert.equal(editor.editorDictionaryMatchPack, pack);
+  assert.equal(blocks[0].HLs[0].replace, 'original suggestion');
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), true, editor.editorLoadError);
+  assert.equal(editor.editorBlocks, blocks); assert.equal(editor._draftSession, session);
+  await client.waitReady({ generation: generation + 1 });
+  blocks[0].translation = 'draft typed while the replacement completed';
+  editor.translationInput(blocks[0], 0);
+  const run = editor._editorDictionaryRefreshRun = (editor._editorDictionaryRefreshRun || 0) + 1;
+  assert.equal(await editor.refreshEditorDictionaryHighlights(run), true);
+  assert.equal(editor.editorBlocks, blocks); assert.equal(editor._draftSession, session);
+  assert.equal(blocks[0].translation, 'draft typed while the replacement completed');
+  assert.equal(blocks[0].HLs[0].replace, 'replacement suggestion');
+  assert.match(blocks[0].translationHLter, /draft typed while the replacement completed/);
+  assert.equal(editor.editorTranslationReadOnly, false);
+  assert.equal(calls.promotions.length, 0, 'Background assistance cannot submit the draft.');
 });
 
 async function failedInlineClaimFixture() {

@@ -652,10 +652,15 @@
                 await this.writeEditorDraft(session, this.serializeEditorTranslations(), true);
               }
             } else {
-              const restored = Array.from({ length: Math.max(desc.translations.English.length, accepted.translations.length) }, (_, index) =>
-                this.makeEditorBlock(desc.translations.English[index] || '', accepted.translations[index] || '', true));
-              this.applyPreparedEditorBlocks(restored);
-              this.editorOriginalTranslations = restored.map(block => block.translation);
+              const beforePrepare = copy(this.serializeEditorTranslations());
+              const stillCurrent = () => this.editorSessionActive && this.editorCurrentEditingDesc === desc
+                && this.editorBlocks === blocks && this._draftSession === session && this._editorOpenRun === openRun
+                && this.draftScopeCurrent(scope) && this.collaborationContextCurrent(context)
+                && equal(accepted, context.client?.fileBase(desc.filepath) || this.collaborationFile(desc));
+              const restored = await this.prepareMatchedEditorBlocks(desc.translations.English, accepted.translations, stillCurrent);
+              if (!restored || !stillCurrent()) return false;
+              if (equal(beforePrepare, this.serializeEditorTranslations())) this.applyPreparedEditorBlocks(restored);
+              this.editorOriginalTranslations = accepted.translations.map(text => this.decodeEscapedNewlines(text));
               this._editorCollabBase = context.client ? copy(accepted) : undefined;
               if (session) { session.base = copy(accepted); session.original = [...accepted.translations]; }
               this.refreshGamePreview();
@@ -771,7 +776,12 @@
           this.editorCompareActive = true; this.editorCompareMode = 'translation';
           this.editorCompareTitle = 'Local draft recovery — review the preserved translation against this source';
           const english = desc.translations.English;
-          this.applyPreparedEditorBlocks(Array.from({ length: Math.max(english.length, translations.length, oldEnglish.length) }, (_, i) => this.makeEditorBlock(english[i] || '', translations[i] || '', true)));
+          const candidate = this.draftRecoveryCandidate;
+          const stillCurrent = () => this.draftRecoveryCandidate === candidate && this.draftScopeCurrent(scope)
+            && candidate.sessionRun === this._editorOpenRun && this.editorCurrentEditingDesc === desc;
+          const prepared = await this.prepareMatchedEditorBlocks(english, translations, stillCurrent, oldEnglish.length);
+          if (!prepared || !stillCurrent()) return;
+          this.applyPreparedEditorBlocks(prepared);
           this.editorShowEnglishDiff = !equal(oldEnglish, english);
           for (let i = 0; i < this.editorBlocks.length; i++) {
             const block = this.editorBlocks[i], oldText = this.decodeEscapedNewlines(this.draftRecoveryCandidate.base.translations[i] || ''), newText = this.decodeEscapedNewlines(translations[i] || '');
@@ -790,10 +800,21 @@
           this.collaborationNotice = 'The committed translation changed during recovery. Reopen Local drafts and review the current comparison.';
           return;
         }
+        const english = this.editorCurrentEditingDesc.translations.English;
+        const stillCurrent = () => this.draftRecoveryCandidate === recovery && this.editorSessionActive
+          && this.draftScopeCurrent(recovery.scope) && recovery.sessionRun === this._editorOpenRun
+          && recovery.expectedRevision === this._draftSession?.expectedRevision;
+        const prepared = await this.prepareMatchedEditorBlocks(english, recovery.translations, stillCurrent);
+        if (!prepared || !stillCurrent()) return;
+        const preparedBase = this.collaborationFile?.(this.editorCurrentEditingDesc)
+          || { translations: this.editorCurrentEditingDesc.translations[this.lang] || [] };
+        if (!equal(recovery.base, preparedBase)) {
+          this.collaborationNotice = 'The committed translation changed during recovery. Reopen Local drafts and review the current comparison.';
+          return;
+        }
         this.editorCompareActive = false; this.draftRecoveryCandidate = null;
         this.editorShowEnglishDiff = !!this.editorDroppedCandidate;
-        const english = this.editorCurrentEditingDesc.translations.English;
-        this.applyPreparedEditorBlocks(Array.from({ length: Math.max(english.length, recovery.translations.length) }, (_, i) => this.makeEditorBlock(english[i] || '', recovery.translations[i] || '', true)));
+        this.applyPreparedEditorBlocks(prepared);
         this._draftSession.base = copy(recovery.base); this._editorCollabBase = copy(recovery.base);
         this._draftSession.resolveConflicts = true;
         this._draftSession.writeError = new Error('Reviewed recovery needs a fresh draft revision');

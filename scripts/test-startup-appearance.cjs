@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { performance } = require('node:perf_hooks');
 
 const publicDir = path.join(__dirname, '../public');
 const html = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8');
@@ -34,21 +35,22 @@ function harness(options = {}) {
   };
   const document = { documentElement: root, body: { style: {} }, addEventListener() {}, removeEventListener() {} };
   const location = { search: options.testMode ? '?testMode=1&lang=Thai' : '', hash: '', hostname: '127.0.0.1', pathname: '/', origin: 'http://127.0.0.1:3333' };
-  const window = { location, document, localStorage, fetch: async () => { throw new Error('Unexpected network request'); }, addEventListener() {} };
+  const window = { location, document, localStorage, fetch: async () => { throw new Error('Unexpected network request'); }, addEventListener() {}, setTimeout, clearTimeout, performance };
   let config;
   const context = vm.createContext({ window, document, location, localStorage, navigator: {},
     sessionStorage: { getItem() { return null; } }, history: { replaceState() {} },
     URLSearchParams, URL, console, setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
     Vue: { defineComponent(value) { config = value; return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; },
-      nextTick(callback) { return Promise.resolve().then(callback); } },
+      nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } },
   });
   const head = html.match(/<head>[\s\S]*?<\/head>/i)[0];
   for (const match of head.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
     if (!/\bsrc\s*=/.test(match[1])) vm.runInContext(match[2], context, { filename: 'startup-bootstrap' });
   }
-  for (const name of ['workspaceState.js', 'cloudSync.js', 'cloudUi.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'dictionarySync.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'cloudSync.js', 'cloudUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
+    if (name === 'dictionarySync.js') window.DictionarySync = context.DictionarySync;
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
     ...config.mixins.map(mixin => mixin.methods || {}), config.methods, {
@@ -109,7 +111,7 @@ test('stale legacy preferences cannot brighten the first upgrade and missing or 
 
 test('stale legacy light preferences cannot brighten the canvas while the active dark profile loads', async () => {
   const h = harness({ cache: 'dark', settings: { lang: 'Thai', theme: 'light' } });
-  const local = deferred(), network = deferred();
+  const local = deferred(), network = deferred(), networkStart = deferred();
   let networkStarted = false;
   h.window.CloudSync.Client = class {
     constructor({ onChange }) { this.onChange = onChange; }
@@ -118,6 +120,7 @@ test('stale legacy light preferences cannot brighten the canvas while the active
     async refreshSession() {
       networkStarted = true;
       assert.equal(h.root.hasAttribute('data-app-booting'), false, 'Remote work must start after local UI is revealed');
+      networkStart.resolve();
       await network.promise;
     }
   };
@@ -129,7 +132,7 @@ test('stale legacy light preferences cannot brighten the canvas while the active
   assert.equal(networkStarted, false);
   assert.equal(h.writes.some(([key, value]) => key === 'sdeditor-theme' && value === 'light'), false);
   local.resolve();
-  await tick();
+  await networkStart.promise;
   assert.equal(h.editor.theme, 'dark');
   assert.equal(h.editor.startupReady, true);
   assert.equal(h.root.hasAttribute('data-app-booting'), false);
@@ -145,11 +148,78 @@ test('startup reveals only after Vue has rendered the resolved theme and state',
   h.editor.theme = 'grey';
   h.editor.$nextTick = () => rendering.promise;
   const finishing = h.editor.finishStartup();
+  await tick();
   assert.equal(h.root.getAttribute('data-theme'), 'grey');
   assert.equal(h.root.hasAttribute('data-app-booting'), true);
   rendering.resolve();
   await finishing;
   assert.equal(h.root.hasAttribute('data-app-booting'), false);
+});
+
+test('Initialization waits for the first local Dictionary snapshot without starting a network request', async () => {
+  const h = harness({ cache: 'dark' }), snapshot = deferred();
+  h.editor.lang = 'Thai'; h.editor.gameVersion = 'poe1';
+  let started = false;
+  h.editor.ensureDictionarySnapshot = () => { started = true; return snapshot.promise; };
+  const finishing = h.editor.finishStartup();
+  await tick();
+  assert.equal(started, true);
+  assert.equal(h.editor.startupReady, false);
+  assert.equal(h.root.hasAttribute('data-app-booting'), true);
+  snapshot.resolve({ generation: 1 });
+  await finishing;
+  assert.equal(h.editor.startupReady, true);
+  assert.equal(h.root.hasAttribute('data-app-booting'), false);
+});
+
+test('the initial game selector paints without awaiting an irrelevant Dictionary snapshot', async () => {
+  const h = harness({ cache: 'dark' });
+  h.editor.lang = 'Thai'; h.editor.gameVersion = '';
+  h.editor.ensureDictionarySnapshot = () => { assert.fail('No selected game means there is no Dictionary scope to prepare.'); };
+  await h.editor.finishStartup(true);
+  assert.equal(h.editor.startupReady, true);
+  assert.equal(h.root.hasAttribute('data-app-booting'), false);
+  assert.equal(h.editor.gameVersion, '');
+});
+
+test('workspace loading starts Dictionary prewarming before its IndexedDB reads settle', async () => {
+  const h = harness({ cache: 'dark' }), workspace = deferred(), source = deferred(), snapshot = deferred();
+  const events = [];
+  h.editor.lang = 'Thai'; h.editor.cloudProfileId = 'local-profile'; h.editor.gameVersion = 'poe1';
+  h.editor.resetVersionedState = () => {};
+  h.window.OfflineStore.getWorkspace = () => { events.push('workspace read'); return workspace.promise; };
+  h.window.OfflineStore.getSource = () => { events.push('source read'); return source.promise; };
+  h.editor.prepareStoredWorkspaceSource = async rows => rows;
+  const ensure = h.editor.ensureDictionaryWorker;
+  h.editor.ensureDictionaryWorker = function () {
+    events.push('Dictionary prewarm');
+    assert.equal(this.cloudProfileId, 'local-profile'); assert.equal(this.lang, 'Thai');
+    return ensure.call(this);
+  };
+  h.editor.ensureDictionarySnapshot = () => snapshot.promise;
+  const loading = h.editor.loadVersionedStorage();
+  await tick();
+  assert.equal(events[0], 'Dictionary prewarm');
+  assert.ok(events.includes('workspace read')); assert.ok(events.includes('source read'));
+  workspace.resolve({ descs: [], status: {} });
+  source.resolve([{ filepath: 'test/local.txt', translations: { English: ['Local source'], Thai: ['คำแปล'] } }]);
+  await tick();
+  assert.equal(h.editor.sourceLoaded, false, 'Cold workspace publication awaits the first prepared local snapshot.');
+  snapshot.resolve({ generation: 1 });
+  await loading;
+  assert.equal(h.editor.sourceLoaded, true);
+  assert.equal(h.editor.descs[0].filepath, 'test/local.txt');
+  assert.equal(h.editor.cloudStorageError, '');
+});
+
+test('a failed first Dictionary snapshot reveals an actionable startup error', async () => {
+  const h = harness({ cache: 'dark' });
+  h.editor.lang = 'Thai'; h.editor.gameVersion = 'poe1';
+  h.editor.ensureDictionarySnapshot = async () => { throw new Error('Fixture local cache failure'); };
+  await h.editor.finishStartup(true);
+  assert.equal(h.editor.startupReady, true);
+  assert.equal(h.root.hasAttribute('data-app-booting'), false);
+  assert.match(h.editor.cloudStorageError, /Dictionary matches.*Fixture local cache failure/);
 });
 
 test('runtime changes and restored profile themes become the next startup theme', async () => {
