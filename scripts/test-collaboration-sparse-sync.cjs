@@ -105,11 +105,12 @@ async function fixture(options = {}) {
     fileCount: baselineSource.length, descriptionCount: baselineSource.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
   const store = options.store || storeFixture(baselineSource), server = options.server || serverFixture(archive), remote = [];
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null, uuid: () => 'sparse-' + ++id,
+    onStatus: options.onStatus, onWork: options.onWork,
     onRemote: files => { options.onRemote?.(files, store); remote.push(copy(files)); } });
   const baselineInitial = options.files || (options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
     translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
   const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: baselineInitial,
-    workspace: store.workspace, archive, baselineSource, baselineTree: tree };
+    workspace: store.workspace, archive, baselineSource, baselineTree: tree, deferRemote: !!options.deferRemote };
   await options.beforeConnect?.({ client, store, server, remote, connection, archive, tree });
   await client.connect(connection);
   return { client, store, server, remote, connection, archive, tree };
@@ -820,4 +821,111 @@ test('a readonly repair reload from an old account cannot replace the new room o
   assert.deepEqual(value.client.state, nextState); assert.deepEqual(value.store.state, nextState);
   assert.deepEqual(value.store.workspace, workspaceBefore);
   assert.equal(value.store.writes, 0); assert.equal(value.remote.length, remoteBefore); assert.equal(notifications, 0);
+});
+
+test('local sparse preparation completes before remote work and durable saves stay queued until release', async t => {
+  const work = [], value = await fixture({ deferRemote: true, onWork: event => work.push(copy(event)) });
+  const { client, server, store } = value; t.after(() => client.destroy());
+  assert.equal(client.room().initialized, false);
+  assert.equal(server.requests.length, 0, 'Local readiness does not start archive resolution, join or catch-up.');
+  assert.equal((await client.claim('a.txt')).offline, true);
+  await client.save({ workspace: store.workspace, waitForSync: false,
+    files: [{ filepath: 'a.txt', translations: ['typed before network starts', 'two'], trackedForExport: true }] });
+  await client.sync(); client.schedule(); client.updatePresence();
+  assert.equal(client.timer, null);
+  assert.equal(server.requests.length, 0);
+  assert.equal(client.room().outbox.length, 1);
+  assert.equal(store.workspace.staged.Thai['a.txt'].translations[0], 'typed before network starts');
+  assert.equal(work.filter(event => event.active).every(event => event.key === 'source'), true);
+
+  const entered = deferred(), release = deferred(), request = client.request;
+  client.request = async (...args) => {
+    if (args[0].endsWith('/archives/resolve')) { entered.resolve(); await release.promise; }
+    return request(...args);
+  };
+  const remote = client.startRemote();
+  assert.equal(client.startRemote(), remote, 'Concurrent release calls share one remote pass.');
+  await entered.promise;
+  assert.equal(client.room().initialized, false);
+  assert.equal(client.fileBase('a.txt').translations[0], 'typed before network starts');
+  release.resolve(); await remote;
+  assert.equal(client.room().initialized, true);
+  assert.equal(client.room().outbox.length, 0);
+  assert.equal(server.files[0].translations[0], 'typed before network starts');
+  assert.equal(server.requests.filter(request => request.path.endsWith('/archives/resolve')).length, 1);
+});
+
+test('disconnect and a replacement account fence a held deferred archive resolution', async t => {
+  const value = await fixture({ deferRemote: true }), { client, store, server } = value;
+  const entered = deferred(), release = deferred(), request = client.request;
+  t.after(() => { release.resolve(); client.destroy(); });
+  client.request = async (...args) => {
+    if (args[0].endsWith('/archives/resolve')) { entered.resolve(); await release.promise; }
+    return request(...args);
+  };
+  const remote = client.startRemote(), rejected = assert.rejects(remote, error => error.stale === true);
+  await entered.promise;
+  client.disconnect();
+  await client.connect({ ...value.connection, accountId: 'replacement-account', deferRemote: true });
+  const key = client.key, durable = copy(store.state), active = copy(client.room());
+  release.resolve(); await rejected;
+  assert.equal(client.key, key); assert.deepEqual(client.room(), active); assert.deepEqual(store.state, durable);
+  assert.equal(server.requests.some(request => request.path.endsWith('/join')), false);
+  assert.equal(client.remoteDeferred, true);
+});
+
+test('deferred canonical mismatch leaves local work usable and reports the actionable error without joining', async t => {
+  const status = [], value = await fixture({ deferRemote: true, onStatus: event => status.push(copy(event)) });
+  const { client, server, store } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace, waitForSync: false,
+    files: [{ filepath: 'a.txt', translations: ['safe local work', 'two'], trackedForExport: true }] });
+  server.archive = await P.finalizeArchive({ ...value.archive, configHash: undefined, baselineId: undefined,
+    decisions: [{ filepath: 'a.txt', language: 'Thai', occurrence: 1, blockHash: 'a'.repeat(64) }] });
+  await assert.rejects(client.startRemote(), error => error.code === 'ARCHIVE_CONFIG_MISMATCH');
+  assert.equal(server.requests.some(request => request.path.endsWith('/join') || request.path.endsWith('/mutations')), false);
+  assert.equal(client.room().outbox.length, 1);
+  assert.equal(store.workspace.staged.Thai['a.txt'].translations[0], 'safe local work');
+  assert.equal(status.at(-1).error, true); assert.match(status.at(-1).message, /agreed import configuration/);
+});
+
+test('sparse snapshot replacement resets removed shared files to the immutable baseline', async t => {
+  const value = await fixture(), { client, server, store, remote } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace,
+    files: [{ filepath: 'a.txt', translations: ['shared text', 'two'], trackedForExport: true }] });
+  server.files = []; server.sequence++;
+  await client.acceptSnapshot(server.snapshot(), client.epoch);
+  assert.equal(store.workspace.staged.Thai['a.txt'], undefined);
+  assert.deepEqual(store.workspace.descs.find(desc => desc.filepath === 'a.txt').translations.Thai, source[0].translations.Thai);
+  assert.deepEqual(client.fileBase('a.txt').translations, source[0].translations.Thai);
+  assert.equal(remote.at(-1)[0].stagingReset, true);
+  assert.equal(remote.at(-1)[0].trackedForExport, false);
+});
+
+test('cold sparse activation and snapshot replacement select actual work rather than untouched manifest paths', async t => {
+  const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());
+  await client.save({ workspace: store.workspace,
+    files: [{ filepath: 'a.txt', translations: ['accepted work', 'two'], trackedForExport: true }] });
+  const commands = [], pathsFor = command => [...new Set([...command.filepaths,
+    ...(command.includeAffected ? Object.keys(store.state.rooms[command.key].shared) : [])])];
+  store.getCollaborationRecords = async command => {
+    commands.push(copy(command));
+    const room = copy(store.state.rooms[command.key]); room.manifest.files = [];
+    return { room, selection: { filepaths: pathsFor(command), operationIds: room.outbox.map(operation => operation.id) } };
+  };
+  const aggregate = store.updateCollaborationState.bind(store);
+  store.updateCollaborationRecords = async (command, update, options) => {
+    commands.push(copy(command));
+    const result = await aggregate(update, options), room = result.rooms[command.key];
+    room.manifest.files = [];
+    return { room, selection: { filepaths: pathsFor(command), operationIds: room.outbox.map(operation => operation.id) } };
+  };
+  store.updateCollaborationState = async () => { throw new Error('Sparse activation must use scoped records.'); };
+  await client.connect({ ...value.connection, workspace: store.workspace, deferRemote: true });
+  assert.equal(commands[0].command, 'open-local-room'); assert.equal(commands[0].includeAffected, true);
+  assert.deepEqual(commands[0].filepaths, ['a.txt']);
+  assert.equal(commands[1].command, 'prepare-local-room'); assert.deepEqual(commands[1].filepaths, ['a.txt']);
+  assert.equal(client.room().manifest.files.length, source.length, 'The active client still retains complete source metadata.');
+  await client.acceptSnapshot(server.snapshot(), client.epoch);
+  assert.equal(commands.at(-1).command, 'accept-snapshot'); assert.deepEqual(commands.at(-1).filepaths, ['a.txt']);
+  assert.deepEqual(client.fileBase('b.txt').translations, source[1].translations.Thai, 'Untouched files use the immutable local baseline.');
 });

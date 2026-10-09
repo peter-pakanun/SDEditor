@@ -30,7 +30,12 @@
                 return lines.join('\n');
             },
         },
-        beforeUnmount() { this.disposeWorkspaceInitialization(); },
+        beforeUnmount() {
+            this._workspaceBackgroundDisposed = true;
+            clearTimeout(this._workspaceBackgroundTimer);
+            this._workspaceBackgroundJobs?.clear();
+            this.disposeWorkspaceInitialization();
+        },
         methods: {
             beginWorkspaceInitialization({ label = 'Initializing workspace', force = false, session } = {}) {
                 if (session && session.run !== this._workspaceInitializationRun) return null;
@@ -66,6 +71,32 @@
                 this._workspaceInitializationTimer = null;
                 this.workspaceInitializationActive = false;
                 this._workspaceInitializationRun = null;
+                this.flushWorkspaceBackground();
+            },
+            queueWorkspaceBackground(key, callback, onError) {
+                if (this._workspaceBackgroundDisposed) return false;
+                (this._workspaceBackgroundJobs ||= new Map()).set(key, { callback, onError });
+                this.flushWorkspaceBackground();
+                return true;
+            },
+            flushWorkspaceBackground() {
+                if (this._workspaceBackgroundDisposed || this.workspaceInitializationActive
+                    || this._workspaceBackgroundTimer || !this._workspaceBackgroundJobs?.size) return;
+                // First expose the prepared local workspace. Remote work starts
+                // in a later task, after its first paint, and never owns the gate.
+                this._workspaceBackgroundTimer = setTimeout(async () => {
+                    await this.$nextTick?.();
+                    if (root.requestAnimationFrame && !root.document?.hidden) {
+                        await new Promise(resolve => root.requestAnimationFrame(() => setTimeout(resolve, 0)));
+                    }
+                    this._workspaceBackgroundTimer = null;
+                    if (this._workspaceBackgroundDisposed || this.workspaceInitializationActive) return;
+                    const jobs = [...this._workspaceBackgroundJobs.values()];
+                    this._workspaceBackgroundJobs.clear();
+                    for (const job of jobs) Promise.resolve().then(job.callback).catch(error => {
+                        if (!error?.stale && !this._workspaceBackgroundDisposed) job.onError?.(error);
+                    });
+                }, 0);
             },
             beginWorkspaceInitializationTask(label, session) {
                 const run = this._workspaceInitializationRun;

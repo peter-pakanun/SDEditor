@@ -65,8 +65,39 @@
       catch (error) { emit('failed'); throw error; }
     }
     const row = (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra });
-    const get = async (tx, name, id) => (await request(tx.objectStore(name).get(id)))?.value;
+    // Accepted baseline rows cannot change within their source identity. Share
+    // their detached reads only inside one transaction, including room/workspace
+    // adapters that otherwise fetch the same original several times.
+    const baselineReads = new WeakMap(), baselineScopes = new WeakMap();
+    function baselineCache(tx) {
+      let cache = baselineReads.get(tx);
+      if (!cache) baselineReads.set(tx, cache = new Map());
+      return cache;
+    }
+    async function get(tx, name, id) {
+      if (name !== stores.baseline) return (await request(tx.objectStore(name).get(id)))?.value;
+      const cache = baselineCache(tx);
+      if (!cache.has(id)) {
+        const pending = request(tx.objectStore(name).get(id)).then(value => {
+          if (!value) cache.delete(id); // Imports may still insert an absent row.
+          return value?.value;
+        }, error => { cache.delete(id); throw error; });
+        cache.set(id, pending);
+      }
+      return cache.get(id);
+    }
     const all = (tx, name, scope) => request(tx.objectStore(name).index('by_scope').getAll(scope));
+    function originalRows(tx, scope) {
+      let scopes = baselineScopes.get(tx);
+      if (!scopes) baselineScopes.set(tx, scopes = new Map());
+      const id = baselineKey(scope);
+      if (!scopes.has(id)) scopes.set(id, all(tx, stores.baseline, id).then(rows => {
+        const cache = baselineCache(tx);
+        for (const item of rows) cache.set(item.key, Promise.resolve(item.value));
+        return rows;
+      }));
+      return scopes.get(id);
+    }
     async function transaction(selected, mode, action) {
       const db = await openDb(), tx = db.transaction([...new Set(selected)], mode), completion = done(tx);
       try { const result = await action(tx); await completion; return result; }
@@ -197,7 +228,9 @@
           records.push(...related.filter(Boolean));
         }
       }
-      const originals = new Map((await Promise.all(files.map(item => get(tx, stores.baseline, key(baselineKey(scope), item.value.filepath))))).filter(Boolean).map(desc => [desc.filepath, desc]));
+      const originalFiles = filepaths == null ? (await originalRows(tx, scope)).map(item => item.value)
+        : await Promise.all(files.map(item => get(tx, stores.baseline, key(baselineKey(scope), item.value.filepath))));
+      const originals = new Map(originalFiles.filter(Boolean).map(desc => [desc.filepath, desc]));
       const workspace = assembleWorkspace(meta, files, [...new Map(records.map(r => [r.key, r])).values()].sort((a,b) => (a.value.order || 0) - (b.value.order || 0)), originals, filepaths == null);
       if (filepaths == null && workspace.importArchive) {
         const retained = await get(tx, stores.assets, baselineKey(scope));
@@ -331,7 +364,18 @@
     }
     async function source(scope) {
       await ensure(scope);
-      return transaction([stores.baseline], 'readonly', async tx => (await all(tx, stores.baseline, baselineKey(scope))).sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value));
+      return transaction([stores.baseline], 'readonly', async tx => (await originalRows(tx, scope)).slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value));
+    }
+    async function activation(scope) {
+      await ensure(scope);
+      return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', async tx => {
+        const source = (await originalRows(tx, scope)).slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value);
+        const workspace = await readWorkspace(tx, scope);
+        const retained = await get(tx, stores.assets, baselineKey(scope));
+        // Source and import-baseline consumers previously owned independent
+        // values. Preserve that boundary while eliminating duplicate DB reads.
+        return { workspace, source, baseline: retained && { ...retained, source: copy(source) } };
+      });
     }
     async function saveWorkspace(scope, value, options = {}) {
       await ensure(scope);
@@ -378,7 +422,7 @@
       await ensure(scope);
       return transaction([stores.assets, stores.baseline], 'readonly', async tx => {
         const value = await get(tx, stores.assets, baselineKey(scope));
-        return value && { ...value, source: (await all(tx, stores.baseline, baselineKey(scope))).sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value) };
+        return value && { ...value, source: (await originalRows(tx, scope)).slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value) };
       });
     }
     async function hasScope(scope) {
@@ -449,7 +493,7 @@
         get(logicalKey) {
           return synthetic(async () => {
             if (logicalKey === logical.workspace) return readWorkspace(tx, scope, paths);
-            if (logicalKey === logical.source) return (await Promise.all(paths.map(path => get(tx, stores.baseline, key(baselineKey(scope), path))))).filter(Boolean);
+            if (logicalKey === logical.source) return copy((await Promise.all(paths.map(path => get(tx, stores.baseline, key(baselineKey(scope), path))))).filter(Boolean));
             if (logicalKey === logical.receipts) { const receipt = await get(tx, stores.receipts, key(id, batch.jobId)); return receipt ? [receipt] : []; }
             if (logicalKey === 'collaboration_v1') {
               const read = await rooms.readRoom(tx, batch.collaboration.key, paths, { includeOutbox: 'paths', includeConflicts: true, includeDropped: true });
@@ -506,14 +550,20 @@
       if (value.sourceRef) {
         const ref = value.sourceRef, id = key(baselineKey(ref), ref.filepath);
         if (!sources.has(id)) sources.set(id, get(tx, stores.baseline, id));
-        record.source = await sources.get(id) || value.source || null;
+        record.source = copy(await sources.get(id) || value.source || null);
       }
       for (const field of ['conflicts', 'recovery']) if (value[field]?.length) record[field] = await Promise.all(value[field].map(variant => hydrateDraft(tx, variant, sources)));
       return record;
     }
     async function draftGet(id) {
-      const normalized = await transaction([stores.drafts, stores.baseline], 'readonly', async tx => hydrateDraft(tx, await get(tx, stores.drafts, id)));
-      if (normalized !== undefined) return normalized;
+      // Most files have no draft. Do not put that tiny lookup behind unrelated
+      // collaboration transactions that include the baseline store.
+      const hasSourceRef = value => !!value?.sourceRef || ['conflicts', 'recovery'].some(field => (value?.[field] || []).some(hasSourceRef));
+      const normalized = await transaction([stores.drafts], 'readonly', tx => get(tx, stores.drafts, id));
+      if (normalized !== undefined) {
+        return hasSourceRef(normalized)
+          ? transaction([stores.baseline], 'readonly', tx => hydrateDraft(tx, normalized)) : normalized;
+      }
       const transferred = await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, key('draft', id)));
       if (transferred) return undefined;
       const legacy = await legacyGet(id);
@@ -528,8 +578,16 @@
         tx.objectStore(stores.migration).put({ key: key('draft', id), scope: key('draft', id), value: { state: 'ready' } });
         return hydrateDraft(tx, current);
       });
-      return legacy ? trackMigration('draft', id, { accountId: legacy.profile, game: legacy.game, branchId: legacy.branchId,
-        sourceHash: legacy.sourceHash, language: legacy.language }, transfer) : transfer();
+      if (legacy) return trackMigration('draft', id, { accountId: legacy.profile, game: legacy.game, branchId: legacy.branchId,
+        sourceHash: legacy.sourceHash, language: legacy.language }, transfer);
+      // Absence needs a readiness marker, but no original. Recheck the draft
+      // inside this transaction so another tab's new checkpoint stays visible.
+      const current = await transaction([stores.drafts, stores.migration], 'readwrite', async tx => {
+        const value = await get(tx, stores.drafts, id);
+        tx.objectStore(stores.migration).put({ key: key('draft', id), scope: key('draft', id), value: { state: 'ready' } });
+        return value;
+      });
+      return hasSourceRef(current) ? transaction([stores.baseline], 'readonly', tx => hydrateDraft(tx, current)) : current;
     }
     async function draftUpdate(id, change) {
       await draftGet(id);
@@ -638,7 +696,7 @@
         return value;
       });
     }
-    return { stores, dependencies, available, ensure, migrate, workspace, source, saveWorkspace, transaction, get, all, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
+    return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
       importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same };
   }

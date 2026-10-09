@@ -62,6 +62,38 @@ test('an old completion cannot change or release a replacement initialization', 
     editor.finishWorkspaceInitialization(current);
 });
 
+test('remote jobs wait for all local owners and paint without holding initialization for their response', async t => {
+    const editor = app(), owner = editor.beginWorkspaceInitialization(), nested = editor.beginWorkspaceInitialization({ session: owner });
+    t.after(() => mixin.beforeUnmount.call(editor));
+    const paint = deferred(), started = deferred(), response = deferred(), calls = [];
+    editor.$nextTick = () => paint.promise;
+    editor.queueWorkspaceBackground('session', () => calls.push('superseded'));
+    editor.queueWorkspaceBackground('session', async () => { calls.push('session'); started.resolve(); await response.promise; });
+    editor.finishWorkspaceInitialization(owner);
+    assert.equal(editor.workspaceInitializationActive, true);
+    assert.deepEqual(calls, []);
+    editor.finishWorkspaceInitialization(nested);
+    assert.equal(editor.workspaceInitializationActive, false);
+    assert.deepEqual(calls, [], 'Local completion precedes remote dispatch.');
+    paint.resolve(); await started.promise;
+    assert.deepEqual(calls, ['session']);
+    assert.equal(editor.workspaceInitializationActive, false, 'An unresolved remote response has no local owner.');
+    response.resolve();
+});
+
+test('unmount fences remote jobs already waiting for the prepared workspace paint', async () => {
+    const editor = app(), owner = editor.beginWorkspaceInitialization(), paint = deferred();
+    let calls = 0;
+    editor.$nextTick = () => paint.promise;
+    editor.queueWorkspaceBackground('remote', () => calls++);
+    editor.finishWorkspaceInitialization(owner);
+    mixin.beforeUnmount.call(editor);
+    paint.resolve();
+    assert.equal(editor.queueWorkspaceBackground('new-remote', () => calls++), false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls, 0);
+});
+
 test('task failures preserve their message and propagate so existing recovery UI can handle them', async () => {
     const editor = app(), owner = editor.beginWorkspaceInitialization();
     const error = new Error('Stored baseline unavailable');

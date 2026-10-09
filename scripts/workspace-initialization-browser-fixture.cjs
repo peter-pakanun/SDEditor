@@ -23,6 +23,7 @@ async function installHarness(page, mode = 'held') {
         app.scheduleCollaboration = app.openManagedPresence = () => {};
         app.loadEditorDrafts = async () => {};
         app._cloudApplying = true;
+        app._cloud.refreshSession = async () => {};
         app._cloudPoll && clearInterval(app._cloudPoll);
         app._managedTimer && clearInterval(app._managedTimer);
         app.gameVersion = 'poe1'; app.gameVersionSelected = true; app.branchId = 'default';
@@ -68,8 +69,10 @@ async function installHarness(page, mode = 'held') {
         OfflineStore.activateVersion = async () => ({ metadata: { details: clone(details) } });
         OfflineStore.getSource = async () => clone(source);
         OfflineStore.getWorkspace = async () => ({ descs: [], status: {}, sourceHash: hash, staged: {}, dropped: {} });
+        OfflineStore.getWorkspaceSnapshot = async () => ({ source: clone(source), workspace: await OfflineStore.getWorkspace() });
         app._cloud.request = async () => {
-            if (++window.__initializationFixture.requests > 1) await wait('final-details');
+            window.__initializationFixture.requests++;
+            await wait('final-details');
             return clone(details);
         };
         app.initializeCollaboration = async () => { await wait('shared'); };
@@ -228,9 +231,8 @@ async function run() {
         await release('cached'); await held('shared'); await hiddenBehindPreparation();
         assert.equal(await page.evaluate(() => window.__initializationFixtureApp.loadingProgress), 100);
         assert.equal(await page.evaluate(() => window.__initializationFixtureApp.sourceLoaded), true);
-        await release('shared'); await held('final-details'); await hiddenBehindPreparation();
-        assert.equal(await page.evaluate(() => window.__initializationFixture.requests), 2);
-        results.push('Cached source, actual workspace preparation, held shared preparation and final version details all remain behind initialization after local loading reaches 100.');
+        assert.equal(await page.evaluate(() => window.__initializationFixture.requests), 0);
+        results.push('Cached source, actual workspace preparation and held local shared preparation remain behind initialization after local loading reaches 100; cached version facts require no network request.');
         await page.evaluate(() => {
             window.__initializationFixtureApp.theme = 'modern-dark';
             document.documentElement.setAttribute('data-theme', 'modern-dark');
@@ -303,11 +305,16 @@ async function run() {
         await page.keyboard.press('Home');
         await page.waitForFunction(bottom => document.querySelector('.workspaceInitializationTerminal').scrollTop < bottom, bottom);
         results.push('All four themes at 1440×1000, resized 900×650 and shorter 900×420 fit, wrap long text, retain historical rows, provide readable contrast and support keyboard scrolling; automatic following preserves manual scrolling.');
-        await release('final-details');
+        await release('shared');
         await page.waitForFunction(() => !window.__initializationFixtureApp.workspaceInitializationActive && !window.__initializationFixtureApp.managedVersionBusy);
+        await held('final-details');
         assert.equal(await page.locator('.workspace').isVisible(), true);
         assert.equal(await terminal.count(), 0);
         assert.equal(await page.evaluate(() => window.__initializationFixtureApp._workspaceInitializationTimer), null);
+        assert.equal(await page.evaluate(() => window.__initializationFixture.requests), 1);
+        assert.equal(await page.evaluate(() => window.__initializationFixtureApp.workspaceInitializationRows.some(row => /Refreshing active version/.test(row.label))), false);
+        results.push('An unresolved refreshed team-details request starts after local readiness and leaves the workspace visible and the initialization log completed.');
+        await release('final-details');
         await checkRetainedSettingsLog(page, context, screenshots, results, layouts);
         for (const mode of ['cancel', 'error']) {
             await installHarness(page, mode); await openButton().click();

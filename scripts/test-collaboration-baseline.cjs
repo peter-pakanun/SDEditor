@@ -194,5 +194,5 @@ test('a mismatched workspace and cached baseline identity abort every queued wri
   await assert.rejects(f.store.saveSourceWorkspaceWithRevisions(source,
     { sourceHash: 'different-id', descs: source }, [], 'poe1', { archive, source }), /identity differ/);
   assert.deepEqual(Array.from(f.kv.entries()), before);
-  assert.throws(() => f.store.getImportedBaseline?.('bad-id', 'poe1'), /Invalid imported baseline identity/);
+  await assert.rejects(f.store.getImportedBaseline('bad-id', 'poe1'), /Invalid imported baseline identity/);
 });

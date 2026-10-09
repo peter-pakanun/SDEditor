@@ -446,6 +446,24 @@ async function runFixture({ storageOnly = false } = {}) {
             ['z-first', 'a-second']);
         results.push({ scenario: 'resolved conflict buckets, strict conflict verification retry and preserved Dropped queue order' });
         results.push({ scenario: 'interrupted migration and recovery', stores: migration.stores.length, legacyFileCount, timings: migration.migrationTimings });
+        const bundled = await page.evaluate(async () => {
+            window.__normalizedProbe.operations = [];
+            const scope = window.__storageScope, snapshot = await OfflineStore.getWorkspaceSnapshot(scope, 'Thai');
+            const operations = window.__normalizedProbe.operations.slice(), original = snapshot.source[0].translations.English[0];
+            snapshot.workspace.descs[0].translations.English[0] = 'Detached editor-only decoration';
+            return { scope: snapshot.scope, files: snapshot.source.length, workspaceFiles: snapshot.workspace.descs.length,
+                sourceDetached: snapshot.source[0].translations.English[0] === original, baseline: snapshot.baseline, operations };
+        });
+        assert.equal(bundled.files, legacyFileCount);
+        assert.equal(bundled.workspaceFiles, legacyFileCount);
+        assert.equal(bundled.sourceDetached, true);
+        assert.equal(bundled.baseline, null);
+        const bundleBaselineReads = bundled.operations.filter(operation => operation.store === 'baseline_files');
+        assert.equal(bundleBaselineReads.length, 1, 'Ordinary cold load shares one original hydration across workspace and source');
+        assert.equal(bundleBaselineReads[0].index, 'by_scope');
+        assert.equal(bundleBaselineReads[0].method, 'getAll');
+        assert.ok(bundled.operations.every(operation => operation.mode === 'readonly'), 'Settled bundle loading cannot rewrite normalized facts');
+        results.push({ scenario: 'cold workspace bundle shares one immutable baseline scope read', files: bundled.files, baselineReads: bundleBaselineReads.length });
         console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
 
         await sameBaselineImportChecks(page, results);

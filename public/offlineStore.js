@@ -238,19 +238,49 @@
     if (workspaceContext || (version && typeof version === 'object')) version = await resolveWorkspaceVersion(version);
     if (await usesRecords(scopedVersion(version))) {
       const scope = scopedVersion(version);
-      const marker = await normalized.transaction([normalized.stores.migration], 'readonly', tx => normalized.get(tx, normalized.stores.migration, normalized.scopeKey(scope)));
-      if (marker?.state !== 'ready') {
-        await normalized.migrate(scope, undefined, undefined, undefined, language);
-        await normalizePreparedRoomRepairs(scope);
-      }
+      await prepareNormalizedWorkspace(scope, language);
       return normalized.workspace(scope);
     }
     return getLegacyWorkspaceView(version, language);
   }
-  async function getLegacyWorkspaceView(version, language, frozen = false) {
+  async function prepareNormalizedWorkspace(scope, language) {
+    const marker = await normalized.transaction([normalized.stores.migration], 'readonly', tx => normalized.get(tx, normalized.stores.migration, normalized.scopeKey(scope)));
+    if (marker?.state !== 'ready') {
+      await normalized.migrate(scope, undefined, undefined, undefined, language);
+      await normalizePreparedRoomRepairs(scope);
+    }
+  }
+  async function getWorkspaceSnapshot(version, language) {
+    const resolved = workspaceContext || (version && typeof version === 'object')
+      ? await resolveWorkspaceVersion(version) : normalizeGameVersion(version);
+    const scope = scopedVersion(resolved);
+    const legacySelection = { scope, workspaceKey: workspaceKey(resolved), sourceKey: sourceKey(resolved),
+      receiptsKey: scope ? receiptScopeKey(scope) : 'translation_save_receipts_' + normalizeGameVersion(resolved) };
+    if (await usesRecords(scope)) {
+      await prepareNormalizedWorkspace(scope, language);
+      const hydrated = await normalized.activation(scope);
+      return { scope, workspace: hydrated.workspace, source: hydrated.source,
+        baseline: hydrated.workspace?.importArchive ? hydrated.baseline : null };
+    }
+    // Keep the established legacy migration/placeholder-repair adapter. Scope
+    // resolution is captured above so this read cannot follow a later account
+    // or version selection while assembling its related immutable inputs.
+    const workspace = await getLegacyWorkspaceView(resolved, language, false, legacySelection);
+    const source = await kvGet(legacySelection.sourceKey);
+    const baseline = workspace?.importArchive
+      ? await kvGet(importedBaselineKey(workspace.importArchive.baselineId, resolved)) : null;
+    return { scope, workspace, source, baseline };
+  }
+  async function getLegacyWorkspaceView(version, language, frozen = false, capturedSelection) {
+    const selectedKey = capturedSelection?.workspaceKey || workspaceKey(version);
     if ((!language || language === 'English') && !frozen) {
-      const workspace = await kvGet(workspaceKey(version));
+      const workspace = await kvGet(selectedKey);
       if (Number(workspace?.stagedVersion) >= 1 && workspace.statusMetadataVersion !== 1) {
+        if (capturedSelection) return withStore(STORE_KV, 'readwrite', async store => {
+          const latest = (await requestToPromise(store.get(selectedKey)))?.value;
+          if (latest !== undefined) store.put({ key: selectedKey, value: pruneWorkspace(latest) });
+          return latest;
+        });
         return updateWorkspace(pruneWorkspace, version);
       }
       return workspace;
@@ -259,7 +289,7 @@
     const tx = db.transaction([STORE_KV, revisionStoreName(version)], frozen ? 'readonly' : 'readwrite');
     const done = txDone(tx);
     const store = tx.objectStore(STORE_KV);
-    const key = workspaceKey(version);
+    const key = selectedKey;
     let result, failure;
     const req = store.get(key);
     req.onsuccess = () => {
@@ -286,12 +316,14 @@
               if (JSON.stringify(result) !== beforeMigration && !frozen) store.put({ key, value: pruneWorkspace(result) });
             } catch (error) { failure = error; tx.abort(); }
           };
-          const sourceRead = store.get(result.importArchive ? importedBaselineKey(result.importArchive.baselineId, version) : sourceKey(version));
+          const sourceRead = store.get(result.importArchive ? importedBaselineKey(result.importArchive.baselineId, version)
+            : capturedSelection?.sourceKey || sourceKey(version));
           sourceRead.onsuccess = () => { source = result.importArchive ? sourceRead.result?.value?.source : sourceRead.result?.value; finish(); };
           const collaborationRead = store.get('collaboration_v1');
           collaborationRead.onsuccess = () => { collaboration = collaborationRead.result?.value; finish(); };
-          const migratedScope = scopedVersion(version);
-          const receiptsRead = store.get(migratedScope ? receiptScopeKey(migratedScope) : 'translation_save_receipts_' + normalizeGameVersion(version));
+          const migratedScope = capturedSelection ? capturedSelection.scope : scopedVersion(version);
+          const receiptsRead = store.get(capturedSelection?.receiptsKey
+            || (migratedScope ? receiptScopeKey(migratedScope) : 'translation_save_receipts_' + normalizeGameVersion(version)));
           receiptsRead.onsuccess = () => { receipts = receiptsRead.result?.value || []; finish(); };
           if (history.openCursor) {
             const cursorRead = history.openCursor();
@@ -641,7 +673,8 @@
     if (await usesRecords(scope)) {
       await normalized.ensure(scope);
       if (!await normalized.hasScope(scope)) throw new Error('This version is not available in this browser.');
-      const [workspace, source, metadata, baseline] = await Promise.all([normalized.workspace(scope), normalized.source(scope), kvGet(versionMetadataKey(scope)), normalized.assets(scope)]);
+      const [hydrated, metadata] = await Promise.all([normalized.activation(scope), kvGet(versionMetadataKey(scope))]);
+      const { workspace, source, baseline } = hydrated;
       await kvSet(activeKey(scope), scope);
       activeScopes.set(activeKey(scope), scope);
       if (workspaceContext?.accountId === scope.accountId && workspaceContext.game === scope.game && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
@@ -1496,6 +1529,7 @@
     getHybridState: () => kvGet('hybrid_v1'),
     updateHybridState,
     getWorkspace,
+    getWorkspaceSnapshot,
     updateWorkspace,
     setWorkspace,
     saveWorkspaceWithRevisions,

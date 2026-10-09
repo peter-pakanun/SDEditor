@@ -572,13 +572,14 @@ test('cancelling older ended version entry preserves active drafts, workspace an
   assert.equal(app.managedVersionBusy, false);
 });
 
-test('managed opening keeps one initialization active through drafts, cached source and the final team-details request', async () => {
+test('managed opening waits for local drafts and source while cached team detail refresh cannot hold initialization', async () => {
   const draft = deferred(), source = deferred(), finalDetails = deferred(); let detailReads = 0;
   const { app } = harness({ storage: { getVersionSource: () => source.promise }, request: async () => {
-    if (++detailReads === 1) return { version: version(), teams: [team()] };
+    detailReads++;
     return finalDetails.promise;
   } });
   withInitialization(app); app.versionChooserVisible = true;
+  const background = new Map(); app.queueWorkspaceBackground = (key, callback) => { background.set(key, callback); return true; };
   app.flushEditorDraft = () => draft.promise;
   let loadedSession;
   app.loadVersionedStorage = async session => { loadedSession = session; assert.equal(app.workspaceInitializationActive, true); };
@@ -594,12 +595,15 @@ test('managed opening keeps one initialization active through drafts, cached sou
     assert.equal(app.versionChooserVisible, true);
     source.resolve([{ filepath: 'source/test.txt' }]); await new Promise(setImmediate);
     assert.equal(loadedSession.run, run);
-    assert.equal(detailReads, 2);
-    assert.equal(app.workspaceInitializationActive, true);
-    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Refreshing active version and team details');
-    assert.equal(app.versionChooserVisible, false);
-    finalDetails.resolve({ version: version(), teams: [team()] });
     assert.equal(await pending, true);
+    assert.equal(detailReads, 0);
+    assert.equal(app.workspaceInitializationActive, false);
+    assert.equal(app.versionChooserVisible, false);
+    const refresh = background.get('active-version-details')();
+    assert.equal(detailReads, 1);
+    assert.equal(app.workspaceInitializationActive, false);
+    finalDetails.resolve({ version: version(), teams: [team()] });
+    await refresh;
     assert.equal(app.workspaceInitializationActive, false);
     assert.equal(app.managedVersionBusy, false);
     assert.ok(app.workspaceInitializationRows.every(row => row.status === 'done'));
@@ -727,10 +731,24 @@ test('a late entry confirmation cannot activate a version after the account chan
   assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
 });
 
-test('direct team entry refuses another translator language and changed server identities even with cached source', async () => {
+test('cached team entry opens locally but a changed remote identity cannot replace its baseline or cached details', async () => {
   const { app, events } = harness({ request: async () => ({ version: version({ sourceHash: hash('c') }), teams: [team()] }) });
+  const background = new Map(); app.queueWorkspaceBackground = (key, callback) => { background.set(key, callback); return true; };
   app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator';
   assert.equal(await app.continueManagedVersion(version(), 'German'), false);
+  assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
+  assert.equal(await app.continueManagedVersion(version(), 'Thai'), true);
+  const source = app.sourceIdentity, details = app.managedActiveDetails;
+  await background.get('active-version-details')();
+  assert.match(app.managedOperationErrors['active-details'], /do not match this source/);
+  assert.equal(app.sourceIdentity, source); assert.equal(app.managedActiveDetails, details);
+  assert.equal(events.some(event => event.type === 'import'), false);
+  assert.equal(events.some(event => event.type === 'metadata' && event.scope.sourceHash === hash('c')), false);
+});
+
+test('an uncached source still refuses changed server identities before any activation or import', async () => {
+  const { app, events } = harness({ storage: { getVersionSource: async () => [] },
+    request: async () => ({ version: version({ sourceHash: hash('c') }), teams: [team()] }) });
   assert.equal(await app.continueManagedVersion(version(), 'Thai'), false);
   assert.match(app.managedOperationErrors.open, /source version changed/);
   assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);

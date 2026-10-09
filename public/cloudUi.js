@@ -187,14 +187,17 @@
         } else {
           // Authentication failure remains an actionable cloud issue while the
           // restored local workspace is usable. Routine refreshes stay silent.
-          const task = this.beginWorkspaceInitializationTask?.('Checking cloud session and account access', initializationSession);
-          try {
-            await this._cloud.refreshSession(true);
-            this.finishWorkspaceInitializationTask?.(task, { error: this.cloudError ? this.cloudStatus : undefined });
-          } catch (error) {
-            this.finishWorkspaceInitializationTask?.(task, { error });
-            throw error;
-          }
+          const client = this._cloud;
+          const restoreSession = async () => {
+            if (this._cloud !== client || this._workspaceBackgroundDisposed) return;
+            try { await client.refreshSession(true); }
+            catch (error) {
+              if (this._cloud === client && !error.stale) {
+                this.cloudStatus = error.message; this.cloudError = true;
+              }
+            }
+          };
+          if (!this.queueWorkspaceBackground?.('cloud-session', restoreSession)) void restoreSession();
         }
       },
       async cloudReloadAccount() {

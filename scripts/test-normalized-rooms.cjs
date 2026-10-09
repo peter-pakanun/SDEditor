@@ -164,6 +164,60 @@ test('room conversion reconstructs pending placeholder repairs after workspace r
   assert.equal(room.placeholderRepairs.length, 1, 'Retry reuses the durable repair ID rather than creating another generation.');
 });
 
+function sparseSelectionFixture() {
+  const stores = { rooms: 'rooms', shared: 'shared', operations: 'operations', roomRecords: 'records',
+    meta: 'workspaces', files: 'files', records: 'workspaceRecords', baseline: 'baseline', assets: 'assets', migration: 'migration' };
+  const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()])), reads = [], transactions = [], selections = [];
+  const key = (...parts) => JSON.stringify(parts), baseId = key(identity.game, identity.sourceHash);
+  const request = value => { const req = {}; queueMicrotask(() => { req.result = copy(value); req.onsuccess(); }); return req; };
+  const tx = { objectStore(name) { return {
+    get(id) { reads.push({ name, id }); return request(data[name].get(id)); },
+    index(index) { return { getAll(id) {
+      reads.push({ name, index, id });
+      return request([...data[name].values()].filter(row => index === 'by_scope' ? row.scope === id : row.pathKey === id || row.paths?.includes(id)));
+    } }; },
+    put(value) { data[name].set(value.key, copy(value)); }, delete(id) { data[name].delete(id); },
+  }; } };
+  const n = { stores, copy, key, same: (a, b) => JSON.stringify(a) === JSON.stringify(b), baselineKey: () => baseId,
+    row: (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra }),
+    async get(tx, name, id) { reads.push({ name, id }); return copy(data[name].get(id)?.value); },
+    async all(tx, name, scope) { reads.push({ name, all: true }); return [...data[name].values()].filter(row => row.scope === scope).map(value => copy(value)); },
+    async readWorkspace(tx, scope, paths) { selections.push(copy(paths)); return { descs: [], staged: {} }; },
+    async transaction(names, mode, action) { transactions.push({ names, mode }); return action(tx); },
+    dependencies: { normalizeScope: scope => scope },
+  };
+  const put = (name, value) => data[name].set(value.key, copy(value));
+  put(stores.migration, { key: key('room', roomKey), value: { state: 'ready' } });
+  put(stores.rooms, { key: roomKey, value: { identity, mode: 'sparse', manifest: { version: 2 }, sequence: 4 } });
+  return { n, rooms: create(n), stores, data, reads, transactions, selections, put, tx };
+}
+
+test('cold sparse reconnect selects actual work and recovery paths instead of every original manifest path', async () => {
+  const f = sparseSelectionFixture();
+  const manifest = Array.from({ length: 1200 }, (_, index) => ({ filepath: 'file-' + index + '.txt', entryCount: 1 }));
+  const shared = { filepath: manifest[8].filepath, translations: ['Accepted'], revision: 4 };
+  const yours = { filepath: manifest[17].filepath, translations: ['Pending'], revision: 0 };
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: manifest },
+    shared: { [shared.filepath]: shared }, outbox: [{ id: 'pending', files: [{ yours }] }],
+    conflicts: [{ id: 'conflict', filepath: manifest[25].filepath }],
+    carries: { [manifest[31].filepath]: { filepath: manifest[31].filepath, translations: ['Carry'] } },
+    placeholderRepairs: [{ id: 'repair', filepath: manifest[43].filepath }],
+    recovery: [{ id: 'recovery', files: [{ filepath: manifest[51].filepath, translations: ['Recovered'] }] }, { id: 'empty-recovery', files: [] }] });
+  f.reads.length = 0;
+  const staged = manifest[67].filepath;
+  const result = await f.rooms.getRecords({ key: roomKey, scope: identity, filepaths: [staged], includeAffected: true, includeDropped: true });
+  const expected = [staged, shared.filepath, yours.filepath, manifest[25].filepath, manifest[31].filepath, manifest[43].filepath, manifest[51].filepath];
+  assert.deepEqual(new Set(result.selection.filepaths), new Set(expected));
+  assert.equal(result.room.manifest.files.length, expected.length);
+  assert.equal(result.room.recovery.length, 2, 'Empty durable recovery headers remain available');
+  assert.deepEqual(result.room.outbox.map(item => item.id), ['pending']);
+  assert.deepEqual(f.selections, [result.selection.filepaths]);
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, expected.length,
+    'Untouched originals must never be hydrated during sparse reconnect');
+  await f.rooms.writeRoom(f.tx, roomKey, result.room, result.selection.filepaths, result.selection.operationIds);
+  assert.equal(f.data.shared.size, manifest.length, 'A scoped reconnect preserves every unselected immutable manifest row');
+});
+
 test('room metadata excludes archive decisions and seed payloads while cold reads recover their exact content', async () => {
   const stores = { rooms: 'rooms', shared: 'shared', operations: 'operations', roomRecords: 'records', baseline: 'baseline', assets: 'assets' };
   const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()])), reads = [], writes = [];

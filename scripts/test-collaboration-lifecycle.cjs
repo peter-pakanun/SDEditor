@@ -588,6 +588,67 @@ test('stored source/workspace hash mismatch preserves all database values and bl
   assert.deepEqual(plain({ workspace, source }), expected);
 });
 
+test('activated workspace reuses its detached baseline without reopening storage', async () => {
+  const { editor: e, window } = harness({ realImport: true });
+  e.cloudProfileId = 'account-one';
+  const source = [description('activated')]; source[0].translations.Thai = ['', ''];
+  const tree = await protocol.buildBaselineTree(source);
+  const archive = await protocol.finalizeArchive({ version: 1,
+    zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const baseline = { source: plain(source), tree, archive };
+  const workspace = { sourceHash: archive.baselineId, importArchive: plain(archive), descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(workspace, { source, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+  window.WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['Saved translation', 'Second'] }, 'Thai',
+    { source: source[0], sourceHash: archive.baselineId, savedAt: 123 });
+  const before = plain(baseline);
+  for (const name of ['getWorkspaceSnapshot', 'getWorkspace', 'getSource', 'getImportedBaseline']) {
+    window.OfflineStore[name] = () => assert.fail('Activated snapshot must avoid another ' + name + ' read');
+  }
+  await e.loadVersionedStorage(undefined, { scope: { accountId: 'account-one', game: 'poe1', branchId: 'default', sourceHash: archive.baselineId },
+    language: 'Thai', workspace, source, baseline });
+  assert.equal(e.sourceLoaded, true); assert.equal(e.sourceIdentity, archive.baselineId);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['Saved translation', 'Second']);
+  e.descs[0].translations.English[0] = 'Editor change';
+  assert.deepEqual(plain(baseline), before, 'The retained original stays independent of the rendered source.');
+});
+
+test('startup consumes one combined snapshot and rejects activation data from another scope', async t => {
+  for (const [name, change] of Object.entries({
+    fresh: () => undefined,
+    account: value => { value.scope.accountId = 'another-account'; },
+    game: value => { value.scope.game = 'poe2'; },
+    branch: value => { value.scope.branchId = 'another-branch'; },
+    language: value => { value.language = 'German'; },
+    source: value => { value.workspace.sourceHash = 'different-source'; },
+  })) await t.test(name, async () => {
+    const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+    const obsolete = { scope: { accountId: 'account-one', game: 'poe1', branchId: 'default', sourceHash: 'hash-obsolete.txt' },
+      language: 'Thai', workspace: { sourceHash: 'hash-obsolete.txt', stagedVersion: 1, statusMetadataVersion: 1 }, source: [description('obsolete')] };
+    change(obsolete);
+    let reads = 0;
+    window.OfflineStore.getWorkspaceSnapshot = async (game, language) => {
+      reads++; assert.equal(game, 'poe1'); assert.equal(language, 'Thai');
+      return { source: [description('combined')], workspace: undefined, baseline: null };
+    };
+    for (const method of ['getWorkspace', 'getSource', 'getImportedBaseline']) window.OfflineStore[method] = () => assert.fail('Combined snapshot avoids ' + method);
+    await e.loadVersionedStorage(undefined, name === 'fresh' ? undefined : obsolete);
+    assert.equal(reads, 1); assert.equal(e.sourceIdentity, 'hash-combined.txt');
+    assert.equal(e.descs[0].filename, 'combined.txt');
+  });
+});
+
+test('pending combined storage read cannot publish into a replacement profile', async () => {
+  const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+  const pending = deferred();
+  window.OfflineStore.getWorkspaceSnapshot = () => pending.promise;
+  const loading = e.loadVersionedStorage(); await tick();
+  e.cloudProfileId = 'account-two';
+  pending.resolve({ source: [description('retired')], workspace: undefined, baseline: null }); await loading;
+  assert.equal(e.sourceLoaded, false); assert.equal(e.sourceIdentity, '');
+  assert.equal(e.descs.length, 0);
+});
+
 test('batched startup preserves review candidates separately without modifying the immutable baseline', async () => {
   const { editor: e, window } = harness();
   const source = [description('source')]; source[0].translations.Thai = ['', ''];
@@ -1359,6 +1420,164 @@ test('canonical baseline transaction cannot be overwritten by a translation save
   commit.resolve(); await reconciling;
   assert.equal(translationWrites, 0); assert.equal(e.sourceIdentity, second.archive.baselineId);
   assert.deepEqual(plain(e.descs[0].translations.Thai), ['Second original']);
+});
+
+test('a session activated during canonical persistence keeps its typing and applies the stored baseline after closing', async t => {
+  for (const surface of ['full', 'inline']) await t.test(surface, async () => {
+    const { editor: e, window } = harness({ realImport: true }), { first, second } = await duplicateBaselines(e);
+    e.importBaseline = first; e.sourceIdentity = first.archive.baselineId; e.descs = plain(first.source);
+    e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
+    e.cloudProfileId = 'account-one'; e.updateLeaveProtection = () => {};
+    const started = deferred(), commit = deferred(), loaded = deferred(), checkpoints = [], activations = [];
+    window.OfflineStore.saveSourceWorkspaceWithRevisions = async () => { started.resolve(); await commit.promise; };
+    const oldWorkspace = e.localDescs, oldSource = e.descs;
+    const reconciling = e.reconcileImportArchive(second.archive); await started.promise;
+    // Ordinary opening is already fenced by _reconcilingImport. This simulates
+    // a session activated by an independent async flow after its initial check.
+    e.editorVisible = surface === 'full'; e.inlineActive = surface === 'inline';
+    e.editorCurrentEditingDesc = e.descs[0]; e.editorBlocks = [{ translation: 'Keep typing in the old source' }];
+    const scope = { profile: 'account-one', game: 'poe1', branchId: 'default', sourceHash: first.archive.baselineId,
+      language: 'Thai', filepath: e.descs[0].filepath };
+    e._draftSession = { scope };
+    commit.resolve(); assert.equal(await reconciling, false);
+    assert.equal(e.sourceIdentity, first.archive.baselineId); assert.equal(e.importBaseline, first);
+    assert.equal(e.localDescs, oldWorkspace); assert.equal(e.descs, oldSource);
+    assert.equal(e.editorSessionActive, true); assert.equal(e.editorBlocks[0].translation, 'Keep typing in the old source');
+    assert.match(e.collaborationNotice, /Close the editor/);
+    assert.equal(await e.resumeReconciledImportReload(), false);
+    e._collaboration = null; // The mismatch handler retires the old client.
+    e.flushEditorDraft = async () => { checkpoints.push({ scope: plain(e._draftSession.scope), text: e.editorBlocks[0].translation }); return true; };
+    window.OfflineStore.activateVersion = async captured => { activations.push(plain(captured)); };
+    e.loadVersionedStorage = async () => { e.sourceIdentity = second.archive.baselineId; e.importBaseline = second; loaded.resolve(); };
+    e.editorVisible = false; e.inlineActive = false;
+    window.CollaborationIntegration.mixin.watch.editorSessionActive.call(e, false);
+    await loaded.promise; await tick();
+    assert.deepEqual(checkpoints, [{ scope, text: 'Keep typing in the old source' }]);
+    assert.deepEqual(activations, [{ accountId: 'account-one', game: 'poe1', branchId: 'default', sourceHash: second.archive.baselineId }]);
+    assert.equal(e._reconciledImportReload, null); assert.equal(e.collaborationNotice, '');
+  });
+});
+
+test('deferred canonical reload cannot activate after its account, language, game, branch, access or source changes', async t => {
+  for (const [name, change] of Object.entries({
+    account: e => { e.cloudUser = { id: 'another-account' }; },
+    profile: e => { e.cloudProfileId = 'another-profile'; },
+    language: e => { e.lang = 'German'; },
+    game: e => { e.gameVersion = 'poe2'; },
+    branch: e => { e.branchId = 'another-branch'; },
+    source: e => { e.sourceIdentity = 'another-source'; },
+    access: e => { e.cloudUser.assignmentVersion = 2; },
+    workspace: e => { e.localDescs = { descs: [], status: {} }; },
+  })) await t.test(name, async () => {
+    const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+    e._reconciledImportReload = { context: e.captureCollaborationContext(), profile: e.cloudProfileId,
+      source: e.descs, workspace: e.localDescs, sourceHash: 'accepted-new-source' };
+    window.OfflineStore.activateVersion = () => assert.fail('A superseded scope cannot activate its stored canonical baseline.');
+    e.loadVersionedStorage = () => assert.fail('A superseded deferred reload cannot replace the new workspace.');
+    change(e);
+    assert.equal(await e.resumeReconciledImportReload(), false); assert.equal(e._reconciledImportReload, null);
+  });
+});
+
+test('deferred canonical reload rechecks scope after flushing the old draft and preserves a reopened session during activation', async () => {
+  const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+  const request = e._reconciledImportReload = { context: e.captureCollaborationContext(), profile: e.cloudProfileId,
+    source: e.descs, workspace: e.localDescs, sourceHash: 'accepted-new-source' };
+  const flushed = deferred(), activating = deferred(), started = deferred();
+  e.flushEditorDraft = () => flushed.promise;
+  window.OfflineStore.activateVersion = async () => { started.resolve(); await activating.promise; };
+  e.loadVersionedStorage = () => assert.fail('A reopened session must remain on its captured source.');
+  const resuming = e.resumeReconciledImportReload(); flushed.resolve(true); await started.promise;
+  e.editorVisible = true; e.editorBlocks = [{ translation: 'New typing during activation' }];
+  activating.resolve(); assert.equal(await resuming, false);
+  assert.equal(e.sourceIdentity, 'old-hash'); assert.equal(e.editorVisible, true);
+  assert.equal(e.editorBlocks[0].translation, 'New typing during activation'); assert.equal(e._reconciledImportReload, request);
+});
+
+test('collaboration retry resumes a blocked canonical reload once without reconnecting the old editor scope', async () => {
+  const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+  const request = e._reconciledImportReload = { context: e.captureCollaborationContext(), profile: e.cloudProfileId,
+    source: e.descs, workspace: e.localDescs, sourceHash: 'accepted-new-source' };
+  e.initializeCollaboration = () => assert.fail('Retry must finish the accepted baseline reload before joining a room.');
+  const activating = deferred(), started = deferred(); let activations = 0, reloads = 0, checkpoints = 0;
+  e.flushEditorDraft = async () => { checkpoints++; return true; };
+  window.OfflineStore.activateVersion = async scope => {
+    activations++; assert.equal(scope.sourceHash, request.sourceHash); started.resolve(); await activating.promise;
+  };
+  e.loadVersionedStorage = async () => { reloads++; e.sourceIdentity = request.sourceHash; };
+  e.editorVisible = true; e.editorBlocks = [{ translation: 'Keep this draft until closing' }];
+  assert.equal(await e.collabRetry(), false); assert.equal(e._reconciledImportReload, request);
+  assert.equal(e.editorBlocks[0].translation, 'Keep this draft until closing'); assert.equal(checkpoints, 0);
+  e.editorVisible = false; e.navigationBusy = true;
+  assert.equal(await e.collabRetry(), false); assert.equal(e._reconciledImportReload, request); assert.equal(activations, 0);
+  e.navigationBusy = false;
+  const first = e.collabRetry(); await started.promise;
+  const second = e.collabRetry(), closing = e.resumeReconciledImportReload();
+  activating.resolve(); assert.deepEqual(await Promise.all([first, second, closing]), [true, true, true]);
+  assert.equal(checkpoints, 1); assert.equal(activations, 1); assert.equal(reloads, 1);
+  assert.equal(e._reconciledImportReload, null); assert.equal(e._reconciledImportReloadPending, null);
+});
+
+test('collaboration retry fences a stale canonical reload before any new-scope join or sync', async () => {
+  const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+  e._reconciledImportReload = { context: e.captureCollaborationContext(), profile: e.cloudProfileId,
+    source: e.descs, workspace: e.localDescs, sourceHash: 'accepted-new-source' };
+  e.cloudUser = { id: 'another-account' };
+  window.OfflineStore.activateVersion = () => assert.fail('A stale retry cannot activate its old baseline.');
+  e.loadVersionedStorage = () => assert.fail('A stale retry cannot reload the new workspace.');
+  let joins = 0; e.initializeCollaboration = async () => { joins++; };
+  assert.equal(await e.collabRetry(), false); assert.equal(e._reconciledImportReload, null); assert.equal(joins, 0);
+  await e.collabRetry(); assert.equal(joins, 1, 'A later independent retry may initialize the current scope.');
+});
+
+test('a failed deferred baseline activation remains retryable and clears only its own failure after recovery', async () => {
+  const { editor: e, window } = harness(); e.cloudProfileId = 'account-one';
+  const request = e._reconciledImportReload = { context: e.captureCollaborationContext(), profile: e.cloudProfileId,
+    source: e.descs, workspace: e.localDescs, sourceHash: 'accepted-new-source' };
+  e.initializeCollaboration = () => assert.fail('The stored baseline must recover before rejoining.');
+  let activations = 0;
+  window.OfflineStore.activateVersion = async () => {
+    if (++activations === 1) throw new Error('The stored baseline could not be activated.');
+  };
+  e.loadVersionedStorage = async () => { e.sourceIdentity = request.sourceHash; };
+  await assert.rejects(e.collabRetry(), /could not be activated/);
+  assert.equal(e._reconciledImportReload, request); assert.equal(e._reconciledImportReloadPending, null);
+  assert.equal(e.collaborationNotice, 'The stored baseline could not be activated.'); assert.equal(e.sourceIdentity, 'old-hash');
+  assert.equal(await e.collabRetry(), true); assert.equal(activations, 2);
+  assert.equal(e._reconciledImportReload, null); assert.equal(e.collaborationNotice, '');
+});
+
+test('remote Dropped refresh patches current-source rows and preserves historical recovery plus active typing', async t => {
+  for (const surface of ['full', 'inline']) await t.test(surface, async () => {
+    const { editor: e, window } = harness(); const W = window.WorkspaceState;
+    e.descs = ['new-dropped', 'resolved-dropped', 'typing'].map(name => ({ ...description(name), hasChanges: false }));
+    e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
+    const [incoming, resolved, typing] = e.descs, historical = description('historical-only');
+    W.dropTranslation(e.localDescs, resolved, 'Thai', { id: 'old-recovery', game: 'poe1', translations: ['Old recovered text', 'Second'] });
+    e.applyWorkspaceOverlay(); e.filterDesc();
+    const unchangedCache = e._fileSearchSnapshot.files.get(typing.filepath);
+    e.editorVisible = surface === 'full'; e.inlineActive = surface === 'inline'; e.editorCurrentEditingDesc = typing;
+    const blocks = e.editorBlocks = [{ translation: 'Typing while shared recovery arrives' }];
+    const session = e._draftSession = { scope: { sourceHash: e.sourceIdentity, language: 'Thai', filepath: typing.filepath } };
+    e._editorOpenRun = 19;
+    const snapshot = plain(e.localDescs);
+    delete snapshot.dropped.Thai[resolved.filepath]; snapshot.droppedArchive['old-recovery'].status = 'discarded';
+    const active = W.dropTranslation(snapshot, incoming, 'Thai', { id: 'new-recovery', game: 'poe1', translations: ['New recovered text', 'Second'] });
+    const archived = W.dropTranslation(snapshot, historical, 'Thai', { id: 'historical-recovery', game: 'poe1',
+      originSourceHash: 'earlier-source', translations: ['Historical recovered text', 'Second'] });
+    const overlays = [], filters = [], overlay = e.applyWorkspaceOverlay, filter = e.filterDesc;
+    e.applyWorkspaceOverlay = options => { overlays.push(...options.filepaths); return overlay.call(e, options); };
+    e.filterDesc = options => { filters.push(...options.changedFilepaths); return filter.call(e, options); };
+    await e.applyRemoteDropped([active, snapshot.droppedArchive['old-recovery'], archived], 'Thai', snapshot);
+    assert.deepEqual(overlays.sort(), [incoming.filepath, resolved.filepath].sort());
+    assert.deepEqual(filters.sort(), [incoming.filepath, resolved.filepath].sort());
+    assert.equal(incoming.isDropped, true); assert.equal(resolved.isDropped, false);
+    assert.equal(e._fileSearchSnapshot.files.get(typing.filepath), unchangedCache, 'The unrelated row keeps its prepared search/status record.');
+    assert.equal(e.localDescs.droppedArchive['historical-recovery'].snapshot.translations[0], 'Historical recovered text');
+    assert.equal(e.localDescs.droppedArchive['old-recovery'].status, 'discarded');
+    assert.equal(e.editorSessionActive, true); assert.equal(e.editorBlocks, blocks); assert.equal(e._draftSession, session);
+    assert.equal(e.editorBlocks[0].translation, 'Typing while shared recovery arrives'); assert.equal(e._editorOpenRun, 19);
+  });
 });
 
 test('a language change during durable reconciliation reloads the accepted baseline after releasing its lock', async () => {

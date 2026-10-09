@@ -5,6 +5,9 @@
   const PAGE_SIZE = 20;
   const SEARCH_DELAY = 250;
   const caches = new WeakMap();
+  const languageCaches = new WeakMap();
+  const raw = value => typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(value) : value;
+  const lookupActive = model => !!(model.editorSessionActive ?? model.editorVisible) && model.sideTab === 'lookup';
   const asLines = value => Array.isArray(value) ? value.map(line => String(line ?? '')) : [];
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
   const compactText = value => readableText(value).replace(/\s+/gu, ' ').trim();
@@ -155,18 +158,39 @@
       lookupActiveLanguage() { return this.lookupLanguage || this.lang || ''; },
       lookupHasAppliedQuery() { return !!foldText(this.lookupAppliedQuery); },
       lookupLanguages() {
-        // Only keys are inspected here. The text index remains lazy.
-        this.lookupRevision;
-        const languages = new Set(this.lang && this.lang !== 'English' ? [this.lang] : []);
-        const saved = new Map((Array.isArray(this.localDescs?.descs) ? this.localDescs.descs : [])
-          .filter(desc => desc?.filepath).map(desc => [desc.filepath, desc]));
-        for (const desc of Array.isArray(this.descs) ? this.descs : []) {
-          const translations = { ...desc?.translations, ...saved.get(desc?.filepath)?.translations };
-          for (const [lang, lines] of Object.entries(translations)) {
-            if (lang !== 'English' && Array.isArray(lines) && lines.length) languages.add(lang);
+        const source = this.descs, workspace = this.localDescs, lang = this.lang;
+        let cache = languageCaches.get(this);
+        const sameSource = cache && cache.source === source && cache.workspace === workspace && cache.lang === lang;
+        if (cache && !sameSource) languageCaches.delete(this);
+        // Vue evaluates watched computeds even when the v-show panel is hidden.
+        // Keep its last complete choices without reading the reactive corpus.
+        if (!lookupActive(this)) return sameSource ? cache.languages : lang && lang !== 'English' ? [lang] : [];
+        const revision = this.lookupRevision;
+        if (sameSource && cache.revision === revision) return cache.languages;
+        const languages = new Set(lang && lang !== 'English' ? [lang] : []);
+        const saved = new Map();
+        const localDescs = raw(raw(workspace)?.descs);
+        for (const value of Array.isArray(localDescs) ? localDescs : []) {
+          const desc = raw(value);
+          if (desc?.filepath) saved.set(desc.filepath, desc);
+        }
+        // Committed workspace/source invalidations advance lookupRevision.
+        // Read raw rows here so hidden typing cannot register thousands of
+        // deep dependencies or copy every translation object's values.
+        for (const value of Array.isArray(source) ? raw(source) : []) {
+          const desc = raw(value);
+          const original = raw(desc?.translations) || {};
+          const overlay = raw(saved.get(desc?.filepath)?.translations) || {};
+          for (const language of new Set([...Object.keys(original), ...Object.keys(overlay)])) {
+            if (language === 'English') continue;
+            const lines = raw(Object.prototype.hasOwnProperty.call(overlay, language) ? overlay[language] : original[language]);
+            if (Array.isArray(lines) && lines.length) languages.add(language);
           }
         }
-        return [...languages].sort((a, b) => a === this.lang ? -1 : b === this.lang ? 1 : a.localeCompare(b));
+        cache = { source, workspace, lang, revision,
+          languages: [...languages].sort((a, b) => a === lang ? -1 : b === lang ? 1 : a.localeCompare(b)) };
+        languageCaches.set(this, cache);
+        return cache.languages;
       },
       lookupResults() {
         // Wait for an applied nonempty query before indexing the corpus.
@@ -234,14 +258,14 @@
         if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup') this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
       },
       lookupLanguages(languages) {
-        if (this.lookupLanguage && !languages.includes(this.lookupLanguage)) this.lookupLanguage = '';
+        if (lookupActive(this) && this.lookupLanguage && !languages.includes(this.lookupLanguage)) this.lookupLanguage = '';
       },
       lookupResults(results) {
         if ((this.editorSessionActive ?? this.editorVisible) && this.sideTab === 'lookup' && this.lookupSelectedFilepath
           && !results.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
-    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); caches.delete(this); },
+    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); caches.delete(this); languageCaches.delete(this); },
     methods: {
       invalidateEditorLookupIndex() {
         caches.delete(this);

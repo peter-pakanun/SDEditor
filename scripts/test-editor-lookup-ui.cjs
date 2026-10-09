@@ -227,6 +227,22 @@ test('workspace refresh invalidates saved lookup matches without consulting the 
   assert.equal(editor.editorBlocks[0].translation, 'Draft only phrase');
 });
 
+test('workspace refresh updates another reference language while retaining identical selected-language inputs', () => {
+  const { editor } = loadEditor();
+  const current = description('current'); editor.descs = [current];
+  editor.sideTab = 'lookup'; editor.lookupLanguage = 'French';
+  editor.lookupQuery = 'New French reference'; editor.lookupApplySearch();
+  assert.equal(editor.lookupResultCount, 0);
+  const selectedText = current.translations.Thai;
+  editor.localDescs.descs = [{ filepath: current.filepath,
+    translations: { Thai: [...selectedText], French: ['New French reference'] } }];
+  editor.applyWorkspaceOverlay();
+  assert.equal(current.translations.Thai, selectedText);
+  assert.equal(editor.lookupResultCount, 1);
+  editor.lookupSelect(current.filepath);
+  assert.equal(editor.lookupSelectedReference.blocks[0].translation, 'New French reference');
+});
+
 test('Lookup panel uses literal text, independent controls, and persistent accessible reference sections', () => {
   assert.ok(panelStart >= 0 && panelEnd > panelStart);
   assert.equal(lookupPanel.includes('v-html'), false, 'Source and translations must render through text interpolation');

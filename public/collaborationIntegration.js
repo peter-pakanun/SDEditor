@@ -17,10 +17,10 @@
       branchId() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
       sourceIdentity() { this.scheduleCollaboration(); },
-      versionChooserVisible: { flush: 'sync', handler() { this._collaboration?.updatePresence?.(); } },
+      versionChooserVisible: { flush: 'sync', handler(visible) { this._collaboration?.updatePresence?.(); if (!visible) this.queueReconciledImportReload(); } },
       selectedFilepath(path) { this._collaboration?.select(path); },
-      editorVisible(visible) { if (!visible && !(this.editorSessionActive ?? this.editorVisible)) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
-      editorSessionActive(active) { if (!active) this._collaboration?.leaveEdit(); this.updateLeaveProtection(); },
+      editorVisible(visible) { if (!visible && !(this.editorSessionActive ?? this.editorVisible)) { this._collaboration?.leaveEdit(); this.queueReconciledImportReload(); } this.updateLeaveProtection(); },
+      editorSessionActive(active) { if (!active) { this._collaboration?.leaveEdit(); this.queueReconciledImportReload(); } this.updateLeaveProtection(); },
       pendingLocalSaves() { this.updateLeaveProtection(); },
       draftWritePending() { this.updateLeaveProtection(); },
     },
@@ -43,6 +43,8 @@
       this._collabPoll = setInterval(() => { this.updateCollaborationActivity(); if (!document.hidden) this.collabRetry({ background: true }).catch(() => {}); }, 15000);
     },
     beforeUnmount() {
+      this._collaborationDisposed = true;
+      clearTimeout(this._reconciledImportReloadTimer); this._reconciledImportReload = null;
       clearTimeout(this._collabStartTimer); clearInterval(this._collabPoll);
       window.removeEventListener('online', this._collabOnline);
       for (const event of ['keydown', 'pointerdown', 'pointermove', 'wheel', 'focus']) window.removeEventListener(event, this._collabActivity);
@@ -79,13 +81,26 @@
         if (!this.droppedCandidateMatches(candidate, current)) throw new Error('The dropped translation changed. Reopen this file to review the current copy.');
         return { id: current.id, revision: current.revision || 0, targetSourceHash: this.sourceIdentity };
       },
-      applyRemoteDropped(records, lang = this.lang, snapshot) {
+      async applyRemoteDropped(records, lang = this.lang, snapshot) {
         if (lang !== this.lang) return;
+        const context = this.captureCollaborationContext(), workspace = this.localDescs;
+        const affected = new Set([...(records || []).map(record => record.filepath),
+          ...Object.keys(workspace.dropped?.[lang] || {}), ...Object.keys(snapshot?.dropped?.[lang] || {})].filter(Boolean));
         if (snapshot) for (const field of ['dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts']) {
-          if (snapshot[field] !== undefined) this.localDescs[field] = copy(snapshot[field]);
+          // The client transfers a detached callback snapshot, independent of
+          // its cached recovery state. Avoid copying that entire payload twice.
+          if (snapshot[field] !== undefined) this.localDescs[field] = snapshot[field];
         }
         else window.WorkspaceState.acceptDropped(this.localDescs, records, { game: this.gameVersion, language: lang, acknowledge: true });
-        this.applyWorkspaceOverlay(); this.filterDesc();
+        const descriptions = this.collaborationFileIndexes().descriptions;
+        const paths = [...affected].filter(path => descriptions.has(path));
+        let sliceStart = Date.now();
+        for (let index = 0; index < paths.length; index += 32) {
+          if (this.localDescs !== workspace || !this.collaborationContextCurrent(context)) return;
+          this.applyWorkspaceOverlay({ filepaths: paths.slice(index, index + 32) });
+          if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); }
+        }
+        if (this.localDescs === workspace && this.collaborationContextCurrent(context) && paths.length) this.filterDesc({ changedFilepaths: paths });
       },
       async readImportZipIdentity(file, zip) {
         if (typeof file?.arrayBuffer !== 'function' || !window.CollaborationProtocol?.zipHash) return null;
@@ -177,9 +192,11 @@
         try {
           if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return false;
           const ctx = this.captureCollaborationContext();
+          const profile = this.cloudProfileId;
           const oldBaseline = this.importBaseline, oldWorkspace = this.localDescs, oldSource = this.descs;
           const baseline = await this.buildImportedBaseline(oldBaseline.archive, oldBaseline.rawSource, [], archive);
-          if ((this.editorSessionActive ?? this.editorVisible) || !this.collaborationContextCurrent(ctx) || this.importBaseline !== oldBaseline || this.localDescs !== oldWorkspace || this.descs !== oldSource) return false;
+          if ((this.editorSessionActive ?? this.editorVisible) || profile !== this.cloudProfileId
+            || !this.collaborationContextCurrent(ctx) || this.importBaseline !== oldBaseline || this.localDescs !== oldWorkspace || this.descs !== oldSource) return false;
           const workspace = copy(oldWorkspace);
           window.WorkspaceState.upgradeSource(workspace, { previousSource: this.workspaceSource(), source: baseline.source,
             previousSourceHash: ctx.source, sourceHash: baseline.archive.baselineId, game: ctx.game });
@@ -204,8 +221,18 @@
             } else workspace.descs.push(replacement);
           }
           await window.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, revisions, ctx.game, baseline);
-          if (!this.collaborationContextCurrent(ctx) || this.localDescs !== oldWorkspace || this.descs !== oldSource) {
-            reloadStorage = this.gameVersion === ctx.game;
+          if (this.editorSessionActive ?? this.editorVisible) {
+            if (profile === this.cloudProfileId && this.collaborationContextCurrent({ ...ctx, client: this._collaboration })
+              && this.localDescs === oldWorkspace && this.descs === oldSource) {
+              this._reconciledImportReload = { context: ctx, sourceHash: baseline.archive.baselineId,
+                profile, workspace: oldWorkspace, source: oldSource };
+              this.collaborationNotice = 'Close the editor to apply the shared import decisions. Your local draft is preserved.';
+            }
+            return false;
+          }
+          if (profile !== this.cloudProfileId || !this.collaborationContextCurrent(ctx) || this.localDescs !== oldWorkspace || this.descs !== oldSource) {
+            reloadStorage = profile === this.cloudProfileId && this.collaborationContextCurrent({ ...ctx, language: this.lang, client: this._collaboration })
+              && this.localDescs === oldWorkspace && this.descs === oldSource;
             return false;
           }
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
@@ -220,6 +247,58 @@
           finishTransition();
           if (reloadStorage && !this.versionChooserVisible) this.loadVersionedStorage().catch(error => this.collaborationFailure(error));
         }
+      },
+      reconciledImportReloadCurrent(request) {
+        return !!request && !this._collaborationDisposed && this._reconciledImportReload === request
+          && request.profile === this.cloudProfileId && this.localDescs === request.workspace && this.descs === request.source
+          && this.collaborationContextCurrent({ ...request.context, client: this._collaboration });
+      },
+      queueReconciledImportReload() {
+        if (!this._reconciledImportReload || this._reconciledImportReloadTimer || this._collaborationDisposed
+          || (this.editorSessionActive ?? this.editorVisible) || this.versionChooserVisible) return;
+        this._reconciledImportReloadTimer = setTimeout(() => {
+          this._reconciledImportReloadTimer = null;
+          this.resumeReconciledImportReload().catch(() => {});
+        }, 0);
+      },
+      resumeReconciledImportReload() {
+        const request = this._reconciledImportReload;
+        if (request && this._reconciledImportReloadPending?.request === request) return this._reconciledImportReloadPending.promise;
+        const pending = { request, promise: null };
+        this._reconciledImportReloadPending = pending;
+        pending.promise = this.resumeReconciledImportReloadRequest(request).catch(error => {
+          if (this.reconciledImportReloadCurrent(request) && !error.stale) {
+            request.failure = error.message || String(error);
+            this.collaborationFailure(error);
+          }
+          throw error;
+        }).finally(() => {
+          if (this._reconciledImportReloadPending === pending) this._reconciledImportReloadPending = null;
+        });
+        return pending.promise;
+      },
+      async resumeReconciledImportReloadRequest(request) {
+        const current = () => this.reconciledImportReloadCurrent(request);
+        if (!current()) {
+          if (this._reconciledImportReload === request) this._reconciledImportReload = null;
+          return false;
+        }
+        if ((this.editorSessionActive ?? this.editorVisible) || this.versionChooserVisible || this.inlineTransitionBusy
+          || this.editorSaving || this.navigationBusy || this._reconcilingImport || this._importingSource) return false;
+        if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
+        if (!current() || (this.editorSessionActive ?? this.editorVisible)) return false;
+        if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return false;
+        if (!current() || (this.editorSessionActive ?? this.editorVisible)) return false;
+        if (window.OfflineStore.activateVersion) await window.OfflineStore.activateVersion({ accountId: request.context.account
+          || request.profile || 'guest', game: request.context.game, branchId: request.context.branchId || 'default', sourceHash: request.sourceHash });
+        if (!current() || (this.editorSessionActive ?? this.editorVisible)) return false;
+        await this.loadVersionedStorage();
+        if (this._reconciledImportReload !== request) return false;
+        this._reconciledImportReload = null;
+        if (this.sourceIdentity === request.sourceHash
+          && (this.collaborationNotice === 'Close the editor to apply the shared import decisions. Your local draft is preserved.'
+            || this.collaborationNotice === request.failure)) this.collaborationNotice = '';
+        return this.sourceIdentity === request.sourceHash;
       },
       initializePendingSaves() {
         if (this._pendingSaves || !window.PendingSaves || !window.SaveWorkerClient) return this._pendingSaves;
@@ -540,17 +619,20 @@
         this._collaboration = client; this._collabKey = key;
         managedContext = this.captureCollaborationContext();
         this.updateCollaborationActivity();
-        const initializationTaskToken = this.beginWorkspaceInitializationTask?.('Connecting shared translations and reconciling saved status');
+        const initializationTaskToken = this.beginWorkspaceInitializationTask?.('Preparing cached shared translations');
         try {
           const activeSource = this.descs, activeWorkspace = this.localDescs;
           const source = Vue.toRaw ? Vue.toRaw(activeSource) : activeSource;
           const workspace = Vue.toRaw ? Vue.toRaw(activeWorkspace) : activeWorkspace, files = [];
           const context = this.captureCollaborationContext();
+          const selectedSource = this.importBaseline && workspace.stagedVersion >= 1
+            ? Object.keys(workspace.staged?.[ctx.language] || {}).map(path => this.collaborationFileIndexes().descriptions.get(path)).filter(Boolean)
+            : source;
           let sliceStart = Date.now();
           this.setBrowserWork?.('collaboration', { key: 'source', label: 'Preparing collaboration data', active: true });
           try {
-            for (let index = 0; index < source.length; index++) {
-              files.push(this.collaborationFile(source[index]));
+            for (let index = 0; index < selectedSource.length; index++) {
+              files.push(this.collaborationFile(selectedSource[index]));
               if (index % 64 === 63 && Date.now() - sliceStart >= 8) {
                 await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now();
                 if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
@@ -558,7 +640,7 @@
             }
           } finally { if (this._collaboration === client) this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
           if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
-          await client.connect({ ...ctx, source,
+          await client.connect({ ...ctx, source, deferRemote: typeof client.startRemote === 'function',
             ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
             files, workspace });
           this.finishWorkspaceInitializationTask?.(initializationTaskToken, {
@@ -567,16 +649,7 @@
           });
         } catch (error) {
           this.finishWorkspaceInitializationTask?.(initializationTaskToken, { error, cancelled: !!error.stale || this._collaboration !== client });
-          if (this._collaboration !== client) return;
-          if (error.code === 'ARCHIVE_CONFIG_MISMATCH' && this._collaboration === client && error.archive) {
-            if (!await this.reconcileImportArchive(error.archive) && this._collaboration === client) {
-              client.disconnect(); this._collaboration = null; this._collabKey = '';
-            }
-            return;
-          }
-          if (this._collaboration === client && !client.room?.()?.roomId) {
-            client.disconnect(); this._collaboration = null; this._collabKey = '';
-          }
+          if (await this.handleCollaborationInitializationError(client, error)) return;
           throw error;
         }
         if (this._collaboration !== client) return;
@@ -591,9 +664,41 @@
           await this.claimCollaborationFile(filepath, false,
             () => this._collaboration === client && (this.editorSessionActive ?? this.editorVisible) && this.editorCurrentEditingDesc?.filepath === filepath);
         }
+        if (typeof client.startRemote === 'function') {
+          const context = this.captureCollaborationContext();
+          const start = async () => {
+            if (!this.collaborationContextCurrent(context) || this._workspaceBackgroundDisposed) return;
+            try { await client.startRemote(); }
+            catch (error) {
+              if (!this.collaborationContextCurrent(context) || error.stale) return;
+              if (!await this.handleCollaborationInitializationError(client, error)) this.collaborationFailure(error);
+            }
+          };
+          if (!this.queueWorkspaceBackground?.('shared-translations', start, error => this.collaborationFailure(error))) {
+            setTimeout(start, 0);
+          }
+        }
+      },
+      async handleCollaborationInitializationError(client, error) {
+        if (this._collaboration !== client || error.stale) return true;
+        if (error.code === 'ARCHIVE_CONFIG_MISMATCH' && error.archive) {
+          if (!await this.reconcileImportArchive(error.archive) && this._collaboration === client) {
+            client.disconnect(); this._collaboration = null; this._collabKey = '';
+          }
+          return true;
+        }
+        // A failed remote connection retains its prepared local room/outbox.
+        // Disconnect only a client that never completed local preparation.
+        if (!client.room?.()) {
+          client.disconnect(); this._collaboration = null; this._collabKey = '';
+        }
+        return false;
       },
       async collabRetry(options) {
         if (this._importingSource || this.pendingDuplicateLangImport?.mode === 'update') return;
+        // The accepted baseline is already durable. Keep the old editor scope
+        // until it closes, and never reconnect it while its reload is pending.
+        if (this._reconciledImportReload) return this.resumeReconciledImportReload();
         if (!this._collaboration) return this.initializeCollaboration();
         return this._collaboration.sync(options);
       },
@@ -620,14 +725,15 @@
             else setTimeout(resolve, 0);
           });
           let sliceStart = Date.now();
-          for (let index = 0; index < files.length; index += 64) {
+          for (let index = 0; index < files.length; index += 32) {
             if (!this.collaborationContextCurrent(context)) return;
-            this.applyCollaborationFiles(files.slice(index, index + 64), lang, batchState);
-            if (Date.now() - sliceStart >= 8) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); }
+            this.applyCollaborationFiles(files.slice(index, index + 32), lang, batchState);
+            if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); }
           }
           if (!this.collaborationContextCurrent(context)) return;
-          if (batchState.changedFilepaths.length) this.updateScannedDescDiagnostics?.(batchState.changedFilepaths);
-          if (batchState.displayChanged) this.filterDesc();
+          const diagnostics = batchState.changedFilepaths.length ? this.updateScannedDescDiagnostics?.(batchState.changedFilepaths) : [];
+          if (batchState.displayChanged) this.filterDesc({ changedFilepaths: Array.isArray(diagnostics)
+            ? [...files.map(file => file.filepath), ...diagnostics] : null });
         } finally {
           if (this._collaboration === context.client) this.setBrowserWork?.('collaboration', { key: 'remote', active: false });
         }

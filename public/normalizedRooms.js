@@ -115,8 +115,23 @@
       for (const id of before.keys()) if (!after.has(id)) store.delete(id);
     }
     async function selectRows(tx, roomKey, requestedPaths, options = {}) {
-      if (requestedPaths == null) {
+      if (requestedPaths == null || options.includeAffected) {
         const [files, operations, records] = await Promise.all([all(tx, S.shared, roomKey), all(tx, S.operations, roomKey), all(tx, S.roomRecords, roomKey)]);
+        if (options.includeAffected && requestedPaths != null) {
+          // Sparse room manifests contain every original path. Cold reconnect
+          // needs actual shared/authored/recoverable work, not an expansion of
+          // all those immutable originals into workspace descriptions.
+          const paths = new Set(requestedPaths);
+          for (const item of files) if (item.value.shared) paths.add(item.value.filepath);
+          for (const item of operations) for (const entry of item.value.files || []) paths.add(entry.yours.filepath);
+          for (const item of records) {
+            const value = item.value;
+            const path = ['carries', 'carryRevisions'].includes(value.field) ? value.entry : value.data?.filepath;
+            if (path) paths.add(path);
+          }
+          return { files: files.filter(item => paths.has(item.value.filepath)), operations, records, paths: [...paths],
+            ids: [...new Set([...(options.operationIds || []), ...operations.map(item => item.value.id)])] };
+        }
         return { files, operations, records, paths: [...new Set([...files.map(item => item.value.filepath),
           ...operations.flatMap(item => item.value.files.map(entry => entry.yours.filepath)),
           ...records.filter(item => item.value.field === 'recoveryFiles').map(item => item.value.data.filepath)])],
@@ -154,7 +169,7 @@
       if (!meta) return { room: null, selection: { filepaths: paths || [], operationIds: options.operationIds || [] } };
       const selected = await selectRows(tx, roomKey, paths, options);
       const room = { ...copy(meta), shared: {}, local: {}, carries: {}, carryRevisions: {}, outbox: [], conflicts: [], recovery: [], placeholderRepairs: [] };
-      if (paths == null && room.archive) {
+      if ((paths == null || options.includeAffected) && room.archive) {
         const assets = await get(tx, S.assets, n.baselineKey(scopeOf(room.identity)));
         if (!assets?.archive || assets.archive.baselineId !== room.archive.baselineId) throw Object.assign(
           new Error('The accepted collaboration archive descriptor is unavailable. Import its matching original ZIP to finish conversion.'),
@@ -183,7 +198,7 @@
         group.files.push(copy(item.data)); group._storageRecovery.fileOrders.push(item.order);
       }
       room.recovery = [...recoveryGroups.values()].sort((left, right) => left._storageRecovery.order - right._storageRecovery.order);
-      if (paths == null && room.seedUpload && room._seedUploadFiles) room.seedUpload.files = seedFiles
+      if ((paths == null || options.includeAffected) && room.seedUpload && room._seedUploadFiles) room.seedUpload.files = seedFiles
         .sort((left, right) => left.order - right.order).map(item => copy(item.data));
       const scope = scopeOf(room.identity);
       const [workspace, originals] = await Promise.all([
@@ -369,20 +384,25 @@
     async function getRecords(command) {
       const identity = commandIdentity(command);
       await ensureRoom(command.key, identity);
-      return transaction(commandStores(command, command.filepaths == null), 'readonly', tx => readRoom(tx, command.key, command.filepaths, command));
+      return transaction(commandStores(command, command.filepaths == null || command.includeAffected), 'readonly', tx => readRoom(tx, command.key, command.filepaths, command));
     }
     async function updateRecords(command, update, options = {}) {
       const identity = commandIdentity(command);
       await ensureRoom(command.key, identity);
       const scope = scopeOf(identity);
       await n.ensure(scope);
-      return transaction(commandStores(options, command.filepaths == null), 'readwrite', async tx => {
+      return transaction(commandStores(options, command.filepaths == null || command.includeAffected), 'readwrite', async tx => {
         const result = await readRoom(tx, command.key, command.filepaths, command), state = { version: 1, rooms: {} };
         if (result.room) state.rooms[command.key] = result.room;
         const updated = update(state, result.room);
         if (updated?.then) throw new Error('Collaboration commands must be synchronous.');
         const finalState = updated || state, room = finalState.rooms[command.key];
         let workspace = result.workspace;
+        // A new room has no read view yet, but its workspace already exists.
+        // Read the requested durable rows before projection rather than letting
+        // the caller fall back to its complete in-memory workspace.
+        if (workspace === undefined && options.projectWorkspace && !Object.hasOwn(options, 'workspace'))
+          workspace = await readWorkspace(tx, scope, command.filepaths, command.includeDropped === true);
         if (Object.hasOwn(options, 'workspace')) workspace = copy(options.workspace);
         if (options.projectWorkspace) workspace = options.projectWorkspace(workspace, finalState);
         if (workspace?.then) throw new Error('Workspace projection must be synchronous.');

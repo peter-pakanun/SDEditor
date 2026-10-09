@@ -460,10 +460,24 @@
         try {
           const result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id));
           if (key !== this.managedCatalogScope || language !== this.lang || this.managedActiveVersion?.id !== version.id) return;
+          if (!this.managedDetailsMatchVersion(result, version)) throw new Error('The active version details do not match this source. Existing local work has been preserved.');
           this.managedActiveDetails = this.managedScopedDetails(result);
           await root.OfflineStore.setVersionMetadata?.(scope, { details: copy(result), catalogVersionId: version.id, officialName: version.name });
+          if (key === this.managedCatalogScope && language === this.lang && this.managedActiveVersion?.id === version.id) this.managedSetOperationError('active-details', '');
         }
-        catch (_) { /* A background detail failure does not interrupt the editor. */ }
+        catch (error) {
+          if (!error.stale && key === this.managedCatalogScope && language === this.lang && this.managedActiveVersion?.id === version.id) {
+            this.managedSetOperationError('active-details', error);
+          }
+        }
+      },
+      queueManagedActiveRefresh() {
+        const key = this.managedCatalogScope, source = this.sourceIdentity, language = this.lang;
+        const refresh = () => {
+          if (key === this.managedCatalogScope && source === this.sourceIdentity && language === this.lang
+            && !this._workspaceBackgroundDisposed) return this.managedRefreshActive();
+        };
+        if (!this.queueWorkspaceBackground?.('active-version-details', refresh)) setTimeout(refresh, 0);
       },
       async showVersionChooser() {
         if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
@@ -565,13 +579,13 @@
           this._managedEditAcknowledged = '';
           if (language) this.lang = language;
           root.OfflineStore.setWorkspaceContext(scope); this.versionChooserVisible = false;
-          await this.loadVersionedStorage(initialization);
+          await this.loadVersionedStorage(initialization, activated && { ...activated, language: this.lang });
           if (!current()) return false;
           this._managedWorkspaceOwner = JSON.stringify([scope.accountId, scope.game, scope.branchId]);
           if (!this.sourceLoaded || this.sourceIdentity !== scope.sourceHash) return false;
           await task('Updating the active source version', () => this.managedAssociateActive());
           if (!current()) return false;
-          if (this.managedOnlineAvailable && this.managedActiveVersion) await task('Refreshing active version and team details', () => this.managedRefreshActive());
+          if (this.managedOnlineAvailable && this.managedActiveVersion) this.queueManagedActiveRefresh();
           return current();
         } finally { this.finishWorkspaceInitialization?.(initialization); }
       },
@@ -606,7 +620,9 @@
             if (!current()) return;
             if (this.managedDetailsMatchVersion(metadata?.details, version)) details = this.managedScopedDetails(metadata.details);
           }
-          if (this.managedOnlineAvailable) {
+          // Cached, scope-checked version facts are enough for local opening.
+          // A first download or missing facts still needs an explicit request.
+          if (this.managedOnlineAvailable && (!source?.length || !details)) {
             try {
               const result = await task('Checking published version and team details', () => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id)));
               if (!current()) return;

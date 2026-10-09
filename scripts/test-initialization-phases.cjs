@@ -19,7 +19,8 @@ function harness() {
       testMode: false, lang: 'Thai', gameVersion: 'poe1', $nextTick: async () => {},
       cloudPayload: () => ({ lang: 'Thai' }), cloudApply: async () => {}, finishStartup: async () => {},
     });
-  const phases = [];
+  const phases = [], background = new Map();
+  editor.queueWorkspaceBackground = (key, callback) => { background.set(key, callback); return true; };
   editor.beginWorkspaceInitializationTask = label => {
     if (!editor.initializing) return null;
     const task = { label }; phases.push(task); return task;
@@ -30,11 +31,11 @@ function harness() {
     try { const value = await callback(); editor.finishWorkspaceInitializationTask(task); return value; }
     catch (error) { editor.finishWorkspaceInitializationTask(task, { error }); throw error; }
   };
-  return { editor, window, phases };
+  return { editor, window, phases, background };
 }
 
 test('initial cloud startup reports local restoration before remote access and keeps local UI available on cloud failure', async () => {
-  const { editor, window, phases } = harness();
+  const { editor, window, phases, background } = harness();
   editor.initializing = true;
   let localVisible = false;
   editor.finishStartup = async () => { localVisible = true; };
@@ -51,13 +52,34 @@ test('initial cloud startup reports local restoration before remote access and k
   assert.deepEqual(phases.map(task => task.label), [
     'Restoring local profile, settings and Dictionary',
     'Applying local settings and restoring editor drafts',
-    'Checking cloud session and account access',
   ]);
-  assert.equal(phases[2].result.error, 'Cloud unavailable');
+  assert.equal(editor.cloudError, false, 'A network check is not required before local startup finishes.');
+  await background.get('cloud-session')();
   assert.equal(editor.cloudError, true); assert.equal(editor._cloudInitializing, false);
   editor.initializing = false;
   await editor._cloud.refreshSession(true);
-  assert.equal(phases.length, 3, 'Recurring session requests do not append initialization work.');
+  assert.equal(phases.length, 2, 'Remote session requests do not append local initialization work.');
+});
+
+test('slow session checks and obsolete queued checks cannot hold or change local initialization', async () => {
+  const { editor, window, background } = harness();
+  let resolve, requested = 0;
+  const response = new Promise(done => { resolve = done; });
+  window.CloudSync.Client = class {
+    async initialize() {}
+    snapshot() { return {}; }
+    async refreshSession() { requested++; await response; }
+  };
+  await editor.initializeCloud();
+  assert.equal(requested, 0);
+  const start = background.get('cloud-session');
+  const pending = start();
+  assert.equal(requested, 1);
+  assert.equal(editor._cloudInitializing, false);
+  resolve(); await pending;
+  editor._cloud = {};
+  await start();
+  assert.equal(requested, 1, 'A replaced local account client cannot start an old session request.');
 });
 
 test('source ZIP hashing and accepted baseline checks report their phases only during workspace initialization', async () => {

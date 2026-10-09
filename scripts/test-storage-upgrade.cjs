@@ -356,6 +356,59 @@ test('loading leaves already shared placeholders staged until the guarded API re
   assert.equal(kv.get('collaboration_v1').value.rooms.own.placeholderRepairs.length, 1);
 });
 
+test('legacy workspace bundles preserve selected-language migration, placeholder repair and settled reload behavior', async t => {
+  for (const language of ['Thai', 'German', 'English']) for (const shared of [false, true]) await t.test(language + (shared ? ' shared' : ' local'), async () => {
+    const { fixture, kv } = storedPlaceholder({ shared }), { store } = loadStore(fixture);
+    const original = copy(kv.get('source_poe1').value);
+    const bundled = await store.getWorkspaceSnapshot('poe1', language);
+    assert.equal(bundled.scope, null);
+    assert.equal(bundled.baseline, null);
+    assert.deepEqual(copy(bundled.source), original);
+    assert.deepEqual(copy(bundled.workspace), copy(await store.getWorkspace('poe1', language)), 'The ordinary workspace adapter and bundle agree');
+    if (language !== 'English') {
+      assert.equal(bundled.workspace.placeholderRepairVersion, 1);
+      assert.equal(kv.get('collaboration_v1').value.rooms.own.placeholderRepairs.length, 1);
+      assert.equal(!!bundled.workspace.staged.Thai['a.txt'], shared, 'Shared placeholders stay staged until the guarded repair is acknowledged');
+    }
+    const settled = fixture.snapshot();
+    assert.deepEqual(copy((await store.getWorkspaceSnapshot('poe1', language)).workspace), copy(bundled.workspace));
+    assert.deepEqual(fixture.snapshot(), settled, 'Settled bundled reload cannot recreate repairs or rewrite migration evidence');
+  });
+});
+
+test('an unscoped legacy bundle keeps captured storage keys when a different account is selected during the read', async () => {
+  const fixture = versionedStorage(), { store } = loadStore(fixture), kv = fixture.tables.get('kv');
+  const selected = { accountId: 'another', game: 'poe2', branchId: 'release', sourceHash: 'new-source' };
+  const suffix = JSON.stringify([selected.accountId, selected.game, selected.branchId, selected.sourceHash]);
+  kv.set('workspace_version_v1:' + suffix, { key: 'workspace_version_v1:' + suffix, value: { untouched: true, sourceHash: selected.sourceHash } });
+  kv.set('source_version_v1:' + suffix, { key: 'source_version_v1:' + suffix, value: [{ filepath: 'another-source.txt' }] });
+  const loading = store.getWorkspaceSnapshot('poe1', 'Thai');
+  store.setWorkspaceContext(selected);
+  const bundled = await loading;
+  assert.equal(bundled.scope, null);
+  assert.equal(bundled.workspace.sourceHash, 'current');
+  assert.deepEqual(copy(bundled.source), source);
+  assert.deepEqual(kv.get('workspace_version_v1:' + suffix).value, { untouched: true, sourceHash: selected.sourceHash });
+});
+
+test('English legacy bundle cleanup commits into its captured slot after an account switch', async () => {
+  const fixture = versionedStorage(), { store } = loadStore(fixture), kv = fixture.tables.get('kv');
+  const legacy = copy(workspace);
+  legacy.stagedVersion = 1; legacy.statusMetadataVersion = 0; legacy.staged = {};
+  kv.set('workspace_poe1', { key: 'workspace_poe1', value: legacy });
+  const selected = { accountId: 'another', game: 'poe1', branchId: 'default', sourceHash: 'new-source' };
+  const key = 'workspace_version_v1:' + JSON.stringify([selected.accountId, selected.game, selected.branchId, selected.sourceHash]);
+  kv.set(key, { key, value: { untouched: true, sourceHash: selected.sourceHash } });
+  const loading = store.getWorkspaceSnapshot('poe1', 'English');
+  store.setWorkspaceContext(selected);
+  const bundled = await loading;
+  assert.equal(bundled.workspace.statusMetadataVersion, 1);
+  assert.equal(bundled.workspace.descs[0].hasChanges, undefined);
+  assert.deepEqual(copy(bundled.source), source);
+  assert.equal(kv.get('workspace_poe1').value.statusMetadataVersion, 1);
+  assert.deepEqual(kv.get(key).value, { untouched: true, sourceHash: selected.sourceHash });
+});
+
 test('authored blank save history and receipts prevent automatic placeholder cleanup on load', async () => {
   for (const evidence of ['history', 'receipt']) {
     const { fixture, kv } = storedPlaceholder({ shared: true });

@@ -135,6 +135,111 @@ test('language choices include saved references for loaded files and keep editor
   assert.equal(model.lang, 'Thai');
 });
 
+test('hidden Lookup language getter and its watcher never traverse the corpus', () => {
+  let corpusReads = 0;
+  const descs = Array.from({ length: 20000 }, (_, index) => {
+    const one = description(String(index));
+    Object.defineProperty(one, 'translations', { get() { corpusReads++; return { English: ['English'], French: ['Français'] }; } });
+    return one;
+  });
+  const localDescs = {};
+  Object.defineProperty(localDescs, 'descs', { get() { corpusReads++; return []; } });
+  const { model, api } = loadLookup({ descs, localDescs, sideTab: 'dictionary', lookupLanguage: 'French' });
+  // Vue establishes and reevaluates the source of a watch even for a hidden
+  // v-show panel; cover those reads as well as template reads explicitly.
+  for (let index = 0; index < 4; index++) {
+    api.mixin.watch.lookupLanguages.call(model, model.lookupLanguages);
+    model.invalidateEditorLookupIndex();
+    assert.deepEqual(Array.from(model.lookupLanguages), ['Thai']);
+  }
+  assert.equal(corpusReads, 0);
+  assert.equal(model.lookupLanguage, 'French', 'Hiding Lookup must not clear its selected language.');
+});
+
+test('Lookup language enumeration is cached, deferred while hidden, and refreshed on activation', () => {
+  let translationReads = 0;
+  const one = description('one', 'English', 'Thai', { French: ['Français'] });
+  const translations = one.translations;
+  Object.defineProperty(one, 'translations', { get() { translationReads++; return translations; } });
+  const { model, api } = loadLookup({ descs: [one], sideTab: 'dictionary', lookupLanguage: 'French' });
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai']);
+  assert.equal(translationReads, 0);
+  model.sideTab = 'lookup';
+  const initial = model.lookupLanguages;
+  assert.deepEqual(Array.from(initial), ['Thai', 'French']);
+  const firstReads = translationReads;
+  assert.ok(firstReads > 0);
+  assert.equal(model.lookupLanguages, initial);
+  assert.equal(translationReads, firstReads);
+  model.sideTab = 'dictionary';
+  translations.French = [];
+  translations.Japanese = ['日本語'];
+  model.invalidateEditorLookupIndex();
+  api.mixin.watch.lookupLanguages.call(model, model.lookupLanguages);
+  assert.equal(model.lookupLanguages, initial, 'Hidden Lookup retains its last complete choices.');
+  assert.equal(translationReads, firstReads);
+  assert.equal(model.lookupLanguage, 'French');
+  model.sideTab = 'lookup';
+  const refreshed = model.lookupLanguages;
+  assert.deepEqual(Array.from(refreshed), ['Thai', 'Japanese']);
+  assert.ok(translationReads > firstReads);
+  api.mixin.watch.lookupLanguages.call(model, refreshed);
+  assert.equal(model.lookupLanguage, '', 'A vanished choice is validated when Lookup becomes visible.');
+});
+
+test('active Lookup refreshes choices after committed changes and respects empty saved overrides', () => {
+  const one = description('one', 'English', [], { French: ['Français'], German: ['Deutsch'] });
+  const local = { filepath: one.filepath, translations: { French: [], Japanese: ['日本語'] } };
+  const { model, api } = loadLookup({ descs: [one], localDescs: { descs: [local] }, lookupLanguage: 'German' });
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai', 'German', 'Japanese']);
+  local.translations.German = [];
+  local.translations.Korean = ['한국어'];
+  model.invalidateEditorLookupIndex();
+  const choices = model.lookupLanguages;
+  assert.deepEqual(Array.from(choices), ['Thai', 'Japanese', 'Korean']);
+  api.mixin.watch.lookupLanguages.call(model, choices);
+  assert.equal(model.lookupLanguage, '');
+});
+
+test('hidden source and editor language switches cannot expose previous language choices', () => {
+  const one = description('old', 'Old English', 'Thai', { French: ['Français'] });
+  const { model, api } = loadLookup({ descs: [one], lookupLanguage: 'French' });
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai', 'French']);
+  model.sideTab = 'dictionary';
+  model.descs = [description('new', 'New English', [], { Japanese: ['日本語'] })];
+  api.mixin.watch.descs.call(model);
+  api.mixin.watch.lookupLanguages.call(model, model.lookupLanguages);
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai']);
+  assert.equal(model.lookupLanguage, 'French');
+  model.lang = 'German';
+  api.mixin.watch.lang.call(model);
+  assert.deepEqual(Array.from(model.lookupLanguages), ['German']);
+  model.sideTab = 'lookup';
+  const choices = model.lookupLanguages;
+  assert.deepEqual(Array.from(choices), ['German', 'Japanese']);
+  api.mixin.watch.lookupLanguages.call(model, choices);
+  assert.equal(model.lookupLanguage, '');
+});
+
+test('inline and full editor handoff reuses completed language choices', () => {
+  let translationReads = 0;
+  const one = description('handoff', 'English', 'Thai', { French: ['Français'] });
+  const translations = one.translations;
+  Object.defineProperty(one, 'translations', { get() { translationReads++; return translations; } });
+  const { model } = loadLookup({ descs: [one], editorVisible: false, editorSessionActive: true });
+  const choices = model.lookupLanguages;
+  const reads = translationReads;
+  model.editorVisible = true;
+  assert.equal(model.lookupLanguages, choices);
+  model.sideTab = 'comments';
+  model.editorSessionActive = false;
+  assert.equal(model.lookupLanguages, choices);
+  model.editorSessionActive = true;
+  model.sideTab = 'lookup';
+  assert.equal(model.lookupLanguages, choices);
+  assert.equal(translationReads, reads);
+});
+
 test('reference preserves every source and translation entry, multiline text, table columns and stat metadata', () => {
   const one = description('table', ['Left A\\nLeft B@Right A\\nRight B', 'Second English'], ['ซ้าย A\\nซ้าย B@ขวา A\\nขวา B', 'ไทยสอง', 'Extra saved entry']);
   one.variables = ['# #', '1|#']; one.remarks = ['table_only', 'negate 1'];

@@ -1250,7 +1250,7 @@ const config = Vue.defineComponent({
         } else await this.loadVersionedStorage(initialization);
       } finally { this.finishWorkspaceInitialization?.(initialization); }
     },
-    async loadVersionedStorage(initializationSession) {
+    async loadVersionedStorage(initializationSession, activatedSnapshot) {
       if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
       if (this._importReconciliationDone) await this._importReconciliationDone;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
@@ -1272,16 +1272,30 @@ const config = Vue.defineComponent({
       this.loadingProgress = 0.001;
       try {
         this.ensureDictionaryWorker();
-        const [workspace, storedSource] = await Promise.all([
-          prepare('Loading saved translations and preserved copies', () => window.OfflineStore.getWorkspace(game, this.lang)),
-          prepare('Loading stored source files', () => window.OfflineStore.getSource(game)),
-        ]);
+        const cached = activatedSnapshot?.scope;
+        const reusable = cached && cached.game === game && String(cached.accountId) === String(profile)
+          && (cached.branchId || 'default') === branch && activatedSnapshot.language === this.lang
+          && cached.sourceHash && activatedSnapshot.workspace?.sourceHash === cached.sourceHash
+          && activatedSnapshot.workspace?.stagedVersion >= 1 && activatedSnapshot.workspace?.statusMetadataVersion === 1
+          && Array.isArray(activatedSnapshot.source);
+        let snapshot;
+        if (reusable) snapshot = await prepare('Reusing the activated local source and saved translations', () => activatedSnapshot);
+        else if (window.OfflineStore.getWorkspaceSnapshot) snapshot = await prepare('Loading saved translations and the original source baseline', () => window.OfflineStore.getWorkspaceSnapshot(game, this.lang));
+        else {
+          const [workspace, source] = await Promise.all([
+            prepare('Loading saved translations and preserved copies', () => window.OfflineStore.getWorkspace(game, this.lang)),
+            prepare('Loading stored source files', () => window.OfflineStore.getSource(game)),
+          ]);
+          snapshot = { workspace, source };
+        }
+        const { workspace, source: storedSource } = snapshot;
         if (!current()) return;
         let source = storedSource;
         let importedBaseline = null;
         let sourceHash = '';
         if (workspace?.importArchive) {
-          importedBaseline = await prepare('Loading and verifying the original baseline', () => window.OfflineStore.getImportedBaseline(workspace.importArchive.baselineId, game));
+          importedBaseline = await prepare('Loading and verifying the original baseline', () => Object.hasOwn(snapshot, 'baseline')
+            ? snapshot.baseline : window.OfflineStore.getImportedBaseline(workspace.importArchive.baselineId, game));
           if (!current()) return;
           const archive = window.CollaborationProtocol.normalizeArchive(workspace.importArchive);
           if (!importedBaseline || importedBaseline.archive?.baselineId !== archive.baselineId
@@ -1340,7 +1354,7 @@ const config = Vue.defineComponent({
           if (current()) {
             this.versionStorageLoading = false;
             if (this.sourceLoaded && this.initializeCollaboration) {
-              try { await prepare('Opening shared translations and checking queued work', () => this.initializeCollaboration(initialization)); }
+              try { await prepare('Preparing cached shared translations and queued work', () => this.initializeCollaboration(initialization)); }
               catch (error) { if (current()) this.collaborationFailure?.(error); }
             }
             if (current()) this.scheduleCollaboration?.();
@@ -5692,21 +5706,27 @@ const config = Vue.defineComponent({
     },
     // Overlay staged text on the immutable ZIP baseline. Status fields on these
     // visible descriptions are caches derived from text and unresolved copies.
-    applyWorkspaceOverlay() {
-      this.invalidateEditorLookupIndex?.();
+    applyWorkspaceOverlay({ filepaths } = {}) {
       window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
         sourceHash: this.sourceIdentity, game: this.gameVersion, language: this.lang });
-      for (const desc of this.descs || []) {
+      const rows = filepaths ? filepaths.map(path => this.collaborationFileIndexes().descriptions.get(path)).filter(Boolean) : this.descs || [];
+      let translationsChanged = false;
+      for (const desc of rows) {
         const state = window.WorkspaceState.workspaceFile(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc, this.lang);
         if (!desc.translations) desc.translations = { English: [] };
         desc.isDNT = window.StatDescCodec.computeIsDNT(desc.translations.English);
-        desc.translations[this.lang] = [...state.translations];
+        if (!arrayEquals(desc.translations[this.lang], state.translations)) {
+          desc.translations[this.lang] = [...state.translations]; translationsChanged = true;
+        }
         desc.hasChanges = state.hasChanges;
         desc.isRevised = state.isRevised;
         desc.isMissing = state.isMissing;
         desc.isDropped = state.isDropped;
         desc.needsReview = state.needsReview;
       }
+      // A full workspace replacement can change saved reference languages
+      // without changing the selected language's visible overlay.
+      if (!filepaths || translationsChanged) this.invalidateEditorLookupIndex?.();
     },
     selectAllFileFilters() {
       this.selectedFileFilters = this.fileFilterOptions.map(option => option.key);

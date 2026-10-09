@@ -8,7 +8,8 @@
   'use strict';
   const { copy, fileState, contentEqual, mergeFile, scopeKey } = P;
   const ROOT = '/v1/collaboration';
-  const transient = error => !error.status || error.status >= 500 || error.status === 429 || error.code === 'UPLOAD_EXPIRED';
+  const transient = error => error.code !== 'ARCHIVE_CONFIG_MISMATCH'
+    && (!error.status || error.status >= 500 || error.status === 429 || error.code === 'UPLOAD_EXPIRED');
   const staleError = () => Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
   const byPath = files => Object.fromEntries(files.map(file => [file.filepath, copy(file)]));
   class Client {
@@ -42,6 +43,8 @@
       this.lastDroppedSync = 0;
       this.droppedConflicts = {};
       this.pendingDropped = false;
+      this.remoteDeferred = false; this.remoteStart = null;
+      this.archiveResolved = false; this.needsRemoteJoin = false;
     }
     current(epoch) { return !this.destroyed && epoch === this.epoch && !!this.key; }
     room() { return this.state?.rooms?.[this.key] || null; }
@@ -77,7 +80,7 @@
       for (let index = 0; index < items.length; index++) {
         if (epoch !== this.epoch || this.destroyed) throw staleError();
         result.push(prepare(items[index], index));
-        if (index % 64 === 63 && Date.now() - start >= 8) {
+        if (index % 32 === 31 && Date.now() - start >= 4) {
           await new Promise(resolve => setTimeout(resolve, 0)); start = Date.now();
         }
       }
@@ -174,7 +177,7 @@
     remoteFiles(files) {
       const room = this.room();
       return files.filter(file => room.mode !== 'sparse' || !this.carryProtected(room, file))
-        .map(file => copy(room.local[file.filepath])).filter(Boolean);
+        .map(file => copy(room.local[file.filepath] || (file.stagingReset ? file : null))).filter(Boolean);
     }
     stageLocalSave(batch) { this.stagedSaves.set(batch.jobId, batch); }
     withLocalWrite(action) {
@@ -284,7 +287,7 @@
       };
       const storageOptions = { roomKey: key, version: this.room()?.identity.game, scope: copy(this.room()?.identity), ...options };
       const result = options.records && this.store.updateCollaborationRecords
-        ? await this.store.updateCollaborationRecords({ key, scope: copy(this.room()?.identity), ...options.records },
+        ? await this.store.updateCollaborationRecords({ key, scope: copy(storageOptions.scope), ...options.records },
           (state, room) => { apply(state); return state; }, storageOptions)
         : await this.store.updateCollaborationState(apply, storageOptions);
       if (!this.current(epoch)) throw staleError();
@@ -314,9 +317,10 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree }) {
-      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree });
+    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false }) {
+      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote });
       this.disconnect(); this.destroyed = false;
+      this.remoteDeferred = true;
       this.baselineStates = null; this.baselineTree = null; this.archive = null;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
@@ -377,18 +381,12 @@
         current.collaborationAccountId = identity.accountId;
         return current;
       } }, epoch);
-      try {
-        await this.initializeRoom(epoch);
-        await this.retry();
-      } catch (error) {
-        if (error.stale || !this.current(epoch)) throw staleError();
-        this.handleError(error);
-        if (!transient(error)) throw error;
-      }
+      await this.finishConnection(epoch, deferRemote);
       return this.snapshot({ includeFiles: false });
     }
-    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree }) {
+    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false }) {
       this.disconnect(); this.destroyed = false;
+      this.remoteDeferred = true;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
       archive = await P.finalizeArchive(archive);
@@ -410,26 +408,40 @@
       }, epoch);
       const identity = { accountId: String(accountId), game, branchId, sourceHash: archive.baselineId, language };
       this.key = scopeKey(identity); this.context = this.getContext();
-      // Resolve the tiny descriptor before creating or altering durable room state.
-      const canonical = await this.api('/archives/resolve', { method: 'POST', body: { game, archive } }, epoch);
-      const known = await P.finalizeArchive(canonical.archive || canonical);
-      if (!P.equal(known, archive)) {
-        this.onCanonicalArchive(copy(known));
-        throw Object.assign(new Error('This original ZIP already has an agreed import configuration.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: known });
-      }
-      const incoming = files.map(file => {
+      // Legacy callers validate the remote descriptor before changing the room.
+      // Local-first activation already has a verified baseline and defers this
+      // network check until the workspace can accept editing.
+      if (!deferRemote) await this.resolveArchive(epoch, identity);
+      const modernWorkspace = workspace?.stagedVersion >= 1;
+      const incoming = (await this.prepareItems(files, file => {
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
+        if (modernWorkspace ? !workspace.staged?.[language]?.[file.filepath] : !file.trackedForExport && !file.needsReview) return null;
         // Unstaged original ZIP blocks can have a structural error themselves.
         // A deletion restores those exact blocks instead of truncating them.
         return fileState(file, file.stagingReset || (workspace?.stagedVersion >= 1 && !workspace.staged?.[language]?.[file.filepath])
           ? undefined : original.english.length);
-      });
+      }, epoch)).filter(Boolean);
       let legacyCarries = {};
-      const modernWorkspace = workspace?.stagedVersion >= 1;
+      let records;
+      const compactManifest = { version: 2, files: await this.prepareItems(manifest.files,
+        file => ({ filepath: file.filepath, entryCount: file.english.length }), epoch) };
+      if (this.store.getCollaborationRecords && this.store.updateCollaborationRecords) {
+        const incomingPaths = incoming.filter(file => modernWorkspace ? workspace.staged?.[language]?.[file.filepath]
+          : file.trackedForExport || file.needsReview).map(file => file.filepath);
+        const repairPaths = Object.values(workspace?.placeholderRepairArchive || {}).map(repair => repair.filepath).filter(Boolean);
+        const loaded = await this.store.getCollaborationRecords({ key: this.key, scope: identity, command: 'open-local-room',
+          filepaths: [...new Set([...incomingPaths, ...repairPaths])], includeAffected: true, includeOutbox: true,
+          includeConflicts: true, includeDropped: true });
+        if (!this.current(epoch)) throw staleError();
+        this.state = { version: 1, rooms: loaded.room ? { [this.key]: loaded.room } : {} };
+        if (loaded.room) loaded.room.manifest = compactManifest;
+        records = this.records('prepare-local-room', [...new Set([...incomingPaths, ...repairPaths, ...(loaded.selection?.filepaths || [])])],
+          loaded.selection?.operationIds || [], { includeDropped: true });
+      }
       await this.update((state, room) => {
         if (!room) room = state.rooms[this.key] = { mode: 'sparse', identity, archive: copy(archive),
-          manifest: { version: 2, files: manifest.files.map(file => ({ filepath: file.filepath, entryCount: file.english.length })) }, roomId: null, sequence: 0,
+          manifest: compactManifest, roomId: null, sequence: 0,
           shared: {}, local: {}, outbox: [], conflicts: [], recovery: [], carries: {}, initialized: false };
         if (room.mode !== 'sparse' || room.archive.baselineId !== archive.baselineId) throw new Error('The stored collaboration baseline differs.');
         legacyCarries = copy(room.carries || {});
@@ -457,11 +469,13 @@
           room.recovery.push({ id: this.uuid(), at: Date.now(), reason: 'Preserved dropped translation', files: [copy(carry)] });
         }
         this.rebuild(room);
-      }, { version: game, scope: identity, projectWorkspace: stored => {
+      }, { version: game, scope: identity, ...(records ? { records } : {}), projectWorkspace: stored => {
         const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash; current.collaborationAccountId = identity.accountId;
-        W.initializeWorkspace(current, { source: baselineSource, sourceHash: identity.sourceHash, game, language });
+        W.initializeWorkspace(current, { source: current._storageSelection
+          ? (current.descs || []).map(desc => this.baselineFiles.get(desc.filepath)).filter(Boolean) : baselineSource,
+          sourceHash: identity.sourceHash, game, language });
         const descriptions = new Map((current.descs || []).map(desc => [desc.filepath, desc]));
         for (const carry of Object.values(legacyCarries)) {
           if (W.droppedForFile(current, carry.filepath, language)) continue;
@@ -474,13 +488,51 @@
         }
         return current;
       } }, epoch);
-      try { await this.initializeRoom(epoch); await this.retry(); }
-      catch (error) {
-        if (error.stale || !this.current(epoch)) throw staleError();
-        if (error.code === 'ARCHIVE_CONFIG_MISMATCH') throw error;
-        this.handleError(error); if (!transient(error)) throw error;
-      }
+      this.room().manifest = compactManifest;
+      await this.finishConnection(epoch, deferRemote);
       return this.snapshot({ includeFiles: false });
+    }
+    async resolveArchive(epoch, identity = this.room()?.identity) {
+      if (this.archiveResolved || !this.archive) return;
+      const archive = this.archive;
+      const canonical = await this.api('/archives/resolve', { method: 'POST', body: { game: identity.game, archive } }, epoch);
+      const known = await P.finalizeArchive(canonical.archive || canonical);
+      if (!this.current(epoch)) throw staleError();
+      if (!P.equal(known, archive)) {
+        this.onCanonicalArchive(copy(known));
+        throw Object.assign(new Error('This original ZIP already has an agreed import configuration.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: known });
+      }
+      this.archiveResolved = true;
+    }
+    startRemote() {
+      const epoch = this.epoch;
+      if (!this.current(epoch)) return Promise.resolve(this.snapshot({ includeFiles: false }));
+      if (this.remoteStart?.epoch === epoch) return this.remoteStart.promise;
+      this.remoteDeferred = false;
+      const start = { epoch, promise: null }; this.remoteStart = start;
+      start.promise = this.retry().then(result => {
+        if (!this.current(epoch)) throw staleError();
+        if (this.lastError && !transient(this.lastError) && this.lastError !== this.placeholderRepairError) throw this.lastError;
+        return result;
+      }).finally(() => { if (this.remoteStart === start) this.remoteStart = null; });
+      return start.promise;
+    }
+    async finishConnection(epoch, deferRemote) {
+      this.needsRemoteJoin = true;
+      if (deferRemote) return;
+      this.remoteDeferred = false;
+      try {
+        // Existing callers join before entering the multi-tab upload lock so
+        // presence can subscribe even while another tab synchronizes saves.
+        await this.initializeRoom(epoch);
+        if (!this.current(epoch)) throw staleError();
+        this.needsRemoteJoin = false;
+        await this.retry();
+      } catch (error) {
+        if (error.stale || !this.current(epoch)) throw staleError();
+        this.handleError(error);
+        if (!transient(error)) throw error;
+      }
     }
     async initializeRoom(epoch) {
       const room = this.room();
@@ -578,7 +630,19 @@
     }
     async acceptSnapshot(snapshot, epoch, initial = false) {
       if (!snapshot?.roomId || !Array.isArray(snapshot.files)) throw new Error('Invalid collaboration snapshot.');
-      const files = snapshot.files.map(file => fileState(file));
+      const files = await this.prepareItems(snapshot.files, file => fileState(file), epoch);
+      let projected = files, records;
+      if (this.room().mode === 'sparse') {
+        const incoming = new Set(files.map(file => file.filepath)), room = this.room();
+        const removed = Object.keys(room.shared || {}).filter(path => !incoming.has(path) && this.baselineStates[path])
+          .map(path => ({ ...copy(this.baselineStates[path]), stagingReset: true }));
+        projected = [...files, ...removed];
+        const affected = [...Object.keys(room.shared || {}), ...Object.keys(room.local || {}), ...Object.keys(room.carries || {}),
+          ...room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)),
+          ...room.conflicts.map(conflict => conflict.filepath), ...(room.placeholderRepairs || []).map(repair => repair.filepath),
+          ...room.recovery.flatMap(entry => (entry.files || []).map(file => file.filepath)), ...projected.map(file => file.filepath)];
+        records = this.records('accept-snapshot', affected, room.outbox.map(operation => operation.id));
+      }
       await this.update((state, room) => {
         if (room.mode === 'sparse') this.preserveCarried(room, files);
         else if (initial) {
@@ -609,8 +673,8 @@
         room.initialized = true;
         delete room.seedUpload;
         this.rebuild(room);
-      }, { projectWorkspace: this.projection(files, epoch) }, epoch);
-      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...files, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
+      }, { ...(records ? { records } : {}), projectWorkspace: this.projection(projected, epoch) }, epoch);
+      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...projected, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
       if (!this.current(epoch)) throw staleError();
     }
     async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, promoteDropped, promoteDroppedByPath = {}, waitForSync = true }) {
@@ -700,6 +764,7 @@
     retry() {
       const epoch = this.epoch;
       if (!this.current(epoch)) return Promise.resolve(this.snapshot({ includeFiles: false }));
+      if (this.remoteDeferred) return Promise.resolve(this.snapshot({ includeFiles: false }));
       // Presence belongs to this browser, so it must not wait for another tab's
       // translation lock, catch-up requests or queued uploads.
       this.startPresence(epoch);
@@ -707,8 +772,13 @@
       const run = async () => {
         try {
           if (!this.current(epoch)) throw staleError();
+          if (this.archive && !this.archiveResolved) await this.resolveArchive(epoch);
           await this.syncDropped(epoch);
-          if (!this.room().roomId) await this.initializeRoom(epoch);
+          if (!this.room().roomId || this.needsRemoteJoin) {
+            await this.initializeRoom(epoch);
+            if (!this.current(epoch)) throw staleError();
+            this.needsRemoteJoin = false;
+          }
           do {
             this.dirty = false;
             await this.catchUp(epoch);
@@ -956,6 +1026,7 @@
       if (hadPresenceError && !this.lastError) this.status('');
     }
     startPresence(epoch) {
+      if (this.remoteDeferred || (this.archive && !this.archiveResolved)) return;
       if (!this.presenceEnabled() || !this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket || this.socketOpening?.epoch === epoch) return;
       this.openSocket(epoch).catch(error => {
         if (error.stale || !this.current(epoch) || !this.presenceEnabled()) return;
@@ -975,6 +1046,7 @@
       else if ([401, 403].includes(error.status)) this.closeSocket();
     }
     schedule() {
+      if (this.remoteDeferred) return;
       if (this.timer || this.destroyed || !this.key) return;
       this.timer = setTimeout(() => { this.timer = null; this.retry(); }, this.backoff);
       this.timer.unref?.(); this.backoff = Math.min(this.backoff * 2, 30000);
@@ -1414,7 +1486,7 @@
       return this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/history/' + encodeURIComponent(id));
     }
     openSocket(epoch) {
-      if (!this.presenceEnabled() || !this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
+      if (this.remoteDeferred || (this.archive && !this.archiveResolved) || !this.presenceEnabled() || !this.current(epoch) || !this.room()?.roomId || !this.WebSocket || this.socket) return Promise.resolve();
       if (this.socketOpening?.epoch === epoch) return this.socketOpening.promise;
       const opening = { epoch, promise: null }; this.socketOpening = opening;
       opening.promise = this.createSocket(epoch, opening).catch(error => {
@@ -1531,6 +1603,7 @@
     }
     disconnect() {
       this.droppedConflicts = {}; this.droppedWorkspace = null; this.lastDroppedSync = 0; this.pendingDropped = false;
+      this.remoteDeferred = false; this.remoteStart = null; this.archiveResolved = false; this.needsRemoteJoin = false;
       this.epoch++; this.claimGeneration++; clearTimeout(this.timer); this.timer = null;
       this.onWork({ key: 'source', active: false });
       this.onWork({ key: 'upload', active: false });
