@@ -49,7 +49,7 @@
   const ACTIVE_PREFIX = 'workspace_active_v1:';
   const CATALOG_PREFIX = 'version_catalog_v1:';
   let workspaceContext = null;
-  const activeScopes = new Map();
+  const activeScopes = new Map(), activationTokens = new Map(), activationWrites = new Map();
 
   function normalizeWorkspaceScope(value = {}) {
     const defaults = workspaceContext || {};
@@ -260,7 +260,8 @@
       await prepareNormalizedWorkspace(scope, language);
       const hydrated = await normalized.activation(scope);
       return { scope, workspace: hydrated.workspace, source: hydrated.source,
-        baseline: hydrated.workspace?.importArchive ? hydrated.baseline : null };
+        baseline: hydrated.workspace?.importArchive ? hydrated.baseline : null,
+        ...(hydrated.sourceBaselineId ? { sourceBaselineId: hydrated.sourceBaselineId } : {}) };
     }
     // Keep the established legacy migration/placeholder-repair adapter. Scope
     // resolution is captured above so this read cannot follow a later account
@@ -670,17 +671,45 @@
   async function activateVersion(value) {
     const scope = normalizeWorkspaceScope(value);
     if (!scope.sourceHash) throw new TypeError('A version activation requires its source identity.');
+    const pointer = activeKey(scope), token = {};
+    activationTokens.set(pointer, token);
+    // Abort a superseded pointer write while it can still be rolled back. This
+    // never owns the workspace/save transaction or an independent scope's key.
+    try { activationWrites.get(pointer)?.abort(); } catch (_) {}
+    const current = () => activationTokens.get(pointer) === token;
+    const superseded = () => Object.assign(new Error('A newer workspace selection superseded this activation.'),
+      { code: 'WORKSPACE_ACTIVATION_SUPERSEDED', stale: true });
     if (await usesRecords(scope)) {
       await normalized.ensure(scope);
       if (!await normalized.hasScope(scope)) throw new Error('This version is not available in this browser.');
       const [hydrated, metadata] = await Promise.all([normalized.activation(scope), kvGet(versionMetadataKey(scope))]);
       const { workspace, source, baseline } = hydrated;
-      await kvSet(activeKey(scope), scope);
-      activeScopes.set(activeKey(scope), scope);
+      if (!current()) throw superseded();
+      let pointerTransaction, selected;
+      try {
+        selected = await withStore(STORE_KV, 'readwrite', (store, tx) => new Promise((resolve, reject) => {
+          if (!current()) { resolve(false); return; }
+          pointerTransaction = tx; activationWrites.set(pointer, tx);
+          // Recheck when this queued transaction becomes active. Corpus copying
+          // may yield long enough for another selection to win the same key.
+          const read = store.get(pointer);
+          read.onerror = () => reject(read.error || new Error('IndexedDB request failed'));
+          read.onsuccess = () => {
+            if (!current()) { resolve(false); return; }
+            store.put({ key: pointer, value: scope }); resolve(true);
+          };
+        }));
+      } catch (error) { throw current() ? error : superseded(); }
+      finally { if (activationWrites.get(pointer) === pointerTransaction) activationWrites.delete(pointer); }
+      if (!selected || !current()) throw superseded();
+      activeScopes.set(pointer, scope);
       if (workspaceContext?.accountId === scope.accountId && workspaceContext.game === scope.game && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
-      return { scope, workspace, source, metadata: metadata || { ...scope }, baseline: workspace.importArchive ? baseline : null };
+      return { scope, workspace, source, metadata: metadata || { ...scope }, baseline: workspace.importArchive ? baseline : null,
+        ...(hydrated.sourceBaselineId ? { sourceBaselineId: hydrated.sourceBaselineId } : {}) };
     }
     const db = await openDb(), tx = db.transaction([STORE_KV], 'readwrite'), done = txDone(tx);
+    if (!current()) { tx.abort(); await done.catch(() => {}); throw superseded(); }
+    activationWrites.set(pointer, tx);
     const kv = tx.objectStore(STORE_KV), values = {};
     const keys = [workspaceKey(scope), sourceKey(scope), versionMetadataKey(scope)];
     let waiting = keys.length, failure;
@@ -689,16 +718,20 @@
       read.onsuccess = () => {
         values[key] = read.result?.value;
         if (--waiting) return;
+        if (!current()) { failure = superseded(); tx.abort(); return; }
         if (!values[keys[0]] || !values[keys[1]]) { failure = new Error('This version is not available in this browser.'); tx.abort(); return; }
-        kv.put({ key: activeKey(scope), value: scope });
+        kv.put({ key: pointer, value: scope });
       };
     }
-    try { await done; } catch (error) { throw failure || error; }
-    activeScopes.set(activeKey(scope), scope);
-    if (workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
-      && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
+    try { await done; } catch (error) { throw current() ? failure || error : superseded(); }
+    finally { if (activationWrites.get(pointer) === tx) activationWrites.delete(pointer); }
+    if (!current()) throw superseded();
     const workspace = values[keys[0]], baseline = workspace.importArchive
       ? await kvGet(importedBaselineKey(workspace.importArchive.baselineId, scope.game)) : null;
+    if (!current()) throw superseded();
+    activeScopes.set(pointer, scope);
+    if (workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext.branchId === scope.branchId) workspaceContext = { ...scope };
     return { scope, source: values[keys[1]], workspace, metadata: values[keys[2]] || { ...scope }, baseline };
   }
   async function setVersionMetadata(value, patch) {

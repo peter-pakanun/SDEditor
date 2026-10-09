@@ -9,6 +9,8 @@
     const { stores: S, transaction, get, all, row, key, copy, same, readWorkspace, writeWorkspace } = n;
     const dependencies = n.dependencies || {}, ready = new Set(), migrating = new Map();
     const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+    const keyRanges = dependencies.IDBKeyRange || globalThis.IDBKeyRange;
+    const batchSize = 128, maximumRangeRowsPerKey = 8;
     const roomStores = [S.rooms, S.shared, S.operations, S.roomRecords];
     const workspaceStores = [S.meta, S.files, S.records, S.baseline];
     const maps = ['shared', 'local', 'carries', 'carryRevisions'];
@@ -114,6 +116,35 @@
       for (const [id, item] of after) if (!same(before.get(id), item)) store.put(item);
       for (const id of before.keys()) if (!after.has(id)) store.delete(id);
     }
+    async function selectedRows(source, requestedKeys, matches, point) {
+      const keys = [...new Set(requestedKeys)], selected = new Map();
+      const keep = rows => { for (const item of rows) if (item && matches(item)) selected.set(item.key, item); };
+      if (keys.length < batchSize || !keyRanges?.bound || !source.getAll) {
+        keep((await Promise.all(keys.map(point))).flat());
+        return [...selected.values()];
+      }
+      keys.sort();
+      // One success event per selected path can occupy the event loop for
+      // seconds. Dense selections use bounded ranges. Count first so sparse
+      // selections cannot pull an unbounded archive of unrelated recovery text.
+      for (let index = 0; index < keys.length; index += batchSize) {
+        const run = keys.slice(index, index + batchSize), range = keyRanges.bound(run[0], run[run.length - 1]);
+        const count = source.count ? await request(source.count(range)) : 0;
+        if (count > run.length * maximumRangeRowsPerKey) keep((await Promise.all(run.map(point))).flat());
+        else keep(await request(source.getAll(range)));
+      }
+      return [...selected.values()];
+    }
+    async function selectedPathRows(tx, name, roomKey, paths) {
+      const store = tx.objectStore(name), keys = paths.map(path => key(roomKey, path)), wanted = new Set(keys);
+      const matches = item => item.scope === roomKey && (wanted.has(item.pathKey) || item.paths?.some(path => wanted.has(path)));
+      return selectedRows(store.index('by_path'), keys, matches,
+        path => request(name === S.shared ? store.get(path) : store.index('by_path').getAll(path)));
+    }
+    async function selectedKeyRows(tx, name, roomKey, keys) {
+      const store = tx.objectStore(name), wanted = new Set(keys);
+      return selectedRows(store, keys, item => item.scope === roomKey && wanted.has(item.key), id => request(store.get(id)));
+    }
     async function selectRows(tx, roomKey, requestedPaths, options = {}) {
       if (requestedPaths == null || options.includeAffected) {
         const [files, operations, records] = await Promise.all([all(tx, S.shared, roomKey), all(tx, S.operations, roomKey), all(tx, S.roomRecords, roomKey)]);
@@ -143,13 +174,13 @@
         const nextIds = [...ids].filter(id => !loadedIds.has(id)), nextPaths = [...paths].filter(path => !loadedPaths.has(path));
         if (!nextIds.length && !nextPaths.length) break;
         nextIds.forEach(id => loadedIds.add(id)); nextPaths.forEach(path => loadedPaths.add(path));
-        const operationRows = (await Promise.all([
-          ...nextIds.map(id => request(tx.objectStore(S.operations).get(key(roomKey, id)))),
-          ...(options.includeOutbox === false ? [] : nextPaths.map(path => request(tx.objectStore(S.operations).index('by_path').getAll(key(roomKey, path))))),
-        ])).flat().filter(Boolean);
-        const recordRows = (await Promise.all(nextPaths.map(path => request(tx.objectStore(S.roomRecords).index('by_path').getAll(key(roomKey, path)))))).flat();
+        const [operationRows, recordRows] = await Promise.all([
+          Promise.all([selectedKeyRows(tx, S.operations, roomKey, nextIds.map(id => key(roomKey, id))),
+            options.includeOutbox === false ? [] : selectedPathRows(tx, S.operations, roomKey, nextPaths)]).then(rows => rows.flat()),
+          selectedPathRows(tx, S.roomRecords, roomKey, nextPaths),
+        ]);
         for (const item of operationRows) {
-          operations.set(item.key, item); ids.add(item.value.id);
+          operations.set(item.key, item); ids.add(item.value.id); loadedIds.add(item.value.id);
           for (const entry of item.value.files || []) paths.add(entry.yours.filepath);
         }
         for (const item of recordRows) {
@@ -160,8 +191,8 @@
       // A disconnected-room recovery can contain the entire source. Read its
       // small header without expanding its unrelated per-file members.
       const groups = [...new Set([...records.values()].filter(item => item.value.field === 'recoveryFiles').map(item => item.value.groupId))];
-      for (const item of (await Promise.all(groups.map(id => request(tx.objectStore(S.roomRecords).get(key(roomKey, ['recovery', id])))))).filter(Boolean)) records.set(item.key, item);
-      const files = (await Promise.all([...paths].map(path => request(tx.objectStore(S.shared).get(key(roomKey, path)))))).filter(Boolean);
+      for (const item of await selectedKeyRows(tx, S.roomRecords, roomKey, groups.map(id => key(roomKey, ['recovery', id])))) records.set(item.key, item);
+      const files = await selectedPathRows(tx, S.shared, roomKey, [...paths]);
       return { files, operations: [...operations.values()], records: [...records.values()], paths: [...paths], ids: [...ids] };
     }
     async function readRoom(tx, roomKey, paths, options = {}) {
@@ -203,7 +234,8 @@
       const scope = scopeOf(room.identity);
       const [workspace, originals] = await Promise.all([
         readWorkspace(tx, scope, selected.paths, options.includeDropped === true),
-        Promise.all(selected.paths.map(path => get(tx, S.baseline, key(n.baselineKey(scope), path)))),
+        n.originalFiles ? n.originalFiles(tx, scope, selected.paths)
+          : Promise.all(selected.paths.map(path => get(tx, S.baseline, key(n.baselineKey(scope), path)))),
       ]);
       const baselineByPath = new Map(originals.filter(Boolean).map(desc => [desc.filepath, desc]));
       const descriptions = new Map((workspace?.descs || []).map(desc => [desc.filepath, desc])), P = protocol();

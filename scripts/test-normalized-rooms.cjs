@@ -167,15 +167,23 @@ test('room conversion reconstructs pending placeholder repairs after workspace r
 function sparseSelectionFixture() {
   const stores = { rooms: 'rooms', shared: 'shared', operations: 'operations', roomRecords: 'records',
     meta: 'workspaces', files: 'files', records: 'workspaceRecords', baseline: 'baseline', assets: 'assets', migration: 'migration' };
-  const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()])), reads = [], transactions = [], selections = [];
+  const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()])), reads = [], transactions = [], selections = [], projections = [];
   const key = (...parts) => JSON.stringify(parts), baseId = key(identity.game, identity.sourceHash);
   const request = value => { const req = {}; queueMicrotask(() => { req.result = copy(value); req.onsuccess(); }); return req; };
+  const matches = (value, query) => query && typeof query === 'object'
+    ? value >= query.lower && value <= query.upper : value === query;
+  const rows = (name, index, query) => [...data[name].values()].flatMap(row => {
+    const keys = index === 'by_scope' ? [row.scope] : index === 'by_path' ? row.paths || [row.pathKey] : [row.key];
+    return keys.filter(value => matches(value, query)).map(() => row);
+  });
   const tx = { objectStore(name) { return {
     get(id) { reads.push({ name, id }); return request(data[name].get(id)); },
-    index(index) { return { getAll(id) {
-      reads.push({ name, index, id });
-      return request([...data[name].values()].filter(row => index === 'by_scope' ? row.scope === id : row.pathKey === id || row.paths?.includes(id)));
-    } }; },
+    getAll(id) { const value = rows(name, null, id); reads.push({ name, id, bulk: true, returned: value.map(row => row.key) }); return request(value); },
+    count(id) { reads.push({ name, id, count: true }); return request(rows(name, null, id).length); },
+    index(index) { return {
+      getAll(id) { const value = rows(name, index, id); reads.push({ name, index, id, returned: value.map(row => row.key) }); return request(value); },
+      count(id) { reads.push({ name, index, id, count: true }); return request(rows(name, index, id).length); },
+    }; },
     put(value) { data[name].set(value.key, copy(value)); }, delete(id) { data[name].delete(id); },
   }; } };
   const n = { stores, copy, key, same: (a, b) => JSON.stringify(a) === JSON.stringify(b), baselineKey: () => baseId,
@@ -183,13 +191,15 @@ function sparseSelectionFixture() {
     async get(tx, name, id) { reads.push({ name, id }); return copy(data[name].get(id)?.value); },
     async all(tx, name, scope) { reads.push({ name, all: true }); return [...data[name].values()].filter(row => row.scope === scope).map(value => copy(value)); },
     async readWorkspace(tx, scope, paths) { selections.push(copy(paths)); return { descs: [], staged: {} }; },
+    async writeWorkspace(tx, scope, workspace, paths) { projections.push({ scope: copy(scope), workspace: copy(workspace), paths: copy(paths) }); },
+    async ensure() {},
     async transaction(names, mode, action) { transactions.push({ names, mode }); return action(tx); },
-    dependencies: { normalizeScope: scope => scope },
+    dependencies: { normalizeScope: scope => scope, IDBKeyRange: { bound: (lower, upper) => ({ lower, upper }) } },
   };
   const put = (name, value) => data[name].set(value.key, copy(value));
   put(stores.migration, { key: key('room', roomKey), value: { state: 'ready' } });
   put(stores.rooms, { key: roomKey, value: { identity, mode: 'sparse', manifest: { version: 2 }, sequence: 4 } });
-  return { n, rooms: create(n), stores, data, reads, transactions, selections, put, tx };
+  return { n, rooms: create(n), stores, data, reads, transactions, selections, projections, put, tx };
 }
 
 test('cold sparse reconnect selects actual work and recovery paths instead of every original manifest path', async () => {
@@ -216,6 +226,137 @@ test('cold sparse reconnect selects actual work and recovery paths instead of ev
     'Untouched originals must never be hydrated during sparse reconnect');
   await f.rooms.writeRoom(f.tx, roomKey, result.room, result.selection.filepaths, result.selection.operationIds);
   assert.equal(f.data.shared.size, manifest.length, 'A scoped reconnect preserves every unselected immutable manifest row');
+});
+
+test('large room selections batch IndexedDB requests while preserving operation closure, recovery order and atomic projection', async () => {
+  const f = sparseSelectionFixture(), path = index => `files/${String(index).padStart(4, '0')}.txt`;
+  const manifest = Array.from({ length: 1200 }, (_, index) => ({ filepath: path(index), entryCount: 1 }));
+  const file = index => ({ filepath: path(index), translations: ['Saved ' + index], revision: 1, trackedForExport: true });
+  const selected = manifest.slice(0, 256).map(file => file.filepath), shared = Object.fromEntries(selected.map((path, index) => [path, file(index)]));
+  const operations = [
+    { id: 'first', files: [{ base: file(254), yours: file(254) }, { base: file(255), yours: { ...file(255), translations: ['Pending selected'] } },
+      { base: file(900), yours: file(900) }] },
+    { id: 'chained', files: [{ base: file(900), yours: file(900) }, { base: file(901), yours: file(901) }] },
+    { id: 'unrelated', files: [{ base: file(1100), yours: file(1100) }] },
+  ];
+  const recovered = manifest.slice(0, 300).map((row, index) => ({ filepath: row.filepath, translations: ['Recovered ' + index] }));
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: manifest }, shared, outbox: operations,
+    carries: { [path(8)]: { filepath: path(8), translations: ['Carry'] } }, carryRevisions: { [path(8)]: 7 },
+    conflicts: [{ id: 'selected-conflict', filepath: path(9), mutationId: 'first' }, { id: 'unrelated-conflict', filepath: path(1100) }],
+    placeholderRepairs: [{ id: 'repair', filepath: path(10) }],
+    recovery: [{ id: 'recovered', at: 1, reason: 'Disconnected work', files: recovered }, { id: 'empty', at: 2, files: [] }],
+    seedUpload: { id: 'seed-ticket', files: [{ filepath: path(1100), translations: ['Large private retry payload ' + 'x'.repeat(200000)] }] } });
+  const unrelatedOperation = copy(f.data.operations.get(f.n.key(roomKey, 'unrelated')));
+  const untouchedRecovery = copy(f.data.records.get(f.n.key(roomKey, ['recoveryFiles', ['recovered', 299]])));
+  const seedRow = [...f.data.records.values()].find(row => row.value.field === 'seedUploadFiles'), seedBefore = copy(seedRow);
+  const foreignKey = f.n.key('other', identity.game, identity.sourceHash, identity.language);
+  f.put(f.stores.shared, f.n.row(foreignKey, path(5), { filepath: path(5), shared: { ...file(5), translations: ['Foreign scope'] } },
+    { pathKey: f.n.key(foreignKey, path(5)) }));
+  f.reads.length = 0;
+  const read = await f.rooms.getRecords({ key: roomKey, scope: identity, filepaths: selected });
+  const expected = new Set([...selected, path(900), path(901)]);
+  assert.deepEqual(new Set(read.selection.filepaths), expected);
+  assert.deepEqual(new Set(read.selection.operationIds), new Set(['first', 'chained']));
+  assert.deepEqual(read.room.outbox.map(operation => operation.id), ['first', 'chained']);
+  assert.equal(read.room.local[path(255)].translations[0], 'Pending selected');
+  assert.equal(read.room.shared[path(5)].translations[0], 'Saved 5');
+  assert.equal(read.room.carries[path(8)].translations[0], 'Carry'); assert.equal(read.room.carryRevisions[path(8)], 7);
+  assert.deepEqual(read.room.conflicts.map(conflict => conflict.id), ['selected-conflict']);
+  assert.deepEqual(read.room.placeholderRepairs.map(repair => repair.id), ['repair']);
+  assert.equal(read.room.recovery.length, 1); assert.deepEqual(read.room.recovery[0].files, recovered.slice(0, 256));
+  assert.equal(read.room.recovery[0]._storageRecovery.fileCount, 300);
+  const roomReads = f.reads.filter(read => [f.stores.rooms, f.stores.shared, f.stores.operations, f.stores.roomRecords].includes(read.name));
+  assert.ok(roomReads.length < 40, 'Hundreds of affected paths must not issue one IndexedDB event for each path and store.');
+  assert.ok(roomReads.some(read => read.id && typeof read.id === 'object'), 'The selection uses bounded range reads.');
+  assert.ok(roomReads.some(read => read.name === f.stores.operations && read.returned && new Set(read.returned).size < read.returned.length),
+    'Duplicate rows from a multi-entry path index must still produce one authored operation.');
+  assert.ok(!roomReads.some(read => read.all), 'Partial commands never materialize every room record.');
+  assert.ok(!roomReads.some(read => read.returned?.includes(seedRow.key)), 'Pathless seed text stays outside bulk path reads.');
+  assert.deepEqual(new Set(f.reads.filter(read => read.name === f.stores.baseline).map(read => JSON.parse(read.id)[1])), expected);
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, expected.size, 'Only exact selected originals are hydrated.');
+  const updated = await f.rooms.updateRecords({ key: roomKey, scope: identity, filepaths: selected }, (state, room) => {
+    room.shared[path(0)].translations = ['New accepted text']; room.recovery[0].files.shift(); return state;
+  }, { projectWorkspace(workspace, state) {
+    assert.equal(state.rooms[roomKey].outbox.length, 2); return { ...workspace, projected: 'selected room' };
+  } });
+  assert.deepEqual(new Set(updated.selection.filepaths), expected);
+  assert.equal(f.transactions.at(-1).mode, 'readwrite'); assert.equal(f.projections.length, 1);
+  assert.deepEqual(new Set(f.projections[0].paths), expected); assert.equal(f.projections[0].workspace.projected, 'selected room');
+  assert.equal(f.data.shared.get(f.n.key(roomKey, path(0))).value.shared.translations[0], 'New accepted text');
+  assert.deepEqual(f.data.operations.get(unrelatedOperation.key), unrelatedOperation);
+  assert.deepEqual(f.data.records.get(untouchedRecovery.key), untouchedRecovery); assert.deepEqual(f.data.records.get(seedRow.key), seedBefore);
+  assert.equal(f.data.records.has(f.n.key(roomKey, ['recoveryFiles', ['recovered', 0]])), false);
+  assert.equal(f.data.records.get(f.n.key(roomKey, ['recovery', 'recovered'])).value.fileCount, 299);
+  assert.equal(f.data.records.get(f.n.key(roomKey, ['recoveryFiles', ['recovered', 1]])).value.data.translations[0], 'Recovered 1');
+  f.reads.length = 0;
+  const explicit = await f.rooms.readRoom(f.tx, roomKey, selected, { includeOutbox: false, operationIds: ['unrelated'], includeConflicts: false });
+  assert.deepEqual(new Set(explicit.selection.filepaths), new Set([...selected, path(1100)]));
+  assert.deepEqual(explicit.room.outbox.map(operation => operation.id), ['unrelated']); assert.deepEqual(explicit.room.conflicts, []);
+});
+
+test('large sparse ranges fall back to exact paths instead of pulling unrelated archived recovery text', async () => {
+  const f = sparseSelectionFixture(), path = index => `files/${String(index).padStart(4, '0')}.txt`;
+  const manifest = Array.from({ length: 2048 }, (_, index) => ({ filepath: path(index), entryCount: 1 }));
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: manifest }, shared: {}, outbox: [],
+    recovery: [{ id: 'large-recovery', files: manifest.map((row, index) => ({ filepath: row.filepath, translations: ['Archived ' + index] })) }] });
+  const selected = Array.from({ length: 128 }, (_, index) => path(index * 16)), wanted = new Set(selected);
+  const skipped = f.n.key(roomKey, ['recoveryFiles', ['large-recovery', 1001]]);
+  f.reads.length = 0;
+  const read = await f.rooms.readRoom(f.tx, roomKey, selected);
+  assert.deepEqual(new Set(read.selection.filepaths), wanted);
+  assert.equal(read.room.recovery[0].files.length, selected.length);
+  assert.ok(read.room.recovery[0].files.every(file => wanted.has(file.filepath)));
+  assert.ok(f.reads.some(read => read.name === f.stores.roomRecords && read.count), 'The range count avoids serializing an oversized sparse range.');
+  assert.ok(f.reads.some(read => read.name === f.stores.roomRecords && read.index === 'by_path' && typeof read.id === 'string'));
+  assert.ok(!f.reads.some(read => read.returned?.includes(skipped)), 'Unselected recovery members are never read into JavaScript.');
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, selected.length);
+});
+
+test('single-file room commands retain point reads while a dense bulk selection reduces success-event count', async () => {
+  const f = sparseSelectionFixture(), manifest = Array.from({ length: 128 }, (_, index) => ({ filepath: `file-${String(index).padStart(3, '0')}.txt` }));
+  const shared = Object.fromEntries(manifest.map(row => [row.filepath, { filepath: row.filepath, translations: ['Accepted'], revision: 1 }]));
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: manifest }, shared, outbox: [] });
+  f.reads.length = 0;
+  const hot = await f.rooms.readRoom(f.tx, roomKey, [manifest[0].filepath]);
+  assert.deepEqual(hot.selection.filepaths, [manifest[0].filepath]);
+  assert.equal(f.reads.some(read => read.count || read.all || typeof read.id === 'object'), false);
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, 1);
+  f.reads.length = 0;
+  const smaller = await f.rooms.readRoom(f.tx, roomKey, manifest.slice(0, 127).map(row => row.filepath));
+  const smallRoomRequests = f.reads.filter(read => read.name !== f.stores.baseline).length;
+  f.reads.length = 0;
+  const bulk = await f.rooms.readRoom(f.tx, roomKey, manifest.map(row => row.filepath));
+  const bulkRoomRequests = f.reads.filter(read => read.name !== f.stores.baseline).length;
+  for (const row of manifest.slice(0, 127)) assert.deepEqual(bulk.room.local[row.filepath], smaller.room.local[row.filepath]);
+  assert.ok(bulkRoomRequests * 20 < smallRoomRequests, 'Batching reduces deterministic IndexedDB request counts independent of machine speed.');
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, 128);
+});
+
+test('bulk explicit operation IDs and recovery headers keep exact selections and unrelated durable groups', async () => {
+  const f = sparseSelectionFixture(), path = index => `file-${String(index).padStart(3, '0')}.txt`;
+  const manifest = Array.from({ length: 256 }, (_, index) => ({ filepath: path(index) }));
+  const operations = manifest.map((file, index) => ({ id: 'operation-' + String(index).padStart(3, '0'),
+    files: [{ yours: { filepath: file.filepath, translations: ['Pending ' + index], revision: 0 } }] }));
+  const recovery = manifest.map((file, index) => ({ id: 'group-' + String(index).padStart(3, '0'), at: index + 1,
+    files: [{ filepath: file.filepath, translations: ['Recovered ' + index] }] }));
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: manifest }, shared: {}, outbox: operations, recovery });
+  const selectedIds = operations.filter((_, index) => index % 2 === 0).map(operation => operation.id);
+  const selectedPaths = manifest.filter((_, index) => index % 2 === 0).map(file => file.filepath);
+  f.reads.length = 0;
+  const read = await f.rooms.readRoom(f.tx, roomKey, [], { includeOutbox: false, operationIds: selectedIds });
+  assert.deepEqual(new Set(read.selection.operationIds), new Set(selectedIds)); assert.deepEqual(new Set(read.selection.filepaths), new Set(selectedPaths));
+  assert.deepEqual(read.room.outbox.map(operation => operation.id), selectedIds);
+  assert.deepEqual(read.room.recovery.map(group => group.id), recovery.filter((_, index) => index % 2 === 0).map(group => group.id));
+  assert.equal(read.room.recovery[127].files[0].translations[0], 'Recovered 254');
+  const roomReads = f.reads.filter(read => read.name !== f.stores.baseline);
+  assert.ok(roomReads.length < 20, 'Bulk operation IDs and recovery headers must not restore per-record success-event fan-out.');
+  assert.ok(roomReads.some(read => read.name === f.stores.operations && read.bulk));
+  assert.ok(roomReads.some(read => read.name === f.stores.roomRecords && read.bulk));
+  assert.equal(f.reads.filter(read => read.name === f.stores.baseline).length, selectedPaths.length);
+  const untouched = copy(f.data.records.get(f.n.key(roomKey, ['recovery', 'group-001'])));
+  await f.rooms.writeRoom(f.tx, roomKey, read.room, read.selection.filepaths, read.selection.operationIds);
+  assert.deepEqual(f.data.records.get(untouched.key), untouched);
+  assert.equal(f.data.operations.size, operations.length); assert.equal(f.data.records.size, 512);
 });
 
 test('room metadata excludes archive decisions and seed payloads while cold reads recover their exact content', async () => {

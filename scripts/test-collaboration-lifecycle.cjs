@@ -613,6 +613,85 @@ test('activated workspace reuses its detached baseline without reopening storage
   assert.deepEqual(plain(baseline), before, 'The retained original stays independent of the rendered source.');
 });
 
+async function acceptedActivationFixture(window, count = 1) {
+  const source = Array.from({ length: count }, (_, index) => description('detached' + (count > 1 ? index : '')));
+  for (const desc of source) desc.translations.Thai = ['', ''];
+  const tree = await protocol.buildBaselineTree(source);
+  const archive = await protocol.finalizeArchive({ version: 1,
+    zipHash: await protocol.zipHash(new Uint8Array([4, 5, 6])), zipSize: 3,
+    fileCount: count, descriptionCount: count, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const baseline = { source: plain(source), tree, archive };
+  const workspace = { sourceHash: archive.baselineId, importArchive: plain(archive), descs: plain(source), status: {} };
+  window.WorkspaceState.initializeWorkspace(workspace, { source, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+  window.WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['Saved translation', 'Second'] }, 'Thai',
+    { source: source[0], sourceHash: archive.baselineId, savedAt: 123 });
+  const freeze = value => {
+    if (value && typeof value === 'object') { for (const item of Object.values(value)) freeze(item); Object.freeze(value); }
+    return value;
+  };
+  freeze(baseline);
+  return { scope: { accountId: 'account-one', game: 'poe1', branchId: 'default', sourceHash: archive.baselineId },
+    language: 'Thai', sourceBaselineId: archive.baselineId, source, workspace, baseline };
+}
+
+test('accepted normalized snapshots render their detached source without cloning the immutable original again', async t => {
+  for (const mode of ['activation', 'cold snapshot']) await t.test(mode, async () => {
+    const { editor: e, window } = harness({ realImport: true }); e.cloudProfileId = 'account-one';
+    const snapshot = await acceptedActivationFixture(window), baselineBefore = plain(snapshot.baseline);
+    let copies = 0; const originalCopy = e.toPlainForStorage;
+    e.toPlainForStorage = value => { copies++; return originalCopy.call(e, value); };
+    window.OfflineStore.getWorkspaceSnapshot = async () => snapshot;
+    await e.loadVersionedStorage(undefined, mode === 'activation' ? snapshot : undefined);
+    assert.equal(e.sourceLoaded, true); assert.equal(e.descs[0], snapshot.source[0]); assert.equal(copies, 0);
+    assert.equal(e.importBaseline, snapshot.baseline);
+    assert.deepEqual(plain(e.descs[0].translations.Thai), ['Saved translation', 'Second']);
+    e.descs[0].translations.English[0] = 'Changed renderer text';
+    e.descs[0].translations.Thai[0] = 'Typing in the rendered view';
+    assert.deepEqual(plain(snapshot.baseline), baselineBefore);
+    assert.notEqual(e.localDescs.descs[0], e.descs[0]);
+    assert.equal(e.localDescs.staged.Thai[snapshot.source[0].filepath].translations[0], 'Saved translation');
+  });
+});
+
+test('language changes during detached-source preparation retain the original baseline and apply the newest overlay', async () => {
+  const { editor: e, window, context } = harness({ realImport: true }); e.cloudProfileId = 'account-one';
+  const snapshot = await acceptedActivationFixture(window, 2), baselineBefore = plain(snapshot.baseline);
+  for (const source of snapshot.source) window.WorkspaceState.stageTranslation(snapshot.workspace,
+    { filepath: source.filepath, translations: ['Saved German', 'Zwei'] }, 'German',
+    { source, sourceHash: snapshot.scope.sourceHash, savedAt: 456 });
+  let clock = 0; context.Date = { now: () => clock += 8 };
+  e.yieldEditorWork = async () => { e.lang = 'German'; };
+  window.OfflineStore.getWorkspaceSnapshot = async () => snapshot;
+  await e.loadVersionedStorage();
+  assert.equal(e.sourceLoaded, true); assert.equal(e.lang, 'German');
+  for (const [index, desc] of e.descs.entries()) {
+    assert.equal(desc, snapshot.source[index]);
+    assert.deepEqual(plain(desc.translations.German), ['Saved German', 'Zwei']);
+    assert.equal(desc.hasChanges, true);
+  }
+  assert.deepEqual(plain(snapshot.baseline), baselineBefore);
+});
+
+test('legacy or unverified source views retain authoritative baseline copying', async t => {
+  for (const [name, change] of Object.entries({
+    legacy: snapshot => { delete snapshot.sourceBaselineId; },
+    provenance: snapshot => { snapshot.sourceBaselineId = 'other-baseline'; },
+    count: snapshot => { snapshot.source = []; },
+    alias: snapshot => { snapshot.source = snapshot.baseline.source; },
+    scope: snapshot => { snapshot.scope.accountId = 'another-account'; },
+  })) await t.test(name, async () => {
+    const { editor: e, window } = harness({ realImport: true }); e.cloudProfileId = 'account-one';
+    const snapshot = await acceptedActivationFixture(window), before = plain(snapshot.baseline);
+    change(snapshot);
+    window.OfflineStore.getWorkspaceSnapshot = async () => snapshot;
+    await e.loadVersionedStorage();
+    assert.equal(e.sourceLoaded, true); assert.notEqual(e.descs[0], snapshot.source[0]);
+    assert.deepEqual(plain(e.descs[0].translations.English), before.source[0].translations.English);
+    e.descs[0].translations.English[0] = 'Editor change';
+    assert.deepEqual(plain(snapshot.baseline), before);
+  });
+});
+
 test('startup consumes one combined snapshot and rejects activation data from another scope', async t => {
   for (const [name, change] of Object.entries({
     fresh: () => undefined,

@@ -1293,6 +1293,7 @@ const config = Vue.defineComponent({
         let source = storedSource;
         let importedBaseline = null;
         let sourceHash = '';
+        let cloneSource = false;
         if (workspace?.importArchive) {
           importedBaseline = await prepare('Loading and verifying the original baseline', () => Object.hasOwn(snapshot, 'baseline')
             ? snapshot.baseline : window.OfflineStore.getImportedBaseline(workspace.importArchive.baselineId, game));
@@ -1302,7 +1303,18 @@ const config = Vue.defineComponent({
             || importedBaseline.tree?.root !== archive.treeRoot || importedBaseline.source?.length !== archive.descriptionCount) {
             throw new Error('The imported baseline is unavailable. Reimport the original upstream ZIP; your translations have been preserved.');
           }
-          source = importedBaseline.source; sourceHash = archive.baselineId;
+          // Normalized activation supplies an independently detached accepted
+          // source. Render that view rather than copying the immutable baseline
+          // again. Legacy adapters retain the baseline as their authority.
+          const scope = snapshot.scope;
+          const detachedSource = snapshot.sourceBaselineId === archive.baselineId
+            && scope?.sourceHash === archive.baselineId && scope.game === game
+            && String(scope.accountId) === String(profile) && (scope.branchId || 'default') === branch
+            && Array.isArray(storedSource) && storedSource.length === archive.descriptionCount
+            && storedSource !== importedBaseline.source;
+          source = detachedSource ? storedSource : importedBaseline.source;
+          cloneSource = !detachedSource;
+          sourceHash = archive.baselineId;
         } else if (Array.isArray(source) && source.length && window.CollaborationProtocol) {
           try {
             sourceHash = await prepare('Verifying stored source identity', () => window.CollaborationProtocol.sourceHashAsync
@@ -1326,7 +1338,7 @@ const config = Vue.defineComponent({
           let language;
           do {
             language = this.lang;
-            prepared = await prepare('Applying translations and calculating file statuses', () => this.prepareStoredWorkspaceSource(prepared || source, workspace, !prepared && !!importedBaseline, current));
+            prepared = await prepare('Applying translations and calculating file statuses', () => this.prepareStoredWorkspaceSource(prepared || source, workspace, !prepared && cloneSource, current));
             if (!prepared || !current()) return;
           } while (language !== this.lang);
         }

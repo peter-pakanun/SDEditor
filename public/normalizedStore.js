@@ -68,13 +68,22 @@
     // Accepted baseline rows cannot change within their source identity. Share
     // their detached reads only inside one transaction, including room/workspace
     // adapters that otherwise fetch the same original several times.
-    const baselineReads = new WeakMap(), baselineScopes = new WeakMap();
+    const baselineReads = new WeakMap(), baselineScopes = new WeakMap(), assetReads = new WeakMap();
     function baselineCache(tx) {
       let cache = baselineReads.get(tx);
       if (!cache) baselineReads.set(tx, cache = new Map());
       return cache;
     }
     async function get(tx, name, id) {
+      // Assets can be replaced by a same-identity import. Cache only readonly
+      // transactions; a readwrite transaction must observe its own later put.
+      if (name === stores.assets && tx.mode === 'readonly') {
+        let cache = assetReads.get(tx);
+        if (!cache) assetReads.set(tx, cache = new Map());
+        if (!cache.has(id)) cache.set(id, request(tx.objectStore(name).get(id)).then(value => value?.value,
+          error => { cache.delete(id); throw error; }));
+        return cache.get(id);
+      }
       if (name !== stores.baseline) return (await request(tx.objectStore(name).get(id)))?.value;
       const cache = baselineCache(tx);
       if (!cache.has(id)) {
@@ -97,6 +106,57 @@
         return rows;
       }));
       return scopes.get(id);
+    }
+    const keyRanges = dependencies.IDBKeyRange || globalThis.IDBKeyRange;
+    const selectionBatchSize = 128, maximumRangeRowsPerKey = 8;
+    async function selectedKeyRows(source, requested, matches, point) {
+      const keys = [...new Set(requested)], selected = new Map();
+      const keep = rows => { for (const item of rows) if (item && matches(item)) selected.set(item.key, item); };
+      if (keys.length < selectionBatchSize || !keyRanges?.bound || !source.getAll || !source.count) {
+        keep((await Promise.all(keys.map(point))).flat());
+      } else {
+        keys.sort();
+        // Count bounded ranges before materializing them. Widely scattered
+        // paths cannot hydrate unlimited unrelated text or recovery records.
+        for (let index = 0; index < keys.length; index += selectionBatchSize) {
+          const run = keys.slice(index, index + selectionBatchSize), range = keyRanges.bound(run[0], run[run.length - 1]);
+          if (await request(source.count(range)) > run.length * maximumRangeRowsPerKey) keep((await Promise.all(run.map(point))).flat());
+          else keep(await request(source.getAll(range)));
+        }
+      }
+      return [...selected.values()];
+    }
+    async function selectedRows(tx, name, scope, paths) {
+      const store = tx.objectStore(name), keys = paths.map(path => key(scope, path)), wanted = new Set(keys);
+      const rows = await selectedKeyRows(store.index('by_path'), keys,
+        item => item.scope === scope && wanted.has(item.pathKey),
+        id => request(name === stores.files ? store.get(id) : store.index('by_path').getAll(id)));
+      const byPath = new Map();
+      for (const item of rows) {
+        if (!byPath.has(item.pathKey)) byPath.set(item.pathKey, []);
+        byPath.get(item.pathKey).push(item);
+      }
+      // Preserve the requested file order and per-path primary-key order used
+      // by the established point-read adapter, including duplicate selections.
+      return keys.flatMap(id => byPath.get(id) || []);
+    }
+    async function originalFiles(tx, scope, paths) {
+      const baseId = baselineKey(scope), ids = paths.map(path => key(baseId, path)), cache = baselineCache(tx);
+      if (paths.length < selectionBatchSize || !keyRanges?.bound) return Promise.all(ids.map(id => get(tx, stores.baseline, id)));
+      const missing = [...new Set(ids)].filter(id => !cache.has(id)), wanted = new Set(missing), store = tx.objectStore(stores.baseline);
+      const rows = selectedKeyRows(store, missing, item => item.scope === baseId && wanted.has(item.key), id => request(store.get(id)))
+        .then(values => new Map(values.map(item => [item.key, item.value])));
+      // Reserve in-flight keys immediately. A room and workspace adapter can
+      // request the same large selection before the first range finishes.
+      for (const id of missing) {
+        const pending = rows.then(values => {
+          if (!values.has(id) && cache.get(id) === pending) cache.delete(id);
+          return values.get(id);
+        }, error => { if (cache.get(id) === pending) cache.delete(id); throw error; });
+        cache.set(id, pending);
+      }
+      // Absent rows remain uncached: an atomic import may insert one later.
+      return Promise.all(ids.map(id => cache.get(id)));
     }
     async function transaction(selected, mode, action) {
       const db = await openDb(), tx = db.transaction([...new Set(selected)], mode), completion = done(tx);
@@ -217,8 +277,7 @@
       let files, records;
       if (filepaths == null) { [files, records] = await Promise.all([all(tx, stores.files, id), all(tx, stores.records, id)]); }
       else {
-        files = (await Promise.all(filepaths.map(path => request(tx.objectStore(stores.files).get(key(id, path)))))).filter(Boolean);
-        records = (await Promise.all(filepaths.map(path => request(tx.objectStore(stores.records).index('by_path').getAll(key(id, path)))))).flat();
+        [files, records] = await Promise.all([selectedRows(tx, stores.files, id, filepaths), selectedRows(tx, stores.records, id, filepaths)]);
         // Alias/provenance keys are IDs rather than paths. Include only records
         // referring to the selected candidates, never all translation files.
         if (allDropped) records.push(...(await Promise.all(fieldMaps.filter(field => field.startsWith('dropped')).map(field => request(tx.objectStore(stores.records).index('by_kind').getAll(key(id, field)))))).flat());
@@ -228,9 +287,9 @@
           records.push(...related.filter(Boolean));
         }
       }
-      const originalFiles = filepaths == null ? (await originalRows(tx, scope)).map(item => item.value)
-        : await Promise.all(files.map(item => get(tx, stores.baseline, key(baselineKey(scope), item.value.filepath))));
-      const originals = new Map(originalFiles.filter(Boolean).map(desc => [desc.filepath, desc]));
+      const originalValues = filepaths == null ? (await originalRows(tx, scope)).map(item => item.value)
+        : await originalFiles(tx, scope, files.map(item => item.value.filepath));
+      const originals = new Map(originalValues.filter(Boolean).map(desc => [desc.filepath, desc]));
       const workspace = assembleWorkspace(meta, files, [...new Map(records.map(r => [r.key, r])).values()].sort((a,b) => (a.value.order || 0) - (b.value.order || 0)), originals, filepaths == null);
       if (filepaths == null && workspace.importArchive) {
         const retained = await get(tx, stores.assets, baselineKey(scope));
@@ -250,14 +309,13 @@
       if (!workspace) return;
       W.pruneWorkspaceStatus(workspace);
       const id = scopeKey(scope), paths = filepaths || workspace.descs.map(file => file.filepath);
-      const originals = new Map((await Promise.all(paths.map(path => get(tx, stores.baseline, key(baselineKey(scope), path))))).filter(Boolean).map(desc => [desc.filepath, desc]));
+      const originals = new Map((await originalFiles(tx, scope, paths)).filter(Boolean).map(desc => [desc.filepath, desc]));
       const parts = splitWorkspace(scope, workspace, originals), beforeMeta = await get(tx, stores.meta, id);
       if (filepaths != null) parts.records = parts.records.filter(item => item.value.field !== 'importRecovery');
       let oldFiles, oldRecords;
       if (filepaths == null) [oldFiles, oldRecords] = await Promise.all([all(tx, stores.files, id), all(tx, stores.records, id)]);
       else {
-        oldFiles = (await Promise.all(paths.map(path => request(tx.objectStore(stores.files).get(key(id, path)))))).filter(Boolean);
-        oldRecords = (await Promise.all(paths.map(path => request(tx.objectStore(stores.records).index('by_path').getAll(key(id, path)))))).flat();
+        [oldFiles, oldRecords] = await Promise.all([selectedRows(tx, stores.files, id, paths), selectedRows(tx, stores.records, id, paths)]);
         for (const candidate of Object.keys(workspace.droppedAliases || {})) {
           const previous = await request(tx.objectStore(stores.records).get(key(id, ['droppedAliases', candidate])));
           if (previous) oldRecords.push(previous);
@@ -366,16 +424,132 @@
       await ensure(scope);
       return transaction([stores.baseline], 'readonly', async tx => (await originalRows(tx, scope)).slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value));
     }
+    // These steps run only after activation's readonly transaction completes.
+    // JSON-compatible copies retain the old materialized-view boundary, while
+    // checking the budget inside arrays, objects, sorting and file assembly.
+    function* activationCopy(value, ancestors = new Set()) {
+      if (typeof value === 'bigint') throw new TypeError('Do not know how to serialize a BigInt');
+      if (!value || typeof value !== 'object') return typeof value === 'number' && !Number.isFinite(value) ? null : value;
+      if (typeof value.toJSON === 'function') return yield* activationCopy(value.toJSON(), ancestors);
+      if (ancestors.has(value)) throw new TypeError('Converting circular structure to JSON');
+      ancestors.add(value);
+      const result = Array.isArray(value) ? [] : {};
+      if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index++) {
+          const item = yield* activationCopy(value[index], ancestors);
+          result.push(item === undefined ? null : item);
+          yield;
+        }
+      } else for (const field in value) if (Object.hasOwn(value, field) && value[field] !== undefined) {
+        const item = yield* activationCopy(value[field], ancestors);
+        if (field === '__proto__') Object.defineProperty(result, field, { value: item, enumerable: true, writable: true, configurable: true });
+        else result[field] = item;
+        yield;
+      }
+      ancestors.delete(value);
+      return result;
+    }
+    function* activationSort(values, compare) {
+      let sorted = [], scratch;
+      for (const value of values) { sorted.push(value); yield; }
+      scratch = new Array(sorted.length);
+      for (let width = 1; width < sorted.length; width *= 2) {
+        for (let start = 0; start < sorted.length; start += width * 2) {
+          const middle = Math.min(start + width, sorted.length), end = Math.min(middle + width, sorted.length);
+          let left = start, right = middle;
+          for (let index = start; index < end; index++) {
+            scratch[index] = right >= end || (left < middle && compare(sorted[left], sorted[right]) <= 0) ? sorted[left++] : sorted[right++];
+            yield;
+          }
+        }
+        [sorted, scratch] = [scratch, sorted];
+      }
+      return sorted;
+    }
+    function* materializeActivation(raw, scope) {
+      const source = [], originals = new Map(), uniqueRecords = new Map();
+      for (const item of yield* activationSort(raw.originals, (a, b) => (a.order || 0) - (b.order || 0))) {
+        source.push(item.value);
+        if (item.value) originals.set(item.value.filepath, item.value);
+        yield;
+      }
+      let workspace;
+      if (raw.meta) {
+        workspace = { ...yield* activationCopy(raw.meta), descs: [] };
+        for (const field of fieldMaps) workspace[field] = field === 'droppedOutbox' ? [] : {};
+        for (const item of raw.records) { uniqueRecords.set(item.key, item); yield; }
+        const archives = [], outbox = [];
+        for (const item of yield* activationSort(uniqueRecords.values(), (a, b) => (a.value.order || 0) - (b.value.order || 0))) {
+          const { field, language, entry, data } = item.value;
+          if (field === 'importRecovery') archives.push(item.value);
+          else if (field === 'droppedOutbox') outbox.push(item.value);
+          else if (language != null) (workspace[field][language] ||= {})[entry] = yield* activationCopy(data);
+          else workspace[field][entry] = yield* activationCopy(data);
+          yield;
+        }
+        for (const item of yield* activationSort(outbox, (a, b) => (a.order || 0) - (b.order || 0))) {
+          workspace.droppedOutbox.push(yield* activationCopy(item.data)); yield;
+        }
+        for (const item of raw.files) {
+          const file = item.value, original = originals.get(file.filepath);
+          const desc = { ...yield* activationCopy(original || file.fallback || { filepath: file.filepath, translations: {} }),
+            ...yield* activationCopy(file.overrides) };
+          desc.translations ||= {};
+          for (const language in workspace.staged) if (Object.hasOwn(workspace.staged, language)) {
+            const entries = workspace.staged[language];
+            if (Object.hasOwn(entries, file.filepath)) desc.translations[language] = yield* activationCopy(entries[file.filepath].translations);
+            yield;
+          }
+          workspace.descs.push(desc); yield;
+        }
+        if (raw.meta._storageArchiveKinds?.includes('importRecovery') || archives.length) workspace.importRecovery = [];
+        for (const item of archives) {
+          if (item.kind === 'group') workspace.importRecovery[item.entry] = yield* activationCopy(item.data);
+          yield;
+        }
+        for (const item of archives) {
+          if (item.kind === 'desc') workspace.importRecovery[item.entry].descs[item.order] = yield* activationCopy(item.data);
+          else if (item.kind === 'status') workspace.importRecovery[item.entry].status[item.statusKey] = yield* activationCopy(item.data);
+          yield;
+        }
+        delete workspace._storageArchiveKinds;
+        if (workspace.importArchive) {
+          if (!raw.retained?.archive) throw new Error('The accepted archive descriptor is unavailable. Reimport its matching original ZIP.');
+          workspace.importArchive = yield* activationCopy(raw.retained.archive);
+        }
+      }
+      // Three callers own independently mutable views of original file data.
+      const baseline = raw.retained && { ...raw.retained, source: yield* activationCopy(source) };
+      return { workspace, source, baseline,
+        ...(workspace?.importArchive && raw.retained?.archive?.baselineId === scope.sourceHash ? { sourceBaselineId: scope.sourceHash } : {}) };
+    }
+    async function runActivation(steps) {
+      const now = dependencies.activationNow || (() => typeof performance === 'object' ? performance.now() : Date.now());
+      const yieldTask = dependencies.activationYield || (() => new Promise(resolve => setTimeout(resolve, 0)));
+      let started = now(), checks = 0;
+      for (;;) {
+        const next = steps.next();
+        if (next.done) return next.value;
+        if (++checks === 32) {
+          checks = 0;
+          if (now() - started >= 4) { await yieldTask(); started = now(); }
+        }
+      }
+    }
     async function activation(scope) {
-      await ensure(scope);
-      return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', async tx => {
-        const source = (await originalRows(tx, scope)).slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(row => row.value);
-        const workspace = await readWorkspace(tx, scope);
-        const retained = await get(tx, stores.assets, baselineKey(scope));
-        // Source and import-baseline consumers previously owned independent
-        // values. Preserve that boundary while eliminating duplicate DB reads.
-        return { workspace, source, baseline: retained && { ...retained, source: copy(source) } };
+      const captured = { ...scope };
+      await ensure(captured);
+      const id = scopeKey(captured), baseId = baselineKey(captured);
+      // Do no corpus cloning, sorting or assembly while this consistent read
+      // holds IndexedDB stores. Every response is already detached by IDB.
+      const raw = await transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', async tx => {
+        const [meta, files, records, originals, retained] = await Promise.all([
+          get(tx, stores.meta, id), all(tx, stores.files, id), all(tx, stores.records, id),
+          all(tx, stores.baseline, baseId), get(tx, stores.assets, baseId),
+        ]);
+        return { meta, files, records, originals, retained };
       });
+      return runActivation(materializeActivation(raw, captured));
     }
     async function saveWorkspace(scope, value, options = {}) {
       await ensure(scope);
@@ -696,7 +870,7 @@
         return value;
       });
     }
-    return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
+    return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
       importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same };
   }

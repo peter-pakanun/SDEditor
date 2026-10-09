@@ -1,5 +1,7 @@
 // Disposable normal-mode desktop acceptance fixture. Real Vue/production mixins;
-// cached source/room adapters and unresolved network gates isolate scheduling.
+// normalized imported-source/room adapters and unresolved network gates isolate
+// scheduling. Archive identity/tree are real protocol output; ZIP parsing is
+// outside this fixture's controlled cache boundary.
 // Run: node scripts/startup-performance-browser-fixture.cjs
 // No production storage, network account, or imported user files are used.
 const assert = require('node:assert/strict');
@@ -65,31 +67,50 @@ async function configureCachedWorkspace(page) {
             translations: { English: ['Fire damage ' + index], Thai: ['คำแปล ' + index],
                 French: index === 0 ? ['Français'] : [], German: index === 0 ? ['Deutsch'] : [] },
         }));
-        const hash = await CollaborationProtocol.sourceHashAsync(source);
+        const tree = await CollaborationProtocol.buildBaselineTree(source);
+        const descriptorBytes = new TextEncoder().encode('Disposable startup fixture archive identity');
+        const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+            zipHash: await CollaborationProtocol.zipHash(descriptorBytes), zipSize: descriptorBytes.length,
+            fileCount: source.length, descriptionCount: source.length, decisions: [], treeRoot: tree.root });
+        const hash = archive.baselineId;
+        const freeze = value => {
+            if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
+            return value;
+        };
+        f.baseline = { source: freeze(clone(source)), archive, tree };
+        f.baselineText = JSON.stringify(f.baseline.source);
         f.hash = hash; f.source = source; f.openPath = source[0].filepath;
         const cachedWorkspace = () => ({ descs: [
             { filepath: source[0].filepath, translations: { German: [] } },
             { filepath: 'unloaded.txt', translations: { Korean: ['Not loaded'] } },
-        ], stagedVersion: 1, staged: {}, dropped: {}, status: {}, sourceHash: hash });
-        f.snapshotCalls = f.sourceReads = f.workspaceReads = 0;
+        ], stagedVersion: 1, statusMetadataVersion: 1, staged: { Thai: {
+            [source[0].filepath]: { sourceHash: hash, translations: ['Normalized saved overlay 0'], before: ['คำแปล 0'], savedAt: 1 },
+        } }, dropped: {}, status: {}, sourceHash: hash, importArchive: clone(archive) });
+        f.snapshotCalls = f.sourceReads = f.workspaceReads = f.baselineReads = 0;
         OfflineStore.getSource = async () => { f.sourceReads++; return clone(source); };
         OfflineStore.getWorkspace = async () => { f.workspaceReads++; return cachedWorkspace(); };
         OfflineStore.getWorkspaceSnapshot = async () => {
             f.snapshotCalls++;
+            f.detachedSource = clone(source);
             return { scope: { accountId: 'guest', game: 'poe2', branchId: 'default', sourceHash: hash },
-                language: 'Thai', source: clone(source), workspace: cachedWorkspace() };
+                language: 'Thai', sourceBaselineId: hash, source: f.detachedSource,
+                workspace: cachedWorkspace(), baseline: f.baseline };
         };
+        OfflineStore.getImportedBaseline = async () => { f.baselineReads++; return f.baseline; };
         OfflineStore.listTranslationDrafts = async () => [];
         OfflineStore.getTranslationDraft = async () => null;
         const OriginalClient = CollaborationSync.Client;
         CollaborationSync.Client = class extends OriginalClient {
             async connect(options) {
                 f.connectCalls++; f.connectDeferred = options.deferRemote;
+                f.collaborationPreparedFiles = options.files.map(file => file.filepath);
                 f.cachedDuringInitialization = app.workspaceInitializationActive;
                 await f.wait('cached-room');
                 this.key = 'fixture-room'; this.epoch++;
+                this.baselineStates = { [source[0].filepath]: { filepath: source[0].filepath,
+                    translations: clone(f.baseline.source[0].translations.Thai), revision: 0 } };
                 this.state = { version: 1, rooms: { [this.key]: {
-                    identity: { ...options, sourceHash: hash }, local: Object.fromEntries(options.files.map(file => [file.filepath, clone(file)])),
+                    mode: 'sparse', identity: { ...options, sourceHash: hash }, local: Object.fromEntries(options.files.map(file => [file.filepath, clone(file)])),
                     shared: {}, outbox: [], conflicts: [], recovery: [], placeholderRepairs: [], revision: 1,
                 } } };
             }
@@ -152,6 +173,20 @@ async function run() {
         assert.deepEqual(await page.evaluate(() => ({ snapshot: window.__startupPerformance.snapshotCalls,
             source: window.__startupPerformance.sourceReads, workspace: window.__startupPerformance.workspaceReads })),
         { snapshot: 1, source: 0, workspace: 0 }, 'Cold preparation consumes one combined snapshot without duplicate workspace/source provider reads.');
+        const imported = await page.evaluate(() => {
+            const app = window.__startupPerformanceApp, f = window.__startupPerformance, rows = Vue.toRaw(app.descs);
+            return { reusedEveryRow: rows.every((row, index) => Vue.toRaw(row) === f.detachedSource[index]),
+                separateBaseline: app._workspaceSourceBaseline === f.baseline.source && rows[0] !== f.baseline.source[0],
+                unchangedBaseline: JSON.stringify(f.baseline.source) === f.baselineText,
+                immutableBaseline: Object.isFrozen(f.baseline.source) && Object.isFrozen(f.baseline.source[0].translations.Thai),
+                renderedOverlay: rows[0].translations.Thai[0], baselineReads: f.baselineReads,
+                collaborationFiles: f.collaborationPreparedFiles };
+        });
+        assert.equal(imported.reusedEveryRow && imported.separateBaseline && imported.unchangedBaseline && imported.immutableBaseline, true);
+        assert.equal(imported.renderedOverlay, 'Normalized saved overlay 0');
+        assert.equal(imported.baselineReads, 0);
+        assert.deepEqual(imported.collaborationFiles, ['startup-fixture/00000.txt']);
+        results.push('Imported normalized snapshot reuses every detached rendering row, preserves the deeply frozen immutable baseline and sends only the staged file to cached sparse collaboration.');
         results.push('Cached room hydration stays inside initialization; local workspace publishes before unresolved remote connection.');
         // Count only translations read inside the watched language computed,
         // separating legitimate per-file preparation from corpus enumeration.
@@ -207,6 +242,8 @@ async function run() {
             for (const key of Object.keys(before)) assert.equal(after[key], before[key], theme + ': retained ' + key);
             assert.equal(await page.evaluate(() => window.__startupPerformance.languageReads), 0);
             assert.equal(await page.evaluate(() => window.__startupPerformanceApp._editorOpenRun === window.__startupPerformance.editorRun), true);
+            assert.equal(await page.evaluate(() => JSON.stringify(window.__startupPerformance.baseline.source) === window.__startupPerformance.baselineText), true,
+                theme + ': saved overlays and typing preserve the complete immutable imported baseline.');
             assert(after.x >= 0 && after.x + after.width <= 1441, theme + ': translation input fits desktop width.');
             await page.screenshot({ path: join(artifacts, 'inline-' + theme + '.png') });
             metrics.push({ theme, ...after });
@@ -252,6 +289,11 @@ async function run() {
             snapshotCalls: window.__startupPerformance.snapshotCalls,
             duplicateSourceReads: window.__startupPerformance.sourceReads,
             duplicateWorkspaceReads: window.__startupPerformance.workspaceReads,
+            duplicateBaselineReads: window.__startupPerformance.baselineReads,
+            importedBaselineUnchanged: JSON.stringify(window.__startupPerformance.baseline.source) === window.__startupPerformance.baselineText,
+            detachedRenderingRowsReused: Vue.toRaw(window.__startupPerformanceApp.descs)
+                .every((row, index) => Vue.toRaw(row) === window.__startupPerformance.detachedSource[index]),
+            collaborationPreparedFiles: window.__startupPerformance.collaborationPreparedFiles.length,
             initialization: window.__startupPerformanceApp.workspaceInitializationRows.map(row => ({ label: row.label, status: row.status, milliseconds: row.endedAt - row.startedAt })) }));
         writeFileSync(join(artifacts, 'results.json'), JSON.stringify({ results, timing, metrics }, null, 2));
         console.log(JSON.stringify({ pass: true, results, timing, artifacts }, null, 2));

@@ -462,10 +462,13 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.equal(bundleBaselineReads.length, 1, 'Ordinary cold load shares one original hydration across workspace and source');
         assert.equal(bundleBaselineReads[0].index, 'by_scope');
         assert.equal(bundleBaselineReads[0].method, 'getAll');
+        assert.equal(bundled.operations.filter(operation => operation.store === 'baseline_assets').length, 1,
+            'Cold activation issues one retained-assets lookup');
         assert.ok(bundled.operations.every(operation => operation.mode === 'readonly'), 'Settled bundle loading cannot rewrite normalized facts');
         results.push({ scenario: 'cold workspace bundle shares one immutable baseline scope read', files: bundled.files, baselineReads: bundleBaselineReads.length });
         console.log('Validated interrupted v8 conversion, immutable evidence and older-source recovery.');
 
+        await denseSelectionChecks(page, results);
         await sameBaselineImportChecks(page, results);
 
         const writes = await page.evaluate(async () => {
@@ -702,6 +705,120 @@ async function runFixture({ storageOnly = false } = {}) {
     }
 }
 
+async function denseSelectionChecks(page, results) {
+    const result = await page.evaluate(async () => {
+        const scope = window.__storageScope, paths = window.__storageSource.map(file => file.filepath).sort().slice(0, 256).reverse();
+        if (paths.length < 128) return { skipped: true, files: paths.length };
+        const identity = { ...scope, language: 'Thai' }, key = JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, 'Thai']);
+        const before = await OfflineStore.getWorkspace(scope, 'Thai'), beforeRoom = await OfflineStore.getCollaborationState({ key, scope: identity });
+        window.__normalizedProbe.operations = [];
+        const selected = await OfflineStore.getCollaborationRecords({ key, scope: identity, filepaths: paths, includeConflicts: true, includeRecovery: true });
+        const readOperations = window.__normalizedProbe.operations.slice();
+        window.__normalizedProbe.operations = [];
+        await OfflineStore.updateCollaborationRecords({ key, scope: identity, filepaths: paths, includeConflicts: true, includeRecovery: true },
+            state => state, { projectWorkspace: workspace => workspace });
+        const writeOperations = window.__normalizedProbe.operations.slice();
+        const after = await OfflineStore.getWorkspace(scope, 'Thai'), afterRoom = await OfflineStore.getCollaborationState({ key, scope: identity });
+        return { files: paths.length, selectedPaths: selected.selection.filepaths, requestedPaths: paths,
+            workspacePaths: selected.workspace.descs.map(file => file.filepath),
+            seedFilesAbsent: selected.room.seedUpload?.files === undefined,
+            archiveAbsent: selected.workspace.importRecovery === undefined,
+            parity: JSON.stringify(before) === JSON.stringify(after), roomParity: JSON.stringify(beforeRoom) === JSON.stringify(afterRoom),
+            recoveryFiles: selected.room.recovery.reduce((count, group) => count + group.files.length, 0), readOperations, writeOperations };
+    });
+    if (result.skipped) return;
+    assert.deepEqual(result.selectedPaths, result.requestedPaths);
+    assert.deepEqual(result.workspacePaths, result.requestedPaths);
+    assert.equal(result.seedFilesAbsent, true, 'Dense scoped reads exclude pathless seed-upload text');
+    assert.equal(result.archiveAbsent, true, 'Dense scoped projections exclude full import-recovery archives');
+    assert.equal(result.parity, true, 'A no-op dense projection preserves every selected and unselected workspace fact');
+    assert.equal(result.roomParity, true, 'Dense range selection and projection retain whole-room recovery ordering and payloads');
+    for (const [label, operations] of [['read', result.readOperations], ['projection', result.writeOperations]]) {
+        const baseline = operations.filter(operation => operation.store === 'baseline_files');
+        assert.equal(baseline.length, 4, 'Concurrent room/workspace ' + label + ' shares two bounded count/read batches');
+        assert.ok(baseline.every(operation => ['getAll', 'count'].includes(operation.method)), 'Dense ' + label + ' cannot flood baseline success events');
+        assert.ok(operations.filter(operation => operation.store === 'workspace_records').every(operation => operation.index === 'by_path'),
+            'Dense ' + label + ' cannot load pathless workspace archives');
+        assertNoAssetReads(operations, 'dense scoped ' + label);
+        assert.equal(aggregateOperations(operations).length, 0);
+        assert.ok(operations.length < result.files / 2, 'Actual dense IDB success events remain bounded by batches rather than file count');
+    }
+    results.push({ scenario: 'dense room/workspace range reads and atomic no-op projection', files: result.files,
+        readOperations: result.readOperations.length, projectionOperations: result.writeOperations.length,
+        baselineRequestsPerTransaction: 4, recoveryFiles: result.recoveryFiles });
+}
+
+async function activationPointerChecks(page, scope, results) {
+    const result = await page.evaluate(async scope => {
+        const previousContext = OfflineStore.captureWorkspaceScope({}), pointer = 'workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId]);
+        const opening = indexedDB.open('sdeditor', 9), db = await new Promise((resolve, reject) => {
+            opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+        });
+        const complete = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); });
+        const readPointer = async () => {
+            const tx = db.transaction('kv', 'readonly'), finished = complete(tx), read = tx.objectStore('kv').get(pointer);
+            const value = await new Promise(resolve => { read.onsuccess = () => resolve(read.result.value); }); await finished; return value;
+        };
+        const errorView = error => ({ code: error.code, stale: error.stale, message: error.message });
+        const transact = IDBDatabase.prototype.transaction, put = IDBObjectStore.prototype.put;
+        let armed = true, replacement, blockerFinished, blockerRead = false, queuedAbort = false;
+        try {
+            OfflineStore.setWorkspaceContext(scope);
+            window.__normalizedProbe.operations = [];
+            IDBDatabase.prototype.transaction = function (...args) {
+                const names = Array.isArray(args[0]) ? args[0] : [args[0]];
+                if (armed && args[1] === 'readwrite' && names.length === 1 && names[0] === 'kv') {
+                    armed = false;
+                    const blocker = transact.call(this, ['kv'], 'readwrite'); blockerFinished = complete(blocker);
+                    const gate = blocker.objectStore('kv').get('fixture-pointer-blocker'); gate.onsuccess = () => { blockerRead = true; };
+                    const queued = transact.apply(this, args); queued.addEventListener('abort', () => { queuedAbort = true; });
+                    queueMicrotask(() => { replacement = OfflineStore.activateVersion(scope).then(value => value, errorView); });
+                    return queued;
+                }
+                return transact.apply(this, args);
+            };
+            const queued = await OfflineStore.activateVersion(scope).then(() => ({ unexpected: true }), errorView);
+            await blockerFinished; const latest = await replacement;
+            const queuedOperations = window.__normalizedProbe.operations.slice();
+            IDBDatabase.prototype.transaction = transact;
+            const prior = { ...scope, sourceHash: 'previous-successful-selection' };
+            const seed = db.transaction('kv', 'readwrite'), seeded = complete(seed); seed.objectStore('kv').put({ key: pointer, value: prior }); await seeded;
+            OfflineStore.setWorkspaceContext(prior);
+            armed = true; let putAbort = false;
+            window.__normalizedProbe.operations = [];
+            IDBObjectStore.prototype.put = function (...args) {
+                const request = put.apply(this, args);
+                if (armed && this.name === 'kv' && args[0]?.key === pointer && args[0].value.sourceHash === scope.sourceHash) {
+                    armed = false; this.transaction.addEventListener('abort', () => { putAbort = true; });
+                    replacement = OfflineStore.activateVersion({ ...scope, sourceHash: 'unavailable-fixture-selection' }).then(() => ({ unexpected: true }), errorView);
+                }
+                return request;
+            };
+            const afterPut = await OfflineStore.activateVersion(scope).then(() => ({ unexpected: true }), errorView), missing = await replacement;
+            const durable = await readPointer(), context = OfflineStore.captureWorkspaceScope({});
+            IDBObjectStore.prototype.put = put;
+            await OfflineStore.activateVersion(scope);
+            return { queued, latestScope: latest.scope, blockerRead, queuedAbort,
+                queuedPuts: queuedOperations.filter(operation => operation.store === 'kv' && operation.method === 'put' && operation.key === pointer).length,
+                afterPut, missing, putAbort, durable, context, prior };
+        } finally {
+            IDBDatabase.prototype.transaction = transact; IDBObjectStore.prototype.put = put;
+            if (previousContext) OfflineStore.setWorkspaceContext(previousContext); db.close();
+        }
+    }, scope);
+    assert.equal(result.blockerRead, true, 'The superseded pointer transaction was queued behind an actual IndexedDB writer');
+    assert.equal(result.queuedAbort, true);
+    assert.equal(result.queued.code, 'WORKSPACE_ACTIVATION_SUPERSEDED'); assert.equal(result.queued.stale, true);
+    assert.equal(result.latestScope.sourceHash, scope.sourceHash);
+    assert.equal(result.queuedPuts, 1, 'Only the newest activation reaches the durable pointer write');
+    assert.equal(result.putAbort, true, 'Supersession after put rolls back the still-live pointer transaction');
+    assert.equal(result.afterPut.code, 'WORKSPACE_ACTIVATION_SUPERSEDED'); assert.equal(result.afterPut.stale, true);
+    assert.match(result.missing.message, /not available in this browser/);
+    assert.deepEqual(result.durable, result.prior); assert.deepEqual(result.context, result.prior);
+    results.push({ scenario: 'real IndexedDB activation fences queued and post-put supersession', queuedPointerPuts: result.queuedPuts,
+        queuedAborted: result.queuedAbort, postPutRolledBack: result.putAbort });
+}
+
 async function sameBaselineImportChecks(page, results) {
     const repeated = await page.evaluate(async () => {
         const copy = value => JSON.parse(JSON.stringify(value));
@@ -753,6 +870,22 @@ async function sameBaselineImportChecks(page, results) {
         const preservedHistory = await OfflineStore.listRevisions(filepath, 'Thai', 100, onlineScope);
         const firstRows = await readRows(['baseline_files']), baseKey = NormalizedStore.baselineKey(onlineScope);
         const initialBaselineRows = firstRows.baseline_files.filter(row => row.scope === baseKey);
+        const previousScope = OfflineStore.captureWorkspaceScope({});
+        window.__normalizedProbe.operations = [];
+        const loadingSnapshot = OfflineStore.getWorkspaceSnapshot(onlineScope, 'Thai');
+        OfflineStore.setWorkspaceContext({ ...offlineScope, sourceHash: 'later-selection' });
+        const snapshot = await loadingSnapshot, snapshotOperations = copy(window.__normalizedProbe.operations);
+        if (previousScope) OfflineStore.setWorkspaceContext(previousScope);
+        const snapshotParity = JSON.stringify(snapshot.workspace) === JSON.stringify(preservedOnline);
+        snapshot.workspace.descs[0].translations.English[0] = 'Workspace decoration';
+        snapshot.workspace.importArchive.baselineId = 'Editor descriptor only';
+        snapshot.baseline.source[1].translations.English[0] = 'Independent import view';
+        snapshot.baseline.rawSource[2].translations.English[0] = 'Independent retained parse';
+        const snapshotChecks = { scope: snapshot.scope, sourceBaselineId: snapshot.sourceBaselineId, operations: snapshotOperations,
+            parity: snapshotParity, sourceMatches: JSON.stringify(snapshot.source) === JSON.stringify(onlineSource),
+            workspaceSaved: snapshot.workspace.staged.Thai[filepath].translations,
+            archiveIndependent: snapshot.baseline.archive.baselineId === archive.baselineId,
+            copiesIndependent: snapshot.source !== snapshot.baseline.source && snapshot.source !== snapshot.baseline.rawSource };
         // Different selected languages produce different parser status flags.
         // Null and empty names and language object order share the same witness.
         offlineSource[0].name = null;
@@ -822,7 +955,7 @@ async function sameBaselineImportChecks(page, results) {
         const legacyFullAfterClear = await OfflineStore.listLocalVersions(legacyScope);
         const afterClear = await readRows(['kv']);
         return {
-            languageStatusChanged: onlineSource[0].isMissing !== parse('German')[0].isMissing,
+            languageStatusChanged: onlineSource[0].isMissing !== parse('German')[0].isMissing, snapshotChecks,
             initialBaselineRows, importedBaselineRows: afterImport.baseline_files.filter(row => row.scope === baseKey),
             migratedBaselineRows: afterMigration.baseline_files.filter(row => row.scope === baseKey), reimportOperations, migrationOperations,
             offlineSaved: offline.staged.German[filepath].translations, migratedSaved: migrated.staged.Thai[filepath].translations,
@@ -835,6 +968,20 @@ async function sameBaselineImportChecks(page, results) {
         };
     });
     assert.equal(repeated.languageStatusChanged, true, 'The real parser reproduces the selected-language decoration difference');
+    const snapshot = repeated.snapshotChecks;
+    assert.equal(snapshot.scope.accountId, 'same-baseline-online', 'An account change during loading cannot retarget a captured activation');
+    assert.equal(snapshot.scope.branchId, 'release');
+    assert.equal(snapshot.sourceBaselineId, snapshot.scope.sourceHash);
+    assert.equal(snapshot.parity, true, 'Cooperative activation retains workspace adapter parity');
+    assert.equal(snapshot.sourceMatches, true);
+    assert.equal(snapshot.archiveIndependent, true);
+    assert.equal(snapshot.copiesIndependent, true);
+    assert.deepEqual(snapshot.workspaceSaved, ['Online Saved Thai']);
+    assert.equal(snapshot.operations.filter(operation => operation.store === 'baseline_files').length, 1);
+    assert.equal(snapshot.operations.filter(operation => operation.store === 'baseline_assets').length, 1);
+    assert.ok(snapshot.operations.every(operation => operation.mode === 'readonly'), 'Captured modern hydration cannot write during corpus copying');
+    results.push({ scenario: 'accepted activation captures one baseline and asset read with independent corpus views', files: 3,
+        baselineReads: 1, assetReads: 1, readonly: true, scope: snapshot.scope });
     assert.deepEqual(repeated.importedBaselineRows, repeated.initialBaselineRows, 'Offline same-archive reimport retains first accepted baseline bytes');
     assert.deepEqual(repeated.migratedBaselineRows, repeated.initialBaselineRows, 'Another legacy profile reuses immutable baseline bytes');
     for (const [label, operations] of [['same-baseline import', repeated.reimportOperations], ['same-baseline legacy conversion', repeated.migrationOperations]]) {
@@ -859,6 +1006,7 @@ async function sameBaselineImportChecks(page, results) {
     }
     results.push({ scenario: 'same PoE2 archive reimport and legacy conversion across profiles and selected languages preserve immutable rows',
         files: repeated.initialBaselineRows.length, rejectedChangedFacts: repeated.rejected.map(result => result.fact) });
+    await activationPointerChecks(page, snapshot.scope, results);
     console.log('Validated same-archive offline import, selected-language decorations and atomic rejection of changed immutable facts.');
 }
 
