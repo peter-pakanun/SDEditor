@@ -4764,7 +4764,7 @@ const config = Vue.defineComponent({
       this.queueCommittedAutocompleteTrigger(e, editorIndex, columnIndex, { compositionTarget: e?.target });
     },
     translationKeydown(e, editorIndex, columnIndex = 0) {
-      if (this.inlineTranslationKeydown?.(e)) return;
+      if (this.inlineTranslationKeydown?.(e, editorIndex, columnIndex)) return;
       if (this.editorTranslationReadOnly) return;
       if (this.isImeComposingEvent(e)) return;
       if ((e.key === "[" || e.key === "<") && !e.ctrlKey && !e.metaKey && !e.altKey) {

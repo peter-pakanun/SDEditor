@@ -1871,6 +1871,20 @@ function inlineArrowEvent(filepath, changes = {}) {
     preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.propagationStopped = true; }, ...changes };
 }
 
+function inlineTabEvent(filepath, changes = {}) {
+  return inlineArrowEvent(filepath, { key: 'Tab', ctrlKey: false, ...changes });
+}
+
+async function dispatchInlineTab(editor, event, index = 0, column = 0) {
+  const navigate = editor.moveInlineTranslation;
+  let pending;
+  editor.moveInlineTranslation = function (...args) { return pending = navigate.apply(this, args); };
+  try {
+    editor.translationKeydown(event, index, column);
+    return pending ? await pending : undefined;
+  } finally { editor.moveInlineTranslation = navigate; }
+}
+
 async function inlineNavigationHarness({ current = 'first', table = false } = {}) {
   const h = harness(), { editor, calls } = h;
   h.rows = [description('first'), description('second'), description('third')];
@@ -2097,6 +2111,170 @@ test('Ctrl+Up and Ctrl+Down from inline translation text consume the shortcut be
     assert.equal(editor.hlPopup.filter, 'keep');
   }
   assert.deepEqual(directions, [-1, 1]);
+});
+
+test('inline Tab and Shift+Tab follow translation blocks and table columns without leaving the draft', async () => {
+  const { editor, desc, calls } = harness();
+  desc.translations.English = ['First source', 'Left source@Right source', 'Multiline\\nsource', 'Last left@Last right'];
+  desc.translations.Thai = ['first', 'left@right', 'multiline\\ntranslation', 'last left@last right'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  const session = editor._draftSession, fields = [[0, null], [1, 0], [1, 1], [2, null], [3, 0], [3, 1]], focused = [];
+  editor.getEditorRef = (...args) => ({ focus() {
+    focused.push(args); editor.setEditorFocus(args[1], args[2]);
+  } });
+  editor.editorBlocks[0].words = [{ replace: 'captured replacement' }];
+  editor.editorBlocks[0].translation = 'unsaved first translation';
+  for (const direction of [1, -1]) {
+    const positions = direction > 0 ? fields : fields.slice().reverse();
+    for (let i = 0; i < positions.length - 1; i++) {
+      const [index, column] = positions[i], [nextIndex, nextColumn] = positions[i + 1];
+      const event = inlineTabEvent(desc.filepath, { shiftKey: direction < 0, target: {
+        tagName: index === 2 ? 'TEXTAREA' : 'INPUT',
+        closest: selector => selector === 'tr[data-filepath]' ? { dataset: { filepath: desc.filepath } } : null,
+      } });
+      assert.equal(await dispatchInlineTab(editor, event, index, column ?? 0), true);
+      assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+      assert.deepEqual(focused.at(-1), ['translation', nextIndex, nextColumn]);
+      assert.equal(editor.editorFocusedIndex, nextIndex); assert.equal(editor.editorFocusedColumnIndex, nextColumn ?? 0);
+    }
+  }
+  assert.equal(editor._draftSession, session); assert.equal(editor.editorCurrentEditingDesc, desc);
+  assert.equal(editor.editorBlocks[0].translation, 'unsaved first translation');
+  assert.equal(calls.promotions.length, 0); assert.equal(calls.writes.length, 0);
+});
+
+test('inline Tab closes autocomplete before focusing another translation field', async () => {
+  const { editor, desc, calls } = harness();
+  desc.translations.English = ['First source', 'Second source'];
+  desc.translations.Thai = ['first', 'second'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  await editor.activateInlineRow(desc.filepath);
+  editor.hlPopup.visible = true; editor.hlPopup.filter = 'old block';
+  editor.openHlPopup = () => assert.fail('Moving focus must not reopen autocomplete or focus its filter');
+  const focused = [];
+  editor.getEditorRef = (...args) => ({ focus() {
+    assert.equal(editor.hlPopup.visible, false);
+    focused.push(args); editor.setEditorFocus(args[1], args[2]);
+  } });
+  assert.equal(await dispatchInlineTab(editor, inlineTabEvent(desc.filepath), 0), true);
+  await tick();
+  assert.deepEqual(focused, [['translation', 1, null]]); assert.equal(editor.hlPopup.filter, '');
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('inline Tab enters the next file at its first table column across pages', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness({ table: true });
+  const event = inlineTabEvent(rows[0].filepath);
+  assert.equal(await dispatchInlineTab(editor, event), true);
+  assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, 0]);
+  assert.equal(calls.reveals.at(-1).moveFocus, false);
+});
+
+for (const table of [false, true]) test(`inline Shift+Tab enters the previous file at its final ${table ? 'table column' : 'block'}`, async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness({ current: 'third' });
+  rows[1].translations.English = ['First source', table ? 'Left source@Middle source@Right source' : 'Last source'];
+  rows[1].translations.Thai = ['first', table ? 'left@middle@right' : 'last'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  const event = inlineTabEvent(rows[2].filepath, { shiftKey: true });
+  assert.equal(await dispatchInlineTab(editor, event), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 1, table ? 2 : null]);
+  assert.equal(calls.translationFocus.at(-1).options.preventScroll, false);
+  assert.equal(await dispatchInlineTab(editor, inlineTabEvent(rows[1].filepath), 1, table ? 2 : 0), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath); assert.equal(editor.currentPage, 3);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+  assert.equal(await editor.moveInlineFile(-1), true);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null], 'Ctrl+Up keeps its first-field destination');
+});
+
+for (const direction of [-1, 1]) test(`inline ${direction < 0 ? 'Shift+Tab' : 'Tab'} skips occupied files across pages`, async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness({ current: direction < 0 ? 'third' : 'first' });
+  const destination = rows[direction < 0 ? 0 : 2], claims = [];
+  destination.translations.English = ['First source', 'Left source@Right source'];
+  destination.translations.Thai = ['first', 'left@right'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  editor._collaboration = { leaveEdit() {}, fileBase() { return null; }, isEditing(filepath) { return filepath === rows[1].filepath; } };
+  editor.claimCollaborationFile = async (filepath, automatic) => { claims.push({ filepath, automatic }); return true; };
+  const event = inlineTabEvent(editor.editorCurrentEditingDesc.filepath, { shiftKey: direction < 0 });
+  assert.equal(await dispatchInlineTab(editor, event), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, destination.filepath);
+  assert.equal(editor.currentPage, direction < 0 ? 1 : 3);
+  assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', direction < 0 ? 1 : 0, direction < 0 ? 1 : null]);
+  assert.deepEqual(claims, [{ filepath: destination.filepath, automatic: true }]);
+});
+
+test('inline Tab leaves full-editor text, sidebar and popup controls, modifiers and IME untouched', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.moveInlineTranslation = () => assert.fail('An unrelated or native Tab must not navigate translations');
+  for (const changes of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { ctrlKey: true, shiftKey: true },
+    { isComposing: true }, { keyCode: 229 }, { key: 'Enter' },
+    { target: { tagName: 'INPUT', closest: () => null } },
+    { target: { tagName: 'INPUT', closest: () => ({ dataset: { filepath: 'test/other.txt' } }) } }]) {
+    const event = inlineTabEvent(desc.filepath, changes);
+    editor.translationKeydown(event, 0);
+    assert.equal(!!event.defaultPrevented, false); assert.equal(!!event.propagationStopped, false);
+  }
+  const prevented = inlineTabEvent(desc.filepath, { defaultPrevented: true });
+  editor.translationKeydown(prevented, 0); assert.equal(!!prevented.propagationStopped, false);
+  editor.editorVisible = true;
+  for (const shiftKey of [false, true]) {
+    const event = inlineTabEvent(desc.filepath, { shiftKey });
+    editor.translationKeydown(event, 0);
+    assert.equal(!!event.defaultPrevented, false); assert.equal(!!event.propagationStopped, false);
+  }
+});
+
+test('inline Tab consumes busy, read-only and blocked navigation without moving or promoting', async () => {
+  const changes = [editor => { editor.editorSaving = true; }, editor => { editor.navigationBusy = true; },
+    editor => { editor.inlineTransitionBusy = true; }, editor => { editor._importingSource = true; },
+    editor => { editor.versionStorageLoading = true; }, editor => { editor.draftRecoveryVisible = true; },
+    editor => { editor.editorLoading = true; }, editor => { editor.editorLoadError = 'Load failed'; },
+    editor => { editor.collaborationConflictVisible = true; }, editor => { editor.importDialogVisible = true; },
+    editor => { editor.$refs.diagnosticScanDialog = { open: true }; },
+    editor => { Object.defineProperty(editor, 'editorTranslationReadOnly', { get: () => true }); }];
+  for (const change of changes) {
+    const { editor, desc, calls } = harness();
+    desc.translations.English = ['First source', 'Second source']; desc.translations.Thai = ['first', 'second'];
+    editor._workspaceSourceBaseline = copy(editor.descs); await editor.activateInlineRow(desc.filepath);
+    const session = editor._draftSession; editor.editorBlocks[0].translation = 'retain blocked draft'; change(editor);
+    for (const [index, shiftKey] of [[0, false], [0, true], [1, false]]) {
+      const event = inlineTabEvent(desc.filepath, { shiftKey });
+      assert.equal(await dispatchInlineTab(editor, event, index), false);
+      assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+    }
+    assert.equal(editor._draftSession, session); assert.equal(editor.editorCurrentEditingDesc, desc);
+    assert.equal(editor.editorBlocks[0].translation, 'retain blocked draft');
+    assert.equal(calls.promotions.length, 0); assert.equal(calls.focused, 0);
+  }
+});
+
+test('inline Tab stops at both file-list bounds without wrapping or promoting the draft', async () => {
+  for (const [current, shiftKey] of [['first', true], ['third', false]]) {
+    const { editor, calls } = await inlineNavigationHarness({ current });
+    const desc = editor.editorCurrentEditingDesc, session = editor._draftSession;
+    editor.editorBlocks[0].translation = 'retain draft at Tab boundary';
+    const event = inlineTabEvent(desc.filepath, { shiftKey });
+    assert.equal(await dispatchInlineTab(editor, event), false);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+    assert.equal(editor.editorCurrentEditingDesc, desc); assert.equal(editor._draftSession, session);
+    assert.equal(calls.promotions.length, 0); assert.equal(calls.translationFocus.length, 0);
+  }
+});
+
+test('inline Tab retains current text and focus when its recovery checkpoint cannot persist', async () => {
+  const { editor, rows, calls, store } = await inlineNavigationHarness();
+  editor.editorBlocks[0].translation = 'retain this failing Tab draft';
+  store.putTranslationDraft = async () => { throw new Error('Quota exceeded'); };
+  editor.editorSaveFindings = () => ({ errors: [{ message: 'Invalid translation' }], warnings: [], confirmations: [] });
+  const event = inlineTabEvent(rows[0].filepath);
+  assert.equal(await dispatchInlineTab(editor, event), false);
+  assert.equal(event.defaultPrevented, true); assert.equal(event.propagationStopped, true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[0].filepath); assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorBlocks[0].translation, 'retain this failing Tab draft'); assert.match(editor.inlineDraftError, /Quota exceeded/);
+  assert.equal(calls.translationFocus.length, 0); assert.equal(calls.promotions.length, 0);
 });
 
 test('inline row shortcuts leave ordinary arrows, IME, other modifiers, popup filters and full-editor text alone', async () => {

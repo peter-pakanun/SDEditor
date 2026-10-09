@@ -426,16 +426,39 @@
         if (event?.target?.closest?.('button, a, input, textarea, select, [contenteditable="true"], .HLter')) return;
         return this.openInlineFullEditor(filepath);
       },
-      inlineTranslationKeydown(event) {
+      inlineTranslationKeydown(event, index = this.editorFocusedIndex || 0, column = this.editorFocusedColumnIndex || 0) {
         if (!this.inlineActive || this.editorVisible || event.defaultPrevented || this.isImeComposingEvent(event)
-          || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
-          || !['ArrowUp', 'ArrowDown'].includes(event.key)
+          || event.altKey || event.metaKey
           || event.target?.closest?.('tr[data-filepath]')?.dataset.filepath !== this.editorCurrentEditingDesc?.filepath) return false;
+        const tab = event.key === 'Tab' && !event.ctrlKey;
+        const arrow = event.ctrlKey && !event.shiftKey && ['ArrowUp', 'ArrowDown'].includes(event.key);
+        if (!tab && !arrow) return false;
         event.preventDefault(); event.stopPropagation();
-        this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
+        if (tab) this.moveInlineTranslation(event.shiftKey ? -1 : 1, index, column);
+        else this.moveInlineFile(event.key === 'ArrowUp' ? -1 : 1);
         return true;
       },
-      async moveInlineFile(direction, path = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : this.selectedFilepath) {
+      async moveInlineTranslation(direction, index, column = 0) {
+        if (!this.inlineEditor || !this.inlineActive || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
+          || this.editorTranslationReadOnly || this._importingSource || this.versionStorageLoading
+          || this.draftRecoveryVisible || this.fileListNavigationBlocked() || ![-1, 1].includes(direction)) return false;
+        let block = this.editorBlocks[index];
+        if (!block) return false;
+        const nextColumn = column + direction;
+        if (block.isTable && nextColumn >= 0 && nextColumn < block.tableColumns.length) column = nextColumn;
+        else {
+          index += direction;
+          block = this.editorBlocks[index];
+          if (!block) return this.moveInlineFile(direction, undefined, { focusEnd: direction < 0 });
+          column = block.isTable && direction < 0 ? block.tableColumns.length - 1 : 0;
+        }
+        const field = this.getEditorRef('translation', index, block.isTable ? column : null);
+        if (!field) return false;
+        this.closeHlPopup();
+        field.focus();
+        return true;
+      },
+      async moveInlineFile(direction, path = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : this.selectedFilepath, { focusEnd = false } = {}) {
         if (!this.inlineEditor || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
           || (this.inlineActive && this.editorTranslationReadOnly) || this._importingSource || this.versionStorageLoading
           || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return false;
@@ -447,15 +470,19 @@
           && cancelRevision === (this._editorOpenCancelRevision || 0) && !this._importingSource
           && !this.draftRecoveryVisible && !this.fileListNavigationBlocked();
         const originalFocus = { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
-        const focusFile = async (filepath, index = 0, column = 0) => {
+        const focusFile = async (filepath, index = 0, column = 0, end = false) => {
           const run = this._editorOpenRun;
           await this.$nextTick();
           if (!current() || !this.inlineActive || this._editorOpenRun !== run
             || this.editorCurrentEditingDesc?.filepath !== filepath || this._inlineRequestedPath !== filepath) return false;
           index = Math.min(index, Math.max(0, this.editorBlocks.length - 1));
+          if (end) index = Math.max(0, this.editorBlocks.length - 1);
           const block = this.editorBlocks[index];
-          this.getEditorRef('translation', index, block?.isTable ? Math.min(column, Math.max(0, block.tableColumns.length - 1)) : null)?.focus?.({ preventScroll: true });
-          this.focusSelectedFileRow(false);
+          if (end && block?.isTable) column = Math.max(0, block.tableColumns.length - 1);
+          const field = this.getEditorRef('translation', index, block?.isTable ? Math.min(column, Math.max(0, block.tableColumns.length - 1)) : null);
+          field?.focus?.({ preventScroll: !end });
+          if (end) field?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+          else this.focusSelectedFileRow(false);
           return true;
         };
         // Preserve the outgoing anchor before promotion can remove it from a filter.
@@ -482,7 +509,7 @@
               if (this.inlineActive || this.editorLoadError || this.inlineDraftError) return false;
               continue;
             }
-            return await focusFile(filepath);
+            return await focusFile(filepath, 0, 0, focusEnd);
           }
           // A claim can lose the occupancy race after the outgoing row was closed.
           if (outgoingPath && !this.inlineActive && current() && this._inlineRequestedPath === lastRequested
