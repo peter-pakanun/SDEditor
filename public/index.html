@@ -154,6 +154,7 @@
           <section id="settings-panel-editor" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-editor" v-show="settingsTab === 'editor'" tabindex="0">
             <label class="settingsToggle" for="inlineEditor"><input type="checkbox" id="inlineEditor" v-model="inlineEditor"><span><strong>Inline editor</strong><small>Edit the focused file in the workspace. Press Enter on a file row to open the full editor.</small></span></label>
             <h3>Editor behavior</h3>
+            <label class="settingsToggle" for="hideEditorClipboard"><input type="checkbox" id="hideEditorClipboard" v-model="hideEditorClipboard"><span><strong>Hide clipboard</strong><small>Hide the clipboard panel in the full editor. Its text is kept when hidden.</small></span></label>
             <label class="settingsToggle" for="hideSourceInPreviewPanel"><input type="checkbox" id="hideSourceInPreviewPanel" v-model="hideSourceInPreviewPanel"><span><strong>Hide source in preview panel</strong><small>Show only the translation in the game preview.</small></span></label>
             <label class="settingsToggle" for="highlightDict"><input type="checkbox" id="highlightDict" v-model="highlightDict"><span><strong>Highlight Dictionary words</strong><small>Mark words matched by your Dictionary.</small></span></label>
             <label class="settingsToggle" for="autoOpenNextFile"><input type="checkbox" id="autoOpenNextFile" v-model="autoOpenNextFile"><span><strong>Open the next file after saving</strong><small>Continue translating without returning to the file list.</small></span></label>
@@ -789,7 +790,7 @@
       </aside>
     </div>
 
-    <div class="editor" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
+    <div class="editor" :class="{ clipboardHidden: hideEditorClipboard }" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
       <div class="edit">
         <div id="fullEditorPreviewHost"></div>
         <div class="twoSided editorActions">
@@ -923,8 +924,8 @@
 
       <div id="fullEditorSidebarHost" class="side fixed editorSidebarHost"></div>
 
-      <div class="fixed clipboard">
-        <textarea placeholder="📋 Clipboard" v-model.lazy="editorClipboard" :lang="translationEditorBcp47"></textarea>
+      <div class="fixed clipboard" v-show="!hideEditorClipboard">
+        <textarea placeholder="📋 Clipboard" aria-label="Editor clipboard" v-model.lazy="editorClipboard" :lang="translationEditorBcp47"></textarea>
       </div>
 
     </div>
@@ -990,7 +991,7 @@
           <p v-if="!tmEditorKey" class="tmEmpty">Focus an entry to see remembered translations.</p>
           <p v-else-if="!tmMatches.length" class="tmEmpty">No matching translation. Save translated entries or build TM from existing work.</p>
           <div class="tmResultList" role="listbox" aria-label="TM matches">
-            <button v-for="(match, matchIndex) in tmMatches" :key="match.id" type="button" role="option" :aria-selected="tmSelectedIndex === matchIndex" :class="{ selected: tmSelectedIndex === matchIndex }" @focus="tmSelectedIndex = matchIndex" @click="tmSelectedIndex = matchIndex">
+            <button v-for="(match, matchIndex) in tmMatches" :key="match.id" type="button" role="option" :aria-selected="tmSelectedIndex === matchIndex" :class="{ selected: tmSelectedIndex === matchIndex }" @focus="tmSelectedIndex = matchIndex" @click="tmSelectedIndex = matchIndex" @dblclick.prevent="useTMMatch(match)" title="Double-click to use translation">
               <span class="tmMatchHeading"><strong>{{ match.score }}%</strong><span>{{ tmMatchLabel(match) }}</span><small>{{ tmGameLabel(match.unit.gameScope) }}</small></span>
               <span class="tmSourceSnippet">{{ tmText(match.source) }}</span><span class="tmTargetSnippet" :lang="translationEditorBcp47">{{ tmText(match.target) }}</span>
             </button>

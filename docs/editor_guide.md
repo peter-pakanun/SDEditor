@@ -37,6 +37,8 @@ Settings and legacy Regex backups stay personal to each account. Dictionaries an
 
 Settings is organized into five tabs: **General** for game version, language, theme and density; **Editor & shortcuts** for preview behavior, highlighting and keyboard preferences; **Cloud backup** for account and shared Dictionary controls; **Data** for importing/exporting settings and starting a workspace from scratch; and **Logs** for viewing and copying the latest workspace initialization activity.
 
+**Editor & shortcuts → Hide clipboard** is enabled by default. Turn it off to show the full editor's clipboard panel. Hiding it preserves its text and gives the sidebar more space; the preference is saved with your personal settings.
+
 **Logs → Copy log** copies the initialization steps, errors and elapsed times after loading finishes. You can also select the log text and copy it with your keyboard. The log remains available in this tab until the next initialization starts or the tab reloads.
 
 During **Initializing workspace**, the overall bar tracks the planned preparation steps. Downloads, parsing, baseline verification and file preparation show measured progress with byte or file counts where available. A moving bar means the total is not yet known. Overall percentages describe preparation steps, rather than estimated time remaining; the bar reaches 100% after preparation finishes. Progress is also retained in **Logs**.
@@ -68,7 +70,7 @@ ClientText **History** lists local and shared changes separately, including the 
 
 An inherited record offers **Compare previous version**. This explicitly verifies or reuses the earlier original without switching the active workspace, then loads the accepted revision recorded by its carry provenance. It exposes earlier English, notes and removed fields. If that saved revision is unavailable, the viewer labels its fallback as the verified original workbook translation. Earlier workbooks are not downloaded automatically when opening an ID. **Restore before as draft** or **Restore after as draft** writes only a scoped draft; Save remains a separate action. Removed fields are excluded from the current draft, and old review hashes cannot mark changed English reviewed. Escape closes the comparison and returns focus; save shortcuts are blocked while the read-only viewer is open.
 
-Cell text remains raw: `@`, actual line breaks and literal `\n` have different meanings. Completion and diagnostics recognize bracket links, numeric substitutions and `<<…>>` icons/keybinds, while brace contents after formatting tags remain localizable. Exact `[NOAUDIO]` prefix-only changes do not require source review; repeated markers or other text changes remain significant. ClientText TM learns valid text/form saves and accepted shared work into this browser's language/game projection, matched by field/form context; enums, sentinel/blank values and unreviewed or conflicted work do not teach it. This projection is separate from cloud StatDescription TM.
+Cell text remains raw: `@`, actual line breaks and literal `\n` have different meanings. Completion and diagnostics recognize bracket links, numeric substitutions and `<<…>>` icons/keybinds, while brace contents after formatting tags remain localizable. Exact `[NOAUDIO]` prefix-only changes do not require source review; repeated markers or other text changes remain significant. ClientText TM learns valid text/form saves and accepted shared work into this browser's language/game projection, matched by field/form context; enums, sentinel/blank values and unreviewed or conflicted work do not teach it. Double-click a ClientText TM match or choose **Use translation** to insert its text into the focused target field as a draft. This projection is separate from cloud StatDescription TM.
 
 ### Finding Files and Navigating Pages
 
@@ -370,7 +372,7 @@ Google backup synchronizes personal settings and the translator's assigned langu
 
 ### Translation Memory
 
-The **TM** tab shows exact, context and fuzzy matches for the focused English entry, with differences, warnings and suggested translations. In the inline editor, **TM matches** beneath each active entry selects it and opens file tools even when the sidebar was hidden. **Use translation** inserts the selected result into the draft and returns focus to the translation field; **Prefill blanks…** previews unambiguous exact/context matches for blank entries.
+The **TM** tab shows exact, context and fuzzy matches for the focused English entry, with differences, warnings and suggested translations. In the inline editor, **TM matches** beneath each active entry selects it and opens file tools even when the sidebar was hidden. Double-click a match or choose **Use translation** to insert it into the focused target entry and return focus to the translation field; replacing existing draft text asks for confirmation. **Prefill blanks…** previews unambiguous exact/context matches for blank entries.
 
 Successful durable saves teach valid nonblank pairs automatically. **Manage TM** provides editing, history, reviewed workspace seeding and JSON import/export. Original ZIP seeding is opt-in, and unresolved Dropped copies are excluded.
 

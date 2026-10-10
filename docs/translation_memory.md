@@ -6,7 +6,7 @@ The suggestion workflow and exact/context/fuzzy categories follow [memoQ's trans
 
 ## Suggestions and insertion
 
-Focus an entry in either editor and open **TM**. Matches show the remembered English, current English, proposed translation, source context and any warnings. The default minimum is **60%**. Use Up/Down in the result panel to select a match, then Enter or **Use translation** to insert it. Replacing existing draft text asks for confirmation.
+Focus an entry in either editor and open **TM**. Matches show the remembered English, current English, proposed translation, source context and any warnings. The default minimum is **60%**. Double-click a match to insert its translation into the focused target entry. You can also use Up/Down in the result panel to select a match, then Enter or **Use translation** to insert it. Replacing existing draft text asks for confirmation.
 
 In the inline editor, each entry in the active row has **TM matches** beneath its translation. It selects that entry and opens the TM sidebar, including when file tools were hidden. Table entries use one button for the whole entry. Inserting a match returns focus to its translation field and keeps the row active; **Stage draft** and leaving the row retain their usual save checks. Prefill reviews take keyboard focus, and applying or cancelling returns to the entry.
 

@@ -1107,6 +1107,11 @@ button, label, th, td, input[type="checkbox"] {
 
 .editor {
   --side-width: 480px;
+  --clipboard-height: calc(120px * var(--density));
+}
+
+.editor.clipboardHidden {
+  --clipboard-height: 0px;
 }
 
 .editorDiagPill {
@@ -1174,7 +1179,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .editor>.fixed {
   position: fixed;
-  height: calc(100% - (120px * var(--density)));
+  height: calc(100% - var(--clipboard-height));
   z-index: 1;
   top: 0;
   overflow-y: auto;
@@ -1191,7 +1196,7 @@ button, label, th, td, input[type="checkbox"] {
   right: 0;
   bottom: 0;
   width: var(--side-width);
-  height: calc(120px * var(--density));
+  height: var(--clipboard-height);
   overflow: hidden;
   padding: calc(0.6em * var(--density));
 }

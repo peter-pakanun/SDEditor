@@ -17,6 +17,18 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+test('clipboard defaults hidden and preserves an explicit visible preference', () => {
+  assert.equal(Cloud.completeSettings({}).hideEditorClipboard, true);
+  assert.equal(Cloud.completeSettings({ hideEditorClipboard: false }).hideEditorClipboard, false);
+  for (const hideEditorClipboard of [true, false]) {
+    assert.deepEqual(Cloud.preferences({ hideEditorClipboard }), { hideEditorClipboard });
+    assert.doesNotThrow(() => Cloud.validateImport({ hideEditorClipboard }));
+  }
+  for (const hideEditorClipboard of ['false', null, 0]) {
+    assert.throws(() => Cloud.validateImport({ hideEditorClipboard }), /hideEditorClipboard must be boolean/);
+  }
+});
+
 test('inline editing defaults on and preserves an explicit disabled preference', () => {
   assert.equal(Cloud.completeSettings({}).inlineEditor, true);
   assert.equal(Cloud.completeSettings({ inlineEditor: false }).inlineEditor, false);

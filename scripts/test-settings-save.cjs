@@ -25,6 +25,32 @@ function harness() {
   return { e, writes, downloads, timers, listeners, context, window, config };
 }
 
+test('clipboard defaults hidden and its visibility and text survive save, export, and import', async () => {
+  const { e, writes, downloads, config } = harness();
+  assert.equal(e.hideEditorClipboard, true);
+  e.editorClipboard = 'Keep this clipboard text';
+  for (const hideEditorClipboard of [false, true]) {
+    e.hideEditorClipboard = hideEditorClipboard;
+    await config.watch.hideEditorClipboard.call(e);
+    await e.flushScheduledSettingsSave();
+    assert.equal(writes.at(-1).hideEditorClipboard, hideEditorClipboard);
+    assert.equal(writes.at(-1).editorClipboard, 'Keep this clipboard text');
+    e.exportSettingsClicked();
+    const imported = JSON.parse(await downloads.at(-1).blob.text());
+    assert.equal(imported.hideEditorClipboard, hideEditorClipboard);
+    const restored = harness().e;
+    restored.importSettings(imported);
+    assert.equal(restored.hideEditorClipboard, hideEditorClipboard);
+    assert.equal(restored.editorClipboard, 'Keep this clipboard text');
+  }
+  const legacy = e.settingsSavePayload();
+  delete legacy.hideEditorClipboard;
+  e.hideEditorClipboard = false;
+  e.importSettings(legacy);
+  assert.equal(e.hideEditorClipboard, true);
+  assert.equal(e.editorClipboard, 'Keep this clipboard text');
+});
+
 test('new Dictionary game scope defaults to All and survives local save, export, and import', async () => {
   const { e, writes, downloads } = harness();
   assert.equal(e.dictionaryDefaultGameScope, 'all');

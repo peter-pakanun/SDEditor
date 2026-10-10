@@ -232,6 +232,7 @@ const config = Vue.defineComponent({
       consistencyShowWhitespace: false,
       consistencyResolutionNotice: '',
       hideDNT: true,
+      hideEditorClipboard: true,
       hideSourceInPreviewPanel: false,
       highlightDict: true,
       shiftEnterSave: false,
@@ -613,6 +614,7 @@ const config = Vue.defineComponent({
     },
     dictionaryFilter() { this.dictionaryPage = 1; },
     hideSourceInPreviewPanel() { this.saveSettings(); },
+    hideEditorClipboard() { this.saveSettings(); },
     uiDensity() { this.saveSettings(); },
     editorRegexes: { deep: true, handler() { this.saveSettings(); } },
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
@@ -7171,6 +7173,7 @@ const config = Vue.defineComponent({
         lang: this.lang,
         theme: this.theme,
         hideDNT: this.hideDNT,
+        hideEditorClipboard: this.hideEditorClipboard,
         hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
         highlightDict: this.highlightDict,
         inlineEditor: this.inlineEditor !== false,
@@ -7265,6 +7268,7 @@ const config = Vue.defineComponent({
         lang: this.lang,
         theme: this.theme,
         hideDNT: this.hideDNT,
+        hideEditorClipboard: this.hideEditorClipboard,
         hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
         highlightDict: this.highlightDict,
         inlineEditor: this.inlineEditor !== false,
@@ -7315,6 +7319,7 @@ const config = Vue.defineComponent({
       this.lang = this.langs.includes(settings.lang) ? settings.lang : '';
       if (['light', 'grey', 'dark', 'modern-dark'].includes(settings.theme)) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
+      this.hideEditorClipboard = settings.hideEditorClipboard !== false;
       if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
       if (typeof settings.inlineEditor !== 'undefined') this.inlineEditor = !!settings.inlineEditor;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;

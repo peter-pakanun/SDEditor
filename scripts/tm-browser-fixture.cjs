@@ -178,11 +178,15 @@ async function check(fixture) {
     }, { unit, options });
     await a.waitForFunction(() => window.__tmFixtureApp.tmMatches.some(match => match.id === 'tm-exact'));
     assert.equal(await a.evaluate(() => window.__tmFixtureApp.tmSelectedMatch.score), 101);
-    await a.getByRole('button', { name: 'Use translation', exact: true }).click();
+    const exactMatch = a.getByRole('listbox', { name: 'TM matches' }).getByRole('option').filter({ hasText: 'Context match' });
+    await exactMatch.click();
+    assert.equal(await a.evaluate(() => window.__tmFixtureApp.serializeEditorTranslations()[0]), '', 'Single click selects without inserting');
+    await exactMatch.dblclick();
+    await a.waitForFunction(() => document.activeElement === window.__tmFixtureApp.getEditorRef('translation', 0));
     assert.equal(await a.evaluate(() => window.__tmFixtureApp.serializeEditorTranslations()[0]), 'เพิ่มความเสียหายไฟ {0}%');
     assert.equal(await a.evaluate(async () => { const vm = window.__tmFixtureApp; await vm.flushEditorDraft(); return !!vm.getDescByFilepath('tm-fixture/01_exact.txt').hasChanges; }), false);
     assert.equal(await a.evaluate(() => window.__tmFixtureApp.testMode), false);
-    results.push('Normal mode loads five remote memories into real IndexedDB; 101% context application changes only a private draft');
+    results.push('Normal mode loads five remote memories into real IndexedDB; single click selects and double-click inserts only a private draft and focuses its target');
     await a.evaluate(async () => { const vm = window.__tmFixtureApp; await vm.editorExit(); await vm.editFile('tm-fixture/02_fuzzy.txt', true); vm.openEditorTM(0); });
     await a.waitForFunction(() => window.__tmFixtureApp.tmMatches.some(match => match.id === 'tm-fuzzy'));
     const fuzzy = await a.evaluate(() => window.__tmFixtureApp.tmMatches.find(match => match.id === 'tm-fuzzy'));
@@ -200,12 +204,36 @@ async function check(fixture) {
     for (const [index, id] of [[0, 'tm-multiline'], [1, 'tm-table'], [2, 'tm-table-multiline']]) {
       await a.evaluate(index => window.__tmFixtureApp.openEditorTM(index), index);
       await a.waitForFunction(id => window.__tmFixtureApp.tmMatches.some(match => match.id === id), id);
-      await a.evaluate(id => { const vm = window.__tmFixtureApp; return vm.useTMMatch(vm.tmMatches.find(match => match.id === id)); }, id);
+      await a.getByRole('listbox', { name: 'TM matches' }).getByRole('option').filter({ hasText: 'Context match' }).dblclick();
+      await a.waitForFunction(index => {
+        const vm = window.__tmFixtureApp, block = vm.editorBlocks[index];
+        return document.activeElement === vm.getEditorRef('translation', index, block.isTable ? 0 : null);
+      }, index);
       assert.equal(await a.evaluate(index => window.__tmFixtureApp.editorBlocks[index].diagnosticErrorCount, index), 0);
     }
     assert.deepEqual(await a.evaluate(() => window.__tmFixtureApp.serializeEditorTranslations()),
       ['สร้างความเสียหาย {0}\\nเป็นเวลา {1} วินาที', 'พลังชีวิต@มานา', 'แรก\\nสอง@สาม\\nสี่']);
     results.push('Fuzzy English differences remain visible; multiline and table TM entries preserve complete entry layout and valid tags');
+    await a.evaluate(async () => {
+      const vm = window.__tmFixtureApp; await vm.editorExit(); vm.inlineEditor = true;
+      await vm.activateInlineRow('tm-fixture/01_exact.txt'); await vm.openEditorTM(0);
+    });
+    await a.waitForFunction(() => window.__tmFixtureApp.inlineActive && window.__tmFixtureApp.tmMatches.some(match => match.id === 'tm-exact'));
+    const inlineTarget = a.locator('[data-editor-ref="translation_0"]');
+    await inlineTarget.fill('existing draft {0}');
+    await exactMatch.dblclick();
+    const replaceDialog = a.getByRole('dialog', { name: 'Use TM translation?', exact: true });
+    await replaceDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal(await inlineTarget.inputValue(), 'existing draft {0}', 'Cancelling replacement preserves the draft');
+    await exactMatch.dblclick();
+    await replaceDialog.getByRole('button', { name: 'Replace draft', exact: true }).click();
+    await a.waitForFunction(() => {
+      const vm = window.__tmFixtureApp;
+      return vm.inlineActive && !vm.editorVisible && vm.serializeEditorTranslations()[0] === 'เพิ่มความเสียหายไฟ {0}%'
+        && document.activeElement === vm.getEditorRef('translation', 0);
+    });
+    await a.evaluate(async () => { const vm = window.__tmFixtureApp; await vm.finishInlineSession({ promote: false }); vm.inlineEditor = false; });
+    results.push('Inline double-click preserves replacement confirmation, cancellation and target focus without closing the row');
     await freezeAutomaticTM(a); await freezeAutomaticTM(b);
     const added = { id: 'tm-client-shared', source: 'Cold Damage', target: 'ความเสียหายน้ำแข็ง', gameScope: 'poe1', context: null, note: '', provenance: { origin: 'manual' } };
     await put(a, added); await sync(a); await catchup(b);

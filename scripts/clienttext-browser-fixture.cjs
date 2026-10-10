@@ -281,7 +281,46 @@ async function run() {
         await name.fill('Épée locale'); await name.press('F2');
         await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy && Object.values(window.__clientFixtureApp.ctSaved).some(saved => Object.values(saved.values).includes('Épée locale')));
         await checkClientHistory({ historyOrigin: 'local', currentText: 'Épée locale', previousText: 'Épée', themes: true });
+        await workspace.getByRole('button', { name: 'record', exact: true }).click();
+        const memoryMatch = workspace.locator('.ctTools article').filter({ has: page.locator('pre').filter({ hasText: /^Épée$/ }) });
+        await memoryMatch.waitFor();
+        const beforeMemory = await page.evaluate(async () => {
+            const vm = window.__clientFixtureApp;
+            return { saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),
+                history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length,
+                outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length };
+        });
+        for (const editorMode of ['full', 'inline']) {
+            if (editorMode === 'inline') {
+                await workspace.getByRole('button', { name: 'Table', exact: true }).click();
+                await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
+            }
+            const otherFields = await page.evaluate(() => {
+                const vm = window.__clientFixtureApp;
+                return Object.fromEntries(Object.entries(vm.ctValues).filter(([id]) => id !== JSON.stringify(['Name', null])));
+            });
+            await name.fill('A private ' + editorMode + ' draft');
+            await memoryMatch.locator('pre').first().click();
+            assert.equal(await name.inputValue(), 'A private ' + editorMode + ' draft', 'One click does not insert a ClientText memory');
+            await memoryMatch.locator('pre').last().dblclick();
+            assert.equal(await name.inputValue(), 'Épée', editorMode + ': a TM match double-click inserts into the focused Name field');
+            assert.deepEqual(await page.evaluate(() => {
+                const vm = window.__clientFixtureApp;
+                return Object.fromEntries(Object.entries(vm.ctValues).filter(([id]) => id !== JSON.stringify(['Name', null])));
+            }), otherFields, 'Other target fields retain their drafts');
+            await page.evaluate(() => window.__clientFixtureApp.ctFlushDraft());
+            const appliedMemory = await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp, draft = await vm._ctStore.getDraft(vm.ctWorkspace.scope, vm.ctSelection);
+                return { saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),
+                    history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length,
+                    outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length,
+                    target: draft?.values[JSON.stringify(['Name', null])], dirty: vm.ctDraftDirty };
+            });
+            assert.deepEqual(appliedMemory, { ...beforeMemory, target: 'Épée', dirty: true }, 'TM insertion persists only a private draft');
+        }
+        results.push('ClientText TM double-click inserts into the focused target in full and inline editors; one click preserves typing, other fields and committed work stay unchanged');
         await workspace.getByRole('button', { name: 'complete', exact: true }).click();
+        await page.waitForFunction(() => window.__clientFixtureApp.ctCurrentUnit?.recordId === 'complete' && !window.__clientFixtureApp.ctBusy);
         await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('Bouclier brouillon');
         await workspace.getByRole('button', { name: 'Table', exact: true }).click();
         await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
