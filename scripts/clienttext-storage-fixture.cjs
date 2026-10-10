@@ -1,9 +1,11 @@
 /* Controlled atomic IndexedDB fixture; native-browser coverage is separate. */
 const CT = require('../public/clientTextStore.js');
-function fixture() {
+function fixture(dependencies = {}) {
     const tables = new Map(CT.names.map(name => [name,new Map()])), operations = [], commits = [];
     let failStore = null;
     const clone = value => value === undefined ? undefined : structuredClone(value);
+    const keyRange={bound:(lower,upper,lowerOpen=false,upperOpen=false)=>({lower,upper,lowerOpen,upperOpen})};
+    const matches=(id,query)=>query&&typeof query==='object'?(query.lowerOpen?id>query.lower:id>=query.lower)&&(query.upperOpen?id<query.upper:id<=query.upper):id===query;
     const db = { objectStoreNames:{contains:name=>tables.has(name)},transaction(names,mode){
         const working = new Map(names.map(name=>[name,new Map([...tables.get(name)].map(([id,row])=>[id,clone(row)]))]));
         let pending=0,ended=false,timer;const writes=[];
@@ -13,15 +15,17 @@ function fixture() {
                 queueMicrotask(()=>{if(ended)return;try{if(failStore===name&&method==='put')throw new Error('Injected storage failure');req.result=fn();req.onsuccess?.();}
                     catch(error){req.error=tx.error=error;req.onerror?.();tx.abort();}pending--;finish();});return req;};
             return {get:id=>run('get',id,()=>clone(working.get(name).get(id))),
+                getAll:(query,count)=>run('getAll',{query,count},()=>[...working.get(name).values()].filter(row=>matches(row.key,query)).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0).slice(0,count).map(clone)),
                 put:row=>run('put',row.key,()=>{if(mode!=='readwrite')throw new Error('Readonly write');working.get(name).set(row.key,clone(row));writes.push({name,key:row.key});return row.key;}),
                 delete:id=>run('delete',id,()=>{if(mode!=='readwrite')throw new Error('Readonly delete');working.get(name).delete(id);writes.push({name,key:id});}),
-                index:index=>({getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(clone))})};
+                index:index=>({getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(clone)),
+                    getAllKeys:value=>run('index.getAllKeys',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(row=>row.key))})};
         },abort(){if(ended)return;ended=true;clearImmediate(timer);queueMicrotask(()=>tx.onabort?.());}};
         function finish(){if(ended||pending)return;clearImmediate(timer);timer=setImmediate(()=>{if(ended||pending)return;ended=true;
             if(mode==='readwrite'){for(const[name,rows]of working)tables.set(name,rows);commits.push(writes);}tx.oncomplete?.();});}
         finish();return tx;
     }};
-    return {db,tables,operations,commits,store:CT.create({openDb:async()=>db,yield:async()=>{}}),fail(name){failStore=name;}};
+    return {db,tables,operations,commits,store:CT.create({openDb:async()=>db,yield:async()=>{},keyRange,...dependencies}),fail(name){failStore=name;}};
 }
 const scope={accountId:'alice',game:'poe2',branchId:'default',versionId:'v1',groupId:'group1',language:'Thai'};
 const fieldId=JSON.stringify(['Text',null]);

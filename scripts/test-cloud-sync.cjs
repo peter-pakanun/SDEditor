@@ -250,6 +250,49 @@ test('archive progress transport retains upload totals and JSON server failures'
   assert.deepEqual(progress, [[5, body.size]]);
 });
 
+test('opt-in gzip manifest transport preserves exact JSON, authentication and raw original uploads', async t => {
+  const h = await harness(t, { state: authenticatedState() }), calls = [];
+  h.client.fetcher = async (url, options) => { calls.push(options); return reply({ accepted: true }); };
+  const body = { index: 0, units: Array.from({ length: 30 }, (_, index) => ({ id: String(index), text: 'Raw @ text\\n with actual\nline breaks and ไทย '.repeat(20) })) };
+  assert.deepEqual(await h.client.request('/v1/content-uploads/fixture/manifests/normal/chunks', { method: 'POST', body, compressJson: true }), { accepted: true });
+  const encoded = calls[0];
+  assert.equal(encoded.headers.Authorization, 'Bearer token-alice'); assert.equal(encoded.headers['Content-Type'], 'application/json'); assert.equal(encoded.headers['Content-Encoding'], 'gzip');
+  const { gunzipSync } = require('node:zlib');
+  assert.equal(gunzipSync(Buffer.from(await encoded.body.arrayBuffer())).toString('utf8'), JSON.stringify(body));
+  assert.ok(encoded.body.size < Buffer.byteLength(JSON.stringify(body)) / 4);
+  const original = new Blob(['exact binary original']);
+  await h.client.request('/v1/content-uploads/fixture/assets/normal', { method: 'PUT', rawBody: original, compressJson: true });
+  assert.equal(calls[1].body, original); assert.equal(calls[1].headers['Content-Encoding'], undefined);
+});
+
+test('JSON remains compatible when gzip is not opted in or native compression is unavailable', async t => {
+  const h = await harness(t, { state: authenticatedState() }), calls = [], body = { index: 0, units: [{ id: 'original' }] };
+  h.client.fetcher = async (url, options) => { calls.push(options); return reply({ accepted: true }); };
+  await h.client.request('/v1/content-uploads/fixture/manifests/normal/chunks', { method: 'POST', body });
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'CompressionStream');
+  Object.defineProperty(globalThis, 'CompressionStream', { configurable: true, value: undefined });
+  t.after(() => Object.defineProperty(globalThis, 'CompressionStream', descriptor));
+  await h.client.request('/v1/content-uploads/fixture/manifests/normal/chunks', { method: 'POST', body, compressJson: true });
+  for (const options of calls) { assert.equal(options.body, JSON.stringify(body)); assert.equal(options.headers['Content-Encoding'], undefined); }
+});
+
+test('account or abort changes during local JSON compression prevent network transmission', async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'CompressionStream');
+  t.after(() => Object.defineProperty(globalThis, 'CompressionStream', descriptor));
+  for (const cancel of [false, true]) {
+    const h = await harness(t, { state: authenticatedState() }), entered = deferred(), release = deferred(), controller = new AbortController(); let calls = 0;
+    Object.defineProperty(globalThis, 'CompressionStream', { configurable: true, value: class {
+      constructor() { return new TransformStream({ transform(chunk, output) { output.enqueue(chunk); }, async flush() { entered.resolve(); await release.promise; } }); }
+    } });
+    h.client.fetcher = async () => { calls++; return reply({ accepted: true }); };
+    const pending = h.client.request('/v1/content-uploads/fixture/carry/chunks', { method: 'POST', body: { index: 0, units: [] }, compressJson: true, signal: controller.signal });
+    await entered.promise;
+    if (cancel) controller.abort(); else h.client.state.auth.user.language = 'French';
+    release.resolve();
+    await assert.rejects(pending, error => cancel ? error.name === 'AbortError' : error.stale === true); assert.equal(calls, 0);
+  }
+});
+
 test('new Dictionary game scope persists through cloud backup and remains personal to each account', async t => {
   const h = await harness(t, { state: authenticatedState() });
   seedAPI(h.api);

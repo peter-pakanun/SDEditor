@@ -691,8 +691,60 @@ async function run() {
             await page.waitForFunction(() => !window.__clientFixtureApp.editorSessionActive);
             results.push('Matching CT/SD parent discovery crosses an omitted-content version and limited catalog; changed English retains carried work as Outdated with a verified previous-version comparison');
         }
-        if (process.env.CLIENTTEXT_PRODUCTION_DIRECTORY) {
-            const productionDirectory = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY);
+        if (process.argv.includes('--large-journal')) {
+            const journalId = 'fixture-large-' + randomUUID();
+            const scope = await page.evaluate(() => window.__clientFixtureApp.ctScope('fixture-large-version', 'fixture-large-group', 'French'));
+            const measured = await page.evaluate(async ({ scope, journalId }) => {
+                const vm = window.__clientFixtureApp, text = 'ก'.repeat(32768), rows = 4500;
+                const payload = { kind: 'publication', name: 'Large publication checkpoint fixture', groups: [{ language: 'French', contentMode: 'clienttext', carryOffset: 120,
+                    carry: Array.from({ length: rows }, (_, index) => ({ id: String(index), text: String(index) + ':' + text })) }] };
+                const inlineBytes = payload.groups[0].carry.reduce((sum, row) => sum + row.text.length * 2, 0);
+                if (inlineBytes <= 257949696) throw new Error('The fixture must exceed Chromium’s old single-value limit.');
+                const originalPut = IDBObjectStore.prototype.put; let maxPutBytes = 0, writes = 0;
+                const weight = value => typeof value === 'string' ? value.length * 2 + 32 : value && typeof value === 'object'
+                    ? Object.entries(value).reduce((sum, [key, item]) => sum + key.length * 2 + 48 + weight(item), 128) : 24;
+                IDBObjectStore.prototype.put = function (value, ...args) {
+                    if (this.name === ClientTextStore.stores.requests) {
+                        maxPutBytes = Math.max(maxPutBytes, weight(value)); writes++;
+                        if (maxPutBytes > 4 * 1024 * 1024 + 65536) throw new Error('The fixture observed an unbounded publication journal put.');
+                    }
+                    return originalPut.call(this, value, ...args);
+                };
+                let header;
+                try { header = await vm._ctStore.putRequest(scope, journalId, payload); }
+                finally { IDBObjectStore.prototype.put = originalPut; }
+                return { inlineBytes, maxPutBytes, writes, carryInline: header.payload.groups[0].carry.length, fragments: header.storage?.parts.reduce((sum, part) => sum + part.chunkIds.length, 0), rows };
+            }, { scope, journalId });
+            assert.ok(measured.inlineBytes > 257949696); assert.equal(measured.carryInline, 0); assert.ok(measured.fragments > 1);
+            await bootstrap();
+            const resumed = await page.evaluate(async ({ scope, journalId }) => {
+                const vm = window.__clientFixtureApp, checkpoint = await vm._ctStore.getRequest(scope, journalId), rows = checkpoint.payload.groups[0].carry;
+                if (rows.length !== 4500 || rows[0].text !== '0:' + 'ก'.repeat(32768) || rows.at(-1).text !== '4499:' + 'ก'.repeat(32768)) throw new Error('The large checkpoint did not hydrate exactly after reload.');
+                const oldOffset = checkpoint.payload.groups[0].carryOffset; checkpoint.payload.groups[0].carryOffset = 121;
+                const originalPut = IDBObjectStore.prototype.put; let puts = 0, interrupted = false;
+                IDBObjectStore.prototype.put = function (value, ...args) {
+                    if (this.name === ClientTextStore.stores.requests && String(value.scope).includes('request-fragments') && ++puts === 3) throw new Error('Fixture interrupted journal staging.');
+                    return originalPut.call(this, value, ...args);
+                };
+                try { await vm._ctStore.putRequest(scope, journalId, checkpoint.payload); }
+                catch (error) { if (!error.message.includes('Fixture interrupted')) throw error; interrupted = true; }
+                finally { IDBObjectStore.prototype.put = originalPut; }
+                if (!interrupted) throw new Error('Journal staging was not interrupted.');
+                const retained = await vm._ctStore.getRequest(scope, journalId);
+                if (retained.payload.groups[0].carryOffset !== oldOffset || retained.payload.groups[0].carry.length !== 4500) throw new Error('The previous complete checkpoint was replaced by partial staging.');
+                await vm._ctStore.putRequest(scope, journalId, checkpoint.payload);
+                const retried = await vm._ctStore.getRequest(scope, journalId);
+                if (retried.payload.groups[0].carryOffset !== 121 || retried.payload.groups[0].carry.at(-1).text !== rows.at(-1).text) throw new Error('The journal retry lost resumable progress or raw text.');
+                await vm._ctStore.deleteRequest(scope, journalId);
+                return { resumedOffset: oldOffset, retriedOffset: retried.payload.groups[0].carryOffset, rows: rows.length };
+            }, { scope, journalId });
+            await bootstrap();
+            assert.equal(await page.evaluate(async ({ scope, journalId }) => (await window.__clientFixtureApp._ctStore.listRequests(scope)).some(row => row.requestId === journalId), { scope, journalId }), false, 'Deleted large checkpoint no longer appears in resumable uploads');
+            results.push({ largeJournal: true, ...measured, ...resumed });
+        }
+        const productionOption = process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || (process.argv.includes('--production') ? 'C:/Users/lpeac/Downloads/2026-10-05_POE2' : '');
+        if (productionOption) {
+            const productionDirectory = resolve(productionOption);
             const productionFiles = ['Thai_PoE2.xlsm', 'French_PoE2.xlsm', 'French_Gender_PoE2.xlsm'].map(name => ({ name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: readFileSync(join(productionDirectory, name)) }));
             if (await workspace.isVisible()) await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             else if (!await page.getByRole('region', { name: 'Source versions' }).isVisible()) assert.equal(await page.evaluate(() => window.__clientFixtureApp.showVersionChooser()), true);

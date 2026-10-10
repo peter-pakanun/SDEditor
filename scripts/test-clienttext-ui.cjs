@@ -8,7 +8,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
-    const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,TextEncoder});
+    const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
         ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
@@ -322,6 +322,40 @@ test('uncertain metadata creation retries its immutable journal body even after 
     await app.ctSaveMetadataDraft();assert.equal(app.ctUploadVersion,null);assert.equal(journal.size,1);
     app.ctUploadName='Changed after uncertainty';app.ctUploadDeadline='20';await app.ctSaveMetadataDraft();
     assert.deepEqual(bodies[1],bodies[0]);assert.equal(app.ctUploadVersion.id,'created-once');assert.equal(journal.size,0);
+});
+
+test('publication resume hydrates the durable journal instead of using its compact list header',async()=>{
+    const {app}=harness(),opened=[],payload={kind:'publication',name:'Release',deadline:'10',releaseRequest:'release-id',
+        groups:[{contentMode:'statdescription',carry:[{id:'unit',values:{field:'Exact carried text'}}],uploadId:'staged-upload'}]};
+    app._ctStore={async getRequest(captured,id,options){assert.equal(captured.accountId,scope.accountId);assert.equal(id,'publication-id');assert.equal(options.guard(),true);return{requestId:id,payload};}};
+    app.ctOpenUpload=async(version,local)=>opened.push({version,local});
+    await app.ctResumePublication({requestId:'publication-id',payload:{...payload,groups:[{contentMode:'statdescription',carry:[]}]},storage:{format:1}});
+    assert.equal(opened.length,1);assert.equal(app.ctUploadName,'Release');assert.equal(app._ctPublicationRequest,'publication-id');
+    assert.equal(app._ctReleaseRequest,'release-id');assert.equal(app.ctPrepared[0].carry[0].values.field,'Exact carried text');
+    assert.equal(app.ctPrepared[0].uploadId,'staged-upload');
+});
+
+test('late journal hydration cannot open publication controls after an account change',async()=>{
+    const {app}=harness(),pending=deferred();let opens=0;
+    app._ctStore={async getRequest(){await pending.promise;return{payload:{kind:'publication',name:'Old private release',groups:[]}};}};
+    app.ctOpenUpload=async()=>{opens++;};
+    const resuming=app.ctResumePublication({requestId:'publication-id',payload:{kind:'publication'}});await settle();
+    app.managedCatalogScope='bob:poe2';app.cloudProfileId='bob';pending.resolve();await resuming;
+    assert.equal(opens,0);assert.equal(app._ctPublicationRequest,undefined);
+});
+
+test('cached publication resume reuses bounded accepted compact data without rehashing original units',async()=>{
+    const {app,window,original}=harness(),compact=S.compactUnit(original),metadata={descriptors:[{...asset,baselineId:'accepted',root:'accepted-root'}]},tree={ids:[original.id],levels:[['leaf']]};let compactReads=0;
+    const payload={kind:'publication',name:'Release',groups:[{contentMode:'clienttext',language:scope.language,cacheScope:scope,carry:[]}]};
+    window.ClientTextState={...S,compactUnit(){throw new Error('Resume must not rehash originals on the UI thread.');}};
+    app._ctStore={async getRequest(){return{payload};},async getUnits(captured,options){assert.equal(options.guard(),true);assert.equal(captured.groupId,scope.groupId);return[original];},
+        async getMetadata(){return metadata;},async getAsset(){return{...asset,name:'Thai_PoE2.xlsm',blob:new Blob(['original bytes']),parsed:{sheets:[]},descriptor:metadata.descriptors[0],tree};},
+        async getCompactUnits(captured,options){assert.equal(options.guard(),true);assert.equal(captured.groupId,scope.groupId);compactReads++;return[compact];}};
+    app.ctOpenUpload=async()=>{};
+    await app.ctResumePublication({requestId:'publication-id',payload:{kind:'publication'}});
+    assert.equal(compactReads,1);assert.equal(app.ctPrepared[0].manifest.units[0],compact);
+    assert.equal(app.ctPrepared[0].manifest.trees.normal,tree);assert.equal(app.ctPrepared[0].manifest.descriptors[0].baselineId,'accepted');
+    assert.equal(await app.ctPrepared[0].candidates[0].file.text(),'original bytes');assert.equal(app.ctUploadError,'');
 });
 
 test('comment acknowledgement preserves a newer composer draft and its durable journal',async()=>{

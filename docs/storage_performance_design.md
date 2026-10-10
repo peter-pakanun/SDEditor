@@ -1,6 +1,6 @@
 # Storage and preparation performance design
 
-Recorded: 2026-10-09; ClientText update: 2026-10-10. The original frontend design at `3107a34` includes the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. TM added IndexedDB v10/API v17; ClientText adds browser v11/API v18. Measurements are local observations, not guaranteed startup times or hosted deployment confirmation.
+Recorded: 2026-10-09; ClientText update: 2026-10-10. The original frontend design at `3107a34` includes the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. TM added IndexedDB v10/API v17; ClientText added browser v11/API v18, with bounded ClientText persistence and transport fenced by browser v12. Measurements are local observations, not guaranteed startup times or hosted deployment confirmation.
 
 Use this design when adding another content mode with comparable original content, editable fields, saved work, recovery, and shared editing. StatDescription and ClientText workbook adapters are implemented in source; deployment remains separate.
 
@@ -41,7 +41,7 @@ Capture identity before the first await, queue insertion, IndexedDB request or w
 
 ## Normalized IndexedDB records
 
-IndexedDB v11 retains the v9/v10 scoped stores in [normalizedStore.js](../public/normalizedStore.js) and adds the ClientText stores:
+IndexedDB v12 retains the v9/v10 scoped stores in [normalizedStore.js](../public/normalizedStore.js) and the ClientText stores introduced in v11:
 
 | Store group | Purpose |
 | --- | --- |
@@ -58,6 +58,14 @@ IndexedDB v11 retains the v9/v10 scoped stores in [normalizedStore.js](../public
 | `clienttext_memory`, `clienttext_memory_history` | Local field-aware TM projection from valid durable and accepted shared saves |
 
 Aggregate source/workspace/room objects are adapters for consumers, not another copy to rewrite on every save. Existing revision stores remain available. Legacy aggregate KV data remains frozen recovery evidence; once normalized readiness is established, normalized absence is authoritative. Do not dual-write aggregates or clear storage to bypass a blocked upgrade.
+
+### Bounded ClientText preparation
+
+Workbook ZIP size does not represent the size of its parsed data. The supplied Thai workbook has 149,550 IDs: its parsed-unit JSON is about 152 MB, compact manifest 145 MB and proof tree 30 MB. Returning database rows with both units and compact metadata, or journaling both predecessor and incoming witnesses for every carried ID as one value, can exceed Chromium's serialization limit.
+
+ClientText original reads now use primary-key pages of at most 128 rows and discard unneeded compact copies per page. Fresh immutable import batches validate accepted compact metadata and enqueue writes without a separate asynchronous existence read per ID. Worker inputs and outputs stream bounded collections, with oversized individual records fragmented into transferable bytes. Journal and proof-tree fragments retain exact materialized compatibility views; small committed headers reference completed fragments, and older direct records remain readable. Repeated publication checkpoints reuse immutable carry fragments while preserving request IDs and scope guards.
+
+Carry-forward loads each predecessor proof tree once per workbook, rather than rereading its full asset per affected ID. Individual saves read only their necessary proof chunks. Equivalent hashing reuses bounded scratch/cache data; the Thai manifest benchmark improved from 28.7 to 13.3 seconds with the same baseline ID and Merkle root. The API reuses prepared SQL statements, aggregates staged chunk counts and copies accepted rows in one transaction. A local synthetic 20,000-ID fixture reduced staging/finalization from 3.94 to 1.74 seconds. Capability-gated gzip reduced its compact JSON from 20.36 to 3.29 MB; expanded validation limits remain in force. These timings measure particular local fixtures, not total production upload duration.
 
 ### Atomic saves and deferred navigation
 
@@ -205,6 +213,10 @@ The 16.18 profile contained only a short blur/focus transition, so it does not e
 Workbook parsing, manifest hashing and full export run through the ClientText worker. Immutable units are written in resumable batches, then materialized once for editing; a save touches its unit, draft, history, outbox, receipt and memory projection atomically. Worker/transaction uncertainty retries the identical job ID. Polling reuses unchanged saved objects and status caches, and event pages commit their cursor with accepted work. An acknowledgement cannot skip unread events. This avoids routing a 100,000-plus-row workbook through StatDescription aggregate storage.
 
 The initial disposable normal-mode browser run used the attached production workbooks: **149,550 Thai units, 89,659 French normal units and 68,250 French Gender units**. Combined preparation took **53.5 s** and storage **73.1 s**. Cached Thai opening took **6.1 s** and full export **8.2 s**; French paired opening took **9.35 s** and paired export **15.5 s**. A second successful production-file run under concurrent load recorded **97.8 s** preparation, **139.5 s** storage and **2.75 s** maximum event-loop lag; Thai opening/export took **6.0/8.15 s**, and French pair opening/export **7.72/12.36 s**. Different load conditions prevent a direct before/after speed comparison. These are local phase observations, not a hosted service benchmark or a promise for every machine.
+
+After bounded reads/writes/worker transport and equivalent hashing changes, the same three files passed again: **43.65 s** preparation, **22.23 s** local storage and **9 ms** maximum measured event-loop lag across 658 timer ticks. Cached Thai opening/edit/export took **2.90/0.90/5.20 s**; French Normal/Gender opening/edit/paired export took **2.89/0.93/6.09 s**. All 307,459 IDs, theme layouts, F2 saves, workload fills and untouched workbook package parts were checked. This local import/export run does not measure network publication. `node scripts/clienttext-browser-fixture.cjs --production --keep` reproduces it; `CLIENTTEXT_PRODUCTION_DIRECTORY` overrides the sample folder.
+
+The separate `--large-journal` browser case persists and reloads a **294,954,780-byte** carry checkpoint, beyond the old 257,949,696-byte single-value limit. It verifies bounded writes, exact hydrated text after reload, preservation of the previous complete checkpoint on injected fragment failure, same-ID retry and deletion. Resume reads accepted compact records directly instead of rehashing all original units on the UI thread. API gzip routes and limits are covered by the sibling API tests; local browser fixtures do not establish hosted CORS or deployment.
 
 The implementation checkpoint passed **346 focused checks** before later integration fixes; use current suite output for the final count. The disposable shared-publication/collection browser fixture also passed, followed by draft reload, injected failed-original-upload recovery, cached publication resume, proof-verified saves and frozen collection export. Mixed new StatDescription/ClientText group switching and both frozen collection formats passed. Repeated-original StatDescription versions also passed independent group saves, cancelled selection and actual offline activation of both groups. A cached immutable baseline and a ready group workspace are separate facts: opening a new group creates empty independent work from the verified retained original; it does not reuse another group's saves. Collaboration stays detached through version confirmation and central workspace activation, and resumes only when loaded workspace metadata matches the selected group/version. Production-file and synthetic local checks do not establish hosted authentication/deployment or restoration from production backups.
 

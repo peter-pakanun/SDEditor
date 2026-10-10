@@ -1,4 +1,4 @@
-/* Additive IndexedDB v11 storage for scoped ClientText originals and authored work. */
+/* Additive IndexedDB v12 storage for scoped ClientText originals and authored work. */
 (function (root, factory) {
     const state = root.ClientTextState || (typeof require === 'function' ? require('./clientTextState.js') : null);
     const api = factory(root, state);
@@ -63,7 +63,55 @@
             catch (error) { try { tx.abort(); } catch (_) {} await done.catch(() => {}); throw error; }
         }
         const one = (scope, name, id, options) => transaction([name], 'readonly', tx => get(tx, name, key(scope,id)), options);
-        const rows = (scope, name, options) => transaction([name], 'readonly', async tx => (await request(tx.objectStore(name).index('by_scope').getAll(scope))).map(row => row.value), options);
+        async function readRows(scope,name,project,options){
+            const range=dependencies.keyRange || root.IDBKeyRange;
+            if(!range)throw new Error('ClientText IndexedDB key ranges are unavailable.');
+            // JSON scoped primary keys share this exact prefix. Page on the
+            // primary key so duplicate by_scope index keys cannot skip rows.
+            const prefix=JSON.stringify([scope]).slice(0,-1)+',',upper=prefix+'\uffff';
+            return transaction([name],'readonly',async tx=>{
+                const output=[];let last;
+                while(true){
+                    guard(options);
+                    const query=range.bound(last||prefix,upper,!!last,false);
+                    const page=await request(tx.objectStore(name).getAll(query,128));
+                    for(const row of page)output.push(project(row));
+                    if(page.length<128)return output;
+                    // Each IDB response yields to the browser. Keep the reads
+                    // in one transaction so Saved materialization remains a
+                    // coherent snapshot while each response stays bounded.
+                    last=page.at(-1).key;
+                }
+            },options);
+        }
+        const rows = (scope,name,options)=>readRows(scope,name,row=>row.value,options);
+        // Chromium caps a single serialized IDB value. Publication carry proofs
+        // can exceed that cap even though every individual witness is small.
+        // Keep one visible journal header and stage bounded immutable fragments.
+        const chunkBytes = Math.max(1024, dependencies.requestChunkBytes || 4 * 1024 * 1024);
+        const chunkRows = Math.max(1, dependencies.requestChunkRows || 128);
+        const requestSnapshots = new Map();
+        const fragmentScope = (scope, id) => key(scope, 'request-fragments', id);
+        const intentId = id => ['request-intent', id];
+        const generationId = () => root.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        function serializedWeight(value) {
+            if (value === null || value === undefined) return 16;
+            if (typeof value === 'string') return value.length * 2 + 32;
+            if (typeof value !== 'object') return 24;
+            // Blob bytes are external IDB data, not an inline structured value.
+            if (typeof Blob !== 'undefined' && value instanceof Blob) return 256;
+            if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value.byteLength + 256;
+            let size = 128;
+            if (Array.isArray(value)) for (const item of value) size += serializedWeight(item) + 16;
+            else for (const [name,item] of Object.entries(value)) size += name.length * 2 + 48 + serializedWeight(item);
+            return size;
+        }
+        const fragmentIds = row => new Set((row?.storage?.parts || []).flatMap(part => part.chunkIds));
+        async function removeRequestFragments(tx, scope, id, retained = new Set()) {
+            const bucket = fragmentScope(scope,id), store = tx.objectStore(stores.requests);
+            const ids = await request(store.index('by_scope').getAllKeys(bucket));
+            for (const id of ids) if (!retained.has(id)) store.delete(id);
+        }
         const adapter=()=>root.ContentAdapters || (typeof require==='function'?require('./contentAdapters.js'):null);
         async function learnMemory(tx,rawScope,unit,saved,jobId,origin){
             const core=adapter();if(!core)return;
@@ -89,14 +137,118 @@
         async function getMetadata(rawScope, options) { return one(capture(rawScope).id, stores.meta, 'meta', options); }
         async function putRequest(rawScope,requestId,payload,options={}){
             if(typeof requestId!=='string'||!requestId||requestId.length>256)throw new TypeError('ClientText request requires a stable ID.');
-            const captured=requestScope(rawScope),detached=structuredClone(payload);
-            return transaction([stores.requests],'readwrite',async tx=>{
-                const before=await get(tx,stores.requests,key(captured.id,requestId));
-                const value={requestId,scope:captured.scope,payload:detached,createdAt:before?.createdAt||Date.now(),updatedAt:Date.now()};
-                put(tx,stores.requests,captured.id,requestId,value);return value;
+            const captured=requestScope(rawScope),generation=generationId(),bucket=fragmentScope(captured.id,requestId);
+            const before=await transaction([stores.requests],'readwrite',async tx=>{
+                const previous=await get(tx,stores.requests,key(captured.id,requestId));
+                put(tx,stores.requests,bucket,intentId(requestId),{generation,idempotencyKey:payload?.idempotencyKey});return previous;
+            },options);
+            const active=fragmentIds(before),parts=[],owner=key(captured.id,requestId);
+            const snapshots=requestSnapshots.get(owner)||new WeakMap();requestSnapshots.set(owner,snapshots);
+            let fragment=0;
+            async function stage(values){
+                const id=key(bucket,['fragment',generation,fragment++]);
+                await transaction([stores.requests],'readwrite',async tx=>{
+                    const intent=await get(tx,stores.requests,key(bucket,intentId(requestId)));
+                    if(intent?.generation!==generation)throw Object.assign(new Error('A newer ClientText request checkpoint replaced this operation.'),{code:'REQUEST_SUPERSEDED'});
+                    tx.objectStore(stores.requests).put({key:id,scope:bucket,value:{generation,values}});
+                },options);
+                active.add(id);await pause();guard(options);return id;
+            }
+            async function detach(value,path){
+                guard(options);
+                if(typeof value==='string' && value.length*2>chunkBytes){
+                    const part={path,kind:'string',length:value.length,chunkIds:[]};parts.push(part);
+                    const length=Math.max(1,Math.floor((chunkBytes-256)/2));
+                    for(let start=0;start<value.length;start+=length)part.chunkIds.push(await stage(value.slice(start,start+length)));
+                    return '';
+                }
+                if(value===null || typeof value!=='object')return value;
+                if(Array.isArray(value)){
+                    // Publication metadata remains mutable between checkpoints.
+                    // Only the prepared carry witness array is declared immutable.
+                    const reusable=options.immutablePublicationData && path.at(-1)==='carry';
+                    const cached=reusable && snapshots.get(value);
+                    if(cached && cached.parts.every(part=>part.chunkIds.every(id=>active.has(id)))){
+                        parts.push(...cached.parts.map(part=>({...part,path:[...path,...part.path]})));return [];
+                    }
+                    const partStart=parts.length;
+                    // Small arrays stay inline unless their detached values would
+                    // make the journal header large. Large arrays never receive
+                    // one aggregate structuredClone or one aggregate IDB put.
+                    const output=[],chunkIds=[];let batch=[],bytes=128,split=value.length>chunkRows;
+                    for(let index=0;index<value.length;index++){
+                        const item=await detach(value[index],[...path,index]),weight=serializedWeight(item)+16;
+                        if(!split && bytes+weight<=chunkBytes){output.push(item);bytes+=weight;continue;}
+                        if(!split){split=true;batch=output.splice(0);}
+                        if(batch.length && (batch.length>=chunkRows || bytes+weight>chunkBytes)){
+                            chunkIds.push(await stage(batch));batch=[];bytes=128;
+                        }
+                        batch.push(item);bytes+=weight;
+                    }
+                    if(!split)return output;
+                    if(batch.length)chunkIds.push(await stage(batch));
+                    parts.push({path,kind:'array',length:value.length,chunkIds});
+                    if(reusable)snapshots.set(value,{parts:parts.slice(partStart).map(part=>({...part,path:part.path.slice(path.length)}))});
+                    return [];
+                }
+                const prototype=Object.getPrototypeOf(value);
+                if(prototype!==Object.prototype && prototype!==null)return structuredClone(value);
+                const output={};let bytes=128;
+                for(const [name,item]of Object.entries(value)){
+                    const detached=await detach(item,[...path,name]);bytes+=name.length*2+48+serializedWeight(detached);
+                    Object.defineProperty(output,name,{value:detached,enumerable:true,writable:true,configurable:true});
+                }
+                if(bytes>chunkBytes){
+                    const entries=Object.entries(output),part={path,kind:'object',length:entries.length,chunkIds:[]};parts.push(part);
+                    let batch=[],size=128;
+                    for(const entry of entries){
+                        const weight=serializedWeight(entry)+16;
+                        if(batch.length && (batch.length>=chunkRows || size+weight>chunkBytes)){part.chunkIds.push(await stage(batch));batch=[];size=128;}
+                        batch.push(entry);size+=weight;
+                    }
+                    if(batch.length)part.chunkIds.push(await stage(batch));return {};
+                }
+                return output;
+            }
+            const detached=await detach(payload,[]);
+            const value=await transaction([stores.requests],'readwrite',async tx=>{
+                const intent=await get(tx,stores.requests,key(bucket,intentId(requestId)));
+                if(intent?.generation!==generation)throw Object.assign(new Error('A newer ClientText request checkpoint replaced this operation.'),{code:'REQUEST_SUPERSEDED'});
+                const current=await get(tx,stores.requests,key(captured.id,requestId));
+                const value={requestId,scope:captured.scope,payload:detached,createdAt:current?.createdAt||before?.createdAt||Date.now(),updatedAt:Date.now()};
+                if(parts.length)value.storage={format:1,generation,parts};
+                put(tx,stores.requests,captured.id,requestId,value);
+                // The new header is the commit point. Until this transaction
+                // succeeds the old complete checkpoint and its fragments remain.
+                await removeRequestFragments(tx,captured.id,requestId,fragmentIds(value));return value;
+            },options);
+            return value;
+        }
+        async function getRequest(rawScope,requestId,options){
+            const captured=requestScope(rawScope),header=await one(captured.id,stores.requests,requestId,options);
+            if(!header?.storage)return header;
+            // Read one atomic generation. A concurrent checkpoint may remove
+            // old fragments; retry its new header instead of exposing a mixture.
+            return transaction([stores.requests],'readonly',async tx=>{
+                const current=await get(tx,stores.requests,key(captured.id,requestId));
+                if(!current?.storage)return current;
+                for(const part of [...current.storage.parts].sort((a,b)=>a.path.length-b.path.length)){
+                    guard(options);
+                    let value=part.kind==='string'?'':[];
+                    for(const id of part.chunkIds){
+                        guard(options);
+                        const row=await get(tx,stores.requests,id);
+                        if(!row || (part.kind!=='string'&&!Array.isArray(row.values)) || (part.kind==='string'&&typeof row.values!=='string'))throw new Error('ClientText request checkpoint is incomplete.');
+                        if(part.kind==='string')value+=row.values;else for(const item of row.values)value.push(item);
+                    }
+                    if(value.length!==part.length)throw new Error('ClientText request checkpoint length differs.');
+                    if(part.kind==='object')value=Object.fromEntries(value);
+                    if(!part.path.length)current.payload=value;
+                    else {let target=current.payload;for(const name of part.path.slice(0,-1))target=target[name];target[part.path.at(-1)]=value;}
+                }
+                return current;
             },options);
         }
-        const getRequest=(rawScope,requestId,options)=>one(requestScope(rawScope).id,stores.requests,requestId,options);
         async function listRequests(rawScope,options){return (await rows(requestScope(rawScope).id,stores.requests,options)).sort((a,b)=>b.updatedAt-a.updatedAt);}
         async function deleteRequest(rawScope,requestId,options={}){
             const captured=requestScope(rawScope);
@@ -104,14 +256,55 @@
                 if(Object.hasOwn(options,'expectedIdempotencyKey')){
                     const current=await get(tx,stores.requests,key(captured.id,requestId));
                     if(!current || current.payload?.idempotencyKey!==options.expectedIdempotencyKey)return false;
+                    const intent=await get(tx,stores.requests,key(fragmentScope(captured.id,requestId),intentId(requestId)));
+                    // A newer composer checkpoint can be staging behind the
+                    // old visible header. Its old ACK must leave that writer
+                    // and the prior durable checkpoint intact.
+                    if(intent && intent.idempotencyKey!==options.expectedIdempotencyKey)return false;
                 }
-                del(tx,stores.requests,captured.id,requestId);return true;
+                del(tx,stores.requests,captured.id,requestId);
+                await removeRequestFragments(tx,captured.id,requestId);return true;
             },options);
         }
         async function requireReady(scope, options) {
             const metadata = await one(scope, stores.meta, 'meta', options);
             if (!metadata || metadata.state !== 'ready') throw Object.assign(new Error('ClientText originals are still being prepared.'), { code: 'CLIENTTEXT_NOT_READY' });
             return metadata;
+        }
+        async function prepareAsset(scope, asset, descriptor, tree, signature, options){
+            if(!descriptor || (asset.hash || asset.assetHash)!==descriptor.assetHash)throw new Error('ClientText original asset differs from its descriptor.');
+            if(!tree || tree.ids?.length!==descriptor.unitCount || tree.levels?.at(-1)?.[0]!==descriptor.root)throw new Error('ClientText original proof tree differs from its descriptor.');
+            const storage={format:1,ids:{length:tree.ids.length,parts:[]},levels:[]},pending=[];
+            async function flush(){
+                if(!pending.length)return;
+                await transaction([stores.meta,stores.assets],'readwrite',async tx=>{
+                    const current=await get(tx,stores.meta,key(scope,'meta'));
+                    if(current && current.signature!==signature)throw new Error('ClientText import changed in another tab.');
+                    for(const entry of pending)put(tx,stores.assets,scope,entry.id,entry.values);
+                },options);
+                pending.length=0;await pause();guard(options);
+            }
+            async function stage(values,label){
+                const part={length:values.length,parts:[]};let batch=[],bytes=128,start=0;
+                async function commit(){
+                    if(!batch.length)return;
+                    const id=['asset-tree',asset.role,descriptor.baselineId,label,start];
+                    part.parts.push({start,length:batch.length,id});pending.push({id,values:batch});start+=batch.length;batch=[];bytes=128;
+                    if(pending.length>=4)await flush();
+                }
+                for(const value of values){
+                    const weight=serializedWeight(value)+16;
+                    if(batch.length && (batch.length>=1024 || bytes+weight>chunkBytes))await commit();
+                    batch.push(value);bytes+=weight;
+                }
+                await commit();return part;
+            }
+            storage.ids=await stage(tree.ids,'ids');
+            for(let level=0;level<tree.levels.length;level++)storage.levels.push(await stage(tree.levels[level],level));
+            await flush();
+            // Parsed units already have their own immutable per-unit records.
+            // Keep only workbook/schema context beside the retained original.
+            return {...asset,parsed:asset.parsed?{...asset.parsed,units:undefined}:asset.parsed,descriptor,tree:undefined,treeStorage:storage};
         }
         async function importContent(rawScope, input, options = {}) {
             const captured = capture(rawScope), scope = captured.id;
@@ -125,6 +318,12 @@
             if (existing?.state === 'ready') return existing;
             const compactById = new Map(manifest.units.map(unit => [unit.id, unit]));
             if (compactById.size !== input.units.length) throw new TypeError('ClientText manifest unit count differs.');
+            const proofIndices=new Map(),preparedAssets=[];
+            for(const asset of assets){
+                const descriptor=manifest.descriptors.find(value=>value.role===asset.role),tree=manifest.trees?.[asset.role];
+                preparedAssets.push(await prepareAsset(scope,asset,descriptor,tree,signature,options));
+                tree.ids.forEach((id,index)=>proofIndices.set(id,index));
+            }
             const priorScope = options.previousScope && capture(options.previousScope).id;
             const previousUnits = priorScope ? new Map((await rows(priorScope, stores.originals, options)).map(row => [row.unit.id,row.unit])) : null;
             const previousSaved = priorScope ? new Map((await rows(priorScope, stores.saved, options)).map(row => [row.unitId,row])) : null;
@@ -132,11 +331,7 @@
             await transaction([stores.meta,stores.assets], 'readwrite', async tx => {
                 const current = await get(tx, stores.meta, key(scope,'meta'));
                 if (current && current.signature !== signature) throw new Error('ClientText import changed in another tab.');
-                for (const asset of assets) {
-                    const descriptor = manifest.descriptors.find(value => value.role === asset.role);
-                    if (!descriptor || (asset.hash || asset.assetHash) !== descriptor.assetHash) throw new Error('ClientText original asset differs from its descriptor.');
-                    put(tx, stores.assets, scope, asset.role, { ...asset, descriptor, tree: manifest.trees?.[asset.role] });
-                }
+                for (const asset of preparedAssets) put(tx, stores.assets, scope, asset.role, asset);
                 put(tx, stores.meta, scope, 'meta', { ...copy(input.metadata || {}), ...captured.scope, state: 'importing', signature,
                     imported: current?.imported || 0, unitCount: input.units.length, descriptors: copy(manifest.descriptors), createdAt: current?.createdAt || Date.now(), sequence: current?.sequence || 0 }, { accountId: captured.scope.accountId });
             }, options);
@@ -145,7 +340,7 @@
                 const end = Math.min(imported + 128, input.units.length);
                 const batch = input.units.slice(imported,end).map(unit => {
                     const original = S.normalizeUnit(unit), compact = compactById.get(original.id);
-                    if (!compact || S.stableStringify(S.compactUnit(original)) !== S.stableStringify(compact)) throw new Error('ClientText original differs from its manifest.');
+                    if (!compact || !proofIndices.has(original.id) || S.stableStringify(S.compactUnit(original)) !== S.stableStringify(compact)) throw new Error('ClientText original differs from its manifest.');
                     const prior = previousUnits?.get(original.id), saved = previousSaved?.get(original.id);
                     return { unit: original, compact, carry: prior && saved ? S.carryForward(prior, original, saved) : null };
                 });
@@ -153,9 +348,10 @@
                     const metadata = await get(tx, stores.meta, key(scope,'meta'));
                     if (!metadata || metadata.signature !== signature) throw new Error('ClientText import ownership changed.');
                     for (const entry of batch) {
-                        const current = await get(tx, stores.originals, key(scope,entry.unit.id));
-                        if (current && current.compact.hash !== entry.compact.hash) throw new Error('ClientText original identity was reused.');
-                        put(tx, stores.originals, scope, entry.unit.id, { unit: entry.unit, compact: entry.compact });
+                        // The immutable import signature and checked compact
+                        // witness authorize this whole batch. Avoid one awaited
+                        // IDB read callback per freshly imported baseline unit.
+                        put(tx, stores.originals, scope, entry.unit.id, { unit: entry.unit, compact: entry.compact, proofIndex:proofIndices.get(entry.unit.id) });
                         if (entry.carry && !await get(tx, stores.saved, key(scope,entry.unit.id))) {
                             const carried = { unitId: entry.unit.id, values: entry.carry.values, reviewed: entry.carry.reviewed,
                                 saved: entry.carry.saved,
@@ -182,17 +378,80 @@
         }
         async function getUnits(rawScope, options = {}) {
             const scope = capture(rawScope).id; await requireReady(scope, options);
-            const original = await rows(scope, stores.originals, options), units = [];
-            for (let index=0;index<original.length;index++) { units.push(original[index].unit); if(index%256===255){guard(options);await pause();} }
+            // Do not retain the duplicate compact manifest while materializing
+            // immutable units; each bounded page releases it immediately.
+            return readRows(scope,stores.originals,row=>row.value.unit,options);
+        }
+        async function getCompactUnits(rawScope,options={}){
+            const scope=capture(rawScope).id,metadata=await requireReady(scope,options);
+            const units=await readRows(scope,stores.originals,row=>{
+                if(!row.value.compact)throw Object.assign(new Error('ClientText immutable manifest is unavailable.'),{code:'CLIENTTEXT_COMPACT_MISSING'});
+                return row.value.compact;
+            },options);
+            if(units.length!==metadata.unitCount)throw new Error('ClientText immutable manifest is incomplete.');
             return units;
         }
         async function getUnit(rawScope, unitId, options) { return (await one(capture(rawScope).id, stores.originals, unitId, options))?.unit; }
         async function getSaved(rawScope, options) { return Object.fromEntries((await rows(capture(rawScope).id,stores.saved,options)).map(row => [row.unitId,row])); }
-        async function getAsset(rawScope, role = 'normal', options) { return one(capture(rawScope).id,stores.assets,role,options); }
+        async function getAsset(rawScope, role = 'normal', options) {
+            const scope=capture(rawScope).id;
+            return transaction([stores.assets],'readonly',async tx=>{
+                const asset=await get(tx,stores.assets,key(scope,role));
+                if(!asset?.treeStorage)return asset;
+                async function read(part){
+                    const values=[];
+                    for(const entry of part.parts){
+                        guard(options);
+                        const chunk=await get(tx,stores.assets,key(scope,entry.id));
+                        if(!Array.isArray(chunk)||chunk.length!==entry.length||entry.start!==values.length)throw new Error('ClientText original proof tree is incomplete.');
+                        for(const value of chunk)values.push(value);
+                    }
+                    if(values.length!==part.length)throw new Error('ClientText original proof tree length differs.');return values;
+                }
+                const ids=await read(asset.treeStorage.ids),levels=[];
+                for(const part of asset.treeStorage.levels)levels.push(await read(part));
+                asset.tree={ids,levels};return asset;
+            },options);
+        }
         async function getProof(rawScope, unitId, options) {
-            const role = JSON.parse(unitId)[0], asset = await getAsset(rawScope,role,options);
-            if (!asset?.tree) throw new Error('ClientText original proof is unavailable.');
-            return { descriptor: asset.descriptor, proof: S.proofFor({trees:{[role]:asset.tree}},unitId) };
+            const scope=capture(rawScope).id,role=JSON.parse(unitId)[0];
+            return transaction([stores.assets,stores.originals],'readonly',async tx=>{
+                const asset=await get(tx,stores.assets,key(scope,role));
+                if(!asset)throw new Error('ClientText original proof is unavailable.');
+                if(!asset.treeStorage){
+                    if(!asset.tree)throw new Error('ClientText original proof is unavailable.');
+                    return {descriptor:asset.descriptor,proof:S.proofFor({trees:{[role]:asset.tree}},unitId)};
+                }
+                const tree=asset.treeStorage,cache=new Map();
+                async function at(part,index){
+                    guard(options);
+                    if(!Number.isSafeInteger(index)||index<0||index>=part.length)throw new Error('ClientText proof index differs.');
+                    let low=0,high=part.parts.length;
+                    while(low<high){const middle=(low+high)>>>1;if(part.parts[middle].start<=index)low=middle+1;else high=middle;}
+                    const entry=part.parts[low-1];
+                    if(!entry || index>=entry.start+entry.length)throw new Error('ClientText proof fragment is absent.');
+                    const id=key(scope,entry.id);
+                    if(!cache.has(id))cache.set(id,await get(tx,stores.assets,id));
+                    const values=cache.get(id);
+                    if(!Array.isArray(values)||values.length!==entry.length)throw new Error('ClientText proof fragment is incomplete.');
+                    return values[index-entry.start];
+                }
+                const original=await get(tx,stores.originals,key(scope,unitId));let index=original?.proofIndex;
+                // Resume compatibility: a pre-upgrade partial import can have
+                // unit rows without the proof index. Search only ID fragments.
+                if(!Number.isSafeInteger(index)){
+                    let low=0,high=tree.ids.length;
+                    while(low<high){const middle=(low+high)>>>1;if(await at(tree.ids,middle)<unitId)low=middle+1;else high=middle;}
+                    index=low;
+                }
+                if(await at(tree.ids,index)!==unitId)throw new Error('ClientText unit is absent from the original.');
+                const siblings=[];let position=index;
+                for(let level=0;level<tree.levels.length-1;level++){
+                    const values=tree.levels[level],sibling=position%2?position-1:Math.min(position+1,values.length-1);
+                    siblings.push({side:position%2?'left':'right',hash:await at(values,sibling)});position=Math.floor(position/2);
+                }
+                return {descriptor:asset.descriptor,proof:{index,siblings}};
+            },options);
         }
         async function putDraft(rawScope, unitId, input, options = {}) {
             const scope = capture(rawScope).id, unit = await getUnit(rawScope,unitId,options);
@@ -336,7 +595,7 @@
                 return row;
             },options);
         }
-        return { import:importContent,importContent,save,getMetadata,getUnits,getUnit,getSaved,getAsset,getProof,putDraft,getDraft,discardDraft,
+        return { import:importContent,importContent,save,getMetadata,getUnits,getCompactUnits,getUnit,getSaved,getAsset,getProof,putDraft,getDraft,discardDraft,
             listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,create };

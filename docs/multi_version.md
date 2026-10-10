@@ -51,7 +51,7 @@ The manager's **Upload next version → Upload and prepare** uses the same path 
 
 For implemented server storage reductions, client-generated managed collections, migration safeguards and pending deployment work, read [Local-first baselines and incremental server storage](local_first_server_storage.md).
 
-IndexedDB v11 retains the v9 scoped source/workspace records and v10 TM stores, and adds ClientText stores without removing legacy data. Explicit content groups add version/group identity to StatDescription workspace, draft, queue and room scopes while keeping legacy keys byte-identical. Accepted baseline assets remain reusable by game/source identity. The existing StatDescription storage split is:
+IndexedDB v12 retains the v9 scoped source/workspace records, v10 TM stores and v11 ClientText stores without removing legacy data. It fences older writers before bounded ClientText journal/proof formats are written. Explicit content groups add version/group identity to StatDescription workspace, draft, queue and room scopes while keeping legacy keys byte-identical. Accepted baseline assets remain reusable by game/source identity. The existing StatDescription storage split is:
 
 | Data | Identity |
 | --- | --- |
@@ -63,7 +63,7 @@ IndexedDB v11 retains the v9 scoped source/workspace records and v10 TM stores, 
 | Drafts | Account/local profile + game + branch + source + language + file |
 | Save submissions, receipts and queued shared work | Captured account, game, branch, source and language; original job/mutation IDs retained |
 
-ClientText originals/assets, per-unit saved work, drafts, history, outbox and receipts are separate records scoped by account, game, branch, version, group and language. Publication/collection request journals retain stable IDs across reloads. Imports write bounded unit batches and activate only after readiness; failed/interrupted preparation retains resumable data. The additive v11 upgrade preserves older stores and excludes older writers. Close other tabs when an upgrade is blocked; do not clear storage.
+ClientText originals/assets, per-unit saved work, drafts, history, outbox and receipts are separate records scoped by account, game, branch, version, group and language. Publication/collection request journals retain stable IDs across reloads. Imports write bounded unit batches and activate only after readiness; failed/interrupted preparation retains resumable data. Large journals and proof trees use bounded fragments, and database reads and worker messages use bounded pages/chunks. The additive v12 upgrade preserves older stores and direct v11 records while excluding older writers. Close other tabs when an upgrade is blocked; do not clear storage.
 
 The old single-version `kv.source`, `kv.workspace`, `revisions`, per-game `source_poe1`/`workspace_poe1` slots (and their PoE2 equivalents), and v8 named-version aggregates remain as recovery evidence. Legacy per-game work maps into its recorded owner's default branch; v9 conversion runs in resumable bounded batches and freezes old aggregates. Unowned legacy work belongs to the guest profile. First sign-in can adopt guest source and committed work into an empty account workspace; it never copies another signed-in account's work. Original guest drafts, receipts and history remain under their original scope.
 

@@ -5,6 +5,7 @@ const JSZip = require('../../SDEditor-API/node_modules/jszip');
 const Codec = require('../public/clientTextCodec.js');
 const State = require('../public/clientTextState.js');
 const WorkerClient = require('../public/clientTextWorkerClient.js');
+const Transport = require('../public/clientTextTransport.js');
 const { readFileSync } = require('node:fs');
 const { runInNewContext, createContext, runInContext } = require('node:vm');
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -172,7 +173,7 @@ test('worker client forwards scoped progress and rejects/ignores cancelled respo
 });
 test('manifest worker computes the same proofs and cancels cooperatively', async () => {
     const parsed = await Codec.parseWorkbook(await workbook(), { filename: 'French.xlsx' });
-    const messages = [], self = { ClientTextCodec: Codec, ClientTextState: State, postMessage: value => messages.push(value) };
+    const messages = [], self = { ClientTextCodec: Codec, ClientTextState: State, ClientTextTransport: Transport, postMessage: value => messages.push(value) };
     const context = createContext({ self, importScripts() {}, Uint8Array, Promise, Set });
     runInContext(readFileSync(require.resolve('../public/clientTextWorker.js'), 'utf8'), context);
     const assets = [{ role: 'normal', hash: parsed.artifactHash }];
@@ -188,10 +189,20 @@ test('worker messages unwrap nested reactive containers without copying plain or
     const originals = new WeakMap(), reactive = value => { const proxy = new Proxy(value, {}); originals.set(proxy, value); return proxy; };
     class SnapshotWorker {
         constructor() { SnapshotWorker.instance = this; queueMicrotask(() => this.onmessage({ data: { type: 'ready', version: 1 } })); }
-        postMessage(value) { this.message = structuredClone(value); }
+        postMessage(value) {
+            const message = structuredClone(value);
+            if (message.type === 'request-start') this.collector = Transport.collector(message);
+            else if (message.type.startsWith('stream-')) this.collector.apply(message);
+            else if (message.type === 'request-end') {
+                this.message = this.collector.finish(); this.message.type = this.message.operation;
+                if (this.message.savedEntries) this.message.saved = Object.fromEntries(this.message.savedEntries);
+                this.onStreamEnd?.();
+            } else this.message = message;
+        }
         terminate() {}
     }
     const context = { Vue: { toRaw: value => originals.get(value) || value }, Worker: SnapshotWorker, setTimeout, clearTimeout, queueMicrotask };
+    runInNewContext(readFileSync(require.resolve('../public/clientTextTransport.js'), 'utf8'), context);
     runInNewContext(readFileSync(require.resolve('../public/clientTextWorkerClient.js'), 'utf8'), context);
     const client = context.ClientTextWorkerClient.create(), rawField = { id: 'Name', source: 'Sword', target: 'Original' }, fields = reactive([reactive(rawField)]);
     const unit = reactive({ id: 'unit', fields, metadata: reactive({ nested: reactive({ value: 'note' }) }) });
@@ -201,5 +212,90 @@ test('worker messages unwrap nested reactive containers without copying plain or
     assert.deepEqual(worker.message.parsed, { units: [{ id: 'unit', fields: [rawField], metadata: { nested: { value: 'note' } } }] });
     assert.deepEqual(worker.message.saved, { unit: { values: { Name: 'Changed' } } });
     assert.equal(unit.fields, fields, 'Original reactive containers remain intact');
-    worker.onmessage({ data: { type: 'result', id: worker.message.id, result: new Uint8Array([2]) } }); assert.deepEqual(await pending, new Uint8Array([2])); client.dispose();
+    worker.onmessage({ data: { type: 'result', id: worker.message.id, result: new Uint8Array([2]) } }); assert.deepEqual(await pending, new Uint8Array([2]));
+    const streamed = client.exportWorkbook(new Uint8Array([1]), { units: reactive(Array.from({ length: 600 }, () => unit)) }, saved);
+    await new Promise(resolve => { worker.onStreamEnd = resolve; });
+    assert.equal(worker.message.parsed.units.length, 600);
+    assert.deepEqual(worker.message.parsed.units[599], { id: 'unit', fields: [rawField], metadata: { nested: { value: 'note' } } });
+    assert.deepEqual(worker.message.saved, { unit: { values: { Name: 'Changed' } } });
+    worker.onmessage({ data: { type: 'result', id: worker.message.id, result: new Uint8Array([3]) } }); assert.deepEqual(await streamed, new Uint8Array([3])); client.dispose();
+});
+test('bounded worker collections preserve manifests, trees, parses and export input shapes', async () => {
+    const original = await Codec.parseWorkbook(await workbook(), { filename: 'French.xlsx' });
+    const units = Array.from({ length: 1100 }, (_, index) => ({ ...original.units[0], recordId: String(index), id: JSON.stringify(['normal', 'Normal', String(index)]) }));
+    const parsed = { ...original, units }, assets = [{ role: 'normal', hash: original.artifactHash }], sizes = [], directions = [];
+    class LoopbackWorker {
+        constructor() {
+            LoopbackWorker.instance = this;
+            this.self = { ClientTextState: State, ClientTextTransport: Transport,
+                ClientTextCodec: { parseWorkbook: async bytes => { assert.deepEqual(bytes, new Uint8Array([1])); return parsed; }, exportWorkbook: async (bytes, supplied, saved) => {
+                    assert.deepEqual(bytes, new Uint8Array([1])); assert.deepEqual(supplied, parsed); assert.equal(saved[units[1099].id].values['Name'], 'Raw @ value\\n\nไทย'); return new Uint8Array([8, 9]);
+                } }, postMessage: (message, transfer) => this.deliver('output', message, transfer, value => this.onmessage?.({ data: value })) };
+            this.context = createContext({ self: this.self, importScripts() {}, Uint8Array, Promise, Set, Map });
+            runInContext(readFileSync(require.resolve('../public/clientTextWorker.js'), 'utf8'), this.context);
+        }
+        deliver(direction, message, transfer, receiver) {
+            sizes.push(message.bytes instanceof Uint8Array ? message.bytes.byteLength : Buffer.byteLength(JSON.stringify(message)));
+            directions.push([direction, message.type]);
+            const cloned = structuredClone(message, { transfer: transfer || [] }); queueMicrotask(() => receiver(cloned));
+        }
+        postMessage(message, transfer) { this.deliver('input', message, transfer, value => this.self.onmessage({ data: value })); if (message.type === 'stream-chunk') this.abortOnChunk?.(); }
+        terminate() {}
+    }
+    const client = WorkerClient.create({ Worker: LoopbackWorker });
+    const originalBytes = new Uint8Array([7, 1, 5]);
+    assert.deepEqual(await client.parseWorkbook(originalBytes.subarray(1, 2), { filename: 'French.xlsx' }), parsed);
+    assert.deepEqual(originalBytes, new Uint8Array([7, 1, 5]), 'Private transfer copies preserve retained originals and subview boundaries');
+    const manifest = await client.buildManifest(units, assets);
+    assert.deepEqual(manifest, await State.buildManifest(units, assets));
+    assert.equal(State.verifyWitness(units[700], manifest.units[700], State.proofFor(manifest, units[700].id), manifest.descriptors[0]), true);
+    assert.deepEqual(await client.exportWorkbook(new Uint8Array([1]), parsed, { [units[1099].id]: { values: { Name: 'Raw @ value\\n\nไทย' } } }), new Uint8Array([8, 9]));
+    assert.ok(directions.some(([direction, type]) => direction === 'input' && type === 'request-start'));
+    assert.ok(directions.some(([direction, type]) => direction === 'output' && type === 'result-start'));
+    assert.ok(Math.max(...sizes) < Transport.MAX_BYTES, 'No full originals/manifest/tree graph crosses the worker boundary');
+    const aborted = new AbortController(), worker = LoopbackWorker.instance;
+    worker.abortOnChunk = () => aborted.abort();
+    await assert.rejects(client.buildManifest(units, assets, { signal: aborted.signal }), { name: 'AbortError' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(runInContext('incoming.size', worker.context), 0, 'Cancellation releases partial worker input collections');
+    assert.equal(runInContext('cancelled.size', worker.context), 0, 'Cancelled stream IDs are cleaned up without retaining tombstones');
+    client.dispose();
+});
+test('oversized individual rows fragment without changing Unicode/raw text or array order', async () => {
+    const rows = [{ id: 'first', text: 'ไทย🦁@\\n\n'.repeat(200000) }, { id: 'last', text: '' }], receiver = Transport.collector({ units: [] }), sizes = [];
+    await Transport.sendCollection((message, transfer) => {
+        sizes.push(message.bytes?.byteLength || Buffer.byteLength(JSON.stringify(message)));
+        receiver.apply(structuredClone(message, { transfer: transfer || [] }));
+    }, 'one', ['units'], rows, { pause: async () => {} });
+    assert.deepEqual(receiver.finish().units, rows); assert.ok(sizes.every(size => size <= Transport.MAX_BYTES));
+    assert.throws(() => Transport.collector({ units: [] }).apply({ type: 'stream-chunk', path: ['units'], start: 1, values: [] }), /out of order/);
+    assert.throws(() => Transport.collector({ units: [] }).apply({ type: 'stream-chunk', path: ['__proto__'], start: 0, values: [] }), /Invalid/);
+    const aborted = new AbortController(), messages = [];
+    await assert.rejects(Transport.sendCollection(message => { messages.push(message); aborted.abort(); }, 'one', ['units'], rows,
+        { guard: () => !aborted.signal.aborted, pause: async () => {} }), { name: 'AbortError' });
+    assert.equal(messages.length, 1, 'Cancellation stops the fragmented row before another large payload is posted');
+});
+test('one million unit transport remains bounded without an aggregate clone or cardinality limit', async () => {
+    const records = function* () { for (let index = 0; index < 1000000; index++) yield { id: String(index) }; };
+    let count = 0, chunks = 0;
+    await Transport.sendCollection(message => {
+        assert.equal(message.type, 'stream-chunk'); assert.equal(message.start, count);
+        assert.ok(message.values.length <= Transport.MAX_RECORDS);
+        assert.equal(message.values[0].id, String(count)); count += message.values.length;
+        assert.equal(message.values.at(-1).id, String(count - 1)); chunks++;
+    }, 'million', ['units'], records(), { pause: async () => {} });
+    assert.equal(count, 1000000); assert.ok(chunks > 1000);
+});
+test('SHA scratch and bounded scalar memoization retain canonical hashes across boundary sizes and edits', () => {
+    const crypto = require('node:crypto');
+    for (const length of [55, 56, 63, 64, 16375, 16376, 16384, 50000, 0, 1]) {
+        const text = 'é'.repeat(length);
+        assert.equal(State.sha256(new TextEncoder().encode(text)), crypto.createHash('sha256').update(text).digest('hex'));
+    }
+    for (let index = 0; index < 10000; index++) {
+        const text = 'Cached ไทย ' + index;
+        assert.equal(State.hash(text), crypto.createHash('sha256').update(State.stableStringify(text)).digest('hex'));
+    }
+    const mutable = { source: 'Before' }, first = State.hash(mutable); mutable.source = 'After';
+    assert.notEqual(State.hash(mutable), first, 'Only immutable string values are memoized');
 });

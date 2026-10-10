@@ -4,9 +4,10 @@
   // v4 cannot read staged records; v5 cannot retain a shared staging reset.
   // v6 dictionary writers cannot preserve per-entry game scope; v7 writers
   // cannot preserve named-version/profile isolation; v8 writers would replace
-  // normalized facts with stale aggregates. Keep every
+  // normalized facts with stale aggregates. v11 writers cannot read bounded
+  // ClientText journal/proof fragments. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 11;
+  const DB_VERSION = 12;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();

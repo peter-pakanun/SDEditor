@@ -38,7 +38,7 @@ test('late or mismatched predecessor discovery cannot become another upload scop
 test('ClientText compares and proves carried work from the discovered group beyond omitted versions',async()=>{
     const app=harness(),original=unit(),incoming=unit('Changed source'),oldManifest=await S.buildManifest([original],[asset]),manifest=await S.buildManifest([incoming],[asset]),calls=[];
     app.managedVersions=[{id:'omitted-content',contentGroups:[]}];
-    app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return[original];},async getAsset(){return{parsed:{sheets:[]}};},async getProof(){return{proof:S.proofFor(oldManifest,original.id)};}};
+    app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return[original];},async getAsset(){return{parsed:{sheets:[]},tree:oldManifest.trees.normal};},async getProof(){throw new Error('A comparison must not reread the workbook proof tree per ID.');}};
     app._cloud={async request(url){calls.push(url);if(url.startsWith('/v1/content-predecessor'))return prior();return{events:[{sequence:1,unitId:original.id,unit:{id:original.id,revision:3,values:{[fieldId]:'Accepted prior target'},reviewed:{}}}],hasMore:false};}};
     const prepared={contentMode:'clienttext',language:'Thai',units:[incoming],assets:[{...asset,parsed:{sheets:[]}}],manifest,warnings:[]};
     await app.ctPrepareCarry(prepared);
@@ -47,4 +47,28 @@ test('ClientText compares and proves carried work from the discovered group beyo
     assert.equal(S.verifyWitness(carry.previousBaseline,oldManifest.units[0],carry.previousProof,oldManifest.descriptors[0]),true);
     assert.equal(S.verifyWitness(carry.baseline,manifest.units[0],carry.proof,manifest.descriptors[0]),true);
     assert.match(calls[1],/^\/v1\/content-groups\/previous-group\/events/);
+});
+
+test('carry comparison reads each previous proof tree once and preserves every membership proof',async()=>{
+    const app=harness(),template=unit(),originals=Array.from({length:96},(_,index)=>({...template,recordId:'record-'+index,id:JSON.stringify([template.role,template.sheet,'record-'+index])}));
+    const incoming=originals.map(original=>({...original,fields:original.fields.map(field=>({...field,source:'Changed dialogue'}))}));
+    const oldManifest=await S.buildManifest(originals,[asset]),manifest=await S.buildManifest(incoming,[asset]);let assetReads=0;
+    app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return originals;},async getAsset(){assetReads++;return{parsed:{sheets:[]},tree:oldManifest.trees.normal};},async getProof(){throw new Error('Per-ID aggregate reads are forbidden.');}};
+    app._cloud={async request(url){return url.startsWith('/v1/content-predecessor')?prior():{events:[],hasMore:false};}};
+    const prepared={contentMode:'clienttext',language:'Thai',units:incoming,assets:[{...asset,parsed:{sheets:[]}}],manifest,warnings:[]};
+    await app.ctPrepareCarry(prepared);assert.equal(assetReads,1);assert.equal(prepared.carry.length,originals.length);
+    const oldById=new Map(oldManifest.units.map(compact=>[compact.id,compact])),nextById=new Map(manifest.units.map(compact=>[compact.id,compact]));
+    for(const carried of prepared.carry){
+        assert.equal(S.verifyWitness(carried.previousBaseline,oldById.get(carried.id),carried.previousProof,oldManifest.descriptors[0]),true);
+        assert.equal(S.verifyWitness(carried.baseline,nextById.get(carried.id),carried.proof,manifest.descriptors[0]),true);
+        assert.equal(carried.sourceOnly,true);
+    }
+});
+
+test('cancelled carry comparison cannot publish partial prepared work after an awaited tree read',async()=>{
+    const app=harness(),original=unit(),incoming=unit('Changed'),manifest=await S.buildManifest([incoming],[asset]);
+    app._cloud={async request(){return prior();}};
+    app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return[original];},async getAsset(){app._ctAbort.abort();return{parsed:{sheets:[]}};}};
+    const prepared={contentMode:'clienttext',language:'Thai',units:[incoming],assets:[{...asset,parsed:{sheets:[]}}],manifest,warnings:[]};
+    await assert.rejects(app.ctPrepareCarry(prepared),error=>error.name==='AbortError');assert.equal(prepared.carry,undefined);
 });

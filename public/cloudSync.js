@@ -281,12 +281,24 @@
       if(controller.signal.aborted){options.signal?.removeEventListener('abort',cancel);throw Object.assign(new Error('Cancelled'),{name:'AbortError'});}
       const timeout = setTimeout(() => controller.abort(), options.timeout || 20000);
       try {
+        let body = options.rawBody || (options.body ? JSON.stringify(options.body) : undefined), gzip = false;
+        if (options.compressJson && options.body && !options.rawBody && typeof CompressionStream === 'function' && typeof Blob === 'function' && typeof Response === 'function') {
+          // Compress one bounded manifest/carry chunk locally. An older API or
+          // browser continues to use ordinary JSON; callers opt in only after
+          // the API advertises the encoding in its content policy.
+          const original = new Blob([body], { type: 'application/json' });
+          const compressed = await new Response(original.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+          if (compressed.size < original.size) { body = compressed; gzip = true; }
+          if (controller.signal.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+          if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
+        }
         const request = { method: options.method || 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal,
           headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}),
             ...(options.rawBody ? { 'Content-Type': 'application/zip' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}),
+            ...(gzip ? { 'Content-Encoding': 'gzip' } : {}),
             ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}),
             ...(/^\/v1\/(collaboration|versions|version-uploads|collections)(\/|\?|$)/.test(path) ? { 'X-SDEditor-Workspace-Version': '2' } : {}) },
-          ...(options.rawBody ? { body: options.rawBody } : options.body ? { body: JSON.stringify(options.body) } : {}) };
+          ...(body !== undefined ? { body } : {}) };
         const response = (options.onUploadProgress || options.onDownloadProgress) && typeof XMLHttpRequest === 'function'
           ? await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest(); xhr.open(request.method, this.apiBase + path); xhr.responseType = 'blob';

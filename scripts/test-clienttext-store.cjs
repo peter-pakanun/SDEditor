@@ -28,6 +28,123 @@ test('request acknowledgement atomically consumes only its exact submitted draft
     assert.equal(await f.store.getRequest(owner,'comment'),undefined);
     assert.equal(await f.store.deleteRequest(owner,'comment',{expectedIdempotencyKey:'second'}),false);
 });
+test('large publication journals use bounded hidden fragments and rehydrate exact witnesses and Blobs',async()=>{
+    const f=fixture({requestChunkBytes:2048,requestChunkRows:3}),owner={accountId:'alice',game:'poe2'},
+        carry=Array.from({length:18},(_,index)=>({id:index,baseline:{...unit('English '+index),developerNotes:'Notes '+index},proof:['a'.repeat(64),'b'.repeat(64)]})),
+        payload={kind:'publication',name:'Release',groups:[{language:'Thai',carry,original:asset.blob}],extra:'x'.repeat(3000)};
+    await f.store.putRequest(owner,'large',payload);
+    const listed=await f.store.listRequests(owner);assert.equal(listed.length,1);assert.equal(listed[0].payload.kind,'publication');
+    assert.deepEqual(listed[0].payload.groups[0].carry,[]);assert.ok(listed[0].storage.parts.length>1);
+    const fragments=[...f.tables.get(CT.stores.requests).values()].filter(row=>Array.isArray(row.value.values));
+    assert.ok(fragments.length>5);assert.ok(fragments.every(row=>row.value.values.length<=3));
+    assert.ok(fragments.every(row=>JSON.stringify(row.value).length*2<4096),'witness fragments remain bounded by bytes as well as rows');
+    const restored=await f.store.getRequest(owner,'large');assert.deepEqual(restored.payload.groups[0].carry,carry);
+    assert.equal(restored.payload.extra,payload.extra);assert.equal(await restored.payload.groups[0].original.text(),'original');
+    carry[0].baseline.fields[0].source='Changed after queue';assert.equal((await f.store.getRequest(owner,'large')).payload.groups[0].carry[0].baseline.fields[0].source,'English 0');
+    assert.equal(await f.store.getRequest({...owner,accountId:'bob'},'large'),undefined);
+    await f.store.deleteRequest(owner,'large');assert.equal(f.tables.get(CT.stores.requests).size,0);
+});
+test('an interrupted checkpoint retains the prior complete generation and retry removes orphan fragments',async()=>{
+    let interrupt=false,current=true;
+    const f=fixture({requestChunkRows:2,yield:async()=>{if(interrupt)current=false;}}),owner={accountId:'alice',game:'poe2'};
+    await f.store.putRequest(owner,'release',{kind:'publication',name:'Accepted checkpoint',carry:[{id:1},{id:2},{id:3}]});
+    interrupt=true;
+    await assert.rejects(f.store.putRequest(owner,'release',{kind:'publication',name:'Incomplete',carry:Array.from({length:8},(_,id)=>({id}))},{guard:()=>current}),error=>error.stale===true);
+    const retained=await f.store.getRequest(owner,'release');assert.equal(retained.payload.name,'Accepted checkpoint');assert.deepEqual(retained.payload.carry,[{id:1},{id:2},{id:3}]);
+    current=true;interrupt=false;
+    await f.store.putRequest(owner,'release',{kind:'publication',name:'Retry',carry:[{id:4},{id:5},{id:6}]});
+    const recovered=await f.store.getRequest(owner,'release');assert.equal(recovered.payload.name,'Retry');
+    const referenced=new Set(recovered.storage.parts.flatMap(part=>part.chunkIds));
+    assert.ok([...f.tables.get(CT.stores.requests).values()].every(row=>row.value.requestId==='release'||referenced.has(row.key)));
+});
+test('immutable publication checkpoints reuse durable carry fragments while mutable requests resnapshot',async()=>{
+    const f=fixture({requestChunkRows:2}),owner={accountId:'alice',game:'poe2'},carry=Array.from({length:7},(_,id)=>({id,text:'Value '+id}));
+    await f.store.putRequest(owner,'release',{kind:'publication',carry},{immutablePublicationData:true});
+    const first=await f.store.listRequests(owner),ids=first[0].storage.parts[0].chunkIds;
+    f.operations.length=0;
+    await f.store.putRequest(owner,'release',{kind:'publication',carry,version:{id:'server-version'}},{immutablePublicationData:true});
+    assert.deepEqual((await f.store.listRequests(owner))[0].storage.parts[0].chunkIds,ids);
+    assert.equal(f.operations.filter(operation=>operation.method==='put').length,2,'only intent and visible header are updated');
+    carry[0].text='Mutable replacement';
+    await f.store.putRequest(owner,'release',{kind:'publication',carry});
+    assert.notDeepEqual((await f.store.listRequests(owner))[0].storage.parts[0].chunkIds,ids);
+    assert.equal((await f.store.getRequest(owner,'release')).payload.carry[0].text,'Mutable replacement');
+});
+test('a newer request can replace an interrupted large write without the older writer resurfacing',async()=>{
+    let entered,release;
+    const ready=new Promise(resolve=>entered=resolve),resume=new Promise(resolve=>release=resolve);let hold=true;
+    const f=fixture({requestChunkRows:2,yield:async()=>{if(hold){hold=false;entered();await resume;}}}),owner={accountId:'alice',game:'poe2'};
+    const old=f.store.putRequest(owner,'request',{idempotencyKey:'old',carry:[1,2,3,4]});await ready;
+    await f.store.putRequest(owner,'request',{idempotencyKey:'new',text:'Newer checkpoint'});
+    release();await assert.rejects(old,error=>error.code==='REQUEST_SUPERSEDED');
+    assert.equal((await f.store.getRequest(owner,'request')).payload.text,'Newer checkpoint');
+    assert.equal(await f.store.deleteRequest(owner,'request',{expectedIdempotencyKey:'old'}),false);
+    assert.equal(await f.store.deleteRequest(owner,'request',{expectedIdempotencyKey:'new'}),true);
+    assert.equal(f.tables.get(CT.stores.requests).size,0);
+});
+test('an old acknowledgement cannot delete a newer same-ID checkpoint while its fragments are staging',async()=>{
+    let entered,release,hold=false;
+    const ready=new Promise(resolve=>entered=resolve),resume=new Promise(resolve=>release=resolve),
+        f=fixture({requestChunkRows:2,yield:async()=>{if(hold){hold=false;entered();await resume;}}}),owner={accountId:'alice',game:'poe2'};
+    await f.store.putRequest(owner,'comment',{idempotencyKey:'old',text:'Submitted'});
+    hold=true;const next=f.store.putRequest(owner,'comment',{idempotencyKey:'new',text:'Newer draft',carry:[1,2,3,4]});await ready;
+    assert.equal(await f.store.deleteRequest(owner,'comment',{expectedIdempotencyKey:'old'}),false);
+    assert.equal((await f.store.getRequest(owner,'comment')).payload.text,'Submitted','prior checkpoint stays recoverable until the new one commits');
+    release();await next;assert.equal((await f.store.getRequest(owner,'comment')).payload.text,'Newer draft');
+    assert.equal(await f.store.deleteRequest(owner,'comment',{expectedIdempotencyKey:'old'}),false);
+    assert.equal(await f.store.deleteRequest(owner,'comment',{expectedIdempotencyKey:'new'}),true);
+});
+test('large object request payloads and nested array parts preserve their exact structure',async()=>{
+    const f=fixture({requestChunkRows:2,requestChunkBytes:2048}),owner={accountId:'alice',game:'poe2'},
+        payload={kind:'publication',groups:[{carry:Array.from({length:5},(_,id)=>({id,proof:Array.from({length:5},(_,index)=>({index,hash:'a'.repeat(64)}))}))}],
+            metadata:Object.fromEntries(Array.from({length:60},(_,index)=>['key'+index,'value'.repeat(20)]))};
+    await f.store.putRequest(owner,'nested',payload);
+    assert.deepEqual((await f.store.getRequest(owner,'nested')).payload,payload);
+    assert.ok((await f.store.listRequests(owner))[0].storage.parts.some(part=>part.kind==='object'));
+});
+test('workspaces read immutable units and Saved records in bounded exact-scope pages',async()=>{
+    const f=fixture(),units=Array.from({length:270},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index}));
+    await f.store.import(scope,{units,assets:[asset]});
+    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='get').length,0,'fresh immutable import does not await 270 per-unit existence reads');
+    await f.store.import({...scope,groupId:'another-group'},{units:[unit('Other group')],assets:[asset]});
+    f.operations.length=0;const loaded=await f.store.getUnits(scope);
+    assert.equal(loaded.length,270);assert.equal(new Set(loaded.map(value=>value.id)).size,270);assert.ok(loaded.every(value=>value.fields[0].source==='Source'));
+    const pages=f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='getAll');
+    assert.equal(pages.length,3);assert.ok(pages.every(operation=>operation.arg.count===128));
+    assert.equal(f.operations.some(operation=>operation.name===CT.stores.originals&&operation.method==='index.getAll'),false);
+    f.operations.length=0;const compact=await f.store.getCompactUnits(scope);
+    assert.equal(compact.length,270);assert.deepEqual(compact.find(value=>value.id===units[0].id),S.compactUnit(units[0]));
+    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='getAll').length,3);
+    await assert.rejects(f.store.getCompactUnits({...scope,language:'French'}),/prepared/);
+    const id=CT.scopeKey(scope);
+    for(let index=0;index<270;index++)f.tables.get(CT.stores.saved).set(JSON.stringify([id,units[index].id]),{key:JSON.stringify([id,units[index].id]),scope:id,value:{unitId:units[index].id,values:{[fieldId]:'Saved '+index}}});
+    f.operations.length=0;assert.equal(Object.keys(await f.store.getSaved(scope)).length,270);
+    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.saved&&operation.method==='getAll').length,3);
+});
+test('bounded proof tree assets keep retained binary originals and return identical point proofs',async()=>{
+    const f=fixture({requestChunkBytes:2048}),units=Array.from({length:75},(_,index)=>({...unit('Source '+index),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index})),
+        original={...asset,name:'Thai.xlsm',blob:new Blob([new Uint8Array([0,255,13,10,42])]),parsed:{units,marker:'Workbook schema',sheets:[{name:'ClientStrings'}]}},
+        manifest=await S.buildManifest(units,[original]);
+    await f.store.import(scope,{units,assets:[original],manifest});
+    const stored=f.tables.get(CT.stores.assets).get(JSON.stringify([CT.scopeKey(scope),'normal'])).value;
+    assert.equal(stored.tree,undefined);assert.equal(stored.parsed.units,undefined);assert.ok(stored.treeStorage.ids.parts.length>1);
+    const reconstructed=await f.store.getAsset(scope,'normal');assert.deepEqual(reconstructed.tree,manifest.trees.normal);
+    assert.deepEqual([...new Uint8Array(await reconstructed.blob.arrayBuffer())],[0,255,13,10,42]);
+    f.operations.length=0;
+    for(const index of [0,1,33,74]){
+        const actual=await f.store.getProof(scope,units[index].id);
+        assert.deepEqual(actual.proof,S.proofFor(manifest,units[index].id));assert.deepEqual(actual.descriptor,manifest.descriptors[0]);
+        assert.equal(S.verifyWitness(units[index],S.compactUnit(units[index]),actual.proof,actual.descriptor),true);
+    }
+    assert.equal(f.operations.some(operation=>operation.method==='getAll'||operation.method==='index.getAll'),false,'single-unit proof reads only its bounded tree path');
+    // A pre-upgrade partial unit lacks proofIndex, so search bounded ID chunks.
+    const row=f.tables.get(CT.stores.originals).get(JSON.stringify([CT.scopeKey(scope),units[33].id]));delete row.value.proofIndex;
+    assert.deepEqual((await f.store.getProof(scope,units[33].id)).proof,S.proofFor(manifest,units[33].id));
+    // Existing v11 whole-tree records remain readable without rewriting them.
+    stored.tree=manifest.trees.normal;delete stored.treeStorage;
+    assert.deepEqual((await f.store.getAsset(scope,'normal')).tree,manifest.trees.normal);
+    assert.deepEqual((await f.store.getProof(scope,units[74].id)).proof,S.proofFor(manifest,units[74].id));
+});
 test('originals/assets activate only when complete and remain scoped and immutable',async()=>{
     const f=await prepared();assert.equal((await f.store.getUnits(scope))[0].fields[0].source,'Source');
     assert.equal((await f.store.getAsset(scope,'normal')).blob.size,asset.blob.size);

@@ -7,7 +7,7 @@
     'use strict';
     const FORMAT = 'clienttext-v1', PARSER_VERSION = 'clienttext-v1';
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
-    const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+    const copy = value => value === undefined || value === null || typeof value === 'string' || typeof value === 'boolean' ? value : JSON.parse(JSON.stringify(value));
     function canonical(value) {
         if (Array.isArray(value)) return value.map(canonical);
         if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort()
@@ -26,34 +26,57 @@
         0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
         0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
         0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    const hashEncoder = new TextEncoder(), hashWords = new Uint32Array(64), hashScratch = new Uint8Array(16384);
+    const rotr = (n, b) => (n >>> b) | (n << (32 - b));
     function sha256(bytes) {
         if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-        const length = bytes.length, padded = new Uint8Array(Math.ceil((length + 9) / 64) * 64);
+        const length = bytes.length, paddedLength = Math.ceil((length + 9) / 64) * 64;
+        const padded = paddedLength <= hashScratch.length ? hashScratch.subarray(0, paddedLength) : new Uint8Array(paddedLength);
+        padded.fill(0);
         padded.set(bytes); padded[length] = 0x80;
-        const view = new DataView(padded.buffer), bits = length * 8;
+        const view = new DataView(padded.buffer, padded.byteOffset, padded.length), bits = length * 8;
         view.setUint32(padded.length - 8, Math.floor(bits / 0x100000000)); view.setUint32(padded.length - 4, bits >>> 0);
-        const h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-        const w = new Uint32Array(64), rotr = (n, b) => (n >>> b) | (n << (32 - b));
+        let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+        const w = hashWords;
         for (let start = 0; start < padded.length; start += 64) {
             for (let i = 0; i < 16; i++) w[i] = view.getUint32(start + i * 4);
             for (let i = 16; i < 64; i++) {
                 const a = w[i - 15], b = w[i - 2];
                 w[i] = (w[i - 16] + (rotr(a,7) ^ rotr(a,18) ^ (a >>> 3)) + w[i - 7] + (rotr(b,17) ^ rotr(b,19) ^ (b >>> 10))) >>> 0;
             }
-            let [a,b,c,d,e,f,g,j] = h;
+            let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,j=h7;
             for (let i = 0; i < 64; i++) {
                 const t1 = (j + (rotr(e,6) ^ rotr(e,11) ^ rotr(e,25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
                 const t2 = ((rotr(a,2) ^ rotr(a,13) ^ rotr(a,22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
                 j=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;
             }
-            for (const [i, value] of [a,b,c,d,e,f,g,j].entries()) h[i] = (h[i] + value) >>> 0;
+            h0=(h0+a)>>>0;h1=(h1+b)>>>0;h2=(h2+c)>>>0;h3=(h3+d)>>>0;
+            h4=(h4+e)>>>0;h5=(h5+f)>>>0;h6=(h6+g)>>>0;h7=(h7+j)>>>0;
         }
-        return h.map(value => value.toString(16).padStart(8, '0')).join('');
+        return [h0,h1,h2,h3,h4,h5,h6,h7].map(value => value.toString(16).padStart(8, '0')).join('');
     }
-    const hash = value => sha256(new TextEncoder().encode(stableStringify(value)));
+    // Repeated source/form/empty-target strings occur within and across rows.
+    // Keep a bounded cache of immutable scalars; mutable witnesses are always
+    // hashed again, so edits cannot reuse an old unit hash.
+    const scalarHashes = new Map(), MAX_SCALAR_HASHES = 8192, MAX_SCALAR_CHARACTERS = 2 * 1024 * 1024;
+    let scalarCharacters = 0;
+    function hash(value) {
+        const cacheable = typeof value === 'string' && value.length <= 8192;
+        if (cacheable && scalarHashes.has(value)) return scalarHashes.get(value);
+        const digest = sha256(hashEncoder.encode(stableStringify(value)));
+        if (cacheable) {
+            while (scalarHashes.size >= MAX_SCALAR_HASHES || scalarCharacters + value.length > MAX_SCALAR_CHARACTERS) {
+                const oldest = scalarHashes.keys().next().value;
+                scalarCharacters -= oldest.length; scalarHashes.delete(oldest);
+            }
+            scalarHashes.set(value, digest); scalarCharacters += value.length;
+        }
+        return digest;
+    }
     function canonicalSource(value) {
         const text = String(value ?? '');
-        return (text.match(/\[NOAUDIO\]/g) || []).length === 1 ? text.replace(/^ ?\[NOAUDIO\](?: |$)/, '') : text;
+        const marker = text.indexOf('[NOAUDIO]');
+        return marker >= 0 && text.indexOf('[NOAUDIO]', marker + 9) < 0 ? text.replace(/^ ?\[NOAUDIO\](?: |$)/, '') : text;
     }
     const audioOnly = source => /^ ?\[NOAUDIO\] ?$/.test(String(source ?? ''));
     const sourceHash = source => hash(canonicalSource(source));
@@ -81,10 +104,10 @@
     }
     function compactUnit(input) {
         const unit = normalizeUnit(input);
-        return { id: unit.id, role: unit.role, sheet: unit.sheet, recordId: unit.recordId, hash: hash(unit), fields: unit.fields.map(field => ({
+        return { id: unit.id, role: unit.role, sheet: unit.sheet, recordId: unit.recordId, hash: hash(unit), fields: unit.fields.map(field => { const markerOnly = audioOnly(field.source); return ({
             id: field.id, kind: field.kind, sourceHash: sourceHash(field.source), originalHash: hash(field.target),
-            required: field.required && !audioOnly(field.source), originalMissing: field.originalMissing && !audioOnly(field.source),
-            outdated: field.outdated && !audioOnly(field.source), audioOnly: audioOnly(field.source) })) };
+            required: field.required && !markerOnly, originalMissing: field.originalMissing && !markerOnly,
+            outdated: field.outdated && !markerOnly, audioOnly: markerOnly }); }) };
     }
     const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
     function normalizeCompact(input) {
