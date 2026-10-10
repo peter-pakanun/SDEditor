@@ -45,6 +45,87 @@ test('nested preparation stays active until every owner finishes and retains com
     assert.equal(editor._workspaceInitializationTimer, null);
 });
 
+test('overall progress counts planned stages and measured work without double-counting nested rows', () => {
+    const editor = app(), owner = editor.beginWorkspaceInitialization({ plan: ['Read source', { label: 'Parse files', weight: 3 }] });
+    const nested = editor.beginWorkspaceInitialization({ session: owner, plan: ['Ignored nested plan'] });
+    const read = editor.beginWorkspaceInitializationTask('Read source', owner);
+    editor.finishWorkspaceInitializationTask(read);
+    const parse = editor.beginWorkspaceInitializationTask('Parse files', owner);
+    editor.updateWorkspaceInitializationTaskProgress(parse, { completed: 1, total: 4, unit: 'files' });
+    assert.equal(editor.workspaceInitializationProgress.value, 43);
+    assert.equal(editor.workspaceInitializationProgress.total, 2);
+    const duplicate = editor.beginWorkspaceInitializationTask('Read source', nested);
+    assert.equal(editor.workspaceInitializationProgress.value, 43, 'Nested repeats cannot undo completed stages.');
+    editor.finishWorkspaceInitializationTask(duplicate);
+    editor.finishWorkspaceInitializationTask(parse);
+    assert.equal(editor.workspaceInitializationProgress.value, 99, 'Measured work does not release the readiness gate.');
+    assert.equal(editor.workspaceInitializationTaskProgress(editor.workspaceInitializationRows[1]).label, '100% · 4 / 4 files');
+    editor.finishWorkspaceInitialization(owner);
+    assert.equal(editor.workspaceInitializationProgress.value, 99);
+    editor.finishWorkspaceInitialization(nested);
+    assert.equal(editor.workspaceInitializationProgress.value, 100);
+});
+
+test('unknown totals remain indeterminate and failures retain measured progress', () => {
+    const editor = app(), owner = editor.beginWorkspaceInitialization();
+    const download = editor.beginWorkspaceInitializationTask('Download ZIP', owner);
+    editor.updateWorkspaceInitializationTaskProgress(download, { completed: 2048, unit: 'bytes' });
+    assert.equal(editor.workspaceInitializationProgress.value, null);
+    assert.deepEqual(editor.workspaceInitializationTaskProgress(editor.workspaceInitializationRows[0]), { value: null, label: '2.0 KiB' });
+    editor.setWorkspaceInitializationPlan(owner, ['Download ZIP']);
+    editor.updateWorkspaceInitializationTaskProgress(download, { completed: 2048, total: 8192, unit: 'bytes' });
+    assert.equal(editor.workspaceInitializationProgress.value, 25);
+    editor.finishWorkspaceInitializationTask(download, { error: new Error('Connection lost') });
+    editor.updateWorkspaceInitializationTaskProgress(download, { percent: 100 });
+    editor.finishWorkspaceInitialization(owner);
+    assert.equal(editor.workspaceInitializationProgress.value, 25);
+    assert.match(editor.workspaceInitializationLogText, /25% · 2\.0 KiB \/ 8\.0 KiB/);
+    assert.match(editor.workspaceInitializationLogText, /Connection lost/);
+});
+
+test('a stopped or failed task cannot complete overall progress even after all measured work arrives', () => {
+    for (const result of [{ cancelled: true }, { error: new Error('Could not publish workspace') }]) {
+        const editor = app(), owner = editor.beginWorkspaceInitialization({ plan: ['Preparing files'] });
+        const task = editor.beginWorkspaceInitializationTask('Preparing files', owner);
+        editor.updateWorkspaceInitializationTaskProgress(task, { completed: 4, total: 4, unit: 'files' });
+        editor.finishWorkspaceInitializationTask(task, result);
+        editor.finishWorkspaceInitialization(owner);
+        assert.equal(editor.workspaceInitializationProgress.value, 99);
+        assert.equal(editor.workspaceInitializationProgress.completed, 0);
+    }
+});
+
+test('declining or refusing a preparation step retains a stopped outcome instead of completing the plan', async () => {
+    const editor = app(), owner = editor.beginWorkspaceInitialization({ plan: ['Open selected version'] });
+    assert.equal(await editor.runWorkspaceInitializationTask('Open selected version', () => false, owner), false);
+    editor.finishWorkspaceInitialization(owner);
+    assert.equal(editor.workspaceInitializationRows[0].status, 'cancelled');
+    assert.equal(editor.workspaceInitializationProgress.value, 0);
+    assert.match(editor.workspaceInitializationLogText, /Stopped: Open selected version/);
+});
+
+test('task callback progress is fenced after completion and replacement initialization', async () => {
+    const editor = app(), old = editor.beginWorkspaceInitialization({ plan: ['Old download'] });
+    const gate = deferred();
+    let report;
+    const pending = editor.runWorkspaceInitializationTask('Old download', progress => {
+        report = progress; progress({ percent: 25 }); return gate.promise;
+    }, old);
+    assert.equal(editor.workspaceInitializationProgress.value, 25);
+    const replacement = editor.beginWorkspaceInitialization({ force: true, plan: ['New files'] });
+    const task = editor.beginWorkspaceInitializationTask('New files', replacement);
+    report({ percent: 90 });
+    editor.setWorkspaceInitializationPlan(old, ['Old download']);
+    gate.resolve(); await pending;
+    assert.equal(editor.workspaceInitializationProgress.value, 0);
+    assert.equal(editor.workspaceInitializationRows[0].progress, null);
+    assert.equal(editor.workspaceInitializationPlan[0].label, 'New files');
+    editor.finishWorkspaceInitializationTask(task);
+    editor.updateWorkspaceInitializationTaskProgress(task, { percent: 50 });
+    assert.equal(editor.workspaceInitializationRows[0].progress, null);
+    editor.finishWorkspaceInitialization(replacement);
+});
+
 test('an old completion cannot change or release a replacement initialization', async () => {
     const editor = app(), old = editor.beginWorkspaceInitialization();
     const gate = deferred();

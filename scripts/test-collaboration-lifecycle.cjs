@@ -749,8 +749,24 @@ test('startup preparation yields and cancels without publishing a partial worksp
   context.Date = { now: () => clock += 8 };
   e.yieldEditorWork = async () => { yields++; active = false; };
   const existing = e.descs;
-  const result = await e.prepareStoredWorkspaceSource([description('first'), description('second')], null, true, () => active);
+  const progress = [];
+  const result = await e.prepareStoredWorkspaceSource([description('first'), description('second')], null, true, () => active,
+    event => progress.push(plain(event)));
   assert.equal(result, null); assert.equal(yields, 1); assert.equal(e.descs, existing);
+  assert.deepEqual(progress, [{ completed: 0, total: 2, unit: 'files' }, { completed: 1, total: 2, unit: 'files' }]);
+});
+
+test('startup preparation reports file counts through completion', async () => {
+  const { editor: e, context } = harness();
+  let clock = 0;
+  context.Date = { now: () => clock += 8 };
+  e.yieldEditorWork = async () => {};
+  const progress = [];
+  await e.prepareStoredWorkspaceSource([description('first'), description('second')], null, true, () => true,
+    event => progress.push(plain(event)));
+  assert.equal(progress[0].completed, 0);
+  assert(progress.some(event => event.completed === 1));
+  assert.deepEqual(progress.at(-1), { completed: 2, total: 2, unit: 'files' });
 });
 
 test('preferences arriving during startup preparation activate only the final language overlay', async () => {
@@ -895,12 +911,18 @@ test('failed translated repair persistence leaves translations unchanged and rep
 
 test('translated repair with no translation changes explains the repair without rewriting storage', async () => {
   const { editor: e, writes, alerts } = harness({ realImport: true });
+  const initialization = require('../public/workspaceInitialization.js').mixin;
+  Object.assign(e, initialization.data(), initialization.methods);
+  for (const [name, getter] of Object.entries(initialization.computed)) Object.defineProperty(e, name, { get: () => getter.call(e) });
   await e.importUpdateZipFile(zipFixture(importText({ broken: false })));
+  assert.equal(e.workspaceInitializationProgress.value, 100, 'Guest source imports complete the no-op shared preparation stage.');
   const hash = e.sourceIdentity, writeCount = writes.length;
   await e.importTranslatedZipFile(zipFixture(importText(), { translated: true }));
   assert.equal(writes.length, writeCount); assert.equal(e.sourceIdentity, hash);
   assert.equal(alerts.length, 1); assert.match(alerts[0], /No translation changes detected/);
   assert.match(alerts[0], /Automatically repaired 1 quoted entry/);
+  assert.equal(e.workspaceInitializationProgress.value, 100, 'A successful unchanged import omits the unnecessary save stage.');
+  assert(!e.workspaceInitializationPlan.some(step => step.label === 'Saving imported translations and recovery history'));
 });
 
 test('shared-history fetch cannot publish into a switched account, source, or client', async t => {

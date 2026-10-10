@@ -39,6 +39,8 @@ Settings is organized into five tabs: **General** for game version, language, th
 
 **Logs → Copy log** copies the initialization steps, errors and elapsed times after loading finishes. You can also select the log text and copy it with your keyboard. The log remains available in this tab until the next initialization starts or the tab reloads.
 
+During **Initializing workspace**, the overall bar tracks the planned preparation steps. Downloads, parsing, baseline verification and file preparation show measured progress with byte or file counts where available. A moving bar means the total is not yet known. Overall percentages describe preparation steps, rather than estimated time remaining; the bar reaches 100% after preparation finishes. Progress is also retained in **Logs**.
+
 **Hide DNT entries** hides the entire file when any English block starts with `[DNT` or `DNT `, even if its first block has no marker. Hidden DNT files are also excluded from workload counters and manual diagnostic scans.
 
 **General → Translation language** remains available to every role. Only signed-in managers and admins have a navbar language link. Language dictionaries remain separate, and closing Settings waits for an active language change to finish saving locally.

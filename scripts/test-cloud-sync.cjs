@@ -193,6 +193,63 @@ function seedAPI(api, { remote = dictionary([word()]), remoteSettings = settings
   api.dictionaries.set('Thai', clone(remote));
 }
 
+function xhrHarness(t) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'XMLHttpRequest'), requests = [];
+  class FakeXHR {
+    constructor() { this.headers = {}; this.upload = {}; requests.push(this); }
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(key, value) { this.headers[key] = value; }
+    send(body) { this.body = body; }
+    abort() { this.onabort?.(); }
+    complete(response, status = 200) { this.response = response; this.status = status; this.onload(); }
+  }
+  globalThis.XMLHttpRequest = FakeXHR;
+  t.after(() => {
+    if (descriptor) Object.defineProperty(globalThis, 'XMLHttpRequest', descriptor);
+    else delete globalThis.XMLHttpRequest;
+  });
+  return requests;
+}
+
+test('archive download reports known and unknown byte totals and retains authenticated blob responses', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() }), progress = [];
+  const pending = h.client.request('/v1/versions/weekly-1/original', { responseType: 'blob',
+    onDownloadProgress: (loaded, total) => progress.push([loaded, total]) });
+  const xhr = requests[0];
+  assert.equal(xhr.method, 'GET'); assert.equal(xhr.headers.Authorization, 'Bearer token-alice');
+  assert.equal(xhr.headers['X-SDEditor-Workspace-Version'], '2');
+  xhr.onprogress({ loaded: 20, total: 100, lengthComputable: true });
+  xhr.onprogress({ loaded: 40, total: 0, lengthComputable: false });
+  const blob = new Blob(['original ZIP']); xhr.complete(blob);
+  assert.equal(await pending, blob);
+  assert.deepEqual(progress, [[20, 100], [40, undefined]]);
+  assert.equal(h.api.calls.length, 0);
+});
+
+test('archive download suppresses stale progress and rejects a response after language access changes', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() }), progress = [];
+  const pending = h.client.request('/v1/versions/weekly-1/original', { responseType: 'blob',
+    onDownloadProgress: (loaded, total) => progress.push([loaded, total]) });
+  const xhr = requests[0]; xhr.onprogress({ loaded: 20, total: 100, lengthComputable: true });
+  h.client.state.auth.user.language = 'French';
+  xhr.onprogress({ loaded: 80, total: 100, lengthComputable: true });
+  xhr.complete(new Blob(['original ZIP']));
+  await assert.rejects(pending, error => error.stale === true);
+  assert.deepEqual(progress, [[20, 100]]);
+});
+
+test('archive progress transport retains upload totals and JSON server failures', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() }), progress = [];
+  const body = new Blob(['original ZIP']);
+  const pending = h.client.request('/v1/version-uploads/upload-1/archive', { method: 'PUT', rawBody: body,
+    onUploadProgress: (loaded, total) => progress.push([loaded, total]) });
+  const xhr = requests[0]; assert.equal(xhr.body, body);
+  xhr.upload.onprogress({ loaded: 5, total: 0, lengthComputable: false });
+  xhr.complete(new Blob([JSON.stringify({ error: { code: 'ARCHIVE_GAME_MISMATCH', message: 'Wrong game' } })]), 409);
+  await assert.rejects(pending, error => error.status === 409 && error.code === 'ARCHIVE_GAME_MISMATCH');
+  assert.deepEqual(progress, [[5, body.size]]);
+});
+
 test('new Dictionary game scope persists through cloud backup and remains personal to each account', async t => {
   const h = await harness(t, { state: authenticatedState() });
   seedAPI(h.api);

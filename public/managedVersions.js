@@ -59,7 +59,7 @@
   }
   const filename = value => String(value || 'StatDescriptions').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '') || 'StatDescriptions';
   const initializationTask = (app, label, callback, session) => app.runWorkspaceInitializationTask
-    ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
+    ? app.runWorkspaceInitializationTask(label, callback, session) : callback(() => {});
   const mixin = {
     data() { return { branchId: DEFAULT_BRANCH, versionChooserVisible: false, managedVersions: [], managedBranch: null,
       managedTeamSort: 'progress', managedTeamSortDir: 'desc',
@@ -556,7 +556,14 @@
         const key = this.managedCatalogScope; let scope = this.managedWorkspaceScope(sourceHash);
         const activation = this._managedActivation = {};
         const current = () => key === this.managedCatalogScope && this._managedActivation === activation;
-        const initialization = this.beginWorkspaceInitialization?.({ label: 'Initializing workspace', session: initializationSession });
+        const initialization = this.beginWorkspaceInitialization?.({ label: 'Initializing workspace', session: initializationSession, plan: [
+          ...(this.flushEditorDraft ? ['Preserving editor drafts'] : []),
+          ...(this._pendingSaves?.snapshot().jobs.length ? ['Waiting for pending local saves'] : []),
+          'Checking local workspace ownership',
+          ...(root.OfflineStore.resolveVersionScope ? ['Resolving the stored source version'] : []),
+          'Activating the selected local workspace', { label: 'Preparing the selected workspace', weight: 3 },
+          'Updating the active source version',
+        ] });
         if (initializationSession && !initialization) return false;
         const task = (label, callback) => initializationTask(this, label, callback, initialization);
         try {
@@ -579,7 +586,7 @@
           this._managedEditAcknowledged = '';
           if (language) this.lang = language;
           root.OfflineStore.setWorkspaceContext(scope); this.versionChooserVisible = false;
-          await this.loadVersionedStorage(initialization, activated && { ...activated, language: this.lang });
+          await task('Preparing the selected workspace', () => this.loadVersionedStorage(initialization, activated && { ...activated, language: this.lang }));
           if (!current()) return false;
           this._managedWorkspaceOwner = JSON.stringify([scope.accountId, scope.game, scope.branchId]);
           if (!this.sourceLoaded || this.sourceIdentity !== scope.sourceHash) return false;
@@ -602,7 +609,11 @@
         const initialization = this.beginWorkspaceInitialization?.({ label: 'Opening selected source version' });
         const operation = this.managedBeginOperation({ key: 'open', label: 'Preparing selected source version' });
         const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && operation === this._managedOperation;
-        const task = (label, callback) => initializationTask(this, label, callback, initialization);
+        const earlySteps = [];
+        const task = (label, callback) => {
+          earlySteps.push(label);
+          return initializationTask(this, label, callback, initialization);
+        };
         try {
           await this.$nextTick?.();
           if (!current()) return;
@@ -620,6 +631,7 @@
             if (!current()) return;
             if (this.managedDetailsMatchVersion(metadata?.details, version)) details = this.managedScopedDetails(metadata.details);
           }
+          let detailsCheckFailed = false;
           // Cached, scope-checked version facts are enough for local opening.
           // A first download or missing facts still needs an explicit request.
           if (this.managedOnlineAvailable && (!source?.length || !details)) {
@@ -636,6 +648,7 @@
               if (!current()) return;
               if (!source?.length || error.code === 'VERSION_IDENTITY_CHANGED' || error.status === 401 || error.status === 403 || error.status === 404) throw error;
               // Retained source and version facts remain usable during a connection failure.
+              detailsCheckFailed = true;
             }
           }
           const targetTeam = details?.teams?.find(team => team.language === targetLanguage)
@@ -643,21 +656,39 @@
           const warning = this.managedVersionOpenWarning(version, targetTeam, targetLanguage);
           const acknowledgedWindow = targetTeam?.ended || version.status === 'withdrawn'
             ? this.managedEditWarningKey(version, targetLanguage, targetTeam) : '';
+          if (initialization?.ownsPlan !== false) this.setWorkspaceInitializationPlan?.(initialization, [
+            ...earlySteps.filter(label => !detailsCheckFailed || label !== 'Checking published version and team details'),
+            ...(warning ? ['Waiting for source version confirmation'] : []),
+            ...(!source?.length ? [
+              { label: 'Downloading the original source ZIP', weight: 3 }, 'Unpacking the source ZIP',
+              'Reading published baseline metadata', { label: 'Parsing source description files', weight: 3 },
+              'Verifying the source ZIP identity', 'Applying import choices and verifying baseline proofs',
+              'Storing the verified source version locally',
+            ] : []),
+            'Storing selected version and team details', { label: 'Opening the prepared workspace', weight: 3 },
+          ]);
           if (warning && !await task('Waiting for source version confirmation', () => this.appConfirm(warning, { title: 'Open source version?', confirmLabel: 'Open editor', danger: false }))) return false;
           if (!current()) return;
           if (!source?.length) {
             if (!this.managedOnlineAvailable) throw new Error('Download this source version once while connected before working offline.');
-            const blob = await task('Downloading the original source ZIP', () => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000 }));
+            const blob = await task('Downloading the original source ZIP', reportProgress => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', {
+              responseType: 'blob', timeout: 120000,
+              onDownloadProgress: (completed, total) => { if (current()) reportProgress({ completed, total, unit: 'bytes' }); },
+            }));
             if (!current()) return;
             const zip = await task('Unpacking the source ZIP', () => root.JSZip.loadAsync(blob)), rawSource = [];
             if (!current()) return;
             const archive = (await task('Reading published baseline metadata', () => this._cloud.request('/v1/collaboration/archives/' + version.game + '/' + version.zipHash))).archive;
             if (!current()) return;
-            await task('Parsing source description files', async () => {
-              for (const entry of Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith('.txt'))) {
+            await task('Parsing source description files', async reportProgress => {
+              const entries = Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith('.txt'));
+              let completed = 0;
+              reportProgress({ completed, total: entries.length, unit: 'files' });
+              for (const entry of entries) {
                 const desc = await root.parseFile(entry.name, entry, targetLanguage, { strict: true });
                 if (desc) rawSource.push(desc);
                 if (!current()) return;
+                reportProgress({ completed: ++completed, total: entries.length, unit: 'files' });
               }
             });
             if (!current()) return;
@@ -673,7 +704,7 @@
           if (!current()) return;
           await task('Storing selected version and team details', () => root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) }));
           if (!current()) return;
-          const opened = await this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization);
+          const opened = await task('Opening the prepared workspace', () => this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization));
           if (opened && current()) {
             this.managedSetOperationError('open', '');
             if (acknowledgedWindow && this.managedActiveVersion?.id === version.id

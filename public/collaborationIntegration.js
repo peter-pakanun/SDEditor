@@ -140,11 +140,13 @@
         }
         return protocol.normalizeDecisions(records);
       },
-      async sourceWithImportDecisions(rawSource, decisions) {
+      async sourceWithImportDecisions(rawSource, decisions, options = {}) {
         const source = copy(rawSource);
         const groups = this.collectDuplicateLangGroups(source);
         const records = window.CollaborationProtocol.normalizeDecisions(decisions || []);
         if (records.length !== groups.length) throw new Error('The shared import decisions do not match this ZIP.');
+        if (groups.length) options.onProgress?.({ completed: 0, total: groups.length, unit: 'items' });
+        let completed = 0;
         for (const group of groups) {
           const record = records.find(item => item.filepath === group.filepath && item.language === group.lang);
           if (!record) throw new Error('A shared duplicate language choice is missing.');
@@ -153,8 +155,10 @@
             throw new Error('A shared duplicate language choice does not match the original ZIP.');
           }
           group.selectedOptionId = selected.id;
+          options.onProgress?.({ completed: ++completed, total: groups.length, unit: 'items' });
         }
         this.applyDuplicateLangSelections(source, groups);
+        if (!groups.length) options.onProgress?.({ percent: 100 });
         return source.filter(Boolean);
       },
       async buildImportedBaseline(identity, rawSource, decisions = [], acceptedArchive) {
@@ -162,10 +166,10 @@
         if (acceptedArchive && acceptedArchive.parserVersion !== 1) throw new Error('This shared import requires a different importer version.');
         const initializationSession = { run: this._workspaceInitializationRun };
         const selectedDecisions = acceptedArchive?.decisions || decisions;
-        const source = await initializationTask(this, 'Applying agreed language choices', () =>
-          this.sourceWithImportDecisions(rawSource, selectedDecisions), initializationSession);
-        const tree = await initializationTask(this, 'Building original source baseline proofs', () =>
-          window.CollaborationProtocol.buildBaselineTree(source), initializationSession);
+        const source = await initializationTask(this, 'Applying agreed language choices', reportProgress =>
+          this.sourceWithImportDecisions(rawSource, selectedDecisions, { onProgress: reportProgress }), initializationSession);
+        const tree = await initializationTask(this, 'Building original source baseline proofs', reportProgress =>
+          window.CollaborationProtocol.buildBaselineTree(source, undefined, { onProgress: reportProgress }), initializationSession);
         const archive = await initializationTask(this, 'Verifying accepted source baseline identity', async () => {
           const descriptor = await window.CollaborationProtocol.finalizeArchive({ version: 1, zipHash: identity.zipHash,
             zipSize: identity.zipSize, fileCount: identity.fileCount,
@@ -629,6 +633,14 @@
           const selectedSource = this.importBaseline && workspace.stagedVersion >= 1
             ? Object.keys(workspace.staged?.[ctx.language] || {}).map(path => this.collaborationFileIndexes().descriptions.get(path)).filter(Boolean)
             : source;
+          const preparationItems = this.importBaseline ? this.importBaseline.source.length * 4 + selectedSource.length
+            : source.length * 6 + selectedSource.length + 3;
+          const reportProgress = (completed, total = selectedSource.length + preparationItems) => {
+            if (this.collaborationContextCurrent(context) && this.descs === activeSource && this.localDescs === activeWorkspace) {
+              this.updateWorkspaceInitializationTaskProgress?.(initializationTaskToken, { completed, total, unit: 'items' });
+            }
+          };
+          reportProgress(0);
           let sliceStart = Date.now();
           this.setBrowserWork?.('collaboration', { key: 'source', label: 'Preparing collaboration data', active: true });
           try {
@@ -638,11 +650,13 @@
                 await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now();
                 if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
               }
+              if (index % 64 === 63 || index === selectedSource.length - 1) reportProgress(index + 1);
             }
           } finally { if (this._collaboration === client) this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
           if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
           await client.connect({ ...ctx, source, deferRemote: typeof client.startRemote === 'function',
             ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
+            onProgress: progress => reportProgress(selectedSource.length + progress.completed, selectedSource.length + progress.total),
             files, workspace });
           this.finishWorkspaceInitializationTask?.(initializationTaskToken, {
             error: client.lastError,

@@ -58,6 +58,27 @@ test('Merkle cache uses stable filepath and language order and never mutates imp
   }
 });
 
+test('baseline proof progress counts hash completions independently of concurrent leaf order', async () => {
+  const source = [description('a'), description('b'), description('c')], reports = [], releases = [];
+  let calls = 0, firstCompleted;
+  const first = new Promise(resolve => { firstCompleted = resolve; });
+  const provider = { subtle: { async digest(...args) {
+    if (calls++ < source.length) await new Promise(resolve => releases.push(resolve));
+    return crypto.webcrypto.subtle.digest(...args);
+  } } };
+  const pending = P.buildBaselineTree(source, provider, { onProgress: progress => {
+    reports.push(progress); if (progress.completed === 1) firstCompleted();
+  } });
+  assert.equal(releases.length, 3);
+  assert.deepEqual(reports, [{ completed: 0, total: 6, unit: 'items' }]);
+  releases[2](); await first;
+  assert.deepEqual(reports.at(-1), { completed: 1, total: 6, unit: 'items' });
+  releases[1](); releases[0]();
+  assert.deepEqual(await pending, await P.buildBaselineTree(source), 'Progress preserves custom crypto providers and canonical proof ordering.');
+  assert.deepEqual(reports.map(progress => progress.completed), [0, 1, 2, 3, 4, 5, 6]);
+  assert.ok(reports.every(progress => progress.total === 6 && progress.unit === 'items'));
+});
+
 test('proof checks reject changed original text, paths, indexes, sibling directions and extra nodes', async () => {
   const source = [description('a'), description('b'), description('c')];
   const tree = await P.buildBaselineTree(source);

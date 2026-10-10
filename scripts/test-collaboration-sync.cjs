@@ -133,7 +133,7 @@ async function fixture(options = {}) {
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null, uuid: () => 'mutation-' + ++nextId,
     onRemote: files => remote.push(copy(files)) });
   await client.connect({ accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source, files: options.files || initial,
-    workspace: { descs: copy(source), status: {}, unrelated: 'preserve' } });
+    workspace: { descs: copy(source), status: {}, unrelated: 'preserve' }, onProgress: options.onProgress });
   return { client, store, server, remote };
 }
 
@@ -157,6 +157,14 @@ test('malformed source is rejected before creating a workspace', async () => {
   for (const bad of [[], [false], [source[0], source[0]], [{ ...source[0], variables: [] }], [{ ...source[0], filepath: '../bad.txt' }]]) {
     await assert.rejects(P.sourceHash(bad), /source/i);
   }
+});
+
+test('legacy connection forwards measurable source progress before the room identity is assigned', async t => {
+  const reports = [], { client } = await fixture({ onProgress: progress => reports.push(progress) });
+  t.after(() => client.destroy());
+  const total = source.length * 6 + initial.length + 3;
+  assert.deepEqual(reports[0], { completed: 0, total, unit: 'items' });
+  assert.deepEqual(reports.at(-1), { completed: total, total, unit: 'items' });
 });
 
 test('source hashing publishes pending progress before the digest and clears it when the hash completes', async t => {

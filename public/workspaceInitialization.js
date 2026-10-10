@@ -10,11 +10,34 @@
         data() {
             return { workspaceInitializationActive: false, workspaceInitializationLabel: '',
                 workspaceInitializationRows: [], workspaceInitializationStartedAt: 0, workspaceInitializationNow: 0,
+                workspaceInitializationPlan: [],
                 workspaceInitializationCopyBusy: false, workspaceInitializationCopyMessage: '' };
         },
         computed: {
             workspaceInitializationElapsed() {
                 return this.workspaceInitializationDuration(this.workspaceInitializationStartedAt, this.workspaceInitializationNow);
+            },
+            workspaceInitializationProgress() {
+                const rows = this.workspaceInitializationRows;
+                const completed = rows.filter(row => row.status === 'done').length;
+                const running = rows.filter(row => row.status === 'running').length;
+                if (!this.workspaceInitializationPlan.length) return { value: null, completed, total: null,
+                    label: `${completed} steps completed${running ? ` · ${running} in progress` : ''}` };
+                let earned = 0, weight = 0, finished = 0;
+                for (const step of this.workspaceInitializationPlan) {
+                    weight += step.weight;
+                    // Nested helpers may repeat an already completed stage.
+                    // Count each planned stage once; owners still hold the
+                    // overall bar below 100 until all preparation finishes.
+                    const row = rows.find(item => item.label === step.label);
+                    if (row?.status === 'done') { earned += step.weight; finished++; }
+                    else if (row?.progress?.value !== null && row?.progress?.value !== undefined) {
+                        earned += step.weight * row.progress.value / 100;
+                    }
+                }
+                const total = this.workspaceInitializationPlan.length;
+                const value = Math.min(this.workspaceInitializationActive || finished < total ? 99 : 100, Math.floor(earned / weight * 100));
+                return { value, completed: finished, total, label: `${value}% · ${finished} of ${total} steps completed` };
             },
             workspaceInitializationLogText() {
                 if (!this.workspaceInitializationRows.length) return '';
@@ -22,9 +45,11 @@
                 const lines = ['Workspace initialization',
                     this.workspaceInitializationLabel,
                     'Total elapsed: ' + this.workspaceInitializationElapsed,
+                    'Overall progress: ' + this.workspaceInitializationProgress.label,
                     this.workspaceInitializationActive ? 'In progress' : 'Finished', ''];
                 for (const row of this.workspaceInitializationRows) {
                     lines.push(`${statuses[row.status] || row.status}: ${row.label} ${this.workspaceInitializationDuration(row.startedAt, row.endedAt)}`);
+                    if (row.progress) lines.push('    ' + this.workspaceInitializationTaskProgress(row).label);
                     if (row.error) lines.push('    ' + row.error);
                 }
                 return lines.join('\n');
@@ -37,14 +62,17 @@
             this.disposeWorkspaceInitialization();
         },
         methods: {
-            beginWorkspaceInitialization({ label = 'Initializing workspace', force = false, session } = {}) {
+            beginWorkspaceInitialization({ label = 'Initializing workspace', force = false, session, plan = [] } = {}) {
                 if (session && session.run !== this._workspaceInitializationRun) return null;
                 if (force) this.disposeWorkspaceInitialization();
                 let run = this._workspaceInitializationRun;
+                const ownsPlan = !this.workspaceInitializationActive || !run;
                 if (!this.workspaceInitializationActive || !run) {
                     const startedAt = now();
                     run = this._workspaceInitializationRun = { owners: new Set(), work: new Map(), sequence: 0 };
                     this.workspaceInitializationRows = [];
+                    this.workspaceInitializationPlan = [];
+                    this.setWorkspaceInitializationPlan({ run }, plan);
                     this.workspaceInitializationCopyMessage = '';
                     this.workspaceInitializationCopyBusy = false;
                     this._workspaceInitializationCopyRequest = null;
@@ -56,9 +84,15 @@
                         if (this._workspaceInitializationRun === run) this.workspaceInitializationNow = now();
                     }, 100);
                 }
-                const owner = { run };
+                const owner = { run, ownsPlan };
                 run.owners.add(owner);
                 return owner;
+            },
+            setWorkspaceInitializationPlan(session, plan) {
+                if (!session || session.run !== this._workspaceInitializationRun) return;
+                this.workspaceInitializationPlan = (plan || []).map(step => typeof step === 'string' ? { label: step, weight: 1 } : step)
+                    .filter(step => step?.label).map(step => ({ label: step.label,
+                        weight: Number.isFinite(step.weight) && step.weight > 0 ? step.weight : 1 }));
             },
             finishWorkspaceInitialization(owner) {
                 const run = this._workspaceInitializationRun;
@@ -104,7 +138,7 @@
                 const log = this.$refs?.workspaceInitializationLog;
                 const follow = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
                 const id = ++run.sequence;
-                this.workspaceInitializationRows.push({ id, label, startedAt: now(), endedAt: null, status: 'running', error: '' });
+                this.workspaceInitializationRows.push({ id, label, startedAt: now(), endedAt: null, status: 'running', error: '', progress: null });
                 if (follow) this.$nextTick?.(() => {
                     const currentLog = this.$refs?.workspaceInitializationLog;
                     if (run === this._workspaceInitializationRun && currentLog) currentLog.scrollTop = currentLog.scrollHeight;
@@ -118,13 +152,39 @@
                 row.endedAt = now();
                 row.status = error ? 'failed' : cancelled ? 'cancelled' : 'done';
                 row.error = error?.message || (error ? String(error) : '');
+                if (row.status === 'done' && row.progress) row.progress = { ...row.progress, value: 100,
+                    completed: row.progress.total ?? row.progress.completed };
                 this.workspaceInitializationNow = row.endedAt;
+            },
+            updateWorkspaceInitializationTaskProgress(task, progress = {}) {
+                if (!task || task.run !== this._workspaceInitializationRun) return;
+                const row = this.workspaceInitializationRows.find(item => item.id === task.id);
+                if (!row || row.endedAt !== null) return;
+                const completed = Number.isFinite(progress.completed) && progress.completed >= 0 ? progress.completed : 0;
+                const total = Number.isFinite(progress.total) && progress.total > 0 ? progress.total : null;
+                const percent = Number.isFinite(progress.percent) ? progress.percent : total ? completed / total * 100 : null;
+                row.progress = { value: percent === null ? null : Math.max(0, Math.min(100, percent)),
+                    completed: total ? Math.min(completed, total) : completed, total,
+                    unit: ['bytes', 'files', 'items'].includes(progress.unit) ? progress.unit : 'items' };
+            },
+            workspaceInitializationTaskProgress(row) {
+                const progress = row.progress;
+                if (!progress) return { value: null, label: 'In progress' };
+                const format = value => progress.unit === 'bytes'
+                    ? value >= 1048576 ? (value / 1048576).toFixed(1) + ' MiB'
+                        : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : Math.round(value) + ' B'
+                    : Math.floor(value).toLocaleString();
+                const counts = progress.total ? `${format(progress.completed)} / ${format(progress.total)}`
+                    : progress.completed ? format(progress.completed) : '';
+                const unit = progress.unit === 'bytes' ? '' : ' ' + progress.unit;
+                const percent = progress.value === null ? '' : Math.floor(progress.value) + '%';
+                return { value: progress.value, label: [percent, counts ? counts + unit : ''].filter(Boolean).join(' · ') || 'In progress' };
             },
             async runWorkspaceInitializationTask(label, callback, session) {
                 const task = this.beginWorkspaceInitializationTask(label, session);
                 try {
-                    const result = await callback();
-                    this.finishWorkspaceInitializationTask(task);
+                    const result = await callback(progress => this.updateWorkspaceInitializationTaskProgress(task, progress));
+                    this.finishWorkspaceInitializationTask(task, { cancelled: result === false });
                     return result;
                 } catch (error) {
                     this.finishWorkspaceInitializationTask(task, error?.stale ? { cancelled: true } : { error });

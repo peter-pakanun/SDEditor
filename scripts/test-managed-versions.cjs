@@ -611,24 +611,33 @@ test('managed opening waits for local drafts and source while cached team detail
 });
 
 test('uncached opening stays under initialization while source parsing and its durable local commit are pending', async () => {
-  const parsing = deferred(), committing = deferred();
+  const downloading = deferred(), parsing = deferred(), committing = deferred();
   const sourceFile = { filepath: 'source/test.txt', English: ['Original'], Thai: ['Translation'], entryMeta: [{}] };
+  const secondSourceFile = { ...copy(sourceFile), filepath: 'source/second.txt' };
   const { app, events } = harness({ storage: {
     async getVersionSource() { return []; },
     async saveSourceWorkspaceWithRevisions(source, workspace, revisions, scope) {
       assert.equal(app.workspaceInitializationActive, true);
       assert.equal(scope.accountId, 'alice'); assert.equal(scope.sourceHash, hash('a'));
-      assert.deepEqual(copy(source), [sourceFile]);
+      assert.deepEqual(copy(source), [sourceFile, secondSourceFile]);
       await committing.promise; events.push({ type: 'import' });
     },
   }, window: {
     WorkspaceState: require('../public/workspaceState.js'),
+    JSZip: { async loadAsync() { return { files: {
+      first: { name: sourceFile.filepath, dir: false }, second: { name: secondSourceFile.filepath, dir: false },
+      folder: { name: 'source/', dir: true }, ignored: { name: 'source/README.md', dir: false },
+    } }; } },
     async parseFile(filepath, entry, language, options) {
       assert.equal(app.workspaceInitializationActive, true); assert.equal(language, 'Thai'); assert.equal(options.strict, true);
-      await parsing.promise; return copy(sourceFile);
+      if (filepath === sourceFile.filepath) return copy(sourceFile);
+      await parsing.promise; return copy(secondSourceFile);
     },
-  }, request: async route => {
-    if (route.endsWith('/original')) return { downloaded: true };
+  }, request: async (route, options) => {
+    if (route.endsWith('/original')) {
+      options.onDownloadProgress(512, 2048);
+      await downloading.promise; return { downloaded: true };
+    }
     if (route.includes('/archives/')) return { archive: { zipHash: hash('b') } };
     return { version: version(), teams: [team()] };
   } });
@@ -638,7 +647,12 @@ test('uncached opening stays under initialization while source parsing and its d
   try {
     const pending = app.continueManagedVersion(version(), 'Thai'); await new Promise(setImmediate);
     assert.equal(app.workspaceInitializationActive, true);
+    assert.equal(app.workspaceInitializationRows.at(-1).label, 'Downloading the original source ZIP');
+    assert.deepEqual(copy(app.workspaceInitializationRows.at(-1).progress), { value: 25, completed: 512, total: 2048, unit: 'bytes' });
+    assert.ok(app.workspaceInitializationProgress.value > 0 && app.workspaceInitializationProgress.value < 100);
+    downloading.resolve(); await new Promise(setImmediate);
     assert.equal(app.workspaceInitializationRows.at(-1).label, 'Parsing source description files');
+    assert.deepEqual(copy(app.workspaceInitializationRows.at(-1).progress), { value: 50, completed: 1, total: 2, unit: 'files' });
     assert.equal(app.versionChooserVisible, true);
     assert.equal(events.some(event => event.type === 'activate' || event.type === 'import'), false);
     parsing.resolve(); await new Promise(setImmediate);
@@ -647,6 +661,8 @@ test('uncached opening stays under initialization while source parsing and its d
     assert.equal(events.some(event => event.type === 'activate' || event.type === 'import'), false);
     committing.resolve(); assert.equal(await pending, true);
     assert.equal(app.workspaceInitializationActive, false);
+    assert.equal(app.workspaceInitializationProgress.value, 100);
+    assert.equal(app.workspaceInitializationRows.find(row => row.label === 'Parsing source description files').progress.completed, 2);
     const imported = events.findIndex(event => event.type === 'import'), activated = events.findIndex(event => event.type === 'activate');
     assert.ok(imported >= 0 && activated > imported);
     const labels = app.workspaceInitializationRows.map(row => row.label);
@@ -654,6 +670,20 @@ test('uncached opening stays under initialization while source parsing and its d
     assert.ok(labels.includes('Unpacking the source ZIP'));
     assert.ok(labels.includes('Verifying the source ZIP identity'));
     assert.ok(labels.includes('Applying import choices and verifying baseline proofs'));
+  } finally { app.disposeWorkspaceInitialization(); }
+});
+
+test('cached opening can complete its progress plan after a best-effort version detail request fails', async () => {
+  const { app } = harness({ request: async () => { throw new Error('Network unavailable'); } });
+  withInitialization(app); app.managedVersionDetails = null;
+  app.queueWorkspaceBackground = () => true;
+  try {
+    assert.equal(await app.continueManagedVersion(version(), 'Thai'), true);
+    const failed = app.workspaceInitializationRows.find(row => row.label === 'Checking published version and team details');
+    assert.equal(failed.status, 'failed');
+    assert.equal(app.workspaceInitializationPlan.some(step => step.label === failed.label), false);
+    assert.equal(app.workspaceInitializationProgress.value, 100);
+    assert.equal(app.workspaceInitializationActive, false);
   } finally { app.disposeWorkspaceInitialization(); }
 });
 

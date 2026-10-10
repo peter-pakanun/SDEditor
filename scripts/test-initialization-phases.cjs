@@ -8,6 +8,7 @@ function harness() {
   const location = { hash: '', hostname: '127.0.0.1', search: '', pathname: '/', origin: 'http://127.0.0.1' };
   const window = { OfflineStore: {}, CloudSync: {}, fetch() {}, addEventListener() {} };
   const context = vm.createContext({ window, location, navigator: {}, URL, URLSearchParams,
+    Vue: { toRaw: value => value },
     sessionStorage: { getItem() { return null; } }, history: { replaceState() {} },
     document: { hidden: false, addEventListener() {} }, setInterval() { return 1; },
     setTimeout, clearTimeout, clearInterval });
@@ -26,9 +27,10 @@ function harness() {
     const task = { label }; phases.push(task); return task;
   };
   editor.finishWorkspaceInitializationTask = (task, result = {}) => { if (task) task.result = result; };
+  editor.updateWorkspaceInitializationTaskProgress = (task, progress) => { if (task) (task.progress ||= []).push(progress); };
   editor.runWorkspaceInitializationTask = async (label, callback) => {
     const task = editor.beginWorkspaceInitializationTask(label);
-    try { const value = await callback(); editor.finishWorkspaceInitializationTask(task); return value; }
+    try { const value = await callback(progress => editor.updateWorkspaceInitializationTaskProgress(task, progress)); editor.finishWorkspaceInitializationTask(task); return value; }
     catch (error) { editor.finishWorkspaceInitializationTask(task, { error }); throw error; }
   };
   return { editor, window, phases, background };
@@ -87,7 +89,12 @@ test('source ZIP hashing and accepted baseline checks report their phases only d
   editor.initializing = true;
   window.CollaborationProtocol = {
     zipHash: async () => 'zip-hash',
-    buildBaselineTree: async () => ({ root: 'tree-root' }),
+    buildBaselineTree: async (source, provider, options) => {
+      assert.equal(provider, undefined, 'Initialization passes options separately from the crypto provider.');
+      options.onProgress?.({ completed: 0, total: 3, unit: 'items' });
+      options.onProgress?.({ completed: 3, total: 3, unit: 'items' });
+      return { root: 'tree-root' };
+    },
     finalizeArchive: async descriptor => descriptor,
   };
   editor.sourceWithImportDecisions = async source => source;
@@ -101,6 +108,10 @@ test('source ZIP hashing and accepted baseline checks report their phases only d
     'Verifying accepted source baseline identity',
   ]);
   assert.ok(phases.every(task => task.result && !task.result.error));
+  assert.deepEqual(phases[2].progress, [
+    { completed: 0, total: 3, unit: 'items' },
+    { completed: 3, total: 3, unit: 'items' },
+  ]);
   editor.initializing = false;
   await editor.buildImportedBaseline(identity, [{ filepath: 'source.txt' }]);
   assert.equal(phases.length, 4, 'Ordinary work outside initialization leaves the terminal history unchanged.');
@@ -129,4 +140,35 @@ test('a baseline builder superseded during language decisions cannot append proo
     assert.equal(editor.workspaceInitializationActive, true);
     assert.equal(editor._workspaceInitializationRun, replacement.run);
   } finally { editor.disposeWorkspaceInitialization(); }
+});
+
+test('cached collaboration progress combines file preparation and source verification with scope guards', async () => {
+  const { editor, window, phases } = harness();
+  Object.assign(editor, { initializing: true, offlineStoreReady: true, sourceLoaded: true, sourceIdentity: 'source-one',
+    cloudSignedIn: true, cloudUser: { id: 'translator', role: 'translator', language: 'Thai', assignmentVersion: 1 },
+    descs: Array.from({ length: 65 }, (_, index) => ({ filepath: `${index}.txt`, translations: { Thai: ['local'] } })),
+    localDescs: { descs: [], status: {} }, _cloud: { apiBase: 'http://api.test', context: () => ({}), request() {} },
+  });
+  let report;
+  window.CollaborationSync = { Client: class {
+    async connect({ source, onProgress }) {
+      report = onProgress;
+      const total = source.length * 7 + 3;
+      report({ completed: 0, total, unit: 'items' });
+      report({ completed: total, total, unit: 'items' });
+    }
+    select() {} disconnect() {}
+  } };
+  await editor.initializeCollaboration();
+  const task = phases[0], total = editor.descs.length * 8 + 3;
+  assert.equal(task.label, 'Preparing cached shared translations');
+  assert.deepEqual(task.progress.map(progress => progress.completed), [0, 64, 65, 65, total]);
+  assert.ok(task.progress.every(progress => progress.total === total && progress.unit === 'items'));
+  const reports = task.progress.length;
+  editor.lang = 'German';
+  report({ completed: 100, total: 100, unit: 'items' });
+  assert.equal(task.progress.length, reports, 'Late callbacks cannot publish into another selected language.');
+  editor.initializing = false;
+  await editor.initializeCollaboration();
+  assert.equal(phases.length, 1, 'Ordinary background collaboration cannot append initialization rows.');
 });

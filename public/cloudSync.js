@@ -283,15 +283,16 @@
             ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}),
             ...(/^\/v1\/(collaboration|versions|version-uploads|collections)(\/|\?|$)/.test(path) ? { 'X-SDEditor-Workspace-Version': '2' } : {}) },
           ...(options.rawBody ? { body: options.rawBody } : options.body ? { body: JSON.stringify(options.body) } : {}) };
-        const response = options.onUploadProgress && typeof XMLHttpRequest === 'function'
+        const response = (options.onUploadProgress || options.onDownloadProgress) && typeof XMLHttpRequest === 'function'
           ? await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest(); xhr.open(request.method, this.apiBase + path); xhr.responseType = 'blob';
             for (const [key, value] of Object.entries(request.headers)) xhr.setRequestHeader(key, value);
-            xhr.upload.onprogress = event => { if (this.permissionsCurrent(ctx)) options.onUploadProgress(event.loaded, event.lengthComputable ? event.total : options.rawBody?.size); };
+            if (options.onUploadProgress) xhr.upload.onprogress = event => { if (this.permissionsCurrent(ctx)) options.onUploadProgress(event.loaded, event.lengthComputable ? event.total : options.rawBody?.size); };
+            if (options.onDownloadProgress) xhr.onprogress = event => { if (this.permissionsCurrent(ctx)) options.onDownloadProgress(event.loaded, event.lengthComputable ? event.total : undefined); };
             xhr.onload = () => resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300,
               json: async () => JSON.parse(await xhr.response.text()), blob: async () => xhr.response });
-            xhr.onerror = () => reject(new Error('Archive upload could not reach the server. Retry to resume this upload.'));
-            xhr.onabort = () => reject(Object.assign(new Error('Archive upload was interrupted. Retry this upload.'), { name: 'AbortError' }));
+            xhr.onerror = () => reject(new Error(options.onUploadProgress ? 'Archive upload could not reach the server. Retry to resume this upload.' : 'Archive download could not reach the server. Open this source version again to retry.'));
+            xhr.onabort = () => reject(Object.assign(new Error(options.onUploadProgress ? 'Archive upload was interrupted. Retry this upload.' : 'Archive download was interrupted. Open this source version again to retry.'), { name: 'AbortError' }));
             controller.signal.addEventListener('abort', () => xhr.abort(), { once: true }); xhr.send(request.body);
           }) : await this.fetcher(this.apiBase + path, request);
         const data = response.status === 204 ? null : response.ok && options.responseType === 'blob' ? await response.blob() : await response.json();

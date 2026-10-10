@@ -375,7 +375,10 @@ const config = Vue.defineComponent({
     }
   },
   async mounted() {
-    const initialization = !this.testMode ? this.beginWorkspaceInitialization?.({ label: 'Starting workspace' }) : null;
+    const initialization = !this.testMode ? this.beginWorkspaceInitialization?.({ label: 'Starting workspace', plan: [
+      'Opening browser storage and checking legacy data', 'Restoring local settings',
+      { label: 'Restoring account and Dictionary', weight: 3 }, 'Saving restored settings',
+    ] }) : null;
     const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, initialization) ?? callback();
     try {
       if (this.testMode) {
@@ -1263,7 +1266,8 @@ const config = Vue.defineComponent({
       window.OfflineStore?.setGameVersion?.(targetVersion);
       this.updateDocumentTitle();
       this.loadingProgress = 0.001;
-      const initialization = this.beginWorkspaceInitialization?.({ label: 'Restoring the earlier workspace' });
+      const initialization = this.beginWorkspaceInitialization?.({ label: 'Restoring the earlier workspace',
+        plan: ['Migrating legacy source, translations and history'] });
       const preparation = this.beginWorkspaceInitializationTask?.('Migrating legacy source, translations and history', initialization);
       try {
         await window.OfflineStore.copyLegacyToVersion(targetVersion);
@@ -1300,7 +1304,7 @@ const config = Vue.defineComponent({
       const initialization = this.beginWorkspaceInitialization?.({ label: 'Initializing workspace', session: initializationSession,
         force: !initializationSession && !!this._workspaceLoadInitialization });
       this._workspaceLoadInitialization = initialization;
-      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, initialization) ?? callback();
+      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, initialization) ?? callback(() => {});
       this.versionStorageLoading = true;
       const workKey = 'load-' + generation;
       this.setBrowserWork('workspace', { key: workKey, label: 'Preparing stored translation files', active: true });
@@ -1326,6 +1330,18 @@ const config = Vue.defineComponent({
         }
         const { workspace, source: storedSource } = snapshot;
         if (!current()) return;
+        if (initialization?.ownsPlan) this.setWorkspaceInitializationPlan(initialization, [
+          ...(reusable ? ['Reusing the activated local source and saved translations']
+            : window.OfflineStore.getWorkspaceSnapshot ? ['Loading saved translations and the original source baseline']
+              : ['Loading saved translations and preserved copies', 'Loading stored source files']),
+          ...(workspace?.importArchive ? ['Loading and verifying the original baseline']
+            : storedSource?.length && window.CollaborationProtocol ? ['Verifying stored source identity'] : []),
+          ...(storedSource?.length || workspace?.importArchive ? [
+            'Applying translations and calculating file statuses', 'Preparing Dictionary matches',
+            'Preparing file search and workspace rows',
+            ...(this.initializeCollaboration ? ['Preparing cached shared translations and queued work'] : []),
+          ] : []),
+        ]);
         let source = storedSource;
         let importedBaseline = null;
         let sourceHash = '';
@@ -1353,8 +1369,8 @@ const config = Vue.defineComponent({
           sourceHash = archive.baselineId;
         } else if (Array.isArray(source) && source.length && window.CollaborationProtocol) {
           try {
-            sourceHash = await prepare('Verifying stored source identity', () => window.CollaborationProtocol.sourceHashAsync
-              ? window.CollaborationProtocol.sourceHashAsync(source, { isCancelled: () => !current(), yieldTask: () => this.yieldEditorWork() })
+            sourceHash = await prepare('Verifying stored source identity', reportProgress => window.CollaborationProtocol.sourceHashAsync
+              ? window.CollaborationProtocol.sourceHashAsync(source, { isCancelled: () => !current(), yieldTask: () => this.yieldEditorWork(), onProgress: reportProgress })
               : window.CollaborationProtocol.sourceHash(source));
           }
           catch (error) { if (current()) this.collaborationNotice = 'Source identity could not be verified. Reimport the source ZIP. ' + error.message; }
@@ -1374,7 +1390,7 @@ const config = Vue.defineComponent({
           let language;
           do {
             language = this.lang;
-            prepared = await prepare('Applying translations and calculating file statuses', () => this.prepareStoredWorkspaceSource(prepared || source, workspace, !prepared && cloneSource, current));
+            prepared = await prepare('Applying translations and calculating file statuses', reportProgress => this.prepareStoredWorkspaceSource(prepared || source, workspace, !prepared && cloneSource, current, reportProgress));
             if (!prepared || !current()) return;
           } while (language !== this.lang);
         }
@@ -1413,10 +1429,11 @@ const config = Vue.defineComponent({
         }
       }
     },
-    async prepareStoredWorkspaceSource(source, workspace, cloneSource, isCurrent) {
+    async prepareStoredWorkspaceSource(source, workspace, cloneSource, isCurrent, reportProgress = () => {}) {
       const prepared = [];
       const language = this.lang;
       let started = Date.now();
+      reportProgress({ completed: 0, total: source.length, unit: 'files' });
       window.WorkspaceState.initializeWorkspace(workspace, { source: this.workspaceSource(),
         sourceHash: workspace?.sourceHash || this.sourceIdentity, game: this.gameVersion, language });
       for (const original of source) {
@@ -1435,8 +1452,12 @@ const config = Vue.defineComponent({
         desc.isDropped = state.isDropped;
         desc.needsReview = state.needsReview;
         prepared.push(desc);
-        if (Date.now() - started >= 6) { await this.yieldEditorWork(); started = Date.now(); }
+        if (Date.now() - started >= 6) {
+          reportProgress({ completed: prepared.length, total: source.length, unit: 'files' });
+          await this.yieldEditorWork(); started = Date.now();
+        }
       }
+      if (isCurrent()) reportProgress({ completed: prepared.length, total: source.length, unit: 'files' });
       return isCurrent() ? prepared : null;
     },
     getGamePreviewFontFamily(lang) {
@@ -5366,7 +5387,10 @@ const config = Vue.defineComponent({
         }
         try {
           if (generation === this._sourceImportGeneration && this.sourceLoaded && !this.pendingDuplicateLangImport && this.initializeCollaboration) {
-            try { await this.initializeCollaboration(initialization); }
+            try {
+              await (this.runWorkspaceInitializationTask?.('Preparing cached shared translations and queued work', () => this.initializeCollaboration(initialization), initialization)
+                ?? this.initializeCollaboration(initialization));
+            }
             catch (error) { if (generation === this._sourceImportGeneration) this.collaborationFailure?.(error); }
           }
           this.scheduleCollaboration?.();
@@ -5375,7 +5399,7 @@ const config = Vue.defineComponent({
     },
 
     async performSourceZipImport(file, resolvedParsed, options) {
-      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, options.initialization) ?? callback();
+      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, options.initialization) ?? callback(() => {});
       const isPostMigrationImport = typeof options.isPostMigrationImport === 'boolean' ? options.isPostMigrationImport : !!this.needsPostMigrationImport;
       const generation = options.generation;
       const importCurrent = () => generation === this._sourceImportGeneration;
@@ -5450,10 +5474,11 @@ const config = Vue.defineComponent({
         const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
         try {
-          parsed = await prepare('Parsing source descriptions', () => allProgress(parseFuncs, (p) => {
+          parsed = await prepare('Parsing source descriptions', reportProgress => allProgress(parseFuncs, (p) => {
             if (!parseCurrent()) return;
             const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
             this.loadingProgress = percent;
+            reportProgress({ percent: Number(p), completed: Math.round(parseFuncs.length * Number(p) / 100), total: parseFuncs.length, unit: 'files' });
           }));
         } catch (error) {
           if (!parseCurrent()) return;
@@ -5490,6 +5515,12 @@ const config = Vue.defineComponent({
         && this.localDescs === importWorkspace && this.descs === importSource;
       let sourceHash;
       let importedBaseline = null;
+      if (options.initialization?.ownsPlan) this.setWorkspaceInitializationPlan(options.initialization, [
+        ...new Set(this.workspaceInitializationRows.filter(row => row.status === 'done').map(row => row.label)),
+        ...(identity ? ['Applying agreed language choices', 'Building original source baseline proofs', 'Verifying accepted source baseline identity'] : []),
+        'Carrying translations and preserved copies into the new source', 'Saving source, translations and recovery history',
+        ...(this.initializeCollaboration ? ['Preparing cached shared translations and queued work'] : []),
+      ]);
       try {
         this.importBaselineHashing = !!identity;
         importedBaseline = await this.buildImportedBaseline(identity, rawSource || parsed, options.decisions || [], acceptedArchive);
@@ -5615,12 +5646,15 @@ const config = Vue.defineComponent({
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {
-      const initialization = this.beginWorkspaceInitialization?.({ label: 'Importing translated ZIP' });
+      const initialization = this.beginWorkspaceInitialization?.({ label: 'Importing translated ZIP', plan: [
+        ...(!resolvedParsed ? ['Opening translated ZIP', 'Parsing translated descriptions'] : []),
+        'Saving imported translations and recovery history',
+      ] });
       try { return await this.performTranslatedZipImport(file, resolvedParsed, initialization); }
       finally { this.finishWorkspaceInitialization?.(initialization); }
     },
     async performTranslatedZipImport(file, resolvedParsed = null, initialization) {
-      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, initialization) ?? callback();
+      const prepare = (label, callback) => this.runWorkspaceInitializationTask?.(label, callback, initialization) ?? callback(() => {});
       if (this._importingSource || this._reconcilingImport) return;
       if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
       if (this._importingSource || this._reconcilingImport) return;
@@ -5680,9 +5714,11 @@ const config = Vue.defineComponent({
         const parseFuncs = getZipTxtFilepaths(zip).map(filepath => parseFile(filepath, zip.files[filepath], this.lang, { strict: true }));
 
         try {
-          parsed = await prepare('Parsing translated descriptions', () => allProgress(parseFuncs, (p) => {
+          parsed = await prepare('Parsing translated descriptions', reportProgress => allProgress(parseFuncs, (p) => {
+            if (importContext && !this.collaborationContextCurrent(importContext)) return;
             const percent = Math.max(0.001, Math.min(99.999, Number(p) || 0));
             this.loadingProgress = percent;
+            reportProgress({ percent: Number(p), completed: Math.round(parseFuncs.length * Number(p) / 100), total: parseFuncs.length, unit: 'files' });
           }));
         } catch (error) {
           this.loadingProgress = this.sourceLoaded ? 100 : 0;
@@ -5767,6 +5803,8 @@ const config = Vue.defineComponent({
       }
       const repairSummary = this.getImportRepairSummary(parsed);
       if (!updates.length) {
+        if (initialization?.ownsPlan) this.setWorkspaceInitializationPlan(initialization,
+          this.workspaceInitializationPlan.filter(step => step.label !== 'Saving imported translations and recovery history'));
         this.loadingProgress = 100;
         this.appAlert('No translation changes detected.' + (repairSummary ? '\n\n' + repairSummary : ''));
         return;

@@ -75,17 +75,38 @@
       try { return await action(); }
       finally { if (epoch === this.epoch) this.onWork({ key: 'source', active: false }); }
     }
-    async prepareItems(items, prepare, epoch) {
+    async prepareItems(items, prepare, epoch, onProgress) {
       const result = []; let start = Date.now();
+      if (epoch !== this.epoch || this.destroyed) throw staleError();
+      onProgress?.(0);
       for (let index = 0; index < items.length; index++) {
         if (epoch !== this.epoch || this.destroyed) throw staleError();
         result.push(prepare(items[index], index));
         if (index % 32 === 31 && Date.now() - start >= 4) {
           await new Promise(resolve => setTimeout(resolve, 0)); start = Date.now();
         }
+        if (index % 32 === 31 || index === items.length - 1) {
+          if (epoch !== this.epoch || this.destroyed) throw staleError();
+          onProgress?.(index + 1);
+        }
       }
       if (epoch !== this.epoch || this.destroyed) throw staleError();
       return result;
+    }
+    connectionPreparation(total, epoch, onProgress) {
+      let completed = 0;
+      const report = count => {
+        if (epoch === this.epoch && !this.destroyed) onProgress?.({ completed: completed + count, total, unit: 'items' });
+      };
+      return {
+        report: progress => report(progress.completed),
+        advance: count => { completed += count; },
+        items: async (items, prepare) => {
+          const result = await this.prepareItems(items, prepare, epoch, report);
+          completed += items.length;
+          return result;
+        },
+      };
     }
     fileBase(filepath) {
       let file = this.room()?.local[filepath] || (this.room()?.mode === 'sparse' && this.baselineStates?.[filepath]) || null;
@@ -317,13 +338,14 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false }) {
-      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote });
+    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
+      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote, onProgress });
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
       this.baselineStates = null; this.baselineTree = null; this.archive = null;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
+      const preparation = this.connectionPreparation((source?.length || 0) * 6 + (files?.length || 0) + 3, epoch, onProgress);
       let manifest, sourceHash;
       this.hashing = true;
       try {
@@ -336,25 +358,27 @@
         sourceHash = await this.prepareWork(() => P.sourceHashAsync(source, {
           isCancelled: () => epoch !== this.epoch || this.destroyed,
           onManifest: value => { manifest = value; },
+          onProgress: preparation.report,
         }), epoch);
         if (epoch !== this.epoch) throw staleError();
+        preparation.advance(source.length * 3 + 3);
       } finally {
         if (epoch === this.epoch) { this.hashing = false; this.notify(); }
       }
       const identity = { accountId: String(accountId), game, branchId, sourceHash, language };
       let incoming;
       await this.prepareWork(async () => {
-        this.source = await this.prepareItems(source, desc => copy(desc), epoch);
+        this.source = await preparation.items(source, desc => copy(desc));
         this.sourceFiles = new Map(); this.sourceDescriptions = new Map(this.source.map(desc => [desc.filepath, desc])); incoming = {};
-        await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
-        await this.prepareItems(files, file => {
+        await preparation.items(manifest.files, file => this.sourceFiles.set(file.filepath, file));
+        await preparation.items(files, file => {
           const original = this.sourceFiles.get(file.filepath);
           if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
           incoming[file.filepath] = fileState(file, original.english.length);
-        }, epoch);
-        await this.prepareItems(manifest.files, original => {
+        });
+        await preparation.items(manifest.files, original => {
           if (!incoming[original.filepath]) incoming[original.filepath] = fileState({ filepath: original.filepath, translations: [] }, original.english.length);
-        }, epoch);
+        });
       }, epoch);
       this.key = scopeKey(identity); this.context = this.getContext();
       await this.update((state, room) => {
@@ -384,7 +408,7 @@
       await this.finishConnection(epoch, deferRemote);
       return this.snapshot({ includeFiles: false });
     }
-    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false }) {
+    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
@@ -393,18 +417,21 @@
       if (epoch !== this.epoch) throw staleError();
       if (!Array.isArray(baselineSource) || baselineSource.length !== archive.descriptionCount
         || baselineTree?.version !== 1 || baselineTree.root !== archive.treeRoot || baselineTree.paths?.length !== archive.descriptionCount) throw new Error('The imported baseline cache is unavailable. Import the original ZIP again.');
+      const preparation = this.connectionPreparation(baselineSource.length * 4 + (files?.length || 0), epoch, onProgress);
       let manifest;
       await this.prepareWork(async () => {
-        manifest = await P.manifestAsync(baselineSource, { isCancelled: () => epoch !== this.epoch || this.destroyed });
+        manifest = await P.manifestAsync(baselineSource, { isCancelled: () => epoch !== this.epoch || this.destroyed,
+          onProgress: preparation.report });
+        preparation.advance(baselineSource.length);
         this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
         this.sourceDescriptions = new Map(baselineSource.map(desc => [desc.filepath, desc]));
         this.baselineFiles = new Map(); this.sourceFiles = new Map(); this.baselineStates = {};
-        await this.prepareItems(baselineSource, file => {
+        await preparation.items(baselineSource, file => {
           this.baselineFiles.set(file.filepath, file);
           this.baselineStates[file.filepath] = fileState({ filepath: file.filepath,
             translations: (file.translations?.[language] || []).slice(0, file.translations.English.length) }, file.translations.English.length);
-        }, epoch);
-        await this.prepareItems(manifest.files, file => this.sourceFiles.set(file.filepath, file), epoch);
+        });
+        await preparation.items(manifest.files, file => this.sourceFiles.set(file.filepath, file));
       }, epoch);
       const identity = { accountId: String(accountId), game, branchId, sourceHash: archive.baselineId, language };
       this.key = scopeKey(identity); this.context = this.getContext();
@@ -413,7 +440,7 @@
       // network check until the workspace can accept editing.
       if (!deferRemote) await this.resolveArchive(epoch, identity);
       const modernWorkspace = workspace?.stagedVersion >= 1;
-      const incoming = (await this.prepareItems(files, file => {
+      const incoming = (await preparation.items(files, file => {
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
         if (modernWorkspace ? !workspace.staged?.[language]?.[file.filepath] : !file.trackedForExport && !file.needsReview) return null;
@@ -421,11 +448,11 @@
         // A deletion restores those exact blocks instead of truncating them.
         return fileState(file, file.stagingReset || (workspace?.stagedVersion >= 1 && !workspace.staged?.[language]?.[file.filepath])
           ? undefined : original.english.length);
-      }, epoch)).filter(Boolean);
+      })).filter(Boolean);
       let legacyCarries = {};
       let records;
-      const compactManifest = { version: 2, files: await this.prepareItems(manifest.files,
-        file => ({ filepath: file.filepath, entryCount: file.english.length }), epoch) };
+      const compactManifest = { version: 2, files: await preparation.items(manifest.files,
+        file => ({ filepath: file.filepath, entryCount: file.english.length })) };
       if (this.store.getCollaborationRecords && this.store.updateCollaborationRecords) {
         const incomingPaths = incoming.filter(file => modernWorkspace ? workspace.staged?.[language]?.[file.filepath]
           : file.trackedForExport || file.needsReview).map(file => file.filepath);

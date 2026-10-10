@@ -91,14 +91,23 @@
     archive.baselineId = calculatedId;
     return archive;
   }
-  async function buildBaselineTree(source, provider) {
+  async function buildBaselineTree(source, provider, options = {}) {
     if (!Array.isArray(source) || !source.length) throw new Error('A baseline requires descriptions.');
     const files = source.map(witness).sort((a, b) => compare(a.filepath, b.filepath));
     if (files.some((file, index) => index && file.filepath === files[index - 1].filepath)) throw new Error('Duplicate baseline filepath.');
-    const levels = [await Promise.all(files.map(file => leafHash(file, provider)))];
+    let total = files.length;
+    for (let width = files.length; width > 1;) { width = Math.ceil(width / 2); total += width; }
+    let completed = 0;
+    const report = () => {
+      if (options.isCancelled?.()) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
+      options.onProgress?.({ completed, total, unit: 'items' });
+    };
+    report();
+    const track = async pending => { const hash = await pending; completed++; report(); return hash; };
+    const levels = [await Promise.all(files.map(file => track(leafHash(file, provider))))];
     while (levels[levels.length - 1].length > 1) {
       const previous = levels[levels.length - 1]; const next = [];
-      for (let index = 0; index < previous.length; index += 2) next.push(parentHash(previous[index], previous[index + 1] || previous[index], provider));
+      for (let index = 0; index < previous.length; index += 2) next.push(track(parentHash(previous[index], previous[index + 1] || previous[index], provider)));
       levels.push(await Promise.all(next));
     }
     return { version: 1, root: levels[levels.length - 1][0], paths: files.map(file => file.filepath), levels };
@@ -162,17 +171,26 @@
   async function manifestAsync(source, options = {}) {
     if (!Array.isArray(source) || !source.length) throw new Error('Collaboration requires a nonempty source archive.');
     const checkpoint = preparationSlice(options), paths = new Set(), files = [];
+    options.onProgress?.({ completed: 0, total: source.length, unit: 'files' });
     for (const desc of source) {
       files.push(manifestFile(desc, paths));
-      if (files.length % 64 === 0) await checkpoint();
+      if (files.length % 64 === 0) {
+        await checkpoint();
+        options.onProgress?.({ completed: files.length, total: source.length, unit: 'files' });
+      }
     }
     await checkpoint();
     files.sort((a, b) => compare(a.filepath, b.filepath));
     await checkpoint();
+    options.onProgress?.({ completed: files.length, total: source.length, unit: 'files' });
     return { version: 1, files };
   }
   async function sourceHashAsync(source, options = {}) {
-    const value = await manifestAsync(source?.version === 1 && Array.isArray(source.files) ? source.files : source, options);
+    const input = source?.version === 1 && Array.isArray(source.files) ? source.files : source;
+    if (!Array.isArray(input) || !input.length) throw new Error('Collaboration requires a nonempty source archive.');
+    const total = input.length * 3 + 3;
+    const report = completed => options.onProgress?.({ completed, total, unit: 'items' });
+    const value = await manifestAsync(input, { ...options, onProgress: progress => report(progress.completed) });
     options.onManifest?.(value);
     const provider = cryptoProvider(options.cryptoProvider), encoder = new TextEncoder(), checkpoint = preparationSlice(options);
     const chunks = [encoder.encode('{"version":1,"files":[')];
@@ -180,17 +198,20 @@
     for (let index = 0; index < value.files.length; index++) {
       const bytes = encoder.encode((index ? ',' : '') + JSON.stringify(value.files[index]));
       chunks.push(bytes); length += bytes.length;
-      if (index % 64 === 63) await checkpoint();
+      if (index % 64 === 63) { await checkpoint(); report(value.files.length + index + 1); }
     }
+    report(value.files.length * 2);
     chunks.push(encoder.encode(']}')); length += 2;
     const bytes = new Uint8Array(length); let offset = 0;
     for (let index = 0; index < chunks.length; index++) {
       bytes.set(chunks[index], offset); offset += chunks[index].length;
-      if (index % 64 === 63) await checkpoint();
+      if (index % 64 === 63) { await checkpoint(); report(value.files.length * 2 + index + 1); }
     }
     await checkpoint();
+    report(total - 1);
     const digest = await provider.subtle.digest('SHA-256', bytes);
     await checkpoint();
+    report(total);
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   }
   async function sourceHash(source, cryptoProvider) {

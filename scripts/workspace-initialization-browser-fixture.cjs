@@ -80,6 +80,60 @@ async function installHarness(page, mode = 'held') {
     }, mode);
 }
 
+async function checkProgressUI(page, results) {
+    await page.evaluate(async () => {
+        const app = window.__initializationFixtureApp;
+        const owner = app.beginWorkspaceInitialization({ force: true, label: 'Preparing a progress fixture' });
+        const unknown = app.beginWorkspaceInitializationTask('Preparing work with unknown size', owner);
+        window.__fixtureProgress = { owner, unknown };
+        await app.$nextTick();
+    });
+    const overall = page.getByRole('progressbar', { name: 'Overall workspace initialization progress', exact: true });
+    const unknown = page.getByRole('progressbar', { name: 'Preparing work with unknown size progress', exact: true });
+    assert.equal(await overall.isVisible(), true, 'Overall progress is always visible during initialization.');
+    assert.equal(await overall.getAttribute('value'), null, 'An undiscovered overall workload remains indeterminate.');
+    assert.equal(await unknown.getAttribute('value'), null, 'Work without a measurable total remains indeterminate.');
+    assert.equal(await unknown.getAttribute('aria-valuetext'), 'In progress');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await unknown.evaluate(element => getComputedStyle(element, '::-webkit-progress-bar').animationName), 'none',
+        'Reduced motion stops the indeterminate progress animation.');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.evaluate(async () => {
+        const app = window.__initializationFixtureApp, fixture = window.__fixtureProgress;
+        app.setWorkspaceInitializationPlan(fixture.owner, [
+            { label: 'Preparing work with unknown size', weight: 1 },
+            { label: 'Downloading source archive', weight: 3 },
+        ]);
+        fixture.download = app.beginWorkspaceInitializationTask('Downloading source archive', fixture.owner);
+        app.updateWorkspaceInitializationTaskProgress(fixture.download, { completed: 1024 * 1024, total: 4 * 1024 * 1024, unit: 'bytes' });
+        app.finishWorkspaceInitializationTask(fixture.unknown);
+        await app.$nextTick();
+    });
+    const download = page.getByRole('progressbar', { name: 'Downloading source archive progress', exact: true });
+    assert.equal(await download.getAttribute('value'), '25', 'Downloaded bytes produce a determinate task percentage.');
+    assert.match(await download.getAttribute('aria-valuetext'), /1\.0 MiB \/ 4\.0 MiB/, 'The task exposes readable byte progress.');
+    assert.equal(await overall.getAttribute('value'), '43', 'Overall progress includes a completed step and the weighted measured task.');
+    assert.match(await overall.getAttribute('aria-valuetext'), /1 of 2 steps completed/, 'Overall progress exposes completed and total steps.');
+    assert.equal(await unknown.count(), 0, 'Completed unmeasured rows keep their timing without a misleading progress bar.');
+    await page.evaluate(async () => {
+        const app = window.__initializationFixtureApp;
+        app.updateWorkspaceInitializationTaskProgress(window.__fixtureProgress.download, { completed: 3 * 1024 * 1024, total: 4 * 1024 * 1024, unit: 'bytes' });
+        await app.$nextTick();
+    });
+    assert.equal(await download.getAttribute('value'), '75', 'Task progress updates in place as more bytes arrive.');
+    assert.equal(await overall.getAttribute('value'), '81', 'Overall progress advances with the measured task.');
+    await page.evaluate(async () => {
+        const app = window.__initializationFixtureApp;
+        app.finishWorkspaceInitializationTask(window.__fixtureProgress.download);
+        await app.$nextTick();
+    });
+    assert.equal(await download.getAttribute('value'), '100', 'A completed measured task retains its completed bar.');
+    assert.equal(await overall.getAttribute('value'), '99', 'Overall progress does not claim readiness while an initialization owner is active.');
+    await page.evaluate(() => window.__initializationFixtureApp.finishWorkspaceInitialization(window.__fixtureProgress.owner));
+    assert.equal(await overall.count(), 0, 'The completed initialization releases its progress view.');
+    results.push('Overall and unknown-size task progress are indeterminate until measured; byte progress updates from 25 to 75 to completion, weighted overall progress advances without reporting readiness early, and reduced motion stops the indeterminate animation.');
+}
+
 async function checkRetainedSettingsLog(page, context, screenshots, results, layouts) {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator('.workspace').getByRole('button', { name: 'Settings', exact: true }).click();
@@ -205,6 +259,7 @@ async function run() {
             'Restoring account and Dictionary', 'Saving restored settings']) assert(startupLabels.includes(label), 'Existing startup work logged: ' + label);
         results.push('Normal-mode startup logs existing browser storage, settings, account/Dictionary and settings-save work.');
         await installHarness(page);
+        await checkProgressUI(page, results);
         const terminal = page.getByRole('log', { name: 'Workspace initialization activity' });
         const openButton = () => page.locator('.onlineVersionTable').getByRole('button', { name: 'Open editor', exact: true });
         const held = name => page.waitForFunction(name => !!window.__initializationFixture.gates[name], name);
@@ -248,6 +303,9 @@ async function run() {
             }
             const errorRow = app.beginWorkspaceInitializationTask('Preserving old local work');
             app.finishWorkspaceInitializationTask(errorRow, { error: new Error('A storage error <script>alert(1)</script>') });
+            const measured = app.beginWorkspaceInitializationTask('Downloading fixture data');
+            app.updateWorkspaceInitializationTaskProgress(measured, { completed: 1024 * 1024, total: 4 * 1024 * 1024, unit: 'bytes' });
+            window.__fixtureMeasuredTask = measured;
         });
         assert.equal(await terminal.locator('img, script').count(), 0, 'Task labels/errors render as escaped text.');
         assert((await terminal.innerText()).includes('<img src=x onerror=alert(1)>'));
@@ -278,20 +336,36 @@ async function run() {
             await page.setViewportSize(viewport);
             for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
                 await page.evaluate(theme => { window.__initializationFixtureApp.theme = theme; document.documentElement.setAttribute('data-theme', theme); }, theme);
+                await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; });
                 const metrics = await terminal.evaluate(element => {
                     const panel = element.closest('.workspaceInitializationPanel'), bounds = panel.getBoundingClientRect();
                     const computed = getComputedStyle(element), timing = getComputedStyle(element.querySelector('.workspaceInitializationTime'));
+                    const overall = panel.querySelector('.workspaceInitializationOverallProgress progress').getBoundingClientRect();
+                    const taskElement = [...element.querySelectorAll('.workspaceInitializationTaskProgress progress')].at(-1);
+                    const task = taskElement.getBoundingClientRect(), terminalBounds = element.getBoundingClientRect();
+                    const progressLabel = taskElement.parentElement.querySelector('.workspaceInitializationProgressDetail');
                     return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
                         viewportWidth: innerWidth, viewportHeight: innerHeight, scrollWidth: element.scrollWidth,
                         clientWidth: element.clientWidth, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight,
                         textContrast: window.__fixtureContrast(computed.color, computed.backgroundColor),
-                        timeContrast: window.__fixtureContrast(timing.color, computed.backgroundColor) };
+                        timeContrast: window.__fixtureContrast(timing.color, computed.backgroundColor),
+                        progressTextContrast: window.__fixtureContrast(getComputedStyle(progressLabel).color, computed.backgroundColor),
+                        overallLeft: overall.left, overallRight: overall.right, overallHeight: overall.height,
+                        taskLeft: task.left, taskRight: task.right, taskHeight: task.height,
+                        taskVisible: task.top >= terminalBounds.top && task.bottom <= terminalBounds.bottom };
                 });
                 assert(metrics.x >= 0 && metrics.x + metrics.width <= viewport.width + 1, theme + ': panel fits desktop width.');
                 assert(metrics.y >= 0 && metrics.y + metrics.height <= viewport.height + 1, theme + ': panel fits desktop height.');
                 assert(metrics.scrollWidth <= metrics.clientWidth + 1, theme + ': long text wraps without horizontal overflow.');
                 assert(metrics.scrollHeight > metrics.clientHeight, theme + ': historical rows stay available by scrolling.');
                 assert(metrics.textContrast >= 4.5 && metrics.timeContrast >= 4.5, theme + ': log and times have readable contrast.');
+                assert(metrics.progressTextContrast >= 4.5, theme + ': task progress text has readable contrast.');
+                assert(metrics.overallHeight >= 8 && metrics.taskHeight >= 5, theme + ': progress bars remain visible.');
+                assert(metrics.taskVisible, theme + ': scrolling to current work exposes the task progress bar.');
+                assert(metrics.overallLeft >= metrics.x && metrics.overallRight <= metrics.x + metrics.width + 1,
+                    theme + ': overall progress fits the panel.');
+                assert(metrics.taskLeft >= metrics.x && metrics.taskRight <= metrics.x + metrics.width + 1,
+                    theme + ': task progress fits the terminal beside aligned timings.');
                 layouts.push({ viewport, theme, ...metrics });
                 await page.screenshot({ path: join(screenshots, theme + '-' + viewport.width + 'x' + viewport.height + '.png') });
             }
@@ -305,6 +379,7 @@ async function run() {
         await page.keyboard.press('Home');
         await page.waitForFunction(bottom => document.querySelector('.workspaceInitializationTerminal').scrollTop < bottom, bottom);
         results.push('All four themes at 1440×1000, resized 900×650 and shorter 900×420 fit, wrap long text, retain historical rows, provide readable contrast and support keyboard scrolling; automatic following preserves manual scrolling.');
+        await page.evaluate(() => window.__initializationFixtureApp.finishWorkspaceInitializationTask(window.__fixtureMeasuredTask));
         await release('shared');
         await page.waitForFunction(() => !window.__initializationFixtureApp.workspaceInitializationActive && !window.__initializationFixtureApp.managedVersionBusy);
         await held('final-details');

@@ -273,6 +273,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceInitializationHeading p { margin: 6px 0 0; color: var(--ui-muted); }
 .workspaceInitializationTotal, .workspaceInitializationTerminal { font-family: Consolas, "Cascadia Mono", "Courier New", monospace; font-variant-numeric: tabular-nums; }
 .workspaceInitializationTotal { color: var(--ui-muted); font-size: 18px; white-space: nowrap; }
+.workspaceInitializationOverallProgress { margin-bottom: 18px; flex: none; }
+.workspaceInitializationProgressSummary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 18px; margin-bottom: 7px; font-size: 13px; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+.workspaceInitializationProgressSummary > :first-child { color: var(--color-font); font-weight: 600; }
+.workspaceInitializationProgressBar { display: block; width: 100%; height: 8px; appearance: none; border: 0; border-radius: 4px; overflow: hidden; color: var(--initialization-progress-color, var(--ui-accent)); background: var(--color-element-alt); }
+.workspaceInitializationProgressBar::-webkit-progress-bar { border-radius: 4px; background: var(--color-element-alt); }
+.workspaceInitializationProgressBar::-webkit-progress-value { border-radius: 4px; background: var(--initialization-progress-color, var(--ui-accent)); }
+.workspaceInitializationProgressBar::-moz-progress-bar { border-radius: 4px; background: var(--initialization-progress-color, var(--ui-accent)); }
+.workspaceInitializationProgressBar:indeterminate { background: var(--color-element-alt); }
+.workspaceInitializationProgressBar:indeterminate::-webkit-progress-bar { background: linear-gradient(90deg, var(--color-element-alt) 35%, var(--initialization-progress-color, var(--ui-accent)) 50%, var(--color-element-alt) 65%); background-size: 250% 100%; animation: workspaceInitializationProgress 1.6s ease-in-out infinite; }
+.workspaceInitializationProgressBar:indeterminate::-moz-progress-bar { background: linear-gradient(90deg, var(--color-element-alt) 35%, var(--initialization-progress-color, var(--ui-accent)) 50%, var(--color-element-alt) 65%); background-size: 250% 100%; animation: workspaceInitializationProgress 1.6s ease-in-out infinite; }
+@keyframes workspaceInitializationProgress { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .workspaceInitializationProgressBar:indeterminate::-webkit-progress-bar { animation: none; background-position: 50% 0; }
+  .workspaceInitializationProgressBar:indeterminate::-moz-progress-bar { animation: none; background-position: 50% 0; }
+}
 .workspaceInitializationTerminal { min-height: min(200px, 30vh); max-height: min(55vh, 560px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--color-element); color: var(--color-font); box-shadow: var(--ui-shadow); font-size: 13px; line-height: 1.7; box-sizing: border-box; }
 .workspaceInitializationTerminal:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .workspaceInitializationRow { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; padding: 4px 0; align-items: start; }
@@ -281,6 +296,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceInitializationRow.done .workspaceInitializationMarker { color: var(--ui-saved); }
 .workspaceInitializationRow.failed .workspaceInitializationMarker, .workspaceInitializationError { color: var(--ui-missing); }
 .workspaceInitializationTask { overflow-wrap: anywhere; }
+.workspaceInitializationTaskProgress { display: block; max-width: 520px; margin: 5px 0 4px; }
+.workspaceInitializationTaskProgress .workspaceInitializationProgressBar { height: 5px; }
+.workspaceInitializationProgressDetail { display: block; margin-top: 3px; color: var(--ui-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.workspaceInitializationRow.done { --initialization-progress-color: var(--ui-saved); }
+.workspaceInitializationRow.failed { --initialization-progress-color: var(--ui-missing); }
 .workspaceInitializationError { display: block; }
 .workspaceInitializationTime { color: var(--ui-muted); white-space: nowrap; }
 .workspaceInitializationHint { margin: 12px 0 0; color: var(--ui-muted); font-size: 13px; }

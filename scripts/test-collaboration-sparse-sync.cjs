@@ -110,7 +110,7 @@ async function fixture(options = {}) {
   const baselineInitial = options.files || (options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
     translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
   const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: baselineInitial,
-    workspace: store.workspace, archive, baselineSource, baselineTree: tree, deferRemote: !!options.deferRemote };
+    workspace: store.workspace, archive, baselineSource, baselineTree: tree, deferRemote: !!options.deferRemote, onProgress: options.onProgress };
   await options.beforeConnect?.({ client, store, server, remote, connection, archive, tree });
   await client.connect(connection);
   return { client, store, server, remote, connection, archive, tree };
@@ -128,6 +128,15 @@ async function queueDeletion(value, filepath = 'a.txt') {
   return id;
 }
 let idSequence = 0;
+
+test('sparse local connection reports manifest and cached baseline preparation progress', async t => {
+  const reports = [], { client } = await fixture({ deferRemote: true, onProgress: progress => reports.push(progress) });
+  t.after(() => client.destroy());
+  const total = source.length * 4 + initial.length;
+  assert.deepEqual(reports[0], { completed: 0, total, unit: 'items' });
+  assert.deepEqual(reports.at(-1), { completed: total, total, unit: 'items' });
+  assert.ok(reports.every((progress, index) => progress.total === total && (!index || progress.completed >= reports[index - 1].completed)));
+});
 
 test('explicit staged deletion queues a verified reset, propagates to peers and keeps other languages staged', async t => {
   const value = await fixture(), { client, store, server } = value; t.after(() => client.destroy());

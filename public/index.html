@@ -442,10 +442,14 @@
           <div><h1 id="workspaceInitializationTitle">Initializing workspace</h1><p>{{ workspaceInitializationLabel }}</p></div>
           <span class="workspaceInitializationTotal" aria-label="Total elapsed time">{{ workspaceInitializationElapsed }}</span>
         </header>
+        <div class="workspaceInitializationOverallProgress">
+          <div class="workspaceInitializationProgressSummary"><span>Overall progress</span><span>{{ workspaceInitializationProgress.label }}</span></div>
+          <progress class="workspaceInitializationProgressBar" max="100" :value="workspaceInitializationProgress.value === null ? undefined : workspaceInitializationProgress.value" aria-label="Overall workspace initialization progress" :aria-valuetext="workspaceInitializationProgress.label"></progress>
+        </div>
         <div ref="workspaceInitializationLog" class="workspaceInitializationTerminal" role="log" aria-label="Workspace initialization activity" aria-live="polite" aria-relevant="additions" tabindex="0">
           <div v-for="row in workspaceInitializationRows" :key="row.id" class="workspaceInitializationRow" :class="row.status">
             <span class="workspaceInitializationMarker" aria-hidden="true">{{ row.status === 'running' ? '›' : row.status === 'done' ? '✓' : row.status === 'failed' ? '!' : '–' }}</span>
-            <span class="workspaceInitializationTask"><span class="srOnly">{{ row.status === 'running' ? 'In progress: ' : row.status === 'done' ? 'Completed: ' : row.status === 'failed' ? 'Failed: ' : 'Stopped: ' }}</span>{{ row.label }}<span v-if="row.error" class="workspaceInitializationError">{{ row.error }}</span></span>
+            <span class="workspaceInitializationTask"><span class="srOnly">{{ row.status === 'running' ? 'In progress: ' : row.status === 'done' ? 'Completed: ' : row.status === 'failed' ? 'Failed: ' : 'Stopped: ' }}</span>{{ row.label }}<span v-if="row.error" class="workspaceInitializationError">{{ row.error }}</span><span v-if="row.status === 'running' || row.progress" class="workspaceInitializationTaskProgress"><progress class="workspaceInitializationProgressBar" max="100" :value="workspaceInitializationTaskProgress(row).value === null ? undefined : workspaceInitializationTaskProgress(row).value" :aria-label="row.label + ' progress'" :aria-valuetext="workspaceInitializationTaskProgress(row).label"></progress><span class="workspaceInitializationProgressDetail">{{ workspaceInitializationTaskProgress(row).label }}</span></span></span>
             <span class="workspaceInitializationTime" aria-hidden="true">{{ workspaceInitializationDuration(row.startedAt, row.endedAt) }}</span>
           </div>
         </div>

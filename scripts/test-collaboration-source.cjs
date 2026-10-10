@@ -45,6 +45,27 @@ test('cooperative source preparation cancels before hashing or publishing a stal
   await assert.rejects(P.manifestAsync([...source, source[0]], { budgetMs: 0, yieldTask: async () => {} }), /duplicate source/);
 });
 
+test('source hash progress measures preparation and completes only after SHA-256 finishes', async () => {
+  const files = Array.from({ length: 130 }, (_, index) => ({ filepath: `${index}.txt`, stats: ['damage'],
+    variables: ['#'], remarks: [''], translations: { English: ['Original'], Thai: ['แปล'] } }));
+  const reports = []; let releaseDigest, digestStarted;
+  const started = new Promise(resolve => { digestStarted = resolve; });
+  const gate = new Promise(resolve => { releaseDigest = resolve; });
+  const cryptoProvider = { subtle: { async digest(...args) {
+    digestStarted(); await gate; return require('node:crypto').webcrypto.subtle.digest(...args);
+  } } };
+  const pending = P.sourceHashAsync(files, { cryptoProvider, onProgress: progress => reports.push(progress) });
+  await started;
+  const total = files.length * 3 + 3;
+  assert.deepEqual(reports[0], { completed: 0, total, unit: 'items' });
+  assert.equal(reports.at(-1).completed, total - 1, 'Byte preparation does not finish the digest step.');
+  releaseDigest();
+  assert.equal(await pending, await P.sourceHash(files));
+  assert.deepEqual(reports.at(-1), { completed: total, total, unit: 'items' });
+  assert.ok(reports.length > 6, 'Every cooperative preparation phase reports intermediate progress.');
+  assert.ok(reports.every((progress, index) => progress.total === total && (!index || progress.completed >= reports[index - 1].completed)));
+});
+
 test('public workspace projection remains pure and preserves other languages and metadata', () => {
   const workspace = { descs: [{ filepath: 'a.txt', translations: { English: ['Original'], Thai: ['old'], German: ['German'] } }],
     status: { 'a.txt': { preserved: true } }, unrelated: { nested: true } };
