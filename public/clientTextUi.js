@@ -17,7 +17,7 @@
     ];
     // CT drafts currently have no sparse list index. Keep complete records
     // visible so a durable draft can always be reopened after a reload.
-    const defaultFilters = () => statusFilters.map(item=>item.key);
+    const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     function detect(filename) {
         const name = String(filename), language = teams.find(team => name.toLowerCase().startsWith(team.replace(/ /g, '_').toLowerCase() + '_')) || '';
