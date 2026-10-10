@@ -1425,7 +1425,7 @@
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 const key=this.managedCatalogScope;
                 if (!local) try { const policy = await this._cloud.request('/v1/content-policy');if(key!==this.managedCatalogScope)return;this.ctPolicy=policy;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
-                else this.ctPolicy = { clientTextRoles: { default: ['normal'], French: ['normal', 'gender'] } };
+                else this.ctPolicy = { clientTextRoles: { default: ['normal'], French: ['normal', 'gender'], German: ['normal', 'gender'] } };
             },
             ctChooseFiles(event) {
                 this.ctPrepared = raw([]); this.ctUploadError = '';
