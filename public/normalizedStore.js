@@ -1,4 +1,4 @@
-/* IndexedDB v9: durable facts are records; aggregate objects are read views. */
+/* IndexedDB v10: durable facts are records; aggregate objects are read views. */
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -10,8 +10,10 @@
     files: 'workspace_files', records: 'workspace_records', drafts: 'translation_drafts',
     rooms: 'collaboration_rooms', shared: 'collaboration_files', operations: 'collaboration_operations',
     roomRecords: 'collaboration_records', submissions: 'save_submissions', receipts: 'save_receipts', migration: 'storage_migrations',
+    tmUnits: 'tm_units', tmOutbox: 'tm_outbox', tmMeta: 'tm_meta', tmRecords: 'tm_records',
   };
   const names = Object.values(stores);
+  const tmStores = [stores.tmUnits, stores.tmOutbox, stores.tmMeta, stores.tmRecords];
   const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(name => [name, canonical(value[name])])) : value;
@@ -42,10 +44,11 @@
       const store = db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, { keyPath: 'key' });
       if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope', 'scope');
       if ([stores.records, stores.shared, stores.files].includes(name) && !store.indexNames.contains('by_path')) store.createIndex('by_path', 'pathKey');
-      if ([stores.records, stores.roomRecords].includes(name) && !store.indexNames.contains('by_kind')) store.createIndex('by_kind', 'kindScope');
+      if ([stores.records, stores.roomRecords, stores.tmRecords, stores.tmOutbox].includes(name) && !store.indexNames.contains('by_kind')) store.createIndex('by_kind', 'kindScope');
       if ([stores.operations, stores.roomRecords, stores.submissions].includes(name) && !store.indexNames.contains('by_path')) store.createIndex('by_path', 'paths', { multiEntry: true });
       if (name === stores.drafts && !store.indexNames.contains('by_profile_lang')) store.createIndex('by_profile_lang', 'profileLanguage');
       if (name === stores.drafts && !store.indexNames.contains('by_scope_language')) store.createIndex('by_scope_language', 'scopeLanguage');
+      if (name === stores.tmUnits && !store.indexNames.contains('by_identity')) store.createIndex('by_identity', 'identityScope', { unique: true });
     }
   }
   function create(dependencies) {
@@ -65,6 +68,419 @@
       catch (error) { emit('failed'); throw error; }
     }
     const row = (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra });
+    const tmScope = scope => {
+      const profile = String(scope?.profile || scope?.accountId || 'guest'), language = String(scope?.language || '');
+      if (!language) throw new TypeError('Translation Memory requires a selected language.');
+      return { profile, language, key: key(profile, language) };
+    };
+    const tmGuard = options => { if (options?.guard && !options.guard()) throw Object.assign(new Error('Translation Memory account or language changed.'), { stale: true }); };
+    const tmCore = () => {
+      const core = dependencies.tmRuntime?.();
+      if (!core) throw new Error('Translation Memory is unavailable. Reload SDEditor.');
+      return core;
+    };
+    const tmIdentity = unit => tmCore().identityFor(unit);
+    const tmId = identity => {
+      const hashes = [2166136261, 2246822519, 3266489917, 668265263];
+      for (let i = 0; i < identity.length; i++) for (let j = 0; j < hashes.length; j++) hashes[j] = Math.imul(hashes[j] ^ (identity.charCodeAt(i) + j), 16777619);
+      return 'tm-' + hashes.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
+    };
+    const tmContent = unit => unit && ({ source: unit.source, target: unit.target, gameScope: unit.gameScope, context: unit.context, note: unit.note || '', enabled: unit.enabled !== false });
+    const tmRequestBytes = 900 * 1024;
+    const tmEncodedBytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+    const tmWireUnit = input => {
+      const unit=copy(input);
+      for(const field of ['revision','localRevision','language','updatedAt','author']) delete unit[field];
+      return unit;
+    };
+    const sameTm = (a, b) => same(tmContent(a), tmContent(b)) && !!a?.deleted === !!b?.deleted;
+    const tmView = record => record && ({ ...copy(record.unit), revision: Number(record.base?.revision || 0), localRevision: record.localRevision || 0,
+      ...(record.deleted ? { deleted: true, suppressed: true } : {}) });
+    const tmRow = (scope, record) => row(scope.key, record.unit.id, record, { identityScope: key(scope.key, tmIdentity(record.unit)) });
+    const tmPendingKey = id => 'pending:' + id;
+    const tmRecord = (scope, id, value) => row(scope.key, id, value, { kindScope: key(scope.key, value.kind) });
+    const tmRecordsOf = async (tx, scope, kind) => (await request(tx.objectStore(stores.tmRecords).index('by_kind').getAll(key(scope.key, kind))));
+    const tmUuid = () => globalThis.crypto?.randomUUID?.() || 'tm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    async function tmFind(tx, scope, unit, options = {}) {
+      const identity = tmIdentity(unit), byId = unit.id && await get(tx, stores.tmUnits, key(scope.key, unit.id));
+      if (byId && tmIdentity(byId.unit) !== identity) {
+        if (options.allowIdentityChange) return byId;
+        if (options.collisionFallback) return (await request(tx.objectStore(stores.tmUnits).index('by_identity').get(key(scope.key, identity))))?.value;
+        throw new Error('A Translation Memory ID was reused for another source or context.');
+      }
+      return byId || (await request(tx.objectStore(stores.tmUnits).index('by_identity').get(key(scope.key, identity))))?.value;
+    }
+    function tmHistory(tx, scope, before, after, origin, eventId) {
+      tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'history:' + eventId, { kind: 'history', id: eventId, unitId: (after || before).id,
+        before: copy(before), after: copy(after), origin, createdAt: Date.now() }));
+    }
+    async function tmCapture(tx, rawScope, rawUnits, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      const mutationId = options.mutationId || tmUuid(), marker = 'capture:' + mutationId;
+      if (await get(tx, stores.tmRecords, key(scope.key, marker))) return false;
+      const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, bootstrapped: false, localVersion: 0 };
+      let changed = false;
+      for (const raw of rawUnits || []) {
+        const normalized = tmCore().normalizeUnit({ ...raw, language: scope.language });
+        let id = normalized.id || normalized._id || tmId(tmIdentity(normalized));
+        const unit = { ...normalized, id }; delete unit._id; delete unit.localRevision; delete unit.baseRevision; delete unit.restore;
+        delete unit.deleted; delete unit.suppressed;
+        if(tmEncodedBytes({mutationId:'00000000-0000-0000-0000-000000000000',upserts:[{...tmWireUnit(unit),baseRevision:0}],deletions:[]})>tmRequestBytes) {
+          if(options.origin==='learn') continue;
+          throw new TypeError('This Translation Memory unit is too large to synchronize. Shorten its text or context.');
+        }
+        const reviewedIdentityChange = ['edit','restore','conflict_resolution'].includes(options.origin) && (options.expectedUnits && Object.hasOwn(options.expectedUnits,id)
+          || options.expectedRevision != null && options.expectedLocalRevision != null);
+        const collisionFallback = !normalized.id || options.origin === 'learn';
+        const current = await tmFind(tx, scope, unit, { allowIdentityChange: reviewedIdentityChange, collisionFallback });
+        if (!current && collisionFallback && await get(tx, stores.tmUnits, key(scope.key, id))) unit.id = id = tmUuid();
+        const currentId = current?.unit.id || id;
+        unit.id = currentId;
+        const restore = !!options.restore || !!raw.restore && ['seed','edit','restore'].includes(options.origin);
+        const explicitDelete = raw.deleted === true && ['seed','edit','restore','adopt','conflict_resolution'].includes(options.origin);
+        if (reviewedIdentityChange && current && tmIdentity(current.unit) !== tmIdentity(unit)) {
+          const duplicate = (await request(tx.objectStore(stores.tmUnits).index('by_identity').get(key(scope.key, tmIdentity(unit)))))?.value;
+          if (duplicate && duplicate.unit.id !== currentId) throw Object.assign(new Error('Another Translation Memory unit already uses this source and context.'), { code: 'TM_IDENTITY_CONFLICT' });
+        }
+        const reviewedId = options.expectedUnits && (Object.hasOwn(options.expectedUnits,currentId) ? currentId
+          : Object.hasOwn(options.expectedUnits,id) ? id : null);
+        const expected = field => typeof options[field] === 'object' ? options[field]?.[currentId] ?? options[field]?.[id] : options[field];
+        if (expected('expectedRevision') != null && Number(current?.base?.revision || 0) !== expected('expectedRevision')
+          || expected('expectedLocalRevision') != null && Number(current?.localRevision || 0) !== expected('expectedLocalRevision')
+          || reviewedId != null
+            && (!sameTm(options.expectedUnits[reviewedId], current ? tmView(current) : null)
+              || options.expectedUnits[reviewedId]?.localRevision != null && options.expectedUnits[reviewedId].localRevision !== Number(current?.localRevision || 0)))
+          throw Object.assign(new Error('Translation Memory changed after this review. Review the current unit again.'), { code: 'TM_LOCAL_CONFLICT' });
+        if (current?.deleted && !restore && !explicitDelete) continue;
+        const conflict = await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + currentId));
+        if (conflict && options.origin === 'learn') {
+          if(sameTm(conflict.local,unit)) continue;
+          tmHistory(tx,scope,conflict.local,unit,'learn_conflict',mutationId+':'+currentId);
+          conflict.local = unit;
+          tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'conflict:' + currentId, conflict));
+          changed = true; continue;
+        }
+        if (current && (explicitDelete ? current.deleted : !current.deleted && sameTm(current.unit, unit))) continue;
+        tmGuard(options);
+        const localRevision = Number(current?.localRevision || 0) + 1;
+        const next = { unit, base: current?.base || null, deleted: explicitDelete, dirty: true, localRevision };
+        tx.objectStore(stores.tmUnits).put(tmRow(scope, next));
+        tx.objectStore(stores.tmOutbox).put(tmRecord(scope, tmPendingKey(currentId), { kind: 'pending', id: currentId, unit: explicitDelete ? { ...unit, deleted:true } : unit, localRevision,
+          origin: options.origin || 'edit', restore, createdAt: Date.now() }));
+        tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + currentId));
+        tmHistory(tx, scope, current ? tmView(current) : null, tmView(next), options.origin || 'edit', mutationId + ':' + currentId);
+        changed = true;
+      }
+      tmGuard(options);
+      tx.objectStore(stores.tmRecords).put(tmRecord(scope, marker, { kind: 'capture', mutationId }));
+      if (changed) tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: { ...meta, localVersion: Number(meta.localVersion || 0) + 1 } });
+      return changed;
+    }
+    async function getTranslationMemory(rawScope) {
+      const scope = tmScope(rawScope);
+      return transaction(tmStores, 'readonly', async tx => {
+        const [rows, meta, records, pending] = await Promise.all([all(tx, stores.tmUnits, scope.key), get(tx, stores.tmMeta, scope.key),
+          tmRecordsOf(tx, scope, 'conflict'), request(tx.objectStore(stores.tmOutbox).index('by_scope').count(scope.key))]);
+        return { revision: 0, bootstrapped: false, localVersion: 0, ...meta,
+          units: rows.filter(row => !row.value.deleted).map(row => tmView(row.value)),
+          tombstones: rows.filter(row => row.value.deleted).map(row => tmView(row.value)),
+          conflicts: records.map(row => row.value).filter(value => value.kind === 'conflict'), pending };
+      });
+    }
+    async function getTranslationMemoryState(rawScope) {
+      const scope = tmScope(rawScope);
+      return transaction([stores.tmMeta, stores.tmOutbox, stores.tmRecords], 'readonly', async tx => {
+        const [meta, pending, conflicts] = await Promise.all([get(tx, stores.tmMeta, scope.key),
+          request(tx.objectStore(stores.tmOutbox).index('by_scope').count(scope.key)),
+          request(tx.objectStore(stores.tmRecords).index('by_kind').count(key(scope.key,'conflict')))]);
+        return { revision: 0, bootstrapped: false, localVersion: 0, ...meta, pending, conflicts };
+      });
+    }
+    async function tmTouch(tx, scope) {
+      const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, bootstrapped: false, localVersion: 0 };
+      tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: { ...meta, localVersion: Number(meta.localVersion || 0) + 1 } });
+    }
+    async function putTranslationMemoryUnits(scope, units, options = {}) {
+      tmGuard(options);
+      const changed = await transaction(tmStores, 'readwrite', tx => tmCapture(tx, scope, units, options));
+      return { changed };
+    }
+    async function deleteTranslationMemoryUnit(rawScope, id, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      await transaction(tmStores, 'readwrite', async tx => {
+        const current = await get(tx, stores.tmUnits, key(scope.key, id)); tmGuard(options);
+        if (!current || current.deleted) return;
+        if (options.expectedRevision != null && Number(current.base?.revision || 0) !== options.expectedRevision
+          || options.expectedLocalRevision != null && Number(current.localRevision || 0) !== options.expectedLocalRevision)
+          throw Object.assign(new Error('Translation Memory changed. Review the current unit before deleting.'), { code: 'TM_LOCAL_CONFLICT' });
+        const wires = await request(tx.objectStore(stores.tmOutbox).index('by_kind').getAll(key(scope.key, 'wire'), 1));
+        const inFlight = wires.some(row => row.value.request.upserts.some(unit => unit.id === id));
+        const cancelUnshared = !current.base && !inFlight;
+        const next = { ...current, deleted: true, dirty: !cancelUnshared, localRevision: current.localRevision + 1 };
+        tx.objectStore(stores.tmUnits).put(tmRow(scope, next));
+        if (cancelUnshared) tx.objectStore(stores.tmOutbox).delete(key(scope.key, tmPendingKey(id)));
+        else tx.objectStore(stores.tmOutbox).put(tmRecord(scope, tmPendingKey(id), { kind: 'pending', id, unit: { ...current.unit, deleted: true },
+          localRevision: next.localRevision, origin: 'delete', createdAt: Date.now() }));
+        tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + id));
+        tmHistory(tx, scope, tmView(current), tmView(next), 'delete', tmUuid() + ':' + id);
+        const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, bootstrapped: false, localVersion: 0 };
+        tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: { ...meta, localVersion: Number(meta.localVersion || 0) + 1 } });
+      });
+      return { changed: true };
+    }
+    async function getTranslationMemoryPending(rawScope, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      return transaction(tmStores, 'readwrite', async tx => {
+        const meta = await get(tx, stores.tmMeta, scope.key); if (!meta?.bootstrapped) return [];
+        const frozen = (await request(tx.objectStore(stores.tmOutbox).index('by_kind').getAll(key(scope.key, 'wire'), 1)))[0]?.value;
+        if (frozen) return [copy(frozen.request)];
+        const pending = (await request(tx.objectStore(stores.tmOutbox).index('by_kind').getAll(key(scope.key, 'pending'), 100))).map(row => row.value);
+        const requestBody = { mutationId: tmUuid(), upserts: [], deletions: [] }, localRevisions = {}, bases = {};
+        let bytes=tmEncodedBytes(requestBody);
+        for (const item of pending) {
+          if (await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + item.id))) continue;
+          const current = await get(tx, stores.tmUnits, key(scope.key, item.id));
+          if (!current) continue;
+          const baseRevision = Number(current.base?.revision || 0);
+          const unit = tmWireUnit(item.unit);let destination,change;
+          if (unit.deleted) {
+            const deletion = { id: item.id, baseRevision };
+            if (!current.base) for (const field of ['source','target','gameScope','context','note','provenance','enabled']) deletion[field] = copy(unit[field]);
+            destination=requestBody.deletions;change=deletion;
+          }
+          else {destination=requestBody.upserts;change={ ...unit,baseRevision,...(item.restore ? {restore:true} : {}) };}
+          const addedBytes=tmEncodedBytes(change)+(destination.length?1:0);
+          if(bytes+addedBytes>tmRequestBytes) {
+            if(!requestBody.upserts.length&&!requestBody.deletions.length) throw new TypeError('A saved Translation Memory unit is too large to synchronize. Edit its text or context in Manage TM.');
+            break;
+          }
+          destination.push(change);bytes+=addedBytes;
+          localRevisions[item.id] = item.localRevision; bases[item.id] = copy(current.base);
+        }
+        if (!requestBody.upserts.length && !requestBody.deletions.length) return [];
+        tmGuard(options);
+        tx.objectStore(stores.tmOutbox).put(tmRecord(scope, 'wire:' + requestBody.mutationId, { kind: 'wire', request: requestBody, localRevisions, bases }));
+        return [copy(requestBody)];
+      });
+    }
+    async function tmMergeRemote(tx, scope, remote, options = {}) {
+      const unit = { ...copy(remote), id: remote.id || remote._id }; delete unit._id;
+      if (!unit.id || !Number.isSafeInteger(unit.revision) || unit.revision < 0) throw new TypeError('Invalid shared Translation Memory unit.');
+      let current = await tmFind(tx, scope, unit, { allowIdentityChange: true }); tmGuard(options);
+      if (current?.base && current.base.revision > unit.revision && !options.rebase) return false;
+      if (options.rebase && current?.base && !sameTm(current.base,unit)) current = { ...current,dirty:true };
+      const identityOwner = (await request(tx.objectStore(stores.tmUnits).index('by_identity').get(key(scope.key,tmIdentity(unit)))))?.value;
+      if (current && current.unit.id === unit.id && identityOwner && identityOwner.unit.id !== unit.id
+        && (!current.base || tmIdentity(current.base) !== tmIdentity(unit))) {
+        // A server identity edit can meet an independently learned local row.
+        // Reconcile that natural identity while retaining the replaced row's
+        // authored content in its immutable local history.
+        tmHistory(tx,scope,tmView(current),copy(unit),'remote_identity',unit.id+':remote-identity:'+unit.revision);
+        tx.objectStore(stores.tmUnits).delete(key(scope.key,current.unit.id));
+        tx.objectStore(stores.tmOutbox).delete(key(scope.key,tmPendingKey(current.unit.id)));
+        tx.objectStore(stores.tmRecords).delete(key(scope.key,'conflict:'+current.unit.id));
+        current = { ...identityOwner, localRevision: Math.max(Number(identityOwner.localRevision || 0),Number(current.localRevision || 0)) + 1 };
+      } else if (current?.dirty && identityOwner && identityOwner.unit.id !== unit.id
+        && !sameTm(current.base,unit)) {
+        // A local source edit can leave a separately relearned copy of its old
+        // identity. A competing shared correction owns that identity; retain
+        // both local authoring attempts in history and review the source edit.
+        tmHistory(tx,scope,tmView(identityOwner),copy(unit),'remote_identity',unit.id+':remote-alias:'+unit.revision);
+        tx.objectStore(stores.tmUnits).delete(key(scope.key,identityOwner.unit.id));
+        tx.objectStore(stores.tmOutbox).delete(key(scope.key,tmPendingKey(identityOwner.unit.id)));
+        tx.objectStore(stores.tmRecords).delete(key(scope.key,'conflict:'+identityOwner.unit.id));
+      }
+      let local = current && tmView(current), dirty = !!current?.dirty;
+      const pending = current && await get(tx, stores.tmOutbox, key(scope.key, tmPendingKey(current.unit.id)));
+      const previousConflict = current && await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + current.unit.id));
+      if (!current?.dirty && !previousConflict && same(current?.base,unit)) return false;
+      if (previousConflict) { local = copy(previousConflict.local); dirty = true; }
+      if (current && current.unit.id !== unit.id) {
+        tx.objectStore(stores.tmUnits).delete(key(scope.key, current.unit.id));
+        tx.objectStore(stores.tmOutbox).delete(key(scope.key, tmPendingKey(current.unit.id)));
+        tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + current.unit.id));
+        local.id = unit.id;
+      }
+      const base = previousConflict?.base || current?.base;
+      const conflict = dirty && !sameTm(local, unit) && (previousConflict || !(base && sameTm(base, unit)));
+      if (conflict && !(unit.deleted && pending?.origin === 'learn')) {
+        tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'conflict:' + unit.id, { kind: 'conflict', id: unit.id,
+          base: copy(base), local: copy(local), shared: copy(unit), revision: unit.revision }));
+        dirty = false;
+      } else if (sameTm(local, unit) || unit.deleted) {
+        dirty = false; tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + unit.id));
+      }
+      const keepLocal = dirty && !conflict;
+      const next = { unit: keepLocal ? { ...local, id: unit.id } : unit, base: unit, dirty: keepLocal,
+        deleted: keepLocal ? !!current.deleted : !!unit.deleted, localRevision: Number(current?.localRevision || 0) + (sameTm(local, unit) ? 0 : 1) };
+      tx.objectStore(stores.tmUnits).put(tmRow(scope, next));
+      if (keepLocal) tx.objectStore(stores.tmOutbox).put(tmRecord(scope, tmPendingKey(unit.id), { ...pending, kind: 'pending', id: unit.id, unit: next.unit,
+        localRevision: next.localRevision, createdAt: pending?.createdAt || Date.now() }));
+      else tx.objectStore(stores.tmOutbox).delete(key(scope.key, tmPendingKey(unit.id)));
+      return true;
+    }
+    async function applyTranslationMemoryRemote(rawScope, payload, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      let changed = false;
+      await transaction(tmStores, 'readwrite', async tx => {
+        const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, localVersion: 0, bootstrapped: false };
+        const beforeMeta = copy(meta);
+        const units = [...(payload.units || []), ...(payload.tombstones || []).map(unit => ({ ...unit, deleted: true }))];
+        if (options.bootstrap) {
+          if (meta.bootstrapAnchor == null) meta.bootstrapAnchor = Number(payload.revision || 0);
+          for (const unit of units) {
+            const previous = await get(tx, stores.tmRecords, key(scope.key, 'bootstrap:' + unit.id));
+            if (!previous || Number(previous.unit.revision || 0) <= Number(unit.revision || 0) && !same(previous.unit,unit)) {
+              tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'bootstrap:' + unit.id, { kind: 'bootstrap', unit }));
+              changed = true;
+            }
+          }
+          if (options.complete) {
+            const staged = await tmRecordsOf(tx, scope, 'bootstrap'), seen = new Set(staged.map(row=>row.value.unit.id));
+            for (const row of staged) {
+              changed = await tmMergeRemote(tx, scope, row.value.unit, { ...options,rebase:!!meta.bootstrapRebase }) || changed; tx.objectStore(stores.tmRecords).delete(row.key);
+            }
+            if (meta.bootstrapRebase) for (const row of await all(tx,stores.tmUnits,scope.key)) {
+              const current = row.value;
+              if (!current.base || seen.has(current.unit.id)) continue;
+              const previous = await get(tx,stores.tmRecords,key(scope.key,'conflict:'+current.unit.id));
+              tx.objectStore(stores.tmRecords).put(tmRecord(scope,'conflict:'+current.unit.id,{kind:'conflict',id:current.unit.id,
+                base:copy(current.base),local:copy(previous?.local || tmView(current)),shared:null,revision:0}));
+              tx.objectStore(stores.tmUnits).put(tmRow(scope,{...current,base:null,dirty:false,deleted:true,localRevision:current.localRevision+1}));
+              tx.objectStore(stores.tmOutbox).delete(key(scope.key,tmPendingKey(current.unit.id))); changed = true;
+            }
+            meta.revision = Math.max(Number(meta.revision || 0), meta.bootstrapAnchor, Number(options.cursorRevision || 0));
+            meta.bootstrapped = true; delete meta.bootstrapAnchor; delete meta.bootstrapRebase;
+          }
+        } else {
+          for (const unit of units) changed = await tmMergeRemote(tx, scope, unit, options) || changed;
+          for (const change of payload.changes || []) for (const unit of [...(change.units || []), ...(change.tombstones || []).map(unit => ({ ...unit, deleted: true }))])
+            changed = await tmMergeRemote(tx, scope, unit, options) || changed;
+          if (!options.noCursor) meta.revision = Math.max(Number(meta.revision || 0), Number(payload.nextAfter ?? payload.revision ?? 0));
+        }
+        tmGuard(options);
+        changed = changed || !same(beforeMeta,meta);
+        if (changed) {
+          meta.localVersion = Number(meta.localVersion || 0) + 1;
+          tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: meta });
+        }
+      });
+      return { changed };
+    }
+    async function resetTranslationMemoryBootstrap(rawScope,options={}) {
+      const scope=tmScope(rawScope);tmGuard(options);
+      await transaction(tmStores,'readwrite',async tx=>{
+        const meta=await get(tx,stores.tmMeta,scope.key)||{localVersion:0};
+        for(const row of await tmRecordsOf(tx,scope,'bootstrap')) tx.objectStore(stores.tmRecords).delete(row.key);
+        for(const row of await request(tx.objectStore(stores.tmOutbox).index('by_kind').getAll(key(scope.key,'wire')))) tx.objectStore(stores.tmOutbox).delete(row.key);
+        tmGuard(options);
+        delete meta.bootstrapAnchor;
+        tx.objectStore(stores.tmMeta).put({key:scope.key,scope:scope.key,value:{...meta,revision:0,bootstrapped:false,bootstrapRebase:true,localVersion:Number(meta.localVersion||0)+1}});
+      });
+      return {changed:true};
+    }
+    async function acknowledgeTranslationMemoryWrite(rawScope, mutationId, response, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      await transaction(tmStores, 'readwrite', async tx => {
+        const wire = await get(tx, stores.tmOutbox, key(scope.key, 'wire:' + mutationId));
+        if (!wire) return;
+        if (response.mutationId !== mutationId || !Number.isSafeInteger(response.appliedRevision)) throw new Error('Invalid Translation Memory acknowledgement.');
+        const returnedUnits = response.accepted || [...(response.units || []), ...(response.tombstones || []).map(unit => ({ ...unit, deleted: true }))];
+        const later = [];
+        for (const desired of [...wire.request.upserts, ...wire.request.deletions.map(item => ({ ...item, deleted: true }))]) {
+          const current = await get(tx, stores.tmUnits, key(scope.key, desired.id)); if (!current) continue;
+          const returned = returnedUnits.find(unit => unit.id === desired.id);
+          if (!returned || !Number.isSafeInteger(returned.revision)) throw new Error('Translation Memory acknowledgement is missing the accepted unit.');
+          const expectedRevision = desired.baseRevision + (sameTm(desired, wire.bases[desired.id]) ? 0 : 1);
+          const replayAdvanced = response.replayed && returned.revision > expectedRevision;
+          const accepted = replayAdvanced ? { ...(desired.deleted ? current.unit : desired), id: desired.id,
+            revision: expectedRevision, ...(desired.deleted ? { deleted: true } : {}) } : returned;
+          if (replayAdvanced) later.push(returned);
+          delete accepted.baseRevision; delete accepted.restore;
+          const unchanged = current.localRevision === wire.localRevisions[desired.id];
+          const next = { ...current, base: accepted, unit: unchanged ? accepted : current.unit, dirty: !unchanged, deleted: unchanged ? !!accepted.deleted : current.deleted };
+          tx.objectStore(stores.tmUnits).put(tmRow(scope, next));
+          if (unchanged) tx.objectStore(stores.tmOutbox).delete(key(scope.key, tmPendingKey(desired.id)));
+        }
+        for (const remote of later) await tmMergeRemote(tx, scope, remote, options);
+        tmGuard(options);
+        tx.objectStore(stores.tmOutbox).delete(key(scope.key, 'wire:' + mutationId));
+        await tmTouch(tx,scope);
+      });
+      return { changed: true };
+    }
+    async function rejectTranslationMemoryWrite(rawScope, mutationId, conflicts = [], options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      await transaction(tmStores, 'readwrite', async tx => {
+        for (const conflict of conflicts) {
+          if (conflict.current) await tmMergeRemote(tx, scope, conflict.current, options);
+          else {
+            const current = await get(tx,stores.tmUnits,key(scope.key,conflict.id));
+            if (!current) continue;
+            tx.objectStore(stores.tmRecords).put(tmRecord(scope,'conflict:'+conflict.id,{kind:'conflict',id:conflict.id,
+              base:copy(current.base),local:tmView(current),shared:null,revision:0}));
+            tx.objectStore(stores.tmUnits).put(tmRow(scope,{...current,base:null,dirty:false,deleted:true}));
+            tx.objectStore(stores.tmOutbox).delete(key(scope.key,tmPendingKey(conflict.id)));
+          }
+        }
+        tmGuard(options); tx.objectStore(stores.tmOutbox).delete(key(scope.key, 'wire:' + mutationId));
+        await tmTouch(tx,scope);
+      });
+      return { changed: true };
+    }
+    async function resolveTranslationMemoryConflict(rawScope, id, choice, options = {}) {
+      const scope = tmScope(rawScope); tmGuard(options);
+      await transaction(tmStores, 'readwrite', async tx => {
+        const conflict = await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + id));
+        if (!conflict || options.expectedRevision != null && conflict.revision !== options.expectedRevision
+          || options.expectedConflict && !same(conflict,options.expectedConflict))
+          throw new Error('Translation Memory conflict changed. Review it again.');
+        tmGuard(options);
+        tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + id));
+        if (choice === 'local') {
+          const current=await get(tx,stores.tmUnits,key(scope.key,id));
+          await tmCapture(tx,rawScope,[conflict.local],{...options,origin:'conflict_resolution',restore:!conflict.shared||!!conflict.shared.deleted,
+            expectedUnits:{[id]:current?tmView(current):null}});
+        }
+        else if (choice !== 'shared') throw new TypeError('Choose local or shared Translation Memory.');
+        else await tmTouch(tx,scope);
+      });
+      return { changed: true };
+    }
+    async function listTranslationMemoryHistory(rawScope, id) {
+      const scope = tmScope(rawScope);
+      return transaction([stores.tmRecords], 'readonly', async tx => (await tmRecordsOf(tx, scope, 'history')).map(row => row.value)
+        .filter(value => value.kind === 'history' && (!id || value.unitId === id)).sort((a,b) => b.createdAt - a.createdAt));
+    }
+    async function adoptTranslationMemoryProfile(fromProfile, toProfile, options = {}) {
+      if (!fromProfile || !toProfile || fromProfile === toProfile) return;
+      tmGuard(options);
+      await transaction(tmStores, 'readwrite', async tx => {
+        const marker = key('adopt-tm-profile', toProfile), previous = await get(tx, stores.tmMeta, marker);
+        if (previous) return;
+        const records = await request(tx.objectStore(stores.tmUnits).getAll());
+        const groups = new Map();
+        for (const record of records) {
+          const [profile, language] = JSON.parse(record.scope);
+          if (profile !== fromProfile) continue;
+          const units = groups.get(language) || []; units.push({ ...record.value.unit, ...(record.value.deleted ? { deleted:true } : {}) }); groups.set(language, units);
+        }
+        for (const [language, units] of groups) {
+          const scope = tmScope({ profile: toProfile, language });
+          const available = [];
+          for (const unit of units) {
+            // Profile IDs are independent. A destination may already have
+            // repurposed this deterministic ID through a reviewed source edit.
+            const existing = await tmFind(tx,scope,unit,{collisionFallback:true});
+            if (existing) continue;
+            available.push(await get(tx,stores.tmUnits,key(scope.key,unit.id)) ? { ...unit,id:tmUuid() } : unit);
+          }
+          await tmCapture(tx, scope, available, { ...options, origin: 'adopt', mutationId: 'adopt:' + fromProfile + ':' + toProfile + ':' + language });
+        }
+        tmGuard(options);
+        tx.objectStore(stores.tmMeta).put({ key: marker, value: { adoptedFrom: fromProfile } });
+      });
+    }
     // Accepted baseline rows cannot change within their source identity. Share
     // their detached reads only inside one transaction, including room/workspace
     // adapters that otherwise fetch the same original several times.
@@ -654,7 +1070,8 @@
       if (checkpoint?.key) await draftGet(checkpoint.key);
       if (batch.collaboration) await rooms.ensureRoom(batch.collaboration.key);
       const db = await openDb(), tx = db.transaction([stores.meta, stores.baseline, stores.files, stores.records, stores.drafts,
-        stores.rooms, stores.shared, stores.operations, stores.roomRecords, stores.submissions, stores.receipts, revisionStoreName(scope.game)], 'readwrite');
+        stores.rooms, stores.shared, stores.operations, stores.roomRecords, stores.submissions, stores.receipts, revisionStoreName(scope.game),
+        ...(batch.tmCapture?.length ? tmStores : [])], 'readwrite');
       let roomSelection;
       const fail = error => { tx._normalizedError = error; try { tx.abort(); } catch (_) {} };
       const synthetic = work => {
@@ -872,7 +1289,10 @@
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
       importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
-      draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same };
+      draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same,
+      tmStores, tmCapture, getTranslationMemory, getTranslationMemoryState, putTranslationMemoryUnits, deleteTranslationMemoryUnit, getTranslationMemoryPending,
+      applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,
+      listTranslationMemoryHistory, adoptTranslationMemoryProfile, resetTranslationMemoryBootstrap };
   }
   return { stores, names, upgrade, create, scopeKey, baselineKey, baselineFile, sameBaselineFile, sameBaselineSource };
 });

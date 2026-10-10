@@ -7,13 +7,13 @@ SDEditor is desktop-first. Use a desktop or laptop browser with a keyboard and m
 
 ## Overview
 
-The editor helps you translate game stat descriptions while maintaining formatting, variables, and special tags. It shows you the original English text and lets you work with a Dictionary and Regex system to speed up your translation work.
+The editor helps you translate game stat descriptions while maintaining formatting, variables, and special tags. It shows the original English and provides Dictionary terminology and Translation Memory suggestions to speed up your work.
 
 ## Getting Started
 
 ### Choosing PoE1 Or PoE2
 
-When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Both versions use the same Dictionary for the selected language and your personal Regex rules. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
+When SDEditor opens, choose whether you are working on **PoE1** or **PoE2**. Source files, workspace data, and history are separated by version. Dictionary and TM stores belong to the selected language, with game scope on their entries. Personal legacy Regex backups are retained. See [Multi-Version Support](multi_version.md) for storage, migration, and auto-detection details.
 
 Click the current version name in the bottom status bar to choose a source; an unnamed local import shows its shortened source hash instead. The full editor offers the same control beside **Translation**. Hover over or focus the name for the full source identity, deadline and window details. **Online** lists manager-published versions with HEAD first. Click a row to view its details. If your account has access to one language, the version-name link, primary **Open editor** button or a double-click on the row opens that team's editor. Managers/Admins select a version, then click a language-name link or double-click its team row to open that language's editor. Ended versions and teams show an **Ended** badge beside their names, and a catalog version shows Ended for Managers/Admins once every team has ended. A version downloaded into this browser remains available while disconnected. **Offline** keeps the previous ZIP → next/update import workflow and allows a local version name. Selecting a stored version preserves its own work and history without reimporting it or recalculating Dropped assignments.
 
@@ -23,7 +23,7 @@ An import deadline is a reminder and appears after **Saved** in the bottom statu
 
 Click the **PoE1/PoE2** label in the navbar to open **Settings → General → Game version**. Choose the other game and save and close Settings to switch; pending local translation saves finish first.
 
-Use each Dictionary entry's **PoE1 / PoE2 / All** selector to choose where it applies. New entries start as **All**. Change **Settings → Editor & shortcuts → Default game version for new Dictionary entries** to **All**, **PoE1**, or **PoE2**; this personal preference applies to manual and autocomplete creation. Existing entries and added alternates keep their entry's game version. You can repeat a Find or keyword identifier in separate game entries. The current game's entry takes priority over an All entry with the same Find, including its alternates; All is the fallback when that game has no specific entry. Other-game entries stay visible and editable with a yellow warning, but do not appear in autocomplete or move to the top when matched. They also do not supply highlights, keyword/Regex replacements or terminology rules.
+Use each Dictionary entry's **PoE1 / PoE2 / All** selector to choose where it applies. New entries start as **All**. Change **Settings → Editor & shortcuts → Default game version for new Dictionary entries** to **All**, **PoE1**, or **PoE2**; this personal preference applies to manual and autocomplete creation. Existing entries and added alternates keep their entry's game version. You can repeat a Find or keyword identifier in separate game entries. The current game's entry takes priority over an All entry with the same Find, including its alternates; All is the fallback when that game has no specific entry. Other-game entries stay visible and editable with a yellow warning, but do not appear in autocomplete or move to the top when matched. They also do not supply highlights, keyword replacements or terminology rules.
 
 ### Google Backup and Language Assignment
 
@@ -31,7 +31,7 @@ Open **Settings → Cloud backup → Back up with Google** to connect personal s
 
 An administrator can change an account's role between **Translator** and **Manager** in **Settings → Cloud backup → Manage users**. Managers and admins can view and edit shared dictionaries and saved translations in every language, inspect and restore shared history, and read all language teams' comments. Select the language to work in; managers and admins also have a navbar language link that opens its Settings selector. User management remains an admin control.
 
-Settings and Regex rules stay personal to each account. Dictionaries are shared by language; saved translations and new shared history synchronize within the same game, branch, source version, and language. Dropped translations synchronize separately across assigned source versions for that game, branch and language. The editor clipboard, unsaved typing and legacy local history stay in this browser. Standalone imports keep their ZIP/baseline local; manager-published versions explicitly store the ZIP and parsed baseline on the server for authorized teams. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
+Settings and legacy Regex backups stay personal to each account. Dictionaries and TM are shared by language, with game scope on their entries. Saved translations and new shared history synchronize within the same game, branch, source version, and language. Dropped translations synchronize separately across assigned source versions for that game, branch and language. The editor clipboard, unsaved typing and legacy local history stay in this browser. Standalone imports keep their ZIP/baseline local; manager-published versions explicitly store the ZIP and compact verified metadata on the server for authorized teams. See [Cloud Backup and Collaboration](cloud_backup.md) for sync status, session renewal, recovery, and account switching.
 
 ### Settings
 
@@ -119,13 +119,13 @@ Inside an inline translation field, **Tab** moves to the next translation field,
 
 Press **Ctrl + Enter** in an inline translation field to open the full editor with the same draft and focus the same block and table column. **Escape** returns to that inline field and keeps any further edits as a local draft. If autocomplete is open, Escape closes it first.
 
-The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **Lookup**, **Preview**, and **Comments**. Dictionary and Lookup are available before opening a file. After focus leaves an editor, the sidebar retains the last file's matches, preview and comments until another file opens or the account, game, source version, branch or language changes. It fills the space between the header and bottom status bar and stays in view while the main scrollbar moves the table. Dictionary matches remain first, Lookup reads committed references, and Preview follows the active draft with frames filling the available width. Clicking anywhere inside the sidebar keeps inline editing active. The right-sidebar icon in the header hides or shows file tools to give the table more room. File selection and editing indicators continue to show other online collaborators.
+The wider **file tools** sidebar takes space beside the table and contains **Dictionary**, **TM**, **Lookup**, **Preview**, and **Comments**. Dictionary and Lookup are available before opening a file. After focus leaves an editor, the sidebar retains the last file's matches, preview and comments until another file opens or the account, game, source version, branch or language changes. It fills the space between the header and bottom status bar and stays in view while the main scrollbar moves the table. Dictionary matches remain first, TM suggests translations for the focused entry, Lookup reads committed references, and Preview follows the active draft with frames filling the available width. Clicking anywhere inside the sidebar keeps inline editing active. The right-sidebar icon in the header hides or shows file tools to give the table more room. File selection and editing indicators continue to show other online collaborators.
 
 Typing is retained as a **Local draft** in this browser, separately from staged translations. The inline draft label and **Stage draft** / **Discard draft** controls appear below the translation; errors and warnings stay in the filename column. **Stage draft** appears only when the editor text differs from this file's committed translation: its staged text when available, otherwise its original ZIP text. Opening an untouched row, including a blank translation, does not show it. Reverting all fields to the committed text clears the local draft, including when the translation was originally empty. Competing copies from other tabs still require review. Drafts keep their account/profile, game, source version, language and file identity. They do not enter translated ZIPs, change Saved/Missing/Revised counts or synchronize to other translators. Closing the full editor also keeps its draft. Use **Drafts** to review preserved drafts, including copies from other source versions, or explicitly discard a draft.
 
 Leaving an inline file attempts to promote its draft through the same save checks as the full editor. Errors keep it as a draft; warnings require confirmation, and declining keeps the draft. Findings appear below the filename. Promotion changes committed text only after the local save transaction succeeds; online synchronization then runs normally. Returning to a draft resumes its text.
 
-Click the filename to open the full editor for Dropped approval/comparison, competing dropped copies, history restoration, Regex tools and **Compare & resolve**. Inline editing never approves a Dropped copy automatically. Shared translation conflicts, competing local draft copies, and drafts whose committed base changed need explicit comparison and resolution before promotion. Opening shared-conflict review from an inline row first carries its draft into the full editor, then opens the conflict comparison.
+Click the filename to open the full editor for Dropped approval/comparison, competing dropped copies, history restoration and **Compare & resolve**. TM is available in both editors. Inline editing never approves a Dropped copy automatically. Shared translation conflicts, competing local draft copies, and drafts whose committed base changed need explicit comparison and resolution before promotion. Opening shared-conflict review from an inline row first carries its draft into the full editor, then opens the conflict comparison.
 
 In the full editor, **Show raw file** beside **Close** opens a read-only text area. Choose **Original zipped txt** to render the original parsed baseline or **With translation applied** to render the current language's editor text, including unsaved changes. Both views use the ZIP export format. **Download .txt** downloads the selected view with the original filename in UTF-16LE with a BOM. Viewing or downloading does not stage the draft. **Escape** closes the modal and returns to the editor.
 
@@ -173,7 +173,7 @@ Previous/next editor shortcuts (**F1/F2** and **Ctrl+, / Ctrl+.**) and automatic
 
 The **History** side panel distinguishes browser-local records from **Shared translation history**. Shared history shows who changed a file, when, how, and its before/after translations. A confirmed restore is a new shared change; existing history is retained. Older local history is not uploaded. See [Translation Collaboration](cloud_backup.md#translation-collaboration) for version matching, offline saves, and conflict recovery.
 
-The editor's **Save & close** button checks the text and retains a submitted save locally, then queues staging together with its local history in a background worker. You can return to the list or use **Save and open next/previous** immediately after queueing; leaving an inline file or clicking **Stage draft** uses the same background staging. The destination becomes ready before queued saving starts. Saved text and counts update when the local transaction succeeds, and online synchronization follows. Reopening that same file waits for its pending save. Reopening the original workspace after reload resumes submitted saves under their original account, language and source version; a changed base or conflicting draft requires review. A failed write retains the submitted text and shows an actionable warning. Keep the tab open when the browser reports unfinished local writes; **Retry saving** and **Download pending edits** preserve failed queued saves. ZIP export, source import, game switching and reset wait for pending local writes. Later sync failures or conflicts appear in the collaboration status. **Close** retains the local draft without staging it. For files opened from the list, both return focus to the selected file. Use the **Small**, **Medium**, or **Large** controls beside **Preview size** to resize the game preview. **Apply regex** fills a translation block using your Regex rules and Dictionary.
+The editor's **Save & close** button checks the text and retains a submitted save locally, then queues staging together with its local history in a background worker. You can return to the list or use **Save and open next/previous** immediately after queueing; leaving an inline file or clicking **Stage draft** uses the same background staging. The destination becomes ready before queued saving starts. Saved text and counts update when the local transaction succeeds, and online synchronization follows. Reopening that same file waits for its pending save. Reopening the original workspace after reload resumes submitted saves under their original account, language and source version; a changed base or conflicting draft requires review. A failed write retains the submitted text and shows an actionable warning. Keep the tab open when the browser reports unfinished local writes; **Retry saving** and **Download pending edits** preserve failed queued saves. ZIP export, source import, game switching and reset wait for pending local writes. Later sync failures or conflicts appear in the collaboration status. **Close** retains the local draft without staging it. For files opened from the list, both return focus to the selected file. Use the **Small**, **Medium**, or **Large** controls beside **Preview size** to resize the game preview. **TM** opens suggestions for the focused entry; **Prefill blanks…** previews compatible exact matches for empty entries.
 
 The editor shows each string as a block:
 - **Top side (English)**: The original text you need to translate
@@ -259,9 +259,9 @@ The editor shows metadata for each block to help you catch mismatches:
 
 If the English and Translation numbers don't match, the interface highlights the mismatched lines in red.
 
-## Using the Dictionary and Regex Panels
+## Using the Dictionary and Translation Memory Panels
 
-On the right side of the editor are two helper panels: **Dictionary** and **Regex**. These let you save common translation pairs to speed up your work.
+The editor's helper panels include **Dictionary** for terminology and **TM** for remembered complete entries. TM suggestions remain drafts until they pass the ordinary save checks.
 
 ### Opening the Helper Popup
 
@@ -346,13 +346,13 @@ Use **Settings → Data → Export settings** to download the current language's
 
 Google backup synchronizes personal settings and the translator's assigned language Dictionary or the manager/admin's selected language Dictionary; collaboration also synchronizes saved translations and new shared history for matching source versions. Managers and admins can switch languages to inspect and edit each team's shared work. The clipboard, unsaved typing, and legacy local history are not uploaded. See [Cloud Backup and Collaboration](cloud_backup.md) for first-login restores, recovery archives, and conflict resolution.
 
-### Regex (Pattern-Based Replacements)
+### Translation Memory
 
-The **Regex** tab lets you define pattern-matching rules. These are useful for translating complex phrases with variations.
+The **TM** tab shows exact, context and fuzzy matches for the focused English entry, with differences, warnings and suggested translations. **Use translation** inserts the selected result into the draft; **Prefill blanks…** previews unambiguous exact/context matches for blank entries.
 
-Use **Add rule** beside the search box underneath the tabs to create a rule.
+Successful durable saves teach valid nonblank pairs automatically. **Manage TM** provides editing, history, reviewed workspace seeding and JSON import/export. Original ZIP seeding is opt-in, and unresolved Dropped copies are excluded.
 
-See [Regex Guide](regex_guide.md) for detailed information on how to use Regex replacements.
+See the [Translation Memory Guide](translation_memory.md) for matching, game scope, synchronization and recovery. Private Regex rules remain exportable as legacy backups; the [Legacy Regex Guide](regex_guide.md) documents their historical syntax.
 
 ## Keyboard Shortcuts
 

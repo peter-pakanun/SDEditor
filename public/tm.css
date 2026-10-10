@@ -1,0 +1,51 @@
+.tmResultsPanel { padding: 12px; box-sizing: border-box; min-height: 0; }
+.tmToolbar, .tmDialogHeading, .tmManagerToolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.tmToolbar { font-size: 12px; }
+.tmToolbar label { display: flex; align-items: center; gap: 5px; }
+.tmToolbar input[type="number"] { width: 56px; min-width: 0; }
+.tmEmpty, .tmProvenance { color: var(--ui-muted); line-height: 1.6; }
+.tmIssue, .tmWarnings { color: var(--color-font); background: var(--color-diagnostic-warning); border: 1px solid var(--color-diagnostic-warning-border); border-radius: 6px; padding: 10px; line-height: 1.5; }
+.tmWarnings { padding-left: 26px; }
+.tmResultList { display: flex; flex-direction: column; gap: 6px; }
+.tmResultList > button { display: block; text-align: left; width: 100%; border: 1px solid var(--ui-border); background: var(--color-element); border-radius: 7px; padding: 10px; }
+.tmResultList > button.selected { outline: 2px solid var(--ui-accent, #5b88d6); outline-offset: -2px; }
+.tmMatchHeading { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.tmMatchHeading strong { font-size: 16px; min-width: 48px; }
+.tmMatchHeading small { margin-left: auto; color: var(--ui-muted); }
+.tmSourceSnippet, .tmTargetSnippet { display: block; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; font-size: 12px; margin-top: 5px; max-height: 4.5em; overflow: hidden; }
+.tmSourceSnippet { color: var(--ui-muted); }
+.tmMatchDetail { border-top: 1px solid var(--ui-border); margin-top: 14px; padding-top: 2px; }
+.tmMatchDetail h4 { font-size: 12px; margin: 12px 0 5px; color: var(--ui-muted); }
+.tmDiff, .tmTargetPreview { white-space: pre-wrap; overflow-wrap: anywhere; padding: 9px; border: 1px solid var(--ui-border); border-radius: 5px; line-height: 1.7; font-size: 13px; }
+.tmRemoved { background: #d8585833; text-decoration: underline; text-decoration-color: #ce4b4b; }
+.tmAdded { background: #4799bd33; text-decoration: underline; text-decoration-color: #4d9cbf; }
+.tmProvenance { font-size: 11px; overflow-wrap: anywhere; }
+.tmUseButton { width: 100%; font-weight: 600; }
+.tmBackdrop { z-index: 15000; }
+.tmPreviewBackdrop { z-index: 16000; }
+.tmDialog { width: min(1150px, calc(100vw - 48px)); font-size: 14px; }
+.tmDialogHeading h2 { margin: 0; }
+.tmDialogHeading p { margin: 7px 0 0; color: var(--ui-muted); }
+.tmDialog input, .tmDialog textarea, .tmDialog select { box-sizing: border-box; padding: 8px; font: inherit; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element); color: var(--color-font); }
+.tmDialog button { padding: 7px 12px; }
+.tmDialog textarea { width: 100%; resize: vertical; min-height: 64px; }
+.tmManagerToolbar input[type="search"] { flex: 1 1 300px; }
+.tmManagerToolbar label { display: flex; align-items: center; gap: 6px; }
+.tmEditColumns, .tmConflictColumns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.tmEditColumns label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.tmEditForm { padding: 16px; background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 8px; margin-bottom: 15px; }
+.tmManagerList > article { display: flex; align-items: flex-start; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--ui-border); }
+.tmUnitText { flex: 1; min-width: 0; }
+.tmUnitText small { color: var(--ui-muted); overflow-wrap: anywhere; }
+.tmDialog pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0; font: inherit; line-height: 1.65; }
+.tmUnitActions { display: flex; gap: 6px; flex-wrap: wrap; width: 180px; justify-content: flex-end; }
+.tmForeign { opacity: .75; }
+.tmDeleted, .tmLegacy { margin-top: 18px; border-top: 1px solid var(--ui-border); padding-top: 12px; }
+.tmDeleted > div { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 7px 0; }
+.tmSeedRow, .tmConflicts article { padding: 14px 0; border-bottom: 1px solid var(--ui-border); }
+.tmSeedRow h4, .tmConflictColumns h4 { margin: 5px 0; font-size: 12px; color: var(--ui-muted); }
+.tmSeedRow > label { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.tmFileButton { cursor: pointer; border: 1px solid var(--ui-border); border-radius: 5px; padding: 7px 12px; }
+.tmFileButton input { width: 1px; height: 1px; overflow: hidden; opacity: 0; position: absolute; }
+.inlineEditorSidebar .tmResultsPanel { flex: 1; overflow-y: auto; }
+@media (max-width: 950px) { .tmDialog { width: calc(100vw - 24px); padding: 16px; } .tmUnitActions { width: 110px; } }

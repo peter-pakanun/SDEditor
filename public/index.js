@@ -144,7 +144,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}],
+  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -4872,6 +4872,7 @@ const config = Vue.defineComponent({
     },
     focusSidebarFilterInput() {
       if (!this.editorSessionActive) return false;
+      if (this.sideTab === 'tm') { this.openTMManager?.(); return true; }
       let ref = this.sideTab === "lookup" ? this.$refs.lookupSearchInput
         : this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
       if (!ref) return false;

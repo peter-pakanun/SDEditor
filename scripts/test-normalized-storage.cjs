@@ -90,11 +90,11 @@ function schema() {
     return { db, tx: { objectStore: name => view(stores.get(name)) }, stores, created, indexes };
 }
 
-test('v9 separates translation records from KV aggregates and adds scoped indexes without deleting legacy stores', () => {
+test('v10 separates translation and TM records from KV aggregates and adds scoped indexes without deleting legacy stores', () => {
     const fixture = schema(); N.upgrade(fixture.db, fixture.tx);
     const expected = ['translation_workspaces', 'baseline_files', 'baseline_assets', 'workspace_files', 'workspace_records',
         'translation_drafts', 'collaboration_rooms', 'collaboration_files', 'collaboration_operations', 'collaboration_records',
-        'save_submissions', 'save_receipts', 'storage_migrations'];
+        'save_submissions', 'save_receipts', 'storage_migrations', 'tm_units', 'tm_outbox', 'tm_meta', 'tm_records'];
     assert.deepEqual(fixture.created.sort(), expected.sort());
     for (const name of expected) {
         assert.deepEqual(fixture.stores.get(name).options, { keyPath: 'key' });
@@ -109,12 +109,13 @@ test('v9 separates translation records from KV aggregates and adds scoped indexe
         assert.deepEqual(fixture.stores.get(name).indices.get('by_path'), { keyPath: 'pathKey' });
     }
     assert.deepEqual(fixture.stores.get('collaboration_records').indices.get('by_path'), { keyPath: 'paths', multiEntry: true });
-    for (const name of ['workspace_records', 'collaboration_records']) {
+    for (const name of ['workspace_records', 'collaboration_records', 'tm_outbox', 'tm_records']) {
         assert.deepEqual(fixture.stores.get(name).indices.get('by_kind'), { keyPath: 'kindScope' });
     }
+    assert.deepEqual(fixture.stores.get('tm_units').indices.get('by_identity'), { keyPath: 'identityScope', unique: true });
 });
 
-test('schema initialization is idempotent for workers and pages sharing the v9 database', () => {
+test('schema initialization is idempotent for workers and pages sharing the v10 database', () => {
     const fixture = schema(); N.upgrade(fixture.db, fixture.tx);
     const created = fixture.created.length, indexes = fixture.indexes.length;
     N.upgrade(fixture.db, fixture.tx);

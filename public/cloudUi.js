@@ -42,6 +42,7 @@
         return this.cloudSignedIn && window.CloudSync.canAccessAllLanguages(this.cloudUser);
       },
       cloudSyncIssue() {
+        if (this.tmIssue) return this.tmIssue;
         if (this.cloudError || this.cloudWarning) return this.cloudStatus;
         if (this.cloudSignedIn && !this.cloudCanAccessAllLanguages && !this.cloudUser?.language) return 'Not configured — awaiting admin language assignment';
         if (this.cloudConflicts.length) return 'Saved locally · dictionary conflicts need your choice';
@@ -146,6 +147,7 @@
           onWork: work => this.setBrowserWork?.('cloud', work),
           yieldWork: () => this.yieldEditorPaint?.() || new Promise(resolve => setTimeout(resolve, 0)),
           beforeSharedApply: () => this.flushScheduledSettingsSave?.(),
+          syncSharedResource: (ctx, hints) => this.syncTranslationMemory?.(ctx, hints),
           onChange: snapshot => {
             const pending = !!this.pendingSettingsSaves;
             this._cloudApplyPending = (async () => {

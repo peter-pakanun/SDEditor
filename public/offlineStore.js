@@ -6,9 +6,41 @@
   // cannot preserve named-version/profile isolation; v8 writers would replace
   // normalized facts with stale aggregates. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 9;
+  const DB_VERSION = 10;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
+  const tmListeners = new Set();
+  let tmChannel;
+  // Workers report committed captures through their save ACK. Only pages
+  // publish the small scope hint so another tab reloads its durable library.
+  if (typeof window === 'object' && typeof runtime.BroadcastChannel === 'function') {
+    try {
+      tmChannel = new runtime.BroadcastChannel('sdeditor-tm-changes');
+      tmChannel.onmessage = event => {
+        const value = event?.data;
+        if (value?.type !== 'tm-change' || typeof value.profile !== 'string' || !value.profile
+          || typeof value.language !== 'string' || !value.language) return;
+        emitTranslationMemoryChange({ profile:value.profile,language:value.language });
+      };
+    } catch (_) {}
+  }
+  function emitTranslationMemoryChange(value) {
+    for (const listener of [...tmListeners]) { try { listener(value); } catch (_) {} }
+  }
+  function notifyTranslationMemoryChange(scope) {
+    const value = { profile: String(scope?.profile || scope?.accountId || 'guest'), language: scope?.language };
+    emitTranslationMemoryChange(value);
+    if (typeof value.language === 'string' && value.language) {
+      try { tmChannel?.postMessage({ type:'tm-change',...value }); } catch (_) {}
+    }
+  }
+  function onTranslationMemoryChange(listener) { tmListeners.add(listener); return () => tmListeners.delete(listener); }
+  const tmMutation = method => async (scope, ...args) => {
+    if (!normalized) throw new Error('Translation Memory storage is unavailable. Reload SDEditor.');
+    const captured = { profile: String(scope?.profile || scope?.accountId || 'guest'), language: scope?.language };
+    const result = await normalized[method](captured, ...args);
+    if (result?.changed !== false && args[args.length-1]?.notify !== false) notifyTranslationMemoryChange(captured); return result;
+  };
   function notifyMigration(event) {
     if (event.state === 'started') migrationActivities.set(event.id, event);
     else migrationActivities.delete(event.id);
@@ -21,7 +53,8 @@
   }
   const normalized = runtime.NormalizedStore?.create({ openDb, W: WorkspaceState, legacyGet: kvGet,
     workspaceKey, sourceKey, receiptKey: receiptScopeKey, revisionStoreName, scopedRevision, normalizeScope: normalizeWorkspaceScope,
-    onMigration: notifyMigration, prepareWorkspace: (scope, language) => getLegacyWorkspaceView(scope, language, true),
+    onMigration: notifyMigration, tmRuntime: () => runtime.TranslationMemory,
+    prepareWorkspace: (scope, language) => getLegacyWorkspaceView(scope, language, true),
     preparedRoom: (scope, key) => preparedRoomRepairs.get(normalized.scopeKey(scope))?.rooms?.[key],
     legacyBaseline: (workspace, scope) => workspace.importArchive ? kvGet(importedBaselineKey(workspace.importArchive.baselineId, scope.game)) : undefined });
   const normalizedRooms = normalized && runtime.NormalizedRooms?.create(normalized);
@@ -1036,7 +1069,7 @@
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
       ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
       ...(!resetStaging && batch.bases ? { bases: batch.bases } : {}), ...(batch.checkpoint ? { checkpoint: batch.checkpoint } : {}),
-      ...(draft ? { draft } : {}) });
+      ...(draft ? { draft } : {}), ...(Object.hasOwn(batch, 'tmCapture') ? { tmCapture: batch.tmCapture, origin: batch.origin } : {}) });
     const receiptKey = captured ? receiptScopeKey(captured) : 'translation_save_receipts_' + batch.game;
     const batchWorkspaceKey = workspaceKey(captured || batch.game), batchSourceKey = sourceKey(captured || batch.game);
     const db = await openDb();
@@ -1044,7 +1077,7 @@
     const recordMode = await usesRecords(captured);
     const recordBatch = recordMode ? await normalized.beginBatch(batch, captured,
       { workspace: batchWorkspaceKey, source: batchSourceKey, receipts: receiptKey }, normalizedRooms) : null;
-    const tx = recordBatch?.tx || db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const tx = recordBatch?.tx || db.transaction([STORE_KV, revisionsStore, ...(batch.tmCapture?.length && normalized ? normalized.tmStores : [])], 'readwrite');
     const done = txDone(tx);
     const kv = recordBatch?.kv || tx.objectStore(STORE_KV);
     let failure, result;
@@ -1329,7 +1362,14 @@
             pending: recordMode ? previousRoomPending - previousSelectedPending + room.outbox.length : room.outbox.length, operation, operations } : {}) };
         // A lost worker response can be retried with the original identifier.
         // Keep recent receipts without growing the workspace on every save.
-        kv.put({ key: receiptKey, value: recordMode ? [{ jobId: batch.jobId, signature, result }] : [...receipts, { jobId: batch.jobId, signature, result }].slice(-256) });
+        const writeReceipt = () => kv.put({ key: receiptKey, value: recordMode ? [{ jobId: batch.jobId, signature, result }]
+          : [...receipts, { jobId: batch.jobId, signature, result }].slice(-256) });
+        if (batch.tmCapture?.length) {
+          if (!normalized || !['save', 'confirm', 'confirm_unchanged', 'restore', 'consistency'].includes(batch.origin || batch.collaboration?.origin || 'save'))
+            throw new Error('Translation Memory learning requires a confirmed local save.');
+          normalized.tmCapture(tx, { profile: batch.accountId || 'guest', language: batch.language }, batch.tmCapture,
+            { origin: 'learn', mutationId: 'save:' + batch.jobId }).then(changed => { result.tmChanged = changed; writeReceipt(); }, fail);
+        } else writeReceipt();
       } catch (error) { fail(error); }
     };
     try {
@@ -1557,6 +1597,20 @@
     adoptGuestVersion,
     migrateFromLocalStorageIfNeeded,
     onMigration,
+    onTranslationMemoryChange,
+    notifyTranslationMemoryChange,
+    getTranslationMemory: normalized ? scope => normalized.getTranslationMemory(scope) : undefined,
+    getTranslationMemoryState: normalized ? scope => normalized.getTranslationMemoryState(scope) : undefined,
+    putTranslationMemoryUnits: tmMutation('putTranslationMemoryUnits'),
+    deleteTranslationMemoryUnit: tmMutation('deleteTranslationMemoryUnit'),
+    getTranslationMemoryPending: normalized ? (scope, options) => normalized.getTranslationMemoryPending(scope, options) : undefined,
+    applyTranslationMemoryRemote: tmMutation('applyTranslationMemoryRemote'),
+    resetTranslationMemoryBootstrap: tmMutation('resetTranslationMemoryBootstrap'),
+    acknowledgeTranslationMemoryWrite: tmMutation('acknowledgeTranslationMemoryWrite'),
+    rejectTranslationMemoryWrite: tmMutation('rejectTranslationMemoryWrite'),
+    resolveTranslationMemoryConflict: tmMutation('resolveTranslationMemoryConflict'),
+    listTranslationMemoryHistory: normalized ? (scope, id) => normalized.listTranslationMemoryHistory(scope, id) : undefined,
+    adoptTranslationMemoryProfile: normalized ? (...args) => normalized.adoptTranslationMemoryProfile(...args) : undefined,
     getSettings: () => kvGet(KV_SETTINGS),
     setSettings: (settings) => kvSet(KV_SETTINGS, settings),
     getHybridState: () => kvGet('hybrid_v1'),

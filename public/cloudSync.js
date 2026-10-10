@@ -103,7 +103,7 @@
     }).map(entry => entry._id);
   }
   class Client {
-    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks, WebSocket: Socket, onWork, yieldWork, beforeSharedApply }) {
+    constructor({ store, merge, fetch: fetcher, apiBase, onChange, onStatus, uuid, locks, WebSocket: Socket, onWork, yieldWork, beforeSharedApply, syncSharedResource }) {
       this.store = store; this.merge = merge; this.fetcher = fetcher;
       this.apiBase = apiBase.replace(/\/$/, '');
       this.onChange = onChange || (() => {}); this.onStatus = onStatus || (() => {});
@@ -116,6 +116,7 @@
       this.lastNotification = null; this.notifiedDictionary = null; this.notifiedConflicts = null;
       this.onWork = onWork || (() => {}); this.yieldWork = yieldWork || (() => Promise.resolve());
       this.beforeSharedApply = beforeSharedApply || (() => true);
+      this.syncSharedResource = syncSharedResource || (() => Promise.resolve());
     }
     async initialize(legacy) {
       this.state = await this.store.getHybridState();
@@ -342,6 +343,7 @@
           const profile = newProfile({ ...guest.settings, editorClipboard: guest.clipboard });
           profile.dictionaries = Object.fromEntries(Object.entries(guest.dictionaries).map(([lang, d]) => [lang, newDictionary(d.entries)]));
           profile.unassignedDictionary = copy(guest.unassignedDictionary || null);
+          profile.tmAdoptGuest = true;
           state.profiles[id] = profile;
         }
         state.auth = { token: result.token, user: copy(result.user), expiresAt: result.expiresAt };
@@ -392,7 +394,7 @@
       const key = this.hintKey(ctx);
       const prior = !authoritative && this.hintsContext === key ? this.remoteHints : null;
       this.remoteHints = { ...hints };
-      for (const field of ['settingsRevision', 'dictionaryRevision']) {
+      for (const field of ['settingsRevision', 'dictionaryRevision', 'tmRevision']) {
         if (prior?.[field] != null && Number(prior[field]) > Number(hints[field])) this.remoteHints[field] = prior[field];
       }
       this.hintsContext = key;
@@ -499,6 +501,9 @@
         if (!d?.base || d.pendingWrite || d.pendingResolution || d.pendingHistoryRestore
           || d.syncedLocalVersion == null || d.syncedLocalVersion !== (d.localVersion || 0)
           || !revisionMatches(d.revision, hints?.dictionaryRevision)) await this.syncDictionary(ctx, language);
+        if (!this.permissionsCurrent(ctx)) return;
+        await this.syncSharedResource(ctx, this.hints(ctx));
+        if (!this.permissionsCurrent(ctx)) return;
         this.backoff = 1000;
         this.notify();
         // Leave existing failures visible throughout retries; only a completed

@@ -1,6 +1,6 @@
 # Storage and preparation performance design
 
-Recorded: 2026-10-09. This document describes the implemented frontend design at `3107a34`, including the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. The measurements below are observations from the supplied Thai workspace logs and browser profiles, not guaranteed startup times. No server contract or storage schema change is proposed here.
+Recorded: 2026-10-09. The original frontend design at `3107a34` includes the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. The TM extension below adds IndexedDB v10 and companion API schema v17. Measurements are local observations, not guaranteed startup times or hosted deployment confirmation.
 
 Use this design when adding another content mode with comparable original content, editable fields, saved work, recovery, and shared editing. Other content modes are extension ideas; this document does not establish that spreadsheet or other format support already exists.
 
@@ -21,7 +21,7 @@ The current design therefore distinguishes durable records from materialized rea
 | Accepted original | Complete parsed baseline, accepted archive descriptor and proof tree; tied to source identity | Immutable. Includes original English, all original languages, and entry metadata. UI decoration, saves, shared edits and recovery do not rewrite it. |
 | Durable authored work | Per-language staged translations, recovery/provenance, drafts, submissions, history, operations and receipts | Persist facts with captured scopes and revisions. Dropped text is separate recovery evidence, never fallback current text. |
 | Workspace/editor views | Detached source, overlaid descriptions, computed statuses, search rows and editor models | Derived, independently mutable read views. Do not persist status booleans as authority. Rendering edits cannot mutate the baseline. |
-| Assistance cache | Dictionary snapshots, compiled index and English matches | Rebuildable memory data. Same-scope older generations are valid until a completed replacement is applied; hard scope changes invalidate them. |
+| Assistance cache | Dictionary/TM snapshots, compiled indexes and English matches | Rebuildable memory data. Same-scope older generations are valid until a completed replacement is applied; hard scope changes invalidate them. |
 
 `baseline_files` is reusable by game/source identity. Workspace and collaboration work additionally require account, branch and selected-language isolation. The browser still loads content into memory for editing; IndexedDB is the durable source of facts rather than a prohibition on memory caches.
 
@@ -32,6 +32,7 @@ Capture identity before the first await, queue insertion, IndexedDB request or w
 - Workspace identity: account, game, branch (initially `default`) and source hash.
 - Translation and collaboration identity: workspace identity plus selected language; preserve role/access context guards in the UI and requests.
 - Dictionary scope: account, selected language, game and effective access context. Source/branch changes can reuse the dictionary index while invalidating editor results.
+- TM durable scope: account/profile and selected language. Units carry game scope and source/branch provenance; the compiled assistance index also captures selected game/access context.
 - Editor result identity: scope plus source, branch, file, editor session and exact English input. Inline/full handoff must retain the intended session and draft ancestry.
 - Hard context change: advance the relevant epoch immediately, cancel obsolete requests, and reject late publication.
 - Same-scope Dictionary change: advance cache generation; allow a query pinned to an older completed generation unless a newer result has already been applied.
@@ -40,7 +41,7 @@ Capture identity before the first await, queue insertion, IndexedDB request or w
 
 ## Normalized IndexedDB records
 
-IndexedDB v9 uses scoped stores in [normalizedStore.js](../public/normalizedStore.js):
+IndexedDB v10 extends the v9 scoped stores in [normalizedStore.js](../public/normalizedStore.js):
 
 | Store group | Purpose |
 | --- | --- |
@@ -50,6 +51,7 @@ IndexedDB v9 uses scoped stores in [normalizedStore.js](../public/normalizedStor
 | `collaboration_rooms`, `collaboration_files`, `collaboration_operations`, `collaboration_records` | Accepted shared state, authored operations, conflicts, carries and recovery |
 | `save_submissions`, `save_receipts` | Durable submitted commands and idempotent commit evidence |
 | `storage_migrations` | Resumable normalization readiness and progress |
+| `tm_units`, `tm_meta`, `tm_outbox`, `tm_records` | Active/suppressed units, local/cloud revisions, pending mutations, conflicts, history and receipts |
 
 Aggregate source/workspace/room objects are adapters for consumers, not another copy to rewrite on every save. Existing revision stores remain available. Legacy aggregate KV data remains frozen recovery evidence; once normalized readiness is established, normalized absence is authoritative. Do not dual-write aggregates or clear storage to bypass a blocked upgrade.
 
@@ -65,6 +67,10 @@ Aggregate source/workspace/room objects are adapters for consumers, not another 
 6. On uncertain worker completion, retry the same job ID/content and read its receipt. Never create a fresh ID and blindly resend. Reload replays durable submissions with their original identity and scope.
 
 Receipts verify command signatures. A reused ID with different content is an error. UI callbacks run after durable acknowledgement and must not turn an observer failure into a duplicate saved revision. Remote event changes and replay cursor commit together; a mutation acknowledgement does not skip unseen events.
+
+TM learning prepares only the saved file's complete English/target entry pairs, then joins the same affected-file transaction. It does not rescan the workspace or modify the immutable baseline. Nonblank syntax/structure-compatible pairs are eligible; unresolved Dropped text and drafts are not. Unit identity uses raw source and canonical context within language/game scope. Corrections update the active unit and append history; tombstones prevent automatic relearning. Revision and mutation checks preserve replay safety across local saves and cloud events.
+
+Core normalization shares the API's field limits: source/target 32,768 characters, note/condition/remarks 4,096, filepath 2,048, and at most 128 stat IDs of 1,024 characters each. Oversized auxiliary learning is excluded without failing the translation save. Explicit imports/edits must validate before queuing; wire mutations additionally respect 100-unit and 1 MiB limits.
 
 ## Combined activation and immutable source reuse
 
@@ -129,6 +135,18 @@ The worker owns the trie and compiled matching state. Plain snapshots contain de
 An open file batches decoded English blocks/table fields once. Translation typing and popup navigation reuse captured results synchronously. On a new publication, refresh assistance without replacing translation text, drafts, inputs, selection, focus, scroll, held dictionary row order or editor session. An open autocomplete popup keeps its results until it closes. Paste, highlights, suggestions and notes use one captured snapshot; dictionary Add/Jump/Edit validates current editable IDs and duplicate creation against the live model.
 
 Closing an editor cancels its queries, not app-level background preparation. Full/inline opening, handoff, draft recovery, restored translations and table/source-diff paths share preparation; reuse exact-English matches when scope/input identity permits. Opening a file does not run an optional full-workspace diagnostic scan.
+
+## TM retrieval and preparation
+
+[translationMemory.js](../public/translationMemory.js) is shared by the worker, cooperative fallback, save capture and Node checks. It groups eligible units by game and raw source, then builds exact/safe-variable maps, source lengths and bigram postings. Game-specific raw sources override All. A query first retrieves exact/context matches and verified variable adaptations, then uses admissible length/bigram lower bounds and banded Unicode Levenshtein distance for fuzzy candidates. It has no fixed candidate shortlist: pruning preserves the deterministic top results. Exact identity is raw English; NFC/case/whitespace normalization affects only fuzzy lookup. Ambiguity considers every target variant, including variants beyond the visible result limit.
+
+[tmWorkerClient.js](../public/tmWorkerClient.js) transfers bounded detached packets and fragments large fields. [tmWorker.js](../public/tmWorker.js) publishes completed generations atomically. Queries pin their index until completion/cancellation; a retired pinned index delays the next build, keeping at most two compiled generations. Construction and retrieval yield in approximately 4 ms slices, with captured scope epochs and cancellable requests. Worker failure restores the last published snapshot into the same cooperative engine before building the newest input. Raw snapshots, transfer buffers and garbage can consume memory beyond the compiled index limit.
+
+Insertion validates the live unit's shared/local revisions and the captured editor session, English and draft after any confirmation. It creates a draft only. Prefill additionally requires an unambiguous compatible raw exact/context result and rechecks every row across awaits. Background TM changes preserve current text and actionable errors.
+
+The read-only Monday-labelled PoE2 ZIP benchmark (`2026-10-05_POE2_StatDescriptions.zip`, SHA-256 `1a2a6115f7807e0c95d0d4f537dac0d8fd3eb1f2c551d1e48d8ff14ee4d3f884`) yielded 30,103 eligible Thai pairs and 26,277 distinct sources. A local Node run built the index in 314 ms and matched seven exact, typo, polarity, variable, short, table and multiline queries identically to exhaustive search; indexed query times ranged from 2 to 264 ms. Retained heap after explicit GC was 68 MiB. These are single-run Node observations, not browser latency guarantees. A separate synthetic 100,000-source check exercises construction/cancellation and reports its larger memory footprint.
+
+Reproduce with `node --expose-gc scripts/test-translation-memory-performance.cjs <zip-path>`; omit the path for the synthetic corpus. Archive decoding uses the sibling API's installed parser/JSZip. It does not mutate the input ZIP or import units into browser storage. Keep exhaustive equivalence checks when adjusting pruning or score normalization.
 
 ## Local readiness and background work
 
@@ -217,8 +235,9 @@ Reuse scopes, activation snapshots, atomic submission/receipt commands, affected
 | Pointer fencing, submissions/receipts and compatibility | [offlineStore.js](../public/offlineStore.js), [saveWorkerClient.js](../public/saveWorkerClient.js) | `node scripts/test-storage-upgrade.cjs`, `node scripts/test-save-worker.cjs`, `node scripts/test-editor-drafts-storage.cjs` |
 | Local initialization gate and immutable render reuse | [index.js](../public/index.js), [workspaceInitialization.js](../public/workspaceInitialization.js), [collaborationIntegration.js](../public/collaborationIntegration.js) | `node scripts/test-collaboration-lifecycle.cjs`, `node scripts/test-initialization-phases.cjs`, `node scripts/test-workspace-initialization.cjs`, `node scripts/test-managed-versions.cjs` |
 | Worker matching/capture/fallback | [dictionaryMatching.js](../public/dictionaryMatching.js), [dictionaryWorkerClient.js](../public/dictionaryWorkerClient.js), [dictionaryWorkerUi.js](../public/dictionaryWorkerUi.js) | `node scripts/test-dictionary-worker.cjs`, `node scripts/test-dictionary-worker-client.cjs`, `node scripts/test-editor-dictionary-index.cjs` |
+| TM matching, worker fallback, draft insertion, durable learning and cloud replay | [translationMemory.js](../public/translationMemory.js), [tmWorkerClient.js](../public/tmWorkerClient.js), [tmUi.js](../public/tmUi.js), [tmCloudSync.js](../public/tmCloudSync.js) | `node scripts/test-translation-memory.cjs`, `node scripts/test-translation-memory-worker.cjs`, `node scripts/test-tm-ui.cjs`, `node scripts/test-tm-storage.cjs`, `node scripts/test-tm-cloud-sync.cjs` |
 | Editor/lookup/render paths | [editorLookup.js](../public/editorLookup.js), [inlineEditor.js](../public/inlineEditor.js), [index.js](../public/index.js) | `node scripts/test-editor-lookup.cjs`, `node scripts/test-editor-lookup-ui.cjs`, `node scripts/test-editor-opening.cjs`, `node scripts/test-inline-editor.cjs`, `node scripts/test-render-safety.cjs` |
 
 Use [normalized-storage-browser-fixture.cjs](../scripts/normalized-storage-browser-fixture.cjs) for real IndexedDB behavior, source/workspace isolation, pointer races and dense versus scattered selections. Use [startup-performance-browser-fixture.cjs](../scripts/startup-performance-browser-fixture.cjs) for 20,000 controlled rows, all four desktop themes, hidden lookup laziness, immutable baseline reuse, local/remote gating and typing/focus/caret/scroll/layout preservation. Its controlled provider is not a production ZIP import or full hosted network test.
 
-Extend existing tests rather than adding a framework. Syntax-check touched JavaScript and run `git diff --check`; `npm test` is an intentional frontend stub. API changes, if a future extension needs them, require separate API checks and compatible API-first rollout. Browser fixtures do not establish hosted OAuth/CORS or production restoration readiness.
+Extend existing tests rather than adding a framework. Syntax-check touched JavaScript and run `git diff --check`; `npm test` is an intentional frontend stub. TM requires the companion API's schema v17 and separate API checks before frontend rollout. Its disposable normal-mode browser check is `node scripts/tm-browser-fixture.cjs --check`. Browser fixtures do not establish hosted OAuth/CORS or production restoration readiness.

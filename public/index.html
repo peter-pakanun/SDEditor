@@ -34,6 +34,7 @@
   <link rel="stylesheet" href="diagnostics-ui.css">
   <link rel="stylesheet" href="comments.css">
   <link rel="stylesheet" href="editor-lookup.css">
+  <link rel="stylesheet" href="tm.css">
   <link rel="stylesheet" href="inline-editor.css">
   <link rel="stylesheet" href="managed-versions.css">
   <title>SDEditor</title>
@@ -170,7 +171,7 @@
           </section>
           <section id="settings-panel-cloud" class="settingsPanel cloudSettings" role="tabpanel" aria-labelledby="settings-tab-cloud" v-show="settingsTab === 'cloud'" tabindex="0">
             <h3>Cloud backup</h3>
-            <p class="settingsHelp">Settings and regex rules are personal. Dictionaries are shared by language. Managers and admins can work in every language.</p>
+            <p class="settingsHelp">Settings are personal. Dictionary and TM are shared by language. Managers and admins can work in every language.</p>
             <p class="settingsHelp">When signed in with language access, saved translations automatically collaborate with translators using the same game and source version. Your name and selected or open file are visible to them. Typing stays in your draft until Save.</p>
             <p class="settingsHelp"><a class="privacyLink" href="/policy" target="_blank" rel="noopener">Privacy policy</a> · How Google sign-in and cloud storage use your data.</p>
             <p v-if="testMode" class="settingsNotice">Cloud backup is disabled in test mode.</p>
@@ -187,6 +188,7 @@
               <div class="cloudActions">
                 <button v-if="cloudSignedIn && cloudSyncIssue" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
                 <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
+                <button @click="openTMManager">Manage translation memory</button>
                 <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
                 <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
                 <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
@@ -206,7 +208,7 @@
           </section>
           <section id="settings-panel-data" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-data" v-show="settingsTab === 'data'" tabindex="0">
             <h3>Settings backup</h3>
-            <p class="settingsHelp">Download your settings, regex rules, and current language Dictionary as a JSON file, or restore a saved copy.</p>
+            <p class="settingsHelp">Download settings, legacy Regex rules, and the current language Dictionary as JSON. Use Manage TM for its separate backup.</p>
             <div class="settingsActions"><button @click="exportSettingsClicked">Export settings</button><button @click="importSettingsClicked">Import settings</button></div>
             <form ref="importSettingsFileForm" hidden><input type="file" id="importSettingsFile" @change="importSettingsFileChanged" ref="importSettingsFile" accept="application/json"></form>
             <div class="settingsReset">
@@ -815,7 +817,7 @@
             </div>
             <div v-if="editorBlock.isTable" class="multilineIcon" :class="{ mismatch: editorBlock.metaColsTr !== editorBlock.metaColsEn }" v-tooltip="'Table content'">@</div>
             <div v-if="editorBlock.isMultiline" class="multilineIcon" :class="{ mismatch: editorBlock.multilineLineMismatch }" v-tooltip="'Multiline content'">↵</div>
-            <button class="applyRegexButton" @click="useRegex(editorBlock)" :disabled="editorTranslationReadOnly" tabindex="-1" title="Fill this translation using your Regex rules and Dictionary">Apply regex</button>
+            <button class="applyRegexButton" @click="openEditorTM(index)" :disabled="!editorReady" tabindex="-1" title="Find remembered translations for this entry">TM matches</button>
           </div>
           <div v-if="editorCompareActive && editorCompareMode === 'translation' && !editorBlock.isTable" class="englishDiff" v-html="editorBlock.translationDiffHtml"></div>
           <template v-else-if="editorBlock.isTable"></template>
@@ -834,10 +836,6 @@
             <button @click="openConsistencyResolver(index)" :disabled="!editorReady || editorCompareActive">Compare &amp; resolve</button>
           </div>
           <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
-          <div class="inputField" v-for="word in editorBlock.words">
-            <input type="text" placeholder="Captured" v-model="word.captured" readonly>
-            <input type="text" placeholder="Replace" v-model="word.replace" :lang="translationEditorBcp47" @input="doTranslationReplace(editorBlock, true)">
-          </div>
         </div>
       </div>
 
@@ -855,7 +853,7 @@
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
             <button type="button" class="tabBtn lookupTab" :class="{ active: sideTab === 'lookup' }" @click="openEditorLookup" :aria-pressed="sideTab === 'lookup'" aria-controls="editorLookupPanel"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg> Lookup</button>
-            <button v-if="editorVisible" class="tabBtn" :class="{ active: sideTab === 'regex' }" @click="sideTab = 'regex'">📑 Regex</button>
+            <button type="button" class="tabBtn" :class="{ active: sideTab === 'tm' }" @click="sideTab = 'tm'" aria-controls="tmResultsPanel">TM<span v-if="tmConflicts.length"> ⚡ {{ tmConflicts.length }}</span></button>
             <button v-if="editorVisible" class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
             <button v-if="!editorVisible" type="button" class="tabBtn" :class="{ active: sideTab === 'preview' }" @click="sideTab = 'preview'">Preview</button>
             <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
@@ -903,24 +901,27 @@
           </div>
         </div>
 
-        <div v-if="sideTab === 'regex' && editorReady">
-          <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="regexFilter" ref="regexFilterInput" placeholder="Search regex rules…" aria-label="Search Regex rules" @keydown.esc="regexFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Regex rule">Add rule</button></div>
-          <div class="editBlock" v-for="regex in filteredRegexes">
-            <div class="twoSided">
-              <div>
-                <div class="inputField">
-                  <input type="text" v-model="regex.find" autocorrect="off" autocomplete="off" placeholder="Find (regex)">
-                  <button @click="moveRegexUp(regex)" title="Run this rule earlier" aria-label="Move Regex rule up">🡩</button>
-                </div>
-                <div class="inputField">
-                  <input type="text" v-model="regex.replace" autocorrect="off" autocomplete="off" placeholder="Replace">
-                  <button @click="moveRegexDown(regex)" title="Run this rule later" aria-label="Move Regex rule down">🡫</button>
-                </div>
-              </div>
-              <button @click="removeRegex(regex)" title="Delete this Regex rule" :aria-label="'Delete Regex rule ' + (regex.find || 'without a pattern')">🗑️</button>
-            </div>
+        <section v-if="sideTab === 'tm'" id="tmResultsPanel" class="tmResultsPanel" tabindex="0" @keydown.stop="tmPanelKeydown" aria-label="Translation memory suggestions">
+          <div class="tmToolbar"><label>Minimum match <input type="number" v-model.number="tmThreshold" min="1" max="99" aria-label="Minimum TM match percentage">%</label><button @click="openTMManager">Manage TM</button></div>
+          <div class="tmToolbar"><span>Entry {{ (editorFocusedIndex || 0) + 1 }} · {{ tmUnits.length.toLocaleString() }} remembered</span><button @click="previewTMPrefill" :disabled="tmBusy || editorTranslationReadOnly">Prefill blanks…</button></div>
+          <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
+          <p v-if="!tmEditorKey" class="tmEmpty">Focus an entry to see remembered translations.</p>
+          <p v-else-if="!tmMatches.length" class="tmEmpty">No matching translation. Save translated entries or build TM from existing work.</p>
+          <div class="tmResultList" role="listbox" aria-label="TM matches">
+            <button v-for="(match, matchIndex) in tmMatches" :key="match.id" type="button" role="option" :aria-selected="tmSelectedIndex === matchIndex" :class="{ selected: tmSelectedIndex === matchIndex }" @focus="tmSelectedIndex = matchIndex" @click="tmSelectedIndex = matchIndex">
+              <span class="tmMatchHeading"><strong>{{ match.score }}%</strong><span>{{ tmMatchLabel(match) }}</span><small>{{ tmGameLabel(match.unit.gameScope) }}</small></span>
+              <span class="tmSourceSnippet">{{ tmText(match.source) }}</span><span class="tmTargetSnippet" :lang="translationEditorBcp47">{{ tmText(match.target) }}</span>
+            </button>
           </div>
-        </div>
+          <section v-if="tmSelectedMatch" class="tmMatchDetail" aria-label="Selected TM match comparison">
+            <h4>Remembered English</h4><div class="tmDiff"><template v-for="(part, partIndex) in tmSelectedMatch.diff.oldSource" :key="partIndex"><span :class="{ tmRemoved: part.changed }">{{ part.text }}</span></template></div>
+            <h4>Current English</h4><div class="tmDiff"><template v-for="(part, partIndex) in tmSelectedMatch.diff.currentSource" :key="partIndex"><span :class="{ tmAdded: part.changed }">{{ part.text }}</span></template></div>
+            <h4>Suggested translation</h4><div class="tmTargetPreview" :lang="translationEditorBcp47">{{ tmText(tmSelectedMatch.target) }}</div>
+            <ul v-if="tmSelectedMatch.warnings.length" class="tmWarnings"><li v-for="warning in tmSelectedMatch.warnings" :key="warning.code">{{ warning.message }}</li></ul>
+            <p class="tmProvenance">{{ tmMatchContext(tmSelectedMatch.unit) }}<br><span v-if="tmSelectedMatch.unit.author">{{ tmSelectedMatch.unit.author.name || tmSelectedMatch.unit.author }}</span><span v-if="tmSelectedMatch.unit.provenance?.sourceHash" :title="tmSelectedMatch.unit.provenance.sourceHash"> · Source {{ tmSelectedMatch.unit.provenance.sourceHash.slice(0, 12) }}</span></p>
+            <button class="tmUseButton" @click="useTMMatch()" :disabled="editorTranslationReadOnly || editorCompareActive || tmLastMatchKey !== tmEditorKey">Use translation</button>
+          </section>
+        </section>
 
         <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls sideControls">
@@ -1291,6 +1292,47 @@
       </template>
     </dialog>
 
+    <div v-if="tmManagerVisible" class="cloudResolverBackdrop tmBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmManagerVisible = false">
+      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmManagerTitle">
+        <div class="tmDialogHeading"><div><h2 id="tmManagerTitle">Translation Memory</h2><p>{{ lang }} · {{ tmUnits.length.toLocaleString() }} entries · {{ tmCloudAvailable ? 'Shared with your language team' : 'Local to this profile' }}</p></div><button @click="tmManagerVisible = false" :disabled="tmBusy" aria-label="Close TM manager">✕</button></div>
+        <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
+        <div v-if="tmConflicts.length" class="tmConflicts">
+          <h3>Corrections need your choice</h3>
+          <article v-for="conflict in tmConflicts" :key="conflict.id"><div class="tmConflictColumns"><section><h4>My correction</h4><small>{{ tmGameLabel(conflict.local?.gameScope) }} · {{ tmMatchContext(conflict.local) }}</small><pre>{{ tmText(conflict.local?.source) }}</pre><pre>{{ tmText(conflict.local?.deleted ? 'Deleted' : conflict.local?.target) }}</pre><button @click="resolveTMConflict(conflict, 'local')">{{ conflict.local?.deleted ? 'Keep my deletion' : 'Use my correction' }}</button></section><section><h4>Shared correction</h4><template v-if="conflict.shared"><small>{{ tmGameLabel(conflict.shared.gameScope) }} · {{ tmMatchContext(conflict.shared) }}</small><pre>{{ tmText(conflict.shared.source) }}</pre><pre>{{ tmText(conflict.shared.deleted ? 'Deleted' : conflict.shared.target) }}</pre></template><p v-else>Entry absent from shared TM.</p><button @click="resolveTMConflict(conflict, 'shared')">{{ !conflict.shared ? 'Keep shared absence' : conflict.shared.deleted ? 'Keep shared deletion' : 'Use shared correction' }}</button></section></div></article>
+        </div>
+        <div class="tmManagerToolbar"><input type="search" v-model="tmManageQuery" ref="tmManagerSearch" placeholder="Search English, translation, note or filepath…" aria-label="Search TM" @keydown.esc.stop="tmManageQuery = ''"><select v-model="tmManageGame" aria-label="TM game filter"><option value="current">Current game + All</option><option value="any">All games</option><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All fallback</option></select><button @click="tmEditUnit()" :disabled="tmBusy">Add entry</button></div>
+        <div class="tmManagerToolbar"><label><input type="checkbox" v-model="tmSeedIncludeZip">Include original ZIP translations when building TM</label><button @click="previewTMSeed" :disabled="tmBusy || !descs.length">Build TM from workspace…</button><button @click="exportTM">Export JSON</button><label class="tmFileButton">Import JSON<input type="file" accept=".json,application/json" @change="importTMFile" :disabled="tmBusy"></label></div>
+        <form v-if="tmEditing" class="tmEditForm" @submit.prevent="saveTMUnit">
+          <div class="tmEditColumns"><label>English<textarea v-model="tmEditing.source" rows="4" lang="en" required></textarea></label><label>Translation<textarea v-model="tmEditing.target" rows="4" :lang="translationEditorBcp47" required></textarea></label></div>
+          <div class="tmEditColumns"><label>Game<select v-model="tmEditing.gameScope"><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All</option></select></label><label>Translator note<textarea v-model="tmEditing.note" rows="2" :lang="translationEditorBcp47"></textarea></label></div>
+          <p>{{ tmMatchContext(tmEditing) }}</p><button type="submit" :disabled="tmBusy">Save TM entry</button> <button type="button" @click="tmEditing = null" :disabled="tmBusy">Cancel</button>
+        </form>
+        <div class="tmManagerList"><article v-for="unit in tmVisibleManagerRows" :key="unit.id" :class="{ tmForeign: unit.gameScope !== 'all' && unit.gameScope !== gameVersion }"><div class="tmUnitText"><strong>{{ tmGameLabel(unit.gameScope) }}</strong><pre lang="en">{{ tmText(unit.source) }}</pre><pre :lang="translationEditorBcp47">{{ tmText(unit.target) }}</pre><small>{{ tmMatchContext(unit) }}<span v-if="unit.gameScope !== 'all' && unit.gameScope !== gameVersion"> · Different game; excluded from matching</span></small><p v-if="unit.note">{{ unit.note }}</p></div><div class="tmUnitActions"><button @click="tmEditUnit(unit)" :disabled="tmBusy">Edit</button><button @click="openTMHistory(unit)">History</button><button @click="removeTMUnit(unit)" :disabled="tmBusy">Delete</button></div></article></div>
+        <p v-if="!tmManagerRows.length" class="tmEmpty">No TM entries match this filter.</p>
+        <div class="tmToolbar"><span>{{ tmManagerRows.length.toLocaleString() }} entries · Page {{ Math.min(tmManagePage, tmManagerPageCount) }} of {{ tmManagerPageCount }}</span><div><button @click="tmManagePage = Math.max(1, tmManagePage - 1)" :disabled="tmManagePage <= 1">Previous</button> <button @click="tmManagePage++" :disabled="tmManagePage >= tmManagerPageCount">Next</button></div></div>
+        <details v-if="tmTombstones.length" class="tmDeleted"><summary>Deleted entries ({{ tmDeletedRows.length }} match this filter)</summary><div v-for="unit in tmVisibleDeletedRows" :key="unit.id"><span>{{ unit.source }}</span><button @click="openTMHistory(unit)">History / restore</button></div><div class="tmToolbar"><span>Page {{ Math.min(tmDeletedPage, tmDeletedPageCount) }} of {{ tmDeletedPageCount }}</span><div><button @click="tmDeletedPage = Math.max(1, tmDeletedPage - 1)" :disabled="tmDeletedPage <= 1">Previous</button> <button @click="tmDeletedPage++" :disabled="tmDeletedPage >= tmDeletedPageCount">Next</button></div></div></details>
+        <details class="tmLegacy"><summary>Legacy Regex backup</summary><p>Regex rules are preserved privately. To reuse a rule’s output, save a validated translation pair or add it to TM.</p><button @click="exportLegacyRegex">Export legacy rules ({{ editorRegexes.length }})</button></details>
+      </section>
+    </div>
+
+    <div v-if="tmSeedVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmSeedVisible = false">
+      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmSeedTitle">
+        <div class="tmDialogHeading"><div><h2 id="tmSeedTitle">Review TM import</h2><p>{{ lang }} · {{ tmSeedSelectedCount }} selected · {{ tmSeedSkipped }} blank or incompatible entries skipped</p></div><button @click="tmSeedVisible = false" :disabled="tmBusy" aria-label="Close TM import">✕</button></div>
+        <p v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</p><p>New entries are selected. Corrections and deleted entries require your selection. Importing TM does not change workspace translations.</p>
+        <div class="tmToolbar"><button @click="tmSeedRows.forEach(row => row.selected = !row.existing && !row.imported)" :disabled="tmBusy">Select additions</button><button @click="tmSeedRows.forEach(row => row.selected = false)" :disabled="tmBusy">Clear selection</button><button @click="applyTMSeed" :disabled="tmBusy || !tmSeedSelectedCount">{{ tmBusy ? 'Importing…' : 'Import selected entries' }}</button></div>
+        <article class="tmSeedRow" v-for="(row, rowIndex) in tmVisibleSeedRows" :key="row.unit.id"><label><input type="checkbox" v-model="row.selected" :disabled="tmBusy || row.imported">{{ row.action }} · {{ tmGameLabel(row.unit.gameScope) }}</label><pre>{{ tmText(row.unit.source) }}</pre><div class="tmEditColumns"><section v-if="row.existing"><h4>Remembered translation</h4><pre>{{ tmText(row.existing.target) }}</pre></section><section><h4>Incoming translation</h4><pre>{{ tmText(row.unit.target) }}</pre></section></div><small>{{ tmMatchContext(row.unit) }}</small></article>
+        <p v-if="!tmSeedRows.length" class="tmEmpty">No new or changed eligible pairs.</p><div class="tmToolbar"><span>Page {{ tmSeedPage }} of {{ Math.max(1, Math.ceil(tmSeedRows.length / 40)) }}</span><div><button @click="tmSeedPage--" :disabled="tmSeedPage <= 1">Previous</button> <button @click="tmSeedPage++" :disabled="tmSeedPage * 40 >= tmSeedRows.length">Next</button></div></div>
+      </section>
+    </div>
+
+    <div v-if="tmPrefillVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmPrefillVisible = false">
+      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmPrefillTitle"><div class="tmDialogHeading"><h2 id="tmPrefillTitle">Prefill blank entries</h2><button @click="tmPrefillVisible = false" aria-label="Close prefill preview">✕</button></div><p>Only unambiguous, compatible exact or context matches are offered. Selected translations become local drafts.</p><article v-for="row in tmPrefillRows" :key="row.index" class="tmSeedRow"><label><input type="checkbox" v-model="row.selected">Entry {{ row.index + 1 }} · {{ row.match.score }}%</label><pre>{{ tmText(row.match.source) }}</pre><pre>{{ tmText(row.match.target) }}</pre></article><p v-if="!tmPrefillRows.length" class="tmEmpty">No eligible exact matches for blank entries.</p><button @click="applyTMPrefill" :disabled="!tmPrefillRows.some(row => row.selected)">Apply selected to draft</button></section>
+    </div>
+
+    <div v-if="tmHistoryVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmHistoryVisible = false">
+      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmHistoryTitle"><div class="tmDialogHeading"><div><h2 id="tmHistoryTitle">TM history</h2><p>{{ tmHistoryRemote ? 'Shared and local history' : 'Local history' }}</p></div><button @click="tmHistoryVisible = false" aria-label="Close TM history">✕</button></div><p v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</p><article v-for="event in tmHistoryEvents" :key="(event.remote ? 'shared:' : 'local:') + (event.id || event.key)" class="tmSeedRow"><p>{{ event.remote ? 'Shared' : 'Local' }} · {{ event.origin || event.action || event.kind || 'Correction' }} · {{ event.actorName || event.author?.name || event.author || '' }} · {{ new Date(event.createdAt || event.at || event.timestamp || 0).toLocaleString() }}</p><div class="tmEditColumns"><section><h4>Before</h4><pre>{{ tmText(event.before?.target ?? event.before?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'before')">Restore before…</button></section><section><h4>After</h4><pre>{{ tmText(event.after?.target ?? event.after?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'after')">Restore after…</button></section></div></article><p v-if="!tmHistoryEvents.length" class="tmEmpty">No history for this entry.</p><button v-if="tmHistoryCursor" @click="loadOlderTMHistory" :disabled="tmHistoryLoading">{{ tmHistoryLoading ? 'Loading…' : 'Load older shared history' }}</button></section>
+    </div>
+
     <div v-if="settingsImportDraft" class="cloudResolverBackdrop" @keydown.esc="cancelSettingsImport">
       <section class="cloudResolver cloudImportConfirm" role="dialog" aria-modal="true" aria-labelledby="settingsImportTitle">
         <h2 id="settingsImportTitle">Replace current settings?</h2>
@@ -1481,6 +1523,8 @@
   <script src="dictionaryWorkerUi.js"></script>
   <script src="translationDiagnostics.js"></script>
   <script src="terminologyDiagnostics.js"></script>
+  <script src="translationMemory.js"></script>
+  <script src="tmWorkerClient.js"></script>
   <script src="normalizedStore.js"></script>
   <script src="normalizedRooms.js"></script>
   <script src="offlineStore.js"></script>
@@ -1488,6 +1532,7 @@
   <script src="pendingSaves.js"></script>
   <script src="dictionarySync.js"></script>
   <script src="cloudSync.js"></script>
+  <script src="tmCloudSync.js"></script>
   <script src="cloudUi.js"></script>
   <script src="cloudHistoryUi.js"></script>
   <script src="collaborationProtocol.js"></script>
@@ -1500,6 +1545,7 @@
   <script src="inlineEditor.js"></script>
   <script src="managedCollectionExports.js"></script>
   <script src="managedVersions.js"></script>
+  <script src="tmUi.js"></script>
   <script src="index.js"></script>
 </body>
 </html>

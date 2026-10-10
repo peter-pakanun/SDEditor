@@ -1,6 +1,6 @@
-# Regex Guide
+# Legacy Regex Guide
 
-This guide explains how to use **Regex** (pattern matching) for advanced translation replacements in the SDEditor.
+This is a reference for preserved private Regex backups. The current editor uses [Translation Memory](translation_memory.md) instead of the Regex panel and **Apply regex** action. Export older rules from **Manage TM → Legacy Regex backup**. The descriptions below explain their historical behavior; they are not instructions for the current UI.
 
 ## What is Regex?
 

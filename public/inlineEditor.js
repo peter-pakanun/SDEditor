@@ -566,7 +566,7 @@
             if (position >= 0) this.currentPage = Math.floor(position / this.pageSize) + 1;
           }
           this._inlineHeldRows = this.descsDisplay.slice();
-          if (!['dictionary', 'lookup', 'preview', 'comments'].includes(this.sideTab)) this.sideTab = 'dictionary';
+          if (!['dictionary', 'lookup', 'tm', 'preview', 'comments'].includes(this.sideTab)) this.sideTab = 'dictionary';
           this._nextEditorSurface = 'inline';
           // Reopening a pending draft waits for its save; allow that queue to run.
           if (this.pendingDraftSaveFor?.(filepath)) releaseLocalSaves?.();

@@ -315,6 +315,7 @@
           },
           onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
           onCommit: async (job, ack) => {
+            if (ack.tmChanged) window.OfflineStore.notifyTranslationMemoryChange?.({ profile: job.batch.accountId || 'guest', language: job.batch.language });
             if (this.collaborationContextCurrent(job.context)) {
               if (job.batch.deferDisplay) {
                 const statuses = ack.duplicate ? ack.statuses || {} : job.batch.statuses || {};
@@ -934,7 +935,9 @@
           if (options.promoteDropped && updates.length === 1) promotions[updates[0].desc.filepath] = options.promoteDropped;
           const promotion = updates.length === 1 ? promotions[updates[0].desc.filepath] : null;
           const hasPromotions = Object.keys(promotions).length > 0;
-          if (origin === 'save' && !this.testMode && this.initializePendingSaves()) {
+          const learnsTm = !!(window.TranslationMemory && window.OfflineStore?.getTranslationMemory)
+            && ['save', 'confirm', 'confirm_unchanged', 'restore', 'consistency'].includes(origin);
+          if ((origin === 'save' || learnsTm) && !this.testMode && this.initializePendingSaves()) {
             if (!this.collaborationContextCurrent(ctx)) return { stale: true };
             window.WorkspaceState.scopeWorkspace(this.localDescs, ctx.language);
             const now = Date.now();
@@ -943,7 +946,7 @@
             const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath,
               window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language,
                 { lastEditedAt: now, lastTranslatedAt: now })]));
-            const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+            const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account, origin,
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
               ...(options.draft ? { draft: copy(options.draft) } : {}),
               ...(options.checkpoint ? { checkpoint: copy(options.checkpoint) } : {}),
@@ -951,14 +954,18 @@
               deferDisplay: true,
               descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
                 { derivedStatus: true })),
-              revisions: updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
+              revisions: options.revisions || updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
                 lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
                 isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source })),
               ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity),
                 bases: copy(Object.fromEntries(files.map(file => [file.filepath,
                   Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin,
+                ...(options.restore && !String(options.restore.eventId).startsWith('local-baseline:') ? { restore: copy(options.restore) } : {}),
                 ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}) } } : {}),
             };
+            if (learnsTm) batch.tmCapture = updates.flatMap(({ desc, lines }) => window.TranslationMemory.unitsFromDescription(
+              this.workspaceSourceFile(desc.filepath) || desc, lines, ctx.language,
+              { game: ctx.game, filepath: desc.filepath, sourceHash: ctx.source, branchId: ctx.branchId || 'default', jobId: batch.jobId }));
             const job = await this.journalPendingSave(batch, ctx);
             if (options.deferCommit) {
               job.onCommitted = options.onCommitted;

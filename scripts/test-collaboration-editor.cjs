@@ -194,6 +194,35 @@ function enablePending(h) {
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 
+test('confirmed Save, promotion, restore and consistency paths submit detached TM captures through the durable command',async t=>{
+  for(const origin of ['save','confirm','restore','consistency']) await t.test(origin,async()=>{
+    const h=enablePending(saveFixture()),{editor:e,window,desc}=h;
+    window.TranslationMemory=require('../public/translationMemory.js');
+    window.OfflineStore.getTranslationMemory=async()=>({units:[]});
+    const notifications=[];window.OfflineStore.notifyTranslationMemoryChange=scope=>notifications.push(scope);
+    const revisions=[{filepath:desc.filepath,lang:'Thai',translations:['ยืนยัน','สอง'],note:origin}];
+    const pending=e.persistTranslationBatch([{desc,lines:['ยืนยัน','สอง']}],origin,{revisions});
+    await pendingTick();await pendingTick();
+    assert.equal(h.calls.length,1);const batch=h.calls[0].batch;
+    assert.equal(batch.origin,origin);assert.equal(batch.tmCapture.length,2);
+    assert.equal(batch.tmCapture[0].source,'Original');assert.equal(batch.tmCapture[0].target,'ยืนยัน');
+    assert.equal(batch.tmCapture[0].provenance.jobId,batch.jobId);
+    assert.deepEqual(JSON.parse(JSON.stringify(batch.revisions)),revisions);
+    assert.equal(notifications.length,0,'Only a committed receipt can announce TM learning.');
+    h.acknowledge(h.calls[0],{tmChanged:true});await pending;
+    assert.equal(notifications.length,1);assert.equal(notifications[0].language,'Thai');
+  });
+});
+
+test('translated imports and received cloud translations do not automatically author TM captures',async()=>{
+  const h=enablePending(saveFixture()),{editor:e,window,desc}=h;
+  window.TranslationMemory=require('../public/translationMemory.js');window.OfflineStore.getTranslationMemory=async()=>({units:[]});
+  await e.persistTranslationBatch([{desc,lines:['นำเข้า','สอง']}],'import');
+  assert.equal(h.calls.length,0);assert.equal(h.writes.length,1);
+  await e.receiveCollaborationFiles([{filepath:desc.filepath,translations:['ส่วนกลาง','สอง'],trackedForExport:true,needsReview:false}],'Thai');
+  assert.equal(h.calls.length,0);
+});
+
 async function pendingDraftFixture() {
   const h = enablePending(saveFixture()), { editor: e, window, context } = h;
   const plain = value => value == null ? value : JSON.parse(JSON.stringify(value));
