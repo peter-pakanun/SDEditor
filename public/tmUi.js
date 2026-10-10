@@ -198,7 +198,18 @@
           this.tmSetIssue('query');
         } catch (error) { if (!error.stale && error.name !== 'AbortError' && epoch === this._tmQueryEpoch && key === this.tmEditorKey) this.tmSetIssue('query', 'Could not prepare TM matches: ' + error.message); }
       },
-      openEditorTM(index = this.editorFocusedIndex || 0) { this.setEditorFocus(index); this.sideTab = 'tm'; this.queryTranslationMemory(); },
+      async openEditorTM(index = this.editorFocusedIndex || 0, { focusPanel = false } = {}) {
+        this.setEditorFocus(index, index === this.editorFocusedIndex ? this.editorFocusedColumnIndex || 0 : 0);
+        if (this.inlineActive) this.inlineSidebarVisible = true;
+        this.sideTab = 'tm'; this.queryTranslationMemory();
+        if (focusPanel) {
+          const key = this.tmEditorKey, capture = this.tmCaptureEditor();
+          await this.$nextTick();
+          if (key === this.tmEditorKey && this.tmEditorCurrent(capture) && this.sideTab === 'tm') {
+            this.$refs?.tmResultsPanel?.focus?.({ preventScroll: true });
+          }
+        }
+      },
       tmPanelKeydown(event) {
         if (this.isFilterFocusShortcut?.(event)) { event.preventDefault(); this.openTMManager(); return; }
         if (this.isImeComposingEvent?.(event) || event.target?.matches?.('input,textarea,select')) return;
@@ -236,6 +247,8 @@
       },
       async previewTMPrefill() {
         if (this.tmBusy || this.editorTranslationReadOnly || !this.editorCurrentEditingDesc) return;
+        // Keep inline focus inside the sidebar when preparation disables its button.
+        if (this.inlineActive) this.$refs?.tmResultsPanel?.focus?.({ preventScroll: true });
         this.tmBusy = true;
         const scopeKey = this.tmScopeKey, capture = this.tmCaptureEditor(), key = capture.key, language = this.lang;
         const before = this.serializeEditorTranslations();
@@ -257,6 +270,10 @@
           }
           if (!this.tmEditorCurrent(capture)) return;
           this.tmPrefillRows = rows; this.tmPrefillKey = key; this._tmPrefillCapture = capture; this.tmPrefillVisible = true; this.tmSetIssue('prefill');
+          await this.$nextTick();
+          if (this.tmEditorCurrent(capture) && this.tmPrefillVisible) {
+            (this.$refs?.tmPrefillDialog?.querySelector('input[type="checkbox"]') || this.$refs?.tmPrefillClose)?.focus?.({ preventScroll: true });
+          }
         } catch (error) { if (!error.stale && error.name !== 'AbortError' && this.tmEditorCurrent(capture)) this.tmSetIssue('prefill', 'Could not prepare blank entries: ' + error.message); }
         finally { await this.tmFinishWork(scopeKey); this.queryTranslationMemory(); }
       },
@@ -267,7 +284,15 @@
           if (!this.tmEditorCurrent(capture) || this.editorTranslationReadOnly || this.editorCompareActive) return;
           if (this.serializeEditorTranslations()[row.index] === row.before && this.tmMatchCurrent(row.match)) await this.tmApplyTarget(row.index, row.match.target, { refocus: false });
         }
-        if (this.tmEditorCurrent(capture)) this.tmPrefillVisible = false;
+        if (this.tmEditorCurrent(capture)) await this.closeTMPrefill();
+      },
+      async closeTMPrefill() {
+        const capture = this._tmPrefillCapture, index = this.editorFocusedIndex || 0, column = this.editorFocusedColumnIndex || 0;
+        this.tmPrefillVisible = false;
+        await this.$nextTick();
+        if (!capture || !this.tmEditorCurrent(capture) || this.tmPrefillVisible) return;
+        const block = this.editorBlocks[index];
+        this.getEditorRef('translation', index, block?.isTable ? Math.min(column, block.tableColumns.length - 1) : null)?.focus?.({ preventScroll: true });
       },
       async openTMManager() {
         const key = this.tmScopeKey;

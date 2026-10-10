@@ -599,7 +599,10 @@
                   <template v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath">
                     <div v-if="block.isTable" class="inlineTableColumns" :style="{ '--table-columns': editorTableColumnCount(block) }"><editor-text-field v-for="(column, columnIndex) in block.tableColumns" :key="columnIndex" :controller="$root" :block="block" :block-index="blockIndex" :column-index="columnIndex" kind="translation"></editor-text-field></div>
                     <editor-text-field v-else :controller="$root" :block="block" :block-index="blockIndex" kind="translation"></editor-text-field>
-                    <div v-if="block.words?.length" class="inlineFileActions"><button type="button" @click.stop="setEditorFocus(blockIndex); openInlineFullEditor(desc.filepath)">Edit captured replacements in editor</button></div>
+                    <div class="inlineFileActions">
+                      <button type="button" @click.stop="openEditorTM(blockIndex, { focusPanel: true })" :disabled="!editorReady" :aria-label="'TM matches for entry ' + (blockIndex + 1)" aria-controls="tmResultsPanel" title="Find remembered translations for this whole entry">TM matches</button>
+                      <button v-if="block.words?.length" type="button" @click.stop="setEditorFocus(blockIndex); openInlineFullEditor(desc.filepath)">Edit captured replacements in editor</button>
+                    </div>
                   </template>
                   <div v-else class="inlineReadText" :lang="translationEditorBcp47">{{ block.translation || '\u00a0' }}</div>
                 </div></div>
@@ -901,7 +904,7 @@
           </div>
         </div>
 
-        <section v-if="sideTab === 'tm'" id="tmResultsPanel" class="tmResultsPanel" tabindex="0" @keydown.stop="tmPanelKeydown" aria-label="Translation memory suggestions">
+        <section v-if="sideTab === 'tm'" id="tmResultsPanel" ref="tmResultsPanel" class="tmResultsPanel" tabindex="0" @keydown.stop="tmPanelKeydown" aria-label="Translation memory suggestions">
           <div class="tmToolbar"><label>Minimum match <input type="number" v-model.number="tmThreshold" min="1" max="99" aria-label="Minimum TM match percentage">%</label><button @click="openTMManager">Manage TM</button></div>
           <div class="tmToolbar"><span>Entry {{ (editorFocusedIndex || 0) + 1 }} · {{ tmUnits.length.toLocaleString() }} remembered</span><button @click="previewTMPrefill" :disabled="tmBusy || editorTranslationReadOnly">Prefill blanks…</button></div>
           <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
@@ -1325,8 +1328,8 @@
       </section>
     </div>
 
-    <div v-if="tmPrefillVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmPrefillVisible = false">
-      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmPrefillTitle"><div class="tmDialogHeading"><h2 id="tmPrefillTitle">Prefill blank entries</h2><button @click="tmPrefillVisible = false" aria-label="Close prefill preview">✕</button></div><p>Only unambiguous, compatible exact or context matches are offered. Selected translations become local drafts.</p><article v-for="row in tmPrefillRows" :key="row.index" class="tmSeedRow"><label><input type="checkbox" v-model="row.selected">Entry {{ row.index + 1 }} · {{ row.match.score }}%</label><pre>{{ tmText(row.match.source) }}</pre><pre>{{ tmText(row.match.target) }}</pre></article><p v-if="!tmPrefillRows.length" class="tmEmpty">No eligible exact matches for blank entries.</p><button @click="applyTMPrefill" :disabled="!tmPrefillRows.some(row => row.selected)">Apply selected to draft</button></section>
+    <div v-if="tmPrefillVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="closeTMPrefill">
+      <section ref="tmPrefillDialog" class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmPrefillTitle"><div class="tmDialogHeading"><h2 id="tmPrefillTitle">Prefill blank entries</h2><button ref="tmPrefillClose" @click="closeTMPrefill" aria-label="Close prefill preview">✕</button></div><p>Only unambiguous, compatible exact or context matches are offered. Selected translations become local drafts.</p><article v-for="row in tmPrefillRows" :key="row.index" class="tmSeedRow"><label><input type="checkbox" v-model="row.selected">Entry {{ row.index + 1 }} · {{ row.match.score }}%</label><pre>{{ tmText(row.match.source) }}</pre><pre>{{ tmText(row.match.target) }}</pre></article><p v-if="!tmPrefillRows.length" class="tmEmpty">No eligible exact matches for blank entries.</p><button @click="applyTMPrefill" :disabled="!tmPrefillRows.some(row => row.selected)">Apply selected to draft</button></section>
     </div>
 
     <div v-if="tmHistoryVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmHistoryVisible = false">

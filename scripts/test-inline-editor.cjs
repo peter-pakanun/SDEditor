@@ -36,7 +36,7 @@ test('early settings hydration scopes draft loading safely before the cloud clie
   assert.equal(editor.editorDraftScope(desc.filepath).profile, 'ready-profile');
 });
 
-function harness({ records = new Map() } = {}) {
+function harness({ records = new Map(), tm = false } = {}) {
   let config, nextId = 0;
   const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };
   const store = {
@@ -70,6 +70,7 @@ function harness({ records = new Map() } = {}) {
     Vue: { defineComponent(value) { config = value; return value; }, createApp() { return { component() {}, directive() {}, mount() {} }; },
       nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } } });
   for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
+    ...(tm ? ['translationMemory.js', 'tmWorkerClient.js', 'tmUi.js'] : []),
     'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
   }
@@ -114,6 +115,210 @@ function harness({ records = new Map() } = {}) {
   };
   return { editor, config, calls, window, store, records, desc, document, context };
 }
+
+async function inlineTMFixture(t, { sources = ['Damage'], translations = sources.map(() => ''), targets = sources.map(() => 'Remembered translation') } = {}) {
+  const h = harness({ tm: true }), { editor, desc, window } = h;
+  desc.stats = ['tm_test']; desc.variables = sources.map(() => '#'); desc.remarks = sources.map(() => '');
+  desc.translations = { English: [...sources], Thai: [...translations] };
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  window.WorkspaceState.initializeWorkspace(editor.localDescs, { source: editor._workspaceSourceBaseline,
+    sourceHash: editor.sourceIdentity, game: editor.gameVersion, language: editor.lang });
+  editor._tmLoadEpoch = 0; editor._tmQueryEpoch = 0;
+  const units = sources.map((source, index) => window.TranslationMemory.normalizeUnit({ id: 'inline-tm-' + index,
+    source, target: targets[index], gameScope: editor.gameVersion, context: window.TranslationMemory.contextFor(desc, index), revision: 2, localRevision: 3 }));
+  window.OfflineStore.getTranslationMemory = async () => ({ units, tombstones: [], conflicts: [], localVersion: 1 });
+  editor.acceptTranslationMemory(await window.OfflineStore.getTranslationMemory());
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true); assert.equal(editor.editorSessionActive, true);
+  await editor.ensureTMWorker().waitReady({ generation: editor.tmGeneration });
+  t.after(() => { clearTimeout(editor._draftTimer); editor._tmWorker?.dispose(); });
+  return { ...h, units };
+}
+
+test('inline TM insertion persists a scoped whole-entry table/multiline draft without staging baseline text', async t => {
+  const source = 'Head\\nFoot@{0}', target = 'หัว\\nเท้า@{0}';
+  const { editor, desc, records, calls, window } = await inlineTMFixture(t, { sources: [source], targets: [target] });
+  const baseline = copy(editor._workspaceSourceBaseline), committed = copy(desc.translations);
+  editor.openEditorTM(0); await editor.queryTranslationMemory();
+  assert.equal(editor.tmMatches[0].score, 101);
+  await editor.useTMMatch();
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), [target]); assert.equal(editor.editorBlocks[0].tableColumns.length, 2);
+  assert.equal(editor.editorBlocks[0].tableColumns[0].translation, 'หัว\nเท้า');
+  assert.equal(editor.inlineDraftHasChanges, true); assert.equal(calls.promotions.length, 0);
+  await editor.flushEditorDraft();
+  const record = records.get(editor._draftSession.key);
+  assert.equal(record.state, 'active'); assert.deepEqual(record.translations, [target]);
+  assert.deepEqual([record.profile, record.game, record.branchId, record.sourceHash, record.language, record.filepath],
+    ['guest', 'poe1', 'default', 'source-a', 'Thai', desc.filepath]);
+  assert.equal(!!window.WorkspaceState.workspaceFile(editor.localDescs, editor.workspaceSourceFile(desc.filepath), 'Thai').staged, false);
+  assert.deepEqual(desc.translations, committed); assert.deepEqual(editor._workspaceSourceBaseline, baseline);
+});
+
+test('inline TM prefill persists only selected blank exact entries and preserves existing text without staging', async t => {
+  const sources = ['Head\\nFoot@{0}', 'Life', 'Existing'];
+  const { editor, desc, records, calls } = await inlineTMFixture(t, { sources, translations: ['', '', 'keep existing'],
+    targets: ['หัว\\nเท้า@{0}', 'พลังชีวิต', 'do not replace'] });
+  const original = copy(desc.translations);
+  await editor.previewTMPrefill();
+  assert.deepEqual(copy(editor.tmPrefillRows.map(row => [row.index, row.match.score])), [[0, 101], [1, 101]]);
+  editor.tmPrefillRows[1].selected = false;
+  await editor.applyTMPrefill(); await editor.flushEditorDraft();
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['หัว\\nเท้า@{0}', '', 'keep existing']);
+  assert.deepEqual(records.get(editor._draftSession.key).translations, ['หัว\\nเท้า@{0}', '', 'keep existing']);
+  assert.equal(calls.promotions.length, 0); assert.deepEqual(desc.translations, original);
+});
+
+test('inline TM prefill retains the active row when its disabled trigger blurs during worker preparation', async t => {
+  const { editor, document, records, calls } = await inlineTMFixture(t, { sources: ['Damage', 'Life'], targets: ['remembered damage', 'remembered life'] });
+  const readiness = deferred(), worker = editor.ensureTMWorker(), waitReady = worker.waitReady.bind(worker), session = editor._draftSession;
+  worker.waitReady = async options => { await readiness.promise; return waitReady(options); };
+  const body = { closest() { return null; } };
+  const panel = { closest(selector) { return selector.includes('[data-inline-focus-surface]') ? panel : null; },
+    focus(options) { assert.equal(options.preventScroll, true); document.activeElement = panel; } };
+  const trigger = { closest: selector => panel.closest(selector) };
+  editor.$refs.tmResultsPanel = panel; document.activeElement = trigger;
+  const preparing = editor.previewTMPrefill();
+  assert.equal(editor.tmBusy, true);
+  // Browsers can move focus to BODY when Vue disables the initiating button.
+  // A deliberate panel focus before disabling must preserve the inline session.
+  if (document.activeElement === trigger) document.activeElement = body;
+  editor.inlineRowFocusOut({ relatedTarget: null });
+  await settleFocus();
+  assert.equal(editor.inlineActive, true); assert.equal(editor._draftSession, session);
+  assert.equal(editor.inlineFocusContains(document.activeElement), true); assert.equal(editor.tmPrefillVisible, false);
+  readiness.resolve(); await preparing;
+  assert.equal(editor.tmPrefillVisible, true); assert.equal(editor.tmPrefillRows.length, 2);
+  await editor.applyTMPrefill(); await editor.flushEditorDraft();
+  assert.equal(editor.inlineActive, true); assert.equal(editor._draftSession, session);
+  assert.deepEqual(records.get(session.key).translations, ['remembered damage', 'remembered life']);
+  assert.equal(calls.promotions.length, 0);
+});
+
+test('inline TM prefill focuses its first checkbox and cancel or apply returns to the current table column', async t => {
+  for (const action of ['cancel', 'apply']) await t.test(action, async t => {
+    const { editor, desc, document, records, calls } = await inlineTMFixture(t, {
+      sources: ['Life', 'Head\\nFoot@{0}'], targets: ['remembered life', 'หัว\\nเท้า@{0}'] });
+    editor.setEditorFocus(1, 1);
+    const session = editor._draftSession, requests = [], row = { dataset: { filepath: desc.filepath } };
+    const field = { closest(selector) { return selector === 'tr[data-filepath]' ? row : null; },
+      focus(options) { assert.equal(options.preventScroll, true); document.activeElement = field; } };
+    const checkbox = { closest(selector) { return selector.includes('[data-inline-focus-surface]') ? checkbox : null; },
+      focus(options) { assert.equal(options.preventScroll, true); document.activeElement = checkbox; } };
+    editor.getEditorRef = (...args) => { requests.push(args); return field; };
+    editor.$refs.tmPrefillDialog = { querySelector(selector) { assert.equal(selector, 'input[type="checkbox"]'); return checkbox; } };
+    document.activeElement = field;
+    await editor.previewTMPrefill();
+    assert.equal(document.activeElement, checkbox); assert.equal(editor.tmPrefillVisible, true);
+    editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+    assert.equal(editor.inlineActive, true); assert.equal(editor._draftSession, session);
+    // Removing the dialog would leave BODY active unless closing restores the field.
+    document.activeElement = { closest() { return null; } };
+    await (action === 'cancel' ? editor.closeTMPrefill() : editor.applyTMPrefill());
+    assert.equal(editor.tmPrefillVisible, false); assert.equal(document.activeElement, field);
+    assert.deepEqual(requests.at(-1), ['translation', 1, 1]);
+    editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+    assert.equal(editor.inlineActive, true); assert.equal(editor._draftSession, session);
+    await editor.flushEditorDraft();
+    if (action === 'apply') assert.deepEqual(records.get(session.key).translations, ['remembered life', 'หัว\\nเท้า@{0}']);
+    else { assert.equal(records.size, 0); assert.deepEqual(copy(editor.serializeEditorTranslations()), ['', '']); }
+    assert.equal(calls.promotions.length, 0); assert.deepEqual(desc.translations.Thai, ['', '']);
+  });
+});
+
+test('an empty inline TM prefill preview focuses its close button', async t => {
+  const { editor, document } = await inlineTMFixture(t, { translations: ['existing draft'] });
+  const close = { closest(selector) { return selector.includes('[data-inline-focus-surface]') ? close : null; },
+    focus(options) { assert.equal(options.preventScroll, true); document.activeElement = close; } };
+  editor.$refs.tmPrefillDialog = { querySelector() { return null; } }; editor.$refs.tmPrefillClose = close;
+  await editor.previewTMPrefill();
+  assert.equal(editor.tmPrefillRows.length, 0); assert.equal(editor.tmPrefillVisible, true);
+  assert.equal(document.activeElement, close);
+  editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+  assert.equal(editor.inlineActive, true);
+});
+
+test('a delayed inline TM prefill preview cannot focus its dialog after the active row is replaced', async t => {
+  const { editor, document } = await inlineTMFixture(t), frame = deferred(), waiting = deferred(), nextTick = editor.$nextTick;
+  let dialogFocus = 0;
+  editor.$refs.tmPrefillDialog = { querySelector() { return { focus() { dialogFocus++; } }; } };
+  editor.$nextTick = () => { waiting.resolve(); return frame.promise; };
+  const opening = editor.previewTMPrefill(); await waiting.promise;
+  editor.$nextTick = nextTick;
+  assert.equal(await editor.activateInlineRow(editor.descs[1].filepath), true);
+  const replacementFocus = {}; document.activeElement = replacementFocus;
+  frame.resolve(); await opening;
+  assert.equal(dialogFocus, 0); assert.equal(document.activeElement, replacementFocus);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, editor.descs[1].filepath);
+});
+
+test('a delayed inline TM prefill close cannot refocus a replacement session for the same file', async t => {
+  for (const action of ['cancel', 'apply']) await t.test(action, async t => {
+    const { editor, desc, document, calls } = await inlineTMFixture(t), frame = deferred(), waiting = deferred();
+    await editor.previewTMPrefill();
+    const session = editor._draftSession, key = editor.tmFileKey(), nextTick = editor.$nextTick;
+    editor.$nextTick = () => { waiting.resolve(); return frame.promise; };
+    const closing = action === 'cancel' ? editor.closeTMPrefill() : editor.applyTMPrefill();
+    await waiting.promise; editor.$nextTick = nextTick;
+    assert.equal(editor.tmPrefillVisible, false);
+    assert.equal(await editor.finishInlineSession({ promote: false }), true);
+    assert.equal(await editor.activateInlineRow(desc.filepath), true);
+    assert.notEqual(editor._draftSession, session); assert.equal(editor.tmFileKey(), key);
+    const replacementFocus = {}, focusBefore = calls.focused; document.activeElement = replacementFocus;
+    frame.resolve(); await closing;
+    assert.equal(calls.focused, focusBefore); assert.equal(document.activeElement, replacementFocus);
+    assert.equal(editor.inlineActive, true); assert.equal(calls.promotions.length, 0);
+  });
+});
+
+test('opening TM for an active inline entry reveals a hidden sidebar without opening the full editor', async t => {
+  const { editor } = await inlineTMFixture(t, { sources: ['Head@{0}', 'Mana@{0}'], targets: ['หัว@{0}', 'มานา@{0}'] });
+  let panelFocus = 0; const fieldRequests = [], getField = editor.getEditorRef;
+  editor.getEditorRef = (...args) => { fieldRequests.push(args); return getField(...args); };
+  editor.$refs.tmResultsPanel = { focus(options) { assert.equal(options.preventScroll, true); panelFocus++; } };
+  editor.inlineSidebarVisible = false; editor.editorFocusedColumnIndex = 1;
+  await editor.openEditorTM(0, { focusPanel: true }); await editor.queryTranslationMemory();
+  assert.equal(editor.inlineSidebarVisible, true); assert.equal(editor.sideTab, 'tm');
+  assert.equal(editor.editorVisible, false); assert.equal(editor.inlineActive, true); assert.equal(editor.tmMatches[0].score, 101);
+  assert.equal(panelFocus, 1); assert.equal(editor.editorFocusedColumnIndex, 1);
+  await editor.useTMMatch();
+  assert.deepEqual(fieldRequests.at(-1), ['translation', 0, 1]);
+  await editor.openEditorTM(1, { focusPanel: true }); await editor.queryTranslationMemory();
+  assert.equal(editor.editorFocusedIndex, 1); assert.equal(editor.editorFocusedColumnIndex, 0); assert.equal(panelFocus, 2);
+});
+
+test('delayed inline TM panel focus is cancelled when the real inline session closes', async t => {
+  const { editor } = await inlineTMFixture(t), frame = deferred(); let panelFocus = 0;
+  editor.$refs.tmResultsPanel = { focus() { panelFocus++; } };
+  editor.$nextTick = () => frame.promise;
+  const pending = editor.openEditorTM(0, { focusPanel: true });
+  assert.equal(await editor.finishInlineSession({ promote: false }), true);
+  frame.resolve(); await pending;
+  assert.equal(editor.inlineActive, false); assert.equal(panelFocus, 0);
+});
+
+test('an inline TM replacement confirmation cannot insert into a newer file session', async t => {
+  const { editor, desc, calls, records } = await inlineTMFixture(t, { translations: ['old draft'], targets: ['remembered'] });
+  editor.openEditorTM(0); await editor.queryTranslationMemory();
+  const confirm = deferred(); editor.appConfirm = () => confirm.promise;
+  const pending = editor.useTMMatch(); await tick();
+  const oldBlocks = editor.editorBlocks;
+  assert.equal(await editor.activateInlineRow(editor.descs[1].filepath), true);
+  const nextBlocks = editor.editorBlocks, focusBefore = calls.focused;
+  confirm.resolve(true); await pending;
+  assert.equal(oldBlocks[0].translation, 'old draft'); assert.equal(nextBlocks[0].translation, 'translation');
+  assert.equal(editor.editorCurrentEditingDesc.filepath, editor.descs[1].filepath); assert.equal(calls.focused, focusBefore);
+  assert.equal([...records.values()].some(record => record.translations?.includes('remembered')), false);
+  assert.equal(desc.translations.Thai[0], 'old draft');
+});
+
+test('an inline TM prefill reviewed for one row cannot populate a newly activated row', async t => {
+  const { editor, calls, records } = await inlineTMFixture(t, { sources: ['Damage', 'Life'], targets: ['remembered damage', 'remembered life'] });
+  await editor.previewTMPrefill(); assert.equal(editor.tmPrefillRows.length, 2);
+  assert.equal(await editor.activateInlineRow(editor.descs[1].filepath), true);
+  const nextBlocks = editor.editorBlocks;
+  await editor.applyTMPrefill();
+  assert.equal(nextBlocks[0].translation, 'translation'); assert.equal(calls.promotions.length, 0); assert.equal(records.size, 0);
+});
 
 async function stagedDeletionFixture({ inline = false } = {}) {
   const h = harness(), { editor, desc, window, calls } = h;

@@ -348,7 +348,7 @@ Google backup synchronizes personal settings and the translator's assigned langu
 
 ### Translation Memory
 
-The **TM** tab shows exact, context and fuzzy matches for the focused English entry, with differences, warnings and suggested translations. **Use translation** inserts the selected result into the draft; **Prefill blanks…** previews unambiguous exact/context matches for blank entries.
+The **TM** tab shows exact, context and fuzzy matches for the focused English entry, with differences, warnings and suggested translations. In the inline editor, **TM matches** beneath each active entry selects it and opens file tools even when the sidebar was hidden. **Use translation** inserts the selected result into the draft and returns focus to the translation field; **Prefill blanks…** previews unambiguous exact/context matches for blank entries.
 
 Successful durable saves teach valid nonblank pairs automatically. **Manage TM** provides editing, history, reviewed workspace seeding and JSON import/export. Original ZIP seeding is opt-in, and unresolved Dropped copies are excluded.
 
