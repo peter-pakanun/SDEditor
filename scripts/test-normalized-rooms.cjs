@@ -164,7 +164,7 @@ test('room conversion reconstructs pending placeholder repairs after workspace r
   assert.equal(room.placeholderRepairs.length, 1, 'Retry reuses the durable repair ID rather than creating another generation.');
 });
 
-function sparseSelectionFixture() {
+function sparseSelectionFixture({ workspace } = {}) {
   const stores = { rooms: 'rooms', shared: 'shared', operations: 'operations', roomRecords: 'records',
     meta: 'workspaces', files: 'files', records: 'workspaceRecords', baseline: 'baseline', assets: 'assets', migration: 'migration' };
   const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()])), reads = [], transactions = [], selections = [], projections = [];
@@ -190,7 +190,7 @@ function sparseSelectionFixture() {
     row: (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra }),
     async get(tx, name, id) { reads.push({ name, id }); return copy(data[name].get(id)?.value); },
     async all(tx, name, scope) { reads.push({ name, all: true }); return [...data[name].values()].filter(row => row.scope === scope).map(value => copy(value)); },
-    async readWorkspace(tx, scope, paths) { selections.push(copy(paths)); return { descs: [], staged: {} }; },
+    async readWorkspace(tx, scope, paths) { selections.push(copy(paths)); return workspace ? copy(workspace) : { descs: [], staged: {} }; },
     async writeWorkspace(tx, scope, workspace, paths) { projections.push({ scope: copy(scope), workspace: copy(workspace), paths: copy(paths) }); },
     async ensure() {},
     async transaction(names, mode, action) { transactions.push({ names, mode }); return action(tx); },
@@ -201,6 +201,44 @@ function sparseSelectionFixture() {
   put(stores.rooms, { key: roomKey, value: { identity, mode: 'sparse', manifest: { version: 2 }, sequence: 4 } });
   return { n, rooms: create(n), stores, data, reads, transactions, selections, projections, put, tx };
 }
+
+test('reconnecting a repaired file replays valid staged or shared work while retaining excess immutable ZIP translations', async t => {
+  for (const current of ['staged', 'shared']) await t.test(current, async () => {
+    const original = { filepath: 'a.txt', translations: { English: ['Current English'], Thai: ['Old retained entry', 'Old removed entry'] } };
+    const yours = { filepath: original.filepath, translations: ['Aligned translation'], revision: 0, trackedForExport: true };
+    const workspace = { descs: [{ ...copy(original), translations: { English: ['Current English'], Thai: copy(yours.translations) } }],
+      staged: current === 'staged' ? { Thai: { [original.filepath]: { sourceHash: identity.sourceHash, translations: copy(yours.translations) } } } : {} };
+    const f = sparseSelectionFixture({ workspace }), baselineId = f.n.baselineKey();
+    f.put(f.stores.baseline, f.n.row(baselineId, original.filepath, original));
+    const preserved = copy(f.data.baseline.get(f.n.key(baselineId, original.filepath)));
+    const operation = { id: 'alignment-save', kind: 'edit', origin: 'save', status: 'pending',
+      files: [{ base: { ...copy(yours), translations: ['Old retained entry'], trackedForExport: false }, yours: copy(yours) }] };
+    await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: [{ filepath: original.filepath, entryCount: 1 }] },
+      shared: current === 'shared' ? { [original.filepath]: copy(yours) } : {}, outbox: [operation] });
+    const command = { key: roomKey, scope: identity, filepaths: [original.filepath], includeAffected: true, includeOutbox: true };
+    const read = await f.rooms.getRecords(command);
+    assert.deepEqual(read.room.local[original.filepath].translations, yours.translations);
+    assert.deepEqual(read.room.outbox[0].files[0].yours.translations, yours.translations);
+    await f.rooms.writeRoom(f.tx, roomKey, read.room, read.selection.filepaths, read.selection.operationIds);
+    const reopened = await f.rooms.getRecords(command);
+    assert.deepEqual(reopened.room.local[original.filepath].translations, yours.translations);
+    assert.deepEqual(f.data.baseline.get(f.n.key(baselineId, original.filepath)), preserved,
+      'Outbox replay must never truncate or rewrite immutable original blocks.');
+  });
+});
+
+test('room replay still rejects excess immutable blocks when they are the required committed fallback', async () => {
+  const f = sparseSelectionFixture(), original = { filepath: 'a.txt', translations: { English: ['Current English'], Thai: ['Old retained entry', 'Old removed entry'] } };
+  const baselineId = f.n.baselineKey();
+  f.put(f.stores.baseline, f.n.row(baselineId, original.filepath, original));
+  const yours = { filepath: original.filepath, translations: ['Aligned translation'], revision: 0, trackedForExport: true };
+  await f.rooms.writeRoom(f.tx, roomKey, { identity, mode: 'sparse', manifest: { version: 2, files: [{ filepath: original.filepath, entryCount: 1 }] },
+    shared: {}, outbox: [{ id: 'alignment-save', files: [{ yours }] }] });
+  const before = copy(f.data.baseline.get(f.n.key(baselineId, original.filepath)));
+  await assert.rejects(f.rooms.getRecords({ key: roomKey, scope: identity, filepaths: [original.filepath], includeOutbox: true }),
+    /Translation count exceeds source entry count: a\.txt/);
+  assert.deepEqual(f.data.baseline.get(f.n.key(baselineId, original.filepath)), before);
+});
 
 test('cold sparse reconnect selects actual work and recovery paths instead of every original manifest path', async () => {
   const f = sparseSelectionFixture();

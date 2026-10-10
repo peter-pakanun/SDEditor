@@ -488,9 +488,16 @@
     if (submissionJobIds.some(id => typeof id !== 'string' || !id)) throw new TypeError('Invalid submitted draft recovery.');
     if (value.sourceRef && (value.sourceRef.game !== scope.game || value.sourceRef.sourceHash !== scope.sourceHash
       || value.sourceRef.filepath !== scope.filepath)) throw new TypeError('The draft source reference does not match its scope.');
+    if (value.alignmentRecovery != null && (!Array.isArray(value.alignmentRecovery) || value.alignmentRecovery.some(item =>
+      !item || !Array.isArray(item.translations) || item.translations.some(line => typeof line !== 'string')
+      || !Array.isArray(item.english) || item.english.length !== item.translations.length
+      || item.english.some(line => line !== null && typeof line !== 'string')
+      || !Number.isFinite(item.savedAt)))) throw new TypeError('Invalid entry alignment recovery.');
     // Detach nested source/base data too; a Vue proxy must never reach IndexedDB.
     return JSON.parse(JSON.stringify({ ...scope, key, id: value.id, revision: value.revision,
       translations: value.translations, base: value.base, source: value.source ?? null,
+      ...(value.alignmentRecovery?.length ? { alignmentRecovery: value.alignmentRecovery.map(item => ({
+        translations: item.translations, english: item.english, savedAt: item.savedAt })) } : {}),
       ...(typeof value.declined === 'string' && value.declined ? { declined: value.declined } : {}),
       updatedAt: Number(value.updatedAt) || Date.now(), state: 'active',
       ...(value.sourceRef ? { sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: scope.filepath } } : {}),

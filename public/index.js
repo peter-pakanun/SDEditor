@@ -144,7 +144,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
+  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -656,7 +656,7 @@ const config = Vue.defineComponent({
       const candidate = this.editorDroppedCandidate;
       const desc = this.editorCurrentEditingDesc;
       return !!candidate && candidate.snapshot.translations?.length === desc?.translations?.English?.length
-        && !this.editorDroppedConflict && !!this.editorReady && !this.editorSaving && !this.editorHaveChanges();
+        && !this.editorDroppedConflict && !!this.editorReady && !this.editorSaving && !this.entryAlignment && !this.editorHaveChanges();
     },
     browserWorkTooltip() {
       const labels = Object.values(this.browserWorkItems);
@@ -702,7 +702,8 @@ const config = Vue.defineComponent({
       return SETTINGS_LANG_TO_BCP47[this.lookupActiveLanguage] || undefined;
     },
     editorTranslationReadOnly() {
-      return this.editorLoading || !!this.editorLoadError || (this.editorCompareActive && this.editorCompareMode === 'translation');
+      return this.editorLoading || !!this.editorLoadError || !!this.entryAlignment || !!this.editorHasExcessTranslationEntries
+        || (this.editorCompareActive && this.editorCompareMode === 'translation');
     },
     editorReady() {
       return !this.editorLoading && !this.editorLoadError;
@@ -1720,7 +1721,7 @@ const config = Vue.defineComponent({
       if (this.editorShowEnglishDiff) this.prepareEditorEnglishDiff();
     },
     async confirmTranslationUnchanged() {
-      if (!this.editorReady) return;
+      if (!this.editorReady || this.entryAlignment) return;
       const desc = this.editorCurrentEditingDesc;
       if (!desc || this.editorSaving) return;
       const context = this.captureCollaborationContext();
@@ -6476,6 +6477,7 @@ const config = Vue.defineComponent({
     },
     beginEditorOpen(filepath, returnToFileList = false) {
       if (this._reconcilingImport || this._importingSource) return null;
+      this.clearEntryAlignment?.();
       this.resetEditorFilePathCopy();
       this.closeRawFileDialog();
       this.consistencyResolutionNotice = '';
@@ -6569,6 +6571,7 @@ const config = Vue.defineComponent({
           this.editorShowEnglishDiff = true;
           this.prepareEditorEnglishDiff();
         }
+        this.offerEntryAlignment?.();
         return true;
       } catch (error) {
         if (isCurrent()) {
@@ -6702,6 +6705,7 @@ const config = Vue.defineComponent({
         const blocksAtSave = this.editorBlocks, baseAtSave = this._editorCollabBase;
         const englishAtSave = JSON.stringify(desc.translations.English);
         const session = this._draftSession;
+        const alignmentRecoveryAtSave = this.toPlainForStorage(session?.alignmentRecovery || []);
         // Save journals validated text directly. Only finish a checkpoint write
         // that already started; creating another checkpoint would duplicate this
         // submission and delay moving to the next file.
@@ -6763,7 +6767,7 @@ const config = Vue.defineComponent({
           }
           // Bookkeeping uses the captured session even after a new file opens.
           // It must never clear or rebase the next file's typing.
-          await this.editorDraftCommitted?.(session, newTranslations, ack, accepted);
+          await this.editorDraftCommitted?.(session, newTranslations, ack, accepted, alignmentRecoveryAtSave);
         };
         const rejectDeferredSave = error => {
           if (!this.collaborationContextCurrent(context)) return;
@@ -6774,8 +6778,10 @@ const config = Vue.defineComponent({
           if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings,
             [desc.filepath]: [{ level: 'error', message, deferredSave: true }] };
         };
+        const alignmentRevisions = this.entryAlignmentSaveRevisions?.(newTranslations);
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
           context, close, bases: { [desc.filepath]: this.toPlainForStorage(baseAtSave || session?.base || this.collaborationFile(desc)) },
+          ...(alignmentRevisions ? { revisions: alignmentRevisions } : {}),
           promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,
           inline: !!this.inlineActive,
           awaitDurable: true,
@@ -6805,7 +6811,7 @@ const config = Vue.defineComponent({
         const { typedDuringSave } = this.rebaseEditorAfterCommit(accepted, {
           draftBefore: draftAtSave, submittedTranslations: newTranslations, refresh: !close,
         });
-        await this.editorDraftCommitted?.(session, newTranslations, result, accepted);
+        await this.editorDraftCommitted?.(session, newTranslations, result, accepted, alignmentRecoveryAtSave);
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)
           || (session && this._draftSession !== session)) return false;
         this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
@@ -6914,7 +6920,7 @@ const config = Vue.defineComponent({
       if (this.sideTab === 'history') this.refreshHistory();
     },
     pickHistoryRevision(rev) {
-      if (!rev) return;
+      if (!rev || this.entryAlignment) return;
       const cur = this.historyItems?.[0] || null;
       if (!cur) return;
 
@@ -6945,7 +6951,7 @@ const config = Vue.defineComponent({
       this.enterEditorCompareModeFromHistory();
     },
     enterEditorCompareModeFromHistory() {
-      if (!this.editorVisible) return;
+      if (!this.editorVisible || this.entryAlignment) return;
       if (!this.editorCurrentEditingDesc) return;
       if (!this.historySelectedA || !this.historySelectedB) return;
 
@@ -7031,7 +7037,7 @@ const config = Vue.defineComponent({
     },
     async restoreHistoryRevision(rev) {
       const desc = this.editorCurrentEditingDesc;
-      if (!desc || !rev || this.editorSaving) return;
+      if (!desc || !rev || this.editorSaving || this.entryAlignment) return;
       if (rev.legacyReference) { this.appAlert('Legacy local records are reference copies. Compare their text and explicitly recover it in the intended source version.'); return; }
       if (rev.branchId && rev.branchId !== this.branchId) { this.appAlert('Cannot restore: revision belongs to another branch.'); return; }
       if (this.historyMode === 'source' || String(rev.lang) === 'English') { this.appAlert('Restoring source English text is disabled.'); return; }
@@ -7700,6 +7706,7 @@ if (window.ClientTextUI) {
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
+if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);
 app.component('app-dialog', window.AppDialogs?.component || {});

@@ -276,6 +276,40 @@ test('declined warning fingerprint survives a durable read and changes only with
   assert.equal(changed.record.declined, undefined);
 });
 
+test('entry alignment retains exact original blocks in durable drafts and validates recovery revisions', async () => {
+  const f = fixture();
+  const recovery = [{ translations: ['เดิม@ช่อง\\nต่อ', 'removed', 'last'], english: ['A', null, 'C'], savedAt: 10 }];
+  const incoming = draft({ alignmentRecovery: copy(recovery) });
+  const { record } = await write(f, incoming);
+  incoming.alignmentRecovery[0].translations[1] = 'mutated after writing';
+  const restored = await commit(f, f.store.getTranslationDraft(record.key));
+  assert.deepEqual(copy(restored.alignmentRecovery), recovery);
+  await assert.rejects(f.store.putTranslationDraft(draft({ alignmentRecovery: [{ ...recovery[0], translations: ['different'] }] })), /Invalid entry alignment recovery/);
+  await assert.rejects(f.store.putTranslationDraft(draft({ alignmentRecovery: [{ ...recovery[0], translations: ['changed', 'removed', 'last'] }] })), /revision cannot be reused/);
+});
+
+test('aligned save atomically retains before-alignment history and consumes the exact draft checkpoint', async () => {
+  const f = fixture();
+  const recovery = [{ translations: ['first', 'removed', 'last'], english: ['A', null, 'C'], savedAt: 10 }];
+  const { record } = await write(f, draft({ alignmentRecovery: recovery }));
+  const before = copy(f.kv.get('workspace_poe1'));
+  const revisions = [{ filepath: 'stat.txt', lang: 'Thai', savedAt: 10, note: 'Before entry alignment', translations: recovery[0].translations },
+    { filepath: 'stat.txt', lang: 'Thai', savedAt: 11, note: 'save', translations: ['new'] }];
+  const request = batch(record, { revisions });
+  const pending = f.store.saveTranslationBatch(request);
+  await tick();
+  assert.deepEqual(f.kv.get('workspace_poe1'), before);
+  assert.equal(f.kv.get(record.key).state, 'active');
+  assert.equal(f.revisions.length, 0);
+  f.transactions.at(-1).complete();
+  assert.equal((await pending).draftConsumed, true);
+  assert.equal(f.kv.get(record.key).state, 'promoted');
+  assert.deepEqual(f.revisions.map(item => copy(item.translations)), [['first', 'removed', 'last'], ['new']]);
+  const retried = await commit(f, f.store.saveTranslationBatch(request));
+  assert.equal(retried.duplicate, true);
+  assert.equal(f.revisions.length, 2, 'An uncertain replay must not create additional before-alignment history.');
+});
+
 test('unresolved conflicts never replace the primary draft during ordinary retries or subsequent typing', async () => {
   const f = fixture(), primary = await write(f, draft({ translations: ['draft A'] }));
   const b = draft({ id: 'draft-b', revision: 'b1', translations: ['draft B'] });

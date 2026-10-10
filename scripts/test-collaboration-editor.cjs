@@ -499,6 +499,92 @@ test('draft promotion publishes committed translations only after its durable ac
   assert.ok(e.localDescs.status[desc.filepath]);
 });
 
+function pendingDroppedPromotionFixture() {
+  const initial = droppedReviewFixture(), workspace = JSON.parse(JSON.stringify(initial.editor.localDescs));
+  const h = enablePending(initial);
+  h.editor.localDescs = workspace;
+  h.editor.applyWorkspaceOverlay(); h.editor.filterDesc();
+  return h;
+}
+
+test('durable Dropped promotion acknowledgements publish resolution and counters even for unchanged text and receipt replay', async t => {
+  for (const variant of ['fresh', 'unchanged', 'receipt replay']) await t.test(variant, async () => {
+    const h = pendingDroppedPromotionFixture(), { editor: e, window, desc, calls, acknowledge } = h;
+    const original = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang)));
+    const lines = ['Aligned replacement', 'Second aligned entry'];
+    if (variant === 'unchanged') {
+      window.WorkspaceState.stageTranslation(e.localDescs, { filepath: desc.filepath, translations: lines }, e.lang,
+        { source: e.workspaceSourceFile(desc.filepath), sourceHash: e.sourceIdentity });
+      e.applyWorkspaceOverlay(); e.filterDesc();
+    }
+    assert.equal(desc.isDropped, true); assert.equal(e.statistic.isDropped, 1);
+    const saving = e.persistTranslationBatch([{ desc, lines }], 'save', { awaitDurable: true });
+    await pendingTick();
+    assert.equal(calls.length, 1);
+    assert.equal(desc.isDropped, true, 'The UI remains Dropped until its guarded durable transaction acknowledges.');
+    acknowledge(calls[0], variant === 'receipt replay' ? { duplicate: true } : {});
+    await saving;
+    assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang), null);
+    assert.equal(desc.isDropped, false); assert.equal(e.statistic.isDropped, 0);
+    assert.equal(desc.hasChanges, true); assert.equal(desc.isRevised, false);
+    assert.equal(e.localDescs.droppedArchive[original.id].status, 'promoted');
+    assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs.droppedArchive[original.id].snapshot)), original.snapshot);
+    assert.ok(e.localDescs.droppedArchive[original.id].targetSourceHashes.includes(e.sourceIdentity));
+  });
+});
+
+test('replayed promotion receipts retain a newer Dropped recovery generation or revision', async t => {
+  for (const newer of ['generation', 'revision']) await t.test(newer, async () => {
+    const h = pendingDroppedPromotionFixture(), { editor: e, window, desc, calls, acknowledge } = h;
+    const original = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang)));
+    const saving = e.persistTranslationBatch([{ desc, lines: ['Accepted older alignment', 'Second'] }], 'save', { awaitDurable: true });
+    await pendingTick();
+    let current;
+    if (newer === 'generation') current = window.WorkspaceState.dropTranslation(e.localDescs, e.workspaceSourceFile(desc.filepath), e.lang,
+      { id: 'new-explicit-recovery', recoveryId: 'new-explicit-recovery', translations: ['Newer preserved copy', 'Second'],
+        originSourceHash: e.sourceIdentity, targetSourceHash: e.sourceIdentity, game: e.gameVersion });
+    else {
+      current = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang);
+      current.revision = (Number(current.revision) || 0) + 1;
+      current.snapshot.translations = ['Newer revised preserved copy', 'Second'];
+      e.localDescs.droppedArchive[current.id] = JSON.parse(JSON.stringify(current));
+    }
+    const preserved = JSON.parse(JSON.stringify(current));
+    acknowledge(calls[0], { duplicate: true }); await saving;
+    assert.deepEqual(JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang))), preserved);
+    assert.equal(e.localDescs.droppedArchive[current.id].status, 'dropped');
+    assert.equal(desc.isDropped, true); assert.equal(e.statistic.isDropped, 1);
+    assert.notEqual(current.id + ':' + current.revision, original.id + ':' + original.revision);
+  });
+});
+
+test('a replayed promotion acknowledgement can publish the latest staged deletion without restaging old saved text', async () => {
+  const h = pendingDroppedPromotionFixture(), { editor: e, window, desc, calls, acknowledge } = h;
+  const original = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang);
+  const saving = e.persistTranslationBatch([{ desc, lines: ['Accepted alignment', 'Second'] }], 'save', { awaitDurable: true });
+  await pendingTick();
+  const baseline = e.workspaceSourceFile(desc.filepath).translations[e.lang];
+  acknowledge(calls[0], { duplicate: true, files: [{ filepath: desc.filepath, translations: [...baseline],
+    trackedForExport: false, needsReview: false, stagingReset: true, revision: 2 }] });
+  await saving;
+  assert.equal(e.localDescs.staged[e.lang]?.[desc.filepath], undefined);
+  assert.deepEqual(Array.from(desc.translations[e.lang]), baseline);
+  assert.equal(desc.hasChanges, false); assert.equal(desc.isDropped, false); assert.equal(e.statistic.isDropped, 0);
+  assert.equal(e.localDescs.droppedArchive[original.id].status, 'promoted');
+});
+
+test('promotion acknowledgements from a switched scope do not resolve the active in-memory candidate', async () => {
+  const h = pendingDroppedPromotionFixture(), { editor: e, window, desc, calls, acknowledge } = h;
+  const candidate = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang)));
+  const saving = e.persistTranslationBatch([{ desc, lines: ['Accepted alignment', 'Second'] }], 'save', { awaitDurable: true });
+  await pendingTick();
+  e.sourceIdentity = 'another-source';
+  acknowledge(calls[0]); const result = await saving;
+  assert.equal(result.stale, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs.dropped.Thai[desc.filepath])), candidate);
+  assert.equal(e.localDescs.droppedArchive[candidate.id].status, 'dropped');
+});
+
 test('rejected stale draft promotion retains committed text and releases only its failed queue entry', async () => {
   const { editor: e, desc, calls } = enablePending(saveFixture());
   const before = [...desc.translations.Thai];

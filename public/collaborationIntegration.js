@@ -335,7 +335,13 @@
                 return desc && (!arrayEquals(desc.translations[job.batch.language] || [], file.translations)
                   || !!desc.needsReview !== !!file.needsReview || !!desc.hasChanges !== !!file.trackedForExport);
               });
-              if (changed) this.applyCollaborationFiles(files, job.batch.language);
+              const promotions = { ...(job.batch.promoteDroppedByPath || {}), ...(job.batch.collaboration?.promoteDroppedByPath || {}) };
+              const promotion = job.batch.promoteDropped || job.batch.collaboration?.promoteDropped;
+              if (promotion && job.batch.files.length === 1) promotions[job.batch.files[0].filepath] = promotion;
+              // A successful receipt also proves the captured Dropped generation
+              // was resolved, including unchanged saves and lost-reply replays.
+              if (changed || Object.keys(promotions).length) this.applyCollaborationFiles(files, job.batch.language, null,
+                { acknowledgedPromotions: promotions, acknowledgedSourceHash: job.batch.sourceHash });
               if (job.batch.resetStaging) for (const file of job.batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
                 [file.filepath]: (this.inlineDraftFindings?.[file.filepath] || []).filter(finding => !finding.submissionReset) };
             }
@@ -765,7 +771,7 @@
           if (this._collaboration === context.client) this.setBrowserWork?.('collaboration', { key: 'remote', active: false });
         }
       },
-      applyCollaborationFiles(files, lang = this.lang, batchState = null) {
+      applyCollaborationFiles(files, lang = this.lang, batchState = null, options = {}) {
         if (lang !== this.lang || !files?.length) return;
         this.ensureLocalDescsReady();
         if ((this.editorSessionActive ?? this.editorVisible) && !this._editorCollabBase && this.editorCurrentEditingDesc?.filepath) {
@@ -786,6 +792,18 @@
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
           const original = this.workspaceSourceFile(file.filepath) || desc;
+          const promotion = options.acknowledgedPromotions?.[file.filepath];
+          const candidate = promotion && window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang);
+          if (candidate && options.acknowledgedSourceHash === this.sourceIdentity
+            && (!promotion.targetSourceHash || promotion.targetSourceHash === this.sourceIdentity)
+            && candidate.id === promotion.id && Number(candidate.revision || 0) === Number(promotion.revision || 0)) {
+            // Do not resolve a later candidate/revision when replaying an old
+            // receipt. Use the same guarded resolution as its durable commit.
+            window.WorkspaceState.stageTranslation(this.localDescs, file, lang, {
+              source: original, sourceHash: this.sourceIdentity, game: this.gameVersion, promoteDropped: promotion,
+              savedAt: this.localDescs.staged?.[lang]?.[file.filepath]?.savedAt,
+            });
+          }
           if (file.needsReview) {
             if (!window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang)
               && (file.translations || []).some(text => String(text).trim())) {

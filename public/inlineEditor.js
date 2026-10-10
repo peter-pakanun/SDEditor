@@ -214,6 +214,7 @@
         this._draftSession = { scope, key, record: existing?.state === 'active' ? copy(existing) : null,
           id: existing?.id || uuid(), expectedRevision: existing?.revision || null, base,
           source: copy(this.workspaceSourceFile?.(scope.filepath) || request.desc), declined: existing?.declined || '',
+          alignmentRecovery: copy(existing?.alignmentRecovery || []),
           original: (request.desc.translations[this.lang] || []).map(String), pendingRecord: null, detached: false };
         this._retainedDraftSessions ||= new Map();
         this._retainedDraftSessions.set(this._draftSession.key, this._draftSession);
@@ -251,10 +252,11 @@
         this.scheduleInlineAlignment();
       },
       async writeEditorDraft(session, lines, force = false) {
-        const unchanged = !force && equal(lines, this.committedEditorDraftTranslations(session));
+        const unchanged = !force && !session.alignmentRecovery?.length && equal(lines, this.committedEditorDraftTranslations(session));
         if (unchanged && !session.record && !session.pendingRecord && !session.writeError && !session.resolveConflicts) return true;
         const previousRecord = session.pendingRecord || session.record;
         if (!unchanged && equal(lines, previousRecord?.translations) && equal(session.base, previousRecord?.base)
+          && equal(session.alignmentRecovery || [], previousRecord?.alignmentRecovery || [])
           && (session.declined || '') === (previousRecord?.declined || '') && !session.writeError && !session.resolveConflicts) {
           await session.write; return !session.writeError;
         }
@@ -263,6 +265,7 @@
         const record = { ...session.scope, key: session.key, id: session.id ||= session.record?.id || session.pendingRecord?.id || uuid(), revision: uuid(),
           state: 'active', translations: copy(lines), base: copy(session.base), source: copy(session.source),
           declined: session.declined || '', updatedAt: Date.now(), conflicts: [],
+          ...(session.alignmentRecovery?.length ? { alignmentRecovery: copy(session.alignmentRecovery) } : {}),
           ...(submissionJobIds.length ? { submissionJobIds } : {}) };
         session.pendingRecord = record;
         if (this.draftScopeCurrent(session.scope)) this.inlineDraftRows = { ...this.inlineDraftRows, [record.filepath]: record };
@@ -660,6 +663,8 @@
         if (!current() || this.editorCurrentEditingDesc?.filepath !== filepath) return false;
         if (action === 'regex' || action === 'history') this.sideTab = action;
         if (action === 'consistency') this.openConsistencyResolver(this.editorFocusedIndex || 0);
+        if (action === 'alignment') this.startEntryAlignment?.();
+        else this.offerEntryAlignment?.();
         return true;
       },
       async restoreInlineEditorFromFull() {
@@ -804,7 +809,7 @@
           await this.loadEditorDrafts(); return true;
         } catch (error) { this.inlineDraftError = 'Could not discard the draft. ' + error.message; return false; }
       },
-      async editorDraftCommitted(session, submitted, ack, accepted) {
+      async editorDraftCommitted(session, submitted, ack, accepted, alignmentRecovery = []) {
         if (!session) return;
         if (session.submission && equal(session.submission.translations, submitted)) session.submission = null;
         const committedBase = copy(accepted || this._editorCollabBase || { translations: submitted });
@@ -815,6 +820,7 @@
         session.base = committedBase;
         session.base.translations = copy(submitted);
         session.original = copy(submitted);
+        session.alignmentRecovery = (session.alignmentRecovery || []).filter(item => !alignmentRecovery.some(saved => equal(item, saved)));
         let stored = null;
         if (this.testMode) this._draftMemory?.delete(session.key);
         else {

@@ -255,8 +255,10 @@
       }
       for (const operation of room.outbox) for (const entry of operation.files) {
         const path = entry.yours.filepath, desc = baselineByPath.get(path);
-        const baseline = desc && P.fileState({ filepath: path, translations: desc.translations?.[room.identity.language] || [], revision: 0 }, desc.translations?.English?.length);
-        const shared = room.local[path] || baseline;
+        // An aligned staged/shared file is authoritative for this replay. The
+        // immutable ZIP can still contain its preserved excess translations.
+        const shared = room.local[path] || (desc && P.fileState({ filepath: path,
+          translations: desc.translations?.[room.identity.language] || [], revision: 0 }, desc.translations?.English?.length));
         room.local[path] = shared ? P.mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
         if (shared?.stagingReset && operation.kind !== 'join' && !operation.resetStaging) {
           room.local[path].trackedForExport = true; delete room.local[path].stagingReset;

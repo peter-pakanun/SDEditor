@@ -36,6 +36,7 @@
   <link rel="stylesheet" href="editor-lookup.css">
   <link rel="stylesheet" href="tm.css">
   <link rel="stylesheet" href="inline-editor.css">
+  <link rel="stylesheet" href="entry-alignment.css">
   <link rel="stylesheet" href="managed-versions.css">
   <link rel="stylesheet" href="client-text.css">
   <title>SDEditor</title>
@@ -612,7 +613,8 @@
         <tbody>
           <tr v-for="desc in descsDisplay" :key="desc.filepath" :data-filepath="desc.filepath" :tabindex="selectedFilepath === desc.filepath ? 0 : -1" :aria-selected="selectedFilepath === desc.filepath" aria-describedby="fileTableKeyboardHelp" :class="{ selectedFileRow: selectedFilepath === desc.filepath, inlineFocusedRow: inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath, isMissing: desc.isMissing, hasChanges: desc.hasChanges, isRevised: desc.isRevised, isDropped: desc.isDropped, diagnosticWarning: desc.hasDiagnosticWarning, diagnosticError: desc.hasDiagnosticError }" @focus.self="selectFileRow(desc.filepath); inlineEditor && activateInlineRow(desc.filepath)" @click="inlineRowClick($event, desc.filepath)" @dblclick="inlineRowDoubleClick($event, desc.filepath)" @focusout="inlineRowFocusOut">
             <td class="fileIdentityCell"><button class="fileOpenButton" tabindex="-1" @click.stop="openInlineFullEditor(desc.filepath)" :aria-label="'Open full editor for ' + desc.filename" v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filepath + '\n' + desc.diagnosticScanTitle) : desc.filepath">{{ desc.filename }}</button><span v-if="desc.hasDiagnosticError || desc.hasDiagnosticWarning" class="fileDiagnosticLabel" :class="desc.hasDiagnosticError ? 'error' : 'warning'">{{ desc.hasDiagnosticError ? 'Error' : 'Warning' }}</span><span v-if="desc.isDropped" class="fileDroppedLabel">Dropped</span><span v-if="desc.isRevised" class="fileRevisedLabel">Revised</span><span v-if="!inlineEditor && inlineDraftFor(desc.filepath)" class="fileDraftLabel">Local draft</span>
-              <div v-if="inlineEditor && ((inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)) || desc.isDropped)" class="inlineFileActions" @click.stop>
+              <div v-if="inlineEditor && ((inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)) || desc.isDropped || fileNeedsEntryAlignment(desc))" class="inlineFileActions" @click.stop>
+                <button v-if="fileNeedsEntryAlignment(desc)" type="button" class="inlineReviewLink" @click="openFileEntryAlignment(desc.filepath)">Align translation entries</button>
                 <button v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)" type="button" @click="openInlineFullEditor(desc.filepath, 'consistency')">Compare inconsistencies in editor</button>
                 <button v-if="desc.isDropped" type="button" class="inlineReviewLink" @click="openInlineFullEditor(desc.filepath, 'dropped')">Review dropped copy in editor</button>
               </div>
@@ -707,6 +709,7 @@
             <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
             <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
             <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+            <a v-else-if="entryAlignmentWarningPath" class="collaborationError" href="#table" role="alert" @click.prevent="openFileEntryAlignment(entryAlignmentWarningPath)">{{ collaborationState.error }} · Align entries</a>
             <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
             <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
           </div>
@@ -774,6 +777,7 @@
           <button @click="discardEditorDraft" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Discard the local draft and restore committed text">Discard draft</button>
           <button v-if="editorHasStagedTranslation" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" title="Delete the staged save and restore the original ZIP translation">Delete staged translation</button>
           <button type="button" @click="openRawFileDialog" :disabled="editorLoading || !!editorLoadError || editorSaving || navigationBusy" title="View and download this file as text">Show raw file</button>
+          <button v-if="!entryAlignment" type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || editorCompareActive || !!editorDroppedConflict">Align entries</button>
           <button @click="editorExit" title="Close the file (Esc); keep its local draft">Close</button>
         </div>
         <div>
@@ -791,6 +795,7 @@
               <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
               <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
               <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
+              <a v-else-if="entryAlignmentWarningPath" class="collaborationError" href="#table" role="alert" @click.prevent="openFileEntryAlignment(entryAlignmentWarningPath)">{{ collaborationState.error }} · Align entries</a>
               <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
               <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
             </div>
@@ -824,7 +829,8 @@
               <span><strong>Dropped translation</strong> · {{ editorDroppedCandidate.reason || 'Source changed' }}</span>
               <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
               <button @click="confirmTranslationUnchanged" :disabled="!editorDroppedCanPromote">Confirm unchanged</button>
-              <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict">Discard dropped copy</button>
+              <button @click="startEntryAlignment('dropped')" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Align dropped entries</button>
+              <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Discard dropped copy</button>
             </div>
             <details open>
               <summary :title="editorDroppedCandidate.originSourceHash">Compare dropped version → current version</summary>
@@ -836,6 +842,12 @@
             </details>
           </div>
         </div>
+        <entry-alignment v-if="entryAlignment" :controller="$root"></entry-alignment>
+        <div v-else-if="editorEntryAlignmentRequired" class="entryAlignmentNotice" role="alert">
+          <span>This translation has {{ editorBlocks.length }} blocks for {{ editorCurrentEditingDesc.translations.English.length }} English entries. Align them before editing or saving.</span>
+          <button type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || !!editorDroppedConflict">Align translation entries</button>
+        </div>
+        <template v-if="!entryAlignment && !editorEntryAlignmentRequired">
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks" :key="index">
           <div class="inputField">
             <div v-if="editorBlock.isTable" class="tableEditorStack" :style="{ '--table-columns': editorTableColumnCount(editorBlock) }">
@@ -882,6 +894,7 @@
           </div>
           <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
         </div>
+        </template>
       </div>
 
       <div id="fullEditorSidebarHost" class="side fixed editorSidebarHost"></div>
@@ -1055,8 +1068,9 @@
             <div v-else>
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
-                  <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
-                  <button v-if="historyMode !== 'source' && !rev.legacyReference" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)">↩</button>
+                  <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)" :disabled="!!entryAlignment">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
+                  <button v-if="historyMode !== 'source' && !rev.legacyReference" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)" :disabled="!!entryAlignment">↩</button>
+                  <button v-if="historyMode !== 'source' && String(rev.note || '').startsWith('Before entry alignment')" type="button" @click="alignHistoryRevision(rev)" :disabled="editorSaving || !!entryAlignment">Align these blocks</button>
                 </div>
                 <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
               </div>
@@ -1595,6 +1609,8 @@
   <script src="editorLookup.js"></script>
   <script src="editorComponents.js"></script>
   <script src="inlineEditor.js"></script>
+  <script src="entryAlignment.js"></script>
+  <script src="entryAlignmentUi.js"></script>
   <script src="managedCollectionExports.js"></script>
   <script src="managedVersions.js"></script>
   <script src="clientTextUi.js"></script>
