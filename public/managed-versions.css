@@ -62,8 +62,9 @@
 .versionProgress.empty .versionProgressSummary strong { color: var(--ui-muted); }
 .versionProgress:focus-visible, .versionCatalog [tabindex="0"]:focus-visible, .versionModal .versionTeamChip:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .teamVersionTable td:first-child { min-width: 125px; }
-.versionTeamActions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: 430px; }
-.versionTeamActions select { max-width: 250px; padding: 7px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); }
+.versionTeamActions { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; width: max-content; }
+.versionTeamActions > button { flex: none; white-space: nowrap; }
+.versionTeamActions select { flex: none; width: 180px; padding: 7px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); color: var(--color-font); }
 .versionPanel .versionDropped { color: var(--ui-dropped); font-size: 12px; margin-top: 5px; }
 .versionPresence { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; min-width: 44px; }
 .versionPresence small { margin: 0; }
