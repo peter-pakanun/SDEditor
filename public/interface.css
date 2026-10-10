@@ -136,8 +136,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceContextLink:focus-visible { color: var(--ui-accent); outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .workspaceActions { display: flex; align-items: center; justify-self: end; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .workspaceActions button { flex: none; white-space: nowrap; }
-.workspaceContentGroup { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
-.workspaceContentGroup select { min-width: 0; max-width: 200px; min-height: 36px; padding: 8px; margin: 0; }
 .workspaceActions .workspaceIconButton { display: inline-flex; align-items: center; justify-content: center; padding: 9px; }
 .workspaceIconButton svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .inlineSidebarToggle[aria-expanded="true"] { color: var(--ui-accent); }
@@ -176,7 +174,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .searchField:focus-within { border-color: var(--ui-accent); outline: 2px solid var(--ui-accent-soft); background: var(--color-element); }
 .searchField svg { width: 20px; height: 20px; stroke: var(--ui-muted); stroke-width: 1.8; fill: none; flex-shrink: 0; }
 .searchField .filterToggle svg { width: 18px; height: 18px; stroke: currentColor; }
-.searchField #searchInp, .searchField #searchInp:focus {
+.searchField :is(#searchInp, #ctSearchInput), .searchField :is(#searchInp, #ctSearchInput):focus {
   flex: 1;
   width: 100%;
   min-width: 0;
@@ -189,7 +187,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   line-height: 1.6;
   transition: none;
 }
-.searchField #searchInp::-webkit-search-cancel-button { display: none; }
+.searchField :is(#searchInp, #ctSearchInput)::-webkit-search-cancel-button { display: none; }
 .searchField kbd { white-space: nowrap; font: inherit; font-size: 11px; color: var(--ui-muted); border: 1px solid var(--ui-border); padding: 3px 6px; border-radius: 4px; }
 .searchField .clearSearch { border: 0; background: transparent; color: var(--ui-accent); padding: 4px 7px; }
 .fileFilters { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 6px; border: 0; max-height: min(210px, 32dvh); overflow-y: auto; overscroll-behavior: contain; }
@@ -221,14 +219,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .filterSelectionActions { display: flex; gap: 6px; }
 .filterSelectionActions button { padding: 4px 7px; border: 0; background: transparent; color: var(--ui-accent); font-size: 12px; line-height: 1.6; }
 .fileTableScroll { overflow-x: auto; background: var(--color-element); border: 1px solid var(--ui-border); border-radius: 10px; box-shadow: var(--ui-shadow); }
-.workspace #table { table-layout: fixed; min-width: 750px; }
-.workspace #table th { background: var(--color-bg2); padding: 10px 12px; vertical-align: middle; border-bottom: 1px solid var(--ui-border); }
-.workspace #table td { padding: 12px; border-bottom: 1px solid var(--ui-border); vertical-align: top; overflow-wrap: anywhere; line-height: 1.6; }
-.workspace #table tbody tr:last-child td { border-bottom: 0; }
-.workspace #table tbody tr { cursor: pointer; }
-.workspace #table .tableSort { border: 0; padding: 0; border-radius: 2px; background: transparent; font-weight: 700; text-align: left; line-height: 1.4; }
-.workspace #table .fileOpenButton { max-width: 100%; padding: 0; border: 0; border-radius: 2px; background: transparent; color: var(--ui-accent); text-align: left; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
-.workspace #table .fileOpenButton:hover { text-decoration: underline; }
+.workspace :is(#table, .fileTable) { table-layout: fixed; min-width: 750px; }
+.workspace :is(#table, .fileTable) > thead > tr > th { background: var(--color-bg2); padding: 10px 12px; vertical-align: middle; border-bottom: 1px solid var(--ui-border); }
+.workspace :is(#table, .fileTable) > tbody > tr > td { padding: 12px; border-bottom: 1px solid var(--ui-border); vertical-align: top; overflow-wrap: anywhere; line-height: 1.6; }
+.workspace :is(#table, .fileTable) > tbody > tr:last-child > td { border-bottom: 0; }
+.workspace :is(#table, .fileTable) > tbody > tr { cursor: pointer; }
+.workspace :is(#table, .fileTable) .tableSort { border: 0; padding: 0; border-radius: 2px; background: transparent; font-weight: 700; text-align: left; line-height: 1.4; }
+.workspace :is(#table, .fileTable) .fileOpenButton { max-width: 100%; padding: 0; border: 0; border-radius: 2px; background: transparent; color: var(--ui-accent); text-align: left; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.workspace :is(#table, .fileTable) .fileOpenButton:hover { text-decoration: underline; }
 .fileDroppedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-dropped); }
 .fileRevisedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-revised); }
 .fileDiagnosticLabel { display: block; margin-top: 4px; font-size: 11px; }
@@ -375,14 +373,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   .searchField { padding: 0 5px 0 10px; }
   .searchField kbd { display: none; }
   .filterChip { font-size: 12px; padding: 8px; min-height: 38px; }
-  .workspace #table { display: block; min-width: 0; }
-  .workspace #table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .workspace #table tbody { display: block; }
-  .workspace #table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--ui-border); }
-  .workspace #table tbody tr:last-child { border-bottom: 0; }
-  .workspace #table td { border-bottom: 0; padding: 9px 12px; }
-  .workspace #table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: var(--ui-muted); }
-  .workspace #table td.translationTr > span:empty::after { content: 'No translation yet'; font-style: italic; color: var(--ui-muted); }
+  .workspace :is(#table, .fileTable) { display: block; min-width: 0; }
+  .workspace :is(#table, .fileTable) > thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .workspace :is(#table, .fileTable) > tbody { display: block; }
+  .workspace :is(#table, .fileTable) > tbody > tr { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--ui-border); }
+  .workspace :is(#table, .fileTable) > tbody > tr:last-child { border-bottom: 0; }
+  .workspace :is(#table, .fileTable) > tbody > tr > td { border-bottom: 0; padding: 9px 12px; }
+  .workspace :is(#table, .fileTable) > tbody > tr > td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: var(--ui-muted); }
+  .workspace :is(#table, .fileTable) > tbody > tr > td.translationTr > span:empty::after { content: 'No translation yet'; font-style: italic; color: var(--ui-muted); }
   .workspaceFooter { padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)); flex-direction: column; align-items: stretch; gap: 8px; }
   .workspaceFooterSummary { flex: none; }
   .workspaceStatus { justify-content: center; }
@@ -399,49 +397,49 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 }
 
 /* Hover and selection frame a row without changing its translation status colors. */
-.workspace #table tbody tr {
+.workspace :is(#table, .fileTable) > tbody > tr {
   --file-row-edge: transparent;
   --file-row-glow: transparent;
   position: relative;
 }
-.workspace #table tbody tr:hover {
+.workspace :is(#table, .fileTable) > tbody > tr:hover {
   --file-row-edge: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-border));
   --file-row-glow: color-mix(in srgb, var(--ui-accent) 18%, transparent);
   z-index: 1;
   box-shadow: 0 2px 8px var(--file-row-glow);
 }
-.workspace #table tbody tr.selectedFileRow {
+.workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow {
   --file-row-edge: var(--ui-accent);
   --file-row-glow: color-mix(in srgb, var(--ui-accent) 28%, transparent);
   z-index: 2;
   box-shadow: 0 2px 10px var(--file-row-glow);
 }
-.workspace #table tbody tr:is(:hover, .selectedFileRow) > td {
+.workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) > td {
   box-shadow: inset 0 1px var(--file-row-edge), inset 0 -1px var(--file-row-edge);
 }
-.workspace #table tbody tr:hover > td:first-child {
+.workspace :is(#table, .fileTable) > tbody > tr:hover > td:first-child {
   box-shadow: inset 1px 0 var(--file-row-edge), inset 0 1px var(--file-row-edge), inset 0 -1px var(--file-row-edge);
 }
-.workspace #table tbody tr:is(:hover, .selectedFileRow) > td:last-child {
+.workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) > td:last-child {
   box-shadow: inset -1px 0 var(--file-row-edge), inset 0 1px var(--file-row-edge), inset 0 -1px var(--file-row-edge);
 }
-.workspace #table tbody tr.selectedFileRow > td:first-child {
+.workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow > td:first-child {
   box-shadow: inset 4px 0 var(--ui-accent), inset 0 1px var(--file-row-edge), inset 0 -1px var(--file-row-edge);
 }
-.workspace #table tbody tr.selectedFileRow:focus { outline: none; }
-.workspace #table tbody tr.selectedFileRow:focus-visible {
+.workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow:focus { outline: none; }
+.workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow:focus-visible {
   outline: 2px solid var(--ui-accent);
   outline-offset: -2px;
 }
 @media (max-width: 700px) {
-  .workspace #table tbody tr:is(:hover, .selectedFileRow) {
+  .workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) {
     outline: 1px solid var(--file-row-edge);
     outline-offset: -1px;
   }
-  .workspace #table tbody tr:is(:hover, .selectedFileRow) > td,
-  .workspace #table tbody tr:is(:hover, .selectedFileRow) > td:first-child,
-  .workspace #table tbody tr:is(:hover, .selectedFileRow) > td:last-child { box-shadow: none; }
-  .workspace #table tbody tr.selectedFileRow::before {
+  .workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) > td,
+  .workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) > td:first-child,
+  .workspace :is(#table, .fileTable) > tbody > tr:is(:hover, .selectedFileRow) > td:last-child { box-shadow: none; }
+  .workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow::before {
     content: '';
     position: absolute;
     inset: 0 auto 0 0;
@@ -449,7 +447,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
     border-left: 4px solid var(--ui-accent);
     pointer-events: none;
   }
-  .workspace #table tbody tr.selectedFileRow:focus-visible {
+  .workspace :is(#table, .fileTable) > tbody > tr.selectedFileRow:focus-visible {
     outline: 2px solid var(--ui-accent);
     outline-offset: -2px;
   }
@@ -478,11 +476,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .collaborationAvatar:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .collaborationPeerLabels { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
 .collaborationPeer { display: inline-block; max-width: 100%; padding: 2px 7px; border-radius: 3px; background: var(--collaboration-color, #17743b); color: #fff; font: 600 12px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
-.workspace #table td.collaborationCell { position: relative; }
-.workspace #table tbody tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
-.workspace #table tbody tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .11), rgba(0, 0, 0, .11)); }
-[data-theme="dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing,
-[data-theme="modern-dark"] .workspace #table tbody tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .28), rgba(0, 0, 0, .28)); }
+.workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell { position: relative; }
+.workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
+.workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .11), rgba(0, 0, 0, .11)); }
+[data-theme="dark"] .workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationEditing,
+[data-theme="modern-dark"] .workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .28), rgba(0, 0, 0, .28)); }
 .collaborationEditorStatus { margin: 9px 0; padding: 9px 12px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element); }
 .collaborationEditorPeers { margin: 9px 0; }
 .collaborationNotice { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }

@@ -9,6 +9,16 @@
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
     const uuid = () => root.crypto.randomUUID();
     const mode = group => String(group?.contentMode || group?.mode || '').toLowerCase();
+    const statusFilters = [
+        {key:'missing',label:'Missing translation',tone:'missing'}, {key:'saved',label:'Saved changes',tone:'saved'},
+        {key:'revised',label:'Revised translations',tone:'revised'}, {key:'outdated',label:'Outdated translation',tone:'outdated'},
+        {key:'error',label:'Diagnostic errors',tone:'error'}, {key:'warning',label:'Diagnostic warnings',tone:'warning'},
+        {key:'unchanged',label:'Unchanged',tone:'unchanged'}
+    ];
+    // CT drafts currently have no sparse list index. Keep complete records
+    // visible so a durable draft can always be reopened after a reload.
+    const defaultFilters = () => statusFilters.map(item=>item.key);
+    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     function detect(filename) {
         const name = String(filename), language = teams.find(team => name.toLowerCase().startsWith(team.replace(/ /g, '_').toLowerCase() + '_')) || '';
         return { language, role: /(?:^|_)Gender(?:_|\.)/i.test(name) ? 'gender' : 'normal' };
@@ -48,12 +58,15 @@
     const mixin = {
         data() { return {
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
-            ctSheet: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 40,
-            ctSelection: '', ctEditor: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
+            ctSheet: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
+            ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false, ctIncludeConsistency: false,
+            ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
             ctBusy: false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
-            ctTool: 'lookup', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
+            ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
+            ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
+            ctPreviewGggVars: {},
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false,
             ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
@@ -99,8 +112,22 @@
                     return (first.percent-second.percent || second.total-first.total)*modifier || label(a,b);
                 });
             },
-            ctCurrentUnit() { return this._ctUnitIndex?.get(this.ctSelection) || null; },
-            ctFieldGroups() { return groupFields(this.ctCurrentUnit); },
+            ctCurrentUnit() { this.ctUnits;const id=this.ctSelection;return this._ctUnitIndex?.get(id) || null; },
+            ctPreviewMounted() { return this.ctActive && !this.versionChooserVisible && !!this.ctCurrentUnit && (this.ctEditor || this.inlineEditor); },
+            ctPreviewField() {
+                const fields=this.ctFieldsFor();
+                return fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender') || null;
+            },
+            ctGamePreview() {
+                const empty={segments:[],keysOrder:[]};
+                if(!this.ctActive)return {source:empty,target:empty};
+                const field=this.ctPreviewField;
+                if(!field)return {source:empty,target:empty};
+                return {source:this.buildGamePreviewSegments(field.source,{contentMode:'clienttext'}),
+                    target:this.buildGamePreviewSegments(this.ctValues[field.id] ?? '',{contentMode:'clienttext'})};
+            },
+            ctPreviewKeys() { return [...new Set([...this.ctGamePreview.source.keysOrder,...this.ctGamePreview.target.keysOrder])]; },
+            ctFieldGroups() { return groupFields({fields:this.ctFieldsFor()}); },
             ctHistoryChoices() {
                 return [{ key: 'original', label: 'Original workbook' }, { key: 'current', label: 'Current draft / saved translation' },
                     ...this.ctHistory.flatMap(entry => ['before', 'after'].map(side => ({ key: entry.key + ':' + side,
@@ -128,22 +155,36 @@
                 return { before, after, rows, notes: this.ctHistoryDiffParts(aNotes, bNotes), hasNotes: !!(aNotes || bNotes) };
             },
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
+            ctDiagnosticCounts() {
+                const counts={error:0,warning:0};
+                for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
+                return counts;
+            },
+            ctStatusFilterOptions() {
+                const counts={...this.ctCounts,error:0,warning:0};
+                for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
+                return statusFilters.map(item=>({...item,count:counts[item.key] || 0}));
+            },
+            ctEffectivePageSize() { return Math.max(1,Math.floor(Number(this.pageSize || this.ctPageSize) || 20)); },
             ctRows() {
                 this.ctRevision;
                 const query = this.ctAppliedSearch.toLocaleLowerCase();
-                return this.ctUnits.filter(unit => {
+                return this.ctOrderedUnits().filter(unit => {
+                    const fields=this.ctFieldsFor(unit);if(!fields.length)return false;
                     if (this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
                     } else if (this.ctFilter && !status[this.ctFilter]) return false;
+                    if(!this.ctFilter && !this.ctSelectedFilters.some(key=>key==='error'||key==='warning'
+                        ? (this.ctDiagnostics[unit.id] || []).some(issue=>issue.severity===key) : status[key]))return false;
                     if (!query) return true;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
-                    return [unit.recordId, unit.sheet, ...unit.fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => String(text).toLocaleLowerCase().includes(query));
+                    return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => String(text).toLocaleLowerCase().includes(query));
                 });
             },
-            ctPageRows() { return this.ctRows.slice((this.ctPage - 1) * this.ctPageSize, this.ctPage * this.ctPageSize); },
-            ctPageCount() { return Math.max(1, Math.ceil(this.ctRows.length / this.ctPageSize)); },
+            ctPageRows() { return this.ctRows.slice((this.ctPage - 1) * this.ctEffectivePageSize, this.ctPage * this.ctEffectivePageSize); },
+            ctPageCount() { return Math.max(1, Math.ceil(this.ctRows.length / this.ctEffectivePageSize)); },
             ctCounts() {
                 this.ctRevision;
                 const counts={total:this.ctUnits.length,missing:0,outdated:0,revised:0,saved:0,unchanged:0};
@@ -162,15 +203,15 @@
                 return { total, resolved, percent: total ? Math.floor(100 * resolved / total) : 100 };
             },
             ctLookupResults() {
-                const current = this.ctCurrentUnit, query = (this.ctLookup || current?.fields.find(field => field.kind !== 'gender')?.source || '').toLocaleLowerCase();
+                const current=this.ctCurrentUnit,fields=this.ctFieldsFor(current),focused=fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender');
+                const query=(this.ctLookup || focused?.source || '').toLocaleLowerCase();
                 if (!query) return [];
                 const output = [];
-                const focused=current?.fields.find(field=>field.id===this.ctFocusedField) || current?.fields.find(field=>field.kind!=='gender');
                 const kinds = new Set(focused ? [JSON.stringify([focused.kind,focused.form || null])] : []);
                 for (const unit of this.ctUnits) {
                     if (unit.id === current?.id) continue;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
-                    for (const field of unit.fields) {
+                    for (const field of this.ctFieldsFor(unit)) {
                         const target = values[field.id];
                         if (field.kind === 'gender' || !target?.trim() || target.trim() === 'NONEXISTENT' || !kinds.has(JSON.stringify([field.kind, field.form || null]))) continue;
                         if (field.source.toLocaleLowerCase().includes(query)) output.push({ unitId: unit.id, sheet: unit.sheet, recordId: unit.recordId, name: field.name, form: field.form, source: field.source, target });
@@ -179,25 +220,295 @@
                 }
                 return output;
             },
-            ctMemoryResults() {const unit=this.ctCurrentUnit,field=unit?.fields.find(field=>field.id===this.ctFocusedField) || unit?.fields.find(field=>field.kind!=='gender');return field ? root.ContentAdapters.clienttext.findMemory(this.ctMemory,unit,field,{game:this.gameVersion,limit:20}) : [];},
+            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctMemory,unit,field,{game:this.gameVersion,limit:20}) : [];},
             ctDictionaryMatches() {
-                const source = this.ctCurrentUnit?.fields.map(field => field.source).join('\n') || '';
-                return (this.dictionary || []).filter(entry => entry.find && source.toLocaleLowerCase().includes(String(entry.find).toLocaleLowerCase())).slice(0, 80);
+                return (this.dictionary || []).filter(entry=>this.ctDictionaryMatchedDefinitions.has(String(entry?._id || '')));
             },
-            activeContentGroups() { return this.managedVersions?.find(version=>version.id===this.ctWorkspace?.scope.versionId)?.contentGroups || this.ctWorkspace?.metadata?.version?.contentGroups || this.managedActiveDetails?.contentGroups || []; }
+            ctDictionaryReady() {
+                return !!(this.ctActive && this.ctWorkspace && this.ctCurrentUnit && !this.ctBusy && !this.ctHistoryViewer
+                    && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting
+                    && (!this.lang || this.lang===this.ctWorkspace.scope.language)
+                    && this.gameVersion===this.ctWorkspace.scope.game && (this.branchId || 'default')===(this.ctWorkspace.scope.branchId || 'default'));
+            },
+            ctDictionaryScopeKey() {return JSON.stringify([this.ctContext(),this.ctSelection]);},
+            ctDictionaryMatchedDefinitions() {
+                const map=new Map(),texts=this.ctFieldsFor().filter(field=>field.kind!=='gender').map(field=>String(field.source || ''));
+                const keywordNames=new Set(texts.flatMap(text=>root.ClientTextState.tokenize(text).filter(token=>token.kind==='keyword')
+                    .map(token=>this.ctDictionaryKeywordName(token.identity).toLowerCase())));
+                const active=this.getActiveDictionaryEntries?.() || root.DictionaryScope?.activeEntries(this.dictionary || [],this.gameVersion) || this.dictionary || [];
+                for(const word of active){
+                    const definitions=new Set(),pairs=this.ctDictionaryPairs(word);
+                    for(const pair of pairs){
+                        const find=String(pair.find || '').trim();if(!find)continue;
+                        const pattern=new RegExp('\\b'+find.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b');
+                        if(texts.some(text=>pattern.test(text)) || pair.isMain && keywordNames.has(find.toLowerCase()))definitions.add(find.toLowerCase());
+                    }
+                    if(definitions.size)map.set(String(word._id || ''),definitions);
+                }
+                return map;
+            },
+            ctDictionaryFiltered() {
+                const entries=(this.dictionary || []).slice(),matched=this.ctDictionaryMatchedDefinitions;
+                let ordered;
+                if(this.ctDictionaryEditOrder.length){
+                    const remaining=new Map(entries.map(word=>[String(word._id),word]));ordered=[];
+                    for(const id of this.ctDictionaryEditOrder)if(remaining.has(id)){ordered.push(remaining.get(id));remaining.delete(id);}
+                    ordered.push(...remaining.values());
+                }else ordered=entries.filter(word=>matched.has(String(word._id))).concat(entries.filter(word=>!matched.has(String(word._id))));
+                const filter=this.ctDictionaryFilter.trim().toLocaleLowerCase();
+                return filter ? ordered.filter(word=>String(word._id)===this.ctDictionaryEditingId
+                    || [word.find,word.replace,word.tlnote,...(word.alts || []).flatMap(alt=>[alt.find,alt.replace])].some(value=>String(value || '').toLocaleLowerCase().includes(filter))) : ordered;
+            },
+            ctDictionaryPageSize() {return Math.max(1,Number(this.dictionaryPageSize) || 50);},
+            ctDictionaryPageCount() {return Math.max(1,Math.ceil(this.ctDictionaryFiltered.length/this.ctDictionaryPageSize));},
+            ctDictionaryVisible() {
+                if(!this.ctDictionaryReady)return [];
+                const page=Math.min(this.ctDictionaryPage,this.ctDictionaryPageCount);
+                return this.ctDictionaryFiltered.slice((page-1)*this.ctDictionaryPageSize,page*this.ctDictionaryPageSize).map(word=>this.getLiveDictionaryEntry?.(word) || word);
+            },
+            ctDictionaryRangeLabel() {
+                const count=this.ctDictionaryFiltered.length,page=Math.min(this.ctDictionaryPage,this.ctDictionaryPageCount),size=this.ctDictionaryPageSize;
+                const first=count ? (page-1)*size+1 : 0,last=Math.min(page*size,count);
+                return first.toLocaleString('en-US')+'–'+last.toLocaleString('en-US')+' of '+count.toLocaleString('en-US');
+            },
+            ctDictionaryController() {
+                const host=this,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary,current=()=>host.ctDictionaryContextCurrent(ctx,unitId,dictionary);
+                const member=word=>current() && host.ctDictionaryReady && dictionary?.includes(word);
+                return {
+                    get editorReady(){return current() && host.ctDictionaryReady;},get visibleDictionary(){return current() ? host.ctDictionaryVisible : [];},
+                    get dictionaryFlashId(){return host.dictionaryFlashId;},get translationEditorBcp47(){return host.translationEditorBcp47;},
+                    dictionaryMultiline:true,get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
+                    get cloudEntryHistoryAvailable(){return current() && host.cloudEntryHistoryAvailable;},get cloudEntryHistoryHint(){return host.cloudEntryHistoryHint;},
+                    isDictionaryEntryFound:word=>host.ctDictionaryMatchedDefinitions.has(String(word._id)),
+                    isDictionaryEntryFindMatched:word=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(word.find || '').trim().toLowerCase()) || false,
+                    isDictionaryAltFindMatched:(word,alt)=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(alt.find || '').trim().toLowerCase()) || false,
+                    dictionaryEntryScope:word=>host.dictionaryEntryScope?.(word) || root.DictionaryScope?.normalize(word) || 'all',
+                    dictionaryEntryScopeWarning:word=>host.dictionaryEntryScopeWarning?.(word) || '',
+                    dictionaryEntryInput:word=>{if(member(word))host.dictionaryEntryInput?.(word);},
+                    setDictionaryEntryScope:(word,scope)=>{if(member(word)){host.ctDictionaryBeginEdit(word._id);host.setDictionaryEntryScope?.(word,scope);}},
+                    addDictionaryAltRow:word=>{if(member(word)){host.ctDictionaryBeginEdit(word._id);host.addDictionaryAltRow?.(word);}},
+                    removeDictionaryAltRow:(word,alt)=>member(word) && host.removeDictionaryAltRow?.(word,alt,{isCurrent:()=>member(word)}),
+                    removeVocab:word=>member(word) && host.removeVocab?.(word,{isCurrent:()=>member(word)}),
+                    cloudOpenHistory:id=>{if(current() && host.cloudEntryHistoryAvailable && dictionary.some(word=>String(word._id)===String(id)))return host.cloudOpenHistory?.(id);},
+                    useDictionaryTranslation:(word,alt,event)=>{
+                        if(event){if(event.isComposing || event.keyCode===229)return false;event.preventDefault();event.stopPropagation?.();}
+                        return member(word) && (!alt || word.alts?.includes(alt)) && host.ctDictionaryUse(word,alt,ctx,unitId,dictionary);
+                    },
+                    dictionaryEntryFocusIn:event=>{if(current())host.ctDictionaryFocusIn(event);},
+                    dictionaryEntryFocusOut:event=>{if(current())host.ctDictionaryFocusOut(event,ctx,unitId,dictionary);},
+                    onDictionaryReplaceEnter:()=>{},
+                };
+            },
         },
         watch: {
-            ctSearch() { clearTimeout(this._ctSearchTimer); this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 180); },
+            ctDictionaryFilter() {this.ctDictionaryPage=1;},
+            ctDictionaryPageCount(value) {this.ctDictionaryPage=Math.min(this.ctDictionaryPage,value);},
+            ctDictionaryScopeKey() {this.ctDictionaryEndEdit();this.ctDictionaryPage=1;},
+            ctPreviewKeys: {flush:'sync',handler(keys) {
+                const next={};for(const key of keys)next[key]=this.ctPreviewGggVars[key] ?? this.defaultPreviewVarValue(key);
+                this.ctPreviewGggVars=next;
+            }},
+            ctSearch() { clearTimeout(this._ctSearchTimer); this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 250); },
             ctFilter() { this.ctPage = 1; }, ctSheet() { this.ctPage = 1; },
+            ctSelectedFilters: {deep:true,handler() {this.ctPage=1;}},
+            inlineEditor() { this.ctFlushDraft().catch(()=>{});this.$nextTick?.(()=>this.ctRefreshLayout()); },
+            ctFiltersVisible() { this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
             managedCatalogScope() { this.ctFence(); this.ctRefreshLocal(); },
             lang() { if (this.ctActive && this.ctWorkspace?.scope.language !== this.lang) this.ctFence(); },
             gameVersion() { if (this.ctActive && this.ctWorkspace?.scope.game !== this.gameVersion) this.ctFence(); },
-            versionChooserVisible(value) { if (value) this.ctRefreshLocal(); }
+            versionChooserVisible(value) {
+                if(value)this.ctRefreshLocal();
+                else if(this.ctActive)this.$nextTick?.(()=>{if(this.ctActive && !this.versionChooserVisible)this.ctRefreshLayout();});
+            }
         },
         mounted() { this._ctStore = root.ClientTextStore.create(); this._ctWorker = root.ClientTextWorkerClient.create(); },
         beforeUnmount() { this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
         methods: {
+            ctDictionaryKeywordName(identity) {return root.getKeywordPopupLookupName?.(identity) || String(identity).trim().replace(/<gemlevel=(?:\d+|\{\d+\})>$/i,'').trim();},
+            ctDictionaryPairs(word) {
+                return this.getDictionaryDefinitionPairs?.(word) || [{find:word.find,replace:word.replace,isMain:true},...(word.alts || []).map(alt=>({...alt,isMain:false}))];
+            },
+            ctDictionaryContextCurrent(ctx,unitId,dictionary) {return this.ctActive && this.ctCurrent(ctx) && this.ctSelection===unitId && this.dictionary===dictionary;},
+            ctDictionaryBeginEdit(id,options={}) {
+                id=String(id || '');if(!id || !(this.dictionary || []).some(word=>String(word._id)===id))return;
+                if(!this.ctDictionaryEditOrder.length || options.newEntry){
+                    const order=this.ctDictionaryFiltered.map(word=>String(word._id));this.ctDictionaryEditOrder=options.newEntry ? [id,...order.filter(value=>value!==id)] : order;
+                }
+                this.ctDictionaryEditingId=id;
+            },
+            ctDictionaryEndEdit() {this.ctDictionaryEditOrder=[];this.ctDictionaryEditingId='';if(this.ctActive)this.endDictionaryEdit?.();},
+            ctDictionaryFocusIn(event) {
+                const id=event.target?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');if(id)this.ctDictionaryBeginEdit(id);
+            },
+            ctDictionaryFocusOut(event,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary) {
+                const nextId=event.relatedTarget?.closest?.('.editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
+                if(nextId){this.ctDictionaryBeginEdit(nextId);return;}
+                const id=this.ctDictionaryEditingId;
+                this.$nextTick?.(()=>{
+                    if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || id!==this.ctDictionaryEditingId)return;
+                    const target=root.document?.activeElement,active=target?.closest?.('.ctTools .editBlock[data-dict-id]')?.getAttribute?.('data-dict-id');
+                    if(active && this.ctTool==='dictionary')this.ctDictionaryBeginEdit(active);else this.ctDictionaryEndEdit();
+                });
+            },
+            ctSetDictionaryPage(page) {
+                this.ctDictionaryEndEdit();this.ctDictionaryPage=Math.max(1,Math.min(Number(page) || 1,this.ctDictionaryPageCount));
+                this.$nextTick?.(()=>{const side=root.document?.querySelector?.('.ctTools');if(side)side.scrollTop=0;});
+            },
+            ctDictionaryAdd() {
+                if(!this.ctDictionaryReady || !this.createDictionaryEntry)return false;
+                const ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary,word=this.createDictionaryEntry();
+                this.ctDictionaryFilter='';dictionary.unshift(word);this.invalidateEditorDictionaryIndex?.(word._id,{membership:true});
+                this.ctDictionaryBeginEdit(word._id,{newEntry:true});this.ctDictionaryPage=1;this.dictionaryFlashId=word._id;
+                this.$nextTick?.(()=>{
+                    if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary))return;
+                    const rows=root.document?.querySelectorAll?.('.ctTools .dictRow[data-dict-id]') || [],row=[...rows].find(row=>row.getAttribute('data-dict-id')===word._id);
+                    row?.querySelector?.('textarea[placeholder="Replace"],input[placeholder="Replace"]')?.focus();
+                });return word;
+            },
+            ctDictionaryTarget(fieldId=this.ctFocusedField) {
+                const refs=this.$refs?.ctEditorRegion,ref=Array.isArray(refs)?refs[0]:refs,region=ref?.$el || ref;
+                return [...(region?.querySelectorAll?.('[data-ct-target]') || root.document?.querySelectorAll?.('[data-ct-target]') || [])].find(input=>input.dataset.ctTarget===fieldId);
+            },
+            ctDictionaryUse(word,alt,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary) {
+                if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || !this.ctDictionaryReady || !dictionary.includes(word) || alt && !word.alts?.includes(alt))return false;
+                const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField),input=this.ctDictionaryTarget(field?.id),replacement=(alt || word).replace;
+                if(!field || field.kind==='gender' || !input || input.isConnected===false || typeof replacement!=='string')return false;
+                const text=this.ctValues[field.id],start=input.selectionStart,end=input.selectionEnd;
+                if(typeof text!=='string' || input.value!==text || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>text.length)return false;
+                const next=text.slice(0,start)+replacement+text.slice(end);this.ctValues[field.id]=next;this.ctCloseCompletion();this.ctEdited(field);
+                this.$nextTick?.(()=>{
+                    if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || this.ctFocusedField!==field.id || this.ctValues[field.id]!==next || input.isConnected===false)return;
+                    input.focus();input.setSelectionRange?.(start+replacement.length,start+replacement.length);this.ctResizeField(input);
+                });return true;
+            },
+            ctOrderedUnits() {
+                const key=this.ctSort,units=this.ctUnits,saved=key==='translation'?this.ctSaved:null;
+                let cache=this._ctOrderCache;
+                if(!cache || cache.units!==units || cache.key!==key || cache.saved!==saved){
+                    const collator=this._ctCollator ||= new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
+                    const ascending=units.slice().sort((a,b)=>collator.compare(this.ctSortValue(a,key),this.ctSortValue(b,key))
+                        || collator.compare(a.recordId,b.recordId) || a.id.localeCompare(b.id));
+                    cache=this._ctOrderCache={units,key,saved,ascending,descending:null};
+                }
+                return this.ctSortDir==='desc'?(cache.descending ||= cache.ascending.slice().reverse()):cache.ascending;
+            },
+            ctSortValue(unit,key) {
+                const cache=this._ctSortCache ||= new WeakMap(),saved=this.ctSaved[unit.id];let item=cache.get(unit);
+                if(!item){item={filename:String(unit.recordId)};cache.set(unit,item);}
+                if(key==='english' && item.english===undefined)item.english=this.ctListText(unit,'source');
+                if(key==='translation' && (item.saved!==saved || item.translation===undefined)){
+                    item.saved=saved;item.translation=this.ctListText(unit,'target');
+                }
+                return item[key] ?? item.filename;
+            },
+            ctSortBy(key) {
+                if(!['filename','english','translation'].includes(key) || this.ctBusy)return;
+                this.ctSortDir=this.ctSort===key && this.ctSortDir==='asc'?'desc':'asc';this.ctSort=key;this.ctPage=1;
+            },
+            ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
+            ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
+            ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=defaultFilters();this.ctSearch='';this.ctApplySearch();},
+            ctOpenScanDialog() {if(!this.ctBusy)this.$refs?.ctDiagnosticDialog?.showModal();},
+            ctCloseScanDialog() {this.$refs?.ctDiagnosticDialog?.close();},
+            ctStartScan() {this.ctCloseScanDialog();return this.ctScan(this.ctIncludeConsistency);},
+            async ctShowVersionChooser() {
+                if(!this.ctActive || this.ctBusy)return false;
+                const ctx=this.ctContext(),unitId=this.ctSelection,current=()=>this.ctActive && !this.ctBusy && this.ctCurrent(ctx) && this.ctSelection===unitId;
+                try {
+                    if(!await this.ctFlushDraft() || !current())return false;
+                    await this.ctFlushCommentDraft();if(!current())return false;
+                    this.versionChooserVisible=true;return true;
+                } catch(error){if(current())this.ctError='Draft was not stored before opening Versions: '+error.message;return false;}
+            },
+            async ctSetPage(value) {
+                if(this.ctBusy)return false;const ctx=this.ctContext();
+                if(!await this.ctFlushDraft() || !this.ctCurrent(ctx))return false;
+                this.ctPage=Math.max(1,Math.min(this.ctPageCount,Math.floor(Number(value)||1)));return true;
+            },
+            ctFocusRow(unitId=this.ctSelection) {
+                const region=this.$refs?.ctFileTableRegion;
+                const row=[...(region?.querySelectorAll?.('[data-unit-id]') || [])].find(item=>item.dataset.unitId===unitId);
+                (row || region)?.focus?.({preventScroll:true});row?.scrollIntoView?.({block:'nearest'});
+            },
+            ctRefreshLayout() {this.observeInlineBlocks?.();this.measureWorkspaceChrome?.();},
+            ctRowClick(unit,event) {
+                if(this.ctBusy || rowControl(event))return false;
+                return this.ctSelect(unit,!this.inlineEditor);
+            },
+            ctRowDoubleClick(unit,event) {
+                if(rowControl(event))return false;
+                const pending=this._ctSelectRun;
+                if(pending?.pending && pending.unitId===unit?.id && this.ctCurrent(pending.ctx)){pending.full=true;if(this.ctSelection===unit.id)this.ctEditor=true;return true;}
+                if(this.ctBusy)return false;
+                return this.ctSelect(unit,true);
+            },
+            async ctRowKeydown(unit,event) {
+                if(!event || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+                    || this.ctBusy || this.ctEditor || this.ctHistoryViewer || this.$refs?.ctDiagnosticDialog?.open || rowControl(event))return false;
+                const keys=['ArrowUp','ArrowDown','Home','End','PageUp','PageDown','ArrowLeft','ArrowRight','Enter'];
+                if(!keys.includes(event.key))return false;
+                unit ||= this.ctCurrentUnit || this.ctPageRows[0];if(!unit)return false;
+                event.preventDefault();const ctx=this.ctContext();
+                if(event.key==='Enter')return this.ctSelect(unit,true);
+                const rows=this.ctRows,size=this.ctEffectivePageSize,index=Math.max(0,rows.findIndex(item=>item.id===unit.id));
+                let targetIndex=index;
+                if(event.key==='Home')targetIndex=0;else if(event.key==='End')targetIndex=rows.length-1;
+                else if(event.key==='ArrowUp')targetIndex--;else if(event.key==='ArrowDown')targetIndex++;
+                else targetIndex+=(event.key==='PageUp'||event.key==='ArrowLeft'?-size:size);
+                targetIndex=Math.max(0,Math.min(rows.length-1,targetIndex));const target=rows[targetIndex];if(!target)return false;
+                if(!await this.ctSelect(target,false,{focus:false}) || !this.ctCurrent(ctx))return false;
+                this.ctPage=Math.floor(targetIndex/size)+1;await this.$nextTick?.();
+                if(this.ctCurrent(ctx) && this.ctSelection===target.id)this.ctFocusRow(target.id);return true;
+            },
+            async ctCloseEditor() {
+                if(this.ctBusy || this._ctCloseRun)return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,unitId=this.ctSelection,selectionRun=this._ctSelectRun,
+                    returning=this._ctInlineReturn,run=this._ctCloseRun={};
+                const current=()=>this._ctCloseRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
+                    && this.ctCurrentUnit===unit && this._ctSelectRun===selectionRun && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
+                const input=this.ctTargetInputs().find(input=>input.dataset.ctTarget===returning?.fieldId);
+                const caret=input && this.ctFocusedField===returning?.fieldId ? this.ctCaptureCaret(input) : returning?.caret;
+                try {
+                    if(!await this.ctFlushDraft() || !current())return false;
+                    await this.ctFlushCommentDraft();if(!current())return false;
+                    this.ctEditor=false;this.ctInlineClosed=false;this.ctCloseCompletion();await this.$nextTick?.();
+                    if(!current())return false;
+                    this.ctRefreshLayout();
+                    if(returning && this._ctInlineReturn===returning && this.inlineEditor && this.ctCurrent(returning.ctx)
+                        && returning.unit===unit && returning.unitId===unitId && returning.selectionRun===selectionRun){
+                        this.ctFocusedField=returning.fieldId;this.ctFocusTarget(false,returning.fieldId,caret);
+                    } else this.ctFocusRow(unitId);
+                    this._ctInlineReturn=null;return true;
+                } finally {if(this._ctCloseRun===run)this._ctCloseRun=null;}
+            },
+            async ctCloseInline() {
+                if(this.ctKeyboardBlocked() || this._ctCloseRun)return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,run=this._ctCloseRun={},selectionRun=this._ctSelectRun;
+                const current=()=>this._ctCloseRun===run && this.ctCurrent(ctx) && this.ctCurrentUnit===unit
+                    && this._ctSelectRun===selectionRun && !this.ctEditor && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
+                try {
+                    if(!await this.ctFlushDraft() || !current())return false;
+                    await this.ctFlushCommentDraft();if(!current())return false;
+                    this.ctInlineClosed=true;this.ctCloseCompletion();this._ctInlineReturn=null;await this.$nextTick?.();
+                    if(!current())return false;this.ctRefreshLayout();this.ctFocusRow(unit.id);return true;
+                } finally {if(this._ctCloseRun===run)this._ctCloseRun=null;}
+            },
+            async ctDiscardDraft() {
+                if(this.ctBusy || !this.ctCurrentUnit || !this.ctDraftDirty)return false;
+                const ctx=this.ctContext(),unitId=this.ctSelection,signature=JSON.stringify([this.ctValues,this.ctReviewed]);
+                if(!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
+                const revision=this._ctDraftRevision;this.ctBusy=true;
+                try {
+                    await this._ctStore.discardDraft(ctx.scope,unitId,{expectedRevision:revision});
+                    if(!this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
+                    if(this._ctDraftRevision===revision){this._ctDraftRevision=null;const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));if(head&&!head.pending){head.revision=null;head.signature=null;}}
+                    if(signature!==JSON.stringify([this.ctValues,this.ctReviewed])){this.ctQueueDraft();return false;}
+                    this.ctValues=this.ctValuesFor(this.ctCurrentUnit);this.ctReviewed={...(this.ctSaved[unitId]?.reviewed || {})};
+                    this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctCompletion=null;return true;
+                } catch(error){if(this.ctCurrent(ctx))this.ctError='Draft was not discarded: '+error.message;return false;}
+                finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
+            },
             ctAssignmentProgress(row) {
                 if(row.contentMode!=='clienttext'){
                     const progress=this.managedProgress(row.team);
@@ -241,10 +552,12 @@
                 this.ctFlushCommentDraft().catch(()=>{});
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);
                 this._ctSync?.stop?.(); this._ctSync = null;
-                this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';
-                this._ctStatusCache = new WeakMap(); this.ctDraftDirty = false; this.ctBusy = false;
+                this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
+                this._ctInlineReturn=null;this._ctCloseRun=null;this.ctInlineClosed=false;
+                this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
+                this.ctPreviewGggVars={};this.ctFocusedField='';
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
                 this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);
                 this.ctResetHistory();
@@ -259,10 +572,42 @@
             ctFieldStatus(field) { return this.ctStatus().fields[field.id] || {}; },
             ctReviewHash(field) { return root.ClientTextState.sourceHash(field.source); },
             ctValuesFor(unit) { return root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); },
+            ctFieldsFor(unit=this.ctCurrentUnit) {
+                if(!unit)return [];
+                // Originals are immutable. Cache visibility without removing
+                // any field from the unit, save payload, history or export.
+                const cache=this._ctVisibleFields ||= new WeakMap();let item=cache.get(unit);
+                if(!item || item.fields!==unit.fields){
+                    const hasEnglish=field=>field.kind!=='gender' && String(field.source ?? '').trim().length>0;
+                    const fields=unit.fields || [],text=fields.filter(hasEnglish);
+                    item={fields:unit.fields,visible:text.length ? fields.filter(field=>field.kind==='gender' || hasEnglish(field)) : []};cache.set(unit,item);
+                }
+                return item.visible;
+            },
+            ctTabFields(unit=this.ctCurrentUnit) {
+                const column=field=>{
+                    const name=/^([A-Z]+)\d+$/i.exec(field.targetCell || '')?.[1];
+                    return name ? [...name.toUpperCase()].reduce((value,char)=>value*26+char.charCodeAt(0)-64,0) : Infinity;
+                };
+                // The form grid's visual rows and parser metadata order differ
+                // from the original worksheet. Coordinates define navigation only.
+                return this.ctFieldsFor(unit).slice().sort((a,b)=>column(a)-column(b));
+            },
+            ctListText(unit,side) {
+                const fields=this.ctFieldsFor(unit).filter(field=>field.kind!=='gender');
+                if(side==='source')return [...new Set(fields.map(field=>field.source))].join('\n');
+                const values=this.ctValuesFor(unit);
+                return fields.map(field=>values[field.id]).filter(text=>String(text ?? '').trim().length>0).join('\n');
+            },
             ctDiagnose(unit) { const values = this.ctValuesFor(unit); return unit.fields.flatMap(field => root.ClientTextState.diagnose(field, values[field.id]).map(issue => ({ ...issue, severity: issue.level || issue.severity, fieldId: field.id }))); },
             ctTone(unit) { const s = this.ctStatus(unit); return s.missing ? 'missing' : s.outdated ? 'outdated' : s.revised ? 'revised' : s.saved ? 'saved' : ''; },
             ctStatusLabel(unit) { const s = this.ctStatus(unit); return ['Missing', 'Outdated', 'Revised', 'Saved'].filter(label => s[label.toLowerCase()]).join(' · ') || 'Unchanged'; },
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
+            ctGroupSources(group) {
+                const sources=new Map();for(const field of group.fields){const text=String(field.source ?? ''),item=sources.get(text);
+                    if(item)item.names.push(field.form || field.name);else sources.set(text,{key:field.id,text,names:[field.form || field.name]});}
+                return [...sources.values()].map(item=>({...item,label:sources.size>1?item.names.join(' / '):group.name}));
+            },
             ctNotes(unit = this.ctCurrentUnit) { return (Array.isArray(unit?.developerNotes) ? unit.developerNotes : unit?.developerNotes ? [unit.developerNotes] : []).map(note => typeof note === 'string' ? note : note.text || note.value || '').filter(Boolean); },
             ctReport(progress) { this.ctProgress = { ...this.ctProgress, ...progress, completed: progress.completed ?? progress.processed ?? this.ctProgress?.completed ?? 0 }; },
             ctCancel() { this._ctAbort?.abort(); this.ctNotice = 'Cancelled. Saved work is retained.'; },
@@ -283,9 +628,10 @@
                     const [units, saved] = await Promise.all([this._ctStore.getUnits(scope), this._ctStore.getSaved(scope)]);
                     if (!this.ctCurrent(ctx)) return false;
                     this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved); this.ctRevision++;
-                    this._ctSheets = raw([...new Set(units.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
+                    const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
+                    this._ctSheets = raw([...new Set(visibleUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
-                    this.ctSheet = units.length ? JSON.stringify([units[0].role, units[0].sheet]) : ''; this.ctPage = 1;
+                    this.ctSheet = visibleUnits.length ? JSON.stringify([visibleUnits[0].role, visibleUnits[0].sheet]) : ''; this.ctPage = 1;
                     this.ctDiagnostics = raw({}); this.ctScanDone = false; this.ctSearch = ''; this.ctAppliedSearch = '';
                     this.ctActive = true; this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
                     this.ctLoadMemory(ctx);
@@ -295,7 +641,7 @@
                         this._ctSync = root.ClientTextSync.create({ scope, store: this._ctStore, request, isCurrent: () => this.ctCurrent(ctx) && this.ctActive });
                         this.ctSync(ctx); this._ctSyncTimer = setInterval(() => { if (!root.document.hidden) this.ctSync(ctx); }, 20000);
                     }
-                    return true;
+                    await this.$nextTick?.();if(!this.ctCurrent(ctx))return false;this.ctRefreshLayout();return true;
                 } catch (error) { if (this.ctCurrent(ctx)) this.ctError = error.message; return false; }
                 finally { if (this.ctCurrent(ctx)) this.ctBusy = false; }
             },
@@ -326,18 +672,30 @@
                 const run={sync,promise:operation};this._ctSyncRun=run;
                 try{return await operation;}finally{if(this._ctSyncRun===run)this._ctSyncRun=null;}
             },
-            async ctSelect(unit, full = false) {
-                if (!unit || this.ctBusy) return;
-                const ctx = this.ctContext();
-                if (!await this.ctFlushDraft()) return;
-                if(!this.ctCurrent(ctx))return;
+            async ctSelect(unit, full = false, options = {}) {
+                if (!unit || this.ctBusy || this._ctUnitIndex?.get(unit.id)!==unit) return false;
+                const ctx = this.ctContext(),run=this._ctSelectRun={unitId:unit.id,ctx,full,pending:true};
+                const current=()=>{
+                    const valid=this.ctCurrent(ctx) && this._ctSelectRun===run && this._ctUnitIndex?.get(unit.id)===unit
+                        && (!options.guard || options.guard());
+                    if(!valid && this._ctSelectRun===run)run.pending=false;
+                    return valid;
+                };
+                if(this.ctSelection===unit.id){
+                    this.ctEditor=run.full;this.ctInlineClosed=false;if(run.full && this.ctTool==='preview')this.ctTool='dictionary';await this.$nextTick?.();if(!current())return false;
+                    run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget();return true;
+                }
+                if (!await this.ctFlushDraft()) {run.pending=false;return false;}
+                if(!current())return false;
                 await this.ctFlushCommentDraft();
-                if(!this.ctCurrent(ctx) || this._ctUnitIndex.get(unit.id)!==unit)return;
+                if(!current())return false;
                 this.ctBusy=true;let draft;
-                try{draft=await this._ctStore.getDraft(ctx.scope,unit.id);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;return;}finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
-                if(!this.ctCurrent(ctx))return;
-                this.ctSelection = unit.id; this.ctEditor = full; this.ctTool = 'lookup'; this.ctLookup = ''; this.ctCompletion=null;this.ctCommentText='';this.ctCommentGlobal=false;
-                this.ctFocusedField=unit.fields.find(field=>field.kind!=='gender')?.id || '';
+                try{draft=await this._ctStore.getDraft(ctx.scope,unit.id);}catch(error){run.pending=false;if(current())this.ctError=error.message;return false;}finally{if(this.ctCurrent(ctx) && this._ctSelectRun===run)this.ctBusy=false;}
+                if(!current())return false;
+                this.ctSelection = unit.id; this.ctEditor = run.full;this.ctInlineClosed=false;this._ctInlineReturn=null; this.ctLookup = ''; this.ctCompletion=null;this.ctCommentText='';this.ctCommentGlobal=false;
+                if(run.full && this.ctTool==='preview')this.ctTool='dictionary';
+                this.ctPreviewGggVars={};
+                this.ctFocusedField=this.ctTabFields(unit)[0]?.id || '';
                 this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;
@@ -345,7 +703,117 @@
                 this.ctResetHistory(); this.ctComments = [];
                 this.ctLoadHistory(ctx, unit.id); this.ctLoadComments(ctx, unit.id); this.ctPresence(ctx);
                 this.ctLoadCommentDraft(ctx,unit.id);
-                await this.$nextTick(); const region = this.$refs.ctEditorRegion; (Array.isArray(region) ? region[0]?.$el : region?.$el)?.querySelector('textarea,select')?.focus();
+                await this.$nextTick?.();if(!current() || this.ctSelection!==unit.id)return false;
+                run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget();return true;
+            },
+            ctEditorElement() {
+                const refs=this.$refs?.ctEditorRegion,ref=Array.isArray(refs)?refs[0]:refs,region=ref?.$el || ref;
+                return region;
+            },
+            ctTargetInputs() {
+                const inputs=[...(this.ctEditorElement()?.querySelectorAll?.('[data-ct-target]') || [])];
+                return this.ctTabFields().map(field=>inputs.find(input=>input.dataset.ctTarget===field.id))
+                    .filter(input=>input && input.isConnected!==false && !input.disabled && !input.closest?.('[inert]'));
+            },
+            ctCaptureCaret(input) {
+                return Number.isInteger(input?.selectionStart) ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection} : null;
+            },
+            ctFocusTarget(last=false,fieldId=last?null:this.ctFocusedField,caret=null) {
+                const fields=this.ctTargetInputs(),field=fields.find(input=>input.dataset.ctTarget===fieldId) || fields[last?fields.length-1:0];
+                if(!field)return false;
+                this.ctFocusedField=field.dataset.ctTarget;field.focus?.();
+                if(caret && field.setSelectionRange){
+                    const length=String(field.value ?? '').length;
+                    field.setSelectionRange(Math.min(caret.start,length),Math.min(caret.end,length),caret.direction || 'none');
+                }
+                return true;
+            },
+            ctKeyboardOverlayOpen() {
+                return !!(root.AppDialogs?.isOpen
+                    || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctUploadVisible
+                    || this.$refs?.ctDiagnosticDialog?.open || this.workspaceInitializationActive || this._importingSource
+                    || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft || this.draftRecoveryVisible);
+            },
+            ctKeyboardBlocked() {
+                return !this.ctActive || this.ctBusy || this._ctSelectRun?.pending || this.ctHistoryViewer || this.ctKeyboardOverlayOpen();
+            },
+            ctKeyboardTarget(field,input) {
+                const current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id),region=this.ctEditorElement();
+                if(!current || !this.ctTabFields().includes(current) || current.source!==field.source || current.kind!==field.kind
+                    || current.targetCell!==field.targetCell || input?.dataset?.ctTarget!==field.id || input.isConnected===false
+                    || input.disabled || input.closest?.('[inert]') || region?.contains && !region.contains(input))return false;
+                const row=input.closest?.('tr[data-unit-id]');
+                return this.ctEditor || this.ctInlineUnitVisible() && (!row || row.dataset.unitId===this.ctSelection);
+            },
+            ctInlineNavigationTarget(input) {
+                if(this.ctTargetInputs().includes(input))return true;
+                const region=this.$refs?.ctFileTableRegion,row=input?.closest?.('tr[data-unit-id]');
+                return !!(region && (input===region || row?.dataset.unitId===this.ctSelection
+                    && region.contains?.(input) && !rowControl({target:input})));
+            },
+            ctFullTabControls() {
+                return [...(this.ctEditorElement()?.querySelectorAll?.('button,a[href],input,textarea,select,[tabindex]') || [])]
+                    .filter(input=>!input.dataset?.ctTarget && !input.dataset?.ctSource && input.tabIndex>=0 && !input.disabled
+                        && input.isConnected!==false && !input.closest?.('[inert]') && (!input.getClientRects || input.getClientRects().length));
+            },
+            ctMoveFullTab(input,direction) {
+                const region=this.ctEditorElement(),targets=this.ctTargetInputs(),stops=[...targets,...this.ctFullTabControls()],index=stops.indexOf(input);
+                if(index<0)return false;
+                let next=stops[index+direction];
+                if(!next){
+                    const controls=[...(root.document?.querySelectorAll?.('button,a[href],input,textarea,select,[tabindex]') || [])]
+                        .filter(input=>input.tabIndex>=0 && !input.disabled && !input.closest?.('[inert]')
+                            && (!input.getClientRects || input.getClientRects().length));
+                    const inside=controls.map((input,index)=>region?.contains?.(input)?index:-1).filter(index=>index>=0);
+                    if(inside.length)next=controls[(direction>0?Math.max(...inside):Math.min(...inside))+direction];
+                }
+                if(!next)return false;
+                next.focus?.();return true;
+            },
+            ctFieldsKeydown(event) {
+                if(!this.ctEditor || this.ctKeyboardBlocked() || event.defaultPrevented || event.isComposing || event.keyCode===229
+                    || event.key!=='Tab' || event.ctrlKey || event.altKey || event.metaKey || event.target?.dataset?.ctTarget)return;
+                if(this.ctMoveFullTab(event.target,event.shiftKey?-1:1)){event.preventDefault();event.stopPropagation?.();}
+            },
+            async ctOpenInlineFull(field,input) {
+                if(this.ctKeyboardBlocked() || this._ctNavigationRun || this.ctEditor || !this.ctKeyboardTarget(field,input))return false;
+                const unit=this.ctCurrentUnit,ctx=this.ctContext(),returning=this._ctInlineReturn={ctx,unit,unitId:unit.id,fieldId:field.id,caret:this.ctCaptureCaret(input)};
+                this.ctCloseCompletion();this.ctFocusedField=field.id;
+                let opened=false;
+                try {
+                    if(!await this.ctSelect(unit,true,{focus:false,guard:()=>!this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer})
+                        || !this.ctCurrent(ctx) || this._ctInlineReturn!==returning || this.ctCurrentUnit!==unit || !this.ctEditor
+                        || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                    returning.selectionRun=this._ctSelectRun;
+                    opened=this.ctFocusTarget(false,field.id,returning.caret);return opened;
+                } finally {if(!opened && this._ctInlineReturn===returning)this._ctInlineReturn=null;}
+            },
+            ctResizeFields(region) {
+                // Inline source and target live in separate table cells. Measure
+                // both together so a shorter edit can shrink the pair again.
+                const area=region?.closest?.('tr[data-unit-id]') || region;
+                const fields=[...(area?.querySelectorAll?.('textarea') || [])],scrolls=new Map(fields.map(field=>[field,field.scrollTop]));
+                for(const field of fields)field.style.height='auto';
+                const heights=new Map(fields.map(field=>[field,field.scrollHeight+2])),groups=new Map();
+                for(const block of area?.querySelectorAll?.('.ctBlock:not(.ctFormBlock)') || []){
+                    const key=block.dataset.fieldGroup;
+                    if(!groups.has(key))groups.set(key,[]);groups.get(key).push(block);
+                }
+                for(const blocks of groups.values()){
+                    const sources=blocks.flatMap(block=>[...block.querySelectorAll('textarea[data-ct-source]')]);
+                    const targets=blocks.flatMap(block=>[...block.querySelectorAll('textarea[data-ct-target]')]);
+                    if(sources.length===1 && targets.length===1){
+                        const height=Math.max(heights.get(sources[0]) || 0,heights.get(targets[0]) || 0);
+                        heights.set(sources[0],height);heights.set(targets[0],height);
+                    }
+                }
+                for(const[field,height]of heights){field.style.height=height+'px';field.scrollTop=scrolls.get(field);}
+                this.scheduleInlineAlignment?.();
+            },
+            ctResizeField(field) {
+                if(!field?.style || !field.scrollHeight)return;
+                const region=field.closest?.('.ctFields');if(region)return this.ctResizeFields(region);
+                const scrollTop=field.scrollTop;field.style.height='auto';field.style.height=field.scrollHeight+2+'px';field.scrollTop=scrollTop;
             },
             ctEdited(field) {
                 this.ctReviewed[field.id] = this.ctReviewHash(field);
@@ -354,25 +822,128 @@
             ctMarkReviewed(field) { this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChooseAlternative(choice, side) { const field = this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId); this.ctValues[choice.fieldId] = side === 'local' ? choice.local : choice.upstream ?? choice.remote; this.ctChoices = this.ctChoices.filter(item=>item!==choice); if(field)this.ctEdited(field); },
             ctCompleteForm(field, event) {
-                if(this.ctCompletion?.fieldId===field.id && ['Tab','Enter'].includes(event.key)){event.preventDefault();this.ctApplyCompletion(field,this.ctCompletion.items[0],event.target);return;}
-                if(event.key==='Escape'){this.ctCompletion=null;return;}
-                if (field.kind !== 'form' || event.key !== 'Tab') return;
-                const value = this.ctValues[field.id];
-                if (value && 'NONEXISTENT'.startsWith(value.toUpperCase()) && value !== 'NONEXISTENT') { event.preventDefault(); this.ctValues[field.id] = 'NONEXISTENT'; this.ctEdited(field); }
-            },
-            ctSuggest(field,event) {
-                const input=event.target,caret=input.selectionStart,text=this.ctValues[field.id],before=text.slice(0,caret),match=/([\[<{])([^\]\}>\r\n]*)$/.exec(before);
-                if(!match){
-                    if(field.kind==='form' && before && 'NONEXISTENT'.startsWith(before.toUpperCase()) && caret===text.length){this.ctCompletion={fieldId:field.id,start:0,end:text.length,items:root.ClientTextState.suggestions(field).filter(item=>item.replaceWholeField)};return;}
-                    this.ctCompletion=null;return;
+                if(event.isComposing || event.keyCode===229)return;
+                if(event.key==='Escape'){if(this.ctCompletion){event.preventDefault();event.stopPropagation?.();}this.ctCloseCompletion();return;}
+                const plain=!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+                if(this.ctCompletion && !this.ctCompletionValid(field,event.target))this.ctCloseCompletion();
+                if(this.ctCompletion && plain && ['ArrowDown','ArrowUp'].includes(event.key)){
+                    event.preventDefault();event.stopPropagation?.();
+                    const completion=this.ctCompletion,count=completion.items.length;
+                    completion.selectedIndex=(completion.selectedIndex+(event.key==='ArrowDown'?1:-1)+count)%count;
+                    this.$nextTick?.(()=>this._ctCompletionInput?.closest?.('.ctTarget')?.querySelector?.('[role="option"][aria-selected="true"]')?.scrollIntoView?.({block:'nearest'}));return;
                 }
-                const items=root.ClientTextState.suggestions(field,{openedByChar:match[1]}).filter(item=>item.value.toLocaleLowerCase().startsWith(match[0].toLocaleLowerCase())).slice(0,15);
-                this.ctCompletion=items.length?{fieldId:field.id,start:caret-match[0].length,end:caret,items}:null;
+                if(this.ctCompletion && plain && ['Tab','Enter'].includes(event.key)){
+                    event.preventDefault();event.stopPropagation?.();this.ctApplyCompletion(field,this.ctCompletion.items[this.ctCompletion.selectedIndex],event.target);return;
+                }
+                if(this.ctCompletion && (event.key==='Tab' || event.key==='Enter' || ['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)))this.ctCloseCompletion();
+                const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id);
+                if (field.kind !== 'form' || event.key !== 'Tab' || !plain || !this.ctActive || this.ctBusy
+                    || this.ctHistoryViewer || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.$refs?.ctDiagnosticDialog?.open
+                    || !current || current.source!==field.source || current.kind!==field.kind) return;
+                const value = this.ctValues[field.id];
+                const caret=event.target?.selectionStart,end=event.target?.selectionEnd;
+                if (value && 'NONEXISTENT'.startsWith(value.toUpperCase()) && value !== 'NONEXISTENT'
+                    && (!Number.isInteger(caret) || caret===value.length && end===caret)) { event.preventDefault(); this.ctValues[field.id] = 'NONEXISTENT'; this.ctEdited(field); }
+            },
+            ctTargetKeydown(field,event) {
+                if(event.defaultPrevented || event.isComposing || event.keyCode===229 || this.ctKeyboardBlocked()
+                    || !this.ctKeyboardTarget(field,event.target))return;
+                const shortcut=this.isAutocompleteShortcut ? this.isAutocompleteShortcut(event)
+                    : event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+                        && (this.autocompleteShortcut==='ctrl-i' ? event.code==='KeyI' || event.key.toLowerCase()==='i'
+                            : this.autocompleteShortcut!=='disabled' && (event.code==='Space' || event.key===' '));
+                if(shortcut && field.kind!=='gender'){
+                    event.preventDefault();event.stopPropagation?.();
+                    if(this.ctCompletionValid(field,event.target))this.ctCloseCompletion();else this.ctSuggest(field,event,{manual:true});return;
+                }
+                this.ctCompleteForm(field,event);if(event.defaultPrevented || this._ctNavigationRun)return;
+                if(!this.ctEditor && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key==='Enter'){
+                    event.preventDefault();event.stopPropagation?.();return this.ctOpenInlineFull(field,event.target);
+                }
+                if(event.key!=='Tab' || event.ctrlKey || event.altKey || event.metaKey)return;
+                const fields=this.ctTargetInputs(),index=fields.indexOf(event.target),direction=event.shiftKey?-1:1;
+                if(index<0)return;
+                if(this.ctEditor){
+                    if(this.ctMoveFullTab(event.target,direction)){event.preventDefault();event.stopPropagation?.();}return;
+                }
+                event.preventDefault();event.stopPropagation?.();this.ctCloseCompletion();
+                const next=fields[index+direction];
+                if(next){next.focus?.();return true;}
+                return this.ctSaveAndNavigate(direction<0,{inline:true,focusEnd:direction<0});
+            },
+            ctCloseCompletion() {this.ctCompletion=null;this._ctCompletionInput=null;},
+            ctCompletionValid(field,input=this._ctCompletionInput) {
+                const completion=this.ctCompletion,current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id);
+                return !!(completion && completion.items?.length && this.ctActive && !this.ctBusy && !this.ctHistoryViewer
+                    && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting && !this.$refs?.ctDiagnosticDialog?.open
+                    && completion.fieldId===field?.id && completion.unitId===this.ctSelection && this.ctCurrent(completion.context)
+                    && current && current.kind!=='gender' && current.source===completion.source
+                    && (!this.ctFocusedField || this.ctFocusedField===field.id) && this.ctValues[field.id]===completion.text
+                    && input && input.isConnected!==false && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
+                    && (typeof input.value!=='string' || input.value===completion.text));
+            },
+            ctCompletionSelectionChanged(field,event) {
+                if(this.ctCompletion && !this.ctCompletionValid(field,event.target))this.ctCloseCompletion();
+            },
+            ctCompletionItems(field,openedByChar='',prefix='') {
+                const tokens=root.ClientTextState.suggestions(field,{openedByChar}),items=[],seen=new Set();
+                const add=item=>{if(!seen.has(item.value)){seen.add(item.value);items.push(item);}};
+                const entries=this.getActiveDictionaryEntries?.() || this.dictionary || [];
+                for(const token of tokens){
+                    const keyword=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(token.value);
+                    if(keyword){
+                        const identity=keyword[1],lookup=(root.getKeywordPopupLookupName?.(identity) || identity.replace(/<gemlevel=(?:\d+|\{\d+\})>$/i,'')).trim().toLocaleLowerCase();
+                        const candidates=[];
+                        for(const entry of entries){
+                            if(String(entry?.find ?? '').trim().toLocaleLowerCase()!==lookup || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(entry))continue;
+                            const pairs=this.getDictionaryDefinitionPairs?.(entry) || [{find:entry.find,replace:entry.replace},...(entry.alts || []).map(alt=>({...alt,replace:alt.replace ?? entry.replace}))];
+                            for(const pair of pairs){
+                                const display=pair.replace;if(typeof display!=='string' || !display.trim() || /[\[\]]/.test(display))continue;
+                                candidates.push({value:'['+identity+'|'+display+']',label:'['+identity+'|'+String(pair.find ?? '')+'] → ['+identity+'|'+display+']',
+                                    dictionaryKey:JSON.stringify([entry._id || entry.id || entry.find,pair._id || '',pair.find,display]),
+                                    exact:String(pair.find ?? '').trim().toLocaleLowerCase()===String(keyword[2] || identity).trim().toLocaleLowerCase()});
+                            }
+                        }
+                        candidates.sort((a,b)=>Number(b.exact)-Number(a.exact));for(const item of candidates)add(item);
+                    }
+                    add(token);
+                }
+                const query=prefix.toLocaleLowerCase();
+                return items.filter(item=>!query || item.value.toLocaleLowerCase().startsWith(query) || item.label.toLocaleLowerCase().startsWith(query)).slice(0,100);
+            },
+            ctSuggest(field,event,options={}) {
+                this.ctCloseCompletion();
+                if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
+                const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=this.ctValues[field.id];
+                const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
+                if(!current || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
+                    || !Number.isInteger(caret) || !Number.isInteger(selectionEnd) || !options.manual && selectionEnd!==caret)return false;
+                const before=text.slice(0,caret),match=selectionEnd===caret ? /([\[<{])([^\]\}>\r\n]*)$/.exec(before) : null;
+                const wholeForm=field.kind==='form' && caret===text.length && selectionEnd===caret && 'NONEXISTENT'.startsWith(text.toUpperCase());
+                let start=caret,end=selectionEnd,items;
+                if(match){start=caret-match[0].length;items=this.ctCompletionItems(field,match[1],match[0]);}
+                else if(wholeForm && (text || options.manual)){start=0;end=text.length;items=options.manual && !text ? this.ctCompletionItems(field) : root.ClientTextState.suggestions(field).filter(item=>item.replaceWholeField);}
+                else if(options.manual)items=this.ctCompletionItems(field).filter(item=>!item.replaceWholeField);
+                else return false;
+                if(!items.length)return false;
+                this._ctCompletionInput=input;
+                this.ctCompletion={fieldId:field.id,unitId:this.ctSelection,context:this.ctContext(),source:current.source,text,
+                    selectionStart:caret,selectionEnd,start,end,items,selectedIndex:0};return true;
             },
             ctApplyCompletion(field,item,input) {
-                const completion=this.ctCompletion;if(!completion || !item)return;
-                this.ctValues[field.id]=this.ctValues[field.id].slice(0,completion.start)+item.value+this.ctValues[field.id].slice(completion.end);this.ctCompletion=null;this.ctEdited(field);
-                this.$nextTick(()=>{const target=input || document.getElementById('ctfield-'+field.targetCell);target?.focus();target?.setSelectionRange(completion.start+item.value.length,completion.start+item.value.length);});
+                const completion=this.ctCompletion,target=input || this._ctCompletionInput;
+                if(!this.ctCompletionValid(field,target) || !completion.items.includes(item)
+                    || item.replaceWholeField && (field.kind!=='form' || completion.start!==0 || completion.end!==completion.text.length)
+                    || item.dictionaryKey && !this.ctCompletionItems(field).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
+                    this.ctCloseCompletion();return false;
+                }
+                const text=completion.text.slice(0,completion.start)+item.value+completion.text.slice(completion.end);
+                this.ctValues[field.id]=text;this.ctCloseCompletion();this.ctEdited(field);
+                this.$nextTick?.(()=>{
+                    if(!this.ctCurrent(completion.context) || this.ctSelection!==completion.unitId || this.ctValues[field.id]!==text
+                        || this.ctFocusedField && this.ctFocusedField!==field.id || target?.isConnected===false)return;
+                    target?.focus();target?.setSelectionRange(completion.start+item.value.length,completion.start+item.value.length);this.ctResizeField(target);
+                });return true;
             },
             ctQueueDraft() { clearTimeout(this._ctDraftTimer); this._ctDraftTimer = setTimeout(() => this.ctFlushDraft(), 250); },
             async ctFlushDraft() {
@@ -418,7 +989,11 @@
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);
-                    if (close && sameEditor) { this.ctEditor = false; this.ctSelection = ''; }
+                    if (close && sameEditor) {
+                        this.ctEditor = false;this.ctInlineClosed=false;this._ctInlineReturn=null;this.ctCompletion=null;await this.$nextTick?.();
+                        if(!this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
+                        this.ctRefreshLayout();this.ctFocusRow(unitId);
+                    }
                     this.ctSync(ctx); return sameEditor;
                 } catch (error) {
                     if (this.ctCurrent(ctx)) {
@@ -437,21 +1012,89 @@
                 finally { if (this.ctCurrent(ctx)) this.ctBusy = false; }
             },
             async ctNavigate(offset) {
-                const rows = this.ctRows, index = rows.findIndex(unit => unit.id === this.ctSelection), target = rows[index + offset];
-                if (!target) return; if (this.ctDraftDirty && !await this.ctSave()) return;
-                this.ctPage = Math.floor((index + offset) / this.ctPageSize) + 1; await this.ctSelect(target, this.ctEditor);
+                if(![-1,1].includes(offset))return false;
+                return this.ctSaveAndNavigate(offset<0,{inline:!this.ctEditor && this.inlineEditor,focusEnd:false});
+            },
+            ctHasEditorChanges() {
+                const unit=this.ctCurrentUnit;if(!unit)return false;
+                const committed=this.ctValuesFor(unit),saved=this.ctSaved[unit.id],status=this.ctStatus(unit);
+                return unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
+                    || status.fields[field.id]?.outdated && this.ctReviewed[field.id]===this.ctReviewHash(field) && saved?.reviewed?.[field.id]!==this.ctReviewed[field.id])
+                    || !this.ctChoices.length && !!saved?.conflicts?.length;
+            },
+            ctInlineUnitVisible() {return !this.ctEditor && !this.ctInlineClosed && this.inlineEditor && !!this.ctCurrentUnit && this.ctPageRows.some(unit=>unit.id===this.ctSelection);},
+            ctUnitOccupied(unitId) {
+                return this.ctPeers.some(peer=>peer.unitId===unitId && peer.sessionId!==this.instanceTabId && !peer.away);
+            },
+            async ctSaveAndNavigate(reverse=false,options={}) {
+                if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
+                const ctx=this.ctContext(),unitId=this.ctSelection,original=this.ctCurrentUnit,selectionRun=this._ctSelectRun,
+                    hadEditor=this.ctEditor || this.ctInlineUnitVisible(),direction=reverse?-1:1;
+                if(!hadEditor)this.ctApplySearch();
+                let rows=this.ctRows.slice();
+                if(hadEditor && original && !rows.some(unit=>unit.id===unitId)){
+                    const visible=new Set(rows.map(unit=>unit.id));
+                    rows=this.ctOrderedUnits().filter(unit=>unit.id===unitId || visible.has(unit.id));
+                }
+                const anchor=hadEditor?rows.findIndex(unit=>unit.id===unitId)
+                    :(this.ctPage-1)*this.ctEffectivePageSize+(reverse?this.ctPageRows.length-1:0);
+                const candidates=[];for(let index=hadEditor?anchor+direction:anchor;index>=0&&index<rows.length;index+=direction)candidates.push(rows[index].id);
+                if(options.inline && !candidates.some(id=>this._ctUnitIndex.has(id) && !this.ctUnitOccupied(id))){
+                    this.ctNotice='No available files in this direction.';return false;
+                }
+                const run=this._ctNavigationRun={},current=()=>this._ctNavigationRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
+                    && this.ctCurrentUnit===original && this._ctSelectRun===selectionRun && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
+                try {
+                    const pending=this._ctSaveJob,retry=pending?.unitId===unitId && pending.scopeKey===root.ClientTextStore.scopeKey(ctx.scope) && pending.command;
+                    if(hadEditor && (retry || options.saveUnchanged || this.ctHasEditorChanges()) && !await this.ctSave())return false;
+                    if(!current())return false;
+                    for(const id of candidates){
+                        const ordered=this.ctRows,index=ordered.findIndex(unit=>unit.id===id);if(index<0)continue;
+                        const unit=this._ctUnitIndex.get(id);if(!unit || this.ctUnitOccupied(id))continue;
+                        if(!current() || !await this.ctSelect(unit,!options.inline,{focus:false,guard:()=>this._ctNavigationRun===run
+                            && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer}))return false;
+                        const opened=this._ctSelectRun;
+                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this.ctSelection!==id
+                            || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                        this.ctPage=Math.floor(index/this.ctEffectivePageSize)+1;await this.$nextTick?.();
+                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==opened
+                            || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                        const fields=this.ctTabFields(unit),field=fields[options.focusEnd?fields.length-1:0];
+                        this.ctFocusedField=field?.id || '';this.ctFocusTarget(!!options.focusEnd,this.ctFocusedField);return true;
+                    }
+                    this.ctNotice='No available files in this direction.';return false;
+                } finally {if(this._ctNavigationRun===run)this._ctNavigationRun=null;}
             },
             async ctKey(event) {
-                if(event.isComposing || event.defaultPrevented || this.showSetting || this.ctUploadVisible || this.versionChooserVisible)return;
+                if(event.isComposing || event.keyCode===229 || event.defaultPrevented || event.altKey || event.shiftKey)return;
+                if(this.ctKeyboardOverlayOpen()){
+                    if(['F1','F2'].includes(event.key) || (event.ctrlKey || event.metaKey)
+                        && (event.key.toLowerCase()==='s' || ['Comma','Period'].includes(event.code)))event.preventDefault();
+                    return;
+                }
                 if(this.ctHistoryViewer){
                     if(event.key==='Escape'){event.preventDefault();this.ctCloseHistoryViewer();}
-                    else if(event.key==='F2' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='s'))event.preventDefault();
+                    else if(['F1','F2'].includes(event.key) || ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase()==='s' || ['Comma','Period'].includes(event.code))))event.preventDefault();
                     return;
                 }
                 if(event.ctrlKey && event.code===(this.filterShortcutCtrlD?'KeyD':'KeyF')){event.preventDefault();this.$refs.ctSearchInput?.focus();return;}
-                if (event.key === 'F2' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) { event.preventDefault(); await this.ctSave(event.key === 'F2' && !this.ctEditor); }
-                else if (event.ctrlKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); await this.ctNavigate(event.key === 'ArrowUp' ? -1 : 1); }
-                else if (event.key === 'Escape' && this.ctEditor) { event.preventDefault(); if (await this.ctFlushDraft()) this.ctEditor = false; }
+                if(event.target?.closest?.('.ctTools')){if(['F1','F2'].includes(event.key) || (event.ctrlKey || event.metaKey) && (event.key.toLowerCase()==='s' || ['Comma','Period'].includes(event.code)))event.preventDefault();return;}
+                if(['F1','F2'].includes(event.key) || event.ctrlKey && ['Comma','Period'].includes(event.code)){
+                    event.preventDefault();await this.ctSaveAndNavigate(event.key==='F1' || event.code==='Comma');
+                }
+                else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+                    event.preventDefault();if(this.ctEditor){if(this.autoOpenNextFile)await this.ctSaveAndNavigate(false,{saveUnchanged:true});else await this.ctSave(true);}
+                    else if(this.ctInlineUnitVisible())await this.ctSave();else await this.ctDownload();
+                }
+                else if (event.ctrlKey && !event.metaKey && ['ArrowUp', 'ArrowDown'].includes(event.key)
+                    && this.ctInlineUnitVisible() && this.ctInlineNavigationTarget(event.target)) {
+                    event.preventDefault();event.stopPropagation?.();await this.ctNavigate(event.key === 'ArrowUp' ? -1 : 1);
+                }
+                else if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey) {
+                    if(this.ctCompletion){event.preventDefault();event.stopPropagation?.();this.ctCloseCompletion();}
+                    else if(this.ctEditor){event.preventDefault();event.stopPropagation?.();await this.ctCloseEditor();}
+                    else if(this.ctInlineUnitVisible()){event.preventDefault();event.stopPropagation?.();await this.ctCloseInline();}
+                }
             },
             ctResetHistory() {
                 this._ctHistoryRun = {}; this._ctHistoryPreviousRun = {}; this._ctHistoryLocal = []; this._ctHistoryShared = []; this._ctHistoryReferences = []; this._ctHistoryLocalLimit = 100;
@@ -609,7 +1252,7 @@
                 this.ctHistoryCompareB = entry.key + ':after'; this.ctOpenHistoryViewer(); return true;
             },
             async ctLoadMemory(ctx=this.ctContext()) {if(!this._ctStore?.getMemory)return;try{const memory=await this._ctStore.getMemory(ctx.scope);if(this.ctCurrent(ctx))this.ctMemory=raw(memory.units);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;}},
-            ctApplyMemory(match) {const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField) || this.ctCurrentUnit?.fields.find(field=>field.kind!=='gender');if(!field || this.ctBusy)return;this.ctValues[field.id]=match.target;this.ctEdited(field);},
+            ctApplyMemory(match) {const field=this.ctPreviewField;if(!field || this.ctBusy)return;this.ctValues[field.id]=match.target;this.ctEdited(field);},
             async ctRestoreHistory(entry, side = 'after') {
                 if (this.ctBusy || !['before', 'after'].includes(side) || !this.ctHistoryEntryCurrent(entry) || !entry[side].available) return false;
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, snapshot = entry[side];
@@ -1015,35 +1658,77 @@
             }
         }
     };
-    const fieldsComponent = { props: ['host'], template: `
-        <div class="ctFields" :inert="host.ctBusy">
-            <section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes"><strong>Translation choice · {{ host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId)?.name }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section>
-            <section v-if="host.ctNotes().length" class="ctDeveloperNotes"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
-            <details v-if="host.ctCurrentUnit?.metadata" class="ctMetadata"><summary>Workbook metadata</summary><pre>{{ host.ctCurrentUnit.metadata }}</pre></details>
-            <section v-for="group in host.ctFieldGroups" :key="group.key" class="ctBlock">
-                <h3>{{ group.name }}</h3><pre v-if="group.source" class="ctEnglish">{{ group.source }}</pre>
+    const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
+        mounted() {
+            this.$nextTick(()=>this.host.ctResizeFields(this.$el));
+            if(root.ResizeObserver){
+                this._ctWidthObserver=new root.ResizeObserver(entries=>{
+                    const width=entries[0]?.contentRect.width;
+                    if(width===this._ctWidth)return;this._ctWidth=width;this.host.ctResizeFields(this.$el);
+                });
+                this._ctWidthObserver.observe(this.$el);
+            }
+        },
+        beforeUnmount() {this._ctWidthObserver?.disconnect();},
+        updated() {this.$nextTick(()=>this.host.ctResizeFields(this.$el));}, template: `
+        <div class="ctFields" :data-side="side === 'both' ? undefined : side" :inert="host.ctBusy" @keydown="host.ctFieldsKeydown($event)">
+            <div :class="{inlineFileBlock:side !== 'both',inlineBlockPrelude:side !== 'both'}" :data-inline-block="side !== 'both' ? 'prelude' : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
+            <template v-if="side !== 'translation'">
+                <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
+            </template>
+            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId)?.name }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
+            </div></div>
+            <section v-for="group in host.ctFieldGroups" :key="group.key" class="ctBlock editBlock" :class="{inlineFileBlock:side !== 'both',ctFormBlock:group.forms}" :data-field-group="group.key" :data-inline-block="side !== 'both' ? 'field:'+group.key : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
+                <h3 v-if="side === 'both'">{{ group.name }}</h3>
+                <div class="ctFieldPair" :class="{ctFullFieldPair:side === 'both'}">
+                <div v-if="side !== 'translation'" class="editorSourceField ctFieldSource">
+                    <template v-if="group.fields.some(field=>field.kind !== 'gender' || field.source)">
+                    <div v-for="source in host.ctGroupSources(group)" :key="source.key" class="ctSourceBlock inputField">
+                        <label v-if="side === 'both' || host.ctGroupSources(group).length > 1" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
+                        <div class="textHL editorTextField multiline"><textarea :value="source.text" :data-ct-source="source.key" @focus="host.ctFocusedField=source.key" readonly tabindex="-1" :aria-label="source.label+' English'" placeholder="English" lang="en" spellcheck="false" rows="1"></textarea></div>
+                    </div>
+                    </template>
+                </div>
+                <div v-if="side !== 'source'" class="ctFieldTranslation">
                 <table v-if="group.forms" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="group.fields.some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
                     <tr v-for="row in ['M','F','N'].filter(row => group.fields.some(field => field.form.startsWith(row)))" :key="row"><th>{{ row }}</th>
                     <td v-for="number in (group.fields.some(field => ['MP','FP','NP'].includes(field.form)) ? ['S','P'] : ['S'])" :key="number">
-                        <template v-if="host.ctForm(group,row+number)"><ct-target :host="host" :field="host.ctForm(group,row+number)"></ct-target></template><span v-else class="versionMuted">Unavailable</span>
+                        <template v-if="host.ctForm(group,row+number)"><ct-target :host="host" :field="host.ctForm(group,row+number)" :compact="side !== 'both'"></ct-target></template><span v-else class="versionMuted">Unavailable</span>
                     </td></tr></tbody></table>
-                <template v-else><ct-target v-for="field in group.fields" :key="field.id" :host="host" :field="field"></ct-target></template>
+                <template v-else><ct-target v-for="field in group.fields" :key="field.id" :host="host" :field="field" :compact="side !== 'both'"></ct-target></template>
+                </div>
+                </div>
+                </div>
             </section>
         </div>` };
-    const targetComponent = { props: ['host', 'field'], template: `
+    const targetComponent = { props: {host:Object,field:Object,compact:Boolean}, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated}">
-            <label :for="'ctfield-'+field.targetCell">{{ field.form || field.name }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
-            <select v-if="field.kind === 'gender'" :id="'ctfield-'+field.targetCell" v-model="host.ctValues[field.id]" @change="host.ctEdited(field)" aria-label="Gender"><option value="">Blank</option><option v-for="gender in ['M','F','N','MP','FP','NP']" :key="gender">{{ gender }}</option></select>
-            <textarea v-else :id="'ctfield-'+field.targetCell" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctEdited(field);host.ctSuggest(field,$event)" @keydown="host.ctCompleteForm(field,$event)" :aria-label="field.name + (field.form ? ' '+field.form : '')" spellcheck="false" rows="3"></textarea>
-            <div v-if="host.ctCompletion?.fieldId===field.id" class="ctCompletion" role="listbox" aria-label="Source token completions"><button v-for="item in host.ctCompletion.items" :key="item.value" @mousedown.prevent @click="host.ctApplyCompletion(field,item)">{{ item.label }}</button></div>
-            <div class="ctFieldFacts"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><small v-if="field.kind === 'form'">NONEXISTENT: type a prefix and press Tab</small></div>
+            <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+field.form : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
+            <select v-if="field.kind === 'gender'" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @change="host.ctEdited(field)" @keydown="host.ctTargetKeydown(field,$event)" aria-label="Gender"><option value="">Blank</option><option v-for="gender in ['M','F','N','MP','FP','NP']" :key="gender">{{ gender }}</option></select>
+            <div v-else class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id;host.ctCompletionSelectionChanged(field,$event)" @blur="host.ctCloseCompletion()" @select="host.ctCompletionSelectionChanged(field,$event)" @click="host.ctCompletionSelectionChanged(field,$event)" @keyup="host.ctCompletionSelectionChanged(field,$event)" @input="host.ctResizeField($event.target);host.ctEdited(field);host.ctSuggest(field,$event)" @keydown="host.ctTargetKeydown(field,$event)" :aria-expanded="host.ctCompletion?.fieldId===field.id" :aria-controls="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell : undefined" :aria-activedescendant="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell+'-'+host.ctCompletion.selectedIndex : undefined" :aria-label="field.name + (field.form ? ' '+field.form : '')" :lang="host.translationEditorBcp47 || undefined" :placeholder="field.kind === 'form' && !field.required ? 'Optional translation' : 'Translation'" spellcheck="false" rows="1"></textarea></div>
+            <div v-if="host.ctCompletion?.fieldId===field.id" :id="'ct-completion-'+field.targetCell" class="ctCompletion" role="listbox" aria-label="Source and Dictionary completions"><button v-for="(item,index) in host.ctCompletion.items" :key="item.value" :id="'ct-completion-'+field.targetCell+'-'+index" type="button" role="option" tabindex="-1" :class="{selected:host.ctCompletion.selectedIndex===index}" :aria-selected="host.ctCompletion.selectedIndex===index" @mousedown.prevent @click="host.ctApplyCompletion(field,item)">{{ item.label }}</button></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button></div>
             <p v-for="(issue,index) in (host.ctDiagnostics[host.ctSelection] || []).filter(item=>item.fieldId === field.id)" :key="index" :class="'ctDiagnostic '+issue.severity">{{ issue.message }}</p>
         </div>` };
-    const toolsComponent = { props: ['host'], template: `
-        <aside class="ctTools" aria-label="File tools"><nav><button v-for="tab in ['lookup','dictionary','history','comments']" :key="tab" :class="{active:host.ctTool === tab}" @click="host.ctTool=tab">{{ tab }}</button></nav>
-            <section v-if="host.ctTool === 'lookup'"><h3>Translation memory</h3><p class="versionMuted">Accepted text from this language, matched by field kind and grammatical form.</p><article v-for="match in host.ctMemoryResults" :key="match.id" @dblclick.prevent="host.ctApplyMemory(match)" title="Double-click to use translation"><strong>{{ match.kind }} · {{ Math.min(100,match.score) }}%</strong><pre>{{ match.source }}</pre><pre>{{ match.target }}</pre><button @click="host.ctApplyMemory(match)" @dblclick.stop :disabled="host.ctBusy">Use translation</button><p v-for="(warning,index) in match.warnings" :key="index">{{ warning.message }}</p></article><p v-if="!host.ctMemoryResults.length">No memory matches.</p><h3>Lookup</h3><input v-model="host.ctLookup" placeholder="Exact text lookup" aria-label="Lookup text"><article v-for="(match,index) in host.ctLookupResults" :key="index"><button @click="host.ctSelect(host._ctUnitIndex.get(match.unitId),host.ctEditor)">{{ match.sheet }} · {{ match.recordId }} · {{ match.name }} {{ match.form }}</button><pre>{{ match.source }}</pre><pre>{{ match.target }}</pre></article><p v-if="!host.ctLookupResults.length">No matches.</p></section>
-            <section v-if="host.ctTool === 'dictionary'"><h3>Dictionary</h3><article v-for="(entry,index) in host.ctDictionaryMatches" :key="entry.id || index"><strong>{{ entry.find }}</strong><pre>{{ entry.replace }}</pre><p v-if="entry.note">{{ entry.note }}</p></article><p v-if="!host.ctDictionaryMatches.length">No matching Dictionary entries.</p></section>
-            <section v-if="host.ctTool === 'history'" class="ctHistoryPanel"><h3>History</h3>
+    const toolsComponent = { props: ['host'], components:{'editor-dictionary-entries':root.EditorComponents?.DictionaryEntries}, template: `
+        <aside class="side sharedEditorSidebar ctTools" :class="{commentsActive:host.ctTool === 'comments',lookupActive:host.ctTool === 'lookup'}" aria-label="File tools">
+            <div class="sideHeader"><div class="sideTabs" aria-label="Editor tools">
+                <button v-if="!host.ctEditor" type="button" class="tabBtn" :class="{active:host.ctTool === 'preview'}" :aria-pressed="host.ctTool === 'preview'" aria-label="Preview" @click="host.ctTool='preview'">Preview</button>
+                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'dictionary'}" :aria-pressed="host.ctTool === 'dictionary'" aria-label="Dictionary" @click="host.ctTool='dictionary'">📚 Dictionary</button>
+                <button type="button" class="tabBtn lookupTab" :class="{active:host.ctTool === 'lookup'}" :aria-pressed="host.ctTool === 'lookup'" aria-label="Lookup" title="Lookup" @click="host.ctTool='lookup'">Lookup</button>
+                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'tm'}" :aria-pressed="host.ctTool === 'tm'" aria-label="TM" title="Translation memory" @click="host.ctTool='tm'">TM</button>
+                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'history'}" :aria-pressed="host.ctTool === 'history'" aria-label="History" title="History" @click="host.ctTool='history'">🕒 History</button>
+                <button type="button" class="tabBtn commentsTab" :class="{active:host.ctTool === 'comments'}" :aria-pressed="host.ctTool === 'comments'" aria-label="Comments" title="Comments" @click="host.ctTool='comments'">Comments</button>
+            </div>
+            <div v-if="host.ctTool === 'dictionary'" class="dictionaryControls sideControls">
+                <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="host.ctDictionaryFilter" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="host.ctDictionaryFilter=''" :disabled="!host.ctDictionaryReady"><button type="button" @click="host.ctDictionaryAdd()" title="Add a Dictionary entry" :disabled="!host.ctDictionaryReady">Add entry</button></div>
+                <div class="dictionaryPagination sidePagination" aria-label="Dictionary pages"><span>{{ host.ctDictionaryRangeLabel }}<template v-if="host.ctCurrentUnit"> · Matches in this file first</template></span><button type="button" @click="host.ctSetDictionaryPage(host.ctDictionaryPage-1)" :disabled="!host.ctDictionaryReady || host.ctDictionaryPage<=1" aria-label="Previous dictionary page">Previous</button><button type="button" @click="host.ctSetDictionaryPage(host.ctDictionaryPage+1)" :disabled="!host.ctDictionaryReady || host.ctDictionaryPage>=host.ctDictionaryPageCount" aria-label="Next dictionary page">Next</button></div>
+            </div></div>
+            <div v-show="!host.ctEditor && host.ctTool === 'preview'" id="ctInlineEditorPreviewHost" class="inlinePreviewHost"></div>
+            <section v-if="host.ctTool === 'tm'" class="tmResultsPanel"><h3>Translation memory</h3><p class="tmEmpty">Accepted text from this language, matched by field kind and grammatical form.</p><div class="tmResultList"><article v-for="match in host.ctMemoryResults" :key="match.id" class="tmMatchDetail" @dblclick.prevent="host.ctApplyMemory(match)" title="Double-click to use translation"><strong>{{ match.kind }} · {{ Math.min(100,match.score) }}%</strong><pre class="tmSourceSnippet">{{ match.source }}</pre><pre class="tmTargetSnippet">{{ match.target }}</pre><button @click="host.ctApplyMemory(match)" @dblclick.stop :disabled="host.ctBusy">Use translation</button><p v-for="(warning,index) in match.warnings" :key="index">{{ warning.message }}</p></article></div><p v-if="!host.ctMemoryResults.length" class="tmEmpty">No memory matches.</p></section>
+            <section v-if="host.ctTool === 'lookup'" class="editorLookupPanel"><div class="lookupControls sideControls"><h3>Lookup</h3><div class="sideSearchRow"><input class="sideFilter" v-model="host.ctLookup" placeholder="Exact text lookup" aria-label="Lookup text"></div></div><div class="lookupResults"><article v-for="(match,index) in host.ctLookupResults" :key="index" class="editBlock"><button @click="host.ctSelect(host._ctUnitIndex.get(match.unitId),host.ctEditor)">{{ match.sheet }} · {{ match.recordId }} · {{ match.name }} {{ match.form }}</button><pre>{{ match.source }}</pre><pre>{{ match.target }}</pre></article><p v-if="!host.ctLookupResults.length" class="tmEmpty">No matches.</p></div></section>
+            <template v-if="host.ctTool === 'dictionary'"><editor-dictionary-entries :controller="host.ctDictionaryController"></editor-dictionary-entries><p v-if="!host.ctDictionaryFiltered.length" class="tmEmpty">{{ host.ctDictionaryFilter ? 'No Dictionary entries match your search.' : 'No Dictionary entries. Add an entry to get started.' }}</p></template>
+            <section v-if="host.ctTool === 'history'" class="ctHistoryPanel historyPanel"><h3>History</h3>
                 <p>Local and shared saved changes for this group and language.</p>
                 <button @click="host.ctOpenHistoryViewer()">Compare original and current</button>
                 <button v-if="host.ctHistoryPreviousProvenance" class="ctHistoryPrevious" @click="host.ctLoadPreviousHistory()" :disabled="host.ctBusy || host.ctHistoryPreviousLoading">{{ host.ctHistoryPreviousLoading ? 'Preparing previous version…' : 'Compare previous version' }}</button>
@@ -1071,12 +1756,11 @@
                                 </section></div>
                             </article>
                             <article v-if="host.ctHistoryComparison.hasNotes" class="ctHistoryNotes"><h4>Developer notes</h4><div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5><pre><span v-for="(part,index) in host.ctHistoryComparison.notes.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre></section></div></article>
-                            <details v-if="host.ctHistoryComparison.before.unit.metadata || host.ctHistoryComparison.after.unit.metadata"><summary>Workbook metadata</summary><div class="ctHistoryColumns"><pre>{{ host.ctHistoryComparison.before.unit.metadata }}</pre><pre>{{ host.ctHistoryComparison.after.unit.metadata }}</pre></div></details>
                         </div>
                     </section>
                 </div>
             </section>
-            <section v-if="host.ctTool === 'comments'"><h3>Comments</h3><article v-for="comment in host.ctComments" :key="comment.id"><strong>{{ comment.actor?.name || comment.authorName || comment.actor?.id || comment.authorId }}</strong><small>{{ comment.audience }}</small><pre>{{ comment.text }}</pre></article><textarea v-model="host.ctCommentText" @input="host.ctQueueCommentDraft()" aria-label="Comment" placeholder="Write a comment" rows="3"></textarea><label><input type="checkbox" v-model="host.ctCommentGlobal" @change="host.ctQueueCommentDraft()"> All language teams</label><button @click="host.ctPostComment" :disabled="!host.managedOnlineAvailable || host.ctBusy || !host.ctCommentText.trim()">Post comment</button></section>
+            <section v-if="host.ctTool === 'comments'" class="commentsPanel"><h3 class="commentsPanelHeader">Comments</h3><div class="commentsList"><article v-for="comment in host.ctComments" :key="comment.id" class="commentCard"><strong>{{ comment.actor?.name || comment.authorName || comment.actor?.id || comment.authorId }}</strong><small>{{ comment.audience }}</small><pre class="commentBody">{{ comment.text }}</pre></article></div><textarea v-model="host.ctCommentText" @input="host.ctQueueCommentDraft()" aria-label="Comment" placeholder="Write a comment" rows="3"></textarea><label class="commentsScopeOption"><input type="checkbox" v-model="host.ctCommentGlobal" @change="host.ctQueueCommentDraft()"> All language teams</label><button @click="host.ctPostComment" :disabled="!host.managedOnlineAvailable || host.ctBusy || !host.ctCommentText.trim()">Post comment</button></section>
         </aside>` };
     return { mixin, teams, detect, groupFields, mode, fieldsComponent, targetComponent, toolsComponent };
 });

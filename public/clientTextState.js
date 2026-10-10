@@ -249,31 +249,46 @@
             && canonicalSource(before.get(field.id).source) !== canonicalSource(field.source)).map(field => field.id);
         return { values, reviewed, outdated, conflicts, removed, saved: !!previousSaved && previousSaved.saved !== false, dropped: [] };
     }
+    // This is SD's variable grammar plus the numeric format extension already
+    // accepted by ClientText (for example {2:0.1f}). Braces around localizable
+    // formatting text, such as {Fire Rune}, are not variable placeholders.
+    const VARIABLE_AT_START = /^([@+\-]?)\{([\dd:+]*|\d+:[^{}\r\n]+)\}(%?)/i;
+    const KEYWORD_AT_START = /^\[([^\]|]+)(?:\|([^\]]*))?\]/;
+    function variableIdentityKey(value) {
+        const full = String(value ?? ''), match = /^[@+\-]?\{([^}]*)\}%?$/.exec(full);
+        return match ? match[1] : full;
+    }
     function tokenize(value) {
         const text = String(value ?? ''), tokens = [];
         const formats = new Set(['size','font','rgb','glow','fg','colour','color','smaller','b','i','n','normal','italic','bold','u',
-            'shadow','center','left','right','red','green','blue','white','yellow','default','light']);
+            'shadow','center','left','right','red','green','blue','white','yellow','default','light',
+            'unique','magic','rare','gem','currency','enchanted']);
         const add = (full,start,kind,identity=full) => tokens.push({full,start,end:start+full.length,kind,identity});
         for (let index=0;index<text.length;index++) {
+            if ('{@+-'.includes(text[index])) {
+                const match = VARIABLE_AT_START.exec(text.slice(index));
+                if (match) {
+                    const full=match[0], prefix=match[1], key=match[2], trailingPercent=!!match[3];
+                    tokens.push({full,start:index,end:index+full.length,kind:'variable',
+                        identity:'{'+key+'}'+(trailingPercent?'%':''),key,prefix,trailingPercent});
+                    index+=full.length-1;continue;
+                }
+            }
             if (text.startsWith('<<',index)) {
                 const end=text.indexOf('>>',index+2);
                 if(end<0)continue;
                 add(text.slice(index,end+2),index,'substitution');index=end+1;continue;
             }
             if(text[index]==='['){
-                const match=/^\[[^\]\r\n]*\]/.exec(text.slice(index));
+                const match=KEYWORD_AT_START.exec(text.slice(index));
                 if(!match)continue;
-                const full=match[0],identity=full.slice(1,-1).split('|')[0];
+                const full=match[0],identity=match[1];
                 add(full,index,full==='[NOAUDIO]'?'audio':'keyword',identity);
                 // Numeric references in keyword identities are part of the ID;
                 // numeric placeholders in visible link text remain variables.
                 const separator=full.indexOf('|');
                 if(separator>=0){const visible=full.slice(separator+1,-1);for(const token of tokenize(visible))tokens.push({...token,start:token.start+index+separator+1,end:token.end+index+separator+1});}
                 index+=full.length-1;continue;
-            }
-            if(text[index]==='{'){
-                const match=/^\{\d+(?::[^{}\r\n]+)?\}/.exec(text.slice(index));
-                if(match){add(match[0],index,'variable');index+=match[0].length-1;}continue;
             }
             if(text[index]==='<'){
                 const match=/^<[^<>\r\n]+>/.exec(text.slice(index));
@@ -285,6 +300,10 @@
         }
         return tokens;
     }
+    /** Raw UTF-16 offsets, including prefixes and %, suitable for preview and insertion. */
+    function extractVariables(value) {
+        return tokenize(value).filter(token => token.kind === 'variable');
+    }
     function diagnose(field, value, options = {}) {
         const text = String(value ?? ''), result = [];
         if (field.kind === 'gender') return result;
@@ -294,6 +313,16 @@
         const source = tokenize(canonicalSource(field.source)), target = tokenize(text);
         if (options.tagSyntax !== false) {
             for(const token of [...source,...target].filter(token=>token.kind==='stage-direction'))if(!result.some(issue=>issue.code==='clienttext-unknown-syntax' && issue.token===token.full))result.push({level:'warning',code:'clienttext-unknown-syntax',token:token.full,message:'Unrecognized ClientText syntax '+token.full+'. Verify the upstream control or formatting rule; this text is preserved.',start:token.start,end:token.end});
+            for (const token of target.filter(token => token.kind === 'keyword')) {
+                // Keep the same narrow nested-brace exceptions as SD. These
+                // braces belong to the immutable reference, never a variable.
+                const identity=token.identity, brace=identity.search(/[{}]/);
+                if(brace>=0 && !/^[A-Za-z][A-Za-z0-9_]*::\{\d+\}$/.test(identity)
+                    && !/^[A-Za-z][A-Za-z0-9_]*<gemlevel=\{\d+\}>$/.test(identity))
+                    add('error','nested-tags','Braces in a keyword ID must be a numeric ::{n} or <gemlevel={n}> reference.',token.start+1+brace,token.start+1+identity.length);
+                const nested=identity.indexOf('[');
+                if(nested>=0)add('error','nested-tags','Close the keyword tag before starting another keyword tag.',token.start+1+nested,token.end);
+            }
             for (const [open, close] of [['[',']'],['{','}']]) {
                 const stack = [];
                 for (let i = 0; i < text.length; i++) {
@@ -324,12 +353,17 @@
     }
     function suggestions(field, options = {}) {
         const openedBy = options.openedByChar || '', tokens = tokenize(canonicalSource(field.source));
-        const values = [...new Set(tokens.filter(token => token.kind !== 'audio' && (!openedBy || token.full[0] === openedBy)).map(token => token.full))];
+        // A prefix already typed before an opening brace must remain outside
+        // the replacement range. Keyword suggestions retain their complete ID
+        // and optional pipe display, including reference metadata.
+        const values = [...new Set(tokens.filter(token => token.kind !== 'audio').map(token =>
+            token.kind==='variable' && openedBy==='{' ? token.full.slice(token.prefix.length) : token.full)
+            .filter(value => !openedBy || value[0]===openedBy))];
         const items = values.map(value => ({ value, label: value, matchText: value, matchTextLower: value.toLocaleLowerCase() }));
         if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
     return { FORMAT, PARSER_VERSION, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        normalizeValues, normalizeReviewed, valuesFor, statusFor, counts, carryForward, tokenize, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, statusFor, counts, carryForward, tokenize, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

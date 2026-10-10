@@ -967,8 +967,8 @@ tr {
 tr:nth-child(even) {
   background-color: var(--color-element-alt);
 }
-table:not(#table) tbody>tr:hover,
-table:not(#table) th:hover {
+table:not(:is(#table, .fileTable)) tbody>tr:hover,
+table:not(:is(#table, .fileTable)) th:hover {
   background-color: var(--color-element-highlight);
 }
 
@@ -980,7 +980,7 @@ tr.hasChanges:nth-child(even)>td {
   background-color: rgba(80, 255, 90, 0.12);
 }
 
-table:not(#table) tbody>tr:hover.hasChanges>td {
+table:not(:is(#table, .fileTable)) tbody>tr:hover.hasChanges>td {
   background-color: rgba(80, 255, 90, 0.3);
 }
 
@@ -1001,7 +1001,7 @@ tr.isMissing:nth-child(even)>td.translationTr {
   background-color: rgba(255, 80, 90, 0.12);
 }
 
-table:not(#table) tbody>tr:hover.isMissing>td.translationTr {
+table:not(:is(#table, .fileTable)) tbody>tr:hover.isMissing>td.translationTr {
   background-color: rgba(255, 80, 90, 0.3);
 }
 
@@ -1013,7 +1013,7 @@ tr.isDropped:nth-child(even)>td {
   background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
-table:not(#table) tbody>tr:hover.isDropped>td {
+table:not(:is(#table, .fileTable)) tbody>tr:hover.isDropped>td {
   background-color: color-mix(in srgb, var(--ui-dropped) 30%, transparent);
 }
 
@@ -1025,25 +1025,25 @@ tr.isDropped:nth-child(even) {
   background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
-table:not(#table) tbody>tr:hover.isDropped {
+table:not(:is(#table, .fileTable)) tbody>tr:hover.isDropped {
   background-color: color-mix(in srgb, var(--ui-dropped) 30%, transparent);
 }
 
-table#table tbody tr.isDropped td {
+table:is(#table, .fileTable) > tbody > tr.isDropped > td {
   background-color: color-mix(in srgb, var(--ui-dropped) 8%, transparent);
 }
 
-table#table tbody tr.isDropped:nth-child(even) td {
+table:is(#table, .fileTable) > tbody > tr.isDropped:nth-child(even) > td {
   background-color: color-mix(in srgb, var(--ui-dropped) 12%, transparent);
 }
 
-table#table tbody tr.diagnosticWarning td,
-table#table tbody tr.diagnosticWarning:nth-child(even) td {
+table:is(#table, .fileTable) > tbody > tr.diagnosticWarning > td,
+table:is(#table, .fileTable) > tbody > tr.diagnosticWarning:nth-child(even) > td {
   background-color: var(--color-diagnostic-warning);
 }
 
-table#table tbody tr.diagnosticError td,
-table#table tbody tr.diagnosticError:nth-child(even) td {
+table:is(#table, .fileTable) > tbody > tr.diagnosticError > td,
+table:is(#table, .fileTable) > tbody > tr.diagnosticError:nth-child(even) > td {
   background-color: var(--color-diagnostic-error);
 }
 

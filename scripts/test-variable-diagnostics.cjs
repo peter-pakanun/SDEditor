@@ -9,6 +9,7 @@ function loadEditor() {
   const alerts = [];
   const confirmations = [];
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} }, OfflineStore: {},
+    ClientTextState: require('../public/clientTextState.js'),
     setTimeout, clearTimeout, performance: require('node:perf_hooks').performance };
   const context = vm.createContext({
     window, URLSearchParams, console, setTimeout, clearTimeout,
@@ -27,7 +28,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'clientTextUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -516,4 +517,59 @@ test('preview value identity still shares the same variable across percentage fo
   assert.deepEqual(variables.map(segment => segment.trailingPercent), [false, true]);
   editor.mergePreviewGggVars(preview.keysOrder);
   assert.deepEqual(Object.keys(editor.previewGggVars), ['1']);
+});
+
+test('ClientText uses shared variables and keyword display without SD text decoding', () => {
+  const {editor}=loadEditor(),raw='@CharacterName literal\\n actual\n{} {d} +{0:+d}% {2:0.1f} [Skill::{7}|Deal {0}% damage]';
+  const preview=editor.buildGamePreviewSegments(raw,{contentMode:'clienttext'});
+  assert.deepEqual(Array.from(preview.keysOrder),['','d','0:+d','2:0.1f','0']);
+  assert.equal(preview.segments.filter(segment=>segment.type==='rightAlign').length,0);
+  assert.equal(preview.segments.filter(segment=>segment.type==='break').length,1);
+  assert.equal(preview.segments[0].text,'@CharacterName literal\\n actual');
+  assert.equal(preview.segments.find(segment=>segment.key==='0:+d').prefix,'+');
+  assert.equal(preview.segments.find(segment=>segment.key==='0:+d').trailingPercent,true);
+  editor.ctActive=true;editor.ctPreviewGggVars={'0':'37'};
+  const keyword=preview.segments.find(segment=>segment.type==='kw');
+  assert.equal(editor.gamePreviewKeywordText(keyword),'Deal 37% damage');
+  assert.equal(keyword.full,'[Skill::{7}|Deal {0}% damage]');
+  assert.ok(!preview.keysOrder.includes('7'),'keyword identity metadata is not a display variable');
+  assert.equal(raw,'@CharacterName literal\\n actual\n{} {d} +{0:+d}% {2:0.1f} [Skill::{7}|Deal {0}% damage]');
+});
+
+test('ClientText preview balances formatting wrappers and preserves unsupported syntax safely',()=>{
+  const {editor}=loadEditor();
+  const preview=editor.buildGamePreviewSegments('<unique>{{{0}}} <smaller>{Small {1}} <fg:rgb(255,0,0)>{<glow:rgb(227,125,1)>{Nested {2}}} <<xbox_button_a>> <unknown>{literal}',{contentMode:'clienttext'});
+  assert.deepEqual(Array.from(preview.keysOrder),['0','1','2']);
+  assert.equal(preview.segments.find(segment=>segment.key==='0').decorTag,'unique');
+  assert.equal(preview.segments.find(segment=>segment.key==='1').decorTag,'smaller');
+  assert.equal(preview.segments.find(segment=>segment.key==='2').decorTag,'glow');
+  assert.ok(preview.segments.some(segment=>segment.text?.includes('<<xbox_button_a>> <unknown>{literal}')));
+  const incomplete=editor.buildGamePreviewSegments('<smaller>{incomplete',{contentMode:'clienttext'});
+  assert.equal(incomplete.segments[0].text,'<smaller>{incomplete');
+});
+
+test('ClientText shares preview hosts and settings while isolating field values from SD state',()=>{
+  const {editor,context}=loadEditor();
+  const text={id:'text',kind:'text',source:'English {}@literal\\n\nnext'},form={id:'MS',kind:'form',source:'Form {0}'},gender={id:'gender',kind:'gender',source:''};
+  editor.ctActive=true;editor.ctEditor=true;editor.ctSelection='ID';editor.versionChooserVisible=false;
+  editor._ctUnitIndex=new Map([['ID',{fields:[text,form,gender]}]]);
+  editor.ctFocusedField='text';editor.ctValues={text:'French {}@literal\\n\nnext',MS:'Masculin {0}',gender:'M'};
+  editor.gamePreviewSegments=[{type:'text',text:'Retained SD preview'}];editor.previewGggVars={'0':'SD'};
+  assert.equal(editor.gamePreviewMounted,true);assert.equal(editor.gamePreviewTarget,'#ctFullEditorPreviewHost');
+  assert.equal(editor.editorToolsMounted,false,'SD assistance must not mount into ClientText');
+  assert.deepEqual(Array.from(editor.ctPreviewKeys),['']);
+  const update=context.window.ClientTextUI.mixin.watch.ctPreviewKeys.handler;
+  update.call(editor,editor.ctPreviewKeys);editor.gamePreviewVarValues['']='23';
+  assert.equal(editor.ctPreviewGggVars[''],'23');assert.equal(editor.previewGggVars['0'],'SD');
+  assert.equal(editor.gamePreviewDisplayTarget.at(-1).text,'next');
+  editor.ctEditor=false;editor.inlineEditor=true;assert.equal(editor.gamePreviewTarget,'#ctInlineEditorPreviewHost');
+  editor.ctFocusedField='MS';assert.deepEqual(Array.from(editor.ctPreviewKeys),['0']);
+  editor.ctFocusedField='gender';assert.equal(editor.ctPreviewField,text,'enum metadata is not a text preview');
+  editor.versionChooserVisible=true;assert.equal(editor.gamePreviewMounted,false);
+  editor.ctActive=false;assert.equal(editor.gamePreviewDisplayTarget[0].text,'Retained SD preview');
+  const html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
+  assert.ok(html.includes('id="ctFullEditorPreviewHost"'));
+  assert.ok(context.window.ClientTextUI.toolsComponent.template.includes('id="ctInlineEditorPreviewHost"'));
+  assert.ok(html.includes('v-model="gamePreviewVarValues[k]"'));
+  assert.ok(!html.includes('aria-label="Content group"'),'group selection belongs in the Versions Assignment table');
 });

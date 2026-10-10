@@ -1,6 +1,9 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
+const fs=require('node:fs');
+const path=require('node:path');
+const vm=require('node:vm');
 const S=require('../public/clientTextState.js');
 const {unit,fieldId,asset}=require('./clienttext-storage-fixture.cjs');
 test('SHA256 and canonical hashes match Node crypto including Unicode and long blocks',()=>{
@@ -94,4 +97,85 @@ test('whole form sentinels tolerate surrounding whitespace while retaining their
     assert.deepEqual(S.diagnose(field,target),[]);
     assert.equal(S.normalizeValues({...unit(),fields:[field]},{[fieldId]:target})[fieldId],target);
     assert.ok(S.diagnose(field,'NONEXISTENT literal text').some(issue=>issue.code==='clienttext-token-identity'));
+});
+
+test('ClientText variables match SD empty, numeric, sign, format and percent rules with exact raw offsets',()=>{
+    const context=vm.createContext({});
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);
+    const source='ไทย mail@example.com @{} +{0}% -{1:+d}% {d} {:+d} {0:d}\n[Skill::{0}|Visible {2}%] [Skill<gemlevel={0}>|Level {3}] <white>{{Damage {4}%}} literal\\n{5}';
+    const expected=Array.from(context.extractGGGVarTags(source),({full,start,end})=>({full,start,end}));
+    const actual=S.extractVariables(source);
+    assert.deepEqual(actual.map(({full,start,end})=>({full,start,end})),expected);
+    for(const token of actual){
+        assert.equal(source.slice(token.start,token.end),token.full);
+        assert.equal(token.key,context.getGggVarIdentityKey(token.full));
+        assert.equal(S.variableIdentityKey(token.full),token.key);
+        assert.equal(token.identity,'{'+token.key+'}'+(token.trailingPercent?'%':''));
+    }
+    assert.deepEqual(actual[0],{full:'@{}',start:source.indexOf('@{}'),end:source.indexOf('@{}')+3,
+        kind:'variable',identity:'{}',key:'',prefix:'@',trailingPercent:false});
+    assert.equal(actual.find(token=>token.full==='-{1:+d}%').prefix,'-');
+    assert.equal(actual.find(token=>token.full==='+{0}%').trailingPercent,true);
+    assert.equal(S.variableIdentityKey('ordinary text'),'ordinary text');
+});
+
+test('ClientText numeric format extension preserves float format while localizable brace bodies stay text',()=>{
+    const source='{2:0.1f} seconds <b>{1-2} <rgb(219,217,206)>{Fire Rune}\n<font:\'fontin\'>{<italic>{Monsters gain:}}';
+    assert.deepEqual(S.extractVariables(source).map(token=>[token.full,token.key]),[['{2:0.1f}','2:0.1f']]);
+    const field={...unit().fields[0],source};
+    assert.deepEqual(S.diagnose(field,'{2:0.1f} secondes <b>{1-2} <rgb(219,217,206)>{Rune de feu}\n<font:\'fontin\'>{<italic>{Les monstres gagnent :}}'),[]);
+    assert.ok(S.diagnose(field,source.replace('{2:0.1f}','{2}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
+});
+
+test('ClientText diagnostic variable identities count repeated placeholders and percentages independently of prefix',()=>{
+    const field={...unit().fields[0],source:'{} attempts {1:+d}% damage\n{1:+d}% chance {2}'};
+    assert.deepEqual(S.diagnose(field,'@{} tentatives +{1:+d}% dégâts\n-{2} et -{1:+d}% chance'),[]);
+    for(const target of ['{} tentatives {1:+d} dégâts\n{1:+d}% chance {2}', '{} tentatives {1:+d}% dégâts\n{2}',
+        '{} tentatives {1}% dégâts\n{1:+d}% chance {2}', 'tentatives {1:+d}% dégâts\n{1:+d}% chance {2}'])
+        assert.ok(S.diagnose(field,target).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'),target);
+});
+
+test('keyword ID braces are immutable reference metadata and display variables retain their own offsets',()=>{
+    const source='[Skill::{0}|Name {1}%] [Skill_2<gemlevel={12}>|Level {}] [Bare]';
+    const field={...unit().fields[0],source};
+    assert.deepEqual(S.extractVariables(source).map(token=>token.full),['{1}%','{}']);
+    assert.deepEqual(S.diagnose(field,'[Skill::{0}|Nom +{1}%] [Skill_2<gemlevel={12}>|Niveau {}] [Bare]'),[]);
+    assert.ok(S.diagnose(field,source.replace('::{0}','::{1}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='warning'));
+    assert.ok(S.diagnose(field,source.replace('Name {1}%','Nom')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
+    for(const identity of ['Skill:{0}','Skill:::{0}','Skill::{d}','Skill::{0}%','Skill<gemlevel={d}>','Skill<gemlevel={0}>suffix','Skill{{0}}']){
+        const malformed='['+identity+'|Name]';
+        assert.ok(S.diagnose({...field,source:malformed},malformed).some(issue=>issue.code==='nested-tags'),identity);
+    }
+});
+
+test('brace and bracket completion preserve SD-style full syntax, display text and exact prefixes',()=>{
+    const source='[NOAUDIO] @{} +{0}% -{1:+d}% [Skill::{0}|Nom {2}%] [Skill<gemlevel={3}>|Name] [Bare]';
+    const field={...unit().fields[0],source};
+    const braces=S.suggestions(field,{openedByChar:'{'}).map(item=>item.value);
+    assert.deepEqual(braces,['{}','{0}%','{1:+d}%','{2}%']);
+    const brackets=S.suggestions(field,{openedByChar:'['}).map(item=>item.value);
+    assert.deepEqual(brackets,['[Skill::{0}|Nom {2}%]','[Skill<gemlevel={3}>|Name]','[Bare]']);
+    assert.equal(brackets.some(value=>value.includes('NOAUDIO')),false);
+    assert.ok(S.suggestions(field).some(item=>item.value==='-{1:+d}%'));
+    assert.equal(S.suggestions({...field,kind:'form'},{openedByChar:'['}).some(item=>item.value==='NONEXISTENT'),false);
+    assert.equal(S.suggestions({...field,kind:'form'},{openedByChar:'{'}).some(item=>item.value==='NONEXISTENT'),false);
+    assert.equal(source,'[NOAUDIO] @{} +{0}% -{1:+d}% [Skill::{0}|Nom {2}%] [Skill<gemlevel={3}>|Name] [Bare]');
+});
+
+test('keyword completion follows SD pipe and multiline display grammar without accepting empty identities',()=>{
+    const field={...unit().fields[0],source:'[] [|{}] [Skill::{0}|line one\nline two {1}%] [Bare|] [Other|A|B]'};
+    const keywords=S.tokenize(field.source).filter(token=>token.kind==='keyword');
+    assert.deepEqual(keywords.map(token=>token.full),['[Skill::{0}|line one\nline two {1}%]','[Bare|]','[Other|A|B]']);
+    assert.deepEqual(S.extractVariables(field.source).map(token=>token.full),['{}','{1}%']);
+    assert.deepEqual(S.suggestions(field,{openedByChar:'['}).map(item=>item.value),keywords.map(token=>token.full));
+});
+
+test('SD rarity and item formatting wrappers are recognized while nested variables remain checked',()=>{
+    for(const name of ['unique','magic','rare','gem','currency','enchanted']){
+        const source='<'+name+'>{{{0}}}',field={...unit().fields[0],source};
+        assert.equal(S.tokenize(source)[0].kind,'format');
+        assert.deepEqual(S.diagnose(field,source),[]);
+        assert.deepEqual(S.extractVariables(source).map(token=>token.full),['{0}']);
+        assert.ok(S.diagnose(field,source.replace('{0}','{1}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
+    }
 });

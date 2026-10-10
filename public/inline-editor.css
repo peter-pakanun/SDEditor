@@ -22,20 +22,20 @@
 .editor > .editorSidebarHost { overflow: hidden; }
 .editorSidebarHost > .sharedEditorSidebar { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .editorSidebarHost > .sharedEditorSidebar:is(.commentsActive, .lookupActive) { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
-#fullEditorPreviewHost { display: contents; }
+#fullEditorPreviewHost, #ctFullEditorPreviewHost { display: contents; }
 .editorSourceField { flex: 1; min-width: 0; }
-.inlineEditorMode #table .inlineFileBlock { box-sizing: content-box; }
-.inlineEditorMode #table .inlineFileBlock:not(.inlineBlockPrelude) + .inlineFileBlock { border-top: 1px solid var(--ui-border); }
-.inlineEditorMode #table .inlineBlockNatural { padding: 8px 0; }
-.inlineEditorMode #table .inlineBlockPrelude .inlineBlockNatural { display: flow-root; padding: 0; }
-.inlineEditorMode #table .inlineBlockPrelude .collaborationPeerLabels { margin-bottom: 8px; }
+.inlineEditorMode :is(#table, .fileTable) .inlineFileBlock { box-sizing: content-box; }
+.inlineEditorMode :is(#table, .fileTable) .inlineFileBlock:not(.inlineBlockPrelude) + .inlineFileBlock { border-top: 1px solid var(--ui-border); }
+.inlineEditorMode :is(#table, .fileTable) .inlineBlockNatural { padding: 8px 0; }
+.inlineEditorMode :is(#table, .fileTable) .inlineBlockPrelude .inlineBlockNatural { display: flow-root; padding: 0; }
+.inlineEditorMode :is(#table, .fileTable) .inlineBlockPrelude .collaborationPeerLabels { margin-bottom: 8px; }
 .inlineReadText { white-space: pre-wrap; overflow-wrap: anywhere; }
-.inlineEditorMode #table .editorTextField { min-width: 0; font-size: calc(13px * var(--density)); line-height: calc(1.6em * var(--density)); --padding-top: 7px; --padding-left: 8px; }
-.inlineEditorMode #table .editorTextField > input,
-.inlineEditorMode #table .editorTextField > textarea { box-sizing: border-box; min-width: 0; padding-right: 8px; padding-bottom: 7px; }
-.inlineEditorMode #table .editorTextField > textarea { min-height: 84px; }
-.inlineEditorMode #table .editorTextField > input:focus,
-.inlineEditorMode #table .editorTextField > textarea:focus { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.inlineEditorMode :is(#table, .fileTable) .editorTextField { min-width: 0; font-size: calc(13px * var(--density)); line-height: calc(1.6em * var(--density)); --padding-top: 7px; --padding-left: 8px; }
+.inlineEditorMode :is(#table, .fileTable) .editorTextField > input,
+.inlineEditorMode :is(#table, .fileTable) .editorTextField > textarea { box-sizing: border-box; min-width: 0; padding-right: 8px; padding-bottom: 7px; }
+.inlineEditorMode :is(#table, .fileTable) .editorTextField > textarea { min-height: 84px; }
+.inlineEditorMode :is(#table, .fileTable) .editorTextField > input:focus,
+.inlineEditorMode :is(#table, .fileTable) .editorTextField > textarea:focus { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
 .inlineTableColumns { display: grid; grid-template-columns: repeat(var(--table-columns, 1), minmax(0, 1fr)); gap: 5px; }
 .fileDraftLabel { display: block; margin-top: 4px; color: var(--ui-accent); font-size: 11px; font-weight: 600; }
 .inlineFileActions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
@@ -75,13 +75,13 @@
 .draftRecoveryActions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 @media (max-width: 700px) {
   .workspace.inlineEditorMode { --inline-workspace-gap: 12px; }
-  .workspace.inlineEditorMode #table { display: table; table-layout: fixed; min-width: 750px; }
-  .workspace.inlineEditorMode #table thead { position: static; display: table-header-group; width: auto; height: auto; overflow: visible; clip-path: none; }
-  .workspace.inlineEditorMode #table tbody { display: table-row-group; }
-  .workspace.inlineEditorMode #table tbody tr { display: table-row; }
-  .workspace.inlineEditorMode #table td { display: table-cell; border-bottom: 1px solid var(--ui-border); }
-  .workspace.inlineEditorMode #table td[data-label]::before { display: none; }
-  .workspace.inlineEditorMode #table tbody tr.selectedFileRow::before { display: none; }
-  .workspace.inlineEditorMode #table tbody tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
+  .workspace.inlineEditorMode :is(#table, .fileTable) { display: table; table-layout: fixed; min-width: 750px; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > thead { position: static; display: table-header-group; width: auto; height: auto; overflow: visible; clip-path: none; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody { display: table-row-group; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody > tr { display: table-row; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody > tr > td { display: table-cell; border-bottom: 1px solid var(--ui-border); }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody > tr > td[data-label]::before { display: none; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody > tr.selectedFileRow::before { display: none; }
+  .workspace.inlineEditorMode :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationSelected { box-shadow: inset 0 0 0 2px var(--collaboration-color, #17743b); }
   .draftRecoveryLayout { grid-template-columns: 210px minmax(320px, 1fr); }
 }

@@ -937,7 +937,7 @@
         this._inlineAlignmentFrame = requestAnimationFrame(() => {
           this._inlineAlignmentFrame = null;
           const writes = [];
-          for (const row of document.querySelectorAll('tr[data-filepath]')) {
+          for (const row of document.querySelectorAll('tr[data-filepath], tr[data-unit-id]')) {
             const groups = new Map();
             for (const block of row.querySelectorAll('[data-inline-block]')) {
               const key = block.dataset.inlineBlock;

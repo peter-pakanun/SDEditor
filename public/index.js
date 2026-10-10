@@ -622,8 +622,8 @@ const config = Vue.defineComponent({
   computed: {
     editorSessionActive() { return this.editorVisible || !!this.inlineActive; },
     editorToolsMounted() {
-      return this.editorVisible || (this.inlineEditor && this.gameVersionSelected && !this.versionChooserVisible
-        && this.loadingProgress >= 100 && !this.needsInitialSettings);
+      return !this.ctActive && (this.editorVisible || (this.inlineEditor && this.gameVersionSelected && !this.versionChooserVisible
+        && this.loadingProgress >= 100 && !this.needsInitialSettings));
     },
     editorToolsVisible() {
       return this.editorToolsMounted && (this.editorVisible || (this.inlineSidebarVisible && !this.workspaceInitializationActive));
@@ -971,19 +971,29 @@ const config = Vue.defineComponent({
     gamePreviewSourceFontFamily() {
       return this.getGamePreviewFontFamily("English");
     },
+    gamePreviewMounted() { return this.ctActive ? this.ctPreviewMounted : this.editorToolsMounted; },
+    gamePreviewFullEditor() { return this.ctActive ? this.ctEditor : this.editorVisible; },
+    gamePreviewTarget() {
+      return this.ctActive ? (this.ctEditor ? '#ctFullEditorPreviewHost' : '#ctInlineEditorPreviewHost')
+        : (this.editorVisible ? '#fullEditorPreviewHost' : '#inlineEditorPreviewHost');
+    },
+    gamePreviewDisplaySource() { return this.ctActive ? this.ctGamePreview.source.segments : this.gamePreviewSourceSegments; },
+    gamePreviewDisplayTarget() { return this.ctActive ? this.ctGamePreview.target.segments : this.gamePreviewSegments; },
+    gamePreviewVarValues() { return this.ctActive ? this.ctPreviewGggVars : this.previewGggVars; },
     gamePreviewVarKeyList() {
       let seen = new Set();
       let out = [];
       let segments = [
-        ...(this.hideSourceInPreviewPanel ? [] : (this.gamePreviewSourceSegments || [])),
-        ...(this.gamePreviewSegments || []),
+        ...(this.hideSourceInPreviewPanel ? [] : (this.gamePreviewDisplaySource || [])),
+        ...(this.gamePreviewDisplayTarget || []),
       ];
       for (const seg of segments) {
-        if (seg?.type !== "var") continue;
-        let k = String(seg.key ?? "");
-        if (seen.has(k)) continue;
-        seen.add(k);
-        out.push(k);
+        for (const variable of seg?.type === 'var' ? [seg] : (seg?.parts || []).filter(part=>part.type==='var')) {
+          let k = String(variable.key ?? "");
+          if (seen.has(k)) continue;
+          seen.add(k);
+          out.push(k);
+        }
       }
       return out;
     }
@@ -1492,8 +1502,9 @@ const config = Vue.defineComponent({
       }
       this.previewGggVars = next;
     },
-    buildGamePreviewSegments(decodedString) {
+    buildGamePreviewSegments(decodedString, options = {}) {
       let s = String(decodedString ?? "");
+      const clientText = options.contentMode === 'clienttext';
       let decorRe = new RegExp("^" + textDecorationTagRegex, "i");
       let kwRe = new RegExp("^" + keywordPopupTagRegex, "i");
       let gggRe = new RegExp("^" + gggVarTagRegex, "i");
@@ -1517,13 +1528,55 @@ const config = Vue.defineComponent({
         textDecorTag = normalizedDecorTag;
         textBuf += text;
       };
+      const rememberVariable = variable => {
+        const key = String(variable.key ?? '');
+        if (!keySeen.has(key)) { keySeen.add(key); keysOrder.push(key); }
+        return {type:'var',key,full:variable.full,prefix:variable.prefix || '',trailingPercent:!!variable.trailingPercent};
+      };
+      const clientVariables = text => window.ClientTextState.extractVariables(text);
+      const keywordParts = text => {
+        const parts=[];let offset=0;
+        for(const variable of clientVariables(text)) {
+          if(variable.start>offset)parts.push({type:'text',text:text.slice(offset,variable.start)});
+          parts.push(rememberVariable(variable));offset=variable.end;
+        }
+        if(offset<text.length)parts.push({type:'text',text:text.slice(offset)});
+        return parts;
+      };
+      // Workbook wrappers use both <tag>{text} and SD's <tag>{{text}}.
+      // Balance the braces so a nested {0} remains a variable rather than
+      // becoming part of the wrapper's closing delimiter.
+      const clientWrapper = part => {
+        const header=/^<([^<>\r\n]+)>/.exec(part),name=header && /^([A-Za-z]+)(?=[:(]|$)/.exec(header[1]);
+        if(!name || part[header[0].length]!=='{')return null;
+        const tag=name[1].toLowerCase();
+        const supported=new Set(['size','font','rgb','glow','fg','colour','color','smaller','b','i','n','normal','italic','bold','u','shadow','center','left','right','red','green','blue','white','yellow','default','light','unique','magic','rare','gem','currency','enchanted']);
+        if(!supported.has(tag))return null;
+        const start=header[0].length;
+        const single=new Set(['size','font','rgb','glow','fg','smaller']);
+        const delimiters=!single.has(tag) && part.slice(start,start+2)==='{{' ? 2 : 1;
+        let depth=0;
+        for(let end=start;end<part.length;end++) {
+          if(part[end]==='{')depth++;
+          else if(part[end]==='}' && --depth===0) {
+            if(delimiters===2 && part.slice(end-1,end+1)!=='}}')return null;
+            return {text:part.slice(start+delimiters,end+1-delimiters),tag,length:end+1};
+          }
+        }
+        return null;
+      };
 
       let scanInline = (part, allowBreaks = true, decorTag = "") => {
         let i = 0;
         let activeDecorTag = String(decorTag ?? "").trim().toLowerCase();
+        const variables=clientText ? new Map(clientVariables(part).map(variable=>[variable.start,variable])) : null;
         while (i < part.length) {
           let slice = part.slice(i);
-          let dm = decorRe.exec(slice);
+          const wrapper=clientText ? clientWrapper(slice) : null;
+          if(wrapper) {
+            flushText();scanInline(wrapper.text,allowBreaks,wrapper.tag);flushText();i+=wrapper.length;continue;
+          }
+          let dm = clientText ? null : decorRe.exec(slice);
           if (dm && dm.index === 0) {
             flushText();
             scanInline(String(dm[3] ?? ""), allowBreaks, dm[2]);
@@ -1538,12 +1591,14 @@ const config = Vue.defineComponent({
             let dynamicContent = String(km[3] ?? "").trim();
             let display = dynamicContent || tagName;
             let seg = { type: "kw", text: display, full: km[0] };
+            if(clientText && dynamicContent)seg.parts=keywordParts(dynamicContent);
             if (activeDecorTag) seg.decorTag = activeDecorTag;
             segments.push(seg);
             i += km[0].length;
             continue;
           }
-          let gm = gggRe.exec(slice);
+          const clientVariable=variables?.get(i);
+          let gm = clientText ? null : gggRe.exec(slice);
           if (gm && gm.index === 0) {
             flushText();
             let full = gm[0];
@@ -1561,7 +1616,12 @@ const config = Vue.defineComponent({
             i += full.length;
             continue;
           }
-          if (part[i] === '@' && this.isTableDelimiterAt(part, i)) {
+          if(clientVariable) {
+            flushText();const seg=rememberVariable(clientVariable);
+            if(activeDecorTag)seg.decorTag=activeDecorTag;
+            segments.push(seg);i+=clientVariable.full.length;continue;
+          }
+          if (!clientText && part[i] === '@' && this.isTableDelimiterAt(part, i)) {
             flushText();
             segments.push({ type: "rightAlign" });
             i++;
@@ -1578,7 +1638,7 @@ const config = Vue.defineComponent({
         }
       };
 
-      if (this.isTableText(s)) {
+      if (!clientText && this.isTableText(s)) {
         let columns = this.splitTableColumns(s).map(col => this.normalizeNewlines(col));
         let columnLines = columns.map(col => String(col).split("\n"));
         let rowCount = columnLines.reduce((max, lines) => Math.max(max, lines.length), 0);
@@ -1601,8 +1661,12 @@ const config = Vue.defineComponent({
       flushText();
       return { segments, keysOrder };
     },
+    gamePreviewKeywordText(segment) {
+      if(!segment.parts)return segment.text;
+      return segment.parts.map(part=>part.type==='var' ? part.prefix+(this.gamePreviewVarValues[part.key] ?? this.defaultPreviewVarValue(part.key))+(part.trailingPercent?'%':'') : part.text).join('');
+    },
     refreshGamePreview() {
-      if (!this.editorSessionActive) return;
+      if (this.ctActive || !this.editorSessionActive) return;
       let block = this.editorBlocks?.[this.editorFocusedIndex];
       let sourceRaw = block?.english ?? "";
       let translationRaw = block?.translation ?? "";
@@ -2192,14 +2256,14 @@ const config = Vue.defineComponent({
       });
       this.markDictionarySnapshotDirty?.(word._id);
     },
-    async removeDictionaryAltRow(word, alt) {
+    async removeDictionaryAltRow(word, alt, options = {}) {
       if (!word || !Array.isArray(word.alts)) return;
       let id = alt?._id;
       const dictionary = this.dictionary;
       if (!await this.appConfirm(`Are you sure you want to remove alternate definition of ${String(alt?.find ?? "")}?`, {
         title: 'Remove alternate definition?', confirmLabel: 'Remove alternate',
       })) return;
-      if (this.dictionary !== dictionary) return;
+      if (this.dictionary !== dictionary || options.isCurrent && !options.isCurrent()) return;
       if (id) {
         word.alts = word.alts.filter(a => String(a?._id) !== String(id));
       } else {
@@ -7454,12 +7518,12 @@ const config = Vue.defineComponent({
       this.beginDictionaryEdit(entry._id, { newEntry: true });
       this.focusDictionaryEntryReplaceInput(entry._id);
     },
-    async removeVocab(word) {
+    async removeVocab(word, options = {}) {
       const dictionary = this.dictionary;
       if (!await this.appConfirm(`Are you sure you want to remove this word?\n\n#${word.find}\n${word.replace}`, {
         title: 'Remove Dictionary entry?', confirmLabel: 'Remove entry',
       })) return;
-      if (this.dictionary !== dictionary) return;
+      if (this.dictionary !== dictionary || options.isCurrent && !options.isCurrent()) return;
       if (String(word?._id) === this.dictionaryEditingId) this.endDictionaryEdit();
       this.dictionary = this.dictionary.filter(o => o !== word);
       this.markDictionarySnapshotDirty?.(null, { replace: true });
@@ -7710,6 +7774,7 @@ if (window.ClientTextUI) {
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
+if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary-entries', window.EditorComponents.DictionaryEntries);
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);

@@ -9,12 +9,14 @@ function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
         ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
+    Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
 }
@@ -27,6 +29,858 @@ function assignmentHarness(changes={}){
     Object.defineProperty(h.app,'ctAssignmentRows',{get:()=>h.mixin.computed.ctAssignmentRows.call(h.app)});
     return h;
 }
+function listHarness(changes={}){
+    const h=harness({inlineEditor:false,pageSize:2,$nextTick:async()=>{},$refs:{},...changes});
+    for(const name of ['ctRows','ctPageRows','ctPageCount','ctEffectivePageSize','ctCounts','ctStatusFilterOptions','ctDiagnosticCounts'])
+        Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
+    return h;
+}
+function namedUnit(id,source='English',target='Translation',outdated=false){
+    return {...unit(source,target,outdated),id:JSON.stringify(['normal','ClientStrings',id]),recordId:id};
+}
+const rowEvent=(key,control=false)=>({key,target:{closest:()=>control?{}:null},preventDefault(){this.defaultPrevented=true;},stopPropagation(){}});
+
+function blankEnglishUnit(id='BlankThenEnglish',source='Visible English'){
+    const original=namedUnit(id),base=original.fields[0];
+    original.fields=[
+        {...base,id:JSON.stringify(['Blank',null]),name:'Blank',source:'',target:'RECOVERABLE_HIDDEN_TRANSLATION',required:false,sourceCell:'D2',targetCell:'E2'},
+        {...base,source,target:'Visible translation'},
+        {...base,id:JSON.stringify(['Gender',null]),name:'Gender',kind:'gender',source:'',target:'F',required:false,sourceCell:'',targetCell:'F2'},
+    ];return original;
+}
+function visibleFieldsHarness(original,changes={}){
+    const h=listHarness({ctUnits:[original],ctSelection:original.id,_ctUnitIndex:new Map([[original.id,original]]),ctValues:S.valuesFor(original),...changes});
+    for(const name of ['ctFieldGroups','ctLookupResults','ctMemoryResults'])
+        Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
+    return {...h,original};
+}
+test('blank English fields hide without trimming nonempty English or removing its Gender metadata',()=>{
+    const raw=' \tEnglish@literal\\n\nline \t',original=blankEnglishUnit('Whitespace',raw),before=clone(original),{app}=visibleFieldsHarness(original);
+    original.fields.splice(1,0,{...original.fields[0],id:JSON.stringify(['Whitespace',null]),name:'Whitespace',source:' \t\r\n\u00a0\uFEFF',target:'Hidden whitespace target'});
+    const snapshot=clone(original),visible=app.ctFieldsFor(original);
+    assert.deepEqual(Array.from(visible,field=>field.name),['Text','Gender']);assert.equal(visible[0],original.fields[2]);assert.equal(visible[0].source,raw);
+    assert.deepEqual(Array.from(app.ctFieldGroups.flatMap(group=>group.fields),field=>field.name),['Text','Gender']);
+    assert.deepEqual(original,snapshot,'view construction keeps every baseline field and raw whitespace');assert.equal(before.fields.length,3);
+    assert.equal(original.fields[0].target,'RECOVERABLE_HIDDEN_TRANSLATION');
+});
+test('ClientText list omits all-blank units and ignores hidden targets in search and sort summaries',()=>{
+    const mixed=blankEnglishUnit(),blank=blankEnglishUnit('AllBlank',' \t\r\n'),snapshot=clone([mixed,blank]),
+        {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,blank],_ctUnitIndex:new Map([[mixed.id,mixed],[blank.id,blank]])});
+    assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);assert.equal(app.ctFieldsFor(blank).length,0,'Gender alone cannot create a visible prose record');
+    assert.equal(app.ctSortValue(mixed,'english').includes('Visible English'),true);assert.equal(app.ctSortValue(mixed,'translation').includes('Visible translation'),true);
+    assert.equal(app.ctSortValue(mixed,'translation').includes('RECOVERABLE_HIDDEN_TRANSLATION'),false);
+    app.ctSearch='RECOVERABLE_HIDDEN_TRANSLATION';app.ctApplySearch();assert.equal(app.ctRows.length,0);
+    app.ctSearch='Visible translation';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);
+    assert.deepEqual([mixed,blank],snapshot);assert.equal(app.ctCounts.total,2,'status totals continue to describe the retained originals');
+});
+test('blank-first-field preview, Lookup and TM fall back to real English while hidden authored text stays intact',()=>{
+    const original=blankEnglishUnit(),reference=blankEnglishUnit('Reference'),{app,window}=visibleFieldsHarness(original,{ctUnits:[original,reference],
+        _ctUnitIndex:new Map([[original.id,original],[reference.id,reference]]),ctFocusedField:original.fields[0].id});
+    reference.fields[1].target='Reference translation';const seen=[];
+    window.ContentAdapters={clienttext:{findMemory(memory,unit,field){seen.push(field);return[{target:'TM@literal\\n\ntranslation'}];}}};
+    assert.equal(app.ctPreviewField,original.fields[1]);assert.equal(app.ctMemoryResults.length,1);assert.equal(seen[0],original.fields[1]);
+    assert.deepEqual(Array.from(app.ctLookupResults,match=>match.name),['Text']);assert.equal(app.ctLookupResults[0].target,'Reference translation');
+    app.ctEdited=field=>{assert.equal(field,original.fields[1]);app.ctDraftDirty=true;};app.ctApplyMemory({target:'TM@literal\\n\ntranslation'});
+    assert.equal(app.ctValues[original.fields[1].id],'TM@literal\\n\ntranslation');assert.equal(app.ctValues[original.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
+    app.ctFocusedField=original.fields[2].id;assert.equal(app.ctPreviewField,original.fields[1],'Gender focus retains a prose preview');
+});
+test('initial ClientText selection focuses later real English and hydrates hidden durable values unchanged',async()=>{
+    const original=blankEnglishUnit(),hidden=original.fields[0],visible=original.fields[1],before=clone(original),{app}=visibleFieldsHarness(original,{ctSelection:'',ctValues:{}}),focus=[];
+    app._ctStore={async getDraft(){return{revision:3,values:{[hidden.id]:'Hidden durable draft',[visible.id]:'Visible durable draft'},reviewed:{}};}};
+    app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};app.ctFocusTarget=()=>focus.push(app.ctFocusedField);
+    assert.equal(await app.ctSelect(original,true),true);assert.equal(app.ctFocusedField,visible.id);assert.deepEqual(focus,[visible.id]);
+    assert.equal(app.ctValues[hidden.id],'Hidden durable draft');assert.equal(app.ctValues[visible.id],'Visible durable draft');assert.equal(app.ctValues[original.fields[2].id],'F');
+    assert.deepEqual(original,before);
+});
+test('hidden English fields remain in real durable saves, immutable originals and recoverable history',async()=>{
+    const original=blankEnglishUnit(),snapshot=clone(original),hidden=original.fields[0],visible=original.fields[1],f=fixture();
+    await f.store.import(scope,{units:[original],assets:[asset]});const {app}=visibleFieldsHarness(original);
+    app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctDraftDirty=true;
+    app.ctValues[hidden.id]='Authored hidden@value\\n\nkept';app.ctValues[visible.id]='Authored visible';
+    assert.deepEqual(Array.from(app.ctFieldsFor(original),field=>field.name),['Text','Gender']);assert.equal(await app.ctSave(),true);
+    const saved=(await f.store.getSaved(scope))[original.id],retained=await f.store.getUnit(scope,original.id),history=await f.store.listHistory(scope,original.id);
+    assert.equal(saved.values[hidden.id],'Authored hidden@value\\n\nkept');assert.equal(saved.values[visible.id],'Authored visible');assert.equal(saved.values[original.fields[2].id],'F');
+    assert.deepEqual(S.normalizeUnit(retained),S.normalizeUnit(snapshot));assert.equal(history.at(-1).after.values[hidden.id],saved.values[hidden.id]);
+    assert.deepEqual(original,snapshot);assert.equal(app.ctStatus(original).saved,true);
+});
+test('late same-ID hydration cannot publish old blank-field drafts or focus into a replacement content group',async()=>{
+    const original=blankEnglishUnit(),replacement=blankEnglishUnit(),pending=deferred(),{app}=visibleFieldsHarness(original,{ctSelection:'',ctValues:{}});
+    replacement.fields[1].source='Replacement visible English';const values=S.valuesFor(replacement);
+    app._ctStore={getDraft:()=>pending.promise};app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};
+    app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};app.ctFocusTarget=()=>assert.fail('Old hydration must not steal focus');
+    const selecting=app.ctSelect(original,true);await settle();
+    app.ctWorkspace={scope:{...scope,versionId:'v2',groupId:'replacement-group'}};app.ctUnits=[replacement];app._ctUnitIndex=new Map([[replacement.id,replacement]]);
+    app.ctSelection=replacement.id;app.ctValues=values;app.ctFocusedField=replacement.fields[1].id;
+    pending.resolve({values:{[original.fields[0].id]:'Old hidden draft'},revision:4});assert.equal(await selecting,false);
+    assert.equal(app.ctValues,values);assert.equal(app.ctWorkspace.scope.groupId,'replacement-group');assert.equal(app.ctPreviewField,replacement.fields[1]);
+    assert.equal(app.ctValues[replacement.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
+});
+
+test('ClientText status chips use OR matching, scoped diagnostic IDs and keep complete durable-draft records visible',()=>{
+    const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
+        {app}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning','unchanged']);
+    assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
+    app.ctSelectedFilters=['missing','saved','revised','outdated','error','warning'];
+    assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id,outdated.id]);
+    app.ctSelectedFilters=['unchanged'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id]);
+    app.ctDiagnostics={[complete.id]:[{severity:'error'},{severity:'error'},{severity:'warning'}],[missing.id]:[{severity:'warning'}]};
+    assert.equal(app.ctDiagnosticCounts.error,1);assert.equal(app.ctDiagnosticCounts.warning,2);
+    app.ctSelectedFilters=['error','outdated'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,outdated.id]);
+    assert.equal(app.ctStatusFilterOptions.find(option=>option.key==='warning').count,2);
+    app.ctSelectedFilters=[];assert.equal(app.ctRows.length,0);
+    app.ctFilter='missing';assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id],'legacy scalar filters remain compatible');
+});
+test('ClientText table sorting and search preserve raw @, literal escapes, newlines and committed values',()=>{
+    const first=namedUnit('ID10','A@literal\\nactual\nline','Z'),second=namedUnit('ID2','B','A'),
+        {app}=listHarness({ctUnits:[first,second],ctSelectedFilters:['unchanged','saved','revised']});
+    assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID2','ID10']);
+    app.ctSortBy('filename');assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID10','ID2']);
+    app.ctSortBy('english');assert.equal(app.ctRows[0],first);
+    const order=app._ctOrderCache.ascending;app.ctAppliedSearch='B';assert.equal(app.ctRows[0],second);assert.equal(app._ctOrderCache.ascending,order,'search filters reuse immutable source order');app.ctAppliedSearch='';
+    app.ctSortBy('translation');assert.equal(app.ctRows[0],second);
+    app.ctValues={[fieldId]:'0 draft'};assert.equal(app.ctRows[0],second,'drafts never change committed sort data');
+    app.ctSaved={[first.id]:{values:{[fieldId]:'0 accepted'},revision:1,reviewed:{}}};assert.equal(app.ctRows[0],first,'saved identity invalidates target sort cache');
+    app.ctSearch='literal\\n';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,row=>row.id),[first.id]);
+    app.ctSearch='literal\n';app.ctApplySearch();assert.equal(app.ctRows.length,0,'literal escape never becomes an actual newline');
+    app.ctResetFilters();assert.equal(app.ctSearch,'');assert.equal(app.ctAppliedSearch,'');assert.equal(app.ctPage,1);
+    assert.equal(first.fields[0].source,'A@literal\\nactual\nline');
+});
+test('row clicks follow inline preference and controls keep native editing and selection',async()=>{
+    const {app,original}=listHarness(),calls=[];app.ctSelect=async(...args)=>{calls.push(args);return true;};
+    for(const method of ['ctRowClick','ctRowDoubleClick'])assert.equal(app[method](original,rowEvent('',true)),false);
+    const typing=rowEvent('Enter',true);assert.equal(await app.ctRowKeydown(original,typing),false);assert.equal(typing.defaultPrevented,undefined);
+    await app.ctRowClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],true);
+    app.inlineEditor=true;await app.ctRowClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],false);
+    await app.ctRowDoubleClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],true);
+});
+test('same-unit inline to full transitions preserve exact drafts, review choices, tool tab and history',async()=>{
+    const {app,original}=listHarness({inlineEditor:true,ctTool:'history',ctHistory:[{key:'history'}],ctLookup:'retained lookup',ctDraftDirty:true}),
+        values={[fieldId]:'@literal\\nactual\nไทย'},reviews={[fieldId]:'review'},choices=[{fieldId,local:'prior'}];
+    app.ctValues=values;app.ctReviewed=reviews;app.ctChoices=choices;app.ctComments=[{text:'kept'}];let layouts=0,focus=0;
+    app.ctFlushDraft=async()=>{throw Error('same-unit transition must not reload its draft');};
+    app.observeInlineBlocks=()=>layouts++;app.ctFocusTarget=()=>focus++;
+    assert.equal(await app.ctSelect(original,true),true);assert.equal(app.ctEditor,true);assert.equal(app.ctValues,values);assert.equal(app.ctReviewed,reviews);
+    assert.equal(app.ctChoices,choices);assert.equal(app.ctTool,'history');assert.equal(app.ctHistory[0].key,'history');assert.equal(app.ctLookup,'retained lookup');
+    assert.equal(app.ctComments[0].text,'kept');assert.equal(app.ctDraftDirty,true);assert.equal(layouts,1);assert.equal(focus,1);
+});
+test('a double-click during inline draft hydration keeps its full-editor intent without reloading the record',async()=>{
+    const pending=deferred(),{app,original}=listHarness({inlineEditor:true,ctSelection:''});let reads=0;
+    app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>true;
+    app._ctStore={async getDraft(){reads++;return pending.promise;}};app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};
+    const selecting=app.ctRowClick(original,rowEvent(''));await settle();assert.equal(app.ctBusy,true);
+    assert.equal(app.ctRowDoubleClick(original,rowEvent('')),true);pending.resolve({values:{[fieldId]:'preserved draft'},reviewed:{},revision:2});
+    assert.equal(await selecting,true);assert.equal(reads,1);assert.equal(app.ctEditor,true);assert.equal(app.ctValues[fieldId],'preserved draft');assert.equal(app.ctDraftDirty,true);
+});
+test('keyboard list navigation uses the page-size preference, keeps row focus and fences late scope changes',async()=>{
+    const rows=Array.from({length:5},(_,index)=>namedUnit('ID'+index)),{app}=listHarness({ctUnits:rows,ctSelectedFilters:['unchanged'],ctSelection:rows[0].id,
+        _ctUnitIndex:new Map(rows.map(value=>[value.id,value]))}),focus=[];
+    app.ctSelect=async(target,full,options)=>{assert.equal(full,false);assert.equal(options.focus,false);app.ctSelection=target.id;return true;};
+    app.ctFocusRow=id=>focus.push(id);
+    const next=rowEvent('PageDown');assert.equal(await app.ctRowKeydown(rows[0],next),true);assert.equal(next.defaultPrevented,true);
+    assert.equal(app.ctSelection,rows[2].id);assert.equal(app.ctPage,2);assert.equal(focus.at(-1),rows[2].id);
+    const end=rowEvent('End');await app.ctRowKeydown(null,end);assert.equal(app.ctSelection,rows[4].id);assert.equal(app.ctPage,3);
+    const pending=deferred();app.ctSelect=()=>pending.promise;const moving=app.ctRowKeydown(rows[4],rowEvent('Home'));
+    app.managedCatalogScope='bob:poe2';app.ctWorkspace={scope:{...scope,accountId:'bob'}};pending.resolve(true);
+    assert.equal(await moving,false);assert.equal(focus.length,2,'late navigation never focuses another account workspace');
+});
+test('page changes and Close preserve durable drafts and cannot alter a replacement workspace',async()=>{
+    const {app}=listHarness({ctUnits:[namedUnit('1'),namedUnit('2'),namedUnit('3')],ctSelectedFilters:['unchanged'],ctEditor:true}),pending=deferred();
+    app.ctFlushDraft=()=>pending.promise;app.ctFlushCommentDraft=async()=>{};
+    const turning=app.ctSetPage(2);app.ctWorkspace={scope:{...scope,groupId:'replacement'}};pending.resolve(true);
+    assert.equal(await turning,false);assert.equal(app.ctPage,1);
+    const closing=deferred();app.ctFlushDraft=()=>closing.promise;const close=app.ctCloseEditor();
+    app.ctWorkspace={scope:{...scope,groupId:'newer'}};closing.resolve(true);assert.equal(await close,false);assert.equal(app.ctEditor,true);
+    app.ctFlushDraft=async()=>true;let focused=0;app.ctFocusRow=()=>focused++;
+    assert.equal(await app.ctCloseEditor(),true);assert.equal(app.ctEditor,false);assert.equal(focused,1);assert.ok(app.ctCurrentUnit);
+});
+test('Discard draft is revision-checked, preserves saved work and retains typing that arrived during deletion',async()=>{
+    const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});
+    const {app,original}=listHarness({ctDraftDirty:true,ctValues:{[fieldId]:'discard me'}});app._ctStore=f.store;
+    const saved=await f.store.save(scope,original.id,{jobId:'accepted',values:{[fieldId]:'Saved exact@\\n'},reviewed:{}});
+    app.ctSaved={[original.id]:saved.saved};app._ctEditRevision=saved.saved.revision;
+    assert.equal(await app.ctDiscardDraft(),true);assert.ok(!await f.store.getDraft(scope,original.id));
+    assert.equal(app.ctValues[fieldId],'Saved exact@\\n');assert.equal(app.ctDraftDirty,false);assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'Saved exact@\\n');
+    const pending=deferred(),calls=[];app.ctValues={[fieldId]:'old draft'};app.ctDraftDirty=true;
+    app.ctFlushDraft=async()=>{app._ctDraftRevision=8;return true;};app._ctStore={async discardDraft(captured,id,options){calls.push({captured,id,options});await pending.promise;}};
+    app.ctQueueDraft=()=>calls.push('new draft queued');const removing=app.ctDiscardDraft();await settle();app.ctValues[fieldId]='newer typing';pending.resolve();
+    assert.equal(await removing,false);assert.equal(app.ctValues[fieldId],'newer typing');assert.equal(app.ctDraftDirty,true);
+    assert.equal(calls[0].options.expectedRevision,8);assert.equal(calls[0].captured.groupId,scope.groupId);assert.equal(calls[1],'new draft queued');
+});
+test('inline translation shortcuts respect autocomplete, raw text and read-only diagnostic modal boundaries',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields[0],first=inputFor(original,field);first.focus();
+    const tab=event(field,'Tab');await app.ctTargetKeydown(field,tab);
+    assert.equal(tab.defaultPrevented,true);assert.equal(focuses.at(-1).fieldId,original.fields[1].id);
+    app.ctValues[field.id]='raw@literal\\nactual\nไทย';let selects=0;app.ctSelect=async(target,full)=>{assert.equal(target,original);assert.equal(full,true);selects++;};
+    first.focus();const enter=event(field,'Enter',{ctrlKey:true});await app.ctTargetKeydown(field,enter);assert.equal(selects,1);assert.equal(app.ctValues[field.id],'raw@literal\\nactual\nไทย');
+    app.ctCompletion={fieldId:field.id,items:[]};const escape=event(field,'Escape');app.ctTargetKeydown(field,escape);assert.equal(escape.defaultPrevented,true);assert.equal(app.ctCompletion,null);
+    const composing=event(field,'Enter',{ctrlKey:true,isComposing:true});app.ctTargetKeydown(field,composing);assert.equal(selects,1);
+    let saves=0;app.ctSave=async()=>saves++;app.$refs.ctDiagnosticDialog={open:true,close(){this.open=false;}};
+    const save=rowEvent('F2');await app.ctKey(save);assert.equal(saves,0);
+    let scanned;app.ctIncludeConsistency=false;app.ctScan=value=>scanned=value;app.ctStartScan();assert.equal(scanned,false);assert.equal(app.$refs.ctDiagnosticDialog.open,false);
+    const sideSave=rowEvent('F2',true);await app.ctKey(sideSave);assert.equal(saves,0,'sidebar controls never save the underlying translation');
+});
+test('ClientText target navigation uses numeric worksheet columns without changing immutable export coordinates',()=>{
+    const {app,original,inputs}=keyboardHarness(),before=clone(original),fieldIds=original.fields.map(field=>field.id),
+        expected=['D2','F2','H2','I2','Z2','AB2'];
+    assert.deepEqual(Array.from(app.ctTabFields(),field=>field.targetCell),expected);
+    assert.deepEqual(Array.from(app.ctTargetInputs(),input=>original.fields.find(field=>field.id===input.dataset.ctTarget).targetCell),expected);
+    assert.deepEqual(Array.from(inputs(),input=>original.fields.find(field=>field.id===input.dataset.ctTarget).targetCell),['F2','H2','I2','Z2','AB2','D2'],
+        'rendered grouped order deliberately differs from worksheet order');
+    assert.deepEqual(original,before);assert.deepEqual(original.fields.map(field=>field.id),fieldIds);
+    assert.equal(app.ctTabFields().find(field=>field.kind==='form' && !field.target).required,false,'optional blank forms stay in the navigation order');
+});
+
+for(const full of [false,true])test(`worksheet-order Tab and Shift+Tab ${full?'full':'inline'} traversal skips hidden English and includes Gender and optional forms`,async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(undefined,{ctEditor:full}),byCell=cell=>original.fields.find(field=>field.targetCell===cell);
+    for(const [from,to,reverse] of [['D2','F2',false],['F2','H2',false],['H2','I2',false],['I2','Z2',false],['Z2','AB2',false],
+        ['AB2','Z2',true],['Z2','I2',true],['I2','H2',true],['H2','F2',true],['F2','D2',true]]){
+        const field=byCell(from),input=inputFor(original,field);input.focus();const key=event(field,'Tab',{shiftKey:reverse});
+        await app.ctTargetKeydown(field,key);assert.equal(key.defaultPrevented,true,from+' to '+to);assert.equal(key.propagationStopped,true);
+        assert.equal(focuses.at(-1).fieldId,byCell(to).id);assert.equal(app.ctFocusedField,byCell(to).id);
+    }
+    assert.equal(app.ctValues[byCell('K2').id],'Hidden authored translation');assert.equal(app.ctValues[byCell('I2').id],'');
+});
+
+test('inline worksheet boundaries save and navigate inline while full boundaries retain native surrounding controls',async()=>{
+    const {app,original,inputFor,event}=keyboardHarness(),calls=[],first=original.fields.find(field=>field.targetCell==='D2'),last=original.fields.find(field=>field.targetCell==='AB2');
+    app.ctSaveAndNavigate=async(...args)=>{calls.push(args);return true;};
+    for(const [field,reverse] of [[last,false],[first,true]]){
+        inputFor(original,field).focus();const key=event(field,'Tab',{shiftKey:reverse});await app.ctTargetKeydown(field,key);
+        assert.equal(key.defaultPrevented,true);assert.equal(calls.at(-1)[0],reverse);assert.equal(calls.at(-1)[1].inline,true);assert.equal(calls.at(-1)[1].focusEnd,reverse);
+    }
+    const count=calls.length;app.ctEditor=true;
+    for(const [field,reverse] of [[last,false],[first,true]]){
+        inputFor(original,field).focus();const key=event(field,'Tab',{shiftKey:reverse});await app.ctTargetKeydown(field,key);assert.equal(key.defaultPrevented,undefined);
+    }
+    assert.equal(calls.length,count,'the full editor never moves to another ID on Tab');
+});
+
+test('full worksheet Tab reaches review and choice buttons before adjacent outside controls',async()=>{
+    const {app,window,original,inputFor,event,focuses,controls,documentControls,inputs}=keyboardHarness(undefined,{ctEditor:true}),before=clone(app.ctValues);
+    const control=(name,disabled=false)=>({dataset:{},tabIndex:0,isConnected:true,disabled,closest:()=>null,getClientRects:()=>[{}],
+        focus(){window.document.activeElement=this;focuses.push({control:name});}});
+    const prior=control('previous outside'),next=control('next outside'),disabled=control('disabled review',true),review=control('review'),choice=control('choice');
+    controls.push(disabled,review,choice);documentControls.push(prior,...inputs(),...controls,next);
+    const first=original.fields.find(field=>field.targetCell==='D2'),last=original.fields.find(field=>field.targetCell==='AB2');
+    inputFor(original,last).focus();const toReview=event(last,'Tab');await app.ctTargetKeydown(last,toReview);
+    assert.equal(toReview.defaultPrevented,true);assert.equal(focuses.at(-1).control,'review');
+    const fromReview={...rowEvent('Tab'),target:review,shiftKey:true};app.ctFieldsKeydown(fromReview);assert.equal(fromReview.defaultPrevented,true);
+    assert.equal(focuses.at(-1).fieldId,last.id,'reverse from the first auxiliary button reaches the last worksheet cell');
+    const toChoice={...rowEvent('Tab'),target:review};app.ctFieldsKeydown(toChoice);assert.equal(toChoice.defaultPrevented,true);assert.equal(focuses.at(-1).control,'choice');
+    const toNext={...rowEvent('Tab'),target:choice};app.ctFieldsKeydown(toNext);assert.equal(toNext.defaultPrevented,true);assert.equal(focuses.at(-1).control,'next outside');
+    inputFor(original,first).focus();const toPrior=event(first,'Tab',{shiftKey:true});await app.ctTargetKeydown(first,toPrior);
+    assert.equal(toPrior.defaultPrevented,true);assert.equal(focuses.at(-1).control,'previous outside');
+    const count=focuses.length;
+    for(const flags of [{isComposing:true},{keyCode:229},{ctrlKey:true},{metaKey:true},{altKey:true}])app.ctFieldsKeydown({...rowEvent('Tab'),target:review,...flags});
+    assert.equal(focuses.length,count);assert.deepEqual(app.ctValues,before);assert.equal(app.ctEditor,true);assert.equal(app.ctSelection,original.id);
+});
+
+test('completion and whole-cell optional-form NONEXISTENT take precedence over worksheet traversal',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),form=original.fields.find(field=>field.form==='FS'),input=inputFor(original,form);
+    input.focus();app.ctValues[form.id]='NON';input.setSelectionRange(3,3);let moves=0;app.ctSaveAndNavigate=async()=>{moves++;};
+    const non=event(form,'Tab');await app.ctTargetKeydown(form,non);assert.equal(non.defaultPrevented,true);assert.equal(app.ctValues[form.id],'NONEXISTENT');assert.equal(moves,0);
+    form.source='[First] [Second]';app.ctValues[form.id]='[';input.setSelectionRange(1,1);assert.equal(app.ctSuggest(form,{target:input}),true);
+    const tab=event(form,'Tab');await app.ctTargetKeydown(form,tab);assert.equal(tab.defaultPrevented,true);
+    assert.equal(app.ctValues[form.id],'[First]');assert.equal(focuses.at(-1).fieldId,form.id,'completion inserts into the current field rather than moving');
+    app.ctValues[form.id]='[';input.setSelectionRange(1,1);app.ctSuggest(form,{target:input});const backward=event(form,'Tab',{shiftKey:true});
+    await app.ctTargetKeydown(form,backward);assert.equal(app.ctCompletion,null);assert.equal(app.ctValues[form.id],'[');assert.equal(app.ctFocusedField,original.fields.find(field=>field.form==='MS').id);
+});
+
+test('inline Ctrl+Enter and Escape return to the exact worksheet field and caret without rehydrating or changing raw drafts',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),form=original.fields.find(field=>field.form==='FS'),input=inputFor(original,form),
+        values=S.valuesFor(original),reviews={[form.id]:'retained review'},choices=[{fieldId:form.id,local:'retained alternative'}];
+    values[form.id]='@raw\\nactual\nไทย';app.ctValues=values;app.ctReviewed=reviews;app.ctChoices=choices;app.ctDraftDirty=true;app.ctTool='history';
+    app._ctStore.getDraft=()=>assert.fail('the same immutable record must not be rehydrated');input.focus();input.setSelectionRange(2,7,'backward');
+    const enter=event(form,'Enter',{ctrlKey:true});await app.ctTargetKeydown(form,enter);
+    assert.equal(enter.defaultPrevented,true);assert.equal(enter.propagationStopped,true);assert.equal(app.ctEditor,true);assert.equal(app.ctFocusedField,form.id);
+    assert.equal(focuses.at(-1).fieldId,form.id);assert.equal(app.ctValues,values);assert.equal(app.ctReviewed,reviews);assert.equal(app.ctChoices,choices);
+    app.ctValues[form.id]+=' edited';const escape=event(form,'Escape');await app.ctTargetKeydown(form,escape);if(!escape.defaultPrevented)await app.ctKey(escape);
+    assert.equal(escape.defaultPrevented,true);assert.equal(app.ctEditor,false);assert.equal(app.ctFocusedField,form.id);assert.equal(focuses.at(-1).fieldId,form.id);
+    assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,7);assert.equal(app.ctValues[form.id],'@raw\\nactual\nไทย edited');
+    assert.equal(app.ctDraftDirty,true);assert.equal(app.ctTool,'history');assert.equal(app.ctValues,values);
+});
+
+test('worksheet keyboard navigation rejects IME, modifiers, busy work, overlays and pending selection',async()=>{
+    const cases=[{isComposing:true},{keyCode:229},{ctrlKey:true},{metaKey:true},{altKey:true},{defaultPrevented:true},
+        {state:{ctBusy:true}},{state:{ctActive:false}},{state:{ctHistoryViewer:true}},{state:{versionChooserVisible:true}},
+        {state:{settingsDialogVisible:true}},{state:{showSetting:true}},{state:{ctUploadVisible:true}},
+        {dialog:true},{pending:true}];
+    for(const changed of cases){
+        const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields[0],input=inputFor(original,field);input.focus();
+        let moves=0,opens=0;app.ctSaveAndNavigate=async()=>moves++;app.ctOpenInlineFull=async()=>opens++;
+        Object.assign(app,changed.state);if(changed.dialog)app.$refs.ctDiagnosticDialog={open:true};
+        if(changed.pending)app._ctSelectRun={unitId:original.id,ctx:app.ctContext(),pending:true};
+        const count=focuses.length,key=event(field,'Tab',Object.fromEntries(Object.entries(changed).filter(([key])=>!['state','dialog','pending'].includes(key))));
+        await app.ctTargetKeydown(field,key);assert.equal(focuses.length,count,JSON.stringify(changed));assert.equal(moves,0);assert.equal(opens,0);
+    }
+});
+
+test('worksheet keyboard events cannot navigate from detached, unrelated, hidden or obsolete same-ID fields',async()=>{
+    const cases=['detached','wrong-field','foreign-input','hidden','old-source','same-id-group'];
+    for(const changed of cases){
+        const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields[0],input=inputFor(original,field);input.focus();
+        const key=event(field,'Tab');let requestedField=field;
+        if(changed==='detached')input.isConnected=false;
+        if(changed==='wrong-field')input.dataset.ctTarget='not-this-field';
+        if(changed==='foreign-input')key.target={...input,closest:()=>null};
+        if(changed==='hidden'){requestedField=original.fields.find(field=>field.targetCell==='K2');key.target=inputFor(original,requestedField);}
+        if(changed==='old-source')requestedField={...field,source:'Different historical English'};
+        if(changed==='same-id-group'){
+            const next=worksheetUnit();app.ctWorkspace={scope:{...scope,groupId:'replacement'}};app.ctUnits=[next];app._ctUnitIndex=new Map([[next.id,next]]);app.ctValues=S.valuesFor(next);
+        }
+        const count=focuses.length;await app.ctTargetKeydown(requestedField,key);assert.equal(focuses.length,count,changed);
+        assert.equal(app.ctValues[field.id],'Main translation',changed+' preserves the current values');
+    }
+});
+
+test('inline special shortcuts keep inline destinations while F1/F2 retain their full-editor behavior',async()=>{
+    const {app,original,inputFor,event}=keyboardHarness(),field=original.fields[0],calls=[];inputFor(original,field).focus();
+    app.ctSaveAndNavigate=async(...args)=>{calls.push(['navigate',...args]);return true;};app.ctSave=async(close=false)=>{calls.push(['save',close]);return true;};
+    for(const [key,reverse] of [['ArrowUp',true],['ArrowDown',false]]){
+        const arrow=event(field,key,{ctrlKey:true});await app.ctTargetKeydown(field,arrow);if(!arrow.defaultPrevented)await app.ctKey(arrow);
+        assert.equal(arrow.defaultPrevented,true);assert.equal(calls.at(-1)[0],'navigate');assert.equal(calls.at(-1)[1],reverse);assert.equal(calls.at(-1)[2].inline,true);
+    }
+    const save=event(field,'s',{code:'KeyS',ctrlKey:true});await app.ctKey(save);assert.deepEqual(calls.at(-1),['save',false]);
+    for(const [key,reverse] of [['F1',true],['F2',false]]){
+        const next=event(field,key,{code:key});await app.ctKey(next);assert.equal(next.defaultPrevented,true);assert.equal(calls.at(-1)[1],reverse);
+        assert.equal(calls.at(-1)[2]?.inline,undefined,'F1/F2 keep the established full-editor destination');
+    }
+    const count=calls.length;
+    for(const modifiers of [{ctrlKey:true,shiftKey:true},{ctrlKey:true,altKey:true},{ctrlKey:true,metaKey:true},{ctrlKey:true,isComposing:true},{ctrlKey:true,keyCode:229}]){
+        const ignored=event(field,'ArrowDown',modifiers);await app.ctTargetKeydown(field,ignored);if(!ignored.defaultPrevented)await app.ctKey(ignored);assert.equal(calls.length,count);
+    }
+});
+
+test('Ctrl+Up/Down only navigate from current inline translations and selected row or table background',async()=>{
+    const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3),worksheetUnit('ID3',4)],
+        {app,inputFor}=keyboardHarness(rows[1],{ctUnits:rows,_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctDraftDirty:true});
+    const field=rows[1].fields[0],input=inputFor(rows[1],field),tableMembers=new Set(),table={contains:target=>tableMembers.has(target),closest:()=>null},
+        selectedRow={dataset:{unitId:rows[1].id}},otherRow={dataset:{unitId:rows[0].id}};
+    app.$refs.ctFileTableRegion=table;app.ctValues[field.id]='Underlying raw@draft\\n\n';let saves=0,opens=0;
+    app.ctSave=async()=>{saves++;return false;};app.ctSelect=async()=>{opens++;return true;};
+    const target=(kind,row=null,inside=false)=>{const node={closest(selector){
+        if(selector==='tr[data-unit-id]')return row;
+        if(selector==='.ctTools')return kind==='sidebar'?{}:null;
+        if(selector.startsWith('textarea,input,'))return ['search','navbar','source','sidebar','button','link','select'].includes(kind)?{}:null;
+        return null;
+    }};if(inside)tableMembers.add(node);return node;};
+    const excluded=[['search',target('search')],['navbar',target('navbar')],['source',target('source',selectedRow,true)],
+        ['other row',target('background',otherRow,true)],['sidebar',target('sidebar')],['row button',target('button',selectedRow,true)],
+        ['row link',target('link',selectedRow,true)],['row select',target('select',selectedRow,true)],['unrelated background',target('background',selectedRow)]];
+    for(const [name,node] of excluded)for(const key of ['ArrowUp','ArrowDown']){
+        const arrow={...rowEvent(key),ctrlKey:true,target:node};await app.ctKey(arrow);
+        assert.equal(arrow.defaultPrevented,undefined,name);assert.equal(saves,0,name+' cannot save the underlying draft');assert.equal(opens,0,name);
+        assert.equal(app.ctSelection,rows[1].id);assert.equal(app.ctValues[field.id],'Underlying raw@draft\\n\n');
+    }
+    for(const node of [input,target('background',selectedRow,true),table])for(const key of ['ArrowUp','ArrowDown']){
+        const before=saves,arrow={...rowEvent(key),ctrlKey:true,target:node};await app.ctKey(arrow);
+        assert.equal(arrow.defaultPrevented,true);assert.equal(saves,before+1,'a current editing target routes through the save guard');
+        assert.equal(opens,0,'failed save still preserves the current ID');assert.equal(app.ctSelection,rows[1].id);
+    }
+});
+
+for(const full of [false,true])test('Shared Dictionary history blocks underlying '+(full?'full':'inline')+' save, navigation and Escape shortcuts',async()=>{
+    const {app,original,event}=keyboardHarness(undefined,{ctEditor:full,cloudHistoryVisible:true,ctDraftDirty:true}),field=original.fields[0],
+        values=app.ctValues,calls=[];app.ctValues[field.id]='Underlying raw@draft\\n\n';
+    for(const name of ['ctSave','ctSaveAndNavigate','ctDownload','ctNavigate','ctCloseEditor','ctCloseInline','ctCloseHistoryViewer'])
+        app[name]=async()=>calls.push(name);
+    app.ctCompletion={fieldId:field.id,items:[{value:'[Retained]'}]};const completion=app.ctCompletion;
+    for(const [key,flags] of [['s',{ctrlKey:true,code:'KeyS'}],['s',{metaKey:true,code:'KeyS'}],['F1',{}],['F2',{}],
+        [',',{ctrlKey:true,code:'Comma'}],['.',{ctrlKey:true,code:'Period'}]]){
+        const keypress=event(field,key,flags);await app.ctKey(keypress);assert.equal(keypress.defaultPrevented,true);
+    }
+    const escape=event(field,'Escape');await app.ctKey(escape);assert.equal(escape.defaultPrevented,undefined,'the overlay keeps its own Escape handling');
+    assert.deepEqual(calls,[]);assert.equal(app.ctCompletion,completion);assert.equal(app.ctValues,values);assert.equal(app.ctDraftDirty,true);
+    assert.equal(app.ctValues[field.id],'Underlying raw@draft\\n\n');assert.equal(app.ctEditor,full);assert.equal(app.ctInlineClosed,false);assert.equal(app.cloudHistoryVisible,true);
+    app.ctCompletion=null;app.cloudHistoryVisible=false;app.ctHistoryViewer=true;const ownHistoryEscape=event(field,'Escape');await app.ctKey(ownHistoryEscape);
+    assert.equal(ownHistoryEscape.defaultPrevented,true);assert.deepEqual(calls,['ctCloseHistoryViewer'],'CT history retains its own Escape action');
+});
+
+for(const overlay of ['settingsDialogVisible','cloudHistoryVisible'])test('guarded selection cancels pending preparation/render behind '+overlay+' and releases busy/pending for retry',async()=>{
+    for(const phase of ['draft','comment','hydrate','render']){
+        const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3)],{app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,
+            _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit]))}),pending=deferred(),values=app.ctValues;
+        app.ctFlushDraft=phase==='draft'?()=>pending.promise:async()=>true;
+        app.ctFlushCommentDraft=phase==='comment'?()=>pending.promise:async()=>{};
+        app._ctStore.getDraft=phase==='hydrate'?()=>pending.promise:async()=>null;
+        app.$nextTick=phase==='render'?()=>pending.promise:async()=>{};
+        const selecting=app.ctSelect(rows[1],true,{guard:()=>!app.ctKeyboardOverlayOpen()});await settle();
+        assert.equal(app._ctSelectRun.pending,true,phase);if(phase==='hydrate')assert.equal(app.ctBusy,true);
+        app[overlay]=true;pending.resolve(phase==='hydrate'?{revision:2,values:{[rows[1].fields[0].id]:'Target durable draft'}}:true);
+        assert.equal(await selecting,false,phase);assert.equal(app._ctSelectRun.pending,false,phase+' must release its pending selection');
+        assert.equal(app.ctBusy,false,phase+' must release its owned busy state');assert.equal(focuses.length,0,phase+' cannot focus behind the overlay');
+        if(phase!=='render'){assert.equal(app.ctSelection,rows[0].id);assert.equal(app.ctEditor,false);assert.equal(app.ctValues,values);}
+        else{assert.equal(app.ctSelection,rows[1].id);assert.equal(app.ctEditor,true,'a transition committed before the overlay stays selected');}
+        app[overlay]=false;app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};app._ctStore.getDraft=async()=>null;app.$nextTick=async()=>{};
+        assert.equal(await app.ctSelect(rows[1],true,{guard:()=>!app.ctKeyboardOverlayOpen()}),true,phase+' must permit a later retry');
+        assert.equal(app._ctSelectRun.pending,false);assert.equal(app.ctBusy,false);assert.equal(focuses.length,1);
+    }
+});
+
+for(const overlay of ['settingsDialogVisible','cloudHistoryVisible'])test('deferred inline navigation cannot change records behind '+overlay,async()=>{
+    for(const phase of ['save','hydrate','render']){
+        const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3)],{app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,
+            _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctDraftDirty:true}),pending=deferred(),reached=deferred(),values=app.ctValues;
+        app.ctValues[rows[0].fields[0].id]='Pending raw@work\\n\n';
+        const pause=()=>{reached.resolve();return pending.promise;};
+        app.ctSave=phase==='save'?pause:async()=>true;
+        app._ctStore.getDraft=phase==='hydrate'?pause:async()=>null;app.$nextTick=phase==='render'?pause:async()=>{};
+        const moving=app.ctSaveAndNavigate(false,{inline:true});await reached.promise;app[overlay]=true;pending.resolve(phase==='hydrate'?null:true);
+        assert.equal(await moving,false,phase);assert.equal(app._ctNavigationRun,null);assert.equal(app._ctSelectRun?.pending || false,false);assert.equal(app.ctBusy,false);
+        assert.equal(focuses.length,0);assert.equal(app.ctEditor,false);
+        if(phase!=='render'){assert.equal(app.ctSelection,rows[0].id);assert.equal(app.ctValues,values);assert.equal(app.ctValues[rows[0].fields[0].id],'Pending raw@work\\n\n');}
+        else assert.equal(app.ctSelection,rows[1].id,'an already committed selection is retained without stealing overlay focus');
+    }
+});
+
+for(const overlay of ['settingsDialogVisible','cloudHistoryVisible'])test('deferred inline/full handoff and closes cannot focus or toggle after '+overlay+' opens',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields.find(field=>field.form==='FS'),input=inputFor(original,field),pending=deferred();
+    input.focus();input.setSelectionRange(0,0);app.$nextTick=()=>pending.promise;const focusCount=focuses.length;
+    const opening=app.ctTargetKeydown(field,event(field,'Enter',{ctrlKey:true}));await settle();assert.equal(app.ctEditor,true);
+    app[overlay]=true;pending.resolve();assert.equal(await opening,false);assert.equal(focuses.length,focusCount);assert.equal(app._ctInlineReturn,null);
+    assert.equal(app._ctSelectRun.pending,false);assert.equal(app.ctBusy,false);
+    app[overlay]=false;app.ctEditor=false;app.$nextTick=async()=>{};input.focus();assert.equal(await app.ctOpenInlineFull(field,input),true,'handoff retry succeeds after the overlay closes');
+    for(const full of [true,false])for(const phase of ['draft','comment','render']){
+        app.ctEditor=full;app.ctInlineClosed=false;const closePending=deferred(),count=focuses.length;
+        app.ctFlushDraft=phase==='draft'?()=>closePending.promise:async()=>true;app.ctFlushCommentDraft=phase==='comment'?()=>closePending.promise:async()=>{};
+        app.$nextTick=phase==='render'?()=>closePending.promise:async()=>{};
+        const closing=full?app.ctCloseEditor():app.ctCloseInline();await settle();
+        const editorBefore=app.ctEditor,inlineBefore=app.ctInlineClosed;app[overlay]=true;closePending.resolve(true);
+        assert.equal(await closing,false);assert.equal(focuses.length,count);assert.equal(app._ctCloseRun,null);
+        assert.equal(app.ctEditor,editorBefore);assert.equal(app.ctInlineClosed,inlineBefore,'cancellation never introduces a new close toggle behind the overlay');
+        if(phase!=='render'){assert.equal(app.ctEditor,full);assert.equal(app.ctInlineClosed,false);}
+        app[overlay]=false;app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};app.$nextTick=async()=>{};
+        assert.equal(await (full?app.ctCloseEditor():app.ctCloseInline()),true,'close can be retried after the overlay closes');assert.equal(app._ctCloseRun,null);
+    }
+});
+
+test('inline Escape closes completion first then closes only the inline session after its draft is durable',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields[0],input=inputFor(original,field);field.source='[First]';
+    app.ctValues[field.id]='[';input.focus();input.setSelectionRange(1,1);assert.equal(app.ctSuggest(field,{target:input}),true);
+    const first=event(field,'Escape');await app.ctTargetKeydown(field,first);if(!first.defaultPrevented)await app.ctKey(first);
+    assert.equal(first.defaultPrevented,true);assert.equal(app.ctCompletion,null);assert.equal(app.ctInlineClosed,false);assert.equal(app.ctEditor,false);
+    const pending=deferred();app.ctFlushDraft=()=>pending.promise;const second=event(field,'Escape'),closing=app.ctTargetKeydown(field,second);
+    await settle();assert.equal(app.ctInlineClosed,false,'an unresolved draft write keeps the inline editor visible');pending.resolve(true);
+    await closing;if(!second.defaultPrevented)await app.ctKey(second);assert.equal(second.defaultPrevented,true);assert.equal(app.ctInlineClosed,true);
+    assert.equal(app.ctSelection,original.id);assert.equal(app.ctValues[field.id],'[');assert.equal(focuses.at(-1).row,true);
+});
+
+for(const changed of ['account','group','unit','run'])test(`late inline-full field focus and return ignore replacement ${changed}`,async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields.find(field=>field.form==='FS'),input=inputFor(original,field),pending=deferred();
+    input.focus();input.setSelectionRange(0,0);app.$nextTick=()=>pending.promise;const count=focuses.length;
+    const opening=app.ctTargetKeydown(field,event(field,'Enter',{ctrlKey:true}));await settle();
+    if(changed==='account')app.ctWorkspace={scope:{...scope,accountId:'other-account'}};
+    if(changed==='group')app.ctWorkspace={scope:{...scope,groupId:'other-group'}};
+    if(changed==='unit'){const next=worksheetUnit();app.ctUnits=[next];app._ctUnitIndex=new Map([[next.id,next]]);}
+    if(changed==='run')app._ctSelectRun={ctx:app.ctContext(),unitId:original.id,pending:false};
+    pending.resolve();await opening;assert.equal(focuses.length,count,'delayed opening never focuses replacement content');
+    app.ctEditor=true;app.$nextTick=async()=>{};app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};
+    await app.ctCloseEditor();assert.equal(focuses.at(-1).row,true,'obsolete return evidence falls back to the current row');
+});
+
+test('late full-to-inline return keeps a replacement same-ID group and newer drafts intact',async()=>{
+    const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields.find(field=>field.form==='FS'),input=inputFor(original,field);
+    input.focus();await app.ctTargetKeydown(field,event(field,'Enter',{ctrlKey:true}));assert.equal(app.ctEditor,true);
+    const pending=deferred();app.ctFlushDraft=()=>pending.promise;const count=focuses.length,closing=app.ctCloseEditor();await settle();
+    const next=worksheetUnit();app.ctWorkspace={scope:{...scope,groupId:'new-group'}};app.ctUnits=[next];app._ctUnitIndex=new Map([[next.id,next]]);
+    const values={...S.valuesFor(next),[field.id]:'New group raw@draft\\n\n'};app.ctValues=values;app.ctFocusedField=next.fields[0].id;app.ctDraftDirty=true;
+    pending.resolve(true);assert.equal(await closing,false);assert.equal(app.ctEditor,true);assert.equal(app.ctValues,values);assert.equal(app.ctFocusedField,next.fields[0].id);
+    assert.equal(focuses.length,count);assert.equal(app.ctDraftDirty,true);
+});
+
+test('dirty inline drafts at a worksheet boundary or before only occupied IDs are retained without saving',async()=>{
+    for(const scenario of ['next-boundary','previous-boundary','all-occupied']){
+        const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3),worksheetUnit('ID3',4)],index=scenario==='next-boundary'?2:0,
+            {app,focuses}=keyboardHarness(rows[index],{ctUnits:rows,_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),
+                ctDraftDirty:true,ctPage:Math.floor(index/2)+1,instanceTabId:'our-session'}),original=rows[index],field=original.fields[0];let saves=0,opens=0;
+        app.ctValues[field.id]='Unsaved@draft\\n\nstill recoverable';app.ctSave=async()=>{saves++;return true;};app.ctSelect=async()=>{opens++;return true;};
+        if(scenario==='all-occupied')app.ctPeers=rows.slice(1).map(unit=>({unitId:unit.id,sessionId:'other-session',away:false}));
+        assert.equal(await app.ctSaveAndNavigate(scenario==='previous-boundary',{inline:true,focusEnd:scenario==='previous-boundary'}),false);
+        assert.equal(saves,0,scenario);assert.equal(opens,0,scenario);assert.equal(focuses.length,0);assert.equal(app.ctSelection,original.id);
+        assert.equal(app.ctValues[field.id],'Unsaved@draft\\n\nstill recoverable');assert.equal(app.ctDraftDirty,true);
+    }
+});
+
+test('inline cross-ID navigation saves exact raw work, skips all-blank and occupied IDs and focuses the worksheet edge',async()=>{
+    const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3),worksheetUnit('ID3',4),worksheetUnit('ID4',5)];
+    for(const field of rows[1].fields)if(field.kind!=='gender')field.source=' \t\n';
+    const f=fixture();await f.store.import(scope,{units:rows,assets:[asset]});
+    const {app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctDraftDirty:true,
+        instanceTabId:'our-session',ctPeers:[{unitId:rows[2].id,sessionId:'other-session',away:false}]});
+    app._ctStore=f.store;app.ctLoadMemory=()=>{};app.ctSync=()=>{};const first=rows[0].fields[0],last=rows[3].fields.find(field=>field.targetCell==='AB5');
+    app.ctValues[first.id]='Raw@translated\\n\nline';assert.equal(await app.ctSaveAndNavigate(false,{inline:true,focusEnd:false}),true);
+    assert.equal((await f.store.getSaved(scope))[rows[0].id].values[first.id],'Raw@translated\\n\nline');assert.equal(app.ctSelection,rows[3].id);
+    assert.equal(app.ctEditor,false);assert.equal(app.ctFocusedField,rows[3].fields.find(field=>field.targetCell==='D5').id);assert.equal(app.ctPage,2);
+    assert.equal(focuses.at(-1).unitId,rows[3].id);assert.equal(await app.ctSaveAndNavigate(true,{inline:true,focusEnd:true}),true);
+    assert.equal(app.ctSelection,rows[0].id);assert.equal(app.ctEditor,false);assert.equal(app.ctFocusedField,last.id,'backward traversal focuses the last visible worksheet column');
+    assert.equal((await f.store.getSaved(scope))[rows[3].id],undefined,'an untouched optional-form record does not manufacture a save');
+});
+
+test('full save navigation keeps the current physical sort anchor when a filter hides the active ID',async()=>{
+    const rows=[namedUnit('ID1','Earlier',''),namedUnit('ID2','Current','Complete'),namedUnit('ID3','Later','')],
+        {app}=listHarness({ctUnits:rows,_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctSelection:rows[1].id,ctEditor:true,
+            ctSelectedFilters:['missing'],ctValues:S.valuesFor(rows[1])}),calls=[];
+    app.ctValues[fieldId]='Corrected@translation\\n\n';app.ctSave=async()=>{calls.push('save');return true;};
+    app.ctSelect=async(target,full)=>{calls.push(target.id);app.ctSelection=target.id;app.ctEditor=full;return true;};
+    assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[rows[0].id,rows[2].id]);assert.equal(await app.ctSaveAndNavigate(),true);
+    assert.deepEqual(calls,['save',rows[2].id]);assert.equal(app.ctSelection,rows[2].id);assert.equal(app.ctEditor,true);
+});
+
+test('failed or late inline boundary saves cannot select a different ID or steal replacement focus',async()=>{
+    for(const changed of ['failure','account','group','same-id-unit','selection-run']){
+        const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3)],{app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,
+            _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctDraftDirty:true}),pending=deferred();let opens=0;
+        app.ctValues[rows[0].fields[0].id]='Retained draft';app.ctSave=()=>pending.promise;app.ctSelect=async()=>{opens++;return true;};
+        const moving=app.ctSaveAndNavigate(false,{inline:true});await settle();
+        if(changed==='account')app.ctWorkspace={scope:{...scope,accountId:'replacement-account'}};
+        if(changed==='group')app.ctWorkspace={scope:{...scope,groupId:'replacement-group'}};
+        if(changed==='same-id-unit'){const replacement=worksheetUnit('ID1');app._ctUnitIndex=new Map([[replacement.id,replacement],[rows[1].id,rows[1]]]);}
+        if(changed==='selection-run')app._ctSelectRun={unitId:rows[0].id,ctx:app.ctContext(),pending:false};
+        pending.resolve(changed!=='failure');assert.equal(await moving,false,changed);assert.equal(opens,0);assert.equal(focuses.length,0);
+        assert.equal(app.ctValues[rows[0].fields[0].id],'Retained draft');assert.equal(app.ctDraftDirty,true);
+    }
+});
+function completionHarness(source,text='',kind='text',changes={}){
+    const h=listHarness({inlineEditor:true,$nextTick:fn=>{fn?.();return Promise.resolve();},...changes}),field=h.original.fields[0];
+    field.source=source;field.kind=kind;h.app.ctValues[field.id]=text;h.app.ctFocusedField=field.id;
+    let edits=0;h.app.ctEdited=()=>edits++;
+    const input={value:text,selectionStart:text.length,selectionEnd:text.length,isConnected:true,dataset:{ctTarget:field.id},tagName:'TEXTAREA',
+        focus(){this.focused=true;},setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;},
+        closest(selector){return selector==='tr[data-unit-id]'?{dataset:{unitId:h.original.id}}:null;}};
+    h.app.$refs.ctEditorRegion={contains:target=>target===input,querySelectorAll:selector=>selector==='[data-ct-target]'?[input]:[]};
+    const event=(key,modifiers={})=>({...rowEvent(key),target:input,...modifiers});
+    return {...h,field,input,event,edits:()=>edits};
+}
+test('ClientText completion arrows choose a source token and preserve raw workbook text',()=>{
+    const prefix='@literal\\nactual\n',h=completionHarness('[First] [Second] {0}',prefix+'['),{app,field,input,event}=h;
+    assert.equal(app.ctSuggest(field,{target:input}),true);assert.equal(app.ctCompletion.selectedIndex,0);
+    const down=event('ArrowDown');app.ctTargetKeydown(field,down);assert.equal(down.defaultPrevented,true);assert.equal(app.ctCompletion.selectedIndex,1);
+    const enter=event('Enter');app.ctTargetKeydown(field,enter);assert.equal(enter.defaultPrevented,true);
+    assert.equal(app.ctValues[field.id],prefix+'[Second]');assert.equal(h.edits(),1);assert.equal(app.ctCompletion,null);assert.equal(input.focused,true);
+    app.ctValues[field.id]='[';input.value='[';input.selectionStart=input.selectionEnd=1;app.ctSuggest(field,{target:input});
+    app.ctTargetKeydown(field,event('ArrowUp'));assert.equal(app.ctCompletion.selectedIndex,1,'up wraps to the final source keyword');
+    const escape=event('Escape');app.ctTargetKeydown(field,escape);assert.equal(escape.defaultPrevented,true);assert.equal(app.ctCompletion,null);
+});
+test('ClientText configured completion shortcuts replace only the selected raw text',()=>{
+    const {app,field,input,event}=completionHarness('[Keyword] {0}','@literal\\n\ntext','text',{autocompleteShortcut:'ctrl-space'});
+    input.selectionStart=1;input.selectionEnd=8;
+    const trigger=event(' ',{ctrlKey:true,code:'Space'});app.ctTargetKeydown(field,trigger);
+    assert.equal(trigger.defaultPrevented,true);assert.equal(app.ctCompletion.items.some(item=>item.value==='[Keyword]'),true);
+    app.ctTargetKeydown(field,event('ArrowDown'));app.ctTargetKeydown(field,event('Tab'));
+    assert.equal(app.ctValues[field.id],'@{0}\\n\ntext');
+    input.value=app.ctValues[field.id];input.selectionStart=input.selectionEnd=input.value.length;
+    app.autocompleteShortcut='ctrl-i';const alternate=event('i',{ctrlKey:true,code:'KeyI'});app.ctTargetKeydown(field,alternate);assert.equal(alternate.defaultPrevented,true);
+    app.ctCloseCompletion();app.autocompleteShortcut='disabled';const disabled=event(' ',{ctrlKey:true,code:'Space'});app.ctTargetKeydown(field,disabled);
+    assert.equal(disabled.defaultPrevented,undefined);assert.equal(app.ctCompletion,null);
+});
+test('ClientText completions leave Shift+Tab and Ctrl+Enter to field and editor navigation',async()=>{
+    const {app,field,input,event}=completionHarness('[Keyword]','[');let opened=0;const moves=[];
+    app.ctSaveAndNavigate=async(...args)=>{moves.push(args);return false;};
+    app.ctSuggest(field,{target:input});const previous=event('Tab',{shiftKey:true});await app.ctTargetKeydown(field,previous);
+    assert.equal(previous.defaultPrevented,true);assert.equal(moves[0][0],true);assert.equal(moves[0][1].inline,true);
+    assert.equal(app.ctValues[field.id],'[');assert.equal(app.ctCompletion,null);
+    app.ctSuggest(field,{target:input});app.ctSelect=(unit,full)=>{assert.equal(unit,app.ctCurrentUnit);assert.equal(full,true);opened++;};
+    const full=event('Enter',{ctrlKey:true});await app.ctTargetKeydown(field,full);assert.equal(opened,1);assert.equal(app.ctValues[field.id],'[');
+    app.ctSuggest(field,{target:input});const composing=event('Enter',{isComposing:true});app.ctTargetKeydown(field,composing);
+    assert.equal(composing.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],'[');
+});
+test('ClientText completion rejects moved selection, replaced text, field, unit, group and account scopes',()=>{
+    const variations=[
+        h=>{h.input.selectionStart=h.input.selectionEnd=0;},
+        h=>{h.input.selectionEnd=0;},
+        h=>{h.app.ctValues[h.field.id]='new typing';},
+        h=>{h.app.ctFocusedField='another field';},
+        h=>{h.app.ctSelection='another unit';},
+        h=>{h.app.ctWorkspace.scope.groupId='replacement-group';},
+        h=>{h.app.managedCatalogScope='other-account:poe2';},
+        h=>{h.field.source='replacement source';},
+        h=>{h.input.isConnected=false;},
+        h=>{h.app.ctBusy=true;},
+    ];
+    for(const change of variations){
+        const h=completionHarness('[Keyword]','[');h.app.ctSuggest(h.field,{target:h.input});const item=h.app.ctCompletion.items[0];change(h);
+        const before=h.app.ctValues[h.field.id];assert.equal(h.app.ctApplyCompletion(h.field,item,h.input),false);
+        assert.equal(h.app.ctValues[h.field.id],before);assert.equal(h.edits(),0);assert.equal(h.app.ctCompletion,null);
+    }
+    const h=completionHarness('[Keyword]','[');h.app.ctSuggest(h.field,{target:h.input});h.input.selectionStart=h.input.selectionEnd=0;
+    h.app.ctCompletionSelectionChanged(h.field,{target:h.input});assert.equal(h.app.ctCompletion,null);
+    h.app.ctSuggest(h.field,{target:h.input});assert.equal(h.app.ctCompletion,null,'no automatic menu at an unrelated caret');
+});
+test('ClientText Dictionary completions preserve keyword metadata and exact translated display text',()=>{
+    const display='Dégâts@feu\\n\ntexte',dictionary=[{_id:'fire',find:'FireDamage',replace:'Dégâts de feu',alts:[{_id:'burning',find:'Burning damage',replace:display}]},
+        {_id:'disabled',find:'FireDamage',replace:'Inactive',disabled:true},{_id:'invalid',find:'FireDamage',replace:'Broken] token'}];
+    const {app,field,input,event}=completionHarness('[FireDamage<gemlevel={2}>|Burning damage] [Other]','[','text',{dictionary,isDictionaryEntryActive:entry=>!entry.disabled});
+    app.ctSuggest(field,{target:input});assert.equal(app.ctCompletion.items[0].value,'[FireDamage<gemlevel={2}>|'+display+']');
+    assert.equal(app.ctCompletion.items.some(item=>item.value.includes('Inactive') || item.value.includes('Broken]')),false);
+    app.ctTargetKeydown(field,event('Enter'));assert.equal(app.ctValues[field.id],'[FireDamage<gemlevel={2}>|'+display+']');
+    const malformed=completionHarness('[FireDamage<gemlevel=oops>|Burning damage]','[','text',{dictionary});
+    malformed.app.ctSuggest(malformed.field,{target:malformed.input});assert.equal(malformed.app.ctCompletion.items.length,1);
+    assert.equal(malformed.app.ctCompletion.items[0].value,'[FireDamage<gemlevel=oops>|Burning damage]');
+    const stale=completionHarness('[FireDamage|Burning damage]','[','text',{dictionary:clone(dictionary)});
+    stale.app.ctSuggest(stale.field,{target:stale.input});const item=stale.app.ctCompletion.items[0];stale.app.dictionary[0].alts[0].replace='New shared display';
+    assert.equal(stale.app.ctApplyCompletion(stale.field,item,stale.input),false);assert.equal(stale.app.ctValues[stale.field.id],'[');
+});
+test('NONEXISTENT completion is form-only, whole-cell and never consumes backward traversal',()=>{
+    const h=completionHarness('{0}','NON','form');h.app.ctSuggest(h.field,{target:h.input});h.app.ctTargetKeydown(h.field,h.event('Tab'));
+    assert.equal(h.app.ctValues[h.field.id],'NONEXISTENT');
+    const blank=completionHarness('[Keyword] {0}','','form');
+    blank.app.ctTargetKeydown(blank.field,blank.event(' ',{ctrlKey:true,code:'Space'}));
+    assert.ok(blank.app.ctCompletion.items.some(item=>item.replaceWholeField && item.value==='NONEXISTENT'));
+    assert.ok(blank.app.ctCompletion.items.some(item=>item.value==='[Keyword]'));
+    assert.ok(blank.app.ctCompletion.items.some(item=>item.value==='{0}'));
+    for(const [kind,text]of [['text','NON'],['form','prefix NON']]){
+        const h=completionHarness('{0}',text,kind);assert.equal(h.app.ctSuggest(h.field,{target:h.input}),false);
+        h.app.ctTargetKeydown(h.field,h.event('Tab'));assert.equal(h.app.ctValues[h.field.id],text);
+        h.app.ctTargetKeydown(h.field,h.event(' ',{ctrlKey:true,code:'Space'}));assert.equal(h.app.ctCompletion.items.some(item=>item.replaceWholeField),false);
+    }
+    const backward=completionHarness('{0}','NON','form');backward.app.ctSuggest(backward.field,{target:backward.input});
+    backward.app.ctTargetKeydown(backward.field,backward.event('Tab',{shiftKey:true}));assert.equal(backward.app.ctValues[backward.field.id],'NON');
+    const moved=completionHarness('{0}','NON','form');moved.input.selectionStart=moved.input.selectionEnd=0;
+    moved.app.ctTargetKeydown(moved.field,moved.event('Tab'));assert.equal(moved.app.ctValues[moved.field.id],'NON');
+});
+test('ClientText completion options use escaped bindings and expose keyboard selection to assistive technology',()=>{
+    const {window}=harness(),template=window.ClientTextUI.targetComponent.template;
+    assert.match(template,/role="listbox"/);assert.match(template,/role="option"/);assert.match(template,/:aria-selected=/);
+    assert.match(template,/:aria-activedescendant=/);assert.match(template,/@blur="host.ctCloseCompletion\(\)"/);
+    assert.match(template,/\{\{ item.label \}\}/);assert.doesNotMatch(template,/v-html/);
+});
+function dictionaryHarness(source,dictionary,changes={}){
+    const h=listHarness({dictionary,dictionaryPageSize:2,$nextTick:fn=>{fn?.();return Promise.resolve();},...changes});
+    h.original.fields[0].source=source;h.app.ctFocusedField=h.original.fields[0].id;
+    h.window.DictionaryScope=require('../public/dictionaryScope.js');
+    for(const name of ['ctDictionaryMatches','ctDictionaryReady','ctDictionaryScopeKey','ctDictionaryMatchedDefinitions','ctDictionaryFiltered',
+        'ctDictionaryPageSize','ctDictionaryPageCount','ctDictionaryVisible','ctDictionaryRangeLabel','ctDictionaryController'])
+        Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
+    return h;
+}
+function worksheetUnit(id='WorksheetOrder',row=2){
+    const original=namedUnit(id),base=original.fields[0];
+    const field=(name,kind,source,target,column,extra={})=>({...base,id:JSON.stringify([name,extra.form || null]),name,kind,source,target,
+        sourceCell:kind==='gender'?'':column+row,targetCell:column+row,required:kind==='text',...extra});
+    // The codec appends Gender after prose definitions; rendered groups need
+    // not have the same order as the immutable worksheet coordinates.
+    original.fields=[field('Text','text','Main English','Main translation','F'),
+        field('Word','form','Shared form English','Form MS','H',{form:'MS',group:'Word',required:false}),
+        field('Word','form','Shared form English','','I',{form:'FS',group:'Word',required:false}),
+        field('Blank','text',' \t\r\n','Hidden authored translation','K',{required:false}),
+        field('Later','text','Later English','Later translation','Z'),
+        field('Wide','text','Wide English','Wide translation','AB'),
+        field('Gender','gender','','F','D',{required:false})];
+    return original;
+}
+function keyboardHarness(original=worksheetUnit(),changes={}){
+    const h=visibleFieldsHarness(original,{inlineEditor:true,...changes}),app=h.app,focuses=[],nodes=new WeakMap(),controls=[],documentControls=[];
+    const row={dataset:{unitId:original.id}},region={contains:input=>inputs().includes(input) || controls.includes(input),querySelectorAll:selector=>selector==='[data-ct-target]'?inputs()
+        :selector==='textarea'?inputs().filter(input=>input.tagName==='TEXTAREA'):selector.startsWith('button,')?[...inputs(),...controls]:[]};
+    function inputFor(unit,field){
+        const key=JSON.stringify([field.id,!!app.ctEditor]);let fields=nodes.get(unit);if(!fields){fields=new Map();nodes.set(unit,fields);}if(fields.has(key))return fields.get(key);
+        const input={dataset:{ctTarget:field.id},tagName:field.kind==='gender'?'SELECT':'TEXTAREA',tabIndex:0,isConnected:true,disabled:false,readOnly:false,
+            selectionStart:0,selectionEnd:0,selectionDirection:'none',style:{},scrollHeight:12,scrollTop:0,
+            get value(){return app.ctValues[field.id] ?? '';},set value(value){app.ctValues[field.id]=value;},
+            getAttribute(name){return name==='data-ct-target'?field.id:null;},
+            closest(selector){return selector.includes('tr[data-unit-id]')?{dataset:{unitId:unit.id}}:selector.includes('.ctFields')?region:null;},
+            focus(){h.window.document.activeElement=this;app.ctFocusedField=field.id;focuses.push({unitId:unit.id,fieldId:field.id});},
+            setSelectionRange(start,end,direction='none'){this.selectionStart=start;this.selectionEnd=end;this.selectionDirection=direction;},scrollIntoView(){}};
+        fields.set(key,input);return input;
+    }
+    function inputs(){
+        const unit=app.ctCurrentUnit;if(!unit)return [];
+        return Array.from(app.ctFieldGroups.flatMap(group=>group.fields),field=>inputFor(unit,field));
+    }
+    h.window.document={activeElement:null,querySelectorAll:()=>documentControls.length?documentControls:[...inputs(),...controls]};app.$refs.ctEditorRegion=region;app.$refs.ctFileTableRegion={focus(){focuses.push({row:true});}};
+    app.$nextTick=async callback=>{callback?.();};app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};
+    app._ctStore={getDraft:async()=>null};app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};
+    app.ctRefreshLayout=()=>{};app.ctFocusRow=unitId=>focuses.push({row:true,unitId});
+    const event=(field,key,modifiers={})=>({...rowEvent(key),target:inputFor(app.ctCurrentUnit,field),...modifiers,
+        stopPropagation(){this.propagationStopped=true;}});
+    return {...h,inputFor,inputs,event,focuses,row,region,controls,documentControls};
+}
+test('ClientText Dictionary lists all entries with game-scoped matches first and searches notes and alternates',()=>{
+    const unrelated={_id:'unrelated',find:'Unrelated',replace:'Autre',alts:[],tlnote:'Note to search'},
+        matched={_id:'matched',find:'FireDamage',replace:'Feu',alts:[{_id:'alt',find:'Burning damage',replace:'Flammes'}]},
+        foreign={_id:'foreign',find:'FireDamage',replace:'PoE1',gameScope:'poe1',alts:[]};
+    const {app}=dictionaryHarness('[FireDamage<gemlevel={2}>|Burning damage]',[unrelated,foreign,matched]);
+    assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['matched','unrelated','foreign']);
+    assert.equal(app.ctDictionaryController.isDictionaryEntryFindMatched(matched),true);assert.equal(app.ctDictionaryController.isDictionaryAltFindMatched(matched,matched.alts[0]),true);
+    assert.equal(app.ctDictionaryController.isDictionaryEntryFound(foreign),false);assert.equal(app.ctDictionaryPageCount,2);assert.equal(app.ctDictionaryRangeLabel,'1–2 of 3');
+    app.ctSetDictionaryPage(2);assert.deepEqual(Array.from(app.ctDictionaryVisible,word=>word._id),['foreign']);assert.equal(app.ctDictionaryRangeLabel,'3–3 of 3');
+    app.ctDictionaryFilter='flammes';assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['matched']);
+    app.ctDictionaryFilter='note to search';assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['unrelated']);
+    app.ctDictionaryFilter='not present';assert.equal(app.ctDictionaryFiltered.length,0);assert.equal(app.ctDictionaryRangeLabel,'0–0 of 0');
+});
+test('ClientText Dictionary keeps the edited row and order stable while definitions stop matching',()=>{
+    const matched={_id:'first',find:'Fire',replace:'Feu',alts:[]},other={_id:'second',find:'Cold',replace:'Froid',alts:[]},
+        {app}=dictionaryHarness('Fire',[other,matched]);
+    app.ctDictionaryBeginEdit(matched._id);matched.find='Changed definition';app.ctDictionaryFilter='Fire';
+    assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['first'],'editing row stays visible after the Find changes');
+    app.ctDictionaryFilter='';assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['first','second']);
+    app.ctDictionaryEndEdit();assert.deepEqual(Array.from(app.ctDictionaryFiltered,word=>word._id),['second','first']);
+});
+test('ClientText Dictionary reuses guarded shared CRUD and cannot mutate a replacement group or account',async()=>{
+    const word={_id:'fire',find:'Fire',replace:'Feu',alts:[{_id:'alt',find:'Flame',replace:'Flamme'}]},h=dictionaryHarness('Fire',[word]),{app}=h;
+    const code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8'),sections=[
+        code.slice(code.indexOf('    addDictionaryAltRow(word)'),code.indexOf('    addDictionaryAltPair(word')),
+        code.slice(code.indexOf('    createDictionaryEntry(fields'),code.indexOf('    findActiveDictionaryKeywordEntry(tagName)')),
+        code.slice(code.indexOf('    async removeVocab(word'),code.indexOf('    async exportZip(doFullExport)')),
+    ];
+    const shared=vm.runInNewContext('({'+sections.join('\n')+'})',{window:{DictionaryScope:h.window.DictionaryScope}});
+    for(const [name,method]of Object.entries(shared))app[name]=method.bind(app);
+    const dirty=[];app.markDictionarySnapshotDirty=(...args)=>dirty.push(args);app.invalidateEditorDictionaryIndex=(...args)=>dirty.push(args);
+    app.dictionaryEntryScope=h.window.DictionaryScope.normalize;app.beginDictionaryEdit=()=>{};app.endDictionaryEdit=()=>{};app.saveSettings=()=>dirty.push('saved');
+    const controller=app.ctDictionaryController;controller.addDictionaryAltRow(word);assert.equal(word.alts.length,2);assert.equal(word.alts[1].replace,'Feu');
+    controller.setDictionaryEntryScope(word,'poe2');assert.equal(word.gameScope,'poe2');
+    const confirmation=deferred();app.appConfirm=()=>confirmation.promise;const removal=controller.removeVocab(word);
+    app.ctWorkspace.scope.groupId='new-group';confirmation.resolve(true);await removal;assert.equal(app.dictionary.includes(word),true);
+    const newer=app.ctDictionaryController,alternateConfirmation=deferred();app.appConfirm=()=>alternateConfirmation.promise;
+    const alternateRemoval=newer.removeDictionaryAltRow(word,word.alts[0]);app.managedCatalogScope='new-account:poe2';alternateConfirmation.resolve(true);await alternateRemoval;
+    assert.equal(word.alts.length,2);const count=dirty.length;controller.dictionaryEntryInput(word);controller.setDictionaryEntryScope(word,'poe1');
+    assert.equal(dirty.length,count);assert.equal(word.gameScope,'poe2');
+    app.appConfirm=async()=>true;await app.removeVocab(word);assert.equal(app.dictionary.length,0,'default SD deletion remains available without a CT context guard');
+});
+test('ClientText Dictionary Add shares creation and persistence without changing translation drafts or scanning',()=>{
+    const word={_id:'existing',find:'Fire',replace:'Feu',alts:[]},h=dictionaryHarness('Fire',[word]),{app}=h;
+    const before=clone(app.ctValues),events=[];app.createDictionaryEntry=()=>({_id:'new',find:'',replace:'',alts:[],tlnote:'',gameScope:'poe2'});
+    app.invalidateEditorDictionaryIndex=(id,options)=>events.push({id,options});app.ctDictionaryFilter='Fire';
+    app.ctScan=()=>assert.fail('Dictionary controls must not run an optional translation scan');
+    const entry=app.ctDictionaryAdd();assert.equal(app.dictionary[0],entry);assert.equal(app.ctDictionaryEditingId,'new');
+    assert.equal(app.ctDictionaryVisible[0],entry);assert.equal(app.ctDictionaryFilter,'');assert.equal(app.ctDictionaryPage,1);
+    assert.deepEqual(app.ctValues,before);assert.equal(events[0].id,'new');assert.equal(events[0].options.membership,true);
+    app.ctBusy=true;assert.equal(app.ctDictionaryAdd(),false);
+});
+test('ClientText Dictionary inserts exact multiline text at the focused translation selection',()=>{
+    const word={_id:'raw',find:'Fire\nSecond line',replace:'Dégâts@feu\\n\nligne',alts:[{_id:'alt',find:'Flame',replace:'Autre\ntexte'}]},
+        h=dictionaryHarness('Fire',[word]),{app}=h,field=h.original.fields[0],input={value:'Before selected after',selectionStart:7,selectionEnd:15,isConnected:true,
+            focus(){this.focused=true;},setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}};
+    app.ctValues[field.id]=input.value;app.ctDictionaryTarget=()=>input;app.ctEdited=changed=>{assert.equal(changed,field);app.ctDraftDirty=true;};
+    const controller=app.ctDictionaryController;assert.equal(controller.dictionaryMultiline,true);assert.equal(controller.dictionaryCanUse,true);
+    for(const composing of [{isComposing:true},{keyCode:229}]){
+        const event={...rowEvent('Enter'),...composing};assert.equal(controller.useDictionaryTranslation(word,null,event),false);
+        assert.equal(event.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],input.value);
+    }
+    assert.equal(controller.useDictionaryTranslation(word),true);assert.equal(app.ctValues[field.id],'Before '+word.replace+' after');assert.equal(input.focused,true);assert.equal(app.ctDraftDirty,true);
+    input.value=app.ctValues[field.id];input.selectionStart=0;input.selectionEnd=input.value.length;
+    assert.equal(controller.useDictionaryTranslation(word,word.alts[0]),true);assert.equal(app.ctValues[field.id],'Autre\ntexte');
+    input.value=app.ctValues[field.id];input.selectionStart=input.selectionEnd=0;
+    app.ctWorkspace.scope.groupId='replacement-group';assert.equal(controller.useDictionaryTranslation(word),false);assert.equal(app.ctValues[field.id],'Autre\ntexte');
+    const gender=app.ctDictionaryController;field.kind='gender';assert.equal(gender.dictionaryCanUse,false);assert.equal(gender.useDictionaryTranslation(word),false);
+});
+test('SD and ClientText share Dictionary entry markup while CT multiline fields keep Enter for newlines',()=>{
+    const {window}=harness(),shared=window.EditorComponents.DictionaryEntries.template,tools=window.ClientTextUI.toolsComponent,
+        html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
+    assert.equal(tools.components['editor-dictionary-entries'],window.EditorComponents.DictionaryEntries);
+    assert.match(html,/<editor-dictionary-entries v-if="sideTab === 'dictionary'" :controller="\$root">/);
+    for(const feature of ['dictRow','dictScopeSelect','dictHistoryBtn','dictAltRow','dictTlnote','dictDeleteBtn'])assert.equal(shared.includes(feature),true);
+    assert.match(shared,/<input v-else type="text" v-model="word.find"/,'SD retains existing input geometry');
+    assert.match(shared,/<textarea v-if="controller.dictionaryMultiline" rows="2" v-model="word.replace"[^>]*@keydown.ctrl.enter="controller.useDictionaryTranslation\(word,null,\$event\)"/);
+    assert.doesNotMatch(shared,/<textarea[^>]*@keydown\.enter/,'plain Enter is never consumed by CT Dictionary fields');
+    assert.match(shared,/v-model="alt.find"/);assert.match(shared,/v-model="alt.replace"/);assert.doesNotMatch(shared,/v-html/);
+    for(const feature of ['Search dictionary entries','Add entry','Previous dictionary page','Next dictionary page','Matches in this file first'])assert.equal(tools.template.includes(feature),true);
+});
+test('shared field components preserve distinct form sources and autosizing changes layout only',()=>{
+    const {app,window}=listHarness(),rawText='@literal\\nactual\nไทย',field={value:rawText,scrollHeight:96,scrollTop:15,selectionStart:3,selectionEnd:7,style:{}};
+    app.ctResizeField(field);assert.equal(field.style.height,'98px');assert.equal(field.value,rawText);assert.equal(field.selectionStart,3);assert.equal(field.selectionEnd,7);assert.equal(field.scrollTop,15);
+    const groups=app.ctGroupSources({name:'Text',fields:[{id:'m',form:'MS',source:'Masculine'},{id:'f',form:'FS',source:'Feminine'}]});
+    assert.deepEqual(Array.from(groups,entry=>entry.text),['Masculine','Feminine']);assert.deepEqual(Array.from(groups,entry=>entry.label),['MS','FS']);
+    const fields=window.ClientTextUI.fieldsComponent,target=window.ClientTextUI.targetComponent,tools=window.ClientTextUI.toolsComponent;
+    assert.equal(fields.props.side.default,'both');assert.match(fields.template,/side !== 'translation'/);assert.match(fields.template,/side !== 'source'/);
+    assert.match(fields.template,/textHL editorTextField multiline/);assert.match(fields.template,/:value="source.text"[^>]* readonly/);
+    assert.match(fields.template,/field.kind !== 'gender' \|\| field.source/,'blank enum metadata has no fake English textarea');
+    assert.match(target.template,/v-model="host.ctValues\[field.id\]"/);assert.match(target.template,/ctTargetKeydown/);
+    assert.match(tools.template,/side sharedEditorSidebar ctTools/);assert.match(tools.template,/sideHeader/);assert.match(tools.template,/sideTabs/);assert.match(tools.template,/aria-label="TM"/);
+    assert.match(tools.template,/class="lookupResults"/,'Lookup follows the shared scroll layout');
+});
+test('save navigation captures candidates before current work disappears from Missing filters',async()=>{
+    const rows=[namedUnit('ID1','First',''),namedUnit('ID2','Second',''),namedUnit('ID3','Third','')],
+        {app}=listHarness({ctUnits:rows,ctSelection:rows[0].id,ctEditor:true,ctSelectedFilters:['missing'],ctValues:{[fieldId]:'Translated first'},
+            _ctUnitIndex:new Map(rows.map(value=>[value.id,value]))}),calls=[];
+    app.ctSave=async()=>{calls.push('save');app.ctSaved={[rows[0].id]:{values:{[fieldId]:'Translated first'},reviewed:{},revision:1}};return true;};
+    app.ctSelect=async(value,full)=>{calls.push(value.id);assert.equal(full,true);app.ctSelection=value.id;return true;};
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.deepEqual(calls,['save',rows[1].id]);assert.equal(app.ctSelection,rows[1].id);assert.equal(app.ctPage,1);
+});
+test('F-key navigation avoids untouched and reverted saves, retains the editor at bounds and saves Outdated reviews',async()=>{
+    const rows=[namedUnit('ID1'),namedUnit('ID2')],{app}=listHarness({ctUnits:rows,ctSelection:rows[0].id,ctEditor:true,
+        ctValues:S.valuesFor(rows[0]),_ctUnitIndex:new Map(rows.map(value=>[value.id,value]))});let saves=0;
+    app.ctSave=async()=>{saves++;return true;};app.ctSelect=async(value,full)=>{app.ctSelection=value.id;app.ctValues=S.valuesFor(value);app.ctEditor=full;return true;};
+    app.ctDraftDirty=true;app.ctReviewed={[fieldId]:S.sourceHash(rows[0].fields[0].source)};
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.equal(saves,0,'reverted text with no review workload does not fabricate Saved');
+    assert.equal(await app.ctSaveAndNavigate(),false);assert.equal(saves,0);assert.equal(app.ctEditor,true);assert.equal(app.ctSelection,rows[1].id);
+    assert.equal(await app.ctSaveAndNavigate(true),true);assert.equal(app.ctSelection,rows[0].id);assert.equal(saves,0);
+    rows[0].fields[0].outdated=true;app._ctStatusCache=new WeakMap();app.ctReviewed={[fieldId]:S.sourceHash(rows[0].fields[0].source)};
+    assert.equal(app.ctHasEditorChanges(),true,'review-only work resolves Outdated without changing text');
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.equal(saves,1);
+});
+test('save navigation fences changed selection/account while awaiting save, and retains failed work',async()=>{
+    const rows=[namedUnit('ID1'),namedUnit('ID2')];
+    for(const change of ['account','unit','failed']){
+        const {app}=listHarness({ctUnits:rows,ctSelection:rows[0].id,ctEditor:true,ctValues:{[fieldId]:'changed'},
+            _ctUnitIndex:new Map(rows.map(value=>[value.id,value]))}),pending=deferred();let opens=0;
+        app.ctSave=()=>pending.promise;app.ctSelect=async()=>{opens++;return true;};const moving=app.ctSaveAndNavigate();
+        if(change==='account'){app.managedCatalogScope='bob:poe2';app.ctWorkspace={scope:{...scope,accountId:'bob'}};}
+        if(change==='unit')app.ctSelection=rows[1].id;
+        pending.resolve(change!=='failed');assert.equal(await moving,false);assert.equal(opens,0);assert.equal(app.ctEditor,true);
+    }
+});
+test('F2 replays a matching uncertain intentional unchanged save before navigating and ignores another scope job',async()=>{
+    const rows=[namedUnit('ID1'),namedUnit('ID2')],{app}=listHarness({ctUnits:rows,ctSelection:rows[0].id,ctEditor:true,
+        ctValues:S.valuesFor(rows[0]),_ctUnitIndex:new Map(rows.map(value=>[value.id,value]))}),calls=[];
+    app._ctSaveJob={unitId:rows[0].id,scopeKey:Store.scopeKey(scope),id:'uncertain-unchanged',command:{values:S.valuesFor(rows[0])}};
+    app.ctSave=async()=>{calls.push('replay');return true;};app.ctSelect=async value=>{calls.push(value.id);app.ctSelection=value.id;return true;};
+    assert.equal(app.ctHasEditorChanges(),false);assert.equal(await app.ctSaveAndNavigate(),true);assert.deepEqual(calls,['replay',rows[1].id]);
+    app.ctSelection=rows[0].id;app._ctSaveJob.scopeKey=Store.scopeKey({...scope,groupId:'other'});calls.length=0;
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.deepEqual(calls,[rows[1].id],'another group receipt is never replayed for this unit');
+});
+test('SD-style keyboard aliases route F1/F2, full Ctrl+S, inline staging and table export through CT actions',async()=>{
+    const {app}=listHarness(),calls=[];app.ctSaveAndNavigate=async(...args)=>calls.push(['navigate',...args]);
+    app.ctSave=async(close=false)=>calls.push(['save',close]);app.ctDownload=async()=>calls.push(['download']);
+    const press=async(key,code,ctrlKey=false)=>{const event=rowEvent(key);event.code=code;event.ctrlKey=ctrlKey;await app.ctKey(event);assert.equal(event.defaultPrevented,true);};
+    app.ctEditor=true;await press('F2','F2');await press('F1','F1');await press('.','Period',true);await press(',','Comma',true);
+    assert.deepEqual(calls.splice(0),[['navigate',false],['navigate',true],['navigate',false],['navigate',true]]);
+    app.autoOpenNextFile=true;await press('s','KeyS',true);assert.equal(calls[0][0],'navigate');assert.equal(calls[0][2].saveUnchanged,true);calls.length=0;
+    app.autoOpenNextFile=false;await press('s','KeyS',true);assert.deepEqual(calls.splice(0),[['save',true]]);
+    app.ctEditor=false;app.inlineEditor=true;await press('s','KeyS',true);assert.deepEqual(calls.splice(0),[['save',false]]);
+    app.inlineEditor=false;await press('s','KeyS',true);assert.deepEqual(calls.splice(0),[['download']]);
+});
+test('Save and close retains the acknowledged row and uses the real SD layout measurement methods',async()=>{
+    const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});
+    const {app,original}=listHarness({ctEditor:true,ctDraftDirty:true,ctValues:{[fieldId]:'saved@literal\\nactual\nไทย'}}),calls=[];
+    app._ctStore=f.store;app.ctLoadMemory=()=>{};app.ctSync=()=>{};app.observeInlineBlocks=()=>calls.push('observe');app.measureWorkspaceChrome=()=>calls.push('measure');app.ctFocusRow=id=>calls.push(id);
+    assert.equal(await app.ctSave(true),true);assert.equal(app.ctEditor,false);assert.equal(app.ctSelection,original.id);assert.equal(app.ctDraftDirty,false);
+    assert.deepEqual(calls,['observe','measure',original.id]);assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'saved@literal\\nactual\nไทย');
+});
+test('filter-panel changes register the real shared chrome observer after render',async()=>{
+    const {app,mixin}=listHarness(),calls=[];app.$nextTick=fn=>{calls.push('render');fn?.();};app.observeInlineBlocks=()=>calls.push('observe');app.measureWorkspaceChrome=()=>calls.push('measure');
+    mixin.watch.ctFiltersVisible.call(app);assert.deepEqual(calls,['render','observe','measure']);
+});
+test('closing the version chooser rebinds shared chrome observers after CT table remount',()=>{
+    const {app,mixin}=listHarness({versionChooserVisible:false}),calls=[];app.$nextTick=fn=>{calls.push('render');fn?.();};
+    app.observeInlineBlocks=()=>calls.push('observe');app.measureWorkspaceChrome=()=>calls.push('measure');
+    mixin.watch.versionChooserVisible.call(app,false);assert.deepEqual(calls,['render','observe','measure']);
+    calls.length=0;app.ctActive=false;mixin.watch.versionChooserVisible.call(app,false);assert.deepEqual(calls,[]);
+});
+test('Versions preserves translation and comment drafts before opening, and stays closed after either failure',async()=>{
+    const {app}=listHarness({versionChooserVisible:false}),calls=[];
+    app.ctFlushDraft=async()=>{calls.push('translation');return true;};app.ctFlushCommentDraft=async()=>calls.push('comment');
+    assert.equal(await app.ctShowVersionChooser(),true);assert.deepEqual(calls,['translation','comment']);assert.equal(app.versionChooserVisible,true);
+    app.versionChooserVisible=false;calls.length=0;app.ctFlushDraft=async()=>false;
+    assert.equal(await app.ctShowVersionChooser(),false);assert.equal(app.versionChooserVisible,false);assert.deepEqual(calls,[]);
+    app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{throw Error('Comment storage failed');};
+    assert.equal(await app.ctShowVersionChooser(),false);assert.equal(app.versionChooserVisible,false);assert.match(app.ctError,/Comment storage failed/);
+});
+test('a delayed Versions action cannot open or store comments after account, group or record replacement',async()=>{
+    for(const change of ['account','group','unit']){
+        const {app}=listHarness({versionChooserVisible:false}),pending=deferred();let comments=0;
+        app.ctFlushDraft=()=>pending.promise;app.ctFlushCommentDraft=async()=>comments++;
+        const opening=app.ctShowVersionChooser();
+        if(change==='account'){app.managedCatalogScope='bob:poe2';app.ctWorkspace={scope:{...scope,accountId:'bob'}};}
+        if(change==='group')app.ctWorkspace={scope:{...scope,groupId:'newer'}};
+        if(change==='unit')app.ctSelection='newer record';
+        pending.resolve(true);assert.equal(await opening,false);assert.equal(comments,0);assert.equal(app.versionChooserVisible,false);
+    }
+    const {app}=listHarness({versionChooserVisible:false}),comment=deferred();app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=()=>comment.promise;
+    const opening=app.ctShowVersionChooser();await settle();app.ctSelection='newer record';comment.resolve();
+    assert.equal(await opening,false);assert.equal(app.versionChooserVisible,false);
+});
 
 test('the unified Assignment table retains legacy API teams and their exact progress/actions data',()=>{
     const thai={language:'Thai',ended:true,latestCollection:{id:'collection'},collections:[{id:'collection'}],presence:[{name:'Peer'}],counts:{saved:3,missing:2,revised:1}},
@@ -377,7 +1231,7 @@ test('comment drafts retain their captured account/group while late loads cannot
 });
 
 test('selection interrupted during draft flush cannot open an old record in a different group',async()=>{
-    const {app,original}=harness(),pending=deferred();let reads=0;
+    const {app,original}=harness({ctSelection:''}),pending=deferred();let reads=0;
     app.ctFlushDraft=()=>pending.promise;app.ctFlushCommentDraft=async()=>{};app._ctStore={async getDraft(){reads++;return null;}};
     app.$nextTick=async()=>{};app.$refs={};app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};
     const selecting=app.ctSelect(original);await settle();
