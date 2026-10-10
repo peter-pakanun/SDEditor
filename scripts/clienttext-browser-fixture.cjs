@@ -103,6 +103,75 @@ async function run() {
         await bootstrap();
         await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
         const upload = page.getByRole('region', { name: 'Content upload' });
+        const desktopSizes = [{ width: 1440, height: 1000 }, { width: 1100, height: 850 }];
+        const themes = ['light', 'grey', 'dark', 'modern-dark'];
+        const checkUploadLayout = async ({ admin = false } = {}) => {
+            const policy = upload.locator('.ctUploadPolicy');
+            assert.equal(await policy.count(), admin ? 1 : 0, 'Role configuration is shown only in manager publication for an admin');
+            assert.doesNotMatch(await upload.textContent(), /Missing_XXX\.txt is ignored|Missing_.*\.txt.*ignore/i, 'Removed Missing-file explanation stays absent');
+            if (admin) await policy.locator('summary').click();
+            for (const size of desktopSizes) {
+                await page.setViewportSize(size);
+                for (const theme of themes) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                    const spacing = await upload.evaluate(element => {
+                        const rect = node => { const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom }; };
+                        const fields = Array.from(element.querySelectorAll('.ctUploadSelectors .ctUploadField'), label => {
+                            const range = document.createRange(); range.selectNode(label.firstChild);
+                            return { label: rect({ getBoundingClientRect: () => range.getBoundingClientRect() }), input: rect(label.querySelector('input')) };
+                        });
+                        const policy = element.querySelector('.ctUploadPolicy');
+                        return { dialog: rect(element), fields, overflow: document.documentElement.scrollWidth - innerWidth,
+                            policy: policy ? { summary: rect(policy.querySelector('summary')), textarea: rect(policy.querySelector('textarea')), button: rect(policy.querySelector('button')) } : null };
+                    });
+                    assert.ok(spacing.dialog.width <= 900 && spacing.dialog.x >= 29 && spacing.dialog.right <= size.width - 29, theme + ': upload fits the desktop viewport');
+                    assert.ok(spacing.overflow <= 1, theme + ': upload creates no horizontal page overflow');
+                    assert.equal(spacing.fields.length, 2);
+                    assert.ok(spacing.fields[1].input.x - spacing.fields[0].input.right >= 15, theme + ': file and folder inputs retain their column gap');
+                    for (const field of spacing.fields) {
+                        assert.ok(field.input.y - field.label.bottom >= 5, theme + ': chooser label has a separate line with spacing');
+                        assert.ok(field.input.height >= 38, theme + ': native file chooser has sufficient vertical padding');
+                    }
+                    if (admin) {
+                        assert.ok(spacing.policy.textarea.y - spacing.policy.summary.bottom >= 20, theme + ': role configuration separates summary and JSON editor');
+                        assert.ok(spacing.policy.button.y - spacing.policy.textarea.bottom >= 11, theme + ': role configuration separates JSON editor and Save button');
+                    }
+                    let first;
+                    for (const completed of [0, 1, 999, 141568, 1000000]) {
+                        await page.evaluate(async completed => {
+                            const vm = window.__clientFixtureApp;
+                            vm.ctReport({ phase: completed % 2 ? 'Validating' : 'Preparing', workbook: 'French_Gender_PoE2.xlsm',
+                                sheet: completed ? 'A very long worksheet label with repeated descriptive names '.repeat(5) : 'Normal', completed, total: 1000000 });
+                            await vm.$nextTick();
+                        }, completed);
+                        const progress = upload.locator('.ctProgress'); await progress.scrollIntoViewIfNeeded();
+                        const bounds = await progress.evaluate(element => {
+                            const bar = element.querySelector('progress'), cancel = element.querySelector('.ctProgressCancel'), label = element.querySelector('.ctProgressLabel'), count = element.querySelector('.ctProgressCount');
+                            const rect = node => { const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right }; };
+                            const prior = window.__fixtureProgressNodes;
+                            window.__fixtureProgressNodes = { element, bar, cancel, label, count };
+                            return { panel: rect(element), bar: rect(bar), cancel: rect(cancel), count: rect(count), label: rect(label),
+                                countText: count.textContent, title: label.title, ellipsis: getComputedStyle(label).textOverflow,
+                                tabular: getComputedStyle(count).fontVariantNumeric, sameNodes: !prior || prior.element !== element || (prior.bar === bar && prior.cancel === cancel && prior.label === label && prior.count === count) };
+                        });
+                        assert.equal(bounds.countText.trim(), completed + ' / 1000000');
+                        assert.equal(bounds.ellipsis, 'ellipsis'); assert.equal(bounds.tabular, 'tabular-nums'); assert.ok(bounds.sameNodes, 'Progress updates reuse the existing controls');
+                        assert.ok(bounds.cancel.x > bounds.bar.right && bounds.cancel.right <= bounds.panel.right - 11, theme + ': Cancel occupies a separate right column');
+                        assert.ok(bounds.cancel.width > 60 && bounds.bar.width > 500, theme + ': Cancel and progress retain usable widths');
+                        if (completed) assert.ok(bounds.title.includes('A very long worksheet label'), 'Full truncated sheet label remains available in the title');
+                        if (first) for (const key of ['panel', 'bar', 'cancel', 'count']) for (const property of ['x', 'width', 'height']) assert.ok(Math.abs(bounds[key][property] - first[key][property]) < 1, `${theme}: ${key}.${property} stays stable as progress count and sheet label change`);
+                        else first = bounds;
+                    }
+                    await page.screenshot({ path: join(directory, `clienttext-upload-${admin ? 'admin' : 'local'}-${size.width}-${theme}.png`), fullPage: true });
+                }
+            }
+            await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.ctProgress = null; await vm.$nextTick(); });
+            if (admin) await policy.locator('summary').click();
+            await page.setViewportSize(desktopSizes[0]);
+            await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
+            results.push(`${admin ? 'Admin publication' : 'Local import'} layout: two desktop sizes and four themes; spaced file/folder selectors${admin ? ' and role configuration' : ''}; fixed-right Cancel and stable progress controls from 0 to 1000000`);
+        };
+        await checkUploadLayout();
         await upload.locator('input[type=text]').fill('ClientText browser fixture');
         await upload.locator('input[type=file]').first().setInputFiles(files.slice(0, 1));
         await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
@@ -285,6 +354,7 @@ async function run() {
         if (process.env.CLIENTTEXT_SHARED_FLOW === '1' || process.argv.includes('--shared')) {
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
+            await checkUploadLayout({ admin: true });
             await upload.locator('input[type=text]').fill('Shared ClientText fixture');
             await upload.getByRole('button', { name: 'Save version draft', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
@@ -349,6 +419,64 @@ async function run() {
             const groups = await page.evaluate(() => window.__clientFixtureApp.ctGroups.map(group => ({ id: group.id, contentMode: group.contentMode })));
             const statGroup = groups.find(group => group.contentMode === 'statdescription'), clientGroup = groups.find(group => group.contentMode === 'clienttext');
             assert.ok(statGroup && clientGroup && statGroup.id !== clientGroup.id);
+            for (const size of desktopSizes) {
+                await page.setViewportSize(size);
+                for (const theme of themes) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                    await details.scrollIntoViewIfNeeded();
+                    const layout = await details.evaluate(element => {
+                        const rect = node => { const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom }; };
+                        const header = element.querySelector('.selectedVersionHeader');
+                        return { panel: rect(element), header: rect(header), title: rect(header.querySelector('h2')), add: rect(header.querySelector('button')),
+                            overflow: document.documentElement.scrollWidth - innerWidth, cards: element.querySelectorAll('.ctGroupCard').length,
+                            groups: Array.from(element.querySelectorAll('.versionContentGroup'), group => {
+                                const wrapper = group.querySelector('.versionTableScroll'), table = group.querySelector('.contentGroupTeamTable');
+                                const team = group.querySelector('tr[data-language="French"]');
+                                const model = window.__clientFixtureApp.ctGroups.find(candidate => candidate.id === group.dataset.contentGroup);
+                                return { id: group.dataset.contentGroup, wrapper: rect(wrapper), headers: Array.from(table.querySelectorAll('th'), th => ({ text: th.textContent.trim(), scope: th.scope })),
+                                    cells: team.children.length, progress: rect(team.querySelector('.versionProgress')), meter: team.querySelector('.versionProgress').getAttribute('role'),
+                                    contentMode: model.contentMode, counts: model.teams.find(candidate => candidate.language === 'French').counts,
+                                    loadedText: team.querySelector('td:first-child > small').textContent.trim(), progressText: team.querySelector('.versionProgressSummary strong').textContent.trim(),
+                                    progressNow: team.querySelector('.versionProgress').getAttribute('aria-valuenow'), progressMax: team.querySelector('.versionProgress').getAttribute('aria-valuemax'),
+                                    actions: Array.from(team.querySelectorAll('.versionTeamActions button'), button => ({ text: button.textContent.trim(), disabled: button.disabled, bounds: rect(button) })) };
+                            }) };
+                    });
+                    assert.equal(layout.cards, 0, 'Content groups use the shared team table instead of cards'); assert.equal(layout.groups.length, 2);
+                    assert.ok(layout.add.x > layout.title.right && Math.abs(layout.add.right - layout.header.right) < 1, theme + ': Add content group is on the right of the selected version header');
+                    assert.ok(Math.abs(layout.add.y - layout.header.y) < 1, theme + ': selected version header and action align at the top');
+                    assert.ok(layout.overflow <= 1, theme + ': content table scroll is contained without widening the page');
+                    for (const group of layout.groups) {
+                        assert.deepEqual(group.headers.map(header => header.text), ['Language team', 'Progress', 'Online', 'Actions']);
+                        assert.ok(group.headers.every(header => header.scope === 'col')); assert.equal(group.cells, 4); assert.equal(group.meter, 'meter');
+                        assert.ok(group.wrapper.x >= layout.panel.x && group.wrapper.right <= layout.panel.right, 'Narrow desktop table overflow stays inside the selected version panel');
+                        assert.ok(group.progress.width >= 200, 'Both content modes reuse the existing readable progress meter');
+                        assert.ok(['Open editor', 'Download accepted work', 'Collect and end'].every(text => group.actions.some(action => action.text === text && !action.disabled)), 'Shared table keeps the team actions available');
+                        if (group.contentMode === 'clienttext') {
+                            assert.equal(group.loadedText, `${group.counts.loaded ?? 0} IDs`, 'ClientText table shows the exact ID count');
+                            assert.equal(group.progressText, `${group.counts.resolvedFields ?? 0} / ${group.counts.workloadFields ?? 0}`, 'ClientText progress uses field workload, rather than unit counts');
+                            assert.equal(group.progressNow, String(group.counts.resolvedFields ?? 0));
+                            assert.equal(group.progressMax, String(Math.max(1, group.counts.workloadFields ?? 0)));
+                        }
+                    }
+                    await page.screenshot({ path: join(directory, `clienttext-group-tables-${size.width}-${theme}.png`), fullPage: true });
+                }
+            }
+            await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
+            await page.evaluate(async groupId => {
+                const vm = window.__clientFixtureApp; window.__fixtureOriginalDetails = vm.managedVersionDetails;
+                vm.managedVersionDetails = { ...vm.managedVersionDetails, contentGroups: vm.ctGroups.map(group => group.id !== groupId ? group : { ...group, teams: group.teams.map(team => team.language !== 'French' ? team : { ...team,
+                    counts: { ...team.counts, loaded: 0, total: 999, resolved: 999, workload: 999, resolvedFields: 0, workloadFields: 0 } }) }) };
+                await vm.$nextTick();
+            }, clientGroup.id);
+            const emptyTeam = details.locator(`[data-content-group="${clientGroup.id}"] tr[data-language="French"]`);
+            assert.equal(await emptyTeam.locator('.versionProgressSummary strong').textContent(), '0 / 0', 'Empty field workload remains zero despite nonzero unit-count fallbacks');
+            assert.equal(await emptyTeam.locator('td:first-child > small').first().textContent(), '0 IDs', 'Zero loaded IDs never falls back to another count');
+            assert.equal(await emptyTeam.locator('.versionProgressTrack .saved').evaluate(element => element.style.width), '0%');
+            await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.managedVersionDetails = window.__fixtureOriginalDetails; delete window.__fixtureOriginalDetails; await vm.$nextTick(); });
+            await details.getByRole('button', { name: 'Add content group', exact: true }).click();
+            await upload.waitFor(); assert.match(await upload.locator('h2').textContent(), /Add content groups to Shared ClientText fixture/);
+            await upload.getByRole('button', { name: 'Close', exact: true }).click();
+            results.push('Selected version header and CT/SD team tables fit two desktop sizes in all four themes; accessible field progress and exact zero-workload counts; header action opens the content uploader');
             const statCard = details.locator('[data-content-group="' + statGroup.id + '"]');
             const statTeam = statCard.locator('.ctGroupTeam').filter({ has: page.locator('strong').filter({ hasText: /^French$/ }) });
             await statTeam.getByRole('button', { name: 'Open editor', exact: true }).click();
@@ -696,7 +824,7 @@ async function run() {
         if (database.isOpen) database.close();
         const absolute = resolve(directory), expectedRoot = resolve(tmpdir()) + sep;
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-clienttext-browser-')) throw new Error('Refusing cleanup outside fixture temporary directory.');
-        if (process.env.KEEP_FIXTURE_ARTIFACTS === '1') console.log('Fixture artifacts: ' + absolute); else rmSync(absolute, { recursive: true, force: true });
+        if (process.env.KEEP_FIXTURE_ARTIFACTS === '1' || process.argv.includes('--keep')) console.log('Fixture artifacts: ' + absolute); else rmSync(absolute, { recursive: true, force: true });
     }
 }
 run().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
