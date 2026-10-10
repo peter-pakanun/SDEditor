@@ -9,7 +9,7 @@ const Transport = require('../public/clientTextTransport.js');
 const { readFileSync } = require('node:fs');
 const { runInNewContext, createContext, runInContext } = require('node:vm');
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#13;');
 const cell = (r, value, style = 0, extra = '') => `<c r="${r}" s="${style}" t="inlineStr" ${extra}><is><t xml:space="preserve">${escape(value)}</t></is></c>`;
 const empty = (r, style) => `<c r="${r}" s="${style}"/>`;
 const row = (r, cells) => `<row r="${r}">${cells.join('')}</row>`;
@@ -113,6 +113,61 @@ test('no-change and reverted complete saves preserve the original package exactl
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [f.id]: f.target } } }), bytes);
     await assert.rejects(Codec.exportWorkbook(new Uint8Array([...bytes, 0]), parsed, {}), /does not match/);
+});
+
+test('arbitrary original Gender strings survive complete saves, history and edited workbook exports verbatim', async () => {
+    const values = ['-', ' ', '  custom\tvalue  ', 'NONEXISTENT', '  first\r\nsecond\nthird  '];
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Gender'), cell('E1', 'Notes'), cell('F1', 'Character')]),
+        ...values.map((value, index) => row(index + 2, [cell('A' + (index + 2), 'raw-' + index), cell('B' + (index + 2), 'English ' + index),
+            cell('C' + (index + 2), 'Original ' + index, 1), cell('D' + (index + 2), value, 1), cell('E' + (index + 2), 'Developer note ' + index), cell('F' + (index + 2), 'Immutable metadata ' + index)])),
+    ]);
+    const bytes = await workbook({ normal, macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', language: 'German' });
+    assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_GENDER_VALUE' || warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes, 'Arbitrary baseline metadata alone never rewrites an original');
+    const { fixture, scope: baseScope } = require('./clienttext-storage-fixture.cjs'), f = fixture(), scope = { ...baseScope, language: 'German' };
+    await f.store.import(scope, { units: parsed.units, assets: [{ role: 'normal', name: 'German.xlsm', hash: parsed.artifactHash, blob: new Blob([bytes]) }] });
+    const records = {};
+    for (let index = 0; index < values.length; index++) {
+        const unit = get(parsed, 'raw-' + index), gender = field(unit, 'Gender'), name = field(unit, 'Name'), savedValues = State.valuesFor(unit);
+        assert.equal(gender.target, values[index]); savedValues[name.id] += ' [authored]';
+        records[unit.id] = (await f.store.save(scope, unit.id, { jobId: 'raw-gender-' + index, values: savedValues, reviewed: {} })).saved;
+        assert.equal(records[unit.id].values[gender.id], values[index]);
+        assert.equal((await f.store.listHistory(scope, unit.id)).at(-1).after.values[gender.id], values[index]);
+        assert.equal(field(await f.store.getUnit(scope, unit.id), 'Gender').target, values[index], 'Immutable originals retain the exact metadata');
+    }
+    const exported = await Codec.exportWorkbook(bytes, parsed, records), reopened = await Codec.parseWorkbook(exported, { filename: 'German.xlsm' });
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(exported), exportedSheet = await after.file('xl/worksheets/sheet1.xml').async('string');
+    for (let index = 0; index < values.length; index++) {
+        const original = get(parsed, 'raw-' + index), current = get(reopened, 'raw-' + index);
+        assert.equal(field(current, 'Gender').target, values[index]);
+        assert.equal(field(current, 'Name').target, field(original, 'Name').target + ' [authored]');
+        assert.equal(field(current, 'Name').source, field(original, 'Name').source);
+        assert.equal(current.developerNotes, original.developerNotes); assert.deepEqual(current.metadata, original.metadata);
+        assert.ok(exportedSheet.includes(cell('D' + (index + 2), values[index], 1)), 'Unedited raw Gender cell XML remains unchanged');
+    }
+    for (const name of ['xl/vbaProject.bin', 'xl/native.bin', 'xl/metadata', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels', 'xl/worksheets/sheet2.xml'])
+        assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+});
+
+test('authored Gender metadata accepts arbitrary strings while non-text saves and exports remain rejected', async () => {
+    const bytes = await workbook(), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsx' }), unit = get(parsed, 'complete'), gender = field(unit, 'Gender');
+    for (const value of ['-', ' ', ' custom\t@literal\\n ', 'NONEXISTENT', ' first\r\nsecond\n ']) {
+        const values = State.valuesFor(unit); values[gender.id] = value;
+        assert.equal(State.normalizeValues(unit, values)[gender.id], value);
+        const result = await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values } }), { filename: 'German.xlsx' });
+        assert.equal(field(get(result, 'complete'), 'Gender').target, value);
+        assert.equal(result.warnings.some(warning => warning.code === 'CLIENTTEXT_GENDER_VALUE' || warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
+    }
+    const { fixture, scope, asset } = require('./clienttext-storage-fixture.cjs'), f = fixture();
+    await f.store.import(scope, { units: [unit], assets: [asset] });
+    for (const value of [null, 0, false, [], {}]) {
+        const values = State.valuesFor(unit); values[gender.id] = value;
+        assert.throws(() => State.normalizeValues(unit, values), /non-text/);
+        await assert.rejects(f.store.save(scope, unit.id, { jobId: 'invalid-gender-' + JSON.stringify(value), values, reviewed: {} }), /non-text/);
+        await assert.rejects(Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values } }), /field is not text/);
+    }
+    assert.deepEqual(await f.store.getSaved(scope), {}); assert.deepEqual(await f.store.listHistory(scope, unit.id), []);
 });
 test('unsafe layouts, duplicate IDs, editable formulas and XML entities are blocked', async () => {
     const bytes = await workbook(), z = await JSZip.loadAsync(bytes), original = await z.file('xl/worksheets/sheet1.xml').async('string');

@@ -19,7 +19,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#13;');
 const cell = (r, value, s = 0) => `<c r="${r}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${escape(value)}</t></is></c>`;
 const blank = (r, s = 0) => `<c r="${r}" s="${s}"/>`;
 const row = (r, cells) => `<row r="${r}">${cells.join('')}</row>`;
@@ -66,13 +66,18 @@ function fieldStackExtent(geometry) {
     return boxes.length ? Math.max(...boxes.map(box => box.bottom)) - Math.min(...boxes.map(box => box.y)) : 0;
 }
 const styles = `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Calibri"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFFFF"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFA8072"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF9966"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4">${[0, 1, 2, 3].map(fill => `<xf numFmtId="0" fontId="0" fillId="${fill}" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1"/></xf>`).join('')}</cellXfs></styleSheet>`;
-async function workbook(JSZip, role) {
+const genderAuditCases = [{ id: 'raw-dash', value: '-' }, { id: 'raw-space', value: ' ' }, { id: 'raw-custom', value: '  custom gender  ' },
+    { id: 'raw-nonexistent', value: 'NONEXISTENT' }, { id: 'raw-multiline', value: ' first\r\nsecond\n ' },
+    { id: 'draft-multiline', value: 'F' }, { id: 'paste-multiline', value: 'M' }, { id: 'shift-newline', value: 'N' }];
+async function workbook(JSZip, role, genderAudit = false) {
     const sheets = role === 'normal' ? [
         ['Normal', sheet([
             row(1, [cell('A1', 'ID'), cell('B1', 'Notes'), cell('C1', 'Name'), cell('D1', 'Translation'), cell('E1', 'Gender'), cell('G1', 'Description'), cell('H1', 'Translation')]),
             row(2, [cell('A2', 'record'), cell('B2', 'Developer instruction'), cell('C2', 'Sword'), blank('D2', 2), cell('E2', 'M', 1), cell('G2', '[NOAUDIO] New description'), cell('H2', 'Old description', 3)]),
             row(3, [cell('A3', 'complete'), cell('C3', 'Shield'), cell('D3', 'Original', 1), cell('E3', 'F', 1), cell('G3', '{0:+d} <<keybind:open_panel>>'), cell('H3', '{0:+d} <<keybind:open_panel>>', 1)]),
-            row(4, [cell('A4', 'noaudio'), cell('C4', '[NOAUDIO] '), blank('D4', 2), blank('E4')])
+            row(4, [cell('A4', 'noaudio'), cell('C4', '[NOAUDIO] '), blank('D4', 2), blank('E4')]),
+            ...(genderAudit ? genderAuditCases.map((item, index) => row(index + 5, [cell('A' + (index + 5), item.id), cell('B' + (index + 5), 'Immutable raw Gender note'),
+                cell('C' + (index + 5), 'English ' + item.id), cell('D' + (index + 5), 'Original ' + item.id, 1), cell('E' + (index + 5), item.value, 1)])) : [])
         ])],
         ['Second', sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Translation Note'), cell('C1', 'Text'), cell('D1', 'Translation')]), row(2, [cell('A2', 'second'), cell('B2', 'Other developer note'), cell('C2', 'Other text'), cell('D2', 'Autre texte', 1)])])],
         ['Visibility', sheet([
@@ -122,8 +127,9 @@ async function run() {
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
-    const normal = await workbook(JSZip, 'normal'), gender = await workbook(JSZip, 'gender');
-    const files = [{ name: 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }, { name: 'French_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }];
+    const genderOnly = process.argv.includes('--gender-only'), normal = await workbook(JSZip, 'normal', genderOnly), gender = await workbook(JSZip, 'gender');
+    const files = [{ name: genderOnly ? 'German.xlsm' : 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
+        { name: genderOnly ? 'German_Gender.xlsm' : 'French_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }];
     const statDescription = { filepath: 'specific_skill_stat_descriptions/explosive_grenade/fire.txt', filedir: 'specific_skill_stat_descriptions/explosive_grenade', filename: 'fire.txt', name: 'fire',
         stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], French: [''] } };
     const statArchive = new JSZip(); statArchive.file(statDescription.filepath, StatCodec.descEncode(statDescription), { createFolders: false });
@@ -148,6 +154,106 @@ async function run() {
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap();
+        if (genderOnly) {
+            await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
+            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            const upload = page.getByRole('region', { name: 'Content upload' });
+            await upload.locator('input[type=text]').fill('Gender browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctPrepared[0].assets.reduce((count, asset) => count + asset.parsed.warnings.length, 0)), 0, 'Arbitrary original Gender values create no import warning');
+            await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
+            await page.getByRole('button', { name: 'Gender browser fixture · ClientText · German', exact: true }).click();
+            const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
+            const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
+            await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
+            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'Normal', exact: true }).click();
+            const fieldId = JSON.stringify(['Gender', null]), nameId = JSON.stringify(['Name', null]), unitId = id => JSON.stringify(['normal', 'Normal', id]);
+            const control = () => workspace.locator('[data-ct-target][aria-label="Gender"]');
+            const choose = async id => {
+                await workspace.getByRole('button', { name: id, exact: true }).click();
+                await page.waitForFunction(id => { const vm = window.__clientFixtureApp; return vm.ctSelection === id && vm.ctEditor && !vm.ctBusy && !vm._ctSelectRun?.pending; }, unitId(id));
+            };
+            const checkSaved = async (id, value) => {
+                await page.waitForFunction(({ id, field, value }) => window.__clientFixtureApp.ctSaved[id]?.values[field] === value && !window.__clientFixtureApp.ctBusy,
+                    { id: unitId(id), field: fieldId, value });
+                return page.evaluate(async ({ id, field }) => {
+                    const vm = window.__clientFixtureApp, saved = (await vm._ctStore.getSaved(vm.ctWorkspace.scope))[id], original = await vm._ctStore.getUnit(vm.ctWorkspace.scope, id), history = await vm._ctStore.listHistory(vm.ctWorkspace.scope, id);
+                    return { saved: saved.values[field], original: original.fields.find(item => item.id === field).target, history: history.find(entry => entry.after.jobId === saved.jobId).after.values[field] };
+                }, { id: unitId(id), field: fieldId });
+            };
+            const expected = new Map(genderAuditCases.map(item => [item.id, item.value]));
+            for (const item of genderAuditCases.slice(0, 5)) {
+                await choose(item.id); await control().focus();
+                assert.equal(await page.evaluate(field => window.__clientFixtureApp.ctValues[field], fieldId), item.value, 'Opening/focusing retains exact original Gender ' + item.id);
+                if (!/[\r\n]/.test(item.value)) {
+                    assert.equal(await control().inputValue(), item.value); assert.equal(await control().evaluate(input => input.tagName), 'INPUT');
+                    assert.deepEqual(await control().evaluate(input => Array.from(input.list.options, option => option.value)), ['M', 'F', 'N', 'MP', 'FP', 'NP', item.value]);
+                } else assert.equal(await control().evaluate(input => input.tagName), 'TEXTAREA', 'Multiline original uses a textarea without rewriting raw CR/LF');
+                const name = workspace.getByRole('textbox', { name: 'Name', exact: true }); await name.fill('Edited ' + item.id); await name.press('Tab');
+                assert.equal(await control().evaluate(input => input === document.activeElement), true, 'Tab reaches Gender by worksheet column');
+                await control().press('Shift+Tab'); assert.equal(await name.evaluate(input => input === document.activeElement), true);
+                await control().focus(); await control().press('Control+s');
+                const saved = await checkSaved(item.id, item.value); assert.deepEqual(saved, { saved: item.value, original: item.value, history: item.value });
+            }
+            await choose('raw-custom'); await control().fill('  authored arbitrary value  '); await control().press('Control+s');
+            expected.set('raw-custom', '  authored arbitrary value  '); assert.equal((await checkSaved('raw-custom', expected.get('raw-custom'))).history, expected.get('raw-custom'));
+            await choose('raw-nonexistent'); await control().fill('NONEXISTENT'); await control().press('Control+s');
+            assert.equal((await checkSaved('raw-nonexistent', 'NONEXISTENT')).history, 'NONEXISTENT');
+            await page.evaluate(async ({ id, field }) => {
+                const vm = window.__clientFixtureApp, unit = vm._ctUnitIndex.get(id), values = ClientTextState.valuesFor(unit); values[field] = 'first\nsecond';
+                await vm._ctStore.putDraft(vm.ctWorkspace.scope, id, { values, reviewed: {} });
+            }, { id: unitId('draft-multiline'), field: fieldId });
+            await choose('draft-multiline'); assert.equal(await control().evaluate(input => input.tagName), 'TEXTAREA');
+            await control().evaluate(input => { window.__genderDraftTextarea = input; }); await control().fill('firstsecond');
+            assert.equal(await control().evaluate(input => input === window.__genderDraftTextarea && input === document.activeElement), true, 'Deleting the last draft newline retains the same textarea and focus');
+            assert.equal(await control().evaluate(input => input.tagName), 'TEXTAREA'); await control().press('Control+s');
+            expected.set('draft-multiline', 'firstsecond'); assert.equal((await checkSaved('draft-multiline', 'firstsecond')).original, 'F');
+            await choose('paste-multiline'); await control().fill('head-tail');
+            const pasted = 'one\r\ntwo\n ';
+            await control().evaluate((input, text) => { input.focus(); input.setSelectionRange(5, 9); const data = new DataTransfer(); data.setData('text/plain', text);
+                input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); }, pasted);
+            await page.waitForFunction(() => document.activeElement?.tagName === 'TEXTAREA' && document.activeElement?.getAttribute('aria-label') === 'Gender');
+            assert.equal(await page.evaluate(field => window.__clientFixtureApp.ctValues[field], fieldId), 'head-' + pasted, 'Actual clipboard paste keeps raw CR/LF and replacement selection');
+            assert.deepEqual(await control().evaluate(input => [input.value, input.selectionStart, input.selectionEnd]), ['head-' + pasted.replace(/\r\n?/g, '\n'), ('head-' + pasted.replace(/\r\n?/g, '\n')).length, ('head-' + pasted.replace(/\r\n?/g, '\n')).length]);
+            await control().press('X');
+            assert.equal(await page.evaluate(field => window.__clientFixtureApp.ctValues[field], fieldId), 'head-' + pasted + 'X', 'Ordinary typing after paste preserves untouched raw CRLF');
+            const replacement = 'TH\r\nREE';
+            await control().evaluate((input, text) => { const start = input.value.indexOf('two'); input.setSelectionRange(start, start + 3); const data = new DataTransfer(); data.setData('text/plain', text);
+                input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); }, replacement);
+            const pastedValue = 'head-one\r\n' + replacement + '\n X';
+            await page.waitForFunction(({ field, value }) => window.__clientFixtureApp.ctValues[field] === value, { field: fieldId, value: pastedValue });
+            assert.deepEqual(await control().evaluate(input => [input.selectionStart, input.selectionEnd]), [15, 15], 'Normalized textarea selection maps back to raw CRLF offsets');
+            await control().press('Control+s'); expected.set('paste-multiline', pastedValue); await checkSaved('paste-multiline', expected.get('paste-multiline'));
+            await choose('shift-newline'); await control().focus(); await control().press('Enter');
+            assert.equal(await control().evaluate(input => input.tagName), 'INPUT', 'Plain Enter keeps native combo behavior');
+            await control().evaluate(input => input.setSelectionRange(0, 0)); await control().press('Shift+Enter');
+            await page.waitForFunction(() => document.activeElement?.tagName === 'TEXTAREA' && document.activeElement?.getAttribute('aria-label') === 'Gender');
+            assert.equal(await page.evaluate(field => window.__clientFixtureApp.ctValues[field], fieldId), '\nN');
+            assert.deepEqual(await control().evaluate(input => [input.selectionStart, input.selectionEnd]), [1, 1]);
+            await control().press('Control+s'); expected.set('shift-newline', '\nN'); await checkSaved('shift-newline', '\nN');
+            await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.inlineEditor = true; await vm.$nextTick(); });
+            const inline = workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'raw-space', exact: true }) }); await inline.click();
+            await page.waitForFunction(id => window.__clientFixtureApp.ctSelection === id && !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy, unitId('raw-space'));
+            assert.equal(await control().inputValue(), ' ', 'Inline combo retains single-space metadata'); await control().focus(); await control().press('Shift+Tab');
+            assert.equal(await page.evaluate(() => document.activeElement?.dataset.ctTarget), nameId);
+            await page.keyboard.press('Tab'); assert.equal(await control().evaluate(input => input === document.activeElement), true);
+            await control().press('Control+s'); await checkSaved('raw-space', ' ');
+            const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
+            const download = await downloaded, archive = await JSZip.loadAsync(readFileSync(await download.path())), output = await archive.file('German.xlsm').async('uint8array'), parsed = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'normal' });
+            for (const [id, value] of expected) assert.equal(parsed.units.find(unit => unit.recordId === id).fields.find(field => field.id === fieldId).target, value, 'Downloaded workbook preserves exact saved Gender ' + id);
+            assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_GENDER_VALUE' || warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
+            const original = await JSZip.loadAsync(normal), exported = await JSZip.loadAsync(output);
+            for (const part of ['xl/vbaProject.bin', 'xl/metadata', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels', 'xl/worksheets/sheet2.xml', 'xl/worksheets/sheet3.xml'])
+                assert.deepEqual(await exported.file(part).async('uint8array'), await original.file(part).async('uint8array'), 'Unrelated package part retained: ' + part);
+            assert.deepEqual(await archive.file('German_Gender.xlsm').async('uint8array'), new Uint8Array(gender), 'Untouched paired original remains byte-identical');
+            assert.deepEqual(failures, []); console.log(JSON.stringify({ status: 'PASS', genderOnly: true, normalMode: true,
+                results: ['Raw arbitrary Gender originals, six native suggestions, free text/NONEXISTENT, worksheet Tab and full/inline Ctrl+S',
+                    'Original/draft multiline mount, deleting final newline retains textarea/focus, actual raw CRLF paste and Shift+Enter promote with caret',
+                    'Real IndexedDB Saved/history and workbook download retain exact values and unrelated package parts'] }, null, 2)); return;
+        }
         if (process.argv.includes('--german-import-audit')) {
             const productionDirectory = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2');
             const originals = ['German.xlsm', 'German_Gender.xlsm'].map(name => {
@@ -178,7 +284,7 @@ async function run() {
             assert.equal(facts.groups, 1); assert.equal(facts.language, 'German'); assert.equal(facts.mode, 'clienttext');
             assert.equal(facts.units, 158386); assert.deepEqual(facts.records, { normal: 89902, gender: 68484 });
             assert.equal(facts.manifestUnits, facts.units, 'The browser worker builds a compact manifest for every parsed German record');
-            assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: index ? 34 : 0 })));
+            assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: index ? 24 : 0 })));
             assert.equal(facts.saved, 0, 'Preparation creates no Saved translation work'); assert.deepEqual(publications, [], 'Audit never publishes content to an API');
             for (const original of originals) assert.equal(createHash('sha256').update(readFileSync(original.path)).digest('hex'), original.sha256, 'German original remains unchanged');
             assert.deepEqual(failures, [], 'German production import has no browser script errors');
@@ -789,7 +895,7 @@ async function run() {
         await name.fill('Épée'); await workspace.getByRole('button', { name: 'Save', exact: true }).click();
         await page.waitForFunction(() => Object.values(window.__clientFixtureApp.ctSaved).some(saved => Object.values(saved.values).includes('Épée')));
         await workspace.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
-        await workspace.getByRole('combobox', { name: 'Gender', exact: true }).selectOption('F');
+        await workspace.getByRole('combobox', { name: 'Gender', exact: true }).fill('F');
         await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
         await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
         await workspace.getByRole('button', { name: 'record', exact: true }).click();
@@ -1012,7 +1118,7 @@ async function run() {
         await workspace.getByRole('button', { name: 'Close', exact: true }).click();
         await page.setViewportSize(desktopSizes[0]); await page.evaluate(async () => { document.documentElement.setAttribute('data-theme', 'modern-dark'); const vm = window.__clientFixtureApp; vm.inlineEditor = false; await vm.$nextTick(); });
         await navigation.getByRole('button', { name: 'Nouns', exact: true }).click(); await workspace.getByRole('button', { name: 'noun', exact: true }).click();
-        await workspace.getByRole('combobox', { name: 'Gender', exact: true }).selectOption('M');
+        await workspace.getByRole('combobox', { name: 'Gender', exact: true }).fill('M');
         await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
         await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
         for (const size of desktopSizes) {

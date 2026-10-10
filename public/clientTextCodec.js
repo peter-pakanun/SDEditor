@@ -250,8 +250,7 @@
                         originalMissing: required && !target.trim(), outdated: originalFill === ORANGE && !State.audioOnly(source),
                         sourceCell: definition.sourceColumn ? letters(definition.sourceColumn) + number : '', targetCell: letters(definition.targetColumn) + number,
                         originalFill, originalStyleId, ...(definition.form ? { form: definition.form, group: definition.group } : {}) };
-                    if (field.kind !== 'form' && target.trim() === 'NONEXISTENT') warnings.push({ code: 'CLIENTTEXT_NONEXISTENT_FIELD', sheet: name, cell: field.targetCell, message: 'NONEXISTENT is only supported in a gender-form field.' });
-                    if (field.kind === 'gender' && target && !['M', 'F', 'N', 'MP', 'FP', 'NP'].includes(target)) warnings.push({ code: 'CLIENTTEXT_GENDER_VALUE', sheet: name, cell: field.targetCell, message: 'Unknown Gender value retained: ' + target + '.' });
+                    if (field.kind === 'text' && target.trim() === 'NONEXISTENT') warnings.push({ code: 'CLIENTTEXT_NONEXISTENT_FIELD', sheet: name, cell: field.targetCell, message: 'NONEXISTENT is only supported in a gender-form field.' });
                     return field;
                 });
                 const metadata = Object.fromEntries(schema.metadata.filter(item => !NOTES.has(item.name)).map(item => [item.name, read(item.column)])), developerNotes = schema.metadata.filter(item => NOTES.has(item.name)).map(item => read(item.column)).filter(Boolean).join('\n');
@@ -385,8 +384,7 @@
                 if (!own(record.values, field.id) && !own(record.reviewed, field.id) && !(record.outdated || []).includes(field.id)) continue;
                 const value = own(record.values, field.id) ? record.values[field.id] : field.target;
                 if (typeof value !== 'string') throw error('Saved ClientText field is not text.');
-                if (field.kind !== 'form' && value.trim() === 'NONEXISTENT') throw error('NONEXISTENT is only valid in a gender-form field.');
-                if (field.kind === 'gender' && value && !['M', 'F', 'N', 'MP', 'FP', 'NP'].includes(value)) throw error('Invalid saved Gender value.');
+                if (field.kind === 'text' && value.trim() === 'NONEXISTENT') throw error('NONEXISTENT is only valid in a gender-form field.');
                 const chosen = chosenFill(field, value, record), fill = chosen === field.originalFill ? null : chosen;
                 if (value === field.target && !fill) continue;
                 if (fill && !styles) styles = stylePatcher(await part(zip, 'xl/styles.xml', true));

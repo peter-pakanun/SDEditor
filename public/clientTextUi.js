@@ -19,6 +19,10 @@
     // visible so a durable draft can always be reopened after a reload.
     const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
+    const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
+    function genderRawOffset(value,offset) {
+        let raw=0,shown=0;while(raw<value.length && shown<offset){raw+=value[raw]==='\r' && value[raw+1]==='\n'?2:1;shown++;}return raw;
+    }
     function detect(filename) {
         const stem=String(filename).replace(/\.[^.]+$/,''),name=stem.replace(/[_.\s-]+/g,' ').trim().toLowerCase();
         const language=teams.find(team=>name===team.toLowerCase() || name.startsWith(team.toLowerCase()+' ')) || '';
@@ -554,7 +558,7 @@
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
-                this._ctInlineReturn=null;this._ctCloseRun=null;this.ctInlineClosed=false;
+                this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this.ctInlineClosed=false;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
@@ -819,6 +823,75 @@
             ctEdited(field) {
                 this.ctReviewed[field.id] = this.ctReviewHash(field);
                 this.ctDraftDirty = true; this.ctQueueDraft();
+            },
+            ctGenderSuggestions(field) {
+                const original=field.target;
+                return typeof original==='string' && original!=='' && !/[\r\n]/.test(original) && !genderSuggestions.includes(original)
+                    ? [...genderSuggestions,original] : genderSuggestions.slice();
+            },
+            ctGenderSuggestionLabel(value,field) {
+                if(genderSuggestions.includes(value))return value;
+                if(/^ +$/.test(value))return 'Original value ('+value.length+' '+(value.length===1?'space':'spaces')+')';
+                if(/^\s+$/.test(value))return 'Original value ('+value.length+' whitespace characters)';
+                return value===field.target?'Original value: '+value:value;
+            },
+            ctGenderMultiline(field) {
+                return /[\r\n]/.test(field.target || '') || /[\r\n]/.test(this.ctValues[field.id] || '');
+            },
+            ctGenderCanEdit(field,input,event={}) {
+                return field?.kind==='gender' && !event.defaultPrevented && !event.isComposing && event.keyCode!==229
+                    && !input?.composing && !this.ctKeyboardBlocked() && this.ctKeyboardTarget(field,input)
+                    && typeof input?.value==='string';
+            },
+            ctGenderEdited(field,event) {
+                const input=event?.target;
+                if(!this.ctGenderCanEdit(field,input,event))return false;
+                let next=input.value;const value=this.ctValues[field.id] ?? '';
+                // Preserve raw CRLF outside the user's edit, even though the
+                // textarea's value and selection use normalized LF characters.
+                if(input.tagName==='TEXTAREA' && value.includes('\r') && !next.includes('\r')){
+                    const shown=value.replace(/\r\n?/g,'\n');let start=0,oldEnd=shown.length,newEnd=next.length;
+                    while(start<oldEnd && start<newEnd && shown[start]===next[start])start++;
+                    while(oldEnd>start && newEnd>start && shown[oldEnd-1]===next[newEnd-1]){oldEnd--;newEnd--;}
+                    next=value.slice(0,genderRawOffset(value,start))+next.slice(start,newEnd)+value.slice(genderRawOffset(value,oldEnd));
+                }
+                this.ctValues[field.id]=next;this.ctEdited(field);
+                if(input.tagName==='TEXTAREA')this.ctResizeField(input);
+                return true;
+            },
+            ctGenderPaste(field,event) {
+                const text=event.clipboardData?.getData?.('text/plain');
+                if(typeof text!=='string' || !/[\r\n]/.test(text) || !this.ctGenderCanEdit(field,event.target,event))return false;
+                event.preventDefault();event.stopPropagation?.();return this.ctInsertGenderText(field,event.target,text);
+            },
+            ctGenderKeydown(field,event) {
+                if(event.key==='Enter' && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey
+                    && this.ctGenderCanEdit(field,event.target,event)){
+                    event.preventDefault();event.stopPropagation?.();return this.ctInsertGenderText(field,event.target,'\n');
+                }
+                return this.ctTargetKeydown(field,event);
+            },
+            async ctInsertGenderText(field,input,text) {
+                if(typeof text!=='string' || !this.ctGenderCanEdit(field,input))return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,selectionRun=this._ctSelectRun,full=this.ctEditor,
+                    run=this._ctGenderInsertRun={},value=this.ctValues[field.id] ?? '';
+                // Textareas expose normalized LF offsets, while originals and
+                // pasted text can retain CRLF. Map only the selection coordinates.
+                const rawOffset=offset=>{
+                    if(input.tagName!=='TEXTAREA')return Math.min(offset,value.length);
+                    return genderRawOffset(value,offset);
+                };
+                const start=rawOffset(Number.isInteger(input.selectionStart)?input.selectionStart:input.value.length),
+                    end=rawOffset(Number.isInteger(input.selectionEnd)?input.selectionEnd:input.value.length),
+                    next=value.slice(0,start)+text+value.slice(end),caret=next.slice(0,start+text.length).replace(/\r\n?/g,'\n').length;
+                this.ctValues[field.id]=next;this.ctFocusedField=field.id;this.ctEdited(field);
+                await this.$nextTick?.();
+                if(this._ctGenderInsertRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selectionRun
+                    || this.ctEditor!==full || this.ctInlineClosed || this.ctKeyboardBlocked() || this.ctFocusedField!==field.id
+                    || this.ctValues[field.id]!==next)return true;
+                const target=this.ctTargetInputs().find(target=>target.dataset.ctTarget===field.id),active=root.document?.activeElement;
+                if(!target || active && active!==input && active!==target && active!==root.document?.body && active!==root.document?.documentElement)return true;
+                target.focus?.({preventScroll:true});target.setSelectionRange?.(caret,caret,'none');this.ctResizeField(target);return true;
             },
             ctMarkReviewed(field) { this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChooseAlternative(choice, side) { const field = this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId); this.ctValues[choice.fieldId] = side === 'local' ? choice.local : choice.upstream ?? choice.remote; this.ctChoices = this.ctChoices.filter(item=>item!==choice); if(field)this.ctEdited(field); },
@@ -1703,10 +1776,22 @@
                 </div>
             </section>
         </div>` };
-    const targetComponent = { props: {host:Object,field:Object,compact:Boolean}, template: `
+    const targetComponent = { props: {host:Object,field:Object,compact:Boolean},
+        data() {return {genderMultilineLatched:false};},
+        computed: {
+            genderMultilineRequired() {return this.field.kind==='gender' && this.host.ctGenderMultiline(this.field);},
+            genderMultiline() {return this.genderMultilineRequired || this.genderMultilineLatched;},
+        },
+        watch: {
+            field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
+            genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
+        }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+field.form : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
-            <select v-if="field.kind === 'gender'" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @change="host.ctEdited(field)" @keydown="host.ctTargetKeydown(field,$event)" aria-label="Gender"><option value="">Blank</option><option v-for="gender in ['M','F','N','MP','FP','NP']" :key="gender">{{ gender }}</option></select>
+            <template v-if="field.kind === 'gender'">
+                <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
+                <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
+            </template>
             <div v-else class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id;host.ctCompletionSelectionChanged(field,$event)" @blur="host.ctCloseCompletion()" @select="host.ctCompletionSelectionChanged(field,$event)" @click="host.ctCompletionSelectionChanged(field,$event)" @keyup="host.ctCompletionSelectionChanged(field,$event)" @input="host.ctResizeField($event.target);host.ctEdited(field);host.ctSuggest(field,$event)" @keydown="host.ctTargetKeydown(field,$event)" :aria-expanded="host.ctCompletion?.fieldId===field.id" :aria-controls="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell : undefined" :aria-activedescendant="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell+'-'+host.ctCompletion.selectedIndex : undefined" :aria-label="field.name + (field.form ? ' '+field.form : '')" :lang="host.translationEditorBcp47 || undefined" :placeholder="field.kind === 'form' && !field.required ? 'Optional translation' : 'Translation'" spellcheck="false" rows="1"></textarea></div>
             <div v-if="host.ctCompletion?.fieldId===field.id" :id="'ct-completion-'+field.targetCell" class="ctCompletion" role="listbox" aria-label="Source and Dictionary completions"><button v-for="(item,index) in host.ctCompletion.items" :key="item.value" :id="'ct-completion-'+field.targetCell+'-'+index" type="button" role="option" tabindex="-1" :class="{selected:host.ctCompletion.selectedIndex===index}" :aria-selected="host.ctCompletion.selectedIndex===index" @mousedown.prevent @click="host.ctApplyCompletion(field,item)">{{ item.label }}</button></div>
             <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button></div>

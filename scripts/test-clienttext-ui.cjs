@@ -677,7 +677,7 @@ function keyboardHarness(original=worksheetUnit(),changes={}){
         :selector==='textarea'?inputs().filter(input=>input.tagName==='TEXTAREA'):selector.startsWith('button,')?[...inputs(),...controls]:[]};
     function inputFor(unit,field){
         const key=JSON.stringify([field.id,!!app.ctEditor]);let fields=nodes.get(unit);if(!fields){fields=new Map();nodes.set(unit,fields);}if(fields.has(key))return fields.get(key);
-        const input={dataset:{ctTarget:field.id},tagName:field.kind==='gender'?'SELECT':'TEXTAREA',tabIndex:0,isConnected:true,disabled:false,readOnly:false,
+        const input={dataset:{ctTarget:field.id},tagName:field.kind==='gender'&&!app.ctGenderMultiline(field)?'INPUT':'TEXTAREA',tabIndex:0,isConnected:true,disabled:false,readOnly:false,
             selectionStart:0,selectionEnd:0,selectionDirection:'none',style:{},scrollHeight:12,scrollTop:0,
             get value(){return app.ctValues[field.id] ?? '';},set value(value){app.ctValues[field.id]=value;},
             getAttribute(name){return name==='data-ct-target'?field.id:null;},
@@ -698,6 +698,103 @@ function keyboardHarness(original=worksheetUnit(),changes={}){
         stopPropagation(){this.propagationStopped=true;}});
     return {...h,inputFor,inputs,event,focuses,row,region,controls,documentControls};
 }
+test('Gender suggestions retain exact originals and opening inline/full editors never normalizes arbitrary metadata',async()=>{
+    for(const value of ['-', ' ', '  custom\tvalue  ', 'NONEXISTENT', ' first\r\nsecond\n '])for(const full of [false,true]){
+        const original=worksheetUnit('RawGender'),gender=original.fields.find(field=>field.kind==='gender');gender.target=value;
+        const snapshot=clone(original),{app,inputFor}=keyboardHarness(original,{ctSelection:'',ctValues:{}});
+        assert.equal(await app.ctSelect(original,full),true);assert.equal(app.ctValues[gender.id],value);assert.equal(inputFor(original,gender).value,value);
+        const suggestions=Array.from(app.ctGenderSuggestions(gender));assert.deepEqual(suggestions.slice(0,6),['M','F','N','MP','FP','NP']);
+        assert.equal(suggestions.includes(value),!/[\r\n]/.test(value),'Native datalist offers one-line original metadata without trimming it');
+        assert.equal(app.ctGenderMultiline(gender),/[\r\n]/.test(value));
+        assert.equal(inputFor(original,gender).tagName,/[\r\n]/.test(value)?'TEXTAREA':'INPUT');
+        if(value===' ')assert.equal(app.ctGenderSuggestionLabel(value,gender),'Original value (1 space)');
+        assert.deepEqual(original,snapshot);assert.equal(app.ctDraftDirty,false,'Mount/focus creates no authored draft');
+    }
+});
+
+test('editing another field saves raw Gender values through actual CT save, immutable originals and history',async()=>{
+    for(const value of ['-', ' ', ' custom\t@literal\\n ', 'NONEXISTENT', ' first\r\nsecond\n ']){
+        const original=worksheetUnit('SaveRawGender'),gender=original.fields.find(field=>field.kind==='gender'),prose=original.fields[0];gender.target=value;
+        const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+        const {app}=visibleFieldsHarness(original,{ctDraftDirty:true});app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+        app.ctValues[prose.id]='Authored prose';assert.equal(await app.ctSave(),true);
+        const saved=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id),retained=await f.store.getUnit(scope,original.id);
+        assert.equal(saved.values[gender.id],value);assert.equal(history.at(-1).after.values[gender.id],value);
+        assert.equal(retained.fields.find(field=>field.kind==='gender').target,value);assert.equal(saved.values[prose.id],'Authored prose');
+    }
+});
+
+test('Gender input keeps authored strings verbatim and ignores IME, stale targets and blocked scopes',()=>{
+    const {app,original,inputFor}=keyboardHarness(),gender=original.fields.find(field=>field.kind==='gender'),input=inputFor(original,gender),edited=[];
+    app.ctQueueDraft=()=>edited.push(app.ctValues[gender.id]);app.ctResizeField=()=>{};
+    Object.defineProperty(input,'value',{value:'  custom\t@literal\\n  ',writable:true,configurable:true});
+    assert.equal(app.ctGenderEdited(gender,{target:input}),true);assert.equal(app.ctValues[gender.id],input.value);assert.deepEqual(edited,[input.value]);
+    input.value='NONEXISTENT';assert.equal(app.ctGenderEdited(gender,{target:input}),true);assert.equal(app.ctValues[gender.id],'NONEXISTENT');
+    const accepted=app.ctValues[gender.id],drafts=edited.length;
+    for(const value of [null,0,false,[],{}]){input.value=value;assert.equal(app.ctGenderEdited(gender,{target:input}),false);assert.equal(app.ctValues[gender.id],accepted);}
+    input.value='Uncommitted IME';assert.equal(app.ctGenderEdited(gender,{target:input,isComposing:true}),false);
+    input.composing=true;assert.equal(app.ctGenderEdited(gender,{target:input}),false);input.composing=false;
+    assert.equal(app.ctGenderEdited(gender,{target:{...input,value:'Stale element'}}),false);
+    app.ctBusy=true;assert.equal(app.ctGenderEdited(gender,{target:input}),false);app.ctBusy=false;
+    app.cloudHistoryVisible=true;assert.equal(app.ctGenderEdited(gender,{target:input}),false);app.cloudHistoryVisible=false;
+    app.ctActive=false;assert.equal(app.ctGenderEdited(gender,{target:input}),false);
+    assert.equal(app.ctValues[gender.id],accepted);assert.equal(edited.length,drafts);
+});
+
+test('editable Gender input keeps worksheet Tab order and Ctrl+S saves its raw value in inline/full mode',async()=>{
+    for(const full of [false,true]){
+        const original=worksheetUnit('GenderKeyboard'),gender=original.fields.find(field=>field.kind==='gender');gender.target='  arbitrary value  ';
+        const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+        const {app,inputFor,event,focuses}=keyboardHarness(original,{ctEditor:full,ctDraftDirty:true,autoOpenNextFile:false});
+        app._ctStore=f.store;app.ctLoadMemory=()=>{};app.ctSync=()=>{};
+        const input=inputFor(original,gender);assert.equal(input.tagName,'INPUT');input.focus();
+        const forward=event(gender,'Tab');await app.ctTargetKeydown(gender,forward);assert.equal(forward.defaultPrevented,true);assert.equal(focuses.at(-1).fieldId,original.fields[0].id);
+        const reverse=event(original.fields[0],'Tab',{shiftKey:true});await app.ctTargetKeydown(original.fields[0],reverse);assert.equal(reverse.defaultPrevented,true);assert.equal(focuses.at(-1).fieldId,gender.id);
+        for(const key of ['ArrowUp','ArrowDown']){const native=event(gender,key);app.ctTargetKeydown(gender,native);assert.equal(native.defaultPrevented,undefined,'Datalist arrows keep their native behavior');}
+        const save=event(gender,'s',{ctrlKey:true,code:'KeyS'});await app.ctKey(save);assert.equal(save.defaultPrevented,true);
+        const saved=(await f.store.getSaved(scope))[original.id];assert.equal(saved.values[gender.id],gender.target);assert.equal(app.ctValues[gender.id],gender.target);
+    }
+});
+
+test('ordinary Gender textarea edits retain untouched raw CRLF and distinguish intentional newline replacement',()=>{
+    const original=worksheetUnit('CRLFGender'),gender=original.fields.find(field=>field.kind==='gender');gender.target='head-one\r\ntwo\rthree\n ';
+    const {app,inputFor}=keyboardHarness(original),input=inputFor(original,gender);app.ctQueueDraft=()=>{};app.ctResizeField=()=>{};
+    Object.defineProperty(input,'value',{value:'head-one\ntwo\nthree\n X',writable:true,configurable:true});
+    assert.equal(app.ctGenderEdited(gender,{target:input}),true);assert.equal(app.ctValues[gender.id],'head-one\r\ntwo\rthree\n X');
+    input.value='head-one\nTWO\nthree\n X';assert.equal(app.ctGenderEdited(gender,{target:input}),true);
+    assert.equal(app.ctValues[gender.id],'head-one\r\nTWO\rthree\n X','Only edited characters are replaced inside the original raw string');
+    input.value='head-oneTWO\nthree\n X';assert.equal(app.ctGenderEdited(gender,{target:input}),true);
+    assert.equal(app.ctValues[gender.id],'head-oneTWO\rthree\n X','Deleting a displayed newline removes its complete original CRLF');
+});
+
+test('Gender multiline paste and Shift+Enter preserve raw selection and fence delayed focus across scope changes',async()=>{
+    const original=worksheetUnit('PasteGender'),gender=original.fields.find(field=>field.kind==='gender');gender.target='head-one\r\ntwo\n ';
+    const {app,inputFor,event,focuses,window}=keyboardHarness(original),input=inputFor(original,gender);app.ctQueueDraft=()=>{};app.ctResizeField=()=>{};
+    Object.defineProperty(input,'value',{get:()=>app.ctValues[gender.id].replace(/\r\n?/g,'\n'),configurable:true});input.focus();input.setSelectionRange(9,12);
+    const paste={...event(gender,'paste'),clipboardData:{getData:()=> 'TH\r\nREE'}};
+    assert.equal(await app.ctGenderPaste(gender,paste),true);assert.equal(paste.defaultPrevented,true);
+    assert.equal(app.ctValues[gender.id],'head-one\r\nTH\r\nREE\n ');assert.deepEqual([input.selectionStart,input.selectionEnd],[15,15]);
+    const oneLine={...event(gender,'paste'),clipboardData:{getData:()=> 'native paste'}};assert.equal(app.ctGenderPaste(gender,oneLine),false);assert.equal(oneLine.defaultPrevented,undefined);
+    input.setSelectionRange(0,0);const enter=event(gender,'Enter',{shiftKey:true});assert.equal(await app.ctGenderKeydown(gender,enter),true);
+    assert.equal(app.ctValues[gender.id],'\nhead-one\r\nTH\r\nREE\n ');assert.deepEqual([input.selectionStart,input.selectionEnd],[1,1]);
+    const before=app.ctValues[gender.id];for(const changes of [{isComposing:true},{keyCode:229},{ctrlKey:true},{metaKey:true},{altKey:true}]){
+        const key=event(gender,'Enter',{shiftKey:true,...changes});await app.ctGenderKeydown(gender,key);assert.equal(app.ctValues[gender.id],before);assert.equal(key.defaultPrevented,undefined);}
+    const pending=deferred();app.$nextTick=()=>pending.promise;const held=event(gender,'Enter',{shiftKey:true}),inserting=app.ctGenderKeydown(gender,held);await settle();
+    const old=app.ctValues[gender.id],priorFocus=focuses.length;app.ctWorkspace={scope:{...scope,groupId:'replacement'}};app.ctValues={[gender.id]:'Replacement raw text'};
+    window.document.activeElement={tagName:'INPUT'};pending.resolve();await inserting;
+    assert.notEqual(old,'Replacement raw text');assert.equal(app.ctValues[gender.id],'Replacement raw text');assert.equal(focuses.length,priorFocus,'Late insertion cannot steal focus or publish text into a replacement group');
+});
+
+test('Gender controls bind raw values explicitly with native suggestions and composition-safe input events',()=>{
+    const {window}=harness(),template=window.ClientTextUI.targetComponent.template;
+    assert.match(template,/<input type="text"[^>]*:list="'ctgender-'\+field.targetCell"[^>]*:value="host.ctValues\[field.id\]"/);
+    assert.match(template,/<datalist[^>]*><option[^>]*ctGenderSuggestions\(field\)/);
+    assert.match(template,/@compositionend="host.ctGenderEdited\(field,\$event\)"/);
+    assert.match(template,/<textarea[^>]*:value="host.ctValues\[field.id\]"[^>]*@input="host.ctGenderEdited\(field,\$event\)"/);
+    assert.doesNotMatch(template,/<select[^>]*aria-label="Gender"/);
+    assert.doesNotMatch(template,/<(?:input|textarea)[^>]*v-model[^>]*aria-label="Gender"/,'Mounting a control cannot feed sanitized browser text back into metadata');
+});
+
 test('ClientText Dictionary lists all entries with game-scoped matches first and searches notes and alternates',()=>{
     const unrelated={_id:'unrelated',find:'Unrelated',replace:'Autre',alts:[],tlnote:'Note to search'},
         matched={_id:'matched',find:'FireDamage',replace:'Feu',alts:[{_id:'alt',find:'Burning damage',replace:'Flammes'}]},
