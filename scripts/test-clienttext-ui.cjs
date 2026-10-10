@@ -30,7 +30,9 @@ function assignmentHarness(changes={}){
     return h;
 }
 function listHarness(changes={}){
-    const h=harness({inlineEditor:false,pageSize:2,$nextTick:async()=>{},$refs:{},...changes});
+    // Mechanics fixtures deliberately show complete records; product defaults
+    // are asserted separately from mixin.data() in the status-filter test.
+    const h=harness({inlineEditor:false,pageSize:2,ctSelectedFilters:['missing','saved','revised','outdated','error','warning','unchanged'],$nextTick:async()=>{},$refs:{},...changes});
     for(const name of ['ctRows','ctPageRows','ctPageCount','ctEffectivePageSize','ctCounts','ctStatusFilterOptions','ctDiagnosticCounts'])
         Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
     return h;
@@ -116,13 +118,13 @@ test('late same-ID hydration cannot publish old blank-field drafts or focus into
     assert.equal(app.ctValues[replacement.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
 });
 
-test('ClientText status chips use OR matching, scoped diagnostic IDs and keep complete durable-draft records visible',()=>{
+test('ClientText status chips default Unchanged off and use OR matching with scoped diagnostic IDs',()=>{
     const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
-        {app}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
-    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning','unchanged']);
-    assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
-    app.ctSelectedFilters=['missing','saved','revised','outdated','error','warning'];
+        {app,mixin}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
+    app.ctSelectedFilters=mixin.data().ctSelectedFilters;
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning']);
     assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id,outdated.id]);
+    app.ctSelectedFilters.push('unchanged');assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
     app.ctSelectedFilters=['unchanged'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id]);
     app.ctDiagnostics={[complete.id]:[{severity:'error'},{severity:'error'},{severity:'warning'}],[missing.id]:[{severity:'warning'}]};
     assert.equal(app.ctDiagnosticCounts.error,1);assert.equal(app.ctDiagnosticCounts.warning,2);
@@ -1383,4 +1385,112 @@ test('local multi-team imports retain complete content membership in every cache
         assert.equal(item.metadata.group.id,item.captured.groupId);
     }
     assert.notEqual(imports[0].captured.groupId,imports[1].captured.groupId);
+});
+
+function uploadPreparationHarness(names,game='poe2'){
+    const h=harness({gameVersion:game,ctUploadVersion:{id:'selected-release',game,branchId:scope.branchId},ctUploadLocal:false,
+        ctPolicy:{clientTextRoles:{default:['normal'],German:['normal','gender'],French:['normal','gender']}}}),
+        parseCalls=[],manifestCalls=[],requests=[],storeCalls=[],files=names.map(name=>new File(['Exact original bytes: '+name],name));
+    h.app.ctReport=()=>{};
+    h.app._ctWorker={
+        async parseWorkbook(bytes,options){
+            parseCalls.push({bytes:Buffer.from(bytes).toString('utf8'),filename:options.filename,role:options.role,language:options.language,signal:options.signal});
+            const original={...unit(),role:options.role,id:JSON.stringify([options.role,'ClientStrings','ID/1'])},artifactHash=S.hash(Buffer.from(bytes).toString('utf8'));
+            return{units:[original],artifactHash,assetHash:artifactHash,sheets:[{name:'ClientStrings',headers:[]}],warnings:[]};
+        },
+        async buildManifest(units,assets,options){
+            manifestCalls.push({units:units.slice(),assets:assets.slice(),signal:options.signal});return S.buildManifest(units,assets);
+        }
+    };
+    h.app._ctStore=new Proxy({}, {get(_target,name){return async()=>{storeCalls.push(String(name));throw Error('Preparation must not write to storage: '+String(name));};}});
+    h.app._cloud={async request(url,options){requests.push({url,options});assert.match(url,/^\/v1\/content-predecessor\?/);
+        assert.equal(options?.method,undefined,'preparation only reads predecessor metadata');return{version:null,group:null};}};
+    h.app.ctChooseFiles({target:{files}});return{...h,files,parseCalls,manifestCalls,requests,storeCalls};
+}
+
+for(const game of ['poe1','poe2'])test('neutral German normal/Gender filenames prepare in the explicitly selected '+game+' version',async()=>{
+    const {app,files,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(['German_Gender.xlsm','German.xlsm'],game);
+    assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>[candidate.file.name,candidate.language,candidate.role]),
+        [['German_Gender.xlsm','German','gender'],['German.xlsm','German','normal']]);
+    await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(app.ctPrepared.length,1);assert.equal(app.ctUploading,false);
+    const group=app.ctPrepared[0];assert.equal(group.contentMode,'clienttext');assert.equal(group.language,'German');assert.deepEqual(Array.from(group.assignments),['German']);
+    assert.deepEqual(Array.from(group.assets,asset=>[asset.role,asset.name]),[['normal','German.xlsm'],['gender','German_Gender.xlsm']]);
+    assert.deepEqual(parseCalls.map(call=>[call.filename,call.role,call.language]),[['German.xlsm','normal','German'],['German_Gender.xlsm','gender','German']]);
+    for(const asset of group.assets){const original=files.find(file=>file.name===asset.name);assert.equal(asset.blob,original);assert.equal(await asset.blob.text(),'Exact original bytes: '+asset.name);}
+    assert.equal(manifestCalls.length,1);assert.equal(group.manifest.descriptors.length,2);assert.equal(storeCalls.length,0);assert.equal(requests.length,1);
+    assert.ok(requests[0].url.includes('game='+game));assert.ok(requests[0].url.includes('versionId=selected-release'));
+});
+
+for(const game of ['poe1','poe2'])test('workbook PoE filename markers are informational under the explicitly selected '+game+' release',async()=>{
+    const other=game==='poe2'?'PoE1':'PoE2';
+    for(const names of [['German_'+other+'.xlsm','German_Gender.xlsm'],['German.xlsm','German_Gender_'+other+'.xlsm'],['German_PoE1.xlsm','German_Gender_PoE2.xlsm']]){
+        const {app,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(names,game);await app.ctPrepareUpload();
+        assert.equal(app.ctUploadError,'');assert.equal(app.ctPrepared.length,1);assert.equal(app.ctUploading,false);
+        assert.equal(parseCalls.length,2);assert.equal(manifestCalls.length,1);assert.equal(requests.length,1);assert.equal(storeCalls.length,0);
+        assert.deepEqual(Array.from(app.ctPrepared[0].assets,asset=>asset.name),names);assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>candidate.file.name),names);
+        assert.ok(requests[0].url.includes('game='+game),'the selected release remains the preparation context');
+    }
+});
+
+test('bounded workbook game markers preserve neutral PoE20 names and case-insensitive explicit game names',async()=>{
+    for(const game of ['poe1','poe2'])for(const marker of ['PoE20','NotPoE2','PoE2copy']){
+        const names=['German_'+marker+'.xlsm','German_Gender_'+marker+'.xlsm'],{app,parseCalls}=uploadPreparationHarness(names,game);
+        await app.ctPrepareUpload();assert.equal(app.ctUploadError,'',game+' '+marker);assert.equal(parseCalls.length,2);
+        assert.deepEqual(Array.from(app.ctPrepared[0].assets,asset=>asset.name),names);
+    }
+    const names=['gErMaN_pOe2.XlSm','GERMAN_gEnDeR_pOe2.XLSM'],correct=uploadPreparationHarness(names,'poe2');await correct.app.ctPrepareUpload();
+    assert.equal(correct.app.ctUploadError,'');assert.deepEqual(correct.parseCalls.map(call=>[call.filename,call.language,call.role]),
+        [[names[0],'German','normal'],[names[1],'German','gender']]);assert.deepEqual(Array.from(correct.app.ctPrepared[0].assets,asset=>asset.name),names);
+    const other=uploadPreparationHarness(names,'poe1');await other.app.ctPrepareUpload();assert.equal(other.app.ctUploadError,'');assert.equal(other.parseCalls.length,2);
+    assert.deepEqual(Array.from(other.app.ctPrepared[0].assets,asset=>asset.name),names);
+});
+
+test('existing explicitly marked French originals continue to prepare their paired group unchanged',async()=>{
+    for(const game of ['poe1','poe2']){
+        const marker=game==='poe2'?'PoE2':'PoE1',names=['French_'+marker+'.xlsm','French_Gender_'+marker+'.xlsm'],
+            {app,parseCalls}=uploadPreparationHarness(names,game);await app.ctPrepareUpload();
+        assert.equal(app.ctUploadError,'');assert.deepEqual(parseCalls.map(call=>[call.filename,call.role,call.language]),
+            [[names[0],'normal','French'],[names[1],'gender','French']]);assert.deepEqual(Array.from(app.ctPrepared[0].assignments),['French']);
+        assert.deepEqual(Array.from(app.ctPrepared[0].assets,asset=>asset.name),names);
+    }
+});
+
+test('relaxed workbook filename handling still rejects missing, duplicate and unsupported roles before parsing',async()=>{
+    const cases=[{names:['German.xlsm'],error:/requires exactly.*normal.*gender/i},
+        {names:['German_Gender.xlsm'],error:/requires exactly.*normal.*gender/i},
+        {names:['German.xlsm','German.xlsm'],error:/Duplicate normal workbook/i},
+        {names:['German.xlsm','German_Gendered.xlsm'],error:/Duplicate normal workbook/i},
+        {names:['German.xlsm','German_Gender.xlsm'],role:'unexpected',error:/requires exactly.*normal.*gender/i},
+        {names:['French_PoE1.xlsm'],error:/requires exactly.*normal.*gender/i}];
+    for(const changed of cases){
+        const {app,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(changed.names);if(changed.role)app.ctUploadFiles[0].role=changed.role;
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,changed.error);assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploading,false);
+        assert.equal(parseCalls.length,0);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);assert.equal(storeCalls.length,0);
+    }
+});
+
+test('language-team detection requires a bounded name and still asks for confirmation instead of guessing',async()=>{
+    for(const filename of ['Germanium.xlsm','German2.xlsm','Frenchman.xlsm']){
+        const {app,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness([filename]);assert.equal(app.ctUploadFiles[0].language,'');
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,/Confirm the language team/i);assert.ok(app.ctUploadError.includes(filename));
+        assert.equal(app.ctPrepared.length,0);assert.equal(parseCalls.length,0);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);assert.equal(storeCalls.length,0);
+    }
+});
+
+test('structural workbook parser failure prevents prepared publication while retaining exact selected originals',async()=>{
+    const {app,files,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(['German.xlsm','German_Gender.xlsm']),
+        parse=app._ctWorker.parseWorkbook,attempts=[];
+    app._ctWorker.parseWorkbook=async(bytes,options)=>{attempts.push(options.filename);if(options.role==='gender')throw Error('Unsupported gender-form columns in sheet Words_Gender.');
+        return parse(bytes,options);};
+    await app.ctPrepareUpload();assert.match(app.ctUploadError,/Unsupported gender-form columns/i);assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploading,false);
+    assert.deepEqual(attempts,['German.xlsm','German_Gender.xlsm']);assert.equal(parseCalls.length,1);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);assert.equal(storeCalls.length,0);
+    assert.equal(app.ctProgress,null);
+    for(let index=0;index<files.length;index++){assert.equal(app.ctUploadFiles[index].file,files[index]);assert.equal(await files[index].text(),'Exact original bytes: '+files[index].name);}
+});
+
+test('paired neutral originals prepare while Missing text files are ignored without renaming assets',async()=>{
+    const {app,parseCalls}=uploadPreparationHarness(['German.xlsm','German_Gender.xlsm','Missing_German.txt']);
+    assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>candidate.file.name),['German.xlsm','German_Gender.xlsm']);
+    await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(parseCalls.length,2);
+    assert.deepEqual(Array.from(app.ctPrepared[0].assets,asset=>asset.name),['German.xlsm','German_Gender.xlsm']);
 });

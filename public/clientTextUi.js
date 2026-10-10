@@ -20,8 +20,9 @@
     const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     function detect(filename) {
-        const name = String(filename), language = teams.find(team => name.toLowerCase().startsWith(team.replace(/ /g, '_').toLowerCase() + '_')) || '';
-        return { language, role: /(?:^|_)Gender(?:_|\.)/i.test(name) ? 'gender' : 'normal' };
+        const stem=String(filename).replace(/\.[^.]+$/,''),name=stem.replace(/[_.\s-]+/g,' ').trim().toLowerCase();
+        const language=teams.find(team=>name===team.toLowerCase() || name.startsWith(team.toLowerCase()+' ')) || '';
+        return { language, role: /(?:^|[_.\s-])Gender(?=$|[_.\s-])/i.test(stem) ? 'gender' : 'normal' };
     }
     function groupFields(unit) {
         const groups = [];
@@ -1457,7 +1458,8 @@
                         candidates.sort((a,b)=>required.indexOf(a.role)-required.indexOf(b.role));
                         const units = [], assets = [];
                         for (const candidate of candidates) {
-                            if (this.gameVersion === 'poe2' && !/_PoE2\./i.test(candidate.file.name) || this.gameVersion === 'poe1' && /_PoE2\./i.test(candidate.file.name)) throw new Error('The workbook filename does not match the selected game: ' + candidate.file.name);
+                            // ClientText filenames are optional naming hints.
+                            // The selected release supplies the game scope.
                             const bytes = await candidate.file.arrayBuffer();
                             const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport(progress) });
                             for(const unit of parsed.units)units.push(unit);

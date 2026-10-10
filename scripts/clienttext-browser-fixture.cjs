@@ -148,6 +148,44 @@ async function run() {
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap();
+        if (process.argv.includes('--german-import-audit')) {
+            const productionDirectory = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2');
+            const originals = ['German.xlsm', 'German_Gender.xlsm'].map(name => {
+                const path = join(productionDirectory, name), bytes = readFileSync(path);
+                return { name, path, bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
+            });
+            const publications = [];
+            page.on('request', request => { if (request.method() === 'POST' && /\/v1\/(?:versions|version-releases|content-versions|content-groups|content-uploads)(?:[/?]|$)/.test(request.url())) publications.push(request.url()); });
+            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            const upload = page.getByRole('region', { name: 'Content upload' });
+            await upload.locator('input[type=text]').fill('German ClientText production audit');
+            await upload.locator('input[type=file]').first().setInputFiles(originals.map(original => ({ name: original.name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: original.bytes })));
+            const detected = await page.evaluate(() => window.__clientFixtureApp.ctUploadFiles.map(candidate => ({ filename: candidate.file.name, language: candidate.language, role: candidate.role })));
+            assert.deepEqual(detected, [{ filename: 'German.xlsm', language: 'German', role: 'normal' }, { filename: 'German_Gender.xlsm', language: 'German', role: 'gender' }], 'Neutral production filenames auto-detect German and both workbook roles');
+            const started = Date.now(); console.log('German import audit: preparing actual neutral filenames through the normal browser worker/manifest route.');
+            await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading, null, { timeout: 300000 });
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'The actual German pair prepares without a filename game marker');
+            const facts = await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp, groups = vm.ctPrepared;
+                return { game: vm.gameVersion, groups: groups.length, language: groups[0]?.language, mode: groups[0]?.contentMode, units: groups[0]?.units.length,
+                    records: groups[0]?.units.reduce((counts, unit) => (counts[unit.role] = (counts[unit.role] || 0) + 1, counts), {}),
+                    assets: groups[0]?.assets.map(asset => ({ filename: asset.name, role: asset.role, hash: asset.parsed.artifactHash, sheets: asset.parsed.sheets.length, warnings: asset.parsed.warnings.length })),
+                    manifestUnits: groups[0]?.manifest.units.length,
+                    saved: groups[0]?.cacheScope ? Object.keys(await vm._ctStore.getSaved(groups[0].cacheScope)).length : 0 };
+            });
+            assert.equal(facts.game, 'poe2', 'Import uses the selected release game scope');
+            assert.equal(facts.groups, 1); assert.equal(facts.language, 'German'); assert.equal(facts.mode, 'clienttext');
+            assert.equal(facts.units, 158386); assert.deepEqual(facts.records, { normal: 89902, gender: 68484 });
+            assert.equal(facts.manifestUnits, facts.units, 'The browser worker builds a compact manifest for every parsed German record');
+            assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: index ? 34 : 0 })));
+            assert.equal(facts.saved, 0, 'Preparation creates no Saved translation work'); assert.deepEqual(publications, [], 'Audit never publishes content to an API');
+            for (const original of originals) assert.equal(createHash('sha256').update(readFileSync(original.path)).digest('hex'), original.sha256, 'German original remains unchanged');
+            assert.deepEqual(failures, [], 'German production import has no browser script errors');
+            const result = { status: 'PASS', germanImportAudit: true, prepareMs: Date.now() - started, detected, ...facts };
+            writeFileSync(join(directory, 'german-import-audit.json'), JSON.stringify(result, null, 2));
+            console.log(JSON.stringify(result)); return;
+        }
         if (process.argv.includes('--french-patchnote')) {
             const publicationRequests = [];
             page.on('request', request => { if (request.method() === 'POST' && /\/v1\/(?:versions|version-releases|content-groups|content-uploads)(?:[/?]|$)/.test(request.url())) publicationRequests.push(request.url()); });
