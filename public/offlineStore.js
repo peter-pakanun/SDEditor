@@ -6,7 +6,7 @@
   // cannot preserve named-version/profile isolation; v8 writers would replace
   // normalized facts with stale aggregates. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 10;
+  const DB_VERSION = 11;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -84,6 +84,11 @@
   let workspaceContext = null;
   const activeScopes = new Map(), activationTokens = new Map(), activationWrites = new Map();
 
+  // Append explicit content-group identity; pre-group keys remain byte-identical.
+  const contentScope = value => value?.groupId ? { versionId: String(value.versionId || ''), groupId: String(value.groupId) } : {};
+  const contentParts = value => value?.groupId ? [contentScope(value)] : [];
+  const sameContentScope = (left, right) => (left?.groupId || '') === (right?.groupId || '') && (left?.versionId || '') === (right?.versionId || '');
+
   function normalizeWorkspaceScope(value = {}) {
     const defaults = workspaceContext || {};
     const game = normalizeGameVersion(value.game || value.version || defaults.game);
@@ -91,10 +96,12 @@
     const branchId = String(value.branchId || defaults.branchId || DEFAULT_BRANCH);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(branchId)) throw new TypeError('Invalid workspace branch.');
     const sourceHash = String(value.sourceHash ?? value.baselineId ?? '');
-    return { accountId, game, branchId, sourceHash };
+    const content = contentScope(value);
+    if (content.groupId && !content.versionId) throw new TypeError('A content-group workspace requires its version ID.');
+    return { accountId, game, branchId, sourceHash, ...content };
   }
-  function activeKey(scope) { return ACTIVE_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId]); }
-  function versionKey(scope) { return VERSION_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function activeKey(scope) { return ACTIVE_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId, ...contentParts(scope)]); }
+  function versionKey(scope) { return VERSION_PREFIX + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]); }
   function scopedVersion(value) {
     if (value && typeof value === 'object') return normalizeWorkspaceScope(value);
     if (!workspaceContext) return null;
@@ -106,7 +113,10 @@
   function captureWorkspaceScope(value = {}) {
     if (value.workspaceScope) return normalizeWorkspaceScope(value.workspaceScope);
     if (!workspaceContext && !value.branchId) return null;
-    return normalizeWorkspaceScope({ ...value, sourceHash: value.sourceHash ?? scopedVersion(value.game)?.sourceHash ?? '' });
+    const selected = scopedVersion(value.game);
+    const explicitScope = Object.hasOwn(value, 'accountId') || Object.hasOwn(value, 'profile') || Object.hasOwn(value, 'versionId') || Object.hasOwn(value, 'groupId');
+    const content = value.groupId ? contentScope(value) : !explicitScope && (!Object.hasOwn(value, 'sourceHash') || value.sourceHash === selected?.sourceHash) ? contentScope(selected) : {};
+    return normalizeWorkspaceScope({ ...content, ...value, sourceHash: value.sourceHash ?? selected?.sourceHash ?? '' });
   }
   function setWorkspaceContext(value) {
     workspaceContext = normalizeWorkspaceScope(value);
@@ -117,13 +127,13 @@
   }
   function scopedRevision(revision, scope) {
     return scope?.sourceHash ? { ...revision, sourceHash: revision.sourceHash || scope.sourceHash,
-      accountId: scope.accountId, branchId: scope.branchId } : runtime.NormalizedStore ? { ...revision,
+      accountId: scope.accountId, branchId: scope.branchId, ...contentScope(scope) } : runtime.NormalizedStore ? { ...revision,
         accountId: String(revision.accountId || revision.collaborationAccountId || 'guest'), branchId: revision.branchId || DEFAULT_BRANCH, sourceHash: revision.sourceHash || '' } : revision;
   }
   function matchesCollaborationIdentity(key, identity) {
     const branch = identity?.branchId || DEFAULT_BRANCH;
-    return key === JSON.stringify([String(identity?.accountId), identity?.game, branch, identity?.sourceHash, identity?.language])
-      || (branch === DEFAULT_BRANCH && key === JSON.stringify([String(identity?.accountId), identity?.game, identity?.sourceHash, identity?.language]));
+    return key === JSON.stringify([String(identity?.accountId), identity?.game, branch, identity?.sourceHash, identity?.language, ...contentParts(identity)])
+      || (branch === DEFAULT_BRANCH && key === JSON.stringify([String(identity?.accountId), identity?.game, identity?.sourceHash, identity?.language, ...contentParts(identity)]));
   }
 
   function pruneWorkspace(workspace) {
@@ -196,6 +206,15 @@
           }
         }
         runtime.NormalizedStore?.upgrade(db, req.transaction);
+        // Every page and legacy SD save worker creates the same additive stores.
+        // ClientTextStore need not be loaded in the SD-only worker to fence old writers.
+        for (const name of ['clienttext_workspaces','clienttext_assets','clienttext_units','clienttext_saved',
+          'clienttext_drafts','clienttext_history','clienttext_outbox','clienttext_receipts','clienttext_requests','clienttext_memory','clienttext_memory_history']) {
+          const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath:'key' });
+          if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope','scope');
+          if (name === 'clienttext_workspaces' && !store.indexNames.contains('by_account')) store.createIndex('by_account','accountId');
+          if (['clienttext_history','clienttext_drafts','clienttext_outbox','clienttext_memory_history'].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit','unitKey');
+        }
       };
       req.onsuccess = () => {
         finishUpgrade('completed');
@@ -392,7 +411,7 @@
     const state = preparedRoomRepairs.get(normalized.scopeKey(scope));
     if (!state || !normalizedRooms) return;
     for (const [key, room] of Object.entries(state.rooms || {})) if (String(room.identity?.accountId) === scope.accountId
-      && room.identity.game === scope.game && room.identity.sourceHash === scope.sourceHash && (room.identity.branchId || DEFAULT_BRANCH) === scope.branchId)
+      && room.identity.game === scope.game && room.identity.sourceHash === scope.sourceHash && (room.identity.branchId || DEFAULT_BRANCH) === scope.branchId && sameContentScope(room.identity, scope))
       await normalizedRooms.ensureRoom(key, room.identity, room);
     preparedRoomRepairs.delete(normalized.scopeKey(scope));
   }
@@ -435,23 +454,25 @@
     const branchId = value.branchId || DEFAULT_BRANCH;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(branchId)) throw new TypeError('Invalid draft branch.');
     return { profile: value.profile, game: value.game, sourceHash: value.sourceHash, language: value.language, filepath: value.filepath,
-      ...(branchId === DEFAULT_BRANCH ? {} : { branchId }) };
+      ...(branchId === DEFAULT_BRANCH ? {} : { branchId }), ...contentScope(value) };
   }
 
   function translationDraftKey(value) {
     const scope = translationDraftScope(value);
     // Preserve default-branch keys, IDs and consumed receipts exactly through v8.
     return KV_TRANSLATION_DRAFT_PREFIX + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath,
-      ...(scope.branchId ? [scope.branchId] : [])]);
+      ...(scope.branchId ? [scope.branchId] : []), ...contentParts(scope)]);
   }
 
   function translationDraftScopeFromKey(key) {
     if (typeof key !== 'string' || !key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)) throw new TypeError('Invalid translation draft key.');
     let parts;
     try { parts = JSON.parse(key.slice(KV_TRANSLATION_DRAFT_PREFIX.length)); } catch (_) { throw new TypeError('Invalid translation draft key.'); }
-    if (!Array.isArray(parts) || ![5, 6].includes(parts.length)) throw new TypeError('Invalid translation draft key.');
+    if (!Array.isArray(parts)) throw new TypeError('Invalid translation draft key.');
+    const content = typeof parts.at(-1) === 'object' && parts.at(-1) !== null ? parts.pop() : {};
+    if (![5, 6].includes(parts.length)) throw new TypeError('Invalid translation draft key.');
     const [profile, game, sourceHash, language, filepath, branchId] = parts;
-    const scope = translationDraftScope({ profile, game, sourceHash, language, filepath, branchId });
+    const scope = translationDraftScope({ profile, game, sourceHash, language, filepath, branchId, ...content });
     if (translationDraftKey(scope) !== key) throw new TypeError('Invalid translation draft key.');
     return scope;
   }
@@ -510,6 +531,7 @@
       return rows.filter(row => row.key.startsWith(KV_TRANSLATION_DRAFT_PREFIX)).map(row => row.value)
         .filter(record => record.profile === scope.profile && record.game === scope.game && record.language === scope.language
           && (record.branchId || DEFAULT_BRANCH) === (scope.branchId || DEFAULT_BRANCH)
+          && sameContentScope(record, scope)
           && (scope.sourceHash == null || record.sourceHash === scope.sourceHash)
           && (record.state === 'active' || record.conflicts?.length));
     });
@@ -601,7 +623,7 @@
   function sourceKey(version) {
     if (version?.legacyWorkspacePending) return KV_SOURCE_PREFIX + normalizeGameVersion(version);
     const scope = scopedVersion(version);
-    if (scope) return 'source_version_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
+    if (scope) return 'source_version_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]);
     return KV_SOURCE_PREFIX + normalizeGameVersion(version);
   }
 
@@ -610,8 +632,8 @@
     return currentGameVersion;
   }
 
-  function versionMetadataKey(scope) { return 'version_metadata_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
-  function versionIndexKey(scope) { return 'version_index_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function versionMetadataKey(scope) { return 'version_metadata_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]); }
+  function versionIndexKey(scope) { return 'version_index_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]); }
   function versionIndexRecord(metadata, scope) {
     const record = { ...normalizeWorkspaceScope(scope || metadata) };
     for (const field of ['name', 'officialName', 'catalogVersionId', 'createdAt', 'updatedAt', 'migrated', 'adoptedFrom']) {
@@ -633,11 +655,12 @@
     const captured = scopedVersion(value) || normalizeWorkspaceScope(typeof value === 'object' ? value : { game: value });
     if (captured.sourceHash) return captured;
     const known = await kvGet(activeKey(captured));
-    if (known?.sourceHash && known.accountId === captured.accountId && known.game === captured.game && known.branchId === captured.branchId) {
+    if (known?.sourceHash && known.accountId === captured.accountId && known.game === captured.game && known.branchId === captured.branchId && sameContentScope(known, captured)) {
       const resolved = normalizeWorkspaceScope(known);
       activeScopes.set(activeKey(resolved), resolved);
       return resolved;
     }
+    if (captured.groupId) return captured;
     let inferredHash = '', inferredSource;
     const legacyWorkspace = await kvGet(KV_WORKSPACE_PREFIX + captured.game);
     if (legacyWorkspace && !legacyWorkspace.sourceHash
@@ -687,6 +710,11 @@
   }
 
   async function getVersionSource(scope) { return getSource(normalizeWorkspaceScope(scope)); }
+  async function hasVersionWorkspace(value) {
+    const scope=normalizeWorkspaceScope(value);
+    if(await usesRecords(scope)){await normalized.ensure(scope);return normalized.hasScope(scope);}
+    return !!await kvGet(workspaceKey(scope));
+  }
   async function getVersionWorkspace(scope, language) {
     const value = await getWorkspace(normalizeWorkspaceScope(scope), language);
     return value ?? null;
@@ -808,23 +836,26 @@
     const selected = new Map(rows.filter(row => row.key.startsWith(indexPrefix)).map(row => {
       const identity = JSON.parse(row.key.slice('version_index_v1:'.length));
       const record = { ...row.value, accountId: identity[0], game: identity[1], branchId: identity[2], sourceHash: identity[3] };
-      return [record.sourceHash, record];
-    }));
+      delete record.groupId; delete record.versionId; Object.assign(record, contentScope(identity[4]));
+      return [versionKey(record), record];
+    }).filter(([, record]) => !scope.groupId || sameContentScope(record, scope)));
     for (const key of keys) {
       if (!key.startsWith(metadataPrefix)) continue;
       const identity = JSON.parse(key.slice('version_metadata_v1:'.length));
-      if (!selected.has(identity[3])) selected.set(identity[3], { ...scope, sourceHash: identity[3], name: '', metadataPending: true });
+      const record = { accountId: identity[0], game: identity[1], branchId: identity[2], sourceHash: identity[3], ...contentScope(identity[4]), name: '', metadataPending: true };
+      if (scope.groupId && !sameContentScope(record, scope)) continue;
+      if (!selected.has(versionKey(record))) selected.set(versionKey(record), record);
     }
     const records = [...selected.values()];
     const availability = await withStore(STORE_KV, 'readonly', store => Promise.all(records.map(row =>
       store.count ? requestToPromise(store.count(sourceKey(row))).then(Boolean) : requestToPromise(store.getKey(sourceKey(row))).then(Boolean))));
     if (normalized && await normalized.available()) for (let index = 0; index < records.length; index++)
       availability[index] = await normalized.scopeAvailable(records[index], availability[index]);
-    const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
-      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash
-      || (active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active.sourceHash : '');
+    const current = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash ? workspaceContext
+      : active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active : null;
     const result = records.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
-      hasSource: availability[index], current: row.sourceHash === selectedHash }));
+      hasSource: availability[index], current: row.sourceHash === current?.sourceHash && sameContentScope(row, current) }));
     if (!result.length && legacyCount) result.push({ ...scope, sourceHash: '', legacy: true, ownershipUnknown: true,
       name: 'Stored offline workspace', offline: true, online: false, hasSource: false, hasLegacySource: !!legacySourceCount, current: false });
     return result.sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));
@@ -837,7 +868,7 @@
     const rows = await withStore(STORE_KV, 'readonly', store => requestToPromise(store.getAll(
       typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff'))));
     const selected = rows.filter(row => row.key.startsWith(prefix)).map(row => row.value)
-      .filter(row => row.accountId === scope.accountId && row.game === scope.game && row.branchId === scope.branchId);
+      .filter(row => row.accountId === scope.accountId && row.game === scope.game && row.branchId === scope.branchId && (!scope.groupId || sameContentScope(row, scope)));
     const { active, availability } = await withStore(STORE_KV, 'readonly', async store => {
       const activeRead = requestToPromise(store.get(activeKey(scope)));
       const availability = await Promise.all(selected.map(async row => {
@@ -846,12 +877,13 @@
       }));
       return { active: (await activeRead)?.value, availability };
     });
-    const selectedHash = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
-      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash || active?.sourceHash;
+    const current = workspaceContext?.accountId === scope.accountId && workspaceContext?.game === scope.game
+      && workspaceContext?.branchId === scope.branchId && workspaceContext.sourceHash ? workspaceContext
+      : active?.accountId === scope.accountId && active?.game === scope.game && active?.branchId === scope.branchId ? active : null;
     if (normalized && await normalized.available()) for (let index = 0; index < selected.length; index++)
       availability[index] = await normalized.scopeAvailable(selected[index], availability[index]);
     return selected.map((row, index) => ({ ...row, online: !!row.catalogVersionId, offline: !row.catalogVersionId,
-        hasSource: availability[index], current: row.sourceHash === selectedHash }))
+        hasSource: availability[index], current: row.sourceHash === current?.sourceHash && sameContentScope(row, current) }))
       .sort((a, b) => Number(b.current) - Number(a.current) || (b.createdAt || 0) - (a.createdAt || 0));
   }
   function catalogKey(value) {
@@ -880,7 +912,7 @@
     if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('Invalid collection recovery identifier.');
     return kvSet(key, requestId);
   }
-  function receiptScopeKey(scope) { return 'translation_save_receipts_v2:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash]); }
+  function receiptScopeKey(scope) { return 'translation_save_receipts_v2:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]); }
 
   async function adoptGuestVersion(value) {
     const target = normalizeWorkspaceScope(value);
@@ -967,7 +999,7 @@
       if (baseline && baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
       const metadata = { createdAt: Date.now(), ...await kvGet(versionMetadataKey(captured)), ...captured,
         ...(workspace.versionName ? { name: workspace.versionName } : {}), updatedAt: Date.now() };
-      await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId }, revisions, baseline, [
+      await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) }, revisions, baseline, [
         { key: activeKey(captured), value: captured }, { key: versionMetadataKey(captured), value: metadata },
         { key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) }]);
       activeScopes.set(activeKey(captured), captured);
@@ -981,7 +1013,7 @@
       const kv = tx.objectStore(STORE_KV);
       kv.put({ key: sourceKey(captured || gameVersion), value: source });
       kv.put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(captured ? { ...workspace,
-        accountId: captured.accountId, game: captured.game, branchId: captured.branchId } : workspace) });
+        accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) } : workspace) });
       if (captured?.sourceHash) {
         kv.put({ key: activeKey(captured), value: captured });
         const metadataRead = kv.get(versionMetadataKey(captured));
@@ -1048,11 +1080,12 @@
       || captured.accountId !== String(batch.accountId || 'guest') || captured.branchId !== (batch.branchId || captured.branchId))) {
       throw new TypeError('The captured workspace does not match this translation save.');
     }
+    if ((batch.groupId || batch.versionId) && !sameContentScope(captured, batch)) throw new TypeError('The captured content group does not match this translation save.');
     if (draft) {
       const scope = translationDraftScopeFromKey(draft.key);
       if (files.length !== 1 || scope.profile !== String(batch.accountId || 'guest') || scope.game !== batch.game
         || scope.sourceHash !== batch.sourceHash || scope.language !== batch.language || scope.filepath !== files[0].filepath
-        || (scope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH)
+        || (scope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH) || !sameContentScope(scope, captured || batch)
         || typeof draft.id !== 'string' || !draft.id || typeof draft.revision !== 'string' || !draft.revision
         || !Array.isArray(draft.base?.translations) || draft.base.translations.some(line => typeof line !== 'string')) {
         throw new TypeError('The saved draft does not match its translation save scope.');
@@ -1062,9 +1095,9 @@
       const draftScope = translationDraftScopeFromKey(checkpoint.key);
       if (files.length !== 1 || draftScope.profile !== String(batch.accountId || 'guest') || draftScope.game !== batch.game
         || draftScope.sourceHash !== batch.sourceHash || draftScope.language !== batch.language || draftScope.filepath !== files[0].filepath
-        || (draftScope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH)) throw new TypeError('The checkpoint does not match its save scope.');
+        || (draftScope.branchId || DEFAULT_BRANCH) !== (captured?.branchId || batch.branchId || DEFAULT_BRANCH) || !sameContentScope(draftScope, captured || batch)) throw new TypeError('The checkpoint does not match its save scope.');
     }
-    const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || '')];
+    const scope = [batch.game, batch.language, batch.sourceHash || '', String(batch.accountId || ''), ...contentParts(captured || batch)];
     const signature = JSON.stringify({ scope, files, descriptions: batch.descriptions || [], statuses: batch.statuses || {}, revisions: batch.revisions || [],
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
       ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
@@ -1154,7 +1187,7 @@
           throw stale('The source archive changed before this translation could be saved.');
         }
         if (captured && ((workspace.accountId && workspace.accountId !== captured.accountId)
-          || (workspace.branchId || DEFAULT_BRANCH) !== captured.branchId)) throw stale('The saved translation belongs to another workspace profile or branch.');
+          || (workspace.branchId || DEFAULT_BRANCH) !== captured.branchId || !sameContentScope(workspace, captured))) throw stale('The saved translation belongs to another workspace profile, branch or content group.');
         if (batch.accountId && workspace.collaborationAccountId
           && String(workspace.collaborationAccountId) !== String(batch.accountId)) {
           throw stale('The signed-in account changed before this translation could be saved.');
@@ -1481,7 +1514,7 @@
 
   function revisionInScope(row, scope) {
     return !scope || ((scope.legacyHistory || row.sourceHash === scope.sourceHash) && (row.branchId || DEFAULT_BRANCH) === scope.branchId
-      && String(row.accountId || row.collaborationAccountId || 'guest') === scope.accountId);
+      && String(row.accountId || row.collaborationAccountId || 'guest') === scope.accountId && sameContentScope(row, scope));
   }
 
   async function revisionClearAll(version) {
@@ -1575,6 +1608,7 @@
 
   const root = typeof window === 'object' ? window : self;
   root.OfflineStore = {
+    openClientTextDb: openDb,
     isAvailable,
     normalizeGameVersion,
     setGameVersion,
@@ -1583,6 +1617,7 @@
     normalizeWorkspaceScope,
     getVersionWorkspace,
     getVersionSource,
+    hasVersionWorkspace,
     getVersionMetadata,
     resolveVersionScope: resolveWorkspaceVersion,
     activateVersion,

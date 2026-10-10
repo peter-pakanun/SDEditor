@@ -1,8 +1,8 @@
 # Storage and preparation performance design
 
-Recorded: 2026-10-09. The original frontend design at `3107a34` includes the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. The TM extension below adds IndexedDB v10 and companion API schema v17. Measurements are local observations, not guaranteed startup times or hosted deployment confirmation.
+Recorded: 2026-10-09; ClientText update: 2026-10-10. The original frontend design at `3107a34` includes the local readiness work in `595caf1` and the preceding normalized storage, durable save, and Dictionary worker changes. TM added IndexedDB v10/API v17; ClientText adds browser v11/API v18. Measurements are local observations, not guaranteed startup times or hosted deployment confirmation.
 
-Use this design when adding another content mode with comparable original content, editable fields, saved work, recovery, and shared editing. Other content modes are extension ideas; this document does not establish that spreadsheet or other format support already exists.
+Use this design when adding another content mode with comparable original content, editable fields, saved work, recovery, and shared editing. StatDescription and ClientText workbook adapters are implemented in source; deployment remains separate.
 
 The [Workspace Status Contract](workspace_statuses.md) governs status and recovery meaning. [Local-first Server Storage](local_first_server_storage.md) governs accepted baseline retention, publication, exports, server payloads, and rollout. Read those documents before changing their boundaries.
 
@@ -29,7 +29,7 @@ The current design therefore distinguishes durable records from materialized rea
 
 Capture identity before the first await, queue insertion, IndexedDB request or worker message. Do not read a mutable selected version later to choose the destination of already-started work.
 
-- Workspace identity: account, game, branch (initially `default`) and source hash.
+- Workspace identity: account, game, branch (initially `default`) and source hash; explicit content groups also capture version/group IDs.
 - Translation and collaboration identity: workspace identity plus selected language; preserve role/access context guards in the UI and requests.
 - Dictionary scope: account, selected language, game and effective access context. Source/branch changes can reuse the dictionary index while invalidating editor results.
 - TM durable scope: account/profile and selected language. Units carry game scope and source/branch provenance; the compiled assistance index also captures selected game/access context.
@@ -41,7 +41,7 @@ Capture identity before the first await, queue insertion, IndexedDB request or w
 
 ## Normalized IndexedDB records
 
-IndexedDB v10 extends the v9 scoped stores in [normalizedStore.js](../public/normalizedStore.js):
+IndexedDB v11 retains the v9/v10 scoped stores in [normalizedStore.js](../public/normalizedStore.js) and adds the ClientText stores:
 
 | Store group | Purpose |
 | --- | --- |
@@ -52,6 +52,10 @@ IndexedDB v10 extends the v9 scoped stores in [normalizedStore.js](../public/nor
 | `save_submissions`, `save_receipts` | Durable submitted commands and idempotent commit evidence |
 | `storage_migrations` | Resumable normalization readiness and progress |
 | `tm_units`, `tm_meta`, `tm_outbox`, `tm_records` | Active/suppressed units, local/cloud revisions, pending mutations, conflicts, history and receipts |
+| `clienttext_workspaces`, `clienttext_assets`, `clienttext_units` | Ready/importing workspace metadata, exact original workbooks/proof trees and immutable per-ID baselines |
+| `clienttext_saved`, `clienttext_drafts`, `clienttext_history`, `clienttext_outbox`, `clienttext_receipts` | Per-ID authored values/reviews, private drafts, history, captured retry commands and durable save evidence |
+| `clienttext_requests` | Scoped publication, collection and comment request journals with stable IDs |
+| `clienttext_memory`, `clienttext_memory_history` | Local field-aware TM projection from valid durable and accepted shared saves |
 
 Aggregate source/workspace/room objects are adapters for consumers, not another copy to rewrite on every save. Existing revision stores remain available. Legacy aggregate KV data remains frozen recovery evidence; once normalized readiness is established, normalized absence is authoritative. Do not dual-write aggregates or clear storage to bypass a blocked upgrade.
 
@@ -194,6 +198,16 @@ The 16.18 profile contained only a short blur/focus transition, so it does not e
 - Include hidden-to-visible and visible-to-hidden transitions; do not use keyboard focus alone as visibility evidence.
 - Local synthetic fixture timings are not hosted production guarantees. Retest after deployment with comparable inputs and capture windows.
 
+## ClientText implementation and measured preparation
+
+[contentAdapters.js](../public/contentAdapters.js) supplies shared serialization/history/lookup/TM contracts; ClientText preserves raw `@`, actual newlines and literal `\n` rather than applying StatDescription editor transformations. Field kind and grammatical form constrain memory matching; heading, workbook role, sheet and record/field IDs remain context/provenance. Gender enum cells, blanks, `NONEXISTENT`, unreviewed Outdated values, conflicted records and source-only carries do not teach TM. Accepted shared events teach the local projection, independently of legacy cloud TM.
+
+Workbook parsing, manifest hashing and full export run through the ClientText worker. Immutable units are written in resumable batches, then materialized once for editing; a save touches its unit, draft, history, outbox, receipt and memory projection atomically. Worker/transaction uncertainty retries the identical job ID. Polling reuses unchanged saved objects and status caches, and event pages commit their cursor with accepted work. An acknowledgement cannot skip unread events. This avoids routing a 100,000-plus-row workbook through StatDescription aggregate storage.
+
+The initial disposable normal-mode browser run used the attached production workbooks: **149,550 Thai units, 89,659 French normal units and 68,250 French Gender units**. Combined preparation took **53.5 s** and storage **73.1 s**. Cached Thai opening took **6.1 s** and full export **8.2 s**; French paired opening took **9.35 s** and paired export **15.5 s**. A second successful production-file run under concurrent load recorded **97.8 s** preparation, **139.5 s** storage and **2.75 s** maximum event-loop lag; Thai opening/export took **6.0/8.15 s**, and French pair opening/export **7.72/12.36 s**. Different load conditions prevent a direct before/after speed comparison. These are local phase observations, not a hosted service benchmark or a promise for every machine.
+
+The implementation checkpoint passed **346 focused checks** before later integration fixes; use current suite output for the final count. The disposable shared-publication/collection browser fixture also passed, followed by draft reload, injected failed-original-upload recovery, cached publication resume, proof-verified saves and frozen collection export. Mixed new StatDescription/ClientText group switching and both frozen collection formats passed. Repeated-original StatDescription versions also passed independent group saves, cancelled selection and actual offline activation of both groups. A cached immutable baseline and a ready group workspace are separate facts: opening a new group creates empty independent work from the verified retained original; it does not reuse another group's saves. Collaboration stays detached through version confirmation and central workspace activation, and resumes only when loaded workspace metadata matches the selected group/version. Production-file and synthetic local checks do not establish hosted authentication/deployment or restoration from production backups.
+
 ## Extending to another content mode
 
 Keep the storage/lifecycle design common and place format-specific behavior behind an adapter. Start with explicit unit and field identities; do not make an array position or display name the durable ID if it can change.
@@ -237,7 +251,8 @@ Reuse scopes, activation snapshots, atomic submission/receipt commands, affected
 | Worker matching/capture/fallback | [dictionaryMatching.js](../public/dictionaryMatching.js), [dictionaryWorkerClient.js](../public/dictionaryWorkerClient.js), [dictionaryWorkerUi.js](../public/dictionaryWorkerUi.js) | `node scripts/test-dictionary-worker.cjs`, `node scripts/test-dictionary-worker-client.cjs`, `node scripts/test-editor-dictionary-index.cjs` |
 | TM matching, worker fallback, draft insertion, durable learning and cloud replay | [translationMemory.js](../public/translationMemory.js), [tmWorkerClient.js](../public/tmWorkerClient.js), [tmUi.js](../public/tmUi.js), [tmCloudSync.js](../public/tmCloudSync.js) | `node scripts/test-translation-memory.cjs`, `node scripts/test-translation-memory-worker.cjs`, `node scripts/test-tm-ui.cjs`, `node scripts/test-tm-storage.cjs`, `node scripts/test-tm-cloud-sync.cjs` |
 | Editor/lookup/render paths | [editorLookup.js](../public/editorLookup.js), [inlineEditor.js](../public/inlineEditor.js), [index.js](../public/index.js) | `node scripts/test-editor-lookup.cjs`, `node scripts/test-editor-lookup-ui.cjs`, `node scripts/test-editor-opening.cjs`, `node scripts/test-inline-editor.cjs`, `node scripts/test-render-safety.cjs` |
+| ClientText parse/proofs, atomic saves, events and raw field adapters | [clientTextCodec.js](../public/clientTextCodec.js), [clientTextState.js](../public/clientTextState.js), [clientTextStore.js](../public/clientTextStore.js), [clientTextSync.js](../public/clientTextSync.js), [contentAdapters.js](../public/contentAdapters.js) | `node scripts/test-clienttext-codec.cjs`, `node scripts/test-clienttext-state.cjs`, `node scripts/test-clienttext-store.cjs`, `node scripts/test-clienttext-sync.cjs`, `node scripts/test-clienttext-ui.cjs`, `node scripts/test-content-adapters.cjs` |
 
 Use [normalized-storage-browser-fixture.cjs](../scripts/normalized-storage-browser-fixture.cjs) for real IndexedDB behavior, source/workspace isolation, pointer races and dense versus scattered selections. Use [startup-performance-browser-fixture.cjs](../scripts/startup-performance-browser-fixture.cjs) for 20,000 controlled rows, all four desktop themes, hidden lookup laziness, immutable baseline reuse, local/remote gating and typing/focus/caret/scroll/layout preservation. Its controlled provider is not a production ZIP import or full hosted network test.
 
-Extend existing tests rather than adding a framework. Syntax-check touched JavaScript and run `git diff --check`; `npm test` is an intentional frontend stub. TM requires the companion API's schema v17 and separate API checks before frontend rollout. Its disposable normal-mode browser check is `node scripts/tm-browser-fixture.cjs --check`. Browser fixtures do not establish hosted OAuth/CORS or production restoration readiness.
+Extend existing tests rather than adding a framework. Syntax-check touched JavaScript and run `git diff --check`; `npm test` is an intentional frontend stub. Current frontend rollout requires API schema v18 and separate API checks first. TM's disposable normal-mode browser check is `node scripts/tm-browser-fixture.cjs --check`; ClientText uses `node scripts/clienttext-browser-fixture.cjs --check`. Browser fixtures do not establish hosted OAuth/CORS or production restoration readiness.

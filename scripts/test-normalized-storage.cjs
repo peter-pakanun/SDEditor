@@ -139,6 +139,21 @@ test('encoded scopes cannot collide when identifiers include punctuation', () =>
     assert.notEqual(N.scopeKey(scope), N.scopeKey(other));
     assert.deepEqual(JSON.parse(N.scopeKey(scope)), [scope.accountId, scope.game, scope.branchId, scope.sourceHash]);
 });
+test('content groups isolate workspaces, drafts and room identities while sharing immutable ZIP baselines', () => {
+    const scope={accountId:'owner',game:'poe2',branchId:'default',sourceHash:'accepted',language:'French'},
+        first={...scope,versionId:'version',groupId:'first'},second={...scope,versionId:'version',groupId:'second'};
+    assert.deepEqual(JSON.parse(N.scopeKey(scope)),['owner','poe2','default','accepted']);
+    assert.equal(new Set([scope,first,second].map(N.scopeKey)).size,3);
+    assert.equal(N.baselineKey(scope),N.baselineKey(first));assert.equal(N.baselineKey(first),N.baselineKey(second));
+    const n=N.create({normalizeScope:value=>({...value,accountId:value.accountId||'guest',branchId:value.branchId||'default'})});
+    const a=n.draftRow({...first,profile:'owner',key:'a'}),b=n.draftRow({...second,profile:'owner',key:'b'});
+    assert.notEqual(a.profileLanguage,b.profileLanguage);assert.equal(a.scope,N.scopeKey(first));
+    const rooms=require('../public/normalizedRooms.js').create(n),P=require('../public/collaborationProtocol.js');
+    for(const value of [scope,first,second,{...first,branchId:'release'}]){
+        const id=rooms.identityKey(value);assert.equal(id,P.scopeKey(value));
+        const decoded=rooms.identityFromKey(id);assert.equal(decoded.sourceHash,'accepted');assert.equal(decoded.groupId,value.groupId);
+    }
+});
 
 test('checkpoint compaction verifies immutable source content and preserves differing recovery evidence', () => {
     const n = N.create({ normalizeScope: scope => ({ ...scope, accountId: scope.accountId || 'guest', branchId: scope.branchId || 'default' }) });
@@ -593,6 +608,52 @@ function seedAnotherVersion(f, changes) {
     f.workspace([f.source('other.txt', 1)], true);
     const scope = { ...f.scope }; Object.assign(f.scope, saved); return scope;
 }
+
+test('cached shared source never makes a different content group workspace ready', async () => {
+    const f = recordFixture(), file = f.source('same-original.txt');
+    Object.assign(f.scope, { versionId: 'first-version', groupId: 'first-group' });
+    const originalScope = { ...f.scope }, originalId = N.scopeKey(originalScope);
+    f.put(N.stores.migration, { key: originalId, value: { state: 'ready' } });
+    f.workspace([file], true);
+    f.put(N.stores.records, f.n.row(originalId, ['staged', 'Thai', file.filepath], {
+        language: 'Thai', filepath: file.filepath, data: { translations: ['First group saved text'], sourceHash: f.scope.sourceHash },
+    }, { kind: 'staged', pathKey: f.n.key(originalId, file.filepath) }));
+    const second = { ...originalScope, versionId: 'second-version', groupId: 'second-group' };
+    const secondId = N.scopeKey(second);
+    f.put(N.stores.migration, { key: secondId, value: { state: 'ready' } });
+    const store = offlineFixture(f);
+    store.setWorkspaceContext(originalScope);
+    assert.equal(N.baselineKey(second), N.baselineKey(originalScope), 'Both groups reuse the identical immutable source');
+    assert.notEqual(secondId, originalId);
+    assert.deepEqual(await store.getVersionSource(second), [file]);
+    assert.equal(await store.hasVersionWorkspace(originalScope), true);
+    assert.equal(await store.hasVersionWorkspace(second), false, 'Readiness requires exact group metadata, even after source hydration');
+    assert.equal(await store.getVersionWorkspace(second, 'Thai'), null);
+    assert.equal(f.data.get(N.stores.meta).has(secondId), false);
+    assert.equal([...f.data.get(N.stores.records).values()].some(row => row.scope === secondId), false,
+        'Reading readiness does not clone another group\'s staged translations');
+    f.put(N.stores.meta, { key: secondId, scope: secondId, value: { ...second, stagedVersion: 1 } });
+    assert.equal(await store.hasVersionWorkspace(second), true);
+    await f.n.clearScope(second);
+    assert.deepEqual(await store.getVersionSource(second), [file], 'Removing group work retains the shared original');
+    assert.equal(await store.hasVersionWorkspace(second), false, 'A removed group is not resurrected by its retained baseline');
+    assert.equal(await store.hasVersionWorkspace(originalScope), true);
+});
+
+test('group workspace readiness also separates versions and accounts using the same baseline', async () => {
+    const f = recordFixture();
+    Object.assign(f.scope, { versionId: 'first-version', groupId: 'shared-group-name' });
+    f.workspace([f.source('same-original.txt')], true);
+    f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
+    const store = offlineFixture(f);
+    for (const changes of [{ versionId: 'second-version' }, { accountId: 'other-account' }]) {
+        const scope = { ...f.scope, ...changes };
+        f.put(N.stores.migration, { key: N.scopeKey(scope), value: { state: 'ready' } });
+        assert.deepEqual(await store.getVersionSource(scope), [f.source('same-original.txt')]);
+        assert.equal(await store.hasVersionWorkspace(scope), false);
+    }
+    assert.equal(await store.hasVersionWorkspace(f.scope), true);
+});
 
 test('an older cooperative activation cannot replace the newer durable selection or cached context', async () => {
     const f = recordFixture(); f.workspace([f.source('old.txt')], true);

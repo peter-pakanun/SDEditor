@@ -784,6 +784,79 @@ test('an uncached source still refuses changed server identities before any acti
   assert.equal(events.some(event => ['metadata', 'activate', 'load', 'import', 'context'].includes(event.type)), false);
 });
 
+function cachedContentGroupHarness(options = {}) {
+  const selected = version({ id: 'second-same-original', archive: { baselineId: hash('a'), treeRoot: 'verified-tree' } });
+  const group = { id: 'second-stat-group', versionId: selected.id, contentMode: 'statdescription', teams: [team()] };
+  const source = [{ filepath: 'source/test.txt', name: 'Test', stats: ['stat'], variables: ['#'], remarks: [''],
+    translations: { English: ['English'], Thai: ['Original Thai'] } }];
+  const baseline = { archive: copy(selected.archive), tree: { root: 'verified-tree' }, source: copy(source) };
+  const writes = [], reads = [];
+  const result = harness({ window: { WorkspaceState: require('../public/workspaceState.js') }, storage: {
+    async getVersionSource(scope) { reads.push({ type: 'source', scope: copy(scope) }); return copy(source); },
+    async hasVersionWorkspace(scope) { reads.push({ type: 'readiness', scope: copy(scope) }); return false; },
+    async getImportedBaseline(sourceHash, scope) { reads.push({ type: 'baseline', sourceHash, scope: copy(scope) }); return copy(baseline); },
+    async saveSourceWorkspaceWithRevisions(original, workspace, revisions, scope, retained) {
+      writes.push(copy({ original, workspace, revisions, scope, retained }));
+    },
+    ...options.storage,
+  } });
+  result.app.activeContentGroup = group;
+  result.app.managedVersions = [selected]; result.app.selectedManagedVersionId = selected.id;
+  result.app.managedVersionDetails = { version: selected, teams: [team()] };
+  result.app.managedActivateWorkspace = async (sourceHash, language) => {
+    result.events.push({ type: 'open', sourceHash, language }); return true;
+  };
+  return { ...result, selected, group, baseline, source, writes, reads };
+}
+
+test('a new StatDescription group reuses its verified original but creates independent empty work', async () => {
+  const f = cachedContentGroupHarness();
+  assert.equal(await f.app.continueManagedVersion(f.selected, 'Thai', f.group), true);
+  assert.equal(f.requests.length, 0, 'A verified cached original and version facts need no network request');
+  assert.equal(f.writes.length, 1);
+  const write = f.writes[0];
+  assert.deepEqual(write.scope, { accountId: 'alice', game: 'poe2', branchId: 'default', sourceHash: hash('a'),
+    versionId: f.selected.id, groupId: f.group.id, contentMode: 'statdescription' });
+  assert.deepEqual(write.original, f.source); assert.deepEqual(write.retained, f.baseline);
+  assert.equal(write.workspace.catalogVersionId, f.selected.id);
+  assert.equal(write.workspace.stagedVersion, 1);
+  assert.deepEqual(write.workspace.descs, []); assert.deepEqual(write.workspace.staged, {});
+  assert.deepEqual(write.workspace.dropped, {}); assert.deepEqual(write.revisions, []);
+  assert.equal(f.events.filter(event => event.type === 'open').length, 1);
+  assert.ok(f.reads.every(read => read.scope.groupId === f.group.id && read.scope.versionId === f.selected.id));
+});
+
+test('an existing group workspace is opened without replacing its staged work from a shared baseline', async () => {
+  const f = cachedContentGroupHarness({ storage: { async hasVersionWorkspace() { return true; },
+    async getImportedBaseline() { throw new Error('Opening existing work must not initialize it again'); } } });
+  assert.equal(await f.app.continueManagedVersion(f.selected, 'Thai', f.group), true);
+  assert.deepEqual(f.writes, []); assert.equal(f.events.filter(event => event.type === 'open').length, 1);
+});
+
+test('a new cached group refuses absent or inconsistent retained baseline evidence', async () => {
+  for (const retained of [null, { archive: { baselineId: hash('c') }, tree: { root: 'verified-tree' } },
+    { archive: { baselineId: hash('a') }, tree: { root: 'wrong-tree' } }]) {
+    const f = cachedContentGroupHarness({ storage: { async getImportedBaseline() { return retained; } } });
+    assert.equal(await f.app.continueManagedVersion(f.selected, 'Thai', f.group), false);
+    assert.match(f.app.managedOperationErrors.open, /cached original baseline is unavailable/i);
+    assert.deepEqual(f.writes, []);
+    assert.equal(f.events.some(event => ['metadata', 'open', 'activate'].includes(event.type)), false);
+  }
+});
+
+test('late cached group readiness or baseline replies cannot create work in a changed account', async () => {
+  for (const step of ['hasVersionWorkspace', 'getImportedBaseline']) {
+    const held = deferred(), reached = deferred();
+    const f = cachedContentGroupHarness({ storage: { async [step]() { reached.resolve(); return held.promise; } } });
+    const opening = f.app.continueManagedVersion(f.selected, 'Thai', f.group);
+    await reached.promise; f.app.cloudProfileId = 'bob';
+    held.resolve(step === 'hasVersionWorkspace' ? false : f.baseline);
+    await opening;
+    assert.deepEqual(f.writes, []);
+    assert.equal(f.events.some(event => ['metadata', 'open', 'activate'].includes(event.type)), false);
+  }
+});
+
 test('row metadata saves retain their explicit version target when another version is selected', async () => {
   const { app, requests } = harness({ request: async () => ({}) });
   const edited = version({ id: 'row-action', name: 'Row action target', revision: 4 });
@@ -998,6 +1071,40 @@ test('workspace switching captures account and game before waiting for drafts', 
     assert.equal(await pending, false);
     assert.equal(events.some(event => event.type === 'activate' || event.type === 'load'), false);
   }
+});
+
+test('central workspace activation owns a collaboration fence before draft and storage awaits', async () => {
+  const draft = deferred(), loading = deferred(), draftEntered = deferred(), loadEntered = deferred();
+  const { app } = harness(), schedules = [];
+  app.scheduleCollaboration = () => schedules.push(!!app._managedWorkspaceTransition);
+  app.flushEditorDraft = async () => { assert.ok(app._managedWorkspaceTransition); draftEntered.resolve(); return draft.promise; };
+  app.loadVersionedStorage = async () => { assert.ok(app._managedWorkspaceTransition); loadEntered.resolve(); await loading.promise; };
+  app.managedAssociateActive = async () => {}; app.queueManagedActiveRefresh = () => {};
+  const opening = app.managedActivateWorkspace(hash('a'));
+  await draftEntered.promise;
+  const transition = app._managedWorkspaceTransition;
+  assert.ok(transition); assert.deepEqual(schedules, [true]);
+  draft.resolve(true); await loadEntered.promise;
+  assert.equal(app._managedWorkspaceTransition, transition); assert.deepEqual(schedules, [true]);
+  loading.resolve(); assert.equal(await opening, true);
+  assert.equal(app._managedWorkspaceTransition, null); assert.deepEqual(schedules, [true, false]);
+});
+
+test('central activation retains an outer or newer collaboration transition instead of clearing it', async () => {
+  const { app } = harness(), outer = {}, schedules = [];
+  app._managedWorkspaceTransition = outer;
+  app.scheduleCollaboration = () => schedules.push(!!app._managedWorkspaceTransition);
+  app.managedAssociateActive = async () => {}; app.queueManagedActiveRefresh = () => {};
+  assert.equal(await app.managedActivateWorkspace(hash('a')), true);
+  assert.equal(app._managedWorkspaceTransition, outer); assert.deepEqual(schedules, []);
+  app._managedWorkspaceTransition = null;
+  const draft = deferred(), reached = deferred();
+  app.flushEditorDraft = async () => { reached.resolve(); return draft.promise; };
+  const opening = app.managedActivateWorkspace(hash('a')); await reached.promise;
+  const newer = {}; app._managedWorkspaceTransition = newer;
+  draft.resolve(false); assert.equal(await opening, false);
+  assert.equal(app._managedWorkspaceTransition, newer);
+  assert.deepEqual(schedules, [true], 'A superseded owner cannot resume room initialization for a newer transition');
 });
 
 test('failed IndexedDB activation leaves the current editor and chooser actionable', async () => {
@@ -1481,4 +1588,54 @@ test('resumed upload dialogs focus an enabled modal control when the version-nam
   app.$nextTick = callback => callback();
   app.managedModalVisibility(true, 'managerUploadName'); assert.equal(focused, 'modal-button');
   requested.disabled = false; app.managedModalVisibility(true, 'managerUploadName'); assert.equal(focused, 'disabled-name');
+});
+
+test('local version discovery includes other groups while a StatDescription group is active', async () => {
+  const reads = [], { app } = harness({ storage: {
+    async listLocalVersions(scope, options) { reads.push(copy({ scope, options })); return [
+      { ...scope, sourceHash: hash('a'), versionId: 'first', groupId: 'first-group', hasSource: true },
+      { ...scope, sourceHash: hash('a'), versionId: 'second', groupId: 'second-group', hasSource: true },
+    ]; },
+  } });
+  app.activeContentGroup = { id: 'first-group', versionId: 'first', contentMode: 'statdescription' };
+  await app.managedLoadLocal();
+  assert.deepEqual(reads, [{ scope: storageScope({ sourceHash: '' }), options: { metadataOnly: true } }]);
+  assert.deepEqual(app.localVersions.map(row => row.groupId), ['first-group', 'second-group']);
+});
+
+test('a cancelled same-original group selection suppresses collaboration and restores the previous group', async () => {
+  const f = cachedContentGroupHarness(), confirmation = deferred(), reached = deferred();
+  const previous = { id: 'first-group', versionId: 'first-version', contentMode: 'statdescription' };
+  const selected = { ...f.selected, isHead: false };
+  f.app.activeContentGroup = previous; f.app.localDescs = { catalogVersionId: previous.versionId };
+  f.app.managedVersionDetails.version = selected;
+  const scheduled = [];
+  f.app.scheduleCollaboration = () => scheduled.push({ transition: !!f.app._managedWorkspaceTransition, groupId: f.app.activeContentGroup?.id });
+  f.app.appConfirm = async () => { reached.resolve(); return confirmation.promise; };
+  const opening = f.app.managedOpenStatGroup(selected, { ...f.group, assets: [{ role: 'source', descriptor: selected.archive }] }, 'Thai');
+  await reached.promise;
+  assert.equal(f.app.activeContentGroup.id, f.group.id);
+  assert.ok(f.app._managedWorkspaceTransition);
+  assert.deepEqual(scheduled, [{ transition: true, groupId: previous.id }], 'Room suppression starts before the target group assignment');
+  assert.deepEqual(f.writes, []);
+  confirmation.resolve(false); assert.equal(await opening, false);
+  assert.equal(f.app.activeContentGroup, previous);
+  assert.equal(f.app._managedWorkspaceTransition, null);
+  assert.deepEqual(scheduled.at(-1), { transition: false, groupId: previous.id });
+  assert.equal(f.events.find(event => event.type === 'context').scope.groupId, previous.id);
+  assert.deepEqual(f.writes, []);
+});
+
+test('successful same-original group opening keeps collaboration suppressed through workspace activation', async () => {
+  const f = cachedContentGroupHarness(), activation = deferred(), reached = deferred(), scheduled = [];
+  f.app.scheduleCollaboration = () => scheduled.push(!!f.app._managedWorkspaceTransition);
+  f.app.managedActivateWorkspace = async () => { reached.resolve(); return activation.promise; };
+  const opening = f.app.managedOpenStatGroup(f.selected,
+    { ...f.group, assets: [{ role: 'source', descriptor: f.selected.archive }] }, 'Thai');
+  await reached.promise;
+  assert.ok(f.app._managedWorkspaceTransition); assert.deepEqual(scheduled, [true]);
+  assert.equal(f.writes.length, 1); assert.equal(f.app.activeContentGroup.id, f.group.id);
+  activation.resolve(true); assert.equal(await opening, true);
+  assert.equal(f.app._managedWorkspaceTransition, null); assert.deepEqual(scheduled, [true, false]);
+  assert.equal(f.app.activeContentGroup.id, f.group.id);
 });

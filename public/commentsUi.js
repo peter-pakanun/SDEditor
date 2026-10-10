@@ -16,7 +16,7 @@
       commentsLanguage() { return this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language; },
       commentsContextKey() {
         return JSON.stringify([this.testMode, this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language,
-          this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages, this.commentsLanguage, this.gameVersion]);
+          this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages, this.commentsLanguage, this.gameVersion, this.activeContentGroup?.id || '', this.activeContentGroup?.versionId || '']);
       },
       commentsUnavailableReason() {
         if (this.testMode) return 'Shared comments are unavailable in test mode.';
@@ -27,7 +27,7 @@
       },
       commentsFilepath() { return this.editorCurrentEditingDesc?.filepath || ''; },
       commentsDraftKey() {
-        return JSON.stringify([this.cloudUser?.id, this.commentsLanguage, this.gameVersion, this.commentsFilepath, this.sourceIdentity]);
+        return JSON.stringify([this.cloudUser?.id, this.commentsLanguage, this.gameVersion, this.commentsFilepath, this.sourceIdentity, ...(this.activeContentGroup?.id ? [this.activeContentGroup.versionId,this.activeContentGroup.id] : [])]);
       },
       commentsFileDraft: {
         get() { return this.commentsDrafts[this.commentsDraftKey] || ''; },
@@ -106,6 +106,7 @@
       commentsCapture() {
         return { key: this.commentsContextKey, generation: this._commentsGeneration || 0,
           game: this.gameVersion, language: this.commentsLanguage, allLanguagesAccess: !!this.cloudCanAccessAllLanguages,
+          groupId: this.activeContentGroup && !this.activeContentGroup.legacyVersionId ? this.activeContentGroup.id : null,
           client: this._cloud, auth: this._cloud?.context() };
       },
       commentsCurrent(ctx) {
@@ -190,7 +191,7 @@
         this._commentsUnreadTask = task;
         const revision = this._commentsReadRevision || 0;
         try {
-          const result = await ctx.client.request('/v1/comments/unread?game=' + encodeURIComponent(ctx.game), {}, ctx.auth);
+          const result = await ctx.client.request('/v1/comments/unread?game=' + encodeURIComponent(ctx.game) + (ctx.groupId ? '&groupId='+encodeURIComponent(ctx.groupId) : ''), {}, ctx.auth);
           if (!this.commentsCurrent(ctx) || revision !== (this._commentsReadRevision || 0)) return;
           this.commentsApplyUnread(result); this.commentsUnreadFetchError = '';
         } catch (error) {
@@ -216,6 +217,7 @@
         const current = () => this.commentsCurrent(ctx) && feed === (surface === 'file' ? this.commentsFileFeed : this.commentsAllFeed)
           && (surface !== 'file' || filepath === this.commentsFilepath);
         const params = new URLSearchParams({ game: ctx.game, limit: '50' });
+        if (ctx.groupId) params.set('groupId',ctx.groupId);
         if (filepath) params.set('filepath', filepath);
         if (append) params.set('before', feed.cursor);
         feed.loading = true; feed.loadingMore = append;
@@ -285,6 +287,7 @@
         this.commentsPosts[key] = task;
         try {
           const result = await ctx.client.request('/v1/comments', { method: 'POST', body: { game: ctx.game, filepath, sourceHash, body, allLanguages,
+            ...(ctx.groupId ? { groupId:ctx.groupId } : {}),
             ...(ctx.allLanguagesAccess && ctx.language ? { language: ctx.language } : {}), mutationId: task.mutationId } }, ctx.auth);
           if (this.commentsDrafts[key] === draft && (this.commentsDraftScopes[key] === true) === allLanguages) {
             this.commentsDrafts[key] = '';
@@ -356,7 +359,7 @@
         this._commentsReadRevision = (this._commentsReadRevision || 0) + 1;
         let succeeded = false;
         try {
-          const result = await ctx.client.request('/v1/comments/read', { method: 'POST', body: { game: ctx.game, ids: [...ids] } }, ctx.auth);
+          const result = await ctx.client.request('/v1/comments/read', { method: 'POST', body: { game: ctx.game, ids: [...ids], ...(ctx.groupId ? { groupId:ctx.groupId } : {}) } }, ctx.auth);
           if (!this.commentsCurrent(ctx)) return;
           this._commentsReadDone ||= new Set();
           for (const id of ids) this._commentsReadDone.add(id);

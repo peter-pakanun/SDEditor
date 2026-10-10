@@ -59,6 +59,23 @@ test('storage and asynchronous acknowledgement callbacks finish in queue order',
   assert.deepEqual(writes, ['first', 'second']); assert.deepEqual(commits, ['first', 'second']);
 });
 
+test('same-baseline groups keep pending overlays and captured commands separate without changing legacy keys', async () => {
+  assert.equal(PendingSaves.scopeKey(scope), JSON.stringify(['account-one', 'poe1', 'source-one', 'Thai']));
+  const calls = []; let group = 'group-one';
+  const queue = PendingSaves.create({ captureScope: value => ({ ...scope, branchId: 'default', versionId: 'version-one', groupId: group }),
+    save: async value => { calls.push(value); return {}; } });
+  const first = queue.enqueue(batch('first', 'one'));
+  group = 'group-two'; const second = queue.enqueue(batch('second', 'two'));
+  assert.equal(first.batch.workspaceScope.groupId, 'group-one'); assert.equal(second.batch.workspaceScope.groupId, 'group-two');
+  assert.equal(Object.hasOwn(first.batch, 'groupId'), false, 'The captured journal command keeps its original top-level shape.');
+  assert.notEqual(PendingSaves.scopeKey(first.batch), PendingSaves.scopeKey(second.batch));
+  assert.equal(queue.overlay({ ...scope, versionId: 'version-one', groupId: 'group-one' }, 'source/file.txt').translations[0], 'one');
+  assert.equal(queue.overlay({ ...scope, versionId: 'version-one', groupId: 'group-two' }, 'source/file.txt').translations[0], 'two');
+  assert.equal(queue.overlay({ ...scope, versionId: 'version-two', groupId: 'group-one' }, 'source/file.txt'), null);
+  assert.equal(queue.overlay(scope, 'source/file.txt'), null);
+  await queue.drain(); assert.deepEqual(calls.map(value => value.workspaceScope.groupId), ['group-one', 'group-two']);
+});
+
 test('navigation holds cancel scheduled intake and require every idempotent release before dispatch', async () => {
   const calls = [];
   const queue = PendingSaves.create({ save: async value => { calls.push(value.jobId); return {}; } });

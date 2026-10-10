@@ -13,6 +13,7 @@
       'cloudUser.role'() { this.scheduleCollaboration(); },
       cloudCanAccessAllLanguages() { this.scheduleCollaboration(); },
       lang() { this.scheduleCollaboration(); },
+      activeContentGroup() { this.scheduleCollaboration(); },
       gameVersion() { this.scheduleCollaboration(); },
       branchId() { this.scheduleCollaboration(); },
       sourceLoaded() { this.scheduleCollaboration(); },
@@ -408,7 +409,8 @@
         catch (_) { return false; }
       },
       pendingSaveScope() {
-        return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '' };
+        return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '',
+          ...(this.activeContentGroup && !this.activeContentGroup.legacyVersionId ? { versionId: this.activeContentGroup.versionId, groupId: this.activeContentGroup.id } : {}) };
       },
       async journalPendingSave(batch, context) {
         // Capture the workspace before the journal write yields; a later
@@ -530,21 +532,30 @@
       },
       captureCollaborationContext() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
+          groupId: this.activeContentGroup?.id || '', versionId: this.activeContentGroup?.versionId || '', contentMode: this.ctActive ? 'clienttext' : 'statdescription',
           assignmentVersion: this.cloudUser?.assignmentVersion, assignedLanguage: this.cloudUser?.language, role: this.cloudUser?.role,
           allLanguagesAccess: this.cloudCanAccessAllLanguages, client: this._collaboration };
       },
       collaborationContextCurrent(ctx) {
         return ctx.game === this.gameVersion && ctx.language === this.lang && ctx.source === this.sourceIdentity
+          && ctx.groupId === (this.activeContentGroup?.id || '') && ctx.versionId === (this.activeContentGroup?.versionId || '') && ctx.contentMode === (this.ctActive ? 'clienttext' : 'statdescription')
           && (ctx.branchId || 'default') === (this.branchId || 'default')
           && ctx.account === (this.cloudUser?.id || '') && ctx.assignmentVersion === this.cloudUser?.assignmentVersion
           && ctx.assignedLanguage === this.cloudUser?.language
           && ctx.role === this.cloudUser?.role && ctx.allLanguagesAccess === this.cloudCanAccessAllLanguages && ctx.client === this._collaboration;
       },
+      collaborationWorkspaceReady() {
+        const group=this.activeContentGroup;
+        if(this._managedWorkspaceTransition || this.ctWorkspace)return false;
+        if(this.localDescs?.workspaceGroupId && (group?.id!==this.localDescs.workspaceGroupId || group?.versionId!==this.localDescs.workspaceVersionId))return false;
+        return !group || group.legacyVersionId || (group.contentMode==='statdescription' && this.localDescs?.catalogVersionId===group.versionId);
+      },
       scheduleCollaboration() {
+        if (this.ctActive) { clearTimeout(this._collabStartTimer); this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = ''; return; }
         // Invalidate an old room immediately, before the debounce or any network await.
         const eligible = this.cloudSignedIn && !!this.cloudUser?.id && !!this.lang
-          && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang) && this.sourceLoaded;
-        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|') : '';
+          && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang) && this.sourceLoaded && this.collaborationWorkspaceReady();
+        const key = eligible ? [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity, this.activeContentGroup?.id || ''].join('|') : '';
         if (this._collabKey && this._collabKey !== key) {
           this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
           this._collabFileIndexes = null;
@@ -562,7 +573,7 @@
       },
       collaborationInitializationKey() {
         return [this.cloudUser?.id, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages,
-          this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|');
+          this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity, this.activeContentGroup?.id || ''].join('|');
       },
       initializeCollaboration() {
         const key = this.collaborationInitializationKey();
@@ -582,19 +593,20 @@
         return tracked;
       },
       async initializeCollaborationForScope(request) {
-        const current = () => request.key === this.collaborationInitializationKey() && request.source === this.descs
+        const current = () => this.collaborationWorkspaceReady() && request.key === this.collaborationInitializationKey() && request.source === this.descs
           && request.workspace === this.localDescs && request.client === this._collaboration;
         if (window.OfflineStore?.listSaveSubmissions) await initializationTask(this, 'Recovering queued local saves', () => this.recoverPendingSaves());
         if (!current()) return;
-        if (this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
+        if (this.ctActive || this._managedWorkspaceTransition || this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
         if (!current()) return;
         if (this._importingSource || this._reconcilingImport || this.pendingDuplicateLangImport?.mode === 'update') return;
-        const key = [this.cloudUser.id, this.cloudUser.assignmentVersion, this.cloudUser.role, this.cloudCanAccessAllLanguages, this.gameVersion, this.branchId || 'default', this.lang, this.sourceIdentity].join('|');
+        const key = this.collaborationInitializationKey();
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
-        const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang };
+        const ctx = { accountId: this.cloudUser.id, game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang,
+          ...(this.activeContentGroup && !this.activeContentGroup.legacyVersionId ? { versionId: this.activeContentGroup.versionId, groupId: this.activeContentGroup.id } : {}) };
         const cloud = this._cloud;
         const openFile = (this.editorSessionActive ?? this.editorVisible) ? this.collaborationFile(this.editorCurrentEditingDesc) : null;
         const originalBase = copy(this._editorCollabBase);
@@ -873,6 +885,7 @@
           const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: ctx.language, sourceHash: ctx.source };
           const bases = { [desc.filepath]: copy(base) };
           const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
+            ...(ctx.groupId ? { versionId: ctx.versionId, groupId: ctx.groupId } : {}),
             resetStaging: true, origin: 'delete_staged', deferDisplay: true, bases, files: [file],
             descriptions: [makeLocalDesc(source, ctx.language, translations, { derivedStatus: true })],
             statuses: { [desc.filepath]: window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language, { lastEditedAt: now }) },
@@ -961,6 +974,7 @@
               window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language,
                 { lastEditedAt: now, lastTranslatedAt: now })]));
             const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account, origin,
+              ...(ctx.groupId ? { versionId: ctx.versionId, groupId: ctx.groupId } : {}),
               files, statuses, ...(hasPromotions ? { promoteDroppedByPath: promotions } : {}), ...(promotion ? { promoteDropped: promotion } : {}),
               ...(options.draft ? { draft: copy(options.draft) } : {}),
               ...(options.checkpoint ? { checkpoint: copy(options.checkpoint) } : {}),
@@ -997,8 +1011,8 @@
           if (this._pendingSaves && !await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before continuing.');
           if (!this.collaborationContextCurrent(ctx)) return { stale: true };
           const recordScope = window.OfflineStore.captureWorkspaceScope?.({ accountId: ctx.account || 'guest', game: ctx.game,
-            branchId: ctx.branchId || 'default', sourceHash: ctx.source }) || { accountId: ctx.account || 'guest', game: ctx.game,
-            branchId: ctx.branchId || 'default', sourceHash: ctx.source };
+            branchId: ctx.branchId || 'default', sourceHash: ctx.source, ...(ctx.groupId ? { versionId: ctx.versionId, groupId: ctx.groupId } : {}) }) || { accountId: ctx.account || 'guest', game: ctx.game,
+            branchId: ctx.branchId || 'default', sourceHash: ctx.source, ...(ctx.groupId ? { versionId: ctx.versionId, groupId: ctx.groupId } : {}) };
           const localRecords = !this.testMode && !ctx.client && !!window.OfflineStore.getWorkspaceRecords && !!window.OfflineStore.updateWorkspace;
           // Collaboration projects saved files onto the latest durable workspace.
           // Ordinary saves only need to stage their metadata, not clone the archive.

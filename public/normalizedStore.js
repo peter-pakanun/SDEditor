@@ -35,7 +35,10 @@
     return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
   }
   const key = (...parts) => JSON.stringify(parts);
-  const scopeKey = scope => key(scope.accountId || 'guest', scope.game, scope.branchId || 'default', scope.sourceHash || '');
+  const contentScope = scope => scope?.groupId ? { versionId: String(scope.versionId || ''), groupId: String(scope.groupId) } : {};
+  const contentParts = scope => scope?.groupId ? [contentScope(scope)] : [];
+  const sameContentScope = (left, right) => (left?.groupId || '') === (right?.groupId || '') && (left?.versionId || '') === (right?.versionId || '');
+  const scopeKey = scope => key(scope.accountId || 'guest', scope.game, scope.branchId || 'default', scope.sourceHash || '', ...contentParts(scope));
   const baselineKey = scope => key(scope.game, scope.sourceHash || '');
   const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
   const done = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error || new Error('Storage transaction aborted.')); });
@@ -617,6 +620,7 @@
     function splitWorkspace(scope, workspace, originals = new Map()) {
       const id = scopeKey(scope), meta = {}, files = [], records = [];
       for (const [field, value] of Object.entries(workspace || {})) if (!['_storageSelection', '_storageArchiveKinds', 'descs', 'importRecovery'].includes(field) && !fieldMaps.includes(field)) meta[field] = value;
+      delete meta.groupId; delete meta.versionId; Object.assign(meta, contentScope(scope));
       if (meta.importArchive) {
         const { decisions, ...descriptor } = meta.importArchive;
         meta.importArchive = descriptor;
@@ -1120,7 +1124,7 @@
       return { tx, kv, consumeJournal };
     }
     function draftRow(value, original) {
-      const scope = normalizeScope({ accountId: value.profile, game: value.game, branchId: value.branchId, sourceHash: value.sourceHash });
+      const scope = normalizeScope({ accountId: value.profile, game: value.game, branchId: value.branchId, sourceHash: value.sourceHash, ...contentScope(value) });
       const data = copy(value);
       const compact = record => {
         if (!record) return;
@@ -1132,7 +1136,7 @@
         for (const variant of [...(record.conflicts || []), ...(record.recovery || [])]) compact(variant);
       };
       compact(data);
-      return { key: value.key, scope: scopeKey(scope), profileLanguage: key(value.profile, value.game, value.branchId || 'default', value.language),
+      return { key: value.key, scope: scopeKey(scope), profileLanguage: key(value.profile, value.game, value.branchId || 'default', value.language, ...contentParts(scope)),
         scopeLanguage: key(scopeKey(scope), value.language), value: data };
     }
     async function hydrateDraft(tx, value, sources = new Map()) {
@@ -1195,14 +1199,14 @@
     }
     async function draftList(scope) {
       // One-time transfer preserves consumed receipts and recovery variants.
-      const marker = key('drafts', scope.profile, scope.game, scope.branchId || 'default', scope.language);
+      const marker = key('drafts', scope.profile, scope.game, scope.branchId || 'default', scope.language, ...contentParts(scope));
       await transaction([stores.migration], 'readonly', tx => get(tx, stores.migration, marker)).then(async ready => {
         if (ready) return;
         return trackMigration('drafts', marker, { accountId: scope.profile, game: scope.game, branchId: scope.branchId, language: scope.language }, async () => {
           const prefix = 'translation_draft_v1:', range = typeof IDBKeyRange === 'undefined' ? undefined : IDBKeyRange.bound(prefix, prefix + '\uffff');
           const rows = (await transaction(['kv'], 'readonly', tx => request(tx.objectStore('kv').getAll(range))))
             .filter(item => item.key.startsWith(prefix) && item.value.profile === scope.profile && item.value.game === scope.game
-              && item.value.language === scope.language && (item.value.branchId || 'default') === (scope.branchId || 'default'));
+              && item.value.language === scope.language && (item.value.branchId || 'default') === (scope.branchId || 'default') && sameContentScope(item.value, scope));
           // Bound each transfer transaction. Readiness follows the final batch;
           // interrupted transfers reuse the rows already copied without rewriting.
           for (let offset = 0; offset < Math.max(rows.length, 1); offset += 128) {
@@ -1218,9 +1222,9 @@
       });
       return transaction([stores.drafts, stores.baseline], 'readonly', async tx => {
         const rows = scope.sourceHash == null
-          ? await request(tx.objectStore(stores.drafts).index('by_profile_lang').getAll(key(scope.profile, scope.game, scope.branchId || 'default', scope.language)))
+          ? await request(tx.objectStore(stores.drafts).index('by_profile_lang').getAll(key(scope.profile, scope.game, scope.branchId || 'default', scope.language, ...contentParts(scope))))
           : await request(tx.objectStore(stores.drafts).index('by_scope_language').getAll(key(scopeKey(normalizeScope({ ...scope, accountId: scope.profile })), scope.language)));
-        return Promise.all(rows.map(row => hydrateDraft(tx, row.value)).filter(Boolean)).then(values => values.filter(value => (scope.sourceHash == null || value.sourceHash === scope.sourceHash) && (value.state === 'active' || value.conflicts?.length)));
+        return Promise.all(rows.map(row => hydrateDraft(tx, row.value)).filter(Boolean)).then(values => values.filter(value => (scope.sourceHash == null || value.sourceHash === scope.sourceHash) && sameContentScope(value, scope) && (value.state === 'active' || value.conflicts?.length)));
       });
     }
     async function putSubmission(batch) {
@@ -1264,10 +1268,10 @@
         if (!same(value, current)) tx.objectStore(stores.submissions).put(row(id, batch.jobId, value, { paths: batch.files.map(file => key(id, batch.language, file.filepath)) }));
         if (patch.state === 'review' && !batch.resetStaging && batch.files.length === 1) {
           const path = batch.files[0].filepath, checkpoint = batch.checkpoint || batch.draft;
-          const draftKey = checkpoint?.key || 'translation_draft_v1:' + key(scope.accountId, scope.game, scope.sourceHash, batch.language, path, ...(scope.branchId === 'default' ? [] : [scope.branchId]));
+          const draftKey = checkpoint?.key || 'translation_draft_v1:' + key(scope.accountId, scope.game, scope.sourceHash, batch.language, path, ...(scope.branchId === 'default' ? [] : [scope.branchId]), ...contentParts(scope));
           const previous = await hydrateDraft(tx, await get(tx, stores.drafts, draftKey));
           const recovered = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: batch.language, filepath: path,
-            ...(scope.branchId === 'default' ? {} : { branchId: scope.branchId }), key: draftKey, id: 'submission:' + batch.jobId, revision: 'submission:' + batch.jobId,
+            ...(scope.branchId === 'default' ? {} : { branchId: scope.branchId }), ...contentScope(scope), key: draftKey, id: 'submission:' + batch.jobId, revision: 'submission:' + batch.jobId,
             state: 'active', submissionJobId: batch.jobId, translations: batch.files[0].translations, base: batch.bases?.[path] || batch.draft?.base || { translations: [] },
             sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: path }, updatedAt: Date.now() };
           const submissionJobIds = [...new Set([previous?.submissionJobId, ...(previous?.submissionJobIds || []), batch.jobId].filter(Boolean))];

@@ -106,6 +106,7 @@
       managedVisibleRecoveryTeam() { return this.managedCatalogAccess && (this.cloudCanAccessAllLanguages || this.managedRecoveryTeam?.language === this.managedSingleLanguage) ? this.managedRecoveryTeam : null; },
       managedActiveVersion() {
         if (!this.managedCatalogAccess) return null;
+        if(this.activeContentGroup && !this.activeContentGroup.legacyVersionId){const details=this.managedActiveDetails;if(details?.version?.id===this.activeContentGroup.versionId && details.version.sourceHash===this.sourceIdentity)return details.version;return null;}
         const matches = v => v?.sourceHash === this.sourceIdentity && v.branchId === this.branchId;
         return this.managedVersions.find(matches) || (matches(this.managedActiveDetails?.version) ? this.managedActiveDetails.version : null)
           || (() => { const local = this.localVersions.find(v => matches(v) && v.catalogVersionId); return local?.catalogVersion || local?.details?.version; })() || null;
@@ -285,7 +286,8 @@
         if (!this.managedCatalogAccess || !details) return null;
         return { ...details, teams: (details.teams || []).filter(team => this.cloudCanAccessAllLanguages || team.language === this.cloudUser?.language) };
       },
-      managedWorkspaceScope(sourceHash = this.sourceIdentity) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || DEFAULT_BRANCH, sourceHash: sourceHash || '' }; },
+      managedWorkspaceScope(sourceHash = this.sourceIdentity, group = this.activeContentGroup) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || DEFAULT_BRANCH, sourceHash: sourceHash || '',
+        ...(group?.contentMode === 'statdescription' && !group.legacyVersionId ? { versionId: group.versionId, groupId: group.id, contentMode: 'statdescription' } : {}) }; },
       syncManagedWorkspaceScope() { if (this.gameVersion) root.OfflineStore?.setWorkspaceContext?.(this.managedWorkspaceScope()); },
       managedScopeChanged({ deferWorkspace = this.versionChooserVisible } = {}) {
         if (this.testMode || !this.gameVersionSelected || !this.offlineStoreReady) return Promise.resolve();
@@ -353,7 +355,7 @@
         await Promise.allSettled([this.managedLoadLocal(), cache, upload, this.refreshManagedVersions()]);
       },
       async managedLoadLocal() {
-        const scope = this.managedWorkspaceScope(''), key = this.managedCatalogScope;
+        const scope = this.managedWorkspaceScope('', null), key = this.managedCatalogScope;
         if (!scope.game || !root.OfflineStore?.listLocalVersions) return;
         const request = this._managedLocalLoad = {};
         this.managedLocalVersionsLoading = !this.managedLocalVersionsLoaded;
@@ -448,7 +450,7 @@
           this.managedVersionDetails = this.managedScopedDetails(result); this.managedVersionError = '';
           this.managedDetailsLoaded = true; this.managedDetailsLoading = false;
           if (this.sourceLoaded && result.version.sourceHash === this.sourceIdentity) this.managedActiveDetails = this.managedVersionDetails;
-          await root.OfflineStore?.setVersionMetadata?.(this.managedWorkspaceScope(result.version.sourceHash), { details: copy(result), catalogVersionId: versionId, officialName: result.version.name });
+          if (result.version.sourceHash) await root.OfflineStore?.setVersionMetadata?.(this.managedWorkspaceScope(result.version.sourceHash,null), { details: copy(result), catalogVersionId: versionId, officialName: result.version.name });
           if (current()) this.openManagedPresence(versionId);
         } catch (error) { if (!error.stale && current()) this.managedVersionError = error.message; }
         finally { if (current()) { this.managedDetailsLoaded = true; this.managedDetailsLoading = false; this._managedDetailPending = null; } }
@@ -460,6 +462,7 @@
         try {
           const result = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id));
           if (key !== this.managedCatalogScope || language !== this.lang || this.managedActiveVersion?.id !== version.id) return;
+          if(this.activeContentGroup && !this.activeContentGroup.legacyVersionId){const group=result.contentGroups?.find(group=>group.id===this.activeContentGroup.id);if(!group)throw new Error('The active content group is unavailable.');this.activeContentGroup=group;result.version={...result.version,sourceHash:version.sourceHash,zipHash:version.zipHash,archive:version.archive};result.teams=group.teams;}
           if (!this.managedDetailsMatchVersion(result, version)) throw new Error('The active version details do not match this source. Existing local work has been preserved.');
           this.managedActiveDetails = this.managedScopedDetails(result);
           await root.OfflineStore.setVersionMetadata?.(scope, { details: copy(result), catalogVersionId: version.id, officialName: version.name });
@@ -497,11 +500,51 @@
       },
       managedOpenVersion(version) {
         if (!this.managedSingleLanguageAccess) return false;
+        const groups = version.contentGroups || this.managedDetailsForVersion(version)?.contentGroups || [];
+        const group = groups.find(group => group.teams?.some(team => team.language === this.managedSingleLanguage));
+        if (group && !group.legacyVersionId) return this.ctOpenGroup(version, group, this.managedSingleLanguage);
+        this.ctFence?.(); this.activeContentGroup = null;
         return this.continueManagedVersion(version, this.managedSingleLanguage);
       },
       managedOpenTeam(version, team, event) {
         if (!team || this.managedRowActionTarget(event)) return false;
+        this.ctFence?.(); this.activeContentGroup = null;
         return this.continueManagedVersion(version, team.language);
+      },
+      async managedOpenStatGroup(version, group, language,previousGroup=this.activeContentGroup) {
+        const key=this.managedCatalogScope,epoch=this._ctEpoch || 0,transition=this._managedWorkspaceTransition={};let opened=false;
+        this.scheduleCollaboration?.();
+        try {
+          if (group.legacyVersionId) { this.activeContentGroup = null; opened=await this.continueManagedVersion(version, language);return opened; }
+          let archive = group.assets?.find(asset => asset.role === 'source')?.descriptor;
+          if(!archive){const response = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id));if(key!==this.managedCatalogScope || epoch!==(this._ctEpoch || 0))return false;group=response.group;archive=group.assets?.find(asset=>asset.role==='source')?.descriptor;}
+          if (!archive) throw new Error('The StatDescription group is missing its verified original.');
+          if(key!==this.managedCatalogScope || epoch!==(this._ctEpoch || 0) || group.versionId!==version.id)return false;
+          this.activeContentGroup = group;
+          opened=await this.continueManagedVersion({ ...version, sourceHash: archive.baselineId, zipHash: archive.zipHash, archive }, language, group);return opened;
+        } finally {
+          if(this._managedWorkspaceTransition===transition){
+            if(!opened && key===this.managedCatalogScope && epoch===(this._ctEpoch || 0) && this.localDescs?.catalogVersionId!==version.id){this.activeContentGroup=previousGroup;this.syncManagedWorkspaceScope();}
+            this._managedWorkspaceTransition=null;this.scheduleCollaboration?.();
+          }
+        }
+      },
+      async managedDownloadStatGroupCollection(version, group, team, collection) {
+        if (group.legacyVersionId) return this.managedDownloadCollection({ ...team, latestCollection: collection }, collection.id);
+        const key = this.managedCatalogScope, current = () => key === this.managedCatalogScope;
+        const files = []; let cursor = '', manifest;
+        do {
+          const result = await this._cloud.request('/v1/content-collections/' + encodeURIComponent(collection.id) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
+          manifest = result.manifest;
+          if (!current()) return;
+          if (result.collection.id !== collection.id || manifest.groupId !== group.id || manifest.versionId !== version.id || manifest.language !== team.language) throw new Error('The collection does not match the selected group and team.');
+          files.push(...(manifest.files || [])); cursor = result.nextCursor || '';
+        } while (cursor);
+        const archive = manifest.assets.find(asset => asset.role === 'source').descriptor;
+        const blob = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/source/original', { responseType: 'blob' });
+        const baseline = await root.ManagedCollectionExports.parseOriginal(blob, archive, team.language, root.JSZip, { current });
+        const output = await root.ManagedCollectionExports.generate({ ...manifest, files }, baseline, root.JSZip, { current });
+        if (current()) {root.saveAs(output, `${version.name}_${team.language}_StatDescriptions.zip`);return true;}
       },
       managedDetailsForVersion(version) {
         if (!this.managedCatalogAccess) return null;
@@ -534,6 +577,8 @@
         const request = this._managedOfflineEntry = {};
         const current = () => key === this.managedCatalogScope && run === this._managedScopeRun && request === this._managedOfflineEntry;
         try {
+          if(this.ctFlushDraft && !await this.ctFlushDraft())return false;this.ctFence?.();
+          this.activeContentGroup=version?.groupId ? version.details?.contentGroups?.find(group=>group.id===version.groupId) || {id:version.groupId,versionId:version.versionId,contentMode:'statdescription'} : null;
           if (version && !await this.managedActivateWorkspace(version.sourceHash)) return false;
           if (!current()) return false;
           if (!version) { this.activeManagedVersionId = ''; this.versionChooserVisible = false; if (!this.sourceLoaded) this.showImportUpdateZipDialog(); }
@@ -566,6 +611,8 @@
         ] });
         if (initializationSession && !initialization) return false;
         const task = (label, callback) => initializationTask(this, label, callback, initialization);
+        const transition=this._managedWorkspaceTransition || {},ownsTransition=!this._managedWorkspaceTransition;
+        if(ownsTransition){this._managedWorkspaceTransition=transition;this.scheduleCollaboration?.();}
         try {
           await this.$nextTick?.();
           if (!current()) return false;
@@ -581,7 +628,7 @@
           if (!scope.sourceHash && !scope.legacyWorkspacePending) throw new Error('This stored workspace is not available for the current account. Switch to the account or local profile that created it. Its stored work has been preserved.');
           const activated = scope.sourceHash ? await task('Activating the selected local workspace', () => root.OfflineStore.activateVersion(scope)) : null;
           if (!current()) return false;
-          if (activated?.metadata?.details) this.managedActiveDetails = this.managedScopedDetails(activated.metadata.details);
+          if (activated?.metadata?.details) {this.managedActiveDetails = this.managedScopedDetails(activated.metadata.details);this.activeContentGroup=scope.groupId ? activated.metadata.details.contentGroups?.find(group=>group.id===scope.groupId) || {id:scope.groupId,versionId:scope.versionId,contentMode:'statdescription'} : null;}
           if (this.editorSessionActive) { this.editorVisible = false; this.inlineActive = false; }
           this._managedEditAcknowledged = '';
           if (language) this.lang = language;
@@ -594,9 +641,12 @@
           if (!current()) return false;
           if (this.managedOnlineAvailable && this.managedActiveVersion) this.queueManagedActiveRefresh();
           return current();
-        } finally { this.finishWorkspaceInitialization?.(initialization); }
+        } finally {
+          this.finishWorkspaceInitialization?.(initialization);
+          if(ownsTransition && this._managedWorkspaceTransition===transition){this._managedWorkspaceTransition=null;this.scheduleCollaboration?.();}
+        }
       },
-      async continueManagedVersion(version = this.managedSelectedVersion, language) {
+      async continueManagedVersion(version = this.managedSelectedVersion, language, contentGroup = null) {
         if (!this.managedCatalogAccess || !version || this.managedVersionBusy) return false;
         if (version.game !== this.gameVersion || (version.branchId || DEFAULT_BRANCH) !== this.branchId) {
           this.managedSetOperationError('open', 'Select a source version in the current game and branch.'); return false;
@@ -625,6 +675,8 @@
           if (!current()) return;
           const source = await task('Reading the cached source version', () => root.OfflineStore.getVersionSource(scope));
           if (!current()) return;
+          const groupWorkspaceReady=!contentGroup || !root.OfflineStore.hasVersionWorkspace || await task('Checking this content group workspace',()=>root.OfflineStore.hasVersionWorkspace(scope));
+          if(!current())return;
           let details = this.managedDetailsForVersion(version);
           if (!details && root.OfflineStore.getVersionMetadata) {
             const metadata = await task('Reading cached version and team details', () => root.OfflineStore.getVersionMetadata(scope));
@@ -638,6 +690,8 @@
             try {
               const result = await task('Checking published version and team details', () => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id)));
               if (!current()) return;
+              if (contentGroup) result.version = { ...result.version, sourceHash: version.sourceHash, zipHash: version.zipHash, archive: version.archive };
+              if (contentGroup) result.teams = contentGroup.teams;
               if (result.version?.id !== version.id || result.version.sourceHash !== scope.sourceHash
                 || result.version.game !== scope.game || (result.version.branchId || DEFAULT_BRANCH) !== scope.branchId) {
                 const error = new Error('The selected source version changed. Select it again before opening.');
@@ -671,14 +725,14 @@
           if (!current()) return;
           if (!source?.length) {
             if (!this.managedOnlineAvailable) throw new Error('Download this source version once while connected before working offline.');
-            const blob = await task('Downloading the original source ZIP', reportProgress => this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', {
+            const blob = await task('Downloading the original source ZIP', reportProgress => this._cloud.request(contentGroup ? '/v1/content-groups/' + encodeURIComponent(contentGroup.id) + '/assets/source/original' : '/v1/versions/' + encodeURIComponent(version.id) + '/original', {
               responseType: 'blob', timeout: 120000,
               onDownloadProgress: (completed, total) => { if (current()) reportProgress({ completed, total, unit: 'bytes' }); },
             }));
             if (!current()) return;
             const zip = await task('Unpacking the source ZIP', () => root.JSZip.loadAsync(blob)), rawSource = [];
             if (!current()) return;
-            const archive = (await task('Reading published baseline metadata', () => this._cloud.request('/v1/collaboration/archives/' + version.game + '/' + version.zipHash))).archive;
+            const archive = contentGroup ? version.archive : (await task('Reading published baseline metadata', () => this._cloud.request('/v1/collaboration/archives/' + version.game + '/' + version.zipHash))).archive;
             if (!current()) return;
             await task('Parsing source description files', async reportProgress => {
               const entries = Object.values(zip.files).filter(e => !e.dir && e.name.toLowerCase().endsWith('.txt'));
@@ -702,6 +756,13 @@
             await task('Storing the verified source version locally', () => root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline));
           }
           if (!current()) return;
+          if(contentGroup && source?.length && !groupWorkspaceReady){
+            const baseline=await task('Reading the retained immutable baseline',()=>root.OfflineStore.getImportedBaseline(version.sourceHash,scope));if(!current())return;
+            if(!baseline || baseline.archive?.baselineId!==version.sourceHash || baseline.tree?.root!==version.archive.treeRoot)throw new Error('The cached original baseline is unavailable. Open this group while connected to verify its original ZIP.');
+            const workspace={descs:[],status:{},branchId:scope.branchId,sourceHash:version.sourceHash,importArchive:baseline.archive,catalogVersionId:version.id};
+            root.WorkspaceState.initializeWorkspace(workspace,{game:version.game,branchId:scope.branchId,sourceHash:version.sourceHash,source:baseline.source,language:targetLanguage});
+            await task('Creating this content group workspace',()=>root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source),workspace,[],scope,baseline));if(!current())return;
+          }
           await task('Storing selected version and team details', () => root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) }));
           if (!current()) return;
           const opened = await task('Opening the prepared workspace', () => this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization));
@@ -731,13 +792,15 @@
       async managedOpenRecoveryFile(reference) {
         if (!this.managedCatalogAccess) return false;
         const key = this.managedCatalogScope, version = this.managedSelectedVersion, team = this.managedRecoveryTeam;
-        if (!version || !team || !await this.continueManagedVersion(version, team.language)) return;
-        if (key !== this.managedCatalogScope || this.sourceIdentity !== version.sourceHash || this.lang !== team.language) return;
+        if (!version || !team || reference.readOnly) return;
+        const group=team.contentGroup,expectedSource=group?.assets?.find(asset=>asset.role==='source')?.descriptor?.baselineId || version.sourceHash;
+        if(group && !group.legacyVersionId){await this.ctOpenGroup(version,group,team.language);if(this.activeContentGroup?.id!==group.id)return;}else if(!await this.continueManagedVersion(version, team.language))return;
+        if (key !== this.managedCatalogScope || this.sourceIdentity !== expectedSource || this.lang !== team.language) return;
         const desc = this.getDescByFilepath(reference.filepath);
         if (!desc) { await this.appAlert('This file is absent from the selected source version. Its preserved text remains available in the inherited copies view.'); return; }
         this.managedRecoveryVisible = false;
         await this.editFile(reference.filepath);
-        if (key === this.managedCatalogScope && this.sourceIdentity === version.sourceHash && this.editorCurrentEditingDesc?.filepath === reference.filepath) {
+        if (key === this.managedCatalogScope && this.sourceIdentity === expectedSource && this.editorCurrentEditingDesc?.filepath === reference.filepath) {
           this.sideTab = 'history'; await this.refreshHistory();
         }
       },

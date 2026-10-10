@@ -1,12 +1,28 @@
 # Import Workflow
 
-This app edits Path of Exile `StatDescriptions.zip` translation files in your browser.
+This app edits Path of Exile StatDescription ZIPs and ClientText XLSX/XLSM workbooks in your browser.
 
 SDEditor supports separate PoE1 and PoE2 workspaces with named source versions. Pick the game on launch, then choose an Online version or the Offline workspace. For identities, retained versions and migration, see [Multi-Version Support](multi_version.md).
 
 The version chooser appears as soon as the game is selected. Its Online list loads version metadata without opening a translation workspace. Selecting a row loads that version's team counts and presence separately; cached content stays visible during background refreshes. Translation files, drafts and workspace preparation load when you explicitly open an editor or continue the Offline workspace. A required legacy-storage migration still needs to finish before legacy work can be opened.
 
-## Manager-Published Versions
+## Multi-content versions and ClientText import/export
+
+A named version is metadata with its own ID. **Add content** accepts any available upstream originals; there is no requirement that the folder contain every file. Keep the upstream folder name, or use the timestamp/game default. Save metadata first when files are not ready. `Missing_XXX.txt` is ignored because the editor computes workload itself.
+
+Choose StatDescription team assignments (all checked by default), and confirm each workbook's detected language and normal/Gender role. ClientText is assigned to that language. French defaults to exactly one normal and one Gender workbook in the same group; uploading either alone is rejected. Admins can change the required-role policy. Original assets and accepted group manifests are immutable; add a new version/group rather than silently replacing their bytes. Older published versions remain one all-team StatDescription group with their existing work/history.
+
+ClientText preparation runs in the browser and reports workbook/sheet progress before publication. Headers map text pairs and Developer notes by name, so a Notes column does not shift translations onto the wrong field. Duplicate IDs within a sheet, ambiguous identities, editable formulas and unsafe merged layouts stop import. Unknown columns/enum values and conditional formatting produce reviewable warnings; unknown columns and untouched package parts are retained. Missing/Outdated workload uses supported direct solid RGB fills, not evaluated theme/indexed colors or conditional-formatting rules.
+
+Local ClientText import uses the same validated workbook roles, baseline and durable storage without uploading originals. Online opening downloads/reuses verified originals, parses them locally and checks the accepted descriptor before activating. Saves preserve exact cell text and per-field reviews; a new English source retains translation with Outdated review requirements. Competing carried values require a choice; removed records remain in the previous version.
+
+Optional content does not break carry-forward. Preparation follows published release ancestors until it finds the last matching workbook group, or the last StatDescription group assigned to each selected team. An intervening release without that content is skipped. Adding content to an older release uses its own ancestry. If that ancestry changes while an upload is prepared, prepare a new upload; retained originals and prior accepted work remain available.
+
+ClientText exports always reconstruct a complete workbook from its original and durably saved values. Unsaved drafts are excluded. A single workbook downloads with its original name; paired French files download together in `<version name>_<language>_ClientText.zip`. XLSM VBA and untouched workbook parts are preserved without executing macros or recalculating formulas. Export updates target cells and status fills: blank Missing stays red, unresolved Outdated orange, completed original Missing grey, reviewed fields green, and eligible corrections purple. Progress reports the active workbook/sheet and compression phase. Managed downloads use a frozen server-accepted collection; local/pending work is outside that snapshot.
+
+## Legacy StatDescription publication and compatibility workflow
+
+This section describes the earlier all-team ZIP publication path and retained versions. Its matching-room reuse and raw ZIP hash uniqueness rules apply to that path. Explicit multi-content groups keep separate version/group work and rooms even when their original ZIPs and accepted baselines match.
 
 Managers and Admins open **Manage version** by clicking the current version name/hash in the status bar, then **Upload next version**. Choose the original ZIP, a name and an informational import deadline. Defaults use the current New Zealand date (`YYYY-MM-DD_POE1` or `YYYY-MM-DD_POE2`) and next Monday at 09:00 in `Pacific/Auckland`, including daylight-saving changes. Passing the deadline changes the reminder only; it does not collect work or end editing.
 

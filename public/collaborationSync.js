@@ -338,8 +338,8 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
-      if (archive) return this.connectSparse({ accountId, game, branchId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote, onProgress });
+    async connect({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
+      if (archive) return this.connectSparse({ accountId, game, branchId, versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote, onProgress });
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
       this.baselineStates = null; this.baselineTree = null; this.archive = null;
@@ -365,7 +365,7 @@
       } finally {
         if (epoch === this.epoch) { this.hashing = false; this.notify(); }
       }
-      const identity = { accountId: String(accountId), game, branchId, sourceHash, language };
+      const identity = { accountId: String(accountId), game, branchId, sourceHash, language, ...(groupId ? { versionId, groupId } : {}) };
       let incoming;
       await this.prepareWork(async () => {
         this.source = await preparation.items(source, desc => copy(desc));
@@ -408,7 +408,7 @@
       await this.finishConnection(epoch, deferRemote);
       return this.snapshot({ includeFiles: false });
     }
-    async connectSparse({ accountId, game, branchId = 'default', language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
+    async connectSparse({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
@@ -433,7 +433,7 @@
         });
         await preparation.items(manifest.files, file => this.sourceFiles.set(file.filepath, file));
       }, epoch);
-      const identity = { accountId: String(accountId), game, branchId, sourceHash: archive.baselineId, language };
+      const identity = { accountId: String(accountId), game, branchId, sourceHash: archive.baselineId, language, ...(groupId ? { versionId, groupId } : {}) };
       this.key = scopeKey(identity); this.context = this.getContext();
       // Legacy callers validate the remote descriptor before changing the room.
       // Local-first activation already has a verified baseline and defers this
@@ -565,6 +565,14 @@
       const room = this.room();
       const identity = { game: room.identity.game, branchId: room.identity.branchId || 'default', sourceHash: room.identity.sourceHash, language: room.identity.language };
       let snapshot;
+      if (room.identity.groupId) {
+        snapshot = await this.request('/v1/content-groups/' + encodeURIComponent(room.identity.groupId) + '/teams/' + encodeURIComponent(identity.language) + '/room', { method: 'POST', body: {} }, this.context);
+        if (!this.current(epoch)) throw staleError();
+        if (snapshot.contentGroupId !== room.identity.groupId || snapshot.versionId !== room.identity.versionId) throw new Error('The shared room belongs to another content group.');
+        if (snapshot.archive && snapshot.archive.baselineId !== room.archive?.baselineId) throw new Error('The shared room uses another original source.');
+        await this.acceptSnapshot(snapshot, epoch, !room.initialized || snapshot.sequence < room.sequence);
+        this.startPresence(epoch); return;
+      }
       if (room.mode === 'sparse') {
         snapshot = await this.api('/join', { method: 'POST', body: { ...identity, archive: this.archive || room.archive } }, epoch);
         if (snapshot.archive && snapshot.archive.baselineId !== room.archive.baselineId) throw Object.assign(new Error('The agreed import configuration changed.'), { code: 'ARCHIVE_CONFIG_MISMATCH', archive: snapshot.archive });
@@ -954,6 +962,7 @@
       if (!observed || observed.targetSourceHash !== identity.sourceHash
         || (expected && (expected.id !== observed.shared.id || Number(expected.revision) !== Number(observed.shared.revision)))) throw staleError();
       const params = new URLSearchParams({ game: identity.game, branchId: identity.branchId || 'default', sourceHash: identity.sourceHash, language: identity.language, includeResolved: '1' });
+      if (identity.groupId) params.set('groupId', identity.groupId);
       const result = await this.api('/dropped?' + params, {}, epoch);
       const candidates = result.candidates || result.items || result.records || [];
       const latest = candidates.filter(item => item.filepath === filepath)
@@ -1011,6 +1020,7 @@
           { method: 'POST', body: { revision: Number(resolved.revision) || 0 } }, epoch);
         else response = await this.api('/dropped', { method: 'PUT', body: {
           game: candidate.game, branchId: identity.branchId || 'default', language: candidate.language, filepath: candidate.filepath,
+          ...(identity.groupId ? { groupId: identity.groupId } : {}),
           originSourceHash: candidate.originSourceHash, targetSourceHash: candidate.targetSourceHash,
           targetSourceHashes: [...new Set([...(candidate.targetSourceHashes || []), candidate.targetSourceHash].filter(Boolean))],
           snapshot: copy(candidate.snapshot), baseRevision: Number(candidate.revision) || 0,
@@ -1031,6 +1041,7 @@
       }
       if (force || pending.length || Object.keys(this.droppedConflicts).length || Date.now() - this.lastDroppedSync >= 20000) {
         const params = new URLSearchParams({ game: identity.game, branchId: identity.branchId || 'default', sourceHash: identity.sourceHash, language: identity.language, includeResolved: '1' });
+        if (identity.groupId) params.set('groupId', identity.groupId);
         const result = await this.api('/dropped?' + params, {}, epoch);
         const records = result.candidates || result.items || result.records || [];
         workspace = await this.coalesceDroppedCopies(records, epoch) || workspace;
@@ -1571,6 +1582,7 @@
             && message.sourceHash === identity.sourceHash) this.onManagedVersionChanged(copy(message));
         }
         else if (message.type === 'dropped_changed' && message.game === this.room()?.identity.game && message.language === this.room()?.identity.language
+          && (message.groupId || '') === (this.room()?.identity.groupId || '')
           && (message.branchId || 'default') === (this.room()?.identity.branchId || 'default')) {
           this.lastDroppedSync = 0; this.retry();
         }

@@ -12,14 +12,20 @@
     'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']);
   const requiresReview = error => reviewCodes.has(error?.code) && !error?.durableUnknown;
   let fallbackId = 0;
+  const contentScope = value => value.workspaceScope || value;
   function scopeKey(batch) {
     const branch = batch.workspaceScope?.branchId || batch.branchId || 'default';
+    const content = contentScope(batch);
     return JSON.stringify([batch.accountId || '', batch.game, batch.sourceHash || '', batch.language,
-      ...(branch === 'default' ? [] : [branch])]);
+      ...(branch === 'default' ? [] : [branch]),
+      ...(content.groupId ? [{ versionId: String(content.versionId || ''), groupId: String(content.groupId) }] : [])]);
   }
   function matchesScope(scope, batch) {
     if (typeof scope === 'string') return scope === scopeKey(batch);
     if (!scope) return false;
+    const expectedContent = contentScope(scope), actualContent = contentScope(batch);
+    if ((expectedContent.groupId || '') !== (actualContent.groupId || '')
+      || (expectedContent.versionId || '') !== (actualContent.versionId || '')) return false;
     for (const [field, alias] of [['game'], ['language'], ['sourceHash', 'source'], ['accountId', 'account'], ['branchId', 'branch']]) {
       if (!Object.hasOwn(scope, field) && !(alias && Object.hasOwn(scope, alias))) continue;
       const expected = Object.hasOwn(scope, field) ? scope[field] : scope[alias];
@@ -100,7 +106,9 @@
       const captured = plain(batch);
       if (!captured || typeof captured !== 'object' || Array.isArray(captured)) throw new TypeError('A save batch is required.');
       const workspaceScope = captureScope?.(captured);
-      if (workspaceScope) { captured.workspaceScope = plain(workspaceScope); captured.branchId = workspaceScope.branchId; }
+      if (workspaceScope) {
+        captured.workspaceScope = plain(workspaceScope); captured.branchId = workspaceScope.branchId;
+      }
       captured.jobId ||= globalThis.crypto?.randomUUID?.() || 'local-save-' + Date.now() + '-' + (++fallbackId);
       const previous = jobs.find(job => job.id === captured.jobId);
       if (previous) {

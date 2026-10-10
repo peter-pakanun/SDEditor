@@ -75,7 +75,7 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [9]);
+  assert.deepEqual(f.versions, [11]);
 });
 
 test('list and key isolate profile, game, source and language without retargeting old-source drafts', async () => {
@@ -97,6 +97,18 @@ test('drafts on distinct release branches remain independent while default-branc
   assert.equal((await commit(f, f.store.listTranslationDrafts({ profile: 'guest', game: 'poe1', language: 'Thai' }))).length, 1);
   const selected = await commit(f, f.store.listTranslationDrafts({ profile: 'guest', game: 'poe1', language: 'Thai', branchId: 'release' }));
   assert.equal(selected.length, 1); assert.equal(selected[0].id, 'branch-draft'); assert.equal(selected[0].translations[0], 'branch text');
+});
+test('identical ZIP sources in separate content groups retain independent drafts and exact legacy keys',async()=>{
+  const f=fixture();await write(f);
+  const a=await write(f,draft({versionId:'version',groupId:'first',id:'first',revision:'first'}));
+  const b=await write(f,draft({versionId:'version',groupId:'second',id:'second',revision:'second'}));
+  assert.notEqual(a.record.key,b.record.key);
+  const legacy=await commit(f,f.store.listTranslationDrafts({profile:'guest',game:'poe1',language:'Thai'}));assert.equal(legacy.length,1);
+  for(const groupId of ['first','second']){
+    const selected=await commit(f,f.store.listTranslationDrafts({profile:'guest',game:'poe1',language:'Thai',versionId:'version',groupId}));
+    assert.equal(selected.length,1);assert.equal(selected[0].id,groupId);
+    assert.equal((await commit(f,f.store.getTranslationDraft(selected[0].key))).groupId,groupId);
+  }
 });
 
 test('CAS preserves competing text, deduplicates retries, and a reviewed choice retains recovery', async () => {

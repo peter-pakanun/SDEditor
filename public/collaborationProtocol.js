@@ -272,8 +272,10 @@
   }
   function scopeKey(identity) {
     const branch = identity.branchId || 'default';
-    return JSON.stringify(branch === 'default' ? [String(identity.accountId), identity.game, identity.sourceHash, identity.language]
-      : [String(identity.accountId), identity.game, branch, identity.sourceHash, identity.language]);
+    const parts = branch === 'default' ? [String(identity.accountId), identity.game, identity.sourceHash, identity.language]
+      : [String(identity.accountId), identity.game, branch, identity.sourceHash, identity.language];
+    if (identity.groupId) parts.push({ versionId: String(identity.versionId || ''), groupId: String(identity.groupId) });
+    return JSON.stringify(parts);
   }
   function projectWorkspace(workspace, files, language, source = [], { mutate = false } = {}) {
     // Internal transaction projections own their IndexedDB snapshot. Other

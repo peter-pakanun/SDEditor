@@ -54,6 +54,7 @@
       lang() { this.draftScopeChanged(); },
       gameVersion() { this.draftScopeChanged(); },
       branchId() { this.draftScopeChanged(); },
+      activeContentGroup() { this.draftScopeChanged(); },
       editorVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
       descsDisplay() { this.$nextTick(() => this.observeInlineBlocks()); },
       inlineSidebarVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
@@ -100,7 +101,8 @@
         const cloud = this._cloud;
         const profile = cloud && (!Object.hasOwn(cloud, 'state') || cloud.state) ? cloud.context?.()?.profile : null;
         return { profile: profile || this.cloudProfileId || this.cloudUser?.id || 'guest',
-          game: this.gameVersion, branchId: this.branchId || 'default', sourceHash: this.sourceIdentity || (this.testMode ? 'test-source' : ''), language: this.lang, filepath };
+          game: this.gameVersion, branchId: this.branchId || 'default', sourceHash: this.sourceIdentity || (this.testMode ? 'test-source' : ''), language: this.lang, filepath,
+          ...(this.activeContentGroup && !this.activeContentGroup.legacyVersionId ? { versionId: this.activeContentGroup.versionId, groupId: this.activeContentGroup.id } : {}) };
       },
       editorDraftKey(scope) {
         return root.OfflineStore?.translationDraftKey?.(scope)
@@ -138,12 +140,12 @@
         if (!scope.game || !scope.language) { this.inlineDraftRows = {}; this.draftRecords = []; return; }
         const run = this._draftLoadRun = (this._draftLoadRun || 0) + 1;
         this._draftListingPending = run;
-        const inScope = record => record.profile === scope.profile && record.game === scope.game && (record.branchId || 'default') === scope.branchId && record.language === scope.language;
+        const inScope = record => record.profile === scope.profile && record.game === scope.game && (record.branchId || 'default') === scope.branchId && record.language === scope.language && (record.groupId || '') === (scope.groupId || '') && (record.versionId || '') === (scope.versionId || '');
         let records, readError;
         try {
           records = this.testMode || !root.OfflineStore?.listTranslationDrafts
             ? [...(this._draftMemory?.values() || [])].filter(r => inScope(r) && (r.state === 'active' || r.conflicts?.length))
-            : await root.OfflineStore.listTranslationDrafts({ profile: scope.profile, game: scope.game, branchId: scope.branchId, language: scope.language });
+            : await root.OfflineStore.listTranslationDrafts({ profile: scope.profile, game: scope.game, branchId: scope.branchId, language: scope.language, ...(scope.groupId ? { groupId: scope.groupId, versionId: scope.versionId } : {}) });
         } catch (error) {
           readError = error;
           records = this.draftRecords.filter(inScope);

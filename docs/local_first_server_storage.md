@@ -1,8 +1,8 @@
 # Local-first baselines and incremental server storage
 
-Design recorded: 2026-10-08. Implementation updated: 2026-10-09.
+Design recorded: 2026-10-08. Implementation updated: 2026-10-10.
 
-Status: Implemented in the frontend and companion API source; production deployment and production compaction remain pending. API schema v16 must deploy before the frontend. This document records the storage decision, implementation, migration safeguards, and local validation. It does not establish that either hosted service has been updated.
+Status: Implemented in the frontend and companion API source; production deployment and production compaction remain pending. Current rollout requires API schema v18 before the IndexedDB v11 frontend, including the earlier v16 storage and v17 TM contracts. This document records the storage decision, implementation, migration safeguards, and local validation. It does not establish that either hosted service has been updated.
 
 Read this document before changing managed-version baseline retention, collection/export generation, shared history storage, or database compaction. The [Workspace Status Contract](workspace_statuses.md) remains authoritative for statuses, assignment provenance, diagnostics, and export eligibility. Operational rollout instructions are in [Cloud Backup](cloud_backup.md).
 
@@ -13,6 +13,16 @@ Keep the immutable complete parsed baseline in the browser. Manager publication 
 The browser generates managed translated downloads from the verified original ZIP and an immutable snapshot of server-accepted Saved translations. When publication preparation or a compatibility download needs original text, the API parses the retained ZIP temporarily. Parsing is coalesced across concurrent requests and uses a bounded two-baseline memory cache; cached parses still require matching retained ZIP bytes.
 
 Ordinary translator saves and standalone room creation do not upload full ZIPs. Unsaved drafts and existing browser-local revision history stay local. "Incremental" means sharing affected files and authored operations, rather than uploading every original file. The API still holds real Saved text, scoped per-file baseline witnesses, Dropped recovery content, and authenticated history. Saves are not character-level patches.
+
+## ClientText content groups and proof authority
+
+Named versions now have independent IDs and metadata. Immutable content groups belong to a version and have assigned teams: one shared StatDescription ZIP group, or one language's ClientText workbook bundle. French defaults to a required normal/Gender pair; administrators can configure required roles. Existing managed versions become versions with one StatDescription group assigned to all teams, preserving their existing rooms, work and history.
+
+The API retains exact original workbook artifacts and compact per-role manifests: stable unit/field IDs, required/missing/outdated facts, source/original hashes, parser version, counts and Merkle roots. The browser parses full English, target text, Developer notes and cell layout locally. A save sends a transient immutable unit witness and membership proof; the API verifies these against the accepted compact manifest and persists touched original target values, authored values, reviews, provenance and server history. It does **not** retain a complete parsed workbook baseline or the full witness's English/notes/layout. The server stores real translation work, not just file hashes.
+
+ClientText manifests are manager/client-approved parse results. The API verifies retained asset bytes, descriptor identity, unit counts, roots and witness membership; it does not independently parse XLSX/XLSM bytes to certify that every declared field came from the workbook. Opening a group reparses verified originals and must reproduce its accepted descriptor. Preserve this authority boundary when changing the codec or proof format.
+
+ClientText source changes retain translations with exact-source review requirements, including sparse source-only records that are not Saved work. Managed collections freeze accepted Saved units and source-only review facts; the browser reconstructs complete workbooks from verified originals, with both files in a paired download. Drafts and unaccepted outbox work are excluded. ClientText TM is a separate local projection learned atomically from valid saves and accepted shared events; its field context and retained text survive removed records. It is not sent through the legacy cloud TM endpoint.
 
 ## Why the downloaded database was large
 
@@ -39,10 +49,10 @@ Legacy room initialization stored a complete source manifest, a current translat
 | Data | Browser | Server |
 | --- | --- | --- |
 | Complete immutable parsed baseline | Retained with accepted source identity | Temporary verified ZIP parsing only for modern managed versions |
-| Original ZIP | Local import or cached authorized download | Explicit manager publication retains an external artifact and reference/checksum |
+| Original ZIP/workbooks | Local import or cached authorized download | Explicit manager publication retains external artifacts and reference/checksum |
 | Accepted archive descriptor | Retained with baseline | ZIP hash/size, parser version, duplicate decisions, configuration hash, Merkle root and baseline identity |
 | Baseline metadata | Complete local baseline | Filepath, English entry count, DNT eligibility and hashes of complete original team translations |
-| Version catalog and team state | Account-scoped cache | Names, HEAD, deadlines, access, advisory ended state and collection references |
+| Version catalog and team state | Account-scoped cache | Independent version/group IDs, assignments, names, HEAD, deadlines, access, advisory ended state and collection references |
 | Drafts and pending local saves | Durable account/workspace-scoped data | Excluded from shared state and collections before acceptance |
 | Saved translations | Durable work and sync cache | Affected-file content, revisions, attribution, conflicts and idempotency receipts |
 | Per-file originals/proofs | Local baseline | Scoped witnesses and recovery content needed for touched work |
@@ -52,7 +62,7 @@ Legacy room initialization stored a complete source manifest, a current translat
 | Legacy collections and rooms | Existing compatibility behavior | Existing ZIP artifacts, source manifests and seed history retained |
 | Dictionaries, settings, comments | Existing local/cache behavior | Existing language/account/audience contracts |
 
-Do not persist UI status booleans. Preserve account, game, branch, baseline, selected language, role/access, and comment audience guards across asynchronous work and retries. Activating an existing version does not advance its source, create Dropped assignments, or rewrite baseline/history. Publication continues to reuse matching rooms and shared history.
+Do not persist UI status booleans. Preserve account, game, branch, version/group, baseline, selected language, role/access, and comment audience guards across asynchronous work and retries. Activating an existing version does not advance its source, create Dropped assignments, or rewrite baseline/history. Legacy publication continues to reuse matching rooms and shared history; explicit groups retain their own work identity.
 
 ## Browser translation storage
 
@@ -98,7 +108,7 @@ No history retention/deletion policy was introduced. Legacy full source manifest
 
 Backup manifest format 4 contains a compacted SQLite snapshot compressed as `sdeditor.sqlite.gz`, checksums for compressed and expanded bytes, the exact expanded size, configuration when present, and external artifact references. Snapshot compaction never vacuums the running source database. ZIP files remain excluded. Restore supports formats 1–4, verifies expansion bounds/checksums, database integrity and immutable references, and verifies separately retained ZIPs before replacing the database. `--uncompressed` creates a compact raw format-3 snapshot for compatibility.
 
-To reclaim pages in the live database after migration, stop the API and run `node scripts/compact.js --stopped` in the API checkout. This command checks the process lock, creates a compressed safety backup, obtains an exclusive database lock, checkpoints the WAL and vacuums deliberately. It does not run automatically at startup. Retain `DATA_DIR/artifacts` separately, including existing collected archives. Deploy schema v16 and reference-aware restore before the frontend; rolling back requires old code plus a compatible database/artifact backup and loses post-backup writes.
+To reclaim pages in the live database after migration, stop the API and run `node scripts/compact.js --stopped` in the API checkout. This command checks the process lock, creates a compressed safety backup, obtains an exclusive database lock, checkpoints the WAL and vacuums deliberately. It does not run automatically at startup. Retain `DATA_DIR/artifacts` separately, including ZIPs, ClientText workbooks and existing collected archives. Deploy schema v18 and reference-aware restore before the frontend; rolling back requires old code plus a compatible database/artifact backup and loses post-backup writes.
 
 ## Validation and remaining operational work
 

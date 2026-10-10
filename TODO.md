@@ -1,4 +1,16 @@
 # TODO
+
+- [x] Add independent named version IDs with assigned StatDescription/ClientText groups and preserve legacy all-team StatDescription versions.
+- [x] Parse/export ClientText XLSX/XLSM locally, retain Developer notes/raw text and require the configurable French normal/Gender pair.
+- [x] Add per-field Missing/Outdated/review/Revised rules, durable per-ID saves/history/retries and local TM learned from valid shared saves.
+- [x] Validate shared ClientText publication/collection and a second production-file browser run; record phase timings and concurrent-load limits.
+- [x] Validate ClientText draft reload, failed upload/resume, proof-verified saves and frozen collection export.
+- [x] Validate mixed new StatDescription/ClientText groups and both frozen collection formats in a disposable browser.
+- [x] Add ClientText local/shared history and field-aware diff, guarded draft restores, and lazy verified previous-version comparisons.
+- [x] Resolve predecessors through release ancestry past omitted content, including independent per-team StatDescription carry; validate with a limited catalog and changed English.
+- [x] Validate repeated-original StatDescription versions, independent group saves, cancelled selection and offline activation in a disposable browser.
+- [ ] Deploy API schema v18 first, then the IndexedDB v11 frontend; verify original artifacts, production backup restore and hosted access/synchronization.
+
 - [x] In statfiles with several lines, compare these lines and mark differences with another color
 - [x] Mark block of symbols with variable (like space_{xxx}%space), copy this block to clipboard with ctrl+click, or paste them below with single click
 - [x] Add function of viewing/comparing files, that were changed for set period of time

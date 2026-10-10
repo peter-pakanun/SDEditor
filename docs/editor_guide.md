@@ -7,7 +7,7 @@ SDEditor is desktop-first. Use a desktop or laptop browser with a keyboard and m
 
 ## Overview
 
-The editor helps you translate game stat descriptions while maintaining formatting, variables, and special tags. It shows the original English and provides Dictionary terminology and Translation Memory suggestions to speed up your work.
+The editor helps you translate StatDescription and ClientText content while maintaining formatting, variables, and special tags. It shows the original English and provides terminology, lookup and Translation Memory assistance.
 
 ## Getting Started
 
@@ -53,6 +53,22 @@ Click a tab or use **Left/Right Arrow**, **Home**, and **End** while a tab has f
 
 Use **Import ZIP** in the main action header to begin the import process in an Offline workspace. The button is disabled for Online versions, including cached Online work while disconnected; these use the manager-published ZIP. Open the version chooser and select the Offline workspace to use local ZIP imports.
 For more details, see the [**Import Workflow**](import_workflow.md).
+
+### ClientText worksheets
+
+Select a ClientText group and language from Versions, or import its workbooks locally. The left pane selects a worksheet; the same pane filters StatDescription directories. Sheets act as paths, record IDs as filenames, and each source/translation pair as an editable block. Search includes ID, sheet, source, current translation and Developer notes. Notes remain visible for translators and are preserved in the workbook.
+
+Gender metadata uses a selector, including when the normal workbook has a Gender column. Gender text forms use M/F/N rows with Singular/Plural columns (MS/FS/NS and MP/FP/NP). Optional forms can remain blank; `NONEXISTENT` completion replaces a whole eligible form cell after typing a prefix and pressing Tab. It is not a prose or Gender-selector suggestion.
+
+Missing is red; Outdated is orange until the exact current English has been reviewed and saved. Edit the field or choose **Mark reviewed**, then Save. Saved remains distinct from completeness; per-field corrections outside original Missing/Outdated work are Revised. The list counts records with each overlapping status; workload progress counts resolved Missing/Outdated fields. ClientText source changes preserve translation and never create Dropped copies. A competing incoming/local translation offers an explicit choice.
+
+Inline and full editors share durable drafts. **Ctrl+S** saves and **F2** performs the supported save/close action; navigation keeps scoped drafts and history. **Restore as draft** lets you inspect history before saving. Comments belong to this version/group/sheet/ID and language; global posting requires the unchecked audience choice. Shared save polling stays silent and preserves the current editing view.
+
+ClientText **History** lists local and shared changes separately, including the shared author. **Compare change** shows a saved change's frozen before/after values; **Compare with current** compares it with your current draft. The read-only viewer can select any two loaded snapshots, including the original workbook and current draft, and displays English, translation, Gender metadata, grammatical forms and Developer notes. Character differences and visible whitespace are optional display settings; raw `@`, literal `\n` and actual newlines stay distinct. **Load older history** pages shared history and expands the local list.
+
+An inherited record offers **Compare previous version**. This explicitly verifies or reuses the earlier original without switching the active workspace, then loads the accepted revision recorded by its carry provenance. It exposes earlier English, notes and removed fields. If that saved revision is unavailable, the viewer labels its fallback as the verified original workbook translation. Earlier workbooks are not downloaded automatically when opening an ID. **Restore before as draft** or **Restore after as draft** writes only a scoped draft; Save remains a separate action. Removed fields are excluded from the current draft, and old review hashes cannot mark changed English reviewed. Escape closes the comparison and returns focus; save shortcuts are blocked while the read-only viewer is open.
+
+Cell text remains raw: `@`, actual line breaks and literal `\n` have different meanings. Completion and diagnostics recognize bracket links, numeric substitutions and `<<…>>` icons/keybinds, while brace contents after formatting tags remain localizable. Exact `[NOAUDIO]` prefix-only changes do not require source review; repeated markers or other text changes remain significant. ClientText TM learns valid text/form saves and accepted shared work into this browser's language/game projection, matched by field/form context; enums, sentinel/blank values and unreviewed or conflicted work do not teach it. This projection is separate from cloud StatDescription TM.
 
 ### Finding Files and Navigating Pages
 

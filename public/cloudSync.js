@@ -275,6 +275,10 @@
     async request(path, options = {}, ctx = this.context()) {
       if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
       const controller = new AbortController();
+      const cancel = () => controller.abort();
+      options.signal?.addEventListener('abort', cancel, { once: true });
+      if (options.signal?.aborted) controller.abort();
+      if(controller.signal.aborted){options.signal?.removeEventListener('abort',cancel);throw Object.assign(new Error('Cancelled'),{name:'AbortError'});}
       const timeout = setTimeout(() => controller.abort(), options.timeout || 20000);
       try {
         const request = { method: options.method || 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal,
@@ -293,7 +297,7 @@
               json: async () => JSON.parse(await xhr.response.text()), blob: async () => xhr.response });
             xhr.onerror = () => reject(new Error(options.onUploadProgress ? 'Archive upload could not reach the server. Retry to resume this upload.' : 'Archive download could not reach the server. Open this source version again to retry.'));
             xhr.onabort = () => reject(Object.assign(new Error(options.onUploadProgress ? 'Archive upload was interrupted. Retry this upload.' : 'Archive download was interrupted. Open this source version again to retry.'), { name: 'AbortError' }));
-            controller.signal.addEventListener('abort', () => xhr.abort(), { once: true }); xhr.send(request.body);
+            controller.signal.addEventListener('abort', () => xhr.abort(), { once: true }); if(controller.signal.aborted){reject(Object.assign(new Error('Cancelled'),{name:'AbortError'}));return;}xhr.send(request.body);
           }) : await this.fetcher(this.apiBase + path, request);
         const data = response.status === 204 ? null : response.ok && options.responseType === 'blob' ? await response.blob() : await response.json();
         if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
@@ -330,7 +334,7 @@
           throw error;
         }
         return data;
-      } finally { clearTimeout(timeout); }
+      } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', cancel); }
     }
     async acceptLogin(result) {
       if (this.localSaveCount) await this.localQueue;

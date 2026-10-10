@@ -4,7 +4,7 @@ This is the canonical repository contract for workspace statuses and their UI be
 
 ## Scope and Sources of Truth
 
-Calculate a loaded file's statuses for the **current game, branch, accepted source version, selected translation language, and active local/account profile**. Changing any of these must use the new scope's data. Thai saves, dropped copies, and counters must not appear as German work, including for an Admin assigned Thai who selects German.
+Calculate a loaded file's statuses for the **current game, branch, accepted source version, content group, selected translation language, and active local/account profile**. Changing any of these must use the new scope's data. Thai saves, dropped copies, and counters must not appear as German work, including for an Admin assigned Thai who selects German. Explicit content groups also isolate work when two versions use identical original bytes; legacy scopes retain their existing identities.
 
 The immutable parsed **original ZIP baseline** supplies English, entry metadata, and original translations. Preserve it separately from staged work. Saving, restoring, importing translated work, and receiving shared edits must not rewrite it or change its source identity. A new source import establishes a new baseline.
 
@@ -20,7 +20,7 @@ Online/offline catalog association, HEAD, import deadlines, ended windows and wi
 
 Dictionary entries use `gameScope` (`poe1`, `poe2`, or `all`; legacy absence means All) while the complete Dictionary remains language-shared. Automatic matching uses only the current game's entries and All fallbacks. A current-game entry overrides the entire All entry with the same normalized main Find, including its alternates. Other-game rows remain visible with a warning but do not contribute autocomplete, highlighting, keyword/Regex replacements, terminology findings, or matches-first ordering. Each row retains a unique internal ID; duplicate Find/keyword identifiers across games are separate records.
 
-## Status Definitions
+## StatDescription Status Definitions
 
 | Status | Derive from | Color |
 | --- | --- | --- |
@@ -37,6 +37,18 @@ Use these color relationships in every supported theme and in list labels, filte
 **Revised** identifies corrections outside this version's Missing/Dropped assignment workload. Original ZIP completeness establishes Missing eligibility; becoming complete after a save does not change it. Compare staged text to the immutable ZIP translation, never to the preceding save, a history entry, or a dropped snapshot. Returning an eligible file exactly to its ZIP text removes Revised while retaining Saved.
 
 Dropping a file in this version permanently excludes it from Revised **for this version and language**, even after confirmation, replacement, or discard. Preserve version-specific assignment provenance, not a permanent file-wide exclusion. A new source version recalculates eligibility against its new immutable baseline.
+
+## ClientText Status Definitions
+
+ClientText uses immutable workbook fields and per-ID saved records. A unit is one record identified by workbook role, sheet name and ID; each named text or grammatical-form field has its own status. **Missing** is a blank required committed field (red). **Outdated** is an original orange field or a carried English-source change whose current source hash has not been reviewed (orange). Optional form cells may stay blank; `NONEXISTENT` is a supported whole-cell form value. Gender metadata is an enum rather than translated prose.
+
+**Saved** means an explicit durable save exists, including unchanged or intentionally blank values. **Revised** means a saved field differs from its complete original translation outside that field's original Missing/Outdated workload (purple). Eligibility is per field: correcting a complete field can make its row Revised even if another field is Missing. Reverting that correction removes Revised while retaining Saved. Source-only carry records preserve Outdated/review facts with `saved: false`; they must not manufacture Saved or Revised work. Row counters overlap, while workload progress counts resolved original Missing/Outdated fields once each.
+
+Changing English never creates ClientText Dropped work or erases an authored translation. Stable role/sheet/ID/field identities drive three-way carry-forward: a local-only change survives; competing local and upstream changes keep the incoming value active and preserve the local alternative for an explicit choice. Removed records and fields remain in the previous version/history, outside the new active export. Review applies to the exact current source hash; stale reviews cannot clear Outdated. Editing or **Mark reviewed** is a draft action until Save commits it.
+
+One exact prefix `[NOAUDIO]` is ignored for source equivalence, with at most one leading space and one following separator removed. Repeated markers, other whitespace and all remaining characters stay significant. Marker-only source fields are exempt from translation workload. Normal text, actual newlines, literal `\n`, and `@` remain distinct raw content.
+
+Manual Error/Warning results remain separate from content statuses. ClientText checks numeric substitutions, `<<…>>` icons/keybinds, bracket link identities, `<continue>` controls and formatting structure while allowing localized brace contents. Unrecognized angle syntax is retained with a warning rather than guessed; it does not teach TM. A saved correction refreshes affected findings and consistency peers without clearing unrelated completed scans. The remaining Dropped sections below describe StatDescription recovery.
 
 ## Dropped Assignment and Sync Boundaries
 

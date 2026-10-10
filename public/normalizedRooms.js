@@ -15,20 +15,24 @@
     const workspaceStores = [S.meta, S.files, S.records, S.baseline];
     const maps = ['shared', 'local', 'carries', 'carryRevisions'];
     const arrays = ['outbox', 'conflicts', 'recovery', 'placeholderRepairs'];
+    const contentScope = identity => identity?.groupId ? { versionId: String(identity.versionId || ''), groupId: String(identity.groupId) } : {};
+    const sameContentScope = (left, right) => (left?.groupId || '') === (right?.groupId || '') && (left?.versionId || '') === (right?.versionId || '');
     const identityKey = identity => key(...((identity.branchId || 'default') === 'default'
       ? [String(identity.accountId), identity.game, identity.sourceHash, identity.language]
-      : [String(identity.accountId), identity.game, identity.branchId, identity.sourceHash, identity.language]));
+      : [String(identity.accountId), identity.game, identity.branchId, identity.sourceHash, identity.language]), ...(identity.groupId ? [contentScope(identity)] : []));
     function identityFromKey(roomKey) {
       const values = JSON.parse(roomKey);
-      return values.length === 4 ? { accountId: values[0], game: values[1], branchId: 'default', sourceHash: values[2], language: values[3] }
-        : { accountId: values[0], game: values[1], branchId: values[2], sourceHash: values[3], language: values[4] };
+      const content = typeof values.at(-1) === 'object' && values.at(-1) !== null ? values.pop() : {};
+      if (![4, 5].includes(values.length)) throw new TypeError('Invalid collaboration scope.');
+      return { ...(values.length === 4 ? { accountId: values[0], game: values[1], branchId: 'default', sourceHash: values[2], language: values[3] }
+        : { accountId: values[0], game: values[1], branchId: values[2], sourceHash: values[3], language: values[4] }), ...contentScope(content) };
     }
     const scopeOf = identity => dependencies.normalizeScope ? dependencies.normalizeScope(identity) : identity;
     function commandIdentity(command) {
       const identity = identityFromKey(command.key), supplied = command.scope;
       if (supplied && (String(supplied.accountId || 'guest') !== String(identity.accountId)
         || supplied.game !== identity.game || (supplied.branchId || 'default') !== identity.branchId
-        || supplied.sourceHash !== identity.sourceHash || (supplied.language && supplied.language !== identity.language))) {
+        || supplied.sourceHash !== identity.sourceHash || !sameContentScope(supplied, identity) || (supplied.language && supplied.language !== identity.language))) {
         throw Object.assign(new Error('Collaboration storage scope changed.'), { stale: true });
       }
       return identity;
@@ -50,7 +54,7 @@
       const identity = room.identity, account = workspace?.accountId || workspace?.collaborationAccountId;
       if (room.mode !== 'sparse' || !workspace || workspace.sourceHash !== identity.sourceHash
         || String(account || '') !== String(identity.accountId) || (workspace.game && workspace.game !== identity.game)
-        || (workspace.branchId || 'default') !== (identity.branchId || 'default')) return;
+        || (workspace.branchId || 'default') !== (identity.branchId || 'default') || !sameContentScope(workspace, identity)) return;
       const empty = lines => Array.isArray(lines) && lines.every(text => text === '');
       const canceled = new Set();
       for (const [id, repair] of Object.entries(workspace.placeholderRepairArchive || {})) {

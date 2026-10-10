@@ -143,6 +143,46 @@ test('manager collaboration joins the selected language without an assignment an
   assert.equal(joins.length, 1);
 });
 
+test('a managed group transition disconnects the old room and blocks initialization until the workspace is ready', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  let joined = 0, disconnected = 0;
+  window.CollaborationSync = { Client: class {
+    async connect() { joined++; } select() {} setAway() {} disconnect() { disconnected++; }
+  } };
+  await e.initializeCollaboration(); assert.equal(joined, 1);
+  e._managedWorkspaceTransition = {};
+  window.CollaborationIntegration.mixin.methods.scheduleCollaboration.call(e);
+  clearTimeout(e._collabStartTimer);
+  assert.equal(disconnected, 1); assert.equal(e._collaboration, null); assert.equal(e._collabKey, '');
+  e.activeContentGroup = { id: 'second-group', versionId: 'second-version', contentMode: 'statdescription' };
+  await e.initializeCollaboration(); assert.equal(joined, 1, 'Target group must not initialize from the previous group\'s displayed work');
+  e._managedWorkspaceTransition = null;
+  await e.initializeCollaboration(); assert.equal(joined, 1, 'A released fence cannot pair a target group with another version\'s loaded workspace');
+  e.localDescs.catalogVersionId='second-version';
+  await e.initializeCollaboration(); assert.equal(joined, 2);
+  e.ctWorkspace={scope:{groupId:'workbook-group'}};
+  assert.equal(e.collaborationWorkspaceReady(),false,'Preparing ClientText cannot reconnect a legacy StatDescription room');
+  e.ctWorkspace=null;e.localDescs.workspaceGroupId='second-group';e.localDescs.workspaceVersionId='second-version';e.activeContentGroup=null;
+  assert.equal(e.collaborationWorkspaceReady(),false,'Clearing selection cannot remap an explicit group into a legacy room');
+});
+
+test('a transition begun during queued-save recovery fences a pending room initialization', async () => {
+  const { editor: e, window } = harness(), held = deferred(), reached = deferred();
+  e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'manager', role: 'manager', language: null, assignmentVersion: 1 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  let joined = 0;
+  window.CollaborationSync = { Client: class { async connect() { joined++; } select() {} setAway() {} disconnect() {} } };
+  window.OfflineStore.listSaveSubmissions = async () => [];
+  e.recoverPendingSaves = async () => { reached.resolve(); await held.promise; };
+  const initializing = e.initializeCollaboration(); await reached.promise;
+  e._managedWorkspaceTransition = {}; held.resolve(); await initializing;
+  assert.equal(joined, 0); assert.equal(!!e._collaboration, false);
+});
+
 test('dashboard suppresses team presence while keeping saved translation collaboration available', async () => {
   const { editor: e, window } = harness();
   e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;

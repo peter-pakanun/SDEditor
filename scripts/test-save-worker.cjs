@@ -534,6 +534,25 @@ test('worker startup import failure safely falls back before dispatch', async ()
   assert.equal((await saving).status, 'local'); assert.equal(calls, 1); assert.equal(h.workers[0].messages.length, 0); client.dispose();
 });
 
+test('worker and fallback retain captured content-group identity before waiting for dispatch', async () => {
+  for (const workerMode of [false, true]) {
+    const h = workerHarness(), calls = []; let group = 'group-one';
+    const store = { captureWorkspaceScope: value => ({ accountId: value.accountId, game: value.game, sourceHash: value.sourceHash,
+      branchId: 'default', versionId: 'version-one', groupId: group }), saveTranslationBatch: async value => { calls.push(value); return {}; } };
+    const client = create({ Worker: workerMode ? h.Worker : null, store });
+    const saving = client.save(batch()); group = 'group-two';
+    if (workerMode) {
+      h.workers[0].emit({ type: 'ready', version: 1 }); await queued();
+      const captured = h.workers[0].messages[0].batch;
+      assert.equal(captured.workspaceScope.versionId, 'version-one');assert.equal(captured.workspaceScope.groupId, 'group-one');
+      h.workers[0].emit({ type: 'saved', id: 'save-1', result: {} });
+    }
+    await saving;
+    if (!workerMode) { assert.equal(calls[0].workspaceScope.versionId, 'version-one'); assert.equal(calls[0].workspaceScope.groupId, 'group-one'); }
+    client.dispose();
+  }
+});
+
 test('worker crash after dispatch rejects as unknown durability without an automatic duplicate write', async () => {
   const h = workerHarness(); let calls = 0;
   const client = create({ Worker: h.Worker, store: { saveTranslationBatch: async () => { calls++; return { duplicate: true }; } } });

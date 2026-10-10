@@ -144,7 +144,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
+  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -1330,6 +1330,8 @@ const config = Vue.defineComponent({
         }
         const { workspace, source: storedSource } = snapshot;
         if (!current()) return;
+        if(snapshot.scope?.groupId){const metadata=await window.OfflineStore.getVersionMetadata(snapshot.scope);if(!current())return;this.managedActiveDetails=this.managedScopedDetails(metadata?.details);this.activeContentGroup=metadata?.details?.contentGroups?.find(group=>group.id===snapshot.scope.groupId) || {id:snapshot.scope.groupId,versionId:snapshot.scope.versionId,contentMode:'statdescription'};}
+        else this.activeContentGroup=null;
         if (initialization?.ownsPlan) this.setWorkspaceInitializationPlan(initialization, [
           ...(reusable ? ['Reusing the activated local source and saved translations']
             : window.OfflineStore.getWorkspaceSnapshot ? ['Loading saved translations and the original source baseline']
@@ -1394,7 +1396,7 @@ const config = Vue.defineComponent({
             if (!prepared || !current()) return;
           } while (language !== this.lang);
         }
-        if (workspace) this.localDescs = workspace;
+        if (workspace) {workspace.workspaceGroupId=snapshot.scope?.groupId || '';workspace.workspaceVersionId=snapshot.scope?.versionId || '';this.localDescs = workspace;}
         this.importBaseline = importedBaseline && Vue.markRaw ? Vue.markRaw(importedBaseline) : importedBaseline;
         this.ensureLocalDescsReady();
         this.sourceIdentity = sourceHash;
@@ -4935,6 +4937,7 @@ const config = Vue.defineComponent({
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
       if (window.AppDialogs?.isOpen) return;
+      if(this.ctActive){this.ctKey(e);return;}
       if (this.$refs.rawFileDialog?.open) {
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
         return;
@@ -6158,6 +6161,7 @@ const config = Vue.defineComponent({
       }
       const filtered = [];
       for (const entry of snapshot.entries) {
+        if (this.sdDirectory && (String(entry.row.filepath || '').split('/').slice(0, -1).join('/') || '(root)') !== this.sdDirectory) continue;
         if (!hasSearch || entry.path.includes(search) || entry.english.includes(search) || entry.translation.includes(search)) filtered.push(entry.row);
       }
       this._fileSearchAppliedText = query;
@@ -7688,6 +7692,11 @@ function renderUnifiedLineDiff(edits) {
 }
 
 const app = Vue.createApp(config);
+if (window.ClientTextUI) {
+  app.component('ct-fields', window.ClientTextUI.fieldsComponent);
+  app.component('ct-target', window.ClientTextUI.targetComponent);
+  app.component('ct-tools', window.ClientTextUI.toolsComponent);
+}
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);

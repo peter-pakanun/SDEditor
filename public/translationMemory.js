@@ -30,13 +30,22 @@
     }
     value = value && typeof value === 'object' ? value : {};
     if (Array.isArray(value.stats) && value.stats.length > 128) throw new TypeError('TM context.stats must contain at most 128 entries.');
-    return {
-      filepath: boundedText(value.filepath, 'TM context.filepath', 2048).replace(/\\/g, '/'),
+    const contentMode = value.contentMode == null || value.contentMode === '' ? '' : text(value.contentMode).toLowerCase();
+    if (contentMode && !['statdescription', 'clienttext'].includes(contentMode)) throw new TypeError('Invalid Translation Memory content mode.');
+    const context = {
+      filepath: contentMode === 'clienttext' ? boundedText(value.filepath, 'TM context.filepath', 2048) : boundedText(value.filepath, 'TM context.filepath', 2048).replace(/\\/g, '/'),
       stats: Array.isArray(value.stats) ? value.stats.map(stat => boundedText(stat, 'TM context.stats entry', 1024)) : [],
       condition: boundedText(value.condition, 'TM context.condition', 4096),
       remarks: boundedText(value.remarks, 'TM context.remarks', 4096),
       entryIndex: Number.isSafeInteger(value.entryIndex) && value.entryIndex >= 0 ? value.entryIndex : null,
     };
+    // The absence/default StatDescription mode preserves all established wire
+    // identities. ClientText fields retain their grammatical and workbook scope.
+    if (contentMode === 'clienttext') context.contentMode = contentMode;
+    for (const [field, maximum] of [['fieldKind',32],['form',32],['fieldName',2048],['role',32],['sheet',2048],['recordId',4096],['fieldId',4096]]) {
+      if (value[field] != null && value[field] !== '') context[field] = boundedText(value[field], 'TM context.' + field, maximum);
+    }
+    return context;
   }
 
   function canonicalContext(context) { return JSON.stringify(normalizeContext(context)); }
