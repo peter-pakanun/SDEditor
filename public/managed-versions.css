@@ -8,9 +8,6 @@
 .selectedVersionHeader > div { min-width: 0; }
 .selectedVersionHeader > button { flex: none; margin-left: auto; }
 .selectedVersionHeader .versionTitleLine { overflow-wrap: anywhere; }
-.versionContentGroup { margin-top: 22px; }
-.versionContentGroup > h3 { margin: 0 0 10px; font-size: 15px; overflow-wrap: anywhere; }
-.versionContentGroup > h3 small { display: block; margin-top: 5px; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
 .contentGroupTeamTable th:nth-child(2) { min-width: 210px; }
 .versionTitleLine, .versionNameLine { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .versionCatalogHeader p, .versionPanelHeading p { margin: 8px 0; color: var(--ui-muted); }
@@ -67,6 +64,7 @@
 .versionProgressTrack { display: flex; height: 8px; margin-top: 7px; background: var(--color-element-alt); border: 1px solid var(--ui-border); border-radius: 5px; overflow: hidden; }
 .versionProgressTrack > span { display: block; height: 100%; flex: none; }
 .versionProgressTrack .saved { background: var(--ui-saved); }.versionProgressTrack .revised { background: var(--ui-revised); }.versionProgressTrack .missing { background: var(--ui-missing); }
+.versionProgressTrack .outdated { background: var(--ui-dropped); }
 .versionProgress.empty .versionProgressSummary strong { color: var(--ui-muted); }
 .versionProgress:focus-visible, .versionCatalog [tabindex="0"]:focus-visible, .versionModal .versionTeamChip:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .teamVersionTable td:first-child { min-width: 125px; }

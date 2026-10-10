@@ -136,6 +136,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceContextLink:focus-visible { color: var(--ui-accent); outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .workspaceActions { display: flex; align-items: center; justify-self: end; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .workspaceActions button { flex: none; white-space: nowrap; }
+.workspaceContentGroup { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
+.workspaceContentGroup select { min-width: 0; max-width: 200px; min-height: 36px; padding: 8px; margin: 0; }
 .workspaceActions .workspaceIconButton { display: inline-flex; align-items: center; justify-content: center; padding: 9px; }
 .workspaceIconButton svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .inlineSidebarToggle[aria-expanded="true"] { color: var(--ui-accent); }

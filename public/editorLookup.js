@@ -113,10 +113,11 @@
     return entries;
   }
 
-  function searchIndex(index, query, scope = 'all') {
+  function searchIndex(index, query, scope = 'all', translatedOnly = false) {
     const needle = foldText(query);
     if (!needle) return [];
     return index.filter(entry => {
+      if (translatedOnly && !entry.translationText) return false;
       if (scope === 'path') return entry.pathText.includes(needle);
       if (scope === 'english') return entry.englishText.includes(needle);
       if (scope === 'translation') return entry.translationText.includes(needle);
@@ -150,7 +151,7 @@
   const mixin = {
     data() {
       return {
-        lookupQuery: '', lookupAppliedQuery: '', lookupLanguage: '', lookupScope: 'all',
+        lookupQuery: '', lookupAppliedQuery: '', lookupLanguage: '', lookupScope: 'all', lookupTranslatedOnly: false,
         lookupPage: 1, lookupPageSize: PAGE_SIZE, lookupSelectedFilepath: '', lookupRevision: 0,
       };
     },
@@ -206,7 +207,7 @@
           cache.byPath = new Map(cache.entries.map(entry => [entry.filepath, entry]));
           caches.set(this, cache);
         }
-        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope);
+        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope, this.lookupTranslatedOnly);
       },
       lookupResultCount() { return this.lookupResults.length; },
       lookupPageCount() { return Math.max(1, Math.ceil(this.lookupResultCount / this.lookupPageSize)); },
@@ -254,6 +255,7 @@
       lang() { this.invalidateEditorLookupIndex(); },
       lookupLanguage() { this.lookupApplySearch(); },
       lookupScope() { this.lookupApplySearch(); },
+      lookupTranslatedOnly() { this.lookupApplySearch(); },
       lookupPageCount(count) {
         if (lookupActive(this)) this.lookupPage = Math.max(1, Math.min(this.lookupPage, count));
       },

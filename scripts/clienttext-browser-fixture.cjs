@@ -458,6 +458,17 @@ async function run() {
             const groups = await page.evaluate(() => window.__clientFixtureApp.ctGroups.map(group => ({ id: group.id, contentMode: group.contentMode })));
             const statGroup = groups.find(group => group.contentMode === 'statdescription'), clientGroup = groups.find(group => group.contentMode === 'clienttext');
             assert.ok(statGroup && clientGroup && statGroup.id !== clientGroup.id);
+            const checkAssignmentTooltip = async (row, expected) => {
+                const meter = row.locator('.versionProgress');
+                assert.equal(await meter.getAttribute('title'), null, 'Assignment progress uses the shared tooltip without a native title');
+                await meter.hover(); await page.getByRole('tooltip').waitFor();
+                assert.match(await page.getByRole('tooltip').textContent(), expected);
+                await meter.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
+                assert.equal(await meter.evaluate(element => element === document.activeElement), true, 'Assignment progress is keyboard reachable');
+                await page.getByRole('tooltip').waitFor();
+                assert.match(await page.getByRole('tooltip').textContent(), expected);
+                await page.mouse.move(0, 0); await meter.evaluate(element => element.blur());
+            };
             for (const size of desktopSizes) {
                 await page.setViewportSize(size);
                 for (const theme of themes) {
@@ -465,39 +476,58 @@ async function run() {
                     await details.scrollIntoViewIfNeeded();
                     const layout = await details.evaluate(element => {
                         const rect = node => { const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom }; };
-                        const header = element.querySelector('.selectedVersionHeader');
+                        const header = element.querySelector('.selectedVersionHeader'), table = element.querySelector('.contentGroupTeamTable');
                         return { panel: rect(element), header: rect(header), title: rect(header.querySelector('h2')), add: rect(header.querySelector('button')),
                             overflow: document.documentElement.scrollWidth - innerWidth, cards: element.querySelectorAll('.ctGroupCard').length,
-                            groups: Array.from(element.querySelectorAll('.versionContentGroup'), group => {
-                                const wrapper = group.querySelector('.versionTableScroll'), table = group.querySelector('.contentGroupTeamTable');
-                                const team = group.querySelector('tr[data-language="French"]');
-                                const model = window.__clientFixtureApp.ctGroups.find(candidate => candidate.id === group.dataset.contentGroup);
-                                return { id: group.dataset.contentGroup, wrapper: rect(wrapper), headers: Array.from(table.querySelectorAll('th'), th => ({ text: th.textContent.trim(), scope: th.scope })),
-                                    cells: team.children.length, progress: rect(team.querySelector('.versionProgress')), meter: team.querySelector('.versionProgress').getAttribute('role'),
+                            tableCount: element.querySelectorAll('.teamVersionTable').length, groupSections: element.querySelectorAll('.versionContentGroup').length,
+                            wrapper: rect(table.closest('.versionTableScroll')), headers: Array.from(table.querySelectorAll('th'), th => ({ text: th.textContent.replace(/[↑↓▲▼]/g, '').trim(), scope: th.scope })),
+                            rowKeys: Array.from(table.querySelectorAll('tbody tr'), row => JSON.stringify([row.dataset.contentGroup, row.dataset.language])),
+                            groups: Array.from(table.querySelectorAll('tr[data-language="French"]'), team => {
+                                const model = window.__clientFixtureApp.ctGroups.find(candidate => candidate.id === team.dataset.contentGroup);
+                                const progress = team.querySelector('.versionProgress');
+                                return { id: team.dataset.contentGroup, assignment: team.querySelector('.teamEditorLink').textContent.trim(), href: team.querySelector('.teamEditorLink').getAttribute('href'),
+                                    cells: team.children.length, progress: rect(progress), meter: progress.getAttribute('role'),
                                     contentMode: model.contentMode, counts: model.teams.find(candidate => candidate.language === 'French').counts,
                                     loadedText: team.querySelector('td:first-child > small').textContent.trim(), progressText: team.querySelector('.versionProgressSummary strong').textContent.trim(),
-                                    progressNow: team.querySelector('.versionProgress').getAttribute('aria-valuenow'), progressMax: team.querySelector('.versionProgress').getAttribute('aria-valuemax'),
+                                    progressPercent: team.querySelector('.versionProgressSummary > span')?.textContent.trim(),
+                                    progressNow: progress.getAttribute('aria-valuenow'), progressMax: progress.getAttribute('aria-valuemax'), tooltip: progress.getAttribute('aria-label'),
+                                    segments: Array.from(team.querySelectorAll('.versionProgressTrack > span'), span => ({ kind: span.className, width: span.style.width })),
                                     actions: Array.from(team.querySelectorAll('.versionTeamActions button'), button => ({ text: button.textContent.trim(), disabled: button.disabled, bounds: rect(button) })) };
                             }) };
                     });
-                    assert.equal(layout.cards, 0, 'Content groups use the shared team table instead of cards'); assert.equal(layout.groups.length, 2);
+                    assert.equal(layout.cards, 0, 'Content groups use the shared team table instead of cards'); assert.equal(layout.groupSections, 0);
+                    assert.equal(layout.tableCount, 1, 'Both content modes share exactly one Assignment table'); assert.equal(layout.groups.length, 2);
+                    assert.equal(layout.rowKeys.length, 13, 'Twelve StatDescription teams and French ClientText are shown together');
+                    assert.equal(new Set(layout.rowKeys).size, 13, 'Each content group/team assignment appears once');
+                    assert.deepEqual(layout.headers.map(header => header.text), ['Assignment', 'Progress', 'Online', 'Actions']);
+                    assert.ok(layout.headers.every(header => header.scope === 'col'));
                     assert.ok(layout.add.x > layout.title.right && Math.abs(layout.add.right - layout.header.right) < 1, theme + ': Add content group is on the right of the selected version header');
                     assert.ok(Math.abs(layout.add.y - layout.header.y) < 1, theme + ': selected version header and action align at the top');
                     assert.ok(layout.overflow <= 1, theme + ': content table scroll is contained without widening the page');
+                    assert.ok(layout.wrapper.x >= layout.panel.x && layout.wrapper.right <= layout.panel.right, 'Narrow desktop table overflow stays inside the selected version panel');
                     for (const group of layout.groups) {
-                        assert.deepEqual(group.headers.map(header => header.text), ['Language team', 'Progress', 'Online', 'Actions']);
-                        assert.ok(group.headers.every(header => header.scope === 'col')); assert.equal(group.cells, 4); assert.equal(group.meter, 'meter');
-                        assert.ok(group.wrapper.x >= layout.panel.x && group.wrapper.right <= layout.panel.right, 'Narrow desktop table overflow stays inside the selected version panel');
+                        assert.equal(group.assignment, 'French — ' + (group.contentMode === 'clienttext' ? 'ClientText' : 'StatDescription'));
+                        assert.equal(group.href, '#table'); assert.equal(group.cells, 4); assert.equal(group.meter, 'meter');
+                        assert.deepEqual(group.segments.map(segment => segment.kind), group.contentMode === 'clienttext' ? ['saved', 'revised', 'missing', 'outdated'] : ['saved', 'revised', 'missing'], 'Both modes share the progress bar layout, with ClientText Outdated work in orange');
                         assert.ok(group.progress.width >= 200, 'Both content modes reuse the existing readable progress meter');
                         assert.ok(['Open editor', 'Download accepted work', 'Collect and end'].every(text => group.actions.some(action => action.text === text && !action.disabled)), 'Shared table keeps the team actions available');
                         if (group.contentMode === 'clienttext') {
                             assert.equal(group.loadedText, `${group.counts.loaded ?? 0} IDs`, 'ClientText table shows the exact ID count');
-                            assert.equal(group.progressText, `${group.counts.resolvedFields ?? 0} / ${group.counts.workloadFields ?? 0}`, 'ClientText progress uses field workload, rather than unit counts');
+                            assert.equal(group.progressText, group.counts.workloadFields ? `${group.counts.resolvedFields ?? 0} / ${group.counts.workloadFields}` : '—', 'ClientText progress uses field workload, rather than unit counts');
+                            assert.equal(group.progressPercent, group.counts.workloadFields ? `${Math.round(100 * (group.counts.resolvedFields ?? 0) / group.counts.workloadFields)}%` : undefined);
                             assert.equal(group.progressNow, String(group.counts.resolvedFields ?? 0));
                             assert.equal(group.progressMax, String(Math.max(1, group.counts.workloadFields ?? 0)));
+                            assert.equal(group.segments.find(segment => segment.kind === 'revised').width, '0%', 'Revised corrections remain outside the initial ClientText workload');
+                        } else {
+                            const total = (group.counts.missing ?? 0) + (group.counts.saved ?? 0);
+                            assert.equal(group.progressText, total ? `${group.counts.saved ?? 0} / ${total}` : '—');
+                            assert.equal(group.progressPercent, total ? `${Math.round(100 * (group.counts.saved ?? 0) / total)}%` : undefined);
                         }
+                        const expectedWidth = Number(group.progressMax) > 1 || Number(group.progressNow) > 0 || group.progressText !== '—' ? 100 : 0;
+                        assert.ok(Math.abs(group.segments.reduce((sum, segment) => sum + parseFloat(segment.width), 0) - expectedWidth) < 0.01, 'Overlapping status counts never overfill the workload bar');
+                        await checkAssignmentTooltip(details.locator(`tr[data-content-group="${group.id}"][data-language="French"]`), /Only server-accepted work is counted; unsaved drafts and pending offline saves are excluded\./);
                     }
-                    await page.screenshot({ path: join(directory, `clienttext-group-tables-${size.width}-${theme}.png`), fullPage: true });
+                    await page.screenshot({ path: join(directory, `clienttext-assignment-table-${size.width}-${theme}.png`), fullPage: true });
                 }
             }
             await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
@@ -507,17 +537,109 @@ async function run() {
                     counts: { ...team.counts, loaded: 0, total: 999, resolved: 999, workload: 999, resolvedFields: 0, workloadFields: 0 } }) }) };
                 await vm.$nextTick();
             }, clientGroup.id);
-            const emptyTeam = details.locator(`[data-content-group="${clientGroup.id}"] tr[data-language="French"]`);
-            assert.equal(await emptyTeam.locator('.versionProgressSummary strong').textContent(), '0 / 0', 'Empty field workload remains zero despite nonzero unit-count fallbacks');
+            const emptyTeam = details.locator(`tr[data-content-group="${clientGroup.id}"][data-language="French"]`);
+            assert.equal(await emptyTeam.locator('.versionProgressSummary strong').textContent(), '—', 'Empty field workload uses the same empty meter as StatDescription despite nonzero unit-count fallbacks');
             assert.equal(await emptyTeam.locator('td:first-child > small').first().textContent(), '0 IDs', 'Zero loaded IDs never falls back to another count');
             assert.equal(await emptyTeam.locator('.versionProgressTrack .saved').evaluate(element => element.style.width), '0%');
+            assert.equal(await emptyTeam.locator('.versionProgress').getAttribute('aria-valuenow'), '0');
+            assert.equal(await emptyTeam.locator('.versionProgress').getAttribute('aria-valuemax'), '1');
+            assert.equal(await emptyTeam.locator('.versionProgressSummary > span').count(), 0, 'Empty meters do not display a percentage');
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.managedVersionDetails = window.__fixtureOriginalDetails; delete window.__fixtureOriginalDetails; await vm.$nextTick(); });
+            await page.evaluate(async statGroupId => {
+                const vm = window.__clientFixtureApp;
+                window.__fixtureCachedModernDetails = vm.managedVersionDetails;
+                vm.managedVersionDetails = { ...vm.managedVersionDetails, teams: vm.ctGroups.find(group => group.id === statGroupId).teams };
+                await vm.$nextTick();
+            }, statGroup.id);
+            assert.equal(await details.locator('.contentGroupTeamTable tbody tr').count(), 13, 'Cached modern SD teams do not add a phantom legacy assignment');
+            assert.equal(await details.locator(`tr[data-content-group="${statGroup.id}"]`).count(), 12);
+            assert.equal(await details.locator(`tr[data-content-group="${clientGroup.id}"]`).count(), 1);
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctAssignmentRows.some(row => row.legacy)), false, 'Explicit modern groups remain authoritative over cached top-level team details');
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                vm.managedVersionDetails = window.__fixtureCachedModernDetails; delete window.__fixtureCachedModernDetails;
+                await vm.$nextTick();
+            });
+            await page.evaluate(async ({ statGroupId, clientGroupId }) => {
+                const vm = window.__clientFixtureApp, details = vm.managedVersionDetails;
+                window.__fixtureOriginalDetails = details;
+                const stat = vm.ctGroups.find(group => group.id === statGroupId), client = vm.ctGroups.find(group => group.id === clientGroupId);
+                const collection = { id: 'fixture-legacy-collection-1', sequence: 1, createdAt: new Date().toISOString(), downloadReady: true, kind: 'download_only' };
+                const team = { ...stat.teams.find(team => team.language === 'French'), ended: true,
+                    counts: { loaded: 5, saved: 2, missing: 1, revised: 1 }, latestCollection: collection,
+                    collections: [collection, { ...collection, id: 'fixture-legacy-collection-2', sequence: 2 }] };
+                window.__fixtureLegacyDetails = { ...details, teams: [team], contentGroups: [client, { ...stat, legacyVersionId: details.version.id, teams: [team] }] };
+                vm.managedVersionDetails = window.__fixtureLegacyDetails;
+                window.__fixtureLegacyCalls = []; window.__fixtureLegacyMethods = {};
+                for (const name of ['managedOpenTeam', 'managedCollect', 'managedDownloadCollection', 'managedDownloadPrevious', 'managedReopen']) {
+                    window.__fixtureLegacyMethods[name] = vm[name];
+                    vm[name] = (...args) => {
+                        window.__fixtureLegacyCalls.push({ name, language: (name === 'managedOpenTeam' ? args[1] : args[0]).language,
+                            versionId: name === 'managedOpenTeam' ? args[0].id : undefined,
+                            end: name === 'managedCollect' ? args[1] !== false : undefined,
+                            snapshot: name === 'managedDownloadPrevious' ? args[1].target.value : undefined });
+                        return false;
+                    };
+                }
+                await vm.$nextTick();
+            }, { statGroupId: statGroup.id, clientGroupId: clientGroup.id });
+            const legacyTeam = details.locator('tr[data-language="French"]').filter({ has: page.getByRole('link', { name: 'French — StatDescription', exact: true }) });
+            for (const size of desktopSizes) {
+                await page.setViewportSize(size);
+                for (const theme of themes) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                    assert.equal(await details.locator('.teamVersionTable').count(), 1, 'Legacy StatDescription and ClientText use the same table');
+                    assert.equal(await details.locator('.contentGroupTeamTable tbody tr').count(), 2, 'Legacy top-level and content-group copies appear once alongside ClientText');
+                    assert.equal(await legacyTeam.count(), 1); assert.equal(await legacyTeam.getAttribute('data-content-group'), null, 'Rich legacy team details retain the legacy action path');
+                    assert.equal(await legacyTeam.locator('.versionProgressSummary strong').textContent(), '2 / 3');
+                    assert.equal(await legacyTeam.locator('.versionProgressSummary > span').textContent(), '67%');
+                    assert.equal(await legacyTeam.locator('.versionBadge.ended').textContent(), 'Ended');
+                    assert.equal(await legacyTeam.locator('.teamEditorLink').getAttribute('href'), '#table');
+                    for (const name of ['Open editor', 'Download', 'Recollect', 'Download collection', 'Reopen']) assert.equal(await legacyTeam.getByRole('button', { name, exact: true }).isEnabled(), true, 'Legacy action remains available: ' + name);
+                    assert.equal(await legacyTeam.getByRole('combobox', { name: 'Download previous snapshot', exact: true }).count(), 1);
+                    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth <= 1), theme + ': legacy mixed table stays within the resized desktop');
+                    await checkAssignmentTooltip(legacyTeam, /Revised: 1 \(included in Saved\)/);
+                    if (theme === 'modern-dark') await page.screenshot({ path: join(directory, `clienttext-legacy-assignment-table-${size.width}-${theme}.png`), fullPage: true });
+                }
+            }
+            await legacyTeam.getByRole('link', { name: 'French — StatDescription', exact: true }).click();
+            for (const name of ['Open editor', 'Download', 'Recollect', 'Download collection', 'Reopen']) await legacyTeam.getByRole('button', { name, exact: true }).click();
+            await legacyTeam.getByRole('combobox', { name: 'Download previous snapshot', exact: true }).selectOption('fixture-legacy-collection-2');
+            const legacyCalls = await page.evaluate(() => window.__fixtureLegacyCalls);
+            assert.deepEqual(legacyCalls.map(call => call.name), ['managedOpenTeam', 'managedOpenTeam', 'managedCollect', 'managedCollect', 'managedDownloadCollection', 'managedReopen', 'managedDownloadPrevious']);
+            assert.ok(legacyCalls.every(call => call.language === 'French'));
+            assert.ok(legacyCalls.filter(call => call.name === 'managedOpenTeam').every(call => call.versionId === draftVersionId));
+            assert.deepEqual(legacyCalls.filter(call => call.name === 'managedCollect').map(call => call.end), [false, true]);
+            assert.equal(legacyCalls.at(-1).snapshot, 'fixture-legacy-collection-2');
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                vm.managedVersionDetails = { ...window.__fixtureLegacyDetails, contentGroups: [] };
+                await vm.$nextTick();
+            });
+            assert.equal(await legacyTeam.count(), 1, 'An old API with no content groups still supplies the StatDescription assignment');
+            assert.equal(await details.locator('.contentGroupTeamTable tbody tr').count(), 1);
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                vm.managedVersionDetails = { ...window.__fixtureLegacyDetails, teams: [] }; await vm.$nextTick();
+            });
+            assert.equal(await legacyTeam.count(), 1, 'A group-only legacy response still supplies the StatDescription assignment');
+            assert.equal(await legacyTeam.getAttribute('data-content-group'), statGroup.id);
+            await legacyTeam.getByRole('link', { name: 'French — StatDescription', exact: true }).click();
+            assert.equal(await page.evaluate(() => window.__fixtureLegacyCalls.at(-1).name), 'managedOpenTeam', 'A legacy content-group row retains the legacy editor action');
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                for (const [name, method] of Object.entries(window.__fixtureLegacyMethods)) vm[name] = method;
+                vm.managedVersionDetails = window.__fixtureOriginalDetails;
+                for (const name of ['__fixtureOriginalDetails', '__fixtureLegacyDetails', '__fixtureLegacyCalls', '__fixtureLegacyMethods']) delete window[name];
+                await vm.$nextTick();
+            });
+            await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
+            results.push('Combined Assignment table avoids phantom rows from cached modern teams and preserves deduplicated legacy API/group fallback, editor links, collections, snapshot selector and reopening at both desktop widths in all four themes');
             await details.getByRole('button', { name: 'Add content group', exact: true }).click();
             await upload.waitFor(); assert.match(await upload.locator('h2').textContent(), /Add content groups to Shared ClientText fixture/);
             await upload.getByRole('button', { name: 'Close', exact: true }).click();
-            results.push('Selected version header and CT/SD team tables fit two desktop sizes in all four themes; accessible field progress and exact zero-workload counts; header action opens the content uploader');
-            const statCard = details.locator('[data-content-group="' + statGroup.id + '"]');
-            const statTeam = statCard.locator('.ctGroupTeam').filter({ has: page.locator('strong').filter({ hasText: /^French$/ }) });
+            results.push('One Assignment table combines Language — Mode rows at two desktop sizes in all four themes; CT/SD share fraction/percentage layout, hover and keyboard tooltips, exact field workload and empty meters; header action opens the content uploader');
+            const statTeam = details.locator('tr[data-content-group="' + statGroup.id + '"][data-language="French"]');
             await statTeam.getByRole('button', { name: 'Open editor', exact: true }).click();
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp; return vm.sourceLoaded && !vm.ctActive && vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive; }, statGroup.id);
             await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
@@ -546,9 +668,60 @@ async function run() {
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration?.retry(); });
             await page.waitForFunction(() => !window.__clientFixtureApp._collaboration?.snapshot({ includeFiles: false }).pending);
             results.push('Legacy SD local history still compares revisions inside an independently scoped content group');
-            const directoryPane = page.getByRole('navigation', { name: 'StatDescription directories' });
-            await directoryPane.getByRole('combobox', { name: 'Content group', exact: true }).selectOption(clientGroup.id);
+            const statGroupSelector = page.locator('.workspaceHeader').getByRole('combobox', { name: 'Content group', exact: true });
+            for (const size of desktopSizes) {
+                await page.setViewportSize(size);
+                for (const theme of themes) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                    assert.equal(await page.getByRole('navigation', { name: 'StatDescription directories' }).count(), 0, 'StatDescription has no left directory pane');
+                    assert.equal(await page.locator('.ctDirectoryPane').count(), 0);
+                    assert.equal(await statGroupSelector.count(), 1, 'The StatDescription toolbar retains one content-group selector');
+                    assert.equal(await statGroupSelector.inputValue(), statGroup.id);
+                    const layout = await page.locator('.workspaceContent').evaluate(element => {
+                        const box = element.getBoundingClientRect(), styles = getComputedStyle(element), table = element.querySelector('.fileTableScroll').getBoundingClientRect();
+                        const selector = document.querySelector('.workspaceHeader select[aria-label="Content group"]').getBoundingClientRect();
+                        return { left: box.left + parseFloat(styles.paddingLeft), right: box.right - parseFloat(styles.paddingRight),
+                            tableLeft: table.left, tableRight: table.right, tableTop: table.top, selectorBottom: selector.bottom,
+                            selectorWidth: selector.width, headerWidth: document.querySelector('.workspaceHeader').getBoundingClientRect().width,
+                            overflow: document.documentElement.scrollWidth - innerWidth };
+                    });
+                    assert.ok(Math.abs(layout.tableLeft - layout.left) <= 1 && Math.abs(layout.tableRight - layout.right) <= 1, theme + ': StatDescription file list uses the available content width');
+                    assert.ok(layout.selectorBottom <= layout.tableTop, 'Content-group switching stays in the toolbar above the file list');
+                    assert.ok(layout.selectorWidth < layout.headerWidth / 3, 'The toolbar selector remains compact');
+                    assert.ok(layout.overflow <= 1, theme + ': resized StatDescription workspace stays within the desktop width');
+                }
+            }
+            await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                window.__fixtureInlineSidebarVisible = vm.inlineSidebarVisible;
+                vm.inlineEditor = true; vm.inlineSidebarVisible = false; await vm.$nextTick();
+            });
+            await page.getByRole('button', { name: 'Show file tools', exact: true }).click();
+            assert.equal(await page.getByRole('complementary', { name: 'Selected file tools', exact: true }).isVisible(), true, 'Inline SD keeps its selected-file tools sidebar');
+            const inlineLayout = await page.locator('.workspaceContent').evaluate(element => {
+                const main = element.querySelector('.workspaceMain').getBoundingClientRect(), table = element.querySelector('.fileTableScroll').getBoundingClientRect();
+                const sidebar = element.querySelector('#inlineEditorSidebar').getBoundingClientRect();
+                return { mainLeft: main.left, mainRight: main.right, tableLeft: table.left, tableRight: table.right, sidebarLeft: sidebar.left };
+            });
+            assert.ok(Math.abs(inlineLayout.tableLeft - inlineLayout.mainLeft) <= 1 && Math.abs(inlineLayout.tableRight - inlineLayout.mainRight) <= 1, 'Inline SD uses its main column without a left directory pane');
+            assert.ok(inlineLayout.mainRight < inlineLayout.sidebarLeft, 'Selected-file tools remain in the separate right column');
+            assert.equal(await page.locator('.ctDirectoryPane').count(), 0);
+            await page.getByRole('button', { name: 'Hide file tools', exact: true }).click();
+            assert.equal(await page.getByRole('complementary', { name: 'Selected file tools', exact: true }).count(), 0);
+            const inlineFullWidth = await page.locator('.workspaceContent').evaluate(element => {
+                const box = element.getBoundingClientRect(), styles = getComputedStyle(element), table = element.querySelector('.fileTableScroll').getBoundingClientRect();
+                return Math.abs(table.left - box.left - parseFloat(styles.paddingLeft)) <= 1 && Math.abs(table.right - box.right + parseFloat(styles.paddingRight)) <= 1;
+            });
+            assert.equal(inlineFullWidth, true, 'Hiding inline file tools returns the full content width to the SD file list');
+            await page.evaluate(async () => {
+                const vm = window.__clientFixtureApp;
+                vm.inlineEditor = false; vm.inlineSidebarVisible = window.__fixtureInlineSidebarVisible;
+                delete window.__fixtureInlineSidebarVisible; await vm.$nextTick();
+            });
+            await statGroupSelector.selectOption(clientGroup.id);
             await workspace.waitFor(); await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy);
+            assert.equal(await navigation.count(), 1, 'ClientText keeps its left workbook-sheet pane');
             await navigation.getByRole('button', { name: 'Normal', exact: true }).click(); await workspace.getByRole('button', { name: 'record', exact: true }).click();
             assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'En ligne', 'ClientText work survives StatDescription switching');
             await workspace.getByRole('combobox', { name: 'Content group', exact: true }).selectOption(statGroup.id);
@@ -563,7 +736,7 @@ async function run() {
             const statDownload = await statCollection, exportedStats = await JSZip.loadAsync(readFileSync(await statDownload.path()));
             const exportedDescription = StatCodec.parseText(statDescription.filepath, StatCodec.decodeUTF16(await exportedStats.file(statDescription.filepath).async('uint8array')), 'French', { strict: true });
             assert.deepEqual(exportedDescription.translations.French, ['Dégâts de feu du groupe']);
-            results.push('Same version adds a StatDescription group for all teams; proof-backed SD save/collection and CT↔SD switches preserve both workspaces');
+            results.push('Same version adds a StatDescription group for all teams; SD file list uses the available width without a directory pane, toolbar switching retains CT sheet navigation; proof-backed SD save/collection and CT↔SD switches preserve both workspaces');
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
             await upload.locator('input[type=text]').fill('Identical-original StatDescription fixture');
             await upload.locator('input[type=file]').first().setInputFiles(statFile);
@@ -575,7 +748,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'Identical original publishes as an independent version');
             const secondGroup = await page.evaluate(() => window.__clientFixtureApp.ctGroups.find(group => group.contentMode === 'statdescription'));
             assert.notEqual(secondGroup.id, statGroup.id); assert.notEqual(secondGroup.versionId, draftVersionId);
-            const secondTeam = details.locator('[data-content-group="' + secondGroup.id + '"] .ctGroupTeam').filter({ has: page.locator('strong').filter({ hasText: /^French$/ }) });
+            const secondTeam = details.locator('tr[data-content-group="' + secondGroup.id + '"][data-language="French"]');
             await secondTeam.getByRole('button', { name: 'Open editor', exact: true }).click();
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp; if (vm.managedVisibleError) throw new Error(vm.managedVisibleError); return vm.sourceLoaded && vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive && !vm.versionChooserVisible; }, secondGroup.id);
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp, collaboration = vm._collaboration?.snapshot({ includeFiles: false }); return collaboration?.connected && !collaboration.pending && vm.statistic.hasChanges === 1; });

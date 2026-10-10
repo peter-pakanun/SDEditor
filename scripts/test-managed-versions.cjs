@@ -453,7 +453,7 @@ test('managed chooser templates gate cached tables, team details and recovery di
   assert.match(html, /<template v-if="managedCatalogAccess">[\s\S]*?onlineVersionTable/);
   assert.match(html, /v-else-if="!managedCatalogAccess"[^>]*>Your account needs a team language assignment/);
   assert.match(html, /v-if="managedCatalogAccess && managedSelectedVersion"/);
-  assert.match(html, /v-for="team in managedSortedTeams"/);
+  assert.match(html, /v-for="row in ctAssignmentRows"/);
   assert.match(html, /v-if="managedManagerAccess && managedUploadVisible"/);
   assert.match(html, /v-if="managedRecoveryVisible && managedVisibleRecoveryTeam"/);
 });

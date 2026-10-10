@@ -18,6 +18,101 @@ function harness(changes={}){
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
 }
+function assignmentHarness(changes={}){
+    const managed=require('../public/managedVersions.js').mixin.methods,
+        h=harness({managedCatalogAccess:true,cloudCanAccessAllLanguages:true,managedTeamSort:'language',managedTeamSortDir:'asc',
+            managedSelectedVersion:{id:'v1',game:'poe2',branchId:'default'},managedSelectedDetails:{version:{id:'v1'},teams:[]},...changes});
+    h.app.managedProgress=managed.managedProgress.bind(h.app);h.app.managedProgressTooltip=managed.managedProgressTooltip.bind(h.app);
+    Object.defineProperty(h.app,'ctGroups',{get:()=>h.mixin.computed.ctGroups.call(h.app)});
+    Object.defineProperty(h.app,'ctAssignmentRows',{get:()=>h.mixin.computed.ctAssignmentRows.call(h.app)});
+    return h;
+}
+
+test('the unified Assignment table retains legacy API teams and their exact progress/actions data',()=>{
+    const thai={language:'Thai',ended:true,latestCollection:{id:'collection'},collections:[{id:'collection'}],presence:[{name:'Peer'}],counts:{saved:3,missing:2,revised:1}},
+        french={language:'French',counts:{saved:1,missing:0,revised:0}},
+        {app}=assignmentHarness({managedSelectedDetails:{version:{id:'v1'},teams:[thai,french]}});
+    const rows=app.ctAssignmentRows;assert.deepEqual(Array.from(rows,row=>row.label),['French — StatDescription','Thai — StatDescription']);
+    assert.ok(rows.every(row=>row.legacy&&row.group===null&&row.contentMode==='statdescription'));
+    const row=rows.find(row=>row.team===thai);assert.ok(row);assert.equal(row.team.latestCollection.id,'collection');
+    const progress=app.ctAssignmentProgress(row),legacy=app.managedProgress(thai);
+    for(const name of Object.keys(legacy))assert.equal(progress[name],legacy[name]);
+    assert.equal(app.ctAssignmentProgressTooltip(row),app.managedProgressTooltip(thai));
+});
+test('mixed assignments deduplicate each legacy team and preserve independent modern content-group rows',()=>{
+    const thai={language:'Thai',counts:{saved:1,missing:0}},french={language:'French',counts:{saved:0,missing:1}},
+        legacy={id:'legacy',versionId:'v1',legacyVersionId:'v1',contentMode:'statdescription',teams:[{...thai},french]},
+        sd={id:'sd',versionId:'v1',contentMode:'StatDescription',teams:[thai]},ct={id:'ct',versionId:'v1',contentMode:'clienttext',teams:[thai]},
+        {app}=assignmentHarness({managedSelectedDetails:{version:{id:'v1'},teams:[thai],contentGroups:[legacy,sd,ct,ct]}});
+    const rows=app.ctAssignmentRows;assert.equal(rows.length,4);assert.equal(new Set(rows.map(row=>row.key)).size,4);
+    assert.equal(rows.find(row=>row.legacy&&row.team.language==='Thai').team,thai);
+    assert.equal(rows.find(row=>row.legacy&&row.team.language==='French').group,legacy,'a legacy group supplies a team absent from old top-level details');
+    assert.equal(rows.find(row=>row.group===ct).legacy,false);assert.equal(rows.find(row=>row.group===sd).legacy,false);
+    app.managedSelectedDetails={version:{id:'v1'},contentGroups:[legacy]};assert.equal(app.ctAssignmentRows.length,2,'legacy group fallback works without top-level teams');
+});
+test('cached modern group team details do not manufacture an extra legacy StatDescription assignment',()=>{
+    const team={language:'Thai',counts:{saved:1,missing:0},latestCollection:{id:'modern-collection'}},
+        sd={id:'modern-sd',versionId:'v1',contentMode:'statdescription',teams:[team]},
+        ct={id:'modern-ct',versionId:'v1',contentMode:'clienttext',teams:[{language:'Thai',counts:{workloadFields:1,resolvedFields:0}}]},
+        {app}=assignmentHarness({managedSelectedDetails:{version:{id:'v1'},teams:[team],contentGroups:[sd,ct]}});
+    const rows=app.ctAssignmentRows;assert.equal(rows.length,2);assert.ok(rows.every(row=>!row.legacy));
+    const sdRow=rows.find(row=>row.contentMode==='statdescription');assert.equal(sdRow.group,sd);assert.equal(sdRow.team,team);
+    assert.equal(sdRow.team.latestCollection.id,'modern-collection','modern actions retain the original group/team facts');
+    app.managedSelectedDetails.contentGroups=[ct];assert.equal(app.ctAssignmentRows.length,1);assert.equal(app.ctAssignmentRows[0].group,ct);
+    app.managedSelectedDetails.contentGroups=[sd];assert.equal(app.ctAssignmentRows.length,1);assert.equal(app.ctAssignmentRows[0].group,sd);
+});
+test('assignment rows use assigned access and selected game/branch/version rather than editor language',()=>{
+    const team=language=>({language,counts:{}}),ct={id:'ct',versionId:'v1',contentMode:'clienttext',teams:[team('French'),team('Thai')]},
+        legacy={id:'legacy',versionId:'v1',legacyVersionId:'v1',contentMode:'statdescription',teams:[team('French'),team('Thai')]},
+        foreign={id:'other',versionId:'other',contentMode:'clienttext',teams:[team('French')]},
+        {app}=assignmentHarness({cloudCanAccessAllLanguages:false,cloudUser:{language:'French'},lang:'Thai',
+            managedSelectedDetails:{version:{id:'v1'},teams:[team('French'),team('Thai')],contentGroups:[legacy,ct,foreign]}});
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),['French — ClientText','French — StatDescription']);
+    app.cloudCanAccessAllLanguages=true;assert.equal(app.ctAssignmentRows.length,4);
+    app.managedCatalogAccess=false;assert.equal(app.ctAssignmentRows.length,0);app.managedCatalogAccess=true;
+    app.gameVersion='poe1';assert.equal(app.ctAssignmentRows.length,0);app.gameVersion='poe2';
+    app.branchId='another';assert.equal(app.ctAssignmentRows.length,0);app.branchId='default';
+    app.managedSelectedDetails={version:{id:'stale'},teams:[team('German')],contentGroups:[ct]};
+    app.managedSelectedVersion.contentGroups=[ct];assert.equal(app.ctAssignmentRows.length,2);assert.ok(app.ctAssignmentRows.every(row=>row.group===ct));
+});
+test('the shared assignment sort compares SD file progress against CT initial field progress',()=>{
+    const thai={language:'Thai',counts:{saved:2,missing:2,revised:1}},ctThai={language:'Thai',counts:{saved:200,missing:100,workloadFields:4,resolvedFields:3}},
+        german={language:'German',counts:{saved:500,missing:500,workloadFields:0,resolvedFields:0}},
+        {app}=assignmentHarness({managedTeamSort:'progress',managedTeamSortDir:'desc',managedSelectedDetails:{version:{id:'v1'},teams:[thai],
+            contentGroups:[{id:'legacy',legacyVersionId:'v1',contentMode:'statdescription',teams:[thai]},
+                {id:'ct-thai',contentMode:'clienttext',teams:[ctThai]},{id:'ct-german',contentMode:'clienttext',teams:[german]}]}});
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>[row.label,app.ctAssignmentProgress(row).percent]),
+        [['Thai — ClientText',75],['Thai — StatDescription',50],['German — ClientText',0]]);
+    app.managedTeamSortDir='asc';assert.equal(app.ctAssignmentRows[0].team,german);
+    app.managedTeamSort='language';app.managedTeamSortDir='desc';assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),
+        ['Thai — StatDescription','Thai — ClientText','German — ClientText']);
+});
+test('ClientText meters count each initial field once and explain overlapping status counts separately',()=>{
+    const {app}=assignmentHarness(),row={contentMode:'clienttext',label:'French — ClientText',team:{language:'French',counts:{
+        loaded:100,fields:400,workloadFields:10,resolvedFields:4,outdatedFields:3,missingFields:8,
+        saved:30,revised:2,missing:5,outdated:3,savedFields:120,revisedFields:12}}},progress=app.ctAssignmentProgress(row);
+    assert.equal(progress.total,10);assert.equal(progress.saved,4);assert.equal(progress.percent,40);
+    assert.equal(progress.missing,3);assert.equal(progress.outdated,3);assert.equal(progress.savedWidth,'40%');
+    assert.equal(progress.missingWidth,'30%');assert.equal(progress.outdatedWidth,'30%');assert.equal(progress.revisedWidth,'0%');
+    assert.equal(progress.saved+progress.missing+progress.outdated,progress.total);assert.equal(progress.savedIds,30);assert.equal(progress.revisedFields,12);
+    const tooltip=app.ctAssignmentProgressTooltip(row);
+    assert.match(tooltip,/Resolved initial fields: 4 \/ 10 \(40%\)/);assert.match(tooltip,/Saved: 30 · Revised: 2/);
+    assert.match(tooltip,/Revised corrections: 12 · Missing: 8 · Outdated: 3/);
+    assert.match(tooltip,/Orange fields are Outdated and may also be Missing/);
+    assert.match(tooltip,/outside the initial workload and are excluded from the progress bar/);
+    assert.match(tooltip,/unsaved drafts and pending offline saves are excluded/);
+    row.team.counts.outdatedFields=100;row.team.counts.resolvedFields=100;
+    assert.equal(app.ctAssignmentProgress(row).savedWidth,'100%');assert.equal(app.ctAssignmentProgress(row).outdatedWidth,'0%');
+});
+test('ClientText zero and unavailable initial workloads remain neutral without using loaded IDs or Saved counts',()=>{
+    const {app}=assignmentHarness(),row={contentMode:'clienttext',label:'Thai — ClientText',team:{language:'Thai',counts:{loaded:149550,saved:1000,missing:100,workloadFields:0,resolvedFields:0}}},
+        progress=app.ctAssignmentProgress(row);
+    assert.equal(progress.total,0);assert.equal(progress.saved,0);assert.equal(progress.percent,0);assert.equal(progress.empty,true);assert.equal(progress.known,true);
+    for(const name of ['savedWidth','revisedWidth','missingWidth','outdatedWidth'])assert.equal(progress[name],'0%');
+    assert.match(app.ctAssignmentProgressTooltip(row),/No initial field workload; the bar is neutral/);
+    delete row.team.counts.workloadFields;assert.equal(app.ctAssignmentProgress(row).known,false);
+    assert.match(app.ctAssignmentProgressTooltip(row),/workload counts are unavailable/);
+});
 test('draft queues capture unit/scope revisions and serialize subsequent edits against their own head',async()=>{
     const first=deferred(),calls=[],{app}=harness();app.ctDraftDirty=true;
     app._ctStore={async putDraft(captured,id,input,options){calls.push({captured,id,input,options});if(calls.length===1)await first.promise;return {revision:calls.length};}};

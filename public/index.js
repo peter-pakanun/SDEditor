@@ -6164,7 +6164,6 @@ const config = Vue.defineComponent({
       }
       const filtered = [];
       for (const entry of snapshot.entries) {
-        if (this.sdDirectory && (String(entry.row.filepath || '').split('/').slice(0, -1).join('/') || '(root)') !== this.sdDirectory) continue;
         if (!hasSearch || entry.path.includes(search) || entry.english.includes(search) || entry.translation.includes(search)) filtered.push(entry.row);
       }
       this._fileSearchAppliedText = query;

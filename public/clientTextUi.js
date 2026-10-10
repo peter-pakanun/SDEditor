@@ -57,10 +57,48 @@
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false,
             ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
-            sdDirectory: '', activeContentGroup: null, ctTeamOptions: teams
+            activeContentGroup: null, ctTeamOptions: teams
         }; },
         computed: {
             ctGroups() { return this.managedSelectedDetails?.contentGroups || this.managedSelectedVersion?.contentGroups || []; },
+            ctAssignmentRows() {
+                const version=this.managedSelectedVersion;
+                if(!version || this.managedCatalogAccess===false || (version.game && version.game!==this.gameVersion)
+                    || (version.branchId || 'default')!==(this.branchId || 'default'))return [];
+                const details=this.managedSelectedDetails;
+                const matches=!details?.version?.id || details.version.id===version.id;
+                const groups=matches ? this.ctGroups : version.contentGroups || [];
+                const eligibleGroups=(groups || []).filter(group=>group?.id && ['clienttext','statdescription'].includes(mode(group))
+                    && (!group.versionId || group.versionId===version.id) && (!group.version?.id || group.version.id===version.id)
+                    && (!group.version?.game || group.version.game===this.gameVersion)
+                    && (!group.version?.branchId || group.version.branchId===(this.branchId || 'default')));
+                const assigned=this.managedSingleLanguage || this.cloudUser?.language;
+                const allowed=team=>!!team?.language && (this.cloudCanAccessAllLanguages || team.language===assigned);
+                const rows=[],seen=new Set();
+                const add=(group,team,legacy,contentMode)=>{
+                    if(!allowed(team))return;
+                    const identity=legacy ? ['legacy',version.id,team.language] : [group.id,contentMode,team.language];
+                    const key=JSON.stringify(identity);if(seen.has(key))return;seen.add(key);
+                    rows.push({key,group,team,legacy,contentMode,label:team.language+' — '+(contentMode==='clienttext'?'ClientText':'StatDescription')});
+                };
+                // Old APIs expose team details directly. Prefer that richer
+                // legacy row (including presence), deduplicating its group copy.
+                // Modern SD activation also caches its teams at the top level;
+                // explicit groups remain authoritative for that cached payload.
+                const legacyFallback=!groups?.length || eligibleGroups.some(group=>group.legacyVersionId && mode(group)==='statdescription');
+                if(matches && legacyFallback)for(const team of details?.teams || [])add(null,team,true,'statdescription');
+                for(const group of eligibleGroups){
+                    const contentMode=mode(group);
+                    for(const team of group.teams || [])add(group,team,!!group.legacyVersionId,contentMode);
+                }
+                const modifier=this.managedTeamSortDir==='desc'?-1:1;
+                const label=(a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true,sensitivity:'base'}) || a.key.localeCompare(b.key);
+                return rows.sort((a,b)=>{
+                    if(this.managedTeamSort==='language')return label(a,b)*modifier;
+                    const first=this.ctAssignmentProgress(a),second=this.ctAssignmentProgress(b);
+                    return (first.percent-second.percent || second.total-first.total)*modifier || label(a,b);
+                });
+            },
             ctCurrentUnit() { return this._ctUnitIndex?.get(this.ctSelection) || null; },
             ctFieldGroups() { return groupFields(this.ctCurrentUnit); },
             ctHistoryChoices() {
@@ -146,14 +184,12 @@
                 const source = this.ctCurrentUnit?.fields.map(field => field.source).join('\n') || '';
                 return (this.dictionary || []).filter(entry => entry.find && source.toLocaleLowerCase().includes(String(entry.find).toLocaleLowerCase())).slice(0, 80);
             },
-            sdDirectories() { return [...new Set((this.descs || []).map(desc => String(desc.filepath || '').split('/').slice(0, -1).join('/') || '(root)'))].sort(); },
             activeContentGroups() { return this.managedVersions?.find(version=>version.id===this.ctWorkspace?.scope.versionId)?.contentGroups || this.ctWorkspace?.metadata?.version?.contentGroups || this.managedActiveDetails?.contentGroups || []; }
         },
         watch: {
             ctSearch() { clearTimeout(this._ctSearchTimer); this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 180); },
             ctFilter() { this.ctPage = 1; }, ctSheet() { this.ctPage = 1; },
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
-            sdDirectory() { this.currentPage = 1; this.filterDesc?.(); },
             managedCatalogScope() { this.ctFence(); this.ctRefreshLocal(); },
             lang() { if (this.ctActive && this.ctWorkspace?.scope.language !== this.lang) this.ctFence(); },
             gameVersion() { if (this.ctActive && this.ctWorkspace?.scope.game !== this.gameVersion) this.ctFence(); },
@@ -162,6 +198,41 @@
         mounted() { this._ctStore = root.ClientTextStore.create(); this._ctWorker = root.ClientTextWorkerClient.create(); },
         beforeUnmount() { this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
         methods: {
+            ctAssignmentProgress(row) {
+                if(row.contentMode!=='clienttext'){
+                    const progress=this.managedProgress(row.team);
+                    return {...progress,outdated:0,outdatedWidth:'0%',empty:!progress.total,known:true};
+                }
+                const counts=row.team.counts || {},count=value=>Number.isFinite(Number(value))?Math.max(0,Math.floor(Number(value))):0;
+                const known=counts.workloadFields!==undefined && counts.workloadFields!==null && Number.isFinite(Number(counts.workloadFields));
+                const total=count(counts.workloadFields),saved=Math.min(total,count(counts.resolvedFields)),unresolved=total-saved;
+                // Outdated is always initial workload; Missing can also arise
+                // from a correction outside it. Do not use all Missing counts
+                // as a segment. Orange owns overlap; red is unresolved without
+                // Outdated, so the initial-workload segments sum exactly once.
+                const outdated=Math.min(unresolved,count(counts.outdatedFields)),missing=unresolved-outdated;
+                const width=value=>total?100*value/total+'%':'0%';
+                return {saved,total,percent:total?Math.round(100*saved/total):0,ordinarySaved:saved,revised:0,missing,outdated,unresolved,
+                    savedWidth:width(saved),revisedWidth:'0%',missingWidth:width(missing),outdatedWidth:width(outdated),empty:!total,known,
+                    loaded:count(counts.loaded),savedIds:count(counts.saved),revisedIds:count(counts.revised),missingIds:count(counts.missing),outdatedIds:count(counts.outdated),
+                    fields:count(counts.fields),savedFields:count(counts.savedFields),revisedFields:count(counts.revisedFields),
+                    missingFields:count(counts.missingFields),outdatedFields:count(counts.outdatedFields)};
+            },
+            ctAssignmentProgressTooltip(row) {
+                if(row.contentMode!=='clienttext')return this.managedProgressTooltip(row.team);
+                const progress=this.ctAssignmentProgress(row),lines=[row.label+' progress',
+                    progress.known?`Resolved initial fields: ${progress.saved} / ${progress.total} (${progress.percent}%)`:'Initial field workload counts are unavailable.',
+                    'Workload denominator: original Missing or Outdated fields, including carried source changes. Each field is counted once.'];
+                if(progress.known && !progress.total)lines.push('No initial field workload; the bar is neutral.');
+                lines.push(`Remaining initial fields: ${progress.unresolved} · Missing only: ${progress.missing} · Outdated: ${progress.outdated}`,
+                    'Orange fields are Outdated and may also be Missing; red fields are unresolved without Outdated.',
+                    `IDs: ${progress.loaded} loaded · Saved: ${progress.savedIds} · Revised: ${progress.revisedIds} · Missing: ${progress.missingIds} · Outdated: ${progress.outdatedIds}`,
+                    `Field statuses: ${progress.fields} fields · Saved: ${progress.savedFields} · Revised corrections: ${progress.revisedFields} · Missing: ${progress.missingFields} · Outdated: ${progress.outdatedFields}`,
+                    'Saved and Revised counts describe explicit accepted saves; status counts can overlap. They do not define this progress denominator.',
+                    'Revised field corrections are outside the initial workload and are excluded from the progress bar.',
+                    'Only server-accepted work is counted; unsaved drafts and pending offline saves are excluded.');
+                return lines.join('\n');
+            },
             ctScope(versionId, groupId, language = this.lang) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || 'default', versionId, groupId, language }; },
             ctContext() { return { key: this.managedCatalogScope, scope: copy(this.ctWorkspace?.scope || {}), epoch: this._ctEpoch || 0 }; },
             ctCurrent(ctx) { return ctx.key === this.managedCatalogScope && ctx.epoch === (this._ctEpoch || 0) && JSON.stringify(ctx.scope) === JSON.stringify(this.ctWorkspace?.scope || {}); },
