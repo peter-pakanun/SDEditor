@@ -569,7 +569,6 @@
             <span class="workspaceInitializationTime" aria-hidden="true">{{ workspaceInitializationDuration(row.startedAt, row.endedAt) }}</span>
           </div>
         </div>
-        <p class="workspaceInitializationHint">Completed steps stay above while the remaining work finishes.</p>
       </div>
     </section>
     <div class="loadingContainer centerContainer loadingPage" :class="{ postMigration: needsPostMigrationImport && loadingProgress == 0 }" v-if="!ctActive && !workspaceInitializationActive && gameVersionSelected && !versionChooserVisible && loadingProgress < 100 && lang !== '' && !needsInitialSettings && !showSetting">
