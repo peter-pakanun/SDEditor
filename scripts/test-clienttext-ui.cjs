@@ -977,28 +977,36 @@ test('ClientText Dictionary inserts exact multiline text at the focused translat
         h=dictionaryHarness('Fire',[word]),{app}=h,field=h.original.fields[0],input={value:'Before selected after',selectionStart:7,selectionEnd:15,isConnected:true,
             focus(){this.focused=true;},setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}};
     app.ctValues[field.id]=input.value;app.ctDictionaryTarget=()=>input;app.ctEdited=changed=>{assert.equal(changed,field);app.ctDraftDirty=true;};
-    const controller=app.ctDictionaryController;assert.equal(controller.dictionaryMultiline,true);assert.equal(controller.dictionaryCanUse,true);
+    const controller=app.ctDictionaryController;assert.equal(controller.dictionaryCanUse,true);
+    const plainEnter=rowEvent('Enter');controller.onDictionaryReplaceEnter(plainEnter,word);
+    assert.equal(plainEnter.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],input.value,'plain Enter in Replace does not insert a translation');
     for(const composing of [{isComposing:true},{keyCode:229}]){
-        const event={...rowEvent('Enter'),...composing};assert.equal(controller.useDictionaryTranslation(word,null,event),false);
+        const event={...rowEvent('Enter'),ctrlKey:true,...composing};assert.equal(controller.onDictionaryReplaceEnter(event,word),false);
         assert.equal(event.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],input.value);
     }
     assert.equal(controller.useDictionaryTranslation(word),true);assert.equal(app.ctValues[field.id],'Before '+word.replace+' after');assert.equal(input.focused,true);assert.equal(app.ctDraftDirty,true);
     input.value=app.ctValues[field.id];input.selectionStart=0;input.selectionEnd=input.value.length;
-    assert.equal(controller.useDictionaryTranslation(word,word.alts[0]),true);assert.equal(app.ctValues[field.id],'Autre\ntexte');
+    const controlEnter={...rowEvent('Enter'),ctrlKey:true};
+    assert.equal(controller.onDictionaryReplaceEnter(controlEnter,word,word.alts[0]),true);assert.equal(controlEnter.defaultPrevented,true);assert.equal(app.ctValues[field.id],'Autre\ntexte');
+    input.value=app.ctValues[field.id];input.selectionStart=0;input.selectionEnd=input.value.length;
+    const commandEnter={...rowEvent('Enter'),metaKey:true};
+    assert.equal(controller.onDictionaryReplaceEnter(commandEnter,word),true);assert.equal(commandEnter.defaultPrevented,true);assert.equal(app.ctValues[field.id],word.replace);
     input.value=app.ctValues[field.id];input.selectionStart=input.selectionEnd=0;
-    app.ctWorkspace.scope.groupId='replacement-group';assert.equal(controller.useDictionaryTranslation(word),false);assert.equal(app.ctValues[field.id],'Autre\ntexte');
+    app.ctWorkspace.scope.groupId='replacement-group';assert.equal(controller.onDictionaryReplaceEnter(controlEnter,word),false);assert.equal(app.ctValues[field.id],word.replace);
     const gender=app.ctDictionaryController;field.kind='gender';assert.equal(gender.dictionaryCanUse,false);assert.equal(gender.useDictionaryTranslation(word),false);
 });
-test('SD and ClientText share Dictionary entry markup while CT multiline fields keep Enter for newlines',()=>{
+test('SD and ClientText share single-line Dictionary inputs and retain multiline TL notes',()=>{
     const {window}=harness(),shared=window.EditorComponents.DictionaryEntries.template,tools=window.ClientTextUI.toolsComponent,
         html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
     assert.equal(tools.components['editor-dictionary-entries'],window.EditorComponents.DictionaryEntries);
     assert.match(html,/<editor-dictionary-entries v-if="sideTab === 'dictionary'" :controller="\$root">/);
     for(const feature of ['dictRow','dictScopeSelect','dictHistoryBtn','dictAltRow','dictTlnote','dictDeleteBtn'])assert.equal(shared.includes(feature),true);
-    assert.match(shared,/<input v-else type="text" v-model="word.find"/,'SD retains existing input geometry');
-    assert.match(shared,/<textarea v-if="controller.dictionaryMultiline" rows="2" v-model="word.replace"[^>]*@keydown.ctrl.enter="controller.useDictionaryTranslation\(word,null,\$event\)"/);
-    assert.doesNotMatch(shared,/<textarea[^>]*@keydown\.enter/,'plain Enter is never consumed by CT Dictionary fields');
-    assert.match(shared,/v-model="alt.find"/);assert.match(shared,/v-model="alt.replace"/);assert.doesNotMatch(shared,/v-html/);
+    for(const value of ['word.find','word.replace','alt.find','alt.replace'])assert.ok(shared.includes('<input type="text" v-model="'+value+'"'),'both modes share input geometry for '+value);
+    assert.match(shared,/@keydown.enter="controller.onDictionaryReplaceEnter\(\$event,word\)"/);
+    assert.match(shared,/@keydown.enter="controller.onDictionaryReplaceEnter\(\$event,word,alt\)"/);
+    assert.match(shared,/<textarea rows="3" v-model="word.tlnote"/);
+    assert.equal((shared.match(/<textarea\b/g) || []).length,1,'only TL note remains a textarea');
+    assert.doesNotMatch(shared,/dictionaryMultiline|v-html/);
     for(const feature of ['Search dictionary entries','Add entry','Previous dictionary page','Next dictionary page','Matches in this file first'])assert.equal(tools.template.includes(feature),true);
 });
 test('shared field components preserve distinct form sources and autosizing changes layout only',()=>{

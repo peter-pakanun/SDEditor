@@ -138,7 +138,7 @@ async function run() {
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
-    const genderOnly = process.argv.includes('--gender-only'), classOnly = process.argv.includes('--class-variants-only');
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only');
     let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
     if (classOnly) {
         const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
@@ -687,7 +687,7 @@ async function run() {
             await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
             results.push(`${admin ? 'Admin publication' : 'Local import'} layout: two desktop sizes and four themes; spaced file/folder selectors${admin ? ' and role configuration' : ''}; fixed-right Cancel and stable progress controls from 0 to 1000000`);
         };
-        await checkUploadLayout();
+        if (!dictionaryOnly) await checkUploadLayout();
         await upload.locator('input[type=text]').fill('ClientText browser fixture');
         await upload.locator('input[type=file]').first().setInputFiles(files.slice(0, 1));
         await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
@@ -714,10 +714,11 @@ async function run() {
             await page.getByRole('region', { name: 'ClientText workspace' }).waitFor();
             if (allStatuses) await showAllClientStatuses();
         };
-        await openCached({ allStatuses: false });
+        await openCached({ allStatuses: dictionaryOnly });
         const workspace = page.getByRole('region', { name: 'ClientText workspace' }), navigation = workspace.getByRole('navigation', { name: 'Workbook sheets' });
         await navigation.getByRole('button', { name: 'All sheets', exact: true }).click();
         const clientChrome = new Map();
+        const visibilityFields = { Name: ' \tVisible English\nline \t', Description: '', Unused: ' \t\n' };
         const readWorkspaceChrome = element => {
             const style = (selector, keys) => {
                 const value = getComputedStyle(element.querySelector(selector));
@@ -728,6 +729,7 @@ async function run() {
                 tableHeading: style('.fileTableScroll table thead th', ['fontFamily', 'fontSize', 'fontWeight', 'padding']),
                 footer: style('.workspaceFooter', ['backgroundColor', 'fontFamily', 'fontSize', 'padding']) };
         };
+        if (!dictionaryOnly) {
         for (const size of desktopSizes) {
             await page.setViewportSize(size);
             for (const theme of themes) {
@@ -763,7 +765,6 @@ async function run() {
         await scanDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
         assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctScanDone), false, 'Opening or cancelling diagnostics does not run a scan');
         const visibilityId = JSON.stringify(['normal', 'Visibility', 'visible-raw']);
-        const visibilityFields = { Name: ' \tVisible English\nline \t', Description: '', Unused: ' \t\n' };
         await navigation.getByRole('button', { name: 'Visibility', exact: true }).click();
         assert.equal(await workspace.getByRole('button', { name: 'empty-english', exact: true }).count(), 0, 'A row without any nonblank English is omitted even when translations and Gender metadata exist');
         assert.doesNotMatch(await workspace.locator('.ctTable').textContent(), /Hidden (?:empty-source|whitespace-source|all-empty|all-whitespace)/, 'Unselected list previews omit translation slots with no English');
@@ -979,6 +980,7 @@ async function run() {
         };
         await checkClientKeyboard();
         if (process.argv.includes('--keyboard-only')) { assert.deepEqual(failures, [], 'Focused keyboard fixture has no browser script errors'); console.log(JSON.stringify({ status: 'PASS', keyboardOnly: true, results }, null, 2)); return; }
+        }
         const checkClientHistory = async ({ historyOrigin, currentText, previousText, emptyOlder = false, themes = false }) => {
             const fieldId = JSON.stringify(['Name', null]);
             await workspace.locator('.ctTools').getByRole('button', { name: /History/i }).click();
@@ -1086,6 +1088,8 @@ async function run() {
             console.log(JSON.stringify({ status: 'AUDIT', original: summary(geometry), wrapped: summary(wrappedGeometry), restored: summary(restoredGeometry) }, null, 2)); return;
         }
         const name = workspace.getByRole('textbox', { name: 'Name', exact: true });
+        const memoryMatch = workspace.locator('.ctTools article').filter({ has: page.locator('pre').filter({ hasText: /^Épée$/ }) });
+        if (!dictionaryOnly) {
         await name.fill('Épée'); await workspace.getByRole('button', { name: 'Save', exact: true }).click();
         await page.waitForFunction(() => Object.values(window.__clientFixtureApp.ctSaved).some(saved => Object.values(saved.values).includes('Épée')));
         await workspace.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
@@ -1098,8 +1102,8 @@ async function run() {
         await checkClientHistory({ historyOrigin: 'local', currentText: 'Épée locale', previousText: 'Épée', themes: true });
         await workspace.getByRole('button', { name: 'record', exact: true }).click();
         await workspace.locator('.ctTools').getByRole('button', { name: 'TM', exact: true }).click();
-        const memoryMatch = workspace.locator('.ctTools article').filter({ has: page.locator('pre').filter({ hasText: /^Épée$/ }) });
         await memoryMatch.waitFor();
+        }
         const beforeMemory = await page.evaluate(async () => {
             const vm = window.__clientFixtureApp;
             return { saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),
@@ -1121,28 +1125,51 @@ async function run() {
             await tools.getByRole('button', { name: 'Add entry', exact: true }).click();
             const entryId = await page.evaluate(() => window.__clientFixtureApp.ctDictionaryEditingId), entry = tools.locator('.dictionaryEntries > .editBlock[data-dict-id="' + entryId + '"]');
             assert.ok(entryId, 'Adding a Dictionary entry gives it a stable editing identity');
-            const marker = 'ct-browser-' + editorMode, find = entry.locator('.dictRow textarea[placeholder=Find]'), replace = entry.locator('.dictRow textarea[placeholder=Replace]');
-            assert.equal(await entry.locator('.dictRow input[placeholder=Find],.dictRow input[placeholder=Replace]').count(), 0, 'CT Dictionary Find/Replace use multiline textareas');
-            await find.fill('Sword'); await find.press('End'); await find.press('Enter'); await find.pressSequentially(marker);
-            await replace.fill('Épée'); await replace.press('End'); await replace.press('Enter'); await replace.pressSequentially('Forgée');
-            assert.equal(await find.inputValue(), 'Sword\n' + marker); assert.equal(await replace.inputValue(), 'Épée\nForgée');
+            const marker = 'ct-browser-' + editorMode, find = entry.locator('.dictRow input[placeholder=Find]'), replace = entry.locator('.dictRow input[placeholder=Replace]');
+            assert.equal(await entry.locator('.dictRow input[placeholder=Find],.dictRow input[placeholder=Replace]').count(), 2, editorMode + ': CT Dictionary Find/Replace use the shared SD inputs');
+            assert.equal(await entry.locator('.dictRow textarea').count(), 0, 'Dictionary definitions do not render textareas');
+            await find.fill('Sword ' + marker); await find.press('Enter');
+            await replace.fill('Épée Forgée'); await replace.press('Enter');
+            assert.equal(await find.inputValue(), 'Sword ' + marker); assert.equal(await replace.inputValue(), 'Épée Forgée');
             assert.equal(await target.inputValue(), original, 'Plain Enter in Dictionary Replace does not insert or save a translation');
             await entry.locator('.dictScopeSelect').selectOption('poe2');
             assert.deepEqual(await entry.locator('.dictScopeSelect option').allTextContents(), ['PoE1', 'PoE2', 'All']);
             assert.equal(await entry.locator('.dictHistoryBtn').count(), 1, 'Dictionary history control remains available');
             await entry.getByRole('button', { name: /^Add an alternate for / }).click();
-            const alternate = entry.locator('.dictAltRow'), alternateFind = alternate.locator('textarea[placeholder=Find]'), alternateReplace = alternate.locator('textarea[placeholder=Replace]');
-            await alternateFind.fill('Shield\nChest'); await alternateReplace.fill('Bouclier\nFort');
-            assert.equal(await alternateFind.inputValue(), 'Shield\nChest'); assert.equal(await alternateReplace.inputValue(), 'Bouclier\nFort');
+            const alternate = entry.locator('.dictAltRow'), alternateFind = alternate.locator('input[placeholder=Find]'), alternateReplace = alternate.locator('input[placeholder=Replace]');
+            assert.equal(await alternate.locator('input[placeholder=Find],input[placeholder=Replace]').count(), 2, 'Alternates also use the shared SD inputs');
+            assert.equal(await alternate.locator('textarea').count(), 0, 'Alternate definitions do not render textareas');
+            await alternateFind.fill('Shield Chest'); await alternateReplace.fill('Bouclier Fort'); await alternateReplace.press('Enter');
+            assert.equal(await alternateFind.inputValue(), 'Shield Chest'); assert.equal(await alternateReplace.inputValue(), 'Bouclier Fort');
+            assert.equal(await target.inputValue(), original, 'Plain Enter in alternate Replace does not insert or save a translation');
             await entry.locator('.dictTlnote summary').click();
             await entry.getByPlaceholder('Translator note (shared)', { exact: true }).fill('Translator fixture note\nSecond line');
             assert.equal(await entry.getByPlaceholder('Translator note (shared)', { exact: true }).inputValue(), 'Translator fixture note\nSecond line');
+            assert.equal(await entry.getByPlaceholder('Translator note (shared)', { exact: true }).evaluate(input => input.tagName), 'TEXTAREA', 'TL notes retain multiline editing');
+            for (const theme of themes) {
+                await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                for (const input of [find, replace, alternateFind, alternateReplace]) {
+                    const bounds = await input.boundingBox();
+                    assert.ok(bounds && bounds.width > 40 && bounds.x >= 0 && bounds.x + bounds.width <= 1440, editorMode + '/' + theme + ': Dictionary inputs remain reachable');
+                    assert.equal(await input.getAttribute('type'), 'text', 'Shared Dictionary fields retain text-input semantics');
+                }
+                await page.screenshot({ path: join(directory, `clienttext-dictionary-${editorMode}-${theme}.png`), fullPage: true });
+            }
+            await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
             await target.focus(); await target.press('Control+A');
             await entry.locator('.dictUseBtn').first().click();
-            assert.equal(await target.inputValue(), 'Épée\nForgée', 'Use translation inserts the exact multiline main definition into the focused target');
+            assert.equal(await target.inputValue(), 'Épée Forgée', 'Use translation inserts the main definition into the focused target');
             await target.focus(); await target.press('Control+A');
             await alternate.getByRole('button', { name: 'Use translation', exact: true }).click();
-            assert.equal(await target.inputValue(), 'Bouclier\nFort', 'An alternate inserts its exact multiline raw text');
+            assert.equal(await target.inputValue(), 'Bouclier Fort', 'Use translation inserts the alternate definition into the focused target');
+            for (const shortcut of ['Control+Enter', 'Meta+Enter']) {
+                await target.focus(); await target.press('Control+A');
+                await replace.press(shortcut);
+                assert.equal(await target.inputValue(), 'Épée Forgée', editorMode + ': ' + shortcut + ' inserts the main definition');
+                await target.focus(); await target.press('Control+A');
+                await alternateReplace.press(shortcut);
+                assert.equal(await target.inputValue(), 'Bouclier Fort', editorMode + ': ' + shortcut + ' inserts the alternate definition');
+            }
             await target.fill(original);
             await search.fill('unmatched-dictionary-fixture-query');
             assert.equal(await tools.locator('.dictionaryEntries > .editBlock').count(), 0, 'Dictionary search filters the complete list');
@@ -1169,6 +1196,7 @@ async function run() {
                 assert.equal(await inlineRow.locator('td').count(), 3, 'Inline editing stays in the three shared table columns');
                 assert.equal(await inlineRow.locator('td:nth-child(3)').getByRole('textbox', { name: 'Name', exact: true }).count(), 1, 'The selected row edits translation directly in its table cell');
                 assert.equal(await workspace.locator('.ctExpanded').count(), 0, 'Inline ClientText uses table cells rather than a separate expanded row');
+                if (!dictionaryOnly) {
                 await workspace.locator('.ctTools').getByRole('button', { name: 'TM', exact: true }).click();
                 for (const size of desktopSizes) {
                     await page.setViewportSize(size);
@@ -1194,8 +1222,10 @@ async function run() {
                 assertInlineAlignment(await inlineGeometry(inlineRow), 'Wrapping translation keeps all later paired fields aligned');
                 await description.fill(originalDescription);
                 assertInlineAlignment(await inlineGeometry(inlineRow), 'Restoring shorter translation keeps paired fields aligned');
+                }
             }
             await checkDictionaryControls(editorMode);
+            if (dictionaryOnly) continue;
             const otherFields = await page.evaluate(() => {
                 const vm = window.__clientFixtureApp;
                 return Object.fromEntries(Object.entries(vm.ctValues).filter(([id]) => id !== JSON.stringify(['Name', null])));
@@ -1219,8 +1249,14 @@ async function run() {
             });
             assert.deepEqual(appliedMemory, { ...beforeMemory, target: 'Épée', dirty: true }, 'TM insertion persists only a private draft');
         }
-        results.push('ClientText TM double-click inserts into the focused target in full and inline editors; one click preserves typing, other fields and committed work stay unchanged');
-        results.push('Full/inline Dictionary keeps search, pagination, Add, scope, alternates, notes, history and deletion controls; all CT text fields preserve raw newlines and explicit main/alternate insertion stays private');
+        if (!dictionaryOnly) results.push('ClientText TM double-click inserts into the focused target in full and inline editors; one click preserves typing, other fields and committed work stay unchanged');
+        results.push('Full/inline Dictionary uses the shared SD single-line Find/Replace inputs and multiline TL notes; main/alternate Use buttons and Ctrl/Meta+Enter insert privately while plain Enter leaves translation work unchanged');
+        if (dictionaryOnly) {
+            assert.deepEqual(failures, [], 'Focused Dictionary fixture has no browser script errors');
+            const report = { status: 'PASS', dictionaryOnly: true, normalMode: true, browser: executablePath, results };
+            writeFileSync(join(directory, 'dictionary-report.json'), JSON.stringify(report, null, 2));
+            console.log(JSON.stringify(report, null, 2)); return;
+        }
         await workspace.getByRole('button', { name: 'complete', exact: true }).click();
         await page.waitForFunction(() => window.__clientFixtureApp.ctCurrentUnit?.recordId === 'complete' && !window.__clientFixtureApp.ctBusy);
         const beforePreview = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { values: JSON.stringify(vm.ctValues), saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)) }; });

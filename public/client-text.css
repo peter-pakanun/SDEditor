@@ -39,10 +39,8 @@
 .ctVariantPicker { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 0; font-size:12px; color:var(--ui-muted); }.ctVariantPicker select { max-width:100%; min-width:0; flex:1; }.ctVariantPicker small { font-size:11px; }.ctClassVariants > .ctTarget > label { display:none; }
 .ctDeveloperNotes { padding:10px; border-left:3px solid var(--color-accent); background:color-mix(in srgb,var(--color-accent) 8%,var(--color-element)); margin-bottom:12px; }.ctDeveloperNotes pre { margin:6px 0 0; }.ctDiagnostic { margin:5px 0; font-size:12px; }.ctDiagnostic.error { color:var(--ui-error); }.ctDiagnostic.warning { color:var(--ui-warning); }
 .ctTools .sideTabs { flex-wrap:wrap; }.ctTools > section { padding:0 10px 12px; }.ctTools section > input,.ctTools textarea { width:100%; }.ctTools article { margin:10px 0; }.ctTools h3 { font-size:1em; }.ctToolsEmpty { color:var(--ui-muted); padding:12px; }
-.ctTools .dictRow > textarea { width:50%; min-width:0; box-sizing:border-box; resize:vertical; white-space:pre-wrap; }
-.ctTools textarea.dictExactMatchFind { box-shadow:inset 3px 0 0 var(--color-element-highlight); }
 .ctTools .dictAltRow { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; align-items:start; }
-.ctTools .dictAltRow > textarea { min-width:0; box-sizing:border-box; font-size:calc(.9em * var(--density)); resize:vertical; white-space:pre-wrap; }
+.ctTools .dictAltRow > input { width:100%; min-width:0; box-sizing:border-box; }
 .ctTools .dictUseBtn { margin-top:5px; padding:3px 7px; font-size:12px; white-space:normal; }
 .ctTools .dictAltRow > .dictUseBtn { grid-column:2; grid-row:2; justify-self:start; margin:0; max-width:100%; }
 .ctTools .dictAltRow > button:not(.dictUseBtn) { grid-column:3; grid-row:1; }

@@ -283,10 +283,14 @@
             ctDictionaryController() {
                 const host=this,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary,current=()=>host.ctDictionaryContextCurrent(ctx,unitId,dictionary);
                 const member=word=>current() && host.ctDictionaryReady && dictionary?.includes(word);
+                const useTranslation=(word,alt,event)=>{
+                    if(event){if(event.isComposing || event.keyCode===229)return false;event.preventDefault();event.stopPropagation?.();}
+                    return member(word) && (!alt || word.alts?.includes(alt)) && host.ctDictionaryUse(word,alt,ctx,unitId,dictionary);
+                };
                 return {
                     get editorReady(){return current() && host.ctDictionaryReady;},get visibleDictionary(){return current() ? host.ctDictionaryVisible : [];},
                     get dictionaryFlashId(){return host.dictionaryFlashId;},get translationEditorBcp47(){return host.translationEditorBcp47;},
-                    dictionaryMultiline:true,get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
+                    get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
                     get cloudEntryHistoryAvailable(){return current() && host.cloudEntryHistoryAvailable;},get cloudEntryHistoryHint(){return host.cloudEntryHistoryHint;},
                     isDictionaryEntryFound:word=>host.ctDictionaryMatchedDefinitions.has(String(word._id)),
                     isDictionaryEntryFindMatched:word=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(word.find || '').trim().toLowerCase()) || false,
@@ -299,13 +303,12 @@
                     removeDictionaryAltRow:(word,alt)=>member(word) && host.removeDictionaryAltRow?.(word,alt,{isCurrent:()=>member(word)}),
                     removeVocab:word=>member(word) && host.removeVocab?.(word,{isCurrent:()=>member(word)}),
                     cloudOpenHistory:id=>{if(current() && host.cloudEntryHistoryAvailable && dictionary.some(word=>String(word._id)===String(id)))return host.cloudOpenHistory?.(id);},
-                    useDictionaryTranslation:(word,alt,event)=>{
-                        if(event){if(event.isComposing || event.keyCode===229)return false;event.preventDefault();event.stopPropagation?.();}
-                        return member(word) && (!alt || word.alts?.includes(alt)) && host.ctDictionaryUse(word,alt,ctx,unitId,dictionary);
-                    },
+                    useDictionaryTranslation:useTranslation,
                     dictionaryEntryFocusIn:event=>{if(current())host.ctDictionaryFocusIn(event);},
                     dictionaryEntryFocusOut:event=>{if(current())host.ctDictionaryFocusOut(event,ctx,unitId,dictionary);},
-                    onDictionaryReplaceEnter:()=>{},
+                    onDictionaryReplaceEnter:(event,word,alt)=>{
+                        if(event.ctrlKey || event.metaKey)return useTranslation(word,alt,event);
+                    },
                 };
             },
         },

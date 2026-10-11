@@ -55,10 +55,8 @@
           <div class="twoSided dictEntryBlock">
             <div>
               <div class="dictRow" :data-dict-id="word._id">
-                <textarea v-if="controller.dictionaryMultiline" rows="2" v-model="word.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" aria-label="Dictionary Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryEntryFindMatched(word) }"></textarea>
-                <input v-else type="text" v-model="word.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryEntryFindMatched(word) }">
-                <textarea v-if="controller.dictionaryMultiline" rows="2" v-model="word.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" aria-label="Dictionary Replace" :lang="controller.translationEditorBcp47" @keydown.ctrl.enter="controller.useDictionaryTranslation(word,null,$event)" @keydown.meta.enter="controller.useDictionaryTranslation(word,null,$event)"></textarea>
-                <input v-else type="text" v-model="word.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter">
+                <input type="text" v-model="word.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryEntryFindMatched(word) }">
+                <input type="text" v-model="word.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter($event,word)">
               </div>
               <button v-if="controller.useDictionaryTranslation" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word)" :disabled="!controller.dictionaryCanUse" title="Insert into the focused translation · Ctrl+Enter from Replace">Use translation</button>
               <div class="dictAltHeader">
@@ -71,10 +69,8 @@
                 <button type="button" @click="controller.addDictionaryAltRow(word)" title="Add an alternate translation" :aria-label="'Add an alternate for ' + (word.find || 'this Dictionary entry')">➕</button>
               </div>
               <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
-                <textarea v-if="controller.dictionaryMultiline" rows="2" v-model="alt.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" :aria-label="'Alternate Dictionary Find '+(alt.find || '')" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryAltFindMatched(word, alt) }"></textarea>
-                <input v-else type="text" v-model="alt.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryAltFindMatched(word, alt) }">
-                <textarea v-if="controller.dictionaryMultiline" rows="2" v-model="alt.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :aria-label="'Alternate Dictionary Replace '+(alt.find || '')" :lang="controller.translationEditorBcp47" @keydown.ctrl.enter="controller.useDictionaryTranslation(word,alt,$event)" @keydown.meta.enter="controller.useDictionaryTranslation(word,alt,$event)"></textarea>
-                <input v-else type="text" v-model="alt.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter">
+                <input type="text" v-model="alt.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryAltFindMatched(word, alt) }">
+                <input type="text" v-model="alt.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter($event,word,alt)">
                 <button v-if="controller.useDictionaryTranslation" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word,alt)" :disabled="!controller.dictionaryCanUse" title="Insert alternate into the focused translation · Ctrl+Enter from Replace">Use translation</button>
                 <button type="button" @click="controller.removeDictionaryAltRow(word, alt)" title="Remove this alternate" :aria-label="'Remove alternate ' + (alt.find || alt.replace || 'translation')">🗑️</button>
               </div>
