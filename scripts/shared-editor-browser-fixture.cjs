@@ -13,6 +13,8 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
 ].find(existsSync);
 const publicDir = join(__dirname, '../public');
+const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
+const { thaiEnglish, germanEnglish, germanTarget, dictionary: shredDictionary } = require('./clienttext-highlight-fixture.cjs');
 
 async function run() {
   assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to installed Edge/Chrome.');
@@ -86,6 +88,35 @@ async function run() {
       await page.evaluate(theme => { document.documentElement.setAttribute('data-theme', theme); }, theme);
       sdDictionary.set(theme + '/' + width, await dictionaryGeometry());
     }
+
+    let alignedGlyphs = 0;
+    await page.evaluate(async ({ source, target }) => {
+      const host = window.__sharedFixtureApp, table = host.editorBlocks[0];
+      table.tableColumns[0].english = source + '\n\t[Attack] repeated tabbed source';
+      table.tableColumns[0].translation = target + '\n\t[Attack|Angriff] repeated tabbed translation';
+      table.tableColumns[0].isMultiline = true;
+      table.tableColumns[1].english = '[Poison] native horizontal scrolling ' + 'long input words '.repeat(12);
+      table.tableColumns[1].translation = '[Poison|Gift] native horizontal scrolling ' + 'long input words '.repeat(12);
+      host.editorBlocks[1].english = source + '\n[Trigger] second native line';
+      host.editorBlocks[1].translation = target + '\n[Trigger|löst] second native line';
+      host.refreshEditorBlockHLter(0); host.refreshEditorBlockHLter(1);
+      await host.$nextTick(); host.autosizeEditorMultilineFields();
+    }, { source: germanEnglish, target: germanTarget });
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1440, 1100, 1001]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+      alignedGlyphs += await checkHighlightGeometry(page, '.editor .editorTextField > input, .editor .editorTextField > textarea', 'SD ' + theme + '/' + width);
+    }
+    await page.evaluate(() => {
+      for (const input of document.querySelectorAll('.editor .editorTextField > textarea')) {
+        input.style.height = '90px'; input.scrollTop = Math.min(40, input.scrollHeight - input.clientHeight); input.dispatchEvent(new Event('scroll'));
+      }
+      for (const input of document.querySelectorAll('.editor .editorTextField > input')) {
+        input.scrollLeft = 80; input.dispatchEvent(new Event('scroll'));
+      }
+    });
+    alignedGlyphs += await checkHighlightGeometry(page, '.editor .editorTextField > input, .editor .editorTextField > textarea', 'SD native scroll');
+    console.log('SD multiline/table wrapping, native input/textarea scrolling and all four themes aligned.');
 
     await page.evaluate(async () => {
       const host = window.__sharedFixtureApp;
@@ -259,7 +290,81 @@ async function run() {
     assert.equal(await page.locator('#ctFullEditorSidebarHost .sharedEditorSidebar').count(), 1);
     assert.equal(await page.evaluate(() => document.querySelector('.sharedEditorSidebar') === window.__fixtureToolsNode), true);
     assert.equal(await page.locator('.ctFullEditor [data-ct-target="text-field"]').inputValue(), 'kept raw @ literal\\n\ntranslation');
-    await page.evaluate(async () => { const host = window.__sharedFixtureApp; host.ctTool = 'dictionary'; host.ctDictionaryFilter = ''; await host.$nextTick(); });
+    await page.evaluate(async ({ source, newerSource, target, words }) => {
+      const host = window.__sharedFixtureApp;
+      const fields = [
+        { id: 'shred-description', kind: 'text', name: 'Description', source, target, required: true, targetCell: 'B2' },
+        { id: 'shred-short', kind: 'text', name: 'Newer source / tabs', source: newerSource + '\r\n\t[Attack] tabbed line', target: newerSource + '\r\n\t[Attack] tabbed line', required: true, targetCell: 'C2' },
+      ];
+      const unit = Vue.markRaw({ id: 'normal|ActiveSkills|shred', role: 'normal', sheet: 'ActiveSkills', recordId: 'shred', fields, developerNotes: 'Reported ActiveSkills/shred geometry' });
+      host.ctUnits = Vue.markRaw([unit]); host._ctUnitIndex = Vue.markRaw(new Map([[unit.id, unit]]));
+      host.ctSelection = unit.id; host.ctFocusedField = fields[0].id; host.ctValues = Object.fromEntries(fields.map(field => [field.id, field.target]));
+      host.dictionary = words.map(word => ({ ...word, game: 'all', tlnote: '' })); host.ctTool = 'dictionary'; host.ctDictionaryFilter = '';
+      await host.$nextTick(); host.ctResizeFields(); await host.scheduleClientTextDictionaryMatches();
+    }, { source: germanEnglish, newerSource: thaiEnglish, target: germanTarget, words: shredDictionary });
+    await page.waitForSelector('.ctFullEditor [data-ct-target="shred-description"]');
+    await page.waitForFunction(() => window.__sharedFixtureApp.ctDictionaryPack?.units?.some(unit => unit.key === 'shred-description'
+      && unit.english === window.__sharedFixtureApp.ctCurrentUnit.fields[0].source && unit.HLs?.some(hl => hl.dictId === 'shift')));
+    const shredTarget = page.locator('.ctFullEditor [data-ct-target="shred-description"]');
+    const shredSourceTag = page.locator('.ctFullEditor [data-ct-source="shred-description"]').locator('..').locator('[data-ct-hl]').filter({ hasText: '[Shapeshift]' }).first();
+    await shredTarget.focus(); await shredTarget.evaluate(input => input.setSelectionRange(0, 0));
+    await shredSourceTag.click();
+    assert.equal(await shredTarget.inputValue(), '[Shapeshift|Verwandelt]' + germanTarget, 'source pointer click pastes its exact prepared keyword through the clipped overlay');
+    await shredSourceTag.click({ modifiers: ['Alt'] });
+    assert.equal(await page.evaluate(() => window.__sharedFixtureApp.editorClipboard), '[Shapeshift]', 'Alt-click copies the exact raw source tag through the inner highlight content');
+    assert.equal(await shredTarget.inputValue(), '[Shapeshift|Verwandelt]' + germanTarget, 'Alt-click preserves the translation');
+    await page.evaluate(async target => { const host = window.__sharedFixtureApp; host.ctValues['shred-description'] = target; await host.$nextTick(); host.ctResizeFields(); }, germanTarget);
+    for (const surface of ['full', 'inline']) {
+      await page.evaluate(async surface => {
+        const host = window.__sharedFixtureApp; host.ctEditor = surface === 'full'; host.inlineEditor = surface === 'inline';
+        host.ctInlineClosed = false; host.inlineSidebarVisible = true; await host.$nextTick(); host.ctResizeFields();
+      }, surface);
+      const selector = surface === 'full' ? '.ctFullEditor .editorTextField > textarea' : '.ctListWorkspace .editorTextField > textarea';
+      for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1440, 1100, 1001]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+        alignedGlyphs += await checkHighlightGeometry(page, selector, 'ClientText Shred ' + surface + ' ' + theme + '/' + width);
+      }
+      const pane = surface === 'full' ? '.ctFullEditor' : '.ctListWorkspace';
+      const sourceInput = page.locator(pane + ' [data-ct-source="shred-description"]');
+      const sourceFragment = sourceInput.locator('..').locator('[data-ct-hl]').filter({ hasText: '[IceFragment|Ice Fragments]' }).first();
+      const targetInput = page.locator(pane + ' [data-ct-target="shred-description"]');
+      await sourceInput.scrollIntoViewIfNeeded();
+      await targetInput.evaluate(input => { input.focus({ preventScroll: true }); input.setSelectionRange(0, 0); });
+      await sourceInput.evaluate(input => { input.scrollTop = input.scrollHeight - input.clientHeight; input.dispatchEvent(new Event('scroll')); });
+      const fragmentPoint = await sourceFragment.evaluate(element => {
+        const fragments = [...element.getClientRects()], box = fragments[fragments.length - 1];
+        const native = element.closest('.textHL').querySelector('textarea'), rect = native.getBoundingClientRect();
+        const x = box.x + box.width / 2, y = box.y + box.height / 2;
+        return { x, y, fragments: fragments.length, laterLine: box.top > rect.top + 30,
+          hit: document.elementFromPoint(x, y)?.closest('[data-ct-hl]')?.textContent };
+      });
+      assert.ok(fragmentPoint.laterLine, surface + ': test source token is on a later wrapped line');
+      assert.equal(fragmentPoint.hit, '[IceFragment|Ice Fragments]', surface + ': pointer hits the visible clipped source token ' + JSON.stringify(fragmentPoint));
+      await page.mouse.click(fragmentPoint.x, fragmentPoint.y);
+      assert.equal(await targetInput.inputValue(), '[IceFragment|Eisfragmente]' + germanTarget, surface + ': real pointer on later source line inserts exact translated tag at captured caret');
+      await sourceInput.scrollIntoViewIfNeeded();
+      const copyPoint = await sourceFragment.evaluate(element => {
+        const boxes = [...element.getClientRects()], box = boxes[boxes.length - 1]; return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      });
+      await page.keyboard.down('Alt'); await page.mouse.click(copyPoint.x, copyPoint.y); await page.keyboard.up('Alt');
+      assert.equal(await page.evaluate(() => window.__sharedFixtureApp.editorClipboard), '[IceFragment|Ice Fragments]', surface + ': real pointer Alt-click copies exact later-line source tag');
+      await page.evaluate(async target => { const host = window.__sharedFixtureApp; host.ctValues['shred-description'] = target; await host.$nextTick(); host.ctResizeFields(); }, germanTarget);
+      await page.evaluate(async () => { const host = window.__sharedFixtureApp; host.uiDensity = 'spacious'; await host.$nextTick(); host.ctResizeFields(); });
+      alignedGlyphs += await checkHighlightGeometry(page, selector, 'ClientText Shred ' + surface + ' spacious density');
+      await page.evaluate(async () => { const host = window.__sharedFixtureApp; host.uiDensity = 'compact'; await host.$nextTick(); host.ctResizeFields(); });
+      await page.evaluate(selector => {
+        for (const input of document.querySelectorAll(selector)) {
+          input.style.height = '90px'; input.scrollTop = Math.min(60, input.scrollHeight - input.clientHeight); input.dispatchEvent(new Event('scroll'));
+        }
+      }, selector);
+      alignedGlyphs += await checkHighlightGeometry(page, selector, 'ClientText Shred ' + surface + ' native scroll');
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.evaluate(async () => { const host = window.__sharedFixtureApp; host.ctResizeFields(); await host.$nextTick(); });
+      const path = join(tmpdir(), 'sdeditor-shred-' + surface + '.png');
+      await page.screenshot({ path }); console.log('Shred screenshot: ' + path);
+    }
+    console.log('PASS ' + alignedGlyphs + ' annotated glyph positions: SD and Shred ClientText inline/full, four themes, resized desktop widths, native scrolling and tabs.');
     const screenshot = join(tmpdir(), 'sdeditor-shared-components-clienttext.png');
     await page.screenshot({ path: screenshot }); console.log('Desktop screenshot: ' + screenshot);
     assert.deepEqual(failures, []);
@@ -275,6 +380,8 @@ async function run() {
         inlineEditor: host?.inlineEditor, ctInlineClosed: host?.ctInlineClosed, ctSelection: host?.ctSelection,
         ctRows: host?.ctPageRows?.map(unit => unit.id), ctCompletion: host?.ctCompletion,
         ctKeyboardBlocked: host?.ctKeyboardBlocked?.(), ctFocusedField: host?.ctFocusedField,
+        ctDictionaryPack: host?.ctDictionaryPack?.units?.map(unit => ({ key: unit.key, english: unit.english, HLs: unit.HLs?.slice(0, 3) })),
+        ctError: host?.ctError,
         ctTargets: [...document.querySelectorAll('[data-ct-target]')].map(input => ({id:input.dataset.ctTarget,value:input.value,readonly:input.readOnly,
           selection:[input.selectionStart,input.selectionEnd],active:input===document.activeElement,
           fieldSource:host?.ctCurrentUnit?.fields.find(field=>field.id===input.dataset.ctTarget)?.source,

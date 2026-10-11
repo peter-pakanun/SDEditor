@@ -3437,7 +3437,8 @@ const config = Vue.defineComponent({
       let inputEl = this.getEditorRef(kind, index, columnIndex);
       let hlterEl = this.getEditorRef(`${kind}HLter`, index, columnIndex);
       if (!inputEl || !hlterEl) return;
-      hlterEl.style.transform = `translate(${-inputEl.scrollLeft}px, ${-inputEl.scrollTop}px)`;
+      const content = hlterEl.querySelector?.('.editorHighlightContent') || hlterEl;
+      content.style.transform = `translate(${-inputEl.scrollLeft}px, ${-inputEl.scrollTop}px)`;
     },
     autosizeTextarea(el, options = {}) {
       if (!el || el.tagName !== "TEXTAREA") return;

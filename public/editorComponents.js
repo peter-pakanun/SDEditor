@@ -36,7 +36,7 @@
         };
         return {
           focus: event => control.focus?.(event),
-          scroll: event => control.scroll?.(event),
+          scroll: event => { this.syncHighlightScroll(); control.scroll?.(event); },
           ...(!this.source ? {
             input,
             keydown: event => control.keydown?.(event),
@@ -54,17 +54,61 @@
         };
       },
     },
+    mounted() {
+      this._highlightResizeObserver = new ResizeObserver(() => this.syncHighlightGeometry());
+      this._highlightResizeObserver.observe(this.$el);
+      this._highlightStyleObserver = new MutationObserver(() => this.syncHighlightGeometry());
+      this._highlightStyleObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      const appRoot = this.$el.closest('.appRoot');
+      if (appRoot) this._highlightStyleObserver.observe(appRoot, { attributes: true, attributeFilter: ['data-density'] });
+      this.syncHighlightGeometry();
+    },
+    updated() { this.syncHighlightGeometry(); },
+    beforeUnmount() { this._highlightResizeObserver?.disconnect(); this._highlightStyleObserver?.disconnect(); },
+    methods: {
+      syncHighlightScroll() {
+        const input = this.$refs.nativeInput, content = this.$refs.highlightContent;
+        if (input && content) content.style.transform = `translate(${-input.scrollLeft}px, ${-input.scrollTop}px)`;
+      },
+      syncHighlightGeometry() {
+        const input = this.$refs.nativeInput, overlay = this.$refs.highlightOverlay;
+        if (input !== this._highlightNativeInput) {
+          if (this._highlightNativeInput) this._highlightResizeObserver?.unobserve(this._highlightNativeInput);
+          this._highlightNativeInput = input;
+          if (input) this._highlightResizeObserver?.observe(input);
+        }
+        if (!input || !overlay) return;
+        const nativeStyle = getComputedStyle(input), rect = input.getBoundingClientRect();
+        const borderLeft = parseFloat(nativeStyle.borderLeftWidth) || 0;
+        const borderTop = parseFloat(nativeStyle.borderTopWidth) || 0;
+        // clientWidth excludes borders and native scrollbars. Retain the native
+        // control's fractional layout size so wrapping also agrees at odd widths.
+        Object.assign(overlay.style, {
+          left: input.offsetLeft + borderLeft + 'px', top: input.offsetTop + borderTop + 'px',
+          width: rect.width - input.offsetWidth + input.clientWidth + 'px',
+          height: rect.height - input.offsetHeight + input.clientHeight + 'px',
+          padding: nativeStyle.padding, transform: '',
+          font: nativeStyle.font, letterSpacing: nativeStyle.letterSpacing, wordSpacing: nativeStyle.wordSpacing,
+          textIndent: nativeStyle.textIndent, textAlign: nativeStyle.textAlign, direction: nativeStyle.direction,
+          tabSize: nativeStyle.tabSize,
+          whiteSpace: input.tagName === 'TEXTAREA' ? nativeStyle.whiteSpace : 'pre',
+          overflowWrap: nativeStyle.overflowWrap, wordBreak: nativeStyle.wordBreak,
+        });
+        overlay.lang = input.lang;
+        this.syncHighlightScroll();
+      },
+    },
     template: `
       <div class="textHL editorTextField" :class="{ multiline: field.isMultiline }">
         <template v-if="source">
-          <input v-if="!field.isMultiline" type="text" v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" v-on="events">
-          <textarea v-else v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" :rows="compact ? 1 : 3" v-on="events"></textarea>
+          <input ref="nativeInput" v-if="!field.isMultiline" type="text" v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" v-on="events">
+          <textarea ref="nativeInput" v-else v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" :rows="compact ? 1 : 3" v-on="events"></textarea>
         </template>
         <template v-else>
-          <input v-if="!field.isMultiline" type="text" v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'Translation'" :lang="field.lang" :spellcheck="field.spellcheck" :readonly="field.readonly" v-on="events">
-          <textarea v-else v-bind="field.dataAttrs" :class="{ multilineField: !compact }" :value="nativeValue" :placeholder="field.placeholder || 'Translation'" :lang="field.lang" :spellcheck="field.spellcheck" :readonly="field.readonly" :rows="compact ? 1 : 4" v-on="events"></textarea>
+          <input ref="nativeInput" v-if="!field.isMultiline" type="text" v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'Translation'" :lang="field.lang" :spellcheck="field.spellcheck" :readonly="field.readonly" v-on="events">
+          <textarea ref="nativeInput" v-else v-bind="field.dataAttrs" :class="{ multilineField: !compact }" :value="nativeValue" :placeholder="field.placeholder || 'Translation'" :lang="field.lang" :spellcheck="field.spellcheck" :readonly="field.readonly" :rows="compact ? 1 : 4" v-on="events"></textarea>
         </template>
-        <div v-if="controller.ready" class="HLter" :class="{ noPointer: !source }" v-bind="controller.highlightAttrs" v-html="controller.highlight" @mousemove="source && controller.tooltip?.($event)" @mouseout="source && controller.hideTooltip?.()" @mouseleave="controller.hideTooltip?.()" @click="source && controller.sourceClick?.($event)"></div>
+        <div ref="highlightOverlay" v-if="controller.ready" class="HLter" data-editor-native-overlay :class="{ noPointer: !source }" v-bind="controller.highlightAttrs" @mousemove="source && controller.tooltip?.($event)" @mouseout="source && controller.hideTooltip?.()" @mouseleave="controller.hideTooltip?.()" @click="source && controller.sourceClick?.($event)"><div ref="highlightContent" class="editorHighlightContent" v-html="controller.highlight"></div></div>
       </div>
     `,
   };

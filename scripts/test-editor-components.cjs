@@ -47,6 +47,38 @@ test('native textarea values normalize display-only newlines without changing ra
   assert.equal(NativeField.computed.nativeValue.call({ field, source: false }), field.translation);
 });
 
+test('native overlay observers follow input/textarea replacements and release detached fields', () => {
+  const observed = [], unobserved = [], disconnected = [], styleObserved = [], appRoot = {}, documentRoot = {}, localWindow = {};
+  class ResizeObserver {
+    observe(element) { observed.push(element); }
+    unobserve(element) { unobserved.push(element); }
+    disconnect() { disconnected.push('resize'); }
+  }
+  class MutationObserver {
+    observe(element) { styleObserved.push(element); }
+    disconnect() { disconnected.push('style'); }
+  }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), {
+    window: localWindow, ResizeObserver, MutationObserver, document: { documentElement: documentRoot },
+    getComputedStyle: () => ({ borderLeftWidth: '1px', borderTopWidth: '1px', padding: '7px 8px', font: '13px / 20.8px sans-serif', tabSize: '4' }),
+  });
+  const field = tagName => ({ tagName, style: {}, offsetWidth: 301, offsetHeight: 100, clientWidth: 299, clientHeight: 98,
+    offsetLeft: 0, offsetTop: 0, scrollLeft: 0, scrollTop: 0, lang: 'en', getBoundingClientRect: () => ({ width: 300.5, height: 100.25 }) });
+  const input = field('INPUT'), textarea = field('TEXTAREA'), overlay = { style: {} }, content = { style: {} };
+  const surface = localWindow.EditorComponents.NativeField;
+  const component = { $el: { closest: () => appRoot }, $refs: { nativeInput: input, highlightOverlay: overlay, highlightContent: content } };
+  for (const [name, method] of Object.entries(surface.methods)) component[name] = method.bind(component);
+  surface.mounted.call(component); surface.updated.call(component);
+  assert.deepEqual(observed, [component.$el, input]); assert.deepEqual(styleObserved, [documentRoot, appRoot]);
+  component.$refs.nativeInput = textarea; surface.updated.call(component);
+  assert.deepEqual(unobserved, [input]); assert.deepEqual(observed, [component.$el, input, textarea]);
+  assert.equal(overlay.style.width, '298.5px'); assert.equal(overlay.style.height, '98.25px');
+  assert.equal(overlay.style.left, '1px'); assert.equal(overlay.style.top, '1px'); assert.equal(overlay.style.tabSize, '4');
+  textarea.scrollLeft = 17; textarea.scrollTop = 34; component.syncHighlightScroll();
+  assert.equal(content.style.transform, 'translate(-17px, -34px)'); assert.equal(overlay.style.transform, '');
+  surface.beforeUnmount.call(component); assert.deepEqual(disconnected, ['resize', 'style']);
+});
+
 test('SD field adapters preserve table column callbacks and stable native highlight refs', () => {
   const calls = [], block = { isTable: true, tableColumns: [{ english: 'source', translation: 'old', isMultiline: true }] };
   const controller = { editorReady: true, editorTranslationReadOnly: false, translationEditorBcp47: 'th',
@@ -61,7 +93,7 @@ test('SD field adapters preserve table column callbacks and stable native highli
   for (const [name, computed] of Object.entries(TextField.computed)) Object.defineProperty(component, name, { get: computed.bind(component) });
   for (const [name, action] of Object.entries(TextField.methods)) component[name] = action.bind(component);
   const native = component.nativeController;
-  const events = NativeField.computed.events.call({ controller: native, field: native.field, source: false });
+  const events = NativeField.computed.events.call({ controller: native, field: native.field, source: false, syncHighlightScroll() {} });
   const target = { value: 'changed' }, event = { target, key: 'Tab' };
   events.input(event); events.focus(event); events.keydown(event); events.scroll(event);
   assert.equal(block.tableColumns[0].translation, 'changed');

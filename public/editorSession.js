@@ -165,7 +165,8 @@
       keydown(event){if(!valid())return;host.ctTargetKeydown?.(field,event);},
       selection(event){if(valid())host.ctCompletionSelectionChanged?.(field,event);},
       blur(){/* The shared popup is part of the same editor focus surface. */},
-      scroll(event){const overlay=event.target.parentElement?.querySelector?.('.HLter');if(overlay){overlay.scrollTop=event.target.scrollTop;overlay.scrollLeft=event.target.scrollLeft;}},
+      scroll(event){const overlay=event.target.parentElement?.querySelector?.('.HLter'),content=overlay?.querySelector?.('.editorHighlightContent') || overlay;
+        if(content)content.style.transform='translate('+(-event.target.scrollLeft)+'px, '+(-event.target.scrollTop)+'px)';},
       paste(event){const text=event.clipboardData?.getData?.('text/plain');if(!valid() || source || typeof text!=='string')return;event.preventDefault();insert(host,field,text,{input:event.target});},
       altKeyup(event){if(!valid() || !event.altKey || event.ctrlKey || event.metaKey || !/^[0-9]$/.test(event.key))return;
         const tokens=ranges(host,field,String(field.source ?? ''),true),range=tokens[(Number(event.key)||10)-1];if(range)insert(host,field,range.replace || range.value,{input:event.target});},

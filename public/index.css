@@ -137,6 +137,19 @@ input:focus, button:focus, textarea:focus {
   word-break: break-word;
 }
 
+.textHL>.HLter[data-editor-native-overlay] {
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.textHL>.HLter>.editorHighlightContent {
+  font: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
+  tab-size: inherit;
+}
+
 .textHL>.HLter * {
   pointer-events: none;
 }

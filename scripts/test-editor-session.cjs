@@ -5,6 +5,14 @@ const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
 const State=require('../public/clientTextState.js');
+const Matching=require('../public/dictionaryMatching.js');
+const Shred=require('./clienttext-highlight-fixture.cjs');
+const drain=iterator=>{let result;do{result=iterator.next();}while(!result.done);return result.value;};
+const unescape=value=>String(value).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#039;/g,"'").replace(/&amp;/g,'&');
+const highlightedText=html=>unescape(html.replace(/<[^>]*>/g,''));
+const highlightSpans=html=>Array.from(html.matchAll(/<span\b([^>]*)>([^<]*)<\/span>/g),match=>({
+    attrs:match[1],text:unescape(match[2]),classes:/\bclass="([^"]*)"/.exec(match[1])?.[1].split(' ') || [],
+}));
 
 function harness(text='First\r\nSecond\r\nThird',source='Fire [ColdDamage|Cold] {0}'){
     const calls=[],ticks=[],copied=[],window={ClientTextState:State,navigator:{clipboard:{writeText(value){copied.push(value);return Promise.resolve();}}}};
@@ -54,6 +62,76 @@ test('annotation spans never divide raw CRLF, lone CR or LF newlines from their 
     assert.equal(html.replace(/<[^>]*>/g,''),text,'rendering preserves raw text while the browser normalizes each complete newline');
     for(const [,content] of html.matchAll(/<span[^>]*>([^<]*)<\/span>/g))assert.doesNotMatch(content,/[\r\n]/,'native newline segments remain outside annotation spans');
     assert.match(html,/<\/span>\r\n<span/);assert.match(html,/<\/span>\r<span/);assert.match(html,/<\/span>\n<span/);
+});
+
+test('ActiveSkills shred source highlights retain whole original keywords and every surrounding character',()=>{
+    for(const [source,keywords]of [[Shred.thaiEnglish,Shred.thaiKeywords],[Shred.germanEnglish,Shred.germanEnglishKeywords]]){
+        for(const prefix of ['', 'A&B <raw> "quote" \'note\' @literal\\n\r\n']){
+            const text=prefix+source+'\r\nuntouched @literal\\n &amp; end',h=harness(Shred.germanTarget,text),control=h.session.fieldController(h.host,h.field,text),before=structuredClone(h.field);
+            const spans=highlightSpans(control.highlight);assert.equal(highlightedText(control.highlight),text);
+            assert.deepEqual(spans.filter(span=>span.classes.includes('keywordHL')).map(span=>span.text),keywords);
+            for(const range of h.session.ranges(h.host,h.field,text,true))assert.equal(range.value,text.slice(range.start,range.end));
+            assert.deepEqual(h.field,before);assert.equal(h.host.ctValues.text,Shred.germanTarget);assert.deepEqual(h.calls,[]);
+        }
+    }
+});
+
+test('ActiveSkills shred Dictionary worker ranges use raw source coordinates after escaping and CRLF',()=>{
+    const snapshot=drain(Matching.buildSnapshot(Shred.dictionary,'poe2',1));
+    for(const [source,keywords]of [[Shred.thaiEnglish,Shred.thaiKeywords],[Shred.germanEnglish,Shred.germanEnglishKeywords]]){
+        const text='A&B <raw> "quote" \'note\' @literal\\n\r\n'+source+'\r\n尾 &amp; end',h=harness(Shred.germanTarget,text),
+            pack=drain(Matching.matchSnapshot(snapshot,[{key:h.field.id,english:text,tokens:State.tokenize(text)}],{contentMode:'clienttext',highlightDict:true}));
+        h.host.ctDictionaryPack=pack;h.host.dictionary=structuredClone(Shred.dictionary);const control=h.session.fieldController(h.host,h.field,text);
+        assert.equal(pack.units[0].english,text);assert.equal(highlightedText(control.highlight),text);
+        for(const range of pack.units[0].HLs){assert.equal(unescape(range.find),text.slice(range.rawStart,range.rawEnd));
+            assert.equal(range.index,Matching.escapeHtml(text.slice(0,range.rawStart)).length);}
+        const spans=highlightSpans(control.highlight).filter(span=>span.text.startsWith('['));assert.deepEqual(spans.map(span=>span.text),keywords);
+        for(const span of spans){const index=Number(/data-ct-hl="(\d+)"/.exec(span.attrs)?.[1]);assert.ok(Number.isInteger(index));
+            const range=h.session.ranges(h.host,h.field,text,true)[index];assert.equal(range.value,span.text);
+            control.sourceClick({target:{closest:()=>({dataset:{ctHl:String(index)}})},altKey:true});}
+        assert.deepEqual(h.copied,keywords,'every rendered source span copies its exact whole token');assert.equal(h.host.ctValues.text,Shred.germanTarget);
+    }
+});
+
+test('ActiveSkills shred German translation highlights retain complete Attack display tokens without raw text normalization',()=>{
+    for(const prefix of ['', 'A&B <raw> "quote" \'note\' @literal\\n\r\n']){
+        const text=prefix+Shred.germanTarget+'\r\n尾 &amp; end',source=prefix+Shred.germanEnglish+'\r\n尾 &amp; end',h=harness(text,source),
+            control=h.session.fieldController(h.host,h.field),html=control.highlight,spans=highlightSpans(html);
+        assert.equal(highlightedText(html),text);assert.deepEqual(spans.filter(span=>span.classes.includes('vocab')).map(span=>span.text),Shred.germanKeywords);
+        assert.equal(spans.filter(span=>span.text==='[Attack|Angriff]').length,2);assert.equal(h.host.ctValues.text,text);assert.deepEqual(h.calls,[]);
+        for(const span of spans)assert.doesNotMatch(span.text,/[\r\n]/,'raw line endings stay outside every overlay span');
+    }
+});
+
+test('ClientText native scroll keeps its highlight viewport stationary and preserves raw text, caret, and editing state',()=>{
+    for(const source of [false,true])for(const useInner of [false,true]){
+        const h=harness('raw@literal\\n\r\n'+Shred.germanTarget,Shred.thaiEnglish),before=structuredClone(h.unit),values=h.host.ctValues,
+            inner={style:{transform:''}},overlay={style:{transform:'',left:'5px',top:'3px',width:'900px',height:'96px'},scrollTop:0,scrollLeft:0,
+                querySelector:selector=>{assert.equal(selector,'.editorHighlightContent');return useInner?inner:null;}},
+            viewport=structuredClone(overlay.style),content=useInner?inner:overlay,control=h.session.fieldController(h.host,h.field,source?h.field.source:undefined);
+        h.input.parentElement={querySelector:selector=>{assert.equal(selector,'.HLter');return overlay;}};
+        h.input.selectionStart=7;h.input.selectionEnd=11;h.input.scrollTop=73;h.input.scrollLeft=29;
+        const native=h.input.value;control.scroll({target:h.input});
+        const offsets=()=>/^translate\((-?\d+)px,\s*(-?\d+)px\)$/.exec(content.style.transform)?.slice(1).map(Number);
+        assert.deepEqual(offsets(),[-29,-73]);assert.deepEqual([overlay.scrollLeft,overlay.scrollTop],[0,0]);
+        if(useInner)assert.deepEqual(overlay.style,viewport,'the measured clipping viewport remains stationary while only its text moves');
+        assert.equal(h.input.value,native);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[7,11]);
+        assert.equal(h.host.ctValues,values);assert.equal(h.host.ctValues.text,'raw@literal\\n\r\n'+Shred.germanTarget);assert.deepEqual(h.unit,before);assert.deepEqual(h.calls,[]);
+        h.input.scrollTop=h.input.scrollLeft=0;control.scroll({target:h.input});assert.deepEqual(offsets(),[0,0]);
+    }
+});
+
+test('SD native scroll uses the same stationary highlight viewport and supports legacy overlays',()=>{
+    const code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8'),start=code.indexOf('    syncHlScroll(kind,'),end=code.indexOf('    autosizeTextarea(el,',start);
+    assert.ok(start>=0 && end>start);const sync=vm.runInNewContext('({'+code.slice(start,end)+'})').syncHlScroll;
+    for(const kind of ['english','translation'])for(const useInner of [false,true]){
+        const input={value:kind==='english'?Shred.thaiEnglish:Shred.germanTarget,selectionStart:3,selectionEnd:12,scrollLeft:21,scrollTop:67},before=structuredClone(input),
+            inner={style:{transform:''}},overlay={style:{transform:'',width:'420px',height:'72px'},querySelector:()=>useInner?inner:null},viewport=structuredClone(overlay.style);
+        sync.call({getEditorRef(name,index,column){assert.equal(index,7);assert.equal(column,2);return name===kind+'HLter'?overlay:input;}},kind,7,2);
+        const content=useInner?inner:overlay,offsets=/^translate\((-?\d+)px,\s*(-?\d+)px\)$/.exec(content.style.transform)?.slice(1).map(Number);
+        assert.deepEqual(Array.from(offsets),[-21,-67]);assert.deepEqual(input,before);
+        if(useInner)assert.deepEqual(overlay.style,viewport,'SD retains the clipping viewport while moving its inner text');
+    }
 });
 test('raw edit mapping preserves untouched CRLF and literal @/backslash-n while keeping intentional newline edits',()=>{
     const {session}=harness(),before='one\r\ntwo@literal\\n\r\nthree';
