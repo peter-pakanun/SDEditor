@@ -450,6 +450,7 @@
   }
 
   function translationDraftScope(value) {
+    if (value?.language === 'English') throw new TypeError('English source text cannot be saved as a translation draft.');
     if (!value || typeof value.profile !== 'string' || !value.profile
       || !['poe1', 'poe2'].includes(value.game) || typeof value.sourceHash !== 'string' || !value.sourceHash
       || typeof value.language !== 'string' || !value.language || typeof value.filepath !== 'string' || !value.filepath) {
@@ -1056,6 +1057,7 @@
   // Ordinary editor saves send only their touched files to the worker. Read the
   // latest archive here so other files, languages and background updates survive.
   async function saveTranslationBatch(batch) {
+    if (batch?.language === 'English') throw new TypeError('English source text cannot be saved as a translation.');
     if (!batch || typeof batch.jobId !== 'string' || !batch.jobId
       || !['poe1', 'poe2'].includes(batch.game) || typeof batch.language !== 'string' || !batch.language
       || !Array.isArray(batch.files) || !batch.files.length || !Array.isArray(batch.revisions || [])) {

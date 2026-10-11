@@ -75,7 +75,46 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [11]);
+  assert.deepEqual(f.versions, [14]);
+});
+
+test('English cannot create or replace an editable translation checkpoint', async () => {
+  const f = fixture(), english = draft({ language: 'English', translations: ['Changed source'], base: { translations: ['Source'] } });
+  const key = 'translation_draft_v1:' + JSON.stringify(['guest', 'poe1', 'source', 'English', 'stat.txt']);
+  const retained = { ...english, key, state: 'active' };
+  f.kv.set(key, copy(retained));
+  const before = copy([...f.kv]);
+  assert.throws(() => f.store.translationDraftKey(english), /English source/);
+  await assert.rejects(f.store.putTranslationDraft(english), /English source/);
+  await assert.rejects(f.store.putTranslationDraft({ ...english, key, revision: 'later', translations: ['Another source'] }), /English source/);
+  assert.deepEqual([...f.kv], before);
+  assert.equal(f.revisions.length, 0);
+  assert.equal(f.transactions.length, 0);
+});
+
+test('normal and legacy dropped translation saves reject English before any durable mutation', async () => {
+  for (const legacy of [false, true]) {
+    const f = fixture();
+    if (legacy) delete f.kv.get('workspace_poe1').stagedVersion;
+    const before = copy([...f.kv]);
+    await assert.rejects(f.store.saveTranslationBatch({ jobId: 'english-save', game: 'poe1', sourceHash: 'source', language: 'English', accountId: '',
+      files: [{ filepath: 'stat.txt', translations: ['Changed source'], needsReview: legacy }],
+      descriptions: copy(f.source), revisions: [{ filepath: 'stat.txt', lang: 'English', translations: ['Changed source'], savedAt: 2 }],
+    }), /English source/);
+    assert.deepEqual([...f.kv], before, legacy ? 'Legacy recovery preserves workspace and source.' : 'Normal save preserves workspace and source.');
+    assert.equal(f.revisions.length, 0);
+    assert.equal(f.transactions.length, 0);
+  }
+});
+
+test('English source history remains available for source imports', async () => {
+  const f = fixture(), source = copy(f.source), workspace = copy(f.kv.get('workspace_poe1'));
+  const revisions = [{ filepath: 'stat.txt', lang: 'English', translations: ['Source'], savedAt: 2 }];
+  await commit(f, f.store.saveSourceWorkspaceWithRevisions(source, workspace, revisions, 'poe1'));
+  assert.deepEqual(f.kv.get('source_poe1'), source);
+  assert.equal(f.revisions.length, 1);
+  assert.equal(f.revisions[0].lang, 'English');
+  assert.deepEqual(f.revisions[0].translations, ['Source']);
 });
 
 test('list and key isolate profile, game, source and language without retargeting old-source drafts', async () => {

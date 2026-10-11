@@ -51,7 +51,7 @@
       },
       startEntryAlignment(kind = 'draft', recovery = null) {
         if (!this.editorVisible || !this.editorReady || this.editorSaving || this.entryAlignmentApplying
-          || this.editorCompareActive || this.editorDroppedConflict || this.ctActive) return false;
+          || this.editorCompareActive || this.editorDroppedConflict || this.ctActive || this.lang === 'English') return false;
         const desc = this.editorCurrentEditingDesc;
         if (!desc) return false;
         const candidate = this.editorDroppedCandidate;
@@ -197,7 +197,8 @@
         <h2 tabindex="-1">Align translation entries</h2>
         <p>{{ c.entryAlignment.english.length }} current English entries · {{ c.entryAlignment.items.length }} translation blocks.
           Drag a block onto its English entry, or select a block and click Place selected. Each block can be used once.</p>
-        <p>Unique exact matches with preserved old English are placed automatically. Choose Leave blank for new entries and mark removed blocks as unused. Continue creates a local draft; Save keeps the original blocks in local history.</p>
+        <p>English text and its order are fixed. Only translation blocks can be moved.</p>
+        <p>Unique exact matches with preserved old English are placed automatically. Leave the translation blank for new entries and mark removed translation blocks as unused. Continue creates a local draft; Save keeps the original blocks in local history.</p>
         <div class="entryAlignmentColumns">
           <section>
             <h3>Current English → translation</h3>
@@ -210,10 +211,10 @@
                   <pre :lang="c.translationEditorBcp47">{{ c.decodeEscapedNewlines(c.entryAlignment.items[c.entryAlignment.slots[index]].translation) || '(Blank block)' }}</pre>
                   <button type="button" @click="c.selectEntryAlignmentItem(c.entryAlignment.slots[index])" :aria-pressed="c.entryAlignmentSelected === c.entryAlignment.slots[index]" :disabled="c.entryAlignmentApplying">Select block #{{ c.entryAlignment.slots[index] + 1 }}</button>
                 </div>
-                <p v-else>{{ c.entryAlignment.slots[index] === 'blank' ? 'Left blank for translation' : 'Choose a translation block or leave this entry blank.' }}</p>
+                <p v-else>{{ c.entryAlignment.slots[index] === 'blank' ? 'Translation left blank' : 'Choose a translation block or leave its translation blank.' }}</p>
                 <div class="entryAlignmentButtons">
                   <button type="button" @click="c.assignEntryAlignmentItem(index)" :disabled="c.entryAlignmentSelected === null || c.entryAlignmentApplying">Place selected at #{{ index + 1 }}</button>
-                  <button type="button" @click="c.mutateEntryAlignment('leaveBlank', index)" :disabled="c.entryAlignmentApplying">Leave #{{ index + 1 }} blank</button>
+                  <button type="button" @click="c.mutateEntryAlignment('leaveBlank', index)" :disabled="c.entryAlignmentApplying">Leave translation #{{ index + 1 }} blank</button>
                   <button v-if="c.entryAlignment.slots[index] !== null" type="button" @click="c.mutateEntryAlignment('unassign', index)" :disabled="c.entryAlignmentApplying">Clear #{{ index + 1 }}</button>
                 </div>
               </div>

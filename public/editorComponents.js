@@ -136,9 +136,9 @@
           field: {
             get english() { return component.field.english; },
             get translation() { return component.field.translation; },
-            set translation(value) { component.field.translation = value; },
+            set translation(value) { if (!component.source && !host.editorTranslationReadOnly) component.field.translation = value; },
             get isMultiline() { return component.field.isMultiline; },
-            get readonly() { return host.editorTranslationReadOnly; },
+            get readonly() { return component.source || host.editorTranslationReadOnly; },
             get lang() { return component.source ? 'en' : host.translationEditorBcp47; },
             get dataAttrs() {
               if (component.source) return { 'data-editor-ref': component.refName };
@@ -167,6 +167,7 @@
     },
     methods: {
       input(event) {
+        if (this.source || this.controller.editorTranslationReadOnly) return;
         if (this.columnIndex != null) this.controller.tableColumnInput(this.block, this.blockIndex, this.columnIndex, event);
         else if (this.field.isMultiline) this.controller.normalizeMultilineEditorBlock(this.block, this.blockIndex, event);
         else this.controller.translationInput(this.block, this.blockIndex, event);

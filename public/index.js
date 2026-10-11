@@ -705,7 +705,7 @@ const config = Vue.defineComponent({
       return SETTINGS_LANG_TO_BCP47[this.lookupActiveLanguage] || undefined;
     },
     editorTranslationReadOnly() {
-      return this.editorLoading || !!this.editorLoadError || !!this.entryAlignment || !!this.editorHasExcessTranslationEntries
+      return this.lang === 'English' || this.editorLoading || !!this.editorLoadError || !!this.entryAlignment || !!this.editorHasExcessTranslationEntries
         || (this.editorCompareActive && this.editorCompareMode === 'translation');
     },
     editorReady() {

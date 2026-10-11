@@ -236,6 +236,19 @@ test('main Save guards reject excess translations and any active alignment befor
   assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'obsolete', 'three']);
 });
 
+test('English cannot become an editable translation language or open alignment', async t => {
+  const { editor, desc, calls } = await fixture(t, { english: ['One', 'Three'], translations: ['one', 'three'] });
+  editor.clearEntryAlignment();
+  const source = copy(desc.translations.English);
+  editor.lang = 'English';
+  assert.equal(editor.editorTranslationReadOnly, true);
+  assert.equal(editor.startEntryAlignment(), false);
+  assert.equal(await editor.editorSave({ close: false, defer: false }), false);
+  assert.deepEqual(copy(desc.translations.English), source);
+  assert.equal(calls.promotions.length, 0);
+  assert.equal(calls.writes.length, 0);
+});
+
 test('preparation failure preserves mapping decisions, original draft and recoverable translation blocks', async t => {
   const { editor, calls, records } = await fixture(t);
   resolveMiddleRemoval(editor);

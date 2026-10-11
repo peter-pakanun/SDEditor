@@ -104,6 +104,29 @@ async function run() {
         currentText: vm.serializeEditorTranslations(), recovery: vm._draftSession?.alignmentRecovery,
         readonly: vm.editorTranslationReadOnly, slots: vm.entryAlignment?.slots };
     }, filepath);
+    const englishSnapshot = () => page.evaluate(async () => {
+      const vm = window.__alignmentApp, source = await OfflineStore.getSource(vm.managedWorkspaceScope());
+      const entries = descs => descs.map(desc => ({ filepath: desc.filepath, english: [...desc.translations.English] }))
+        .sort((a, b) => a.filepath.localeCompare(b.filepath));
+      return { sourceHash: vm.sourceIdentity, visible: entries(vm.descs), baseline: entries(source) };
+    });
+    const originalEnglish = await englishSnapshot();
+    const assertEnglishFixed = async stage => assert.deepEqual(await englishSnapshot(), originalEnglish,
+      stage + ': current English text, entry order, source identity and immutable baseline stay unchanged');
+    const assertNativeSourceReadonly = async (fields, surface) => {
+      assert.ok(await fields.count(), surface + ': source controls are mounted');
+      const editorEnglish = await page.evaluate(() => window.__alignmentApp.editorBlocks.map(block => block.english));
+      for (const field of await fields.all()) {
+        assert.equal(await field.evaluate(node => node.readOnly), true, surface + ': English control has native readonly');
+        assert.equal(await field.isEditable(), false, surface + ': English cannot be edited');
+        const before = await field.inputValue();
+        await field.focus(); await page.keyboard.type('Source must stay unchanged'); await page.keyboard.press('Backspace');
+        assert.equal(await field.inputValue(), before, surface + ': typing cannot change displayed English');
+      }
+      assert.deepEqual(await page.evaluate(() => window.__alignmentApp.editorBlocks.map(block => block.english)), editorEnglish,
+        surface + ': typing cannot mutate English editor blocks');
+      await assertEnglishFixed(surface + ' readonly keyboard interaction');
+    };
     const panel = () => page.getByRole('region', { name: 'Align translation entries', exact: true });
     const poolCard = id => panel().locator('.entryAlignmentPool .entryAlignmentCard').filter({ has: page.getByRole('button', { name: 'Select block #' + id, exact: true }) });
     const slot = id => panel().locator('.entryAlignmentSlot').nth(id - 1);
@@ -115,6 +138,11 @@ async function run() {
     assert.deepEqual(initial.committed, ['Thai A', 'Thai removed', 'Thai C']); assert.equal(initial.staged, null);
     assert.equal(await save().isDisabled(), true); assert.equal(await continueButton().isDisabled(), true);
     assert.equal(await page.locator('.editor .editBlock').count(), 0, 'Overflow blocks cannot be edited before alignment');
+    assert.equal(await panel().getByRole('textbox').count(), 0, 'Alignment provides no editable English text controls');
+    assert.equal(await panel().locator('[contenteditable]:not([contenteditable="false"])').count(), 0,
+      'Alignment English is never contenteditable');
+    assert.deepEqual(await panel().locator('.entryAlignmentSlot > pre[lang="en"]').allTextContents(), ['English A', 'English C'],
+      'Alignment displays fixed English in source order');
     assert.equal(await page.evaluate(() => window.__alignmentApp.editorSave()), false, 'Direct save is also gated');
     await page.getByRole('button', { name: '🕒 History', exact: true }).click();
     await page.waitForFunction(() => !window.__alignmentApp.historyLoading && window.__alignmentApp.historyItems?.length > 0);
@@ -158,6 +186,7 @@ async function run() {
     const placeC = slot(2).getByRole('button', { name: 'Place selected at #2', exact: true });
     await placeC.focus(); await page.keyboard.press('Enter');
     assert.deepEqual((await inspect(overflow)).slots, [0, 2]);
+    await assertEnglishFixed('Dragging and placing translation blocks');
     assert.equal(await continueButton().isDisabled(), true, 'Unused block requires an explicit decision');
     await poolCard(2).getByRole('checkbox', { name: 'Unused in this version' }).check();
     assert.equal(await continueButton().isEnabled(), true); await continueButton().click();
@@ -168,6 +197,9 @@ async function run() {
     assert.deepEqual(aligned.committed, initial.committed); assert.equal(aligned.staged, null); assert.equal(aligned.saved, false);
     assert.equal(aligned.missing, true, 'Private alignment draft cannot clear committed Missing status');
     assert.equal(aligned.readonly, false);
+    await assertEnglishFixed('Continue editing');
+    await assertNativeSourceReadonly(page.locator('.editor .edit input[placeholder="English"], .editor .edit textarea[placeholder="English"]'),
+      'Full editor after alignment');
     results.push('Pointer drag and keyboard placement preserved whole blocks; explicit unused decision enabled Continue; Continue only retained an aligned private draft and the original blocks.');
     const sourceHash = await page.evaluate(() => window.__alignmentApp.sourceIdentity);
     await page.getByRole('button', { name: 'Close', exact: true }).first().click(); await open(overflow);
@@ -180,6 +212,7 @@ async function run() {
     const restored = await inspect(overflow);
     assert.deepEqual(restored.currentText, ['Thai A', 'Thai C']); assert.deepEqual(restored.recovery[0].translations, initial.committed);
     assert.deepEqual(restored.committed, initial.committed); assert.equal(restored.staged, null);
+    await assertEnglishFixed('Reload before Save');
     await save().click();
     await page.waitForFunction(() => !window.__alignmentApp.editorVisible && !window.__alignmentApp.pendingLocalSaves
       && !window.__alignmentApp._pendingSaves.snapshot().jobs.length);
@@ -188,6 +221,7 @@ async function run() {
       'Durable translation save used the real background worker');
     assert.deepEqual(saved.committed, ['Thai A', 'Thai C']); assert.equal(saved.saved, true); assert.equal(saved.missing, false);
     assert.deepEqual(saved.baseline, initial.committed); assert.ok(saved.staged);
+    await assertEnglishFixed('Save aligned translations');
     const revisions = await page.evaluate(async filepath => {
       const vm = window.__alignmentApp; return await OfflineStore.listRevisions(filepath, 'Thai', 100, vm.managedWorkspaceScope());
     }, overflow);
@@ -201,8 +235,11 @@ async function run() {
     assert.equal(droppedInitial.missing, false, 'Complete current text coexists with the Dropped candidate');
     await poolCard(2).getByRole('button', { name: 'Select block #2', exact: true }).click();
     await slot(2).getByRole('button', { name: 'Place selected at #2', exact: true }).click();
-    await slot(3).getByRole('button', { name: 'Leave #3 blank', exact: true }).click();
-    await slot(4).getByRole('button', { name: 'Leave #4 blank', exact: true }).click();
+    await slot(3).getByRole('button', { name: 'Leave translation #3 blank', exact: true }).click();
+    await slot(4).getByRole('button', { name: 'Leave translation #4 blank', exact: true }).click();
+    await assertEnglishFixed('Leaving translations blank');
+    assert.deepEqual(await panel().locator('.entryAlignmentSlot > pre[lang="en"]').allTextContents(),
+      originalEnglish.visible.find(desc => desc.filepath === dropped).english, 'Blank translation decisions preserve displayed English');
     await poolCard(3).getByRole('checkbox', { name: 'Unused in this version' }).check();
     await continueButton().click();
     await page.waitForFunction(() => !window.__alignmentApp.entryAlignment && !!window.__alignmentApp._draftSession?.record);
@@ -210,6 +247,7 @@ async function run() {
     assert.deepEqual(droppedDraft.currentText, ['Old unique', 'Old repeat one', '', '']);
     assert.deepEqual(droppedDraft.committed, droppedInitial.committed); assert.ok(droppedDraft.candidate);
     assert.equal(droppedDraft.missing, false, 'Blank draft slots do not alter committed Missing status');
+    await assertEnglishFixed('Continue editing with blank translations');
     await save().click();
     const confirmation = page.getByRole('alertdialog', { name: 'Confirm action', exact: true });
     await confirmation.waitFor(); assert.match(await confirmation.innerText(), /missing fields/);
@@ -224,6 +262,7 @@ async function run() {
     assert.deepEqual(droppedSaved.committed, ['Old unique', 'Old repeat one', '', '']);
     assert.equal(droppedSaved.saved, true); assert.equal(droppedSaved.missing, true); assert.equal(droppedSaved.candidate, null);
     assert.equal(droppedSaved.dropped, false); assert.equal(droppedSaved.derivedDropped, false); assert.equal(droppedSaved.localCandidate, null);
+    await assertEnglishFixed('Save blank translations');
     const droppedRevisions = await page.evaluate(async filepath => {
       const vm = window.__alignmentApp; return await OfflineStore.listRevisions(filepath, 'Thai', 100, vm.managedWorkspaceScope());
     }, dropped);
@@ -243,7 +282,28 @@ async function run() {
     assert.equal(droppedReloaded.missing, true); assert.equal(droppedReloaded.dropped, false);
     assert.equal(droppedReloaded.candidate, null); assert.equal(droppedReloaded.localCandidate, null);
     assert.equal(await panel().count(), 0, 'Reload does not offer alignment for already resolved Dropped work');
+    await assertEnglishFixed('Reload after Save');
     results.push('Dropped source evidence placed only a unique exact match; duplicate English stayed manual. Continue kept Dropped unresolved; explicit confirmed Save resolved it, kept blank slots Missing, and retained all old blocks in local history.');
+    await page.getByRole('button', { name: 'Close', exact: true }).first().click();
+    await page.evaluate(async () => {
+      const vm = window.__alignmentApp;
+      vm.inlineEditor = true; vm.inlineSidebarVisible = false;
+      vm.selectAllFileFilters(); vm.applyFileSearch(); await vm.$nextTick();
+    });
+    const inlineRow = page.locator('tr[data-filepath="' + overflow + '"]');
+    await inlineRow.locator('.inlineSourceCell').click();
+    await page.waitForFunction(filepath => {
+      const vm = window.__alignmentApp;
+      return vm.inlineActive && vm.editorCurrentEditingDesc?.filepath === filepath && !vm.editorLoading
+        && !vm.inlineTransitionBusy && !vm.navigationBusy;
+    }, overflow, { timeout: 2000 });
+    await assertNativeSourceReadonly(inlineRow.locator('.inlineSourceCell input, .inlineSourceCell textarea'), 'Inline editor');
+    await page.evaluate(async () => {
+      const vm = window.__alignmentApp;
+      if (!await vm.finishInlineSession({ promote: false })) throw new Error('Could not finish readonly inline check.');
+      vm.inlineEditor = false; await vm.$nextTick();
+    });
+    results.push('English had no editable alignment controls; drag, blank decisions, Continue, Save and reload preserved every English entry and immutable source. Native English fields stayed readonly under keyboard typing in both full and inline editors.');
     await open(long); await panel().waitFor();
     const longGeometry = [];
     for (const viewport of [{ width: 1440, height: 1000 }, { width: 1100, height: 850 }]) {
@@ -275,6 +335,7 @@ async function run() {
       }
     }
     results.push('28 English entries and 29 translation blocks: available pool stayed fully visible below the toolbar while English #20 was visible, with pointer placement and pool-scroll/button placement in both desktop viewports.');
+    await assertEnglishFixed('Long-file drag and placement');
     assert.deepEqual(pageErrors, [], 'No uncaught browser errors'); results.push('No uncaught browser errors.');
     console.log(JSON.stringify({ origin, results, screenshots, longGeometry }, null, 2)); await context.close();
   } catch (error) {

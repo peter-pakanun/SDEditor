@@ -104,6 +104,29 @@ test('SD field adapters preserve table column callbacks and stable native highli
   assert.deepEqual(calls.slice(1), [['focus', 3, 0], ['keydown', event, 3, 0], ['scroll', 'translation', 3, 0]]);
 });
 
+test('English descriptors stay read-only and reject writes in ordinary, multiline and table fields', () => {
+  for (const shape of ['ordinary', 'multiline', 'table']) {
+    const calls = [], field = { english: 'Fixed source', translation: 'Preserved translation', isMultiline: shape === 'multiline' };
+    const block = shape === 'table' ? { isTable: true, tableColumns: [field] } : field;
+    const controller = { editorReady: true, editorTranslationReadOnly: false,
+      editorRefName: (kind, index, column) => `${kind}_${index}_${column}`,
+      translationInput: () => calls.push('ordinary'), normalizeMultilineEditorBlock: () => calls.push('multiline'),
+      tableColumnInput: () => calls.push('table') };
+    const component = { controller, block, blockIndex: 0, columnIndex: shape === 'table' ? 0 : null, kind: 'english' };
+    for (const [name, computed] of Object.entries(TextField.computed)) Object.defineProperty(component, name, { get: computed.bind(component) });
+    for (const [name, action] of Object.entries(TextField.methods)) component[name] = action.bind(component);
+    const native = component.nativeController;
+    assert.equal(native.field.readonly, true, shape);
+    const events = NativeField.computed.events.call({ controller: native, field: native.field, source: true });
+    for (const event of ['input', 'keydown', 'paste', 'compositionstart', 'compositionend', 'change']) assert.equal(events[event], undefined, event);
+    native.field.translation = 'Rejected descriptor write';
+    native.input({ target: { value: 'Rejected input' } });
+    assert.equal(field.english, 'Fixed source');
+    assert.equal(field.translation, 'Preserved translation');
+    assert.deepEqual(calls, []);
+  }
+});
+
 test('SD source click modifiers retain insertion, clipboard and Dictionary actions', () => {
   const calls = [], field = { english: 'source' };
   const component = { field, blockIndex: 1, column: 2, controller: {
