@@ -95,6 +95,13 @@ test('Dictionary edit readiness can lock ClientText writes while its History pan
   assert.match(entries.template, /:inert="!ready \|\| undefined"/);
 });
 
+test('Dictionary uses the compact SD controls unless insertion buttons are explicitly requested', () => {
+  const entries = window.EditorComponents.DictionaryEntries, useDictionaryTranslation = () => {};
+  assert.equal(entries.computed.useButtons.call({ controller: { useDictionaryTranslation } }), false);
+  assert.equal(entries.computed.useButtons.call({ controller: { dictionaryUseButtons: true } }), false);
+  assert.equal(entries.computed.useButtons.call({ controller: { dictionaryUseButtons: true, useDictionaryTranslation } }), true);
+});
+
 test('shared surfaces publish DOM refs after mounting and updates and release their owner on unmount', () => {
   for (const surface of [Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History]) {
     const refs = [], removed = [], controller = { registerRefs: (value, owner) => refs.push([value, owner]), unregisterRefs: owner => removed.push(owner) };

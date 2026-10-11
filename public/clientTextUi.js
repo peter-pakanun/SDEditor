@@ -7,6 +7,7 @@
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
+    const unproxy = value => root.Vue?.toRaw ? root.Vue.toRaw(value) : value;
     const uuid = () => root.crypto.randomUUID();
     const mode = group => String(group?.contentMode || group?.mode || '').toLowerCase();
     const trustedProtocol = 'clienttext-trusted-v1';
@@ -313,6 +314,11 @@
                     isDictionaryEntryFound:word=>host.ctDictionaryMatchedDefinitions.has(String(word._id)),
                     isDictionaryEntryFindMatched:word=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(word.find || '').trim().toLowerCase()) || false,
                     isDictionaryAltFindMatched:(word,alt)=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(alt.find || '').trim().toLowerCase()) || false,
+                    isDictionaryPopupSelected:(word,alt)=>{
+                        const completion=host.ctCompletion,item=completion?.items?.[completion.selectedIndex],field=host.ctCurrentUnit?.fields.find(field=>field.id===completion?.fieldId);
+                        return current() && host.ctCompletionValid(field) && String(item?.dictEntryId || '')===String(word._id)
+                            && String(item?.dictAltId || '')===String(alt?._id || '');
+                    },
                     dictionaryEntryScope:word=>host.dictionaryEntryScope?.(word) || root.DictionaryScope?.normalize(word) || 'all',
                     dictionaryEntryScopeWarning:word=>host.dictionaryEntryScopeWarning?.(word) || '',
                     dictionaryEntryInput:word=>{if(member(word))host.dictionaryEntryInput?.(word);},
@@ -325,7 +331,12 @@
                     dictionaryEntryFocusIn:event=>{if(current())host.ctDictionaryFocusIn(event);},
                     dictionaryEntryFocusOut:event=>{if(current())host.ctDictionaryFocusOut(event,ctx,unitId,dictionary);},
                     onDictionaryReplaceEnter:(event,word,alt)=>{
-                        if(event.ctrlKey || event.metaKey)return useTranslation(word,alt,event);
+                        const info=host._ctDictionaryReturn;
+                        if(info && String(info.dictId)===String(word?._id) && String(info.altId || '')===String(alt?._id || ''))return current() && host.ctDictionaryReturnEnter(event,word,alt);
+                        if(event.ctrlKey || event.metaKey){
+                            if(event.isComposing || event.keyCode===229)return false;
+                            host._ctDictionaryReturn=null;return useTranslation(word,alt,event);
+                        }
                     },
                 };
             },
@@ -381,17 +392,101 @@
                 catch(error){if(this.ctCurrent(ctx))this.ctError='Could not load local drafts: '+error.message;}
             },
             ctOpenHighlightDictionary(field,range) {
-                if(!this.ctActive || this.ctBusy)return;
-                let word=(this.dictionary || []).find(word=>String(word._id)===String(range.dictId));
-                if(!word && range.kind==='keyword'){
-                    const name=this.ctDictionaryKeywordName(range.identity),token=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(range.value),replacement=token?.[2] || name;
-                    word=(this.dictionary || []).find(word=>String(word.find).trim().toLowerCase()===name.toLowerCase());
-                    if(!word){word=this.createDictionaryEntry({find:name,replace:replacement,alts:[],tlnote:''});this.dictionary.unshift(word);this.dictionaryEntryInput?.(word);}
+                if(!this.ctDictionaryReady || !this.ctCurrentUnit?.fields.includes(field))return false;
+                this._ctDictionaryReturn=null;
+                if(range.kind==='keyword' && this.ensureDictionaryKeywordTag){
+                    const token=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(range.value);
+                    const dynamic=token?.[2] || '';
+                    return this.ensureDictionaryKeywordTag(range.identity,dynamic.includes('<') ? '' : dynamic, '',this.ctDictionaryPresentation());
                 }
-                if(!word)return;this.ctTool='dictionary';this.ctDictionaryFilter='';this.ctDictionaryBeginEdit(word._id);
-                const index=this.ctDictionaryFiltered.indexOf(word);this.ctDictionaryPage=Math.floor(Math.max(0,index)/this.ctDictionaryPageSize)+1;
-                const ctx=this.ctContext(),unit=this.ctCurrentUnit,dictionary=this.dictionary;
-                this.$nextTick?.(()=>{if(this.ctCurrent(ctx) && this.ctCurrentUnit===unit && this.dictionary===dictionary && this.ctTool==='dictionary')this.focusDictionaryEntryReplaceInput?.(word._id);});
+                const word=(this.dictionary || []).find(word=>String(word._id)===String(range.dictId) && (!this.isDictionaryEntryActive || this.isDictionaryEntryActive(word)));
+                if(!word)return false;this.ctTool='dictionary';this.ctDictionaryFilter='';
+                this.ctFocusDictionaryReplace(word._id);return true;
+            },
+            ctDictionaryPresentation(returnInfo=null) {
+                const host=this;
+                return {
+                    set sideTab(value){host.ctTool=value;},set dictionaryFilter(value){host.ctDictionaryFilter=value;},
+                    beginDictionaryEdit:(id,options)=>host.ctDictionaryBeginEdit(id,options),
+                    syncEditorHlterWithDictionaryNow:id=>{
+                        const word=(host.dictionary || []).find(word=>String(word._id)===String(id));if(word)host.dictionaryEntryInput?.(word);
+                        host.scheduleClientTextDictionaryMatches();
+                    },
+                    focusDictionaryEntryReplaceInput:(id,options={})=>{
+                        if(returnInfo){returnInfo.dictId=id;returnInfo.altId=options.altId || '';}
+                        host.ctFocusDictionaryReplace(id,options);
+                    },
+                };
+            },
+            ctRevealDictionaryEntry(id) {
+                const index=this.ctDictionaryFiltered.findIndex(word=>String(word._id)===String(id));
+                if(index<0)return false;this.ctDictionaryPage=Math.floor(index/this.ctDictionaryPageSize)+1;return true;
+            },
+            ctFocusDictionaryReplace(id,options={}) {
+                if(!this.ctDictionaryReady)return;
+                this.ctDictionaryBeginEdit(id);if(!this.ctRevealDictionaryEntry(id))return;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,dictionary=this.dictionary,focusedField=this.ctFocusedField,returnInfo=this._ctDictionaryReturn,run=this._ctDictionaryFocusRun={};
+                const word=dictionary.find(word=>String(word._id)===String(id)),alt=options.altId ? word?.alts?.find(alt=>String(alt._id)===String(options.altId)) : null;
+                const entryScope=this.dictionaryEntryScope?.(word),disabled=!!word?.disabled;
+                this.$nextTick?.(()=>{
+                    if(this._ctDictionaryFocusRun!==run || !this.ctDictionaryContextCurrent(ctx,unit.id,dictionary) || this.ctCurrentUnit!==unit || !this.ctDictionaryReady || this.ctTool!=='dictionary')return;
+                    if(this.ctFocusedField!==focusedField || !word || !dictionary.includes(word) || this.dictionaryEntryScope?.(word)!==entryScope || !!word.disabled!==disabled
+                        || options.altId && (!alt || !word.alts?.includes(alt)) || returnInfo && (this._ctDictionaryReturn!==returnInfo || !this.ctDictionaryReturnCurrent(returnInfo)))return;
+                    const rows=root.document?.querySelectorAll?.('.ctTools .dictRow[data-dict-id],.ctTools .dictAltRow[data-dict-id]') || [];
+                    const row=[...rows].find(row=>row.getAttribute('data-dict-id')===String(id) && String(row.getAttribute('data-dict-alt-id') || '')===String(options.altId || ''));
+                    const input=row?.querySelector?.('input[placeholder="Replace"],textarea[placeholder="Replace"]');
+                    this.scrollDictionaryEntryIntoView?.(row);input?.focus();input?.select?.();
+                });
+            },
+            ctCompletionEnter(field,item,input) {
+                return item?.mustCreate ? this.ctEditCompletionDictionary(field,item,input) : this.ctApplyCompletion(field,item,input);
+            },
+            ctEditCompletionDictionary(field,item,input=this._ctCompletionInput) {
+                const completion=this.ctCompletion;
+                if(!this.ctCompletionValid(field,input) || !completion.items.includes(item)){this.ctCloseCompletion();return false;}
+                if(!item.kwTagName || !this.ctDictionaryReady){this.ctCloseCompletion();return false;}
+                const dictionary=this.dictionary,word=dictionary.find(word=>String(word._id)===String(item.dictEntryId));
+                if(item.dictEntryId && (!word || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(word))
+                    || item.dictAltId && !word?.alts?.some(alt=>String(alt._id)===String(item.dictAltId))){this.ctCloseCompletion();return false;}
+                const info={...completion,field,unit:this.ctCurrentUnit,input,dictionary,kwTagName:item.kwTagName,dictId:'',altId:''};
+                const selected=completion.text.slice(root.EditorSession.rawOffset(completion.text,completion.selectionStart),root.EditorSession.rawOffset(completion.text,completion.selectionEnd));
+                this.ctCloseCompletion();this._ctDictionaryReturn=info;
+                const create=item.mustCreate || (this.canCreateDictionaryEntryFromHlPopupItem?.(item) ?? (item.kwDynamicContent && !this.ctDictionaryPairs(word || {}).some(pair=>String(pair.find).trim().toLowerCase()===item.kwDynamicContent.trim().toLowerCase())));
+                if(create){
+                    const result=this.ensureDictionaryKeywordTag?.(item.kwTagName,item.kwDynamicContent || '',selected,this.ctDictionaryPresentation(info));
+                    if(!result?.dictId){this._ctDictionaryReturn=null;return false;}return true;
+                }
+                info.dictId=word._id;info.altId=item.dictAltId || '';
+                if(selected){const pair=info.altId ? word.alts.find(alt=>String(alt._id)===String(info.altId)) : word;pair.replace=selected;this.dictionaryEntryInput?.(word);}
+                this.ctTool='dictionary';this.ctDictionaryFilter='';this.ctFocusDictionaryReplace(word._id,{altId:info.altId});return true;
+            },
+            ctDictionaryReturnCurrent(info) {
+                const input=info?.input,field=info?.field;
+                return !!(info && this.ctDictionaryReady && this.ctDictionaryContextCurrent(info.context,info.unitId,info.dictionary) && this.ctCurrentUnit===info.unit
+                    && this.ctCurrentUnit.fields.includes(field) && field.source===info.source && this.ctFocusedField===field.id && this.ctValues[field.id]===info.text
+                    && input && input.isConnected!==false && !input.composing && !input.readOnly && (!input.dataset?.ctTarget || input.dataset.ctTarget===field.id)
+                    && input.value===info.text.replace(/\r\n?/g,'\n') && input.selectionStart===info.selectionStart && input.selectionEnd===info.selectionEnd);
+            },
+            ctDictionaryReturnEnter(event,word,alt) {
+                if(event.isComposing || event.keyCode===229)return false;
+                const info=this._ctDictionaryReturn,input=info?.input,field=info?.field;
+                if(!info || String(info.dictId)!==String(word?._id) || String(info.altId || '')!==String(alt?._id || ''))return false;
+                this._ctDictionaryReturn=null;
+                if(!this.ctDictionaryReturnCurrent(info) || !info.dictionary.includes(word) || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(word) || alt && !word.alts?.includes(alt))return false;
+                const replacement=event.target?.value;
+                if(typeof replacement!=='string')return false;
+                event.preventDefault();event.stopPropagation?.();
+                return root.EditorSession.insert(this,field,'['+info.kwTagName+'|'+replacement+']',{input,start:info.start,end:info.end,raw:true});
+            },
+            ctSyncCompletionSelection() {
+                const completion=this.ctCompletion,item=completion?.items?.[completion.selectedIndex],unit=this.ctCurrentUnit,field=unit?.fields.find(field=>field.id===completion?.fieldId);
+                if(!this.ctCompletionValid(field))return;
+                if(this.ctTool==='dictionary' && item?.dictEntryId)this.ctRevealDictionaryEntry(item.dictEntryId);
+                this.$nextTick?.(()=>{
+                    if(this.ctCompletion!==completion || this.ctCurrentUnit!==unit || completion.items[completion.selectedIndex]!==item || !this.ctCompletionValid(field))return;
+                    this.scrollHlPopupSelectionIntoView?.();
+                    if(this.ctTool==='dictionary')this.scrollDictionaryEntryIntoView?.(this.getHlPopupDictionaryRow?.(item));
+                });
             },
             clientTextPopupController() {
                 if(this._clientTextPopupController)return this._clientTextPopupController;
@@ -404,22 +499,22 @@
                         noteX:Math.max(0,rect.left-300),noteY:rect.bottom,noteWidth:280,noteMaxHeight:220,
                         get filter(){return host.ctCompletion?.filter || '';},set filter(value){if(host.ctCompletion)host.ctCompletion.filter=value;},
                         get items(){return host.ctCompletion?.allItems || host.ctCompletion?.items || [];},get filtered(){return host.ctCompletion?.items || [];},
-                        get selectedIndex(){return host.ctCompletion?.selectedIndex || 0;},set selectedIndex(value){if(host.ctCompletion)host.ctCompletion.selectedIndex=value;}};
+                        get selectedIndex(){return host.ctCompletion?.selectedIndex || 0;},set selectedIndex(value){if(host.ctCompletion){host.ctCompletion.selectedIndex=value;host.ctSyncCompletionSelection();}}};
                 };
                 const actions={
                     closeHlPopup:options=>{const input=host._ctCompletionInput;host.ctCloseCompletion();if(options?.refocus)input?.focus?.();},
                     applyHlPopupFilter:()=>{const completion=host.ctCompletion;if(!completion)return;const query=(completion.filter || '').toLowerCase();
-                        completion.items=(completion.allItems || completion.items).filter(item=>!query || (item.label+' '+item.value).toLowerCase().includes(query));completion.selectedIndex=0;},
+                        completion.items=(completion.allItems || completion.items).filter(item=>!query || (item.label+' '+item.value).toLowerCase().includes(query));completion.selectedIndex=0;host.ctSyncCompletionSelection();},
                     insertHlPopupItem:item=>field() && host.ctApplyCompletion(field(),item),
                     hlPopupFilterKeydown:event=>{
                         if(event.isComposing || event.keyCode===229)return;
                         if(event.key==='Escape'){event.preventDefault();event.stopPropagation?.();actions.closeHlPopup({refocus:true});return;}
                         const completion=host.ctCompletion;if(!completion)return;
-                        if(['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const count=completion.items.length;if(count)completion.selectedIndex=(completion.selectedIndex+(event.key==='ArrowDown'?1:-1)+count)%count;}
+                        if(['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const count=completion.items.length;if(count)completion.selectedIndex=(completion.selectedIndex+(event.key==='ArrowDown'?1:-1)+count)%count;host.ctSyncCompletionSelection();}
                         else if(event.key==='Enter'){event.preventDefault();const item=completion.items[completion.selectedIndex];
-                            if(event.ctrlKey && item){host.ctOpenHighlightDictionary(field(),{value:item.value,identity:/^\[([^\]|]+)/.exec(item.value)?.[1],kind:'keyword',dictId:item.dictEntryId});actions.closeHlPopup();}
-                            else if(item)actions.insertHlPopupItem(item);}
-                    },hlPopupCtrlEnterPillText:item=>item.dictEntryId?'Ctrl+Enter · Dictionary':/^\[/.test(item.value)?'Ctrl+Enter · Add Dictionary':'',
+                            if(event.ctrlKey)host.ctEditCompletionDictionary(field(),item);
+                            else if(item)host.ctCompletionEnter(field(),item);}
+                    },hlPopupCtrlEnterPillText:item=>host.hlPopupCtrlEnterPillText?.(item) ?? (!item?.kwTagName ? '' : item.mustCreate ? item.dictEntryId?'Ctrl+Enter Add alt':'Ctrl+Enter Add':'Ctrl+Enter Edit'),
                 };
                 this._clientTextPopupController=new Proxy(base,{get(target,name){if(name==='hlPopup')return popup();if(name==='hlPopupTlnote')return host.ctCompletion?.items[host.ctCompletion.selectedIndex]?.tlnote || '';
                     return name in actions ? actions[name]:target[name];},ownKeys:()=>[...new Set([...Reflect.ownKeys(base),...names])],getOwnPropertyDescriptor:()=>({enumerable:true,configurable:true})});
@@ -674,7 +769,7 @@
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
-                this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this.ctInlineClosed=false;
+                this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
                 this.ctVariantSelections={};this.ctDefaultsExpanded={};
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
@@ -1200,10 +1295,14 @@
                     event.preventDefault();event.stopPropagation?.();
                     const completion=this.ctCompletion,count=completion.items.length;
                     completion.selectedIndex=(completion.selectedIndex+(event.key==='ArrowDown'?1:-1)+count)%count;
-                    this.$nextTick?.(()=>this._ctCompletionInput?.closest?.('.ctTarget')?.querySelector?.('[role="option"][aria-selected="true"]')?.scrollIntoView?.({block:'nearest'}));return;
+                    this.ctSyncCompletionSelection();return;
+                }
+                if(this.ctCompletion && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key==='Enter'){
+                    event.preventDefault();event.stopPropagation?.();this.ctEditCompletionDictionary(field,this.ctCompletion.items[this.ctCompletion.selectedIndex],event.target);return;
                 }
                 if(this.ctCompletion && plain && ['Tab','Enter'].includes(event.key)){
-                    event.preventDefault();event.stopPropagation?.();this.ctApplyCompletion(field,this.ctCompletion.items[this.ctCompletion.selectedIndex],event.target);return;
+                    event.preventDefault();event.stopPropagation?.();const item=this.ctCompletion.items[this.ctCompletion.selectedIndex];
+                    if(event.key==='Enter')this.ctCompletionEnter(field,item,event.target);else this.ctApplyCompletion(field,item,event.target);return;
                 }
                 if(this.ctCompletion && (event.key==='Tab' || event.key==='Enter' || ['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)))this.ctCloseCompletion();
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id);
@@ -1247,42 +1346,54 @@
                 return !!(completion && completion.items?.length && this.ctActive && !this.ctBusy && !this.ctHistoryViewer
                     && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting && !this.$refs?.ctDiagnosticDialog?.open
                     && completion.fieldId===field?.id && completion.unitId===this.ctSelection && this.ctCurrent(completion.context)
+                    && unproxy(completion.unit)===unproxy(this.ctCurrentUnit) && unproxy(completion.field)===unproxy(current)
                     && current && current.kind!=='gender' && current.source===completion.source
                     && (!this.ctFocusedField || this.ctFocusedField===field.id) && this.ctValues[field.id]===completion.text
-                    && input && input.isConnected!==false && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
+                    && input && input.isConnected!==false && !input.composing && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
                     && (typeof input.value!=='string' || input.value===completion.text.replace(/\r\n?/g,'\n')));
             },
             ctCompletionSelectionChanged(field,event) {
                 if(this.ctCompletion && !this.ctCompletionValid(field,event.target))this.ctCloseCompletion();
             },
             ctCompletionItems(field,openedByChar='',prefix='') {
-                const tokens=root.ClientTextState.suggestions(field,{openedByChar}),items=[],seen=new Set();
-                const add=item=>{if(!seen.has(item.value)){seen.add(item.value);items.push(item);}};
+                const tokens=root.ClientTextState.suggestions(field,{openedByChar}),sourceTokens=root.ClientTextState.tokenize(field.source),items=[],seen=new Map();
+                const add=item=>{const identity=item.dictionaryKey ? item.dictionaryKey+':'+item.value : item.value,existing=seen.get(identity);if(existing){
+                    for(const range of item.sourceRanges || [])if(!existing.sourceRanges.some(value=>value.start===range.start && value.end===range.end))existing.sourceRanges.push(range);
+                    if(item.exactFromContext && !existing.exactFromContext)Object.assign(existing,{exact:true,exactMatch:true,exactFromContext:true,isAlt:false,kwDynamicContent:item.kwDynamicContent});
+                }else{seen.set(identity,item);items.push(item);}};
                 const entries=this.getActiveDictionaryEntries?.() || this.dictionary || [];
                 for(const token of tokens){
+                    const sourceRanges=sourceTokens.filter(source=>source.full===token.value || source.kind==='variable' && openedByChar==='{' && source.full.slice(source.prefix.length)===token.value)
+                        .map(source=>({start:source.start,end:source.end}));
+                    const base={...token,sourceRanges};
                     const keyword=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(token.value);
                     if(keyword){
-                        const identity=keyword[1],lookup=(root.getKeywordPopupLookupName?.(identity) || identity.replace(/<gemlevel=(?:\d+|\{\d+\})>$/i,'')).trim().toLocaleLowerCase();
-                        const candidates=[];
+                        const identity=keyword[1],name=this.ctDictionaryKeywordName(identity),lookup=name.toLocaleLowerCase(),dynamic=keyword[2] || '',sourceFind=(dynamic || name).trim().toLocaleLowerCase();
+                        const candidates=[];let associated;
                         for(const entry of entries){
                             if(String(entry?.find ?? '').trim().toLocaleLowerCase()!==lookup || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(entry))continue;
-                            const pairs=this.getDictionaryDefinitionPairs?.(entry) || [{find:entry.find,replace:entry.replace},...(entry.alts || []).map(alt=>({...alt,replace:alt.replace ?? entry.replace}))];
+                            associated ||= entry;const pairs=this.ctDictionaryPairs(entry);
                             for(const pair of pairs){
                                 const display=pair.replace;if(typeof display!=='string' || !display.trim() || /[\[\]]/.test(display))continue;
+                                const exact=String(pair.find ?? '').trim().toLocaleLowerCase()===sourceFind;
                                 candidates.push({value:'['+identity+'|'+display+']',label:'['+identity+'|'+String(pair.find ?? '')+'] → ['+identity+'|'+display+']',dictEntryId:entry._id,tlnote:entry.tlnote || '',
-                                    dictionaryKey:JSON.stringify([entry._id || entry.id || entry.find,pair._id || '',pair.find,display]),
-                                    exact:String(pair.find ?? '').trim().toLocaleLowerCase()===String(keyword[2] || identity).trim().toLocaleLowerCase()});
+                                    dictionaryKey:JSON.stringify([entry._id || entry.id || entry.find,pair._id || '',pair.find,display]),dictAltId:pair._id || '',
+                                    exact,exactMatch:exact,exactFromContext:exact,isAlt:!exact,kwTagName:identity,kwDynamicContent:dynamic.includes('<')?'':dynamic,sourceRanges:sourceRanges.map(range=>({...range}))});
                             }
                         }
+                        if(!candidates.some(item=>item.exactFromContext))add({...base,mustCreate:true,exactMatch:true,exactFromContext:true,
+                            kwTagName:identity,kwDynamicContent:dynamic.includes('<')?'':dynamic,dictEntryId:associated?._id || '',
+                            label:token.value+' → '+(associated?'create a new alternative...':'create a new dictionary entry...')});
                         candidates.sort((a,b)=>Number(b.exact)-Number(a.exact));for(const item of candidates)add(item);
+                        continue;
                     }
-                    add(token);
+                    add(base);
                 }
                 const query=prefix.toLocaleLowerCase();
                 return items.filter(item=>!query || item.value.toLocaleLowerCase().startsWith(query) || item.label.toLocaleLowerCase().startsWith(query)).slice(0,100);
             },
             ctSuggest(field,event,options={}) {
-                this.ctCloseCompletion();
+                this.ctCloseCompletion();this._ctDictionaryReturn=null;
                 if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=this.ctValues[field.id];
                 const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
@@ -1298,12 +1409,15 @@
                 else return false;
                 if(!items.length)return false;
                 this._ctCompletionInput=input;
-                this.ctCompletion={fieldId:field.id,unitId:this.ctSelection,context:this.ctContext(),source:current.source,text,
-                    selectionStart:caret,selectionEnd,start,end,items,allItems:items.slice(),filter:'',selectedIndex:0};return true;
+                this.ctCompletion={fieldId:field.id,unitId:this.ctSelection,unit:this.ctCurrentUnit,field:current,context:this.ctContext(),source:current.source,text,
+                    selectionStart:caret,selectionEnd,start,end,items,allItems:items.slice(),filter:'',selectedIndex:0};this.ctSyncCompletionSelection();return true;
             },
             ctApplyCompletion(field,item,input) {
                 const completion=this.ctCompletion,target=input || this._ctCompletionInput;
+                const entry=item?.dictEntryId ? (this.getDictionaryEntryById ? this.getDictionaryEntryById(item.dictEntryId)
+                    : (this.dictionary || []).find(word=>String(word._id)===String(item.dictEntryId))) : null;
                 if(!this.ctCompletionValid(field,target) || !completion.items.includes(item)
+                    || item.dictEntryId && (!entry || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(entry))
                     || item.replaceWholeField && (field.kind!=='form' || completion.start!==0 || completion.end!==completion.text.length)
                     || item.dictionaryKey && !(completion.allItems || completion.items).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
                     this.ctCloseCompletion();return false;

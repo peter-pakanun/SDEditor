@@ -125,11 +125,12 @@ async function run() {
             const geometry = await page.locator('.ctFormGrid').evaluate(element => {
                 const rect = node => {const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
                 const unobscured = cell => {const r=cell.getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest('.ctFormGrid')===element;};
+                const inViewport = cell => {const r=cell.getBoundingClientRect();return r.top+r.height/2>=0 && r.top+r.height/2<innerHeight;};
                 return {table:rect(element),full:!!element.closest('.ctFullEditor'),headers:[...element.tHead.rows[0].cells].map(cell=>({
-                    ...rect(cell),text:cell.textContent.trim(),align:getComputedStyle(cell).textAlign,unobscured:unobscured(cell)})),
+                    ...rect(cell),text:cell.textContent.trim(),align:getComputedStyle(cell).textAlign,unobscured:unobscured(cell),inViewport:inViewport(cell)})),
                     rows:[...element.tBodies[0].rows].map(row=>[...row.cells].map(cell=>({
                         ...rect(cell),text:cell.tagName==='TH'?cell.textContent.trim():undefined,
-                        verticalAlign:getComputedStyle(cell).verticalAlign,unobscured:unobscured(cell),
+                        verticalAlign:getComputedStyle(cell).verticalAlign,unobscured:unobscured(cell),inViewport:inViewport(cell),
                         field:cell.querySelector('textarea')?rect(cell.querySelector('textarea')):null
                     }))) };
             });
@@ -143,8 +144,8 @@ async function run() {
             }
             for(const header of geometry.headers) assert.equal(header.align,'center',name+': headings centered');
             if(geometry.full) {
-                for(const header of geometry.headers) assert.ok(header.unobscured,name+': full form header is visible');
-                for(const row of geometry.rows) assert.ok(row[0].unobscured,name+': full M/F/N label is visible');
+                for(const header of geometry.headers) if(header.inViewport)assert.ok(header.unobscured,name+': full form header is visible');
+                for(const row of geometry.rows) if(row[0].inViewport)assert.ok(row[0].unobscured,name+': full M/F/N label is visible');
             }
             results.push({name,formWidth:Math.round(geometry.headers[0].width),columnWidth:Math.round(geometry.headers[1].width)});
         };
@@ -167,13 +168,14 @@ async function run() {
                 return {source:rect(element),target:rect(target),highlights:document.querySelectorAll('.ctFields .HLter').length};
             });
             if(full){
-                assert.ok(geometry.source.bottom<=geometry.target.top,name+': English source stacks above translation as in SD full editor');
-                assert.ok(Math.abs(geometry.source.left-geometry.target.left)<1 && Math.abs(geometry.source.right-geometry.target.right)<1,name+': source and translation share block width');
+                assert.ok(geometry.source.right<=geometry.target.left,name+': English stays left of translation in the full editor');
+                assert.ok(Math.abs(geometry.source.width-geometry.target.width)<1,name+': English and translation get equal column widths');
+                assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': English and translation are top-aligned');
             }else assert.ok(geometry.source.right<=geometry.target.left,name+': inline English and translation retain separate table columns');
             assert.equal(geometry.highlights,7,name+': source and all six form targets use shared highlight overlays');
             results.push({name:name+' native field layout',sourceWidth:Math.round(geometry.source.width),targetWidth:Math.round(geometry.target.width)});
         };
-        for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100]) {
+        for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100,1000]) {
             await page.setViewportSize({width,height:900});
             await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);window.__ctLayoutFixture.ctEditor=false;},theme);
             await settle();
@@ -195,6 +197,20 @@ async function run() {
             assert.equal(await page.locator('.ctFullEditor').count(),1,theme+'/'+width+': full editor template mounted');
             await checkGrid(theme+'/'+width+' full');
             await checkFieldLayout(true,theme+'/'+width+' full');
+            const lastFormLabel=page.locator('.ctFullEditor .ctFormGrid tbody tr:last-child > th');
+            await lastFormLabel.scrollIntoViewIfNeeded();
+            assert.equal(await lastFormLabel.evaluate(element=>{const r=element.getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===element;}),true,theme+'/'+width+': last full form label remains reachable by scrolling');
+            await page.evaluate(()=>window.scrollTo(0,0));await settle();
+            const actions=await page.locator('.ctEditorActionButtons').evaluate(element=>({
+                right:element.getBoundingClientRect().right,headerRight:element.closest('.editorActions').getBoundingClientRect().right,
+                buttons:[...element.children].map(button=>{const rect=button.getBoundingClientRect();return {text:button.textContent.trim(),left:rect.left,right:rect.right,top:rect.top};})
+            }));
+            assert.deepEqual(actions.buttons.map(button=>button.text),['Save','Save & close','Discard draft','Close']);
+            assert.ok(actions.right<=actions.headerRight+1,theme+'/'+width+': grouped actions fit the editor header');
+            for(let index=1;index<actions.buttons.length;index++){
+                const before=actions.buttons[index-1],after=actions.buttons[index];
+                if(Math.abs(before.top-after.top)<1)assert.ok(after.left-before.right>=0 && after.left-before.right<12,theme+'/'+width+': action buttons remain adjacent');
+            }
             const gutter=await page.locator('.ctFullEditor > .edit').evaluate(element=>{
                 const probe=document.createElement('div');probe.className='editor';probe.style.cssText='position:absolute;left:-10000px;visibility:hidden';
                 const edit=document.createElement('div');edit.className='edit';probe.append(edit);element.closest('[data-density]').append(probe);

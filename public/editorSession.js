@@ -107,6 +107,10 @@
         else output.push({start:hl.rawStart,end:hl.rawEnd,value:text.slice(hl.rawStart,hl.rawEnd),replace:hl.replace,
           dictId:hl.dictId,dictDefFind:hl.dictDefFind,className:'vocab'});
       }
+      const completion=host.ctCompletion,selected=completion?.items?.[completion.selectedIndex];
+      if(completion?.fieldId===field.id && completion.source===text && host.ctCompletionValid?.(field)){
+        for(const range of output)if(selected?.sourceRanges?.some(item=>range.start<=item.start && range.end>=item.end))range.className+=' hlPopupActive';
+      }
     }
     return output.sort((a,b)=>a.start-b.start || b.end-a.end).reduce((all,range)=>{if(!all.length || range.start>=all[all.length-1].end)all.push(range);return all;},[]);
   }

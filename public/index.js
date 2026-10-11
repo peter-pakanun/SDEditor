@@ -4453,14 +4453,14 @@ const config = Vue.defineComponent({
       dynamicContent = dynamicContent.trim();
       return { tagName, dynamicContent };
     },
-    ensureDictionaryKeywordTag(tagName, altFind = "", replaceText = "") {
+    ensureDictionaryKeywordTag(tagName, altFind = "", replaceText = "", presentation = this) {
       let tn = getKeywordPopupLookupName(tagName);
       if (!tn) return { dictId: "", created: false, addedAlt: false };
       let alt = String(altFind ?? "").trim();
       let replace = String(replaceText ?? "");
 
-      this.sideTab = "dictionary";
-      this.dictionaryFilter = "";
+      presentation.sideTab = "dictionary";
+      presentation.dictionaryFilter = "";
 
       let existing = this.findDictionaryKeywordCreationEntry(tn);
       if (existing) {
@@ -4480,9 +4480,9 @@ const config = Vue.defineComponent({
         this._dictFlashTimer = setTimeout(() => {
           if (this.dictionaryFlashId === existing._id) this.dictionaryFlashId = '';
         }, 320);
-        this.syncEditorHlterWithDictionaryNow(existing._id);
-        if (focusAltId) this.focusDictionaryEntryReplaceInput(existing._id, { altId: focusAltId });
-        else this.focusDictionaryEntryReplaceInput(existing._id);
+        presentation.syncEditorHlterWithDictionaryNow(existing._id);
+        if (focusAltId) presentation.focusDictionaryEntryReplaceInput(existing._id, { altId: focusAltId });
+        else presentation.focusDictionaryEntryReplaceInput(existing._id);
         return { dictId: existing._id || "", created: false, addedAlt };
       }
 
@@ -4495,15 +4495,15 @@ const config = Vue.defineComponent({
       });
       this.dictionary.unshift(entry);
       this.invalidateEditorDictionaryIndex(entry._id, { membership: true });
-      this.beginDictionaryEdit(entry._id, { newEntry: true });
+      presentation.beginDictionaryEdit(entry._id, { newEntry: true });
       this.dictionaryFlashId = entry._id;
       if (this._dictFlashTimer) clearTimeout(this._dictFlashTimer);
       this._dictFlashTimer = setTimeout(() => {
         if (this.dictionaryFlashId === entry._id) this.dictionaryFlashId = '';
       }, 320);
-      this.syncEditorHlterWithDictionaryNow(entry._id);
-      if (createdAltId) this.focusDictionaryEntryReplaceInput(entry._id, { altId: createdAltId });
-      else this.focusDictionaryEntryReplaceInput(entry._id);
+      presentation.syncEditorHlterWithDictionaryNow(entry._id);
+      if (createdAltId) presentation.focusDictionaryEntryReplaceInput(entry._id, { altId: createdAltId });
+      else presentation.focusDictionaryEntryReplaceInput(entry._id);
       return { dictId: entry._id, created: true, addedAlt: !!alt };
     },
     canCreateDictionaryEntryFromHlPopupItem(item) {

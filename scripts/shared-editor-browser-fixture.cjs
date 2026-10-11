@@ -67,10 +67,30 @@ async function run() {
     assert.equal(await sd.inputValue(), 'SD retained draft');
     assert.equal(await sd.evaluate(input => input === document.activeElement), true);
 
+    const dictionaryGeometry = async () => page.locator('.dictionaryEntries .editBlock[data-dict-id="fixture-shared"]').evaluate(element => {
+      const rect = input => { const value = input.getBoundingClientRect(); return { width: value.width, height: value.height, top: value.top }; };
+      return { main: [...element.querySelectorAll('.dictRow > input')].map(rect),
+        alternate: [...element.querySelectorAll('.dictAltRow > input')].map(rect),
+        useButtons: element.querySelectorAll('.dictUseBtn').length };
+    });
+    const sdDictionary = new Map();
+    await page.evaluate(async () => {
+      const host = window.__sharedFixtureApp;
+      host.dictionary = [{ _id: 'fixture-shared', find: 'AbyssThread', replace: 'Abgrund-Faden', game: 'all', tlnote: '',
+        alts: [{ _id: 'fixture-alternate', find: 'Abyss Threads', replace: 'Abgrund-Fäden' }] }];
+      host.dictionaryFilter = ''; await host.$nextTick();
+    });
+    await page.waitForSelector('.dictionaryEntries .editBlock[data-dict-id="fixture-shared"]');
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1440, 1100, 1000]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(theme => { document.documentElement.setAttribute('data-theme', theme); }, theme);
+      sdDictionary.set(theme + '/' + width, await dictionaryGeometry());
+    }
+
     await page.evaluate(async () => {
       const host = window.__sharedFixtureApp;
       await host.editorExit();
-      const source = '[Fire|Fire] {0} <<icon>> raw @ literal\\n';
+      const source = '[Fire] [Fire|Burning] {0} <<icon>> raw @ literal\\n';
       const field = { id: 'text-field', kind: 'text', name: 'Text', source, target: 'raw @ literal\\n\nactual',
         targetCell: 'B2', required: true, originalMissing: false, outdated: false };
       const unit = Vue.markRaw({ id: 'normal|Sheet|record', role: 'normal', sheet: 'Sheet', recordId: 'record', fields: [field], developerNotes: 'Developer note', notes: [] });
@@ -89,6 +109,96 @@ async function run() {
     const ct = page.locator('.ctFullEditor [data-ct-target="text-field"]');
     assert.equal(await ct.inputValue(), 'raw @ literal\\n\nactual');
     assert.ok(await page.locator('.ctFullEditor .HLter [data-ct-hl]').count() >= 3);
+    await page.waitForSelector('.dictionaryEntries .editBlock[data-dict-id="fixture-shared"]');
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1440, 1100, 1000]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(theme => new Promise(resolve => {
+        document.documentElement.setAttribute('data-theme', theme); requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }), theme);
+      const name = theme + '/' + width, dictionary = await dictionaryGeometry(), reference = sdDictionary.get(name);
+      assert.equal(dictionary.useButtons, 0, name + ': ClientText Dictionary keeps the SD controls');
+      for (const row of ['main', 'alternate']) {
+        assert.equal(dictionary[row].length, 2);
+        assert.ok(Math.abs(dictionary[row][0].top - dictionary[row][1].top) < 1, name + ': Dictionary inputs retain one row');
+        for (const [index, input] of dictionary[row].entries()) {
+          assert.ok(Math.abs(input.height - reference[row][index].height) < 1, name + ': Dictionary row height matches SD');
+          assert.ok(Math.abs(input.width - reference[row][index].width) < 1, name + ': Dictionary input width matches SD');
+        }
+      }
+      const layout = await page.locator('.ctFullFieldPair').evaluate(element => {
+        const rect = node => { const value = node.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, width: value.width }; };
+        const header = document.querySelector('.ctEditorActions'), actions = header.querySelector('.ctEditorActionButtons');
+        return { source: rect(element.querySelector('.ctFieldSource')), target: rect(element.querySelector('.ctFieldTranslation')),
+          pair: rect(element), editor: rect(element.closest('.edit')), actions: rect(actions), header: rect(header),
+          buttons: [...actions.children].map(rect) };
+      });
+      assert.ok(layout.source.right <= layout.target.left, name + ': full editor places English left of translation');
+      assert.ok(Math.abs(layout.source.width - layout.target.width) < 1, name + ': full field columns have equal width');
+      assert.ok(Math.abs(layout.source.top - layout.target.top) < 1, name + ': full fields are top aligned');
+      assert.ok(layout.pair.left >= layout.editor.left && layout.pair.right <= layout.editor.right, name + ': full fields remain in the edit pane');
+      assert.ok(layout.actions.right <= layout.header.right + 1, name + ': header actions fit their pane');
+      for (let index = 1; index < layout.buttons.length; index++) {
+        const before = layout.buttons[index - 1], after = layout.buttons[index];
+        if (Math.abs(before.top - after.top) < 1) assert.ok(after.left - before.right >= 0 && after.left - before.right < 12, name + ': header actions remain grouped');
+      }
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    const keywordOriginal = 'Before\r\nselected\r\nAfter', keywordInserted = 'Before\r\n[Fire|ไฟ]\r\nAfter';
+    await page.evaluate(async original => {
+      const host = window.__sharedFixtureApp; host.ctValues['text-field'] = original; await host.$nextTick();
+      const input = document.querySelector('.ctFullEditor [data-ct-target="text-field"]');
+      input.focus(); input.setSelectionRange(7, 15);
+    }, keywordOriginal);
+    await ct.press('Control+Space'); await page.waitForSelector('.hlPopupFilter');
+    await page.locator('.hlPopupFilter').fill('Fire');
+    assert.equal(await page.locator('.hlPopupItem.active.mustCreate').count(), 1, 'missing keyword uses the SD Dictionary creation action');
+    assert.ok(await page.locator('.ctFieldSource .hlPopupActive').count() > 0, 'selected keyword highlights its exact English source');
+    await page.locator('.hlPopupFilter').fill('{0}');
+    assert.match((await page.locator('.ctFieldSource .hlPopupActive').allTextContents()).join(''), /\{0\}/, 'filter selection moves the English highlight');
+    await page.locator('.hlPopupFilter').fill('Fire'); await page.locator('.hlPopupFilter').press('Enter');
+    await page.waitForFunction(() => document.activeElement?.placeholder === 'Replace');
+    assert.equal(await page.evaluate(() => window.__sharedFixtureApp.ctValues['text-field']), keywordOriginal, 'creating a missing Dictionary entry retains the captured translation');
+    const fireId = await page.evaluate(() => window.__sharedFixtureApp.dictionary.find(word => word.find === 'Fire')._id);
+    const fireReplace = page.locator('.dictRow[data-dict-id="' + fireId + '"] input[placeholder="Replace"]');
+    assert.equal(await fireReplace.evaluate(input => input === document.activeElement), true);
+    await fireReplace.fill('ไฟ'); await fireReplace.press('Enter');
+    assert.equal(await ct.inputValue(), keywordInserted.replace(/\r\n/g, '\n'));
+    assert.equal(await page.evaluate(() => window.__sharedFixtureApp.ctValues['text-field']), keywordInserted, 'Replace Enter inserts at the captured selection and retains raw CRLF');
+    assert.equal(await ct.evaluate(input => input === document.activeElement), true);
+    await ct.press('Control+z');
+    assert.equal(await page.evaluate(() => window.__sharedFixtureApp.ctValues['text-field']), keywordOriginal, 'Dictionary return insertion retains native Undo and exact raw CRLF');
+    await ct.press('Control+y');
+    assert.equal(await page.evaluate(() => window.__sharedFixtureApp.ctValues['text-field']), keywordInserted, 'Dictionary return insertion retains native Redo');
+    await ct.fill('Existing '); await ct.focus(); await ct.press('Control+Space');
+    await page.waitForSelector('.hlPopupFilter'); await page.locator('.hlPopupFilter').fill('Fire');
+    assert.equal(await page.locator('.hlPopupItem.active.mustCreate').count(), 0);
+    assert.equal(await page.locator('.dictRow[data-dict-id="' + fireId + '"].hlPopupDictActive').count(), 1, 'selected exact replacement highlights its Dictionary row');
+    await page.locator('.hlPopupFilter').press('Enter');
+    assert.equal(await ct.inputValue(), 'Existing [Fire|ไฟ]', 'Enter inserts an existing exact pair directly');
+    assert.equal(await ct.evaluate(input => input === document.activeElement), true);
+    await ct.fill('Edit '); await ct.focus(); await ct.press('Control+Space');
+    await page.waitForSelector('.hlPopupFilter'); await page.locator('.hlPopupFilter').fill('Fire');
+    await page.locator('.hlPopupFilter').press('Control+Enter');
+    await page.waitForFunction(() => document.activeElement?.placeholder === 'Replace');
+    assert.equal(await fireReplace.evaluate(input => input === document.activeElement), true, 'Ctrl+Enter opens the existing Dictionary replacement');
+    await fireReplace.fill('ไฟใหม่'); await fireReplace.press('Enter');
+    assert.equal(await ct.inputValue(), 'Edit [Fire|ไฟใหม่]', 'Replace Enter returns to the captured existing-entry caret');
+    assert.equal(await ct.evaluate(input => input === document.activeElement), true);
+    await ct.fill('Alternate '); await ct.focus(); await ct.press('Control+Space');
+    await page.waitForSelector('.hlPopupFilter'); await page.locator('.hlPopupFilter').fill('Burning');
+    assert.equal(await page.locator('.hlPopupItem.active.mustCreate').count(), 1, 'missing keyword alternatives use the Dictionary creation action');
+    await page.locator('.hlPopupFilter').press('Enter');
+    await page.waitForFunction(() => document.activeElement?.closest('.dictAltRow'));
+    const fireAltId = await page.evaluate(() => window.__sharedFixtureApp.dictionary.find(word => word.find === 'Fire').alts.find(alt => alt.find === 'Burning')._id);
+    const fireAltReplace = page.locator('.dictAltRow[data-dict-alt-id="' + fireAltId + '"] input[placeholder="Replace"]');
+    assert.equal(await fireAltReplace.evaluate(input => input === document.activeElement), true);
+    await fireAltReplace.fill('ไฟแรง'); await fireAltReplace.press('Enter');
+    assert.equal(await ct.inputValue(), 'Alternate [Fire|ไฟแรง]', 'alternate Replace Enter returns to the captured caret');
+    await ct.press('Control+Space'); await page.waitForSelector('.hlPopupFilter'); await page.locator('.hlPopupFilter').fill('Burning');
+    assert.equal(await page.locator('.dictAltRow[data-dict-alt-id="' + fireAltId + '"].hlPopupDictActive').count(), 1, 'selected alternate highlights its exact Dictionary row');
+    await page.locator('.hlPopupFilter').press('Escape');
+    console.log('ClientText missing and existing Dictionary actions, source/row highlights, caret return and native Undo/Redo passed.');
     await ct.fill('kept raw @ literal\\n\ntranslation');
     assert.equal(await page.evaluate(() => window.__sharedFixtureApp.ctValues['text-field']), 'kept raw @ literal\\n\ntranslation');
     await ct.focus(); await ct.press('Control+Space');
@@ -149,6 +259,7 @@ async function run() {
     assert.equal(await page.locator('#ctFullEditorSidebarHost .sharedEditorSidebar').count(), 1);
     assert.equal(await page.evaluate(() => document.querySelector('.sharedEditorSidebar') === window.__fixtureToolsNode), true);
     assert.equal(await page.locator('.ctFullEditor [data-ct-target="text-field"]').inputValue(), 'kept raw @ literal\\n\ntranslation');
+    await page.evaluate(async () => { const host = window.__sharedFixtureApp; host.ctTool = 'dictionary'; host.ctDictionaryFilter = ''; await host.$nextTick(); });
     const screenshot = join(tmpdir(), 'sdeditor-shared-components-clienttext.png');
     await page.screenshot({ path: screenshot }); console.log('Desktop screenshot: ' + screenshot);
     assert.deepEqual(failures, []);
@@ -158,10 +269,16 @@ async function run() {
     if (page && !page.isClosed()) console.error('Editor state:', await page.evaluate(() => {
       const host = window.__sharedFixtureApp;
       return { editorVisible: host?.editorVisible, editorReady: host?.editorReady, editorLoadError: host?.editorLoadError,
+        dictionaryWorkerError: host?.dictionaryWorkerError, cloudStorageError: host?.cloudStorageError,
         descs: host?.descs?.length, fields: [...document.querySelectorAll('[data-editor-ref]')].map(field => field.dataset.editorRef),
         sidebar: !!document.querySelector('.sharedEditorSidebar'), ctActive: host?.ctActive, ctEditor: host?.ctEditor,
         inlineEditor: host?.inlineEditor, ctInlineClosed: host?.ctInlineClosed, ctSelection: host?.ctSelection,
-        ctRows: host?.ctPageRows?.map(unit => unit.id), ctTargets: [...document.querySelectorAll('[data-ct-target]')].map(input => input.dataset.ctTarget) };
+        ctRows: host?.ctPageRows?.map(unit => unit.id), ctCompletion: host?.ctCompletion,
+        ctKeyboardBlocked: host?.ctKeyboardBlocked?.(), ctFocusedField: host?.ctFocusedField,
+        ctTargets: [...document.querySelectorAll('[data-ct-target]')].map(input => ({id:input.dataset.ctTarget,value:input.value,readonly:input.readOnly,
+          selection:[input.selectionStart,input.selectionEnd],active:input===document.activeElement,
+          fieldSource:host?.ctCurrentUnit?.fields.find(field=>field.id===input.dataset.ctTarget)?.source,
+          keyboardTarget:host?.ctKeyboardTarget?.(host?.ctCurrentUnit?.fields.find(field=>field.id===input.dataset.ctTarget),input)})) };
     }));
     throw error;
   } finally {

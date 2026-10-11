@@ -18,6 +18,8 @@
 .statusPill.outdated .statusDot,.filterChip.outdated { --filter-color:var(--ui-dropped); color:var(--ui-dropped); }
 .filterChip.outdated.selected { border-color:var(--ui-dropped); background:color-mix(in srgb,var(--ui-dropped) 10%,var(--color-element)); }
 .ctFullEditor.clipboardHidden { --clipboard-height:0px; }
+.ctEditorActions > h1 { flex:1; min-width:0; }
+.ctEditorActions > .ctEditorActionButtons { display:flex; flex:0 0 auto; flex-wrap:wrap; align-items:center; gap:calc(0.5em * var(--density)); max-width:100%; }
 .ctEditorNavigation { display:flex; align-items:center; gap:12px; margin:12px 0; }.ctEditorNavigation strong { flex:1; overflow-wrap:anywhere; }
 .ctFields pre,.ctTools pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; tab-size:4; }.ctBlock h3 { margin:0 0 6px; font-size:12px; color:var(--ui-muted); }
 .ctFields[data-side] .ctBlock { padding:0; margin:0 0 6px; background:transparent; }.ctFields[data-side] .ctBlock:last-child { margin-bottom:0; }
@@ -26,7 +28,7 @@
 .inlineEditorMode :is(#table,.fileTable).ctTable .ctFields .editorTextField > textarea { min-height:calc(40px * var(--density)); }
 .ctTable .ctReadPreview { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
 .ctFieldPair > * { min-width:0; }
-.ctFullFieldPair { display:flex; flex-direction:column; gap:12px; align-items:stretch; }
+.ctFullFieldPair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
 .ctFields .ctSourceBlock { display:block; }
 .ctFields .ctSourceLabel { display:block; font-size:12px; line-height:1.4; margin:0 0 4px; }
 .ctFields .ctTarget > label:not(.srOnly) { line-height:1.4; }

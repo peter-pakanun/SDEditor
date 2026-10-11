@@ -139,17 +139,20 @@
   const DictionaryEntries = {
     name: 'EditorDictionaryEntries',
     props: { controller: { type: Object, required: true } },
-    computed: { ready() { return this.controller.dictionaryReady ?? this.controller.editorReady; } },
+    computed: {
+      ready() { return this.controller.dictionaryReady ?? this.controller.editorReady; },
+      useButtons() { return this.controller.dictionaryUseButtons === true && typeof this.controller.useDictionaryTranslation === 'function'; },
+    },
     template: `
       <div class="dictionaryEntries" :inert="!ready || undefined">
         <div class="editBlock" v-for="word in controller.visibleDictionary" :key="word._id" :data-dict-id="word._id" :class="{ dictFound: controller.isDictionaryEntryFound(word), dictNew: word._id === controller.dictionaryFlashId }" @focusin="controller.dictionaryEntryFocusIn" @focusout="controller.dictionaryEntryFocusOut">
           <div class="twoSided dictEntryBlock">
             <div>
-              <div class="dictRow" :data-dict-id="word._id">
+              <div class="dictRow" :data-dict-id="word._id" :class="{ hlPopupDictActive: controller.isDictionaryPopupSelected?.(word) }">
                 <input type="text" v-model="word.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryEntryFindMatched(word) }">
                 <input type="text" v-model="word.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter($event,word)">
               </div>
-              <button v-if="controller.useDictionaryTranslation" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word)" :disabled="!controller.dictionaryCanUse" title="Insert into the focused translation · Ctrl+Enter from Replace">Use translation</button>
+              <button v-if="useButtons" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word)" :disabled="!controller.dictionaryCanUse" title="Insert into the focused translation · Ctrl+Enter from Replace">Use translation</button>
               <div class="dictAltHeader">
                 <span>Alternates</span>
                 <select class="dictScopeSelect" :value="controller.dictionaryEntryScope(word)" @change="controller.setDictionaryEntryScope(word, $event.target.value)" :aria-label="'Game for ' + (word.find || 'this Dictionary entry')" title="Dictionary entry game">
@@ -159,10 +162,10 @@
                 <button type="button" class="dictHistoryBtn" @click="controller.cloudOpenHistory(word._id)" :disabled="!controller.cloudEntryHistoryAvailable" :aria-label="'View shared history for ' + (word.find || 'this dictionary entry')" :title="controller.cloudEntryHistoryHint"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
                 <button type="button" @click="controller.addDictionaryAltRow(word)" title="Add an alternate translation" :aria-label="'Add an alternate for ' + (word.find || 'this Dictionary entry')">➕</button>
               </div>
-              <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id">
+              <div class="dictAltRow" v-for="alt in (word.alts || [])" :key="alt._id" :data-dict-id="word._id" :data-dict-alt-id="alt._id" :class="{ hlPopupDictActive: controller.isDictionaryPopupSelected?.(word,alt) }">
                 <input type="text" v-model="alt.find" @input="controller.dictionaryEntryInput(word)" placeholder="Find" lang="en" :class="{ dictExactMatchFind: controller.isDictionaryAltFindMatched(word, alt) }">
                 <input type="text" v-model="alt.replace" @input="controller.dictionaryEntryInput(word)" placeholder="Replace" :lang="controller.translationEditorBcp47" @keydown.enter="controller.onDictionaryReplaceEnter($event,word,alt)">
-                <button v-if="controller.useDictionaryTranslation" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word,alt)" :disabled="!controller.dictionaryCanUse" title="Insert alternate into the focused translation · Ctrl+Enter from Replace">Use translation</button>
+                <button v-if="useButtons" type="button" class="dictUseBtn" @click="controller.useDictionaryTranslation(word,alt)" :disabled="!controller.dictionaryCanUse" title="Insert alternate into the focused translation · Ctrl+Enter from Replace">Use translation</button>
                 <button type="button" @click="controller.removeDictionaryAltRow(word, alt)" title="Remove this alternate" :aria-label="'Remove alternate ' + (alt.find || alt.replace || 'translation')">🗑️</button>
               </div>
               <details class="dictTlnote">

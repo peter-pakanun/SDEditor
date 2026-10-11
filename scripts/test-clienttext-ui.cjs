@@ -656,23 +656,350 @@ test('failed or late inline boundary saves cannot select a different ID or steal
 });
 function completionHarness(source,text='',kind='text',changes={}){
     const h=listHarness({inlineEditor:true,$nextTick:fn=>{fn?.();return Promise.resolve();},...changes}),field=h.original.fields[0];
+    for(const name of ['ctDictionaryMatches','ctDictionaryReady','ctDictionaryScopeKey','ctDictionaryMatchedDefinitions','ctDictionaryFiltered',
+        'ctDictionaryPageSize','ctDictionaryPageCount','ctDictionaryVisible','ctDictionaryRangeLabel','ctDictionaryController'])
+        Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
     field.source=source;field.kind=kind;h.app.ctValues[field.id]=text;h.app.ctFocusedField=field.id;
     let edits=0;h.app.ctEdited=()=>edits++;
     const input={value:text,selectionStart:text.length,selectionEnd:text.length,isConnected:true,dataset:{ctTarget:field.id},tagName:'TEXTAREA',
         focus(){this.focused=true;},setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;},
+        setRangeText(value,start,end){this.value=this.value.slice(0,start)+value+this.value.slice(end);this.setSelectionRange(start+value.length,start+value.length);},
         closest(selector){return selector==='tr[data-unit-id]'?{dataset:{unitId:h.original.id}}:null;}};
     h.app.$refs.ctEditorRegion={contains:target=>target===input,querySelectorAll:selector=>selector==='[data-ct-target]'?[input]:[]};
     const event=(key,modifiers={})=>({...rowEvent(key),target:input,...modifiers});
     return {...h,field,input,event,edits:()=>edits};
 }
+
+function activeSourceText(controller){
+    return Array.from(controller.highlight.matchAll(/<span\b(?=[^>]*class="[^"]*\bhlPopupActive\b)[^>]*>([\s\S]*?)<\/span>/g),match=>match[1]);
+}
+
+function completionDictionaryHarness(source,text='[',dictionary=[],options={}){
+    const callbacks=[],h=completionHarness(source,text,'text',{dictionary,dictionaryDefaultGameScope:'poe2',...options,$nextTick:fn=>{if(fn)callbacks.push(fn);return Promise.resolve();}}),{app,window,input}=h;
+    window.DictionaryScope=require('../public/dictionaryScope.js');
+    const code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8'),section=(first,last)=>{
+        const start=code.indexOf('    '+first),end=code.indexOf('    '+last,start);assert.ok(start>=0 && end>start);return code.slice(start,end);};
+    const context=vm.createContext({window,Vue:window.Vue,setTimeout,clearTimeout});
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);
+    const shared=vm.runInContext('({'+[
+        section('getDictionaryDefinitionPairs(entry)','addDictionaryAltRow(word)'),section('addDictionaryAltPair(word','computeTextStats(text)'),
+        section('createDictionaryEntry(fields','setDictionaryEntryScope(word'),section('ensureDictionaryKeywordTag(tagName','canCreateDictionaryEntryFromHlPopupItem(item)'),
+        section('getDictionaryEntryById(dictId)','createDictionaryEntry(fields'),section('getActiveDictionaryEntries()','getPreparedEditorDictionaryIndex()'),
+        section('findActiveDictionaryKeywordEntry(tagName)','isDictionaryHighlightActive(highlight)'),
+        section('getDictionaryAssistanceEntry(dictId','resetDictionaryAssistanceScope()'),
+    ].join('\n')+'})',context);
+    for(const [name,method]of Object.entries(shared))if(name!=='getDictionaryAssistanceEntry')app[name]=method.bind(app);
+    window.getKeywordPopupLookupName=vm.runInContext('getKeywordPopupLookupName',context);
+    const scopeView=vm.runInContext('({'+section('dictionaryScopeView()','editorConsistencyDiagnostics()')+'})',context);
+    for(const [name,compute]of Object.entries(scopeView))Object.defineProperty(app,name,{get:()=>compute.call(app)});
+    const changes=[],focuses=[],body={};window.document={body,documentElement:{},activeElement:input};
+    app.dictionaryEntryInput=word=>changes.push({kind:'input',id:word._id});app.markDictionarySnapshotDirty=id=>changes.push({kind:'dirty',id});
+    app.invalidateEditorDictionaryIndex=(id,options)=>changes.push({kind:'invalidate',id,options});app.syncEditorHlterWithDictionaryNow=id=>changes.push({kind:'matches',id});
+    app.beginDictionaryEdit=(id,options)=>app.ctDictionaryBeginEdit(id,options);
+    const nativeFocus=input.focus.bind(input);input.focus=()=>{nativeFocus();focuses.push({kind:'target'});window.document.activeElement=input;};
+    let replace;
+    window.document.querySelectorAll=()=>app.ctDictionaryVisible.flatMap(word=>[word,...(word.alts || [])].map(pair=>{
+        const alt=pair===word?null:pair,row={getAttribute:name=>name==='data-dict-id'?String(word._id):name==='data-dict-alt-id'?String(alt?._id || ''):null};
+        const control={value:String(pair.replace || '').replace(/[\r\n]/g,''),isConnected:true,closest:()=>row,
+            focus(){replace=this;window.document.activeElement=this;focuses.push({kind:'dictionary',id:word._id,altId:alt?._id});},select(){this.selected=true;}};
+        row.querySelector=()=>control;return row;
+    }));
+    const flush=()=>{for(let guard=0;callbacks.length && guard<30;guard++)callbacks.shift()();clearTimeout(app._dictFlashTimer);assert.equal(callbacks.length,0);};
+    const dictionaryEvent=(value,options={})=>{replace.value=value;return{key:'Enter',target:replace,preventDefault(){this.defaultPrevented=true;},stopPropagation(){this.stopped=true;},...options};};
+    return {...h,changes,focuses,flush,dictionaryEvent,sharedDictionaryMethods:shared,replace:()=>replace};
+}
+
+test('ClientText autocomplete lights the selected source token across target arrows, popup selection, filtering and close',()=>{
+    const h=completionHarness('Before [First] then [Second] and {0}','['),{app,field,input,event}=h,
+        source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source});
+    app.ctSuggest(field,{target:input});assert.deepEqual(activeSourceText(source),['[First]']);
+    app.ctTargetKeydown(field,event('ArrowDown'));assert.deepEqual(activeSourceText(source),['[Second]']);
+    app.ctTargetKeydown(field,event('ArrowUp'));assert.deepEqual(activeSourceText(source),['[First]']);
+    const popup=app.clientTextPopupController();popup.hlPopup.selectedIndex=1;assert.deepEqual(activeSourceText(source),['[Second]'],'pointer/hover selection uses the same source activation');
+    popup.hlPopup.filter='First';popup.applyHlPopupFilter();assert.deepEqual(activeSourceText(source),['[First]']);
+    popup.hlPopup.filter='No matching source';popup.applyHlPopupFilter();assert.deepEqual(activeSourceText(source),[],'an empty filtered popup clears the source activation');
+    app.ctCloseCompletion();assert.deepEqual(activeSourceText(source),[]);
+    app.ctValues[field.id]='{';input.value='{';input.setSelectionRange(1,1);app.ctSuggest(field,{target:input});
+    assert.deepEqual(activeSourceText(source),['{0}'],'variables use the exact same selection highlight');
+});
+
+test('translated and alternate completion rows light exact original keyword ranges without crossing field or scope',()=>{
+    const dictionary=[{_id:'fire',find:'Fire',replace:'Feu',alts:[{_id:'burning',find:'Burning damage',replace:'Brûlure'}]}],
+        h=completionHarness('[Fire<gemlevel={2}>|Burning damage] [Fire<gemlevel={3}>|Other]','[','text',{dictionary}),{app,field,input}=h;
+    const other={...field,id:JSON.stringify(['Other',null]),name:'Other',source:'[Fire<gemlevel={2}>|Burning damage]'};h.original.fields.push(other);
+    const source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source}),otherSource=app.ctSourceFieldController({fields:[other]},{key:other.id,text:other.source});
+    app.ctSuggest(field,{target:input});assert.match(app.ctCompletion.items[0].value,/Brûlure/);
+    assert.deepEqual(activeSourceText(source),['[Fire&lt;gemlevel={2}&gt;|Burning damage]']);assert.deepEqual(activeSourceText(otherSource),[]);
+    const selected=app.ctCompletion.items.findIndex(item=>item.value==='[Fire<gemlevel={3}>|Feu]');assert.ok(selected>=0);
+    app.clientTextPopupController().hlPopup.selectedIndex=selected;
+    assert.deepEqual(activeSourceText(source),['[Fire&lt;gemlevel={3}&gt;|Other]'],'metadata distinguishes source tokens sharing a Dictionary Find name');
+    app.ctWorkspace={scope:{...scope,groupId:'replacement'}};assert.deepEqual(activeSourceText(source),[],'stale popup selection cannot light a replacement group');
+});
+
+test('one ClientText completion lights every duplicate original token without merging different tokens',()=>{
+    const h=completionHarness('[Fire] then [Fire] and [Cold] {0} then {0}','['),{app,field,input}=h,
+        source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source});
+    app.ctSuggest(field,{target:input});assert.deepEqual(activeSourceText(source),['[Fire]','[Fire]']);
+    assert.equal(app.ctCompletion.items.filter(item=>item.value==='[Fire]').length,1);
+    app.ctValues[field.id]='{';input.value='{';input.setSelectionRange(1,1);app.ctSuggest(field,{target:input});
+    assert.deepEqual(activeSourceText(source),['{0}','{0}']);assert.equal(app.ctCompletion.items.length,1);
+});
+
+test('ClientText variable selection lights its containing source keyword and other exact occurrences',()=>{
+    const h=completionHarness('[Fire|Damage {0}] then {0} and {1}','{'),{app,field,input,event}=h,
+        source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source});
+    app.ctSuggest(field,{target:input});assert.deepEqual(activeSourceText(source),['[Fire|Damage {0}]','{0}']);
+    app.ctTargetKeydown(field,event('ArrowDown'));assert.deepEqual(activeSourceText(source),['{1}']);
+    app.ctCloseCompletion();assert.deepEqual(activeSourceText(source),[]);
+});
+
+test('a stale ClientText popup cannot light or insert into a same-ID replacement record or field',()=>{
+    for(const change of ['record','field','composing']){
+        const h=completionHarness('[Fire]','['),{app,field,input}=h,
+            source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source});
+        app.ctSuggest(field,{target:input});const item=app.ctCompletion.items[0];assert.deepEqual(activeSourceText(source),['[Fire]']);
+        if(change==='record'){const replacement=clone(h.original);app._ctUnitIndex=new Map([[replacement.id,replacement]]);app.ctUnits=[replacement];}
+        else if(change==='field')h.original.fields[0]={...field};
+        else input.composing=true;
+        assert.deepEqual(activeSourceText(source),[],change);assert.equal(app.ctApplyCompletion(field,item,input),false,change);
+        assert.equal(app.ctValues[field.id],'[',change);assert.equal(h.edits(),0,change);assert.equal(input.focused,undefined,change);
+    }
+});
+
+test('ClientText popup identity survives Vue proxy reads while retaining the exact source and target',()=>{
+    const h=completionHarness('[Fire]','['),{app,window,field,input}=h,
+        source=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source}),rawValues=app.ctValues;
+    app.ctSuggest(field,{target:input});const completion=app.ctCompletion,fieldProxy=new Proxy(field,{}),unitProxy=new Proxy(h.original,{}),
+        rawObjects=new WeakMap([[fieldProxy,field],[unitProxy,h.original]]);
+    window.Vue.toRaw=value=>rawObjects.get(value) || value;
+    app.ctCompletion=new Proxy(completion,{get(target,name){return name==='field'?fieldProxy:name==='unit'?unitProxy:Reflect.get(target,name);}});
+    assert.deepEqual(activeSourceText(source),['[Fire]'],'a reactive completion references the same raw source field');
+    assert.equal(app.ctApplyCompletion(field,completion.items[0],input),true);assert.equal(app.ctValues,rawValues);
+    assert.equal(app.ctValues[field.id],'[Fire]');assert.equal(h.edits(),1);assert.equal(input.focused,true);
+});
+
+test('missing ClientText keyword Enter creates the SD main/alternate rows, then Replace Enter inserts exact raw text and returns its caret',()=>{
+    const prefix='head@literal\\n\r\n',initial=prefix+'[TAIL',h=completionDictionaryHarness('[Fire<gemlevel={2}>|Burning damage]',initial),{app,field,input,event}=h;
+    input.value=initial.replace(/\r\n/g,'\n');input.setSelectionRange((prefix+'[').replace(/\r\n/g,'\n').length,(prefix+'[').replace(/\r\n/g,'\n').length);
+    const retained=clone(h.original),saved=app.ctSaved;assert.equal(app.ctSuggest(field,{target:input}),true);assert.equal(app.ctCompletion.items[0].mustCreate,true);
+    const enter=event('Enter');app.ctTargetKeydown(field,enter);assert.equal(enter.defaultPrevented,true);h.flush();
+    const word=app.dictionary[0],alt=word?.alts?.[0];assert.equal(app.dictionary.length,1);assert.equal(word.find,'Fire');assert.equal(word.gameScope,'poe2');
+    assert.equal(alt.find,'Burning damage');assert.equal(app.ctCompletion,null);assert.equal(app.ctValues[field.id],initial,'creation leaves the typed bracket and suffix in place');assert.equal(h.edits(),0);
+    assert.equal(h.focuses.at(-1).kind,'dictionary');assert.equal(h.focuses.at(-1).altId,alt._id);assert.equal(app.ctDictionaryEditingId,word._id);
+    const replacement='Feu@literal\\n exact',replacementEvent=h.dictionaryEvent(replacement);alt.replace=replacement;
+    app.ctDictionaryController.onDictionaryReplaceEnter(replacementEvent,word,alt);h.flush();
+    const inserted='[Fire<gemlevel={2}>|'+replacement+']',expected=prefix+inserted+'TAIL',caret=(prefix+inserted).replace(/\r\n/g,'\n').length;
+    assert.equal(replacementEvent.defaultPrevented,true);assert.equal(app.ctValues[field.id],expected);assert.equal(input.value,expected.replace(/\r\n/g,'\n'));
+    assert.deepEqual([input.selectionStart,input.selectionEnd],[caret,caret]);assert.equal(h.window.document.activeElement,input);assert.equal(h.edits(),1);
+    app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Duplicate'),word,alt);h.flush();assert.equal(app.ctValues[field.id],expected,'return intent is consumed once');
+    assert.equal(h.edits(),1);assert.equal(app.ctSaved,saved);assert.deepEqual(h.original,retained,'Dictionary creation and insertion leave immutable source metadata intact');
+});
+
+test('ClientText popup Enter adds a missing dynamic alternate and Ctrl+Enter edits an existing alternate without duplicate Dictionary rows',()=>{
+    for(const existing of [false,true]){
+        const word={_id:'fire',find:'Fire',replace:'Feu',alts:existing?[{_id:'burning',find:'Burning damage',replace:'Brûlure'}]:[]},
+            h=completionDictionaryHarness('[Fire|Burning damage]','[',[word]),{app,field,input}=h;
+        app.ctSuggest(field,{target:input});const popup=app.clientTextPopupController();
+        const item=app.ctCompletion.items.find(item=>existing?item.dictAltId==='burning':item.mustCreate);assert.ok(item);
+        popup.hlPopup.selectedIndex=app.ctCompletion.items.indexOf(item);
+        const enter={key:'Enter',ctrlKey:existing,preventDefault(){this.defaultPrevented=true;},stopPropagation(){}};
+        popup.hlPopupFilterKeydown(enter);h.flush();assert.equal(enter.defaultPrevented,true);assert.equal(app.ctValues[field.id],'[');assert.equal(app.dictionary.length,1);assert.equal(word.alts.length,1);
+        const alt=word.alts[0];assert.equal(alt.find,'Burning damage');assert.equal(h.focuses.at(-1).altId,alt._id);
+        alt.replace='Edited flame';app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent(alt.replace),word,alt);h.flush();
+        assert.equal(app.ctValues[field.id],'[Fire|Edited flame]');assert.equal(h.window.document.activeElement,input);assert.equal(word.alts.length,1);assert.equal(h.edits(),1);
+    }
+});
+
+test('an existing ClientText main keyword inserts on Enter and edits that same main row on Ctrl+Enter',()=>{
+    for(const edit of [false,true]){
+        const word={_id:'fire',find:'Fire',replace:'Feu',alts:[]},h=completionDictionaryHarness('[Fire]','[',[word]),{app,field,input,event}=h;
+        app.ctSuggest(field,{target:input});assert.equal(app.ctCompletion.items[0].mustCreate,undefined);
+        app.ctTargetKeydown(field,event('Enter',{ctrlKey:edit}));h.flush();
+        if(edit){assert.equal(app.ctValues[field.id],'[');assert.equal(h.focuses.at(-1).id,'fire');assert.equal(h.focuses.at(-1).altId,undefined);
+            app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Edited fire'),word);h.flush();}
+        assert.equal(app.ctValues[field.id],edit?'[Fire|Edited fire]':'[Fire|Feu]');assert.equal(h.window.document.activeElement,input);
+        assert.equal(h.edits(),1);assert.equal(app.dictionary.length,1);assert.equal(word.alts.length,0);
+    }
+});
+
+test('ClientText direct Dictionary completion rejects removed or inactive parents but retains its pinned translation text',()=>{
+    for(const change of ['removed','foreign','shadowed','replacement-text']){
+        const word={_id:'fire',find:'Fire',replace:'Captured flame',alts:[]},h=completionDictionaryHarness('[Fire]','[',[word]),{app,field,input}=h;
+        app.ctSuggest(field,{target:input});const item=app.ctCompletion.items[0];assert.equal(item.value,'[Fire|Captured flame]');
+        if(change==='removed')app.dictionary.splice(0,1);
+        else if(change==='foreign')word.gameScope='poe1';
+        else if(change==='shadowed')app.dictionary.push({_id:'poe2-fire',gameScope:'poe2',find:'Fire',replace:'Override flame',alts:[]});
+        else word.replace='New shared flame';
+        const accepted=change==='replacement-text';assert.equal(app.ctApplyCompletion(field,item,input),accepted,change);h.flush();
+        assert.equal(app.ctValues[field.id],accepted?'[Fire|Captured flame]':'[',change);assert.equal(h.edits(),accepted?1:0,change);
+        if(!accepted)assert.equal(input.focused,undefined,change);assert.equal(app.ctCompletion,null);
+    }
+});
+
+test('ClientText Dictionary completion works on the shared app when its SD-only assistance cache is empty',()=>{
+    const word={_id:'fire',find:'Fire',replace:'Captured flame',alts:[]},h=completionDictionaryHarness('[Fire]','[',[word]),{app,field,input,event}=h;
+    app.getEditorDictionaryMatchPack=()=>null;app.getDictionaryAssistanceEntry=h.sharedDictionaryMethods.getDictionaryAssistanceEntry.bind(app);
+    assert.equal(app.getDictionaryAssistanceEntry('fire',true),undefined,'the actual SD accessor has no ClientText entry');
+    app.ctDictionaryPack={units:[{key:field.id,english:field.source,HLs:[]}],entriesById:{fire:clone(word)}};
+    app.ctSuggest(field,{target:input});word.replace='New shared flame';app.ctTargetKeydown(field,event('Enter'));h.flush();
+    assert.equal(app.ctValues[field.id],'[Fire|Captured flame]');assert.equal(h.edits(),1);assert.equal(h.window.document.activeElement,input);
+});
+
+test('ClientText keeps separate main and alternate Dictionary actions when their displayed translation is identical',()=>{
+    for(const editAlt of [false,true]){
+        const word={_id:'fire',find:'Fire',replace:'Feu',alts:[{_id:'burning',find:'Burning damage',replace:'Feu'}]},
+            h=completionDictionaryHarness('[Fire|Burning damage] then [Fire|Burning damage]','[',[word]),{app,field,input,event}=h;
+        app.ctSuggest(field,{target:input});const candidates=app.ctCompletion.items.filter(item=>item.value==='[Fire|Feu]');
+        assert.equal(candidates.length,2);assert.equal(candidates.every(item=>item.sourceRanges.length===2),true,'each definition retains every original occurrence');
+        const selected=candidates.find(item=>editAlt?item.dictAltId==='burning':!item.dictAltId);assert.ok(selected);
+        app.clientTextPopupController().hlPopup.selectedIndex=app.ctCompletion.items.indexOf(selected);
+        app.ctTargetKeydown(field,event('Enter',{ctrlKey:true}));h.flush();assert.equal(h.focuses.at(-1).altId,editAlt?'burning':undefined);
+        const alt=editAlt?word.alts[0]:undefined;app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Edited flame'),word,alt);h.flush();
+        assert.equal(app.ctValues[field.id],'[Fire|Edited flame]');assert.equal(app.dictionary.length,1);assert.equal(word.alts.length,1);assert.equal(h.edits(),1);
+    }
+});
+
+test('ClientText explicit keyword creation uses the configured foreign-game SD row without allowing its automatic translation',()=>{
+    for(const dynamic of ['', '|Burning damage']){
+        const foreign={_id:'foreign-fire',find:'Fire',replace:'PoE1 flame',gameScope:'poe1',alts:[]},
+            h=completionDictionaryHarness('[Fire<gemlevel={2}>'+dynamic+']','[',[foreign],{dictionaryDefaultGameScope:'poe1'}),{app,field,input,event}=h;
+        app.ctSuggest(field,{target:input});assert.equal(app.ctCompletion.items.length,1);assert.equal(app.ctCompletion.items[0].mustCreate,true);
+        assert.equal(app.ctCompletion.items.some(item=>item.value.includes('PoE1 flame')),false,'foreign definitions stay outside automatic completion');
+        app.ctTargetKeydown(field,event('Enter'));h.flush();assert.equal(app.dictionary.length,1);assert.equal(app.dictionary[0],foreign);
+        assert.equal(foreign.alts.length,dynamic?1:0);assert.equal(h.focuses.at(-1).id,'foreign-fire');assert.equal(foreign.gameScope,'poe1');
+        const alt=dynamic?foreign.alts[0]:undefined;if(alt)assert.equal(alt.find,'Burning damage');
+        const replace=h.dictionaryEvent('Foreign edited flame');app.ctDictionaryController.onDictionaryReplaceEnter(replace,foreign,alt);h.flush();
+        assert.equal(app.ctValues[field.id],'[','SD allows explicit foreign-game editing but refuses translation insertion');
+        assert.equal(replace.defaultPrevented,undefined);assert.equal(h.edits(),0);
+    }
+    for(const defaultScope of ['poe2','all']){
+        const foreign={_id:'foreign-fire',find:'Fire',replace:'PoE1 flame',gameScope:'poe1',alts:[]},before=clone(foreign),
+            h=completionDictionaryHarness('[Fire]','[',[foreign],{dictionaryDefaultGameScope:defaultScope}),{app,field,input,event}=h;
+        app.ctSuggest(field,{target:input});app.ctTargetKeydown(field,event('Enter'));h.flush();
+        assert.equal(app.dictionary.length,2);const created=app.dictionary[0];assert.notEqual(created,foreign);
+        assert.equal(h.window.DictionaryScope.normalize(created),defaultScope);assert.deepEqual(foreign,before);
+        app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Current flame'),created);h.flush();
+        assert.equal(app.ctValues[field.id],'[Fire|Current flame]');assert.equal(h.edits(),1);
+    }
+});
+
+test('ClientText keyword Add/Edit prefers the current active SD definition over its configured foreign-game fallback',()=>{
+    const foreign={_id:'foreign-fire',find:'Fire',replace:'PoE1 flame',gameScope:'poe1',alts:[]},
+        active={_id:'current-fire',find:'Fire',replace:'PoE2 flame',gameScope:'poe2',alts:[]},before=clone(foreign),
+        h=completionDictionaryHarness('[Fire]','[',[foreign,active],{dictionaryDefaultGameScope:'poe1'}),{app,field,input,event}=h;
+    app.ctSuggest(field,{target:input});assert.equal(app.ctCompletion.items[0].value,'[Fire|PoE2 flame]');
+    app.ctTargetKeydown(field,event('Enter',{ctrlKey:true}));h.flush();assert.equal(h.focuses.at(-1).id,'current-fire');
+    assert.equal(app.dictionary.length,2);app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Edited PoE2 flame'),active);h.flush();
+    assert.equal(app.ctValues[field.id],'[Fire|Edited PoE2 flame]');assert.deepEqual(foreign,before);assert.equal(h.edits(),1);
+});
+
+test('ClientText keyword creation follows SD markup display handling without changing the original token',()=>{
+    const source='[Fire|<i>Fire</i>]',h=completionDictionaryHarness(source),{app,field,input,event}=h;
+    app.ctSuggest(field,{target:input});assert.equal(app.ctCompletion.items[0].value,source);
+    const controller=app.ctSourceFieldController({fields:[field]},{key:field.id,text:field.source});
+    assert.deepEqual(activeSourceText(controller),['[Fire|&lt;i&gt;Fire&lt;/i&gt;]']);
+    app.ctTargetKeydown(field,event('Enter'));h.flush();const word=app.dictionary[0];
+    assert.equal(word.find,'Fire');assert.equal(word.alts.length,0,'SD does not turn markup display content into an alternate Find');
+    assert.equal(h.focuses.at(-1).altId,undefined);assert.equal(field.source,source);assert.equal(app.ctValues[field.id],'[');
+    app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Feu'),word);h.flush();assert.equal(app.ctValues[field.id],'[Fire|Feu]');
+});
+
+test('manual ClientText keyword creation seeds selected translation and replaces only its captured raw range',()=>{
+    const prefix='before\r\n',selected='  selected@literal\\n  ',suffix='\r\nafter',h=completionDictionaryHarness('[Fire]',prefix+selected+suffix),{app,field,input,event}=h;
+    input.value=app.ctValues[field.id].replace(/\r\n/g,'\n');input.setSelectionRange(prefix.replace(/\r\n/g,'\n').length,(prefix+selected).replace(/\r\n/g,'\n').length);
+    assert.equal(app.ctSuggest(field,{target:input},{manual:true}),true);app.ctTargetKeydown(field,event('Enter'));h.flush();
+    const word=app.dictionary[0];assert.equal(word.replace,selected,'SD creation starts from the selected translation');assert.equal(app.ctValues[field.id],prefix+selected+suffix);
+    const replacement=h.dictionaryEvent('Feu');app.ctDictionaryController.onDictionaryReplaceEnter(replacement,word);h.flush();
+    assert.equal(app.ctValues[field.id],prefix+'[Fire|Feu]'+suffix);assert.deepEqual([input.selectionStart,input.selectionEnd],[(prefix+'[Fire|Feu]').replace(/\r\n/g,'\n').length,(prefix+'[Fire|Feu]').replace(/\r\n/g,'\n').length]);
+});
+
+test('ClientText Dictionary completion return rejects stale field, caret, native input, scope and removed entry callbacks',()=>{
+    for(const change of ['text','caret','native-text','field','unit','same-id-unit','source','account','group','branch','language','dictionary','removed','entry-scope','alternate','detached','composing','busy']){
+        const h=completionDictionaryHarness('[Fire|Burning damage]'),{app,field,input,event}=h;
+        app.ctSuggest(field,{target:input});app.ctTargetKeydown(field,event('Enter'));h.flush();
+        const word=app.dictionary[0],alt=word.alts[0],controller=app.ctDictionaryController,replaceEvent=h.dictionaryEvent('Edited flame'),values=app.ctValues;
+        const focus=h.focuses.length,changes=h.changes.length;
+        if(change==='text'){app.ctValues[field.id]='New target';input.value='New target';}
+        else if(change==='caret')input.setSelectionRange(0,0);
+        else if(change==='native-text')input.value='Unsynchronized input';
+        else if(change==='field')app.ctFocusedField='another-field';
+        else if(change==='unit')app.ctSelection='another-unit';
+        else if(change==='same-id-unit'){const replacement=clone(h.original);app._ctUnitIndex=new Map([[replacement.id,replacement]]);app.ctUnits=[replacement];}
+        else if(change==='source')field.source='[Changed source]';
+        else if(change==='account')app.managedCatalogScope='other-account:poe2';
+        else if(['group','branch','language'].includes(change))app.ctWorkspace={scope:{...scope,[{group:'groupId',branch:'branchId',language:'language'}[change]]:'replacement'}};
+        else if(change==='dictionary')app.dictionary=[...app.dictionary];
+        else if(change==='removed')app.dictionary.splice(0,1);
+        else if(change==='entry-scope')word.gameScope='poe1';
+        else if(change==='alternate')word.alts=[];
+        else if(change==='detached')input.isConnected=false;
+        else if(change==='composing')input.composing=true;
+        else if(change==='busy')app.ctBusy=true;
+        controller.onDictionaryReplaceEnter(replaceEvent,word,alt);h.flush();
+        assert.equal(app.ctValues,values,change);assert.equal(app.ctValues[field.id],change==='text'?'New target':'[',change);
+        assert.equal(h.edits(),0,change);assert.equal(h.focuses.length,focus,change);assert.equal(h.changes.length,changes,change);
+    }
+});
+
+test('ClientText Dictionary return stays with its captured row until another explicit insertion consumes it',()=>{
+    const other={_id:'cold',find:'Cold',replace:'Froid',alts:[]},h=completionDictionaryHarness('[Fire]','[',[other]),{app,field,input,event}=h;
+    app.ctSuggest(field,{target:input});app.ctTargetKeydown(field,event('Enter'));h.flush();const created=app.dictionary[0],info=app._ctDictionaryReturn;
+    const otherRow=h.window.document.querySelectorAll().find(row=>row.getAttribute('data-dict-id')==='cold'),otherInput=otherRow.querySelector();otherInput.focus();
+    const keydown=modifiers=>({key:'Enter',target:otherInput,preventDefault(){this.defaultPrevented=true;},...modifiers});
+    app.ctDictionaryController.onDictionaryReplaceEnter(keydown({}),other);h.flush();
+    assert.equal(app._ctDictionaryReturn,info,'plain Enter in another Dictionary row cannot consume the pending return');assert.equal(app.ctValues[field.id],'[');assert.equal(h.edits(),0);
+    app.ctDictionaryController.onDictionaryReplaceEnter(keydown({ctrlKey:true,isComposing:true}),other);h.flush();
+    assert.equal(app._ctDictionaryReturn,info);assert.equal(h.edits(),0);
+    const use=keydown({ctrlKey:true});app.ctDictionaryController.onDictionaryReplaceEnter(use,other);h.flush();
+    assert.equal(use.defaultPrevented,true);assert.equal(app._ctDictionaryReturn,null);assert.equal(app.ctValues[field.id],'[Froid');assert.equal(h.edits(),1);
+    app.ctDictionaryController.onDictionaryReplaceEnter(h.dictionaryEvent('Fire replacement'),created);h.flush();
+    assert.equal(app.ctValues[field.id],'[Froid','the older keyword return cannot replace the later explicit insertion');assert.equal(h.edits(),1);
+});
+
+test('ClientText completion and Dictionary return ignore IME Enter while preserving the later committed action',()=>{
+    for(const ime of [{isComposing:true},{keyCode:229}]){
+        const h=completionDictionaryHarness('[Fire]'),{app,field,input,event}=h;
+        assert.equal(app.ctSuggest(field,{target:input,...ime}),false);assert.equal(app.dictionary.length,0);
+        app.ctSuggest(field,{target:input});const completion=app.ctCompletion;
+        const composing=event('Enter',ime);app.ctTargetKeydown(field,composing);
+        assert.equal(composing.defaultPrevented,undefined);assert.equal(app.ctCompletion,completion);assert.equal(app.dictionary.length,0);
+        const popupEvent={key:'Enter',...ime,preventDefault(){this.defaultPrevented=true;}};app.clientTextPopupController().hlPopupFilterKeydown(popupEvent);
+        assert.equal(popupEvent.defaultPrevented,undefined);assert.equal(app.ctCompletion,completion);assert.equal(app.dictionary.length,0);
+        app.ctTargetKeydown(field,event('Enter'));h.flush();const word=app.dictionary[0];
+        const replacement=h.dictionaryEvent('Feu',ime);app.ctDictionaryController.onDictionaryReplaceEnter(replacement,word);h.flush();
+        assert.equal(replacement.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],'[');assert.equal(h.edits(),0);
+        const committed=h.dictionaryEvent('Feu');app.ctDictionaryController.onDictionaryReplaceEnter(committed,word);h.flush();
+        assert.equal(committed.defaultPrevented,true);assert.equal(app.ctValues[field.id],'[Fire|Feu]');assert.equal(h.edits(),1);
+    }
+});
+
+test('queued ClientText Dictionary focus and translation-caret callbacks cannot steal focus after a scope change',()=>{
+    for(const change of ['group','entry-scope','disabled','removed','field','target']){
+        const creating=completionDictionaryHarness('[Fire]');creating.app.ctSuggest(creating.field,{target:creating.input});creating.app.ctTargetKeydown(creating.field,creating.event('Enter'));
+        const focusedBeforeCreation=creating.focuses.length;
+        if(change==='group')creating.app.ctWorkspace={scope:{...scope,groupId:'replacement'}};
+        else if(change==='entry-scope')creating.app.dictionary[0].gameScope='poe1';
+        else if(change==='disabled')creating.app.dictionary[0].disabled=true;
+        else if(change==='removed')creating.app.dictionary.splice(0,1);
+        else if(change==='field')creating.app.ctFocusedField='another-field';
+        else creating.app.ctValues[creating.field.id]='New typing';
+        creating.flush();assert.equal(creating.focuses.length,focusedBeforeCreation,'queued Replace focus is fenced after '+change);
+    }
+    const returning=completionDictionaryHarness('[Fire]');returning.app.ctSuggest(returning.field,{target:returning.input});returning.app.ctTargetKeydown(returning.field,returning.event('Enter'));returning.flush();
+    const word=returning.app.dictionary[0];returning.app.ctDictionaryController.onDictionaryReplaceEnter(returning.dictionaryEvent('Feu'),word);
+    assert.equal(returning.app.ctValues[returning.field.id],'[Fire|Feu]');const focusedBeforeReturn=returning.focuses.length;
+    returning.app.managedCatalogScope='replacement-account:poe2';returning.window.document.activeElement={replacement:true};returning.flush();
+    assert.equal(returning.focuses.length,focusedBeforeReturn,'a completed insertion cannot restore a caret into a different account');
+    assert.deepEqual(returning.window.document.activeElement,{replacement:true});
+});
 test('ClientText completion arrows choose a source token and preserve raw workbook text',()=>{
-    const prefix='@literal\\nactual\n',h=completionHarness('[First] [Second] {0}',prefix+'['),{app,field,input,event}=h;
+    const prefix='@literal\\nactual\n',h=completionHarness('{0} {1}',prefix+'{'),{app,field,input,event}=h;
     assert.equal(app.ctSuggest(field,{target:input}),true);assert.equal(app.ctCompletion.selectedIndex,0);
     const down=event('ArrowDown');app.ctTargetKeydown(field,down);assert.equal(down.defaultPrevented,true);assert.equal(app.ctCompletion.selectedIndex,1);
     const enter=event('Enter');app.ctTargetKeydown(field,enter);assert.equal(enter.defaultPrevented,true);
-    assert.equal(app.ctValues[field.id],prefix+'[Second]');assert.equal(h.edits(),1);assert.equal(app.ctCompletion,null);assert.equal(input.focused,true);
-    app.ctValues[field.id]='[';input.value='[';input.selectionStart=input.selectionEnd=1;app.ctSuggest(field,{target:input});
-    app.ctTargetKeydown(field,event('ArrowUp'));assert.equal(app.ctCompletion.selectedIndex,1,'up wraps to the final source keyword');
+    assert.equal(app.ctValues[field.id],prefix+'{1}');assert.equal(h.edits(),1);assert.equal(app.ctCompletion,null);assert.equal(input.focused,true);
+    app.ctValues[field.id]='{';input.value='{';input.selectionStart=input.selectionEnd=1;app.ctSuggest(field,{target:input});
+    app.ctTargetKeydown(field,event('ArrowUp'));assert.equal(app.ctCompletion.selectedIndex,1,'up wraps to the final source variable');
     const escape=event('Escape');app.ctTargetKeydown(field,escape);assert.equal(escape.defaultPrevented,true);assert.equal(app.ctCompletion,null);
 });
 test('ClientText configured completion shortcuts replace only the selected raw text',()=>{
@@ -687,16 +1014,17 @@ test('ClientText configured completion shortcuts replace only the selected raw t
     app.ctCloseCompletion();app.autocompleteShortcut='disabled';const disabled=event(' ',{ctrlKey:true,code:'Space'});app.ctTargetKeydown(field,disabled);
     assert.equal(disabled.defaultPrevented,undefined);assert.equal(app.ctCompletion,null);
 });
-test('ClientText completions leave Shift+Tab and Ctrl+Enter to field and editor navigation',async()=>{
-    const {app,field,input,event}=completionHarness('[Keyword]','[');let opened=0;const moves=[];
+test('ClientText Shift+Tab traverses fields and variable-popup Ctrl+Enter closes before a later editor handoff',async()=>{
+    const {app,field,input,event}=completionHarness('{0}','{');let opened=0;const moves=[];
     app.ctSaveAndNavigate=async(...args)=>{moves.push(args);return false;};
     app.ctSuggest(field,{target:input});const previous=event('Tab',{shiftKey:true});await app.ctTargetKeydown(field,previous);
     assert.equal(previous.defaultPrevented,true);assert.equal(moves[0][0],true);assert.equal(moves[0][1].inline,true);
-    assert.equal(app.ctValues[field.id],'[');assert.equal(app.ctCompletion,null);
+    assert.equal(app.ctValues[field.id],'{');assert.equal(app.ctCompletion,null);
     app.ctSuggest(field,{target:input});app.ctSelect=(unit,full)=>{assert.equal(unit,app.ctCurrentUnit);assert.equal(full,true);opened++;};
-    const full=event('Enter',{ctrlKey:true});await app.ctTargetKeydown(field,full);assert.equal(opened,1);assert.equal(app.ctValues[field.id],'[');
+    const popupEnter=event('Enter',{ctrlKey:true});await app.ctTargetKeydown(field,popupEnter);assert.equal(opened,0);assert.equal(app.ctCompletion,null);assert.equal(app.ctValues[field.id],'{');
+    const full=event('Enter',{ctrlKey:true});await app.ctTargetKeydown(field,full);assert.equal(opened,1);assert.equal(app.ctValues[field.id],'{');
     app.ctSuggest(field,{target:input});const composing=event('Enter',{isComposing:true});app.ctTargetKeydown(field,composing);
-    assert.equal(composing.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],'[');
+    assert.equal(composing.defaultPrevented,undefined);assert.equal(app.ctValues[field.id],'{');
 });
 test('ClientText completion rejects moved selection, replaced text, field, unit, group and account scopes',()=>{
     const variations=[
@@ -742,12 +1070,14 @@ test('Dictionary background preparation pins open completion and highlights unti
     const h=completionHarness('[Fire|Burning]','[','text',{dictionary:[{_id:'fire',find:'Fire',replace:'Captured flame'}],highlightDict:true}),{app,field,input}=h;
     const first={units:[{key:field.id,HLs:[]}],entriesById:{fire:{find:'Fire',replace:'Captured flame'}}},
         next={units:[{key:field.id,HLs:[{rawStart:0,rawEnd:14,dictId:'fire',replace:'New flame'}]}],entriesById:{fire:{find:'Fire',replace:'New flame'}}};
-    app.ctDictionaryPack=first;app.ctSuggest(field,{target:input});const popup=app.ctCompletion,values=app.ctValues,caret=[input.selectionStart,input.selectionEnd];
+    app.ctDictionaryPack=first;app.ctSuggest(field,{target:input});const popup=app.ctCompletion,values=app.ctValues,caret=[input.selectionStart,input.selectionEnd],
+        captured=popup.items.find(item=>item.value==='[Fire|Captured flame]');assert.ok(captured);
+    popup.selectedIndex=popup.items.indexOf(captured);
     app.ensureDictionarySnapshot=async()=>{};app.ensureDictionaryWorker=()=>({match(fields,options){assert.equal(fields[0].english,field.source);assert.equal(options.contentMode,'clienttext');return Promise.resolve(next);}});
     app.dictionary[0].replace='New flame';await app.scheduleClientTextDictionaryMatches();
     assert.equal(app.ctCompletion,popup);assert.equal(app.ctDictionaryPack,first);assert.equal(app._ctPendingDictionaryPack,next);
     assert.equal(app.ctValues,values);assert.deepEqual([input.selectionStart,input.selectionEnd],caret);assert.equal(h.edits(),0);
-    assert.equal(app.ctApplyCompletion(field,popup.items[0],input),true);assert.equal(app.ctValues[field.id],'[Fire|Captured flame]');assert.equal(app.ctDictionaryPack,next);
+    assert.equal(app.ctApplyCompletion(field,captured,input),true);assert.equal(app.ctValues[field.id],'[Fire|Captured flame]');assert.equal(app.ctDictionaryPack,next);
     const held=deferred();app.ensureDictionaryWorker=()=>({match:()=>held.promise});const preparing=app.scheduleClientTextDictionaryMatches();await settle();
     app.ctWorkspace={scope:{...scope,groupId:'new-group'}};const replacement={units:[],entriesById:{}};app.ctDictionaryPack=replacement;
     held.resolve(first);await preparing;assert.equal(app.ctDictionaryPack,replacement,'late same-ID match preparation is scope fenced');
@@ -946,7 +1276,7 @@ test('selected class variants keep the existing keyword/variable completion, NON
     const group=app.ctFieldGroups[0],field=group.fields.find(field=>field.form==='IntFour');app.ctSelectVariant(group,field.id,{focus:false});
     const input=inputFor(app.ctCurrentUnit,field);input.focus();app.ctQueueDraft=()=>{};
     app.ctValues[field.id]='@literal\\n\n[';input.setSelectionRange(app.ctValues[field.id].length,app.ctValues[field.id].length);
-    assert.equal(app.ctSuggest(field,{target:input}),true);app.ctTargetKeydown(field,event(field,'Enter'));
+    assert.equal(app.ctSuggest(field,{target:input}),true);app.ctTargetKeydown(field,event(field,'Tab'));
     assert.equal(app.ctValues[field.id],'@literal\\n\n[Keyword]');assert.equal(app.ctPreviewField,field);
     assert.equal(app.ctReviewed[field.id],S.sourceHash(field.source));
     app.ctValues[field.id]='NON';input.setSelectionRange(3,3);app.ctTargetKeydown(field,event(field,'Tab'));
