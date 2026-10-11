@@ -1000,17 +1000,12 @@
       },
       async managedWithdraw(version = this.managedSelectedVersion) {
         if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
-        const key = this.managedCatalogScope, requestId = id(), path = '/v1/versions/' + encodeURIComponent(version.id) + '/withdraw';
+        const key = this.managedCatalogScope, requestId = id(), revision = version.revision, path = '/v1/versions/' + encodeURIComponent(version.id) + '/withdraw';
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try {
-          try { await this._cloud.request(path, { method: 'POST', body: { expectedRevision: version.revision, idempotencyKey: requestId } }); }
-          catch (error) {
-            if (!current()) return;
-            if (error.code !== 'VERSION_IN_USE') throw error;
-            if (!await this.appConfirm('This version has team work, a collection, or active editors. Withdraw it from ordinary selection while preserving all rooms, translations, history, and recovery access?', { title: 'Withdraw worked-on version?', confirmLabel: 'Withdraw and preserve work', danger: true })) return;
-            if (!current()) return;
-            await this._cloud.request(path, { method: 'POST', body: { expectedRevision: version.revision, confirmed: true, idempotencyKey: requestId } });
-          }
+          if (!await this.appConfirm(`Withdraw "${version.name}" from ordinary selection? Existing translations, history, collections, and recovery access will be preserved. Shared saves will be paused.`, { title: 'Withdraw version?', confirmLabel: 'Withdraw and preserve work', danger: true })) return;
+          if (!current()) return;
+          await this._cloud.request(path, { method: 'POST', body: { expectedRevision: revision, confirmed: true, idempotencyKey: requestId } });
           if (current()) { this.managedSetOperationError(path, ''); await this.refreshManagedVersions(); }
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError(path, error); }
         finally { this.managedFinishOperation(operation); }

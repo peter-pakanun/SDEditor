@@ -1456,6 +1456,64 @@ test('account and branch changes clear previous upload IDs, collection IDs and c
   gate.resolve([]); await pending;
 });
 
+test('withdrawal confirms before requesting both named and legacy versions', async t => {
+  for (const namedContentVersion of [true, false]) await t.test(namedContentVersion ? 'named' : 'legacy', async () => {
+    const confirmation = deferred(), target = version({ namedContentVersion });
+    const { app, requests } = harness({ request: async (route, options) => {
+      assert.equal(options.body.confirmed, true, 'the first request must already contain explicit confirmation');
+      return {};
+    } });
+    let dialog, refreshed = 0;
+    app.appConfirm = (message, options) => { dialog = { message, options }; return confirmation.promise; };
+    app.refreshManagedVersions = async () => { refreshed++; };
+    const pending = app.managedWithdraw(target);
+    assert.ok(dialog, 'Withdraw must open a dialog without waiting for an API error');
+    assert.ok(dialog.message.includes(target.name));
+    assert.match(dialog.message, /preserv/i);
+    assert.equal(dialog.options.danger, true);
+    assert.equal(dialog.options.confirmLabel, 'Withdraw and preserve work');
+    assert.equal(requests.length, 0);
+    assert.equal(app.managedVersionBusy, true);
+    await app.managedWithdraw(target);
+    assert.equal(requests.length, 0, 'a repeated click cannot submit while the dialog is open');
+    confirmation.resolve(true); await pending;
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].route, '/v1/versions/' + target.id + '/withdraw');
+    assert.equal(requests[0].options.body.expectedRevision, target.revision);
+    assert.ok(requests[0].options.body.idempotencyKey);
+    assert.equal(refreshed, 1);
+    assert.equal(app.managedVersionBusy, false);
+  });
+});
+
+test('withdrawal cancellation and scope changes during confirmation never submit', async t => {
+  for (const change of ['cancel', 'account', 'game', 'branch', 'access']) await t.test(change, async () => {
+    const confirmation = deferred(), { app, requests } = harness();
+    app.appConfirm = () => confirmation.promise;
+    const pending = app.managedWithdraw(version());
+    if (change === 'account') app.cloudProfileId = 'bob';
+    if (change === 'game') app.gameVersion = 'poe1';
+    if (change === 'branch') app.branchId = 'another';
+    if (change === 'access') { app.cloudCanAccessAllLanguages = false; app.cloudUser.role = 'translator'; }
+    confirmation.resolve(change !== 'cancel'); await pending;
+    assert.equal(requests.length, 0);
+    assert.equal(app.managedVersionBusy, false);
+  });
+});
+
+test('withdrawal preserves the confirmed target revision and reports a revision conflict without retrying', async () => {
+  const confirmation = deferred(), target = version(), failure = { code: 'VERSION_REVISION_CONFLICT', message: 'Version metadata changed.' };
+  const { app, requests } = harness({ request: async () => { throw failure; } });
+  app.appConfirm = () => confirmation.promise;
+  const pending = app.managedWithdraw(target);
+  target.revision = 2;
+  confirmation.resolve(true); await pending;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.body.expectedRevision, 1);
+  assert.equal(app.managedOperationErrors[requests[0].route], failure.message);
+  assert.equal(app.managedVersionBusy, false);
+});
+
 test('stale manual operation completion cannot clear a newer scope operation busy state or spinner', async t => {
   for (const method of ['continueManagedVersion', 'managedCollect', 'managedAction', 'managedWithdraw', 'saveManagedMetadata', 'prepareManagedUpload', 'publishManagedUpload']) {
     await t.test(method, async () => {
