@@ -34,6 +34,7 @@ function fixture(handler = async () => ({ total: 0, files: [], items: [], nextCu
     cloudUser: { id: 'account-a', language: 'Thai', assignmentVersion: 1 }, gameVersion: 'poe1', lang: 'Japanese',
     sourceIdentity: HASH_A, versionStorageLoading: false, editorVisible: true, sideTab: 'comments',
     editorCurrentEditingDesc: { filepath: 'Metadata/test.txt' }, $refs: {}, $nextTick: async () => {},
+    _ctUnitIndex: new Map([['unit-a', {}], ['unit-b', {}], ['normal|Sheet|record', {}]]),
   };
   app._cloud = { context: () => ({ account: app.cloudUser.id }), request: (url, options = {}, auth) => {
     calls.push(copy({ url, options, auth })); return handler(url, options, auth, app);
@@ -384,7 +385,7 @@ test('background card reordering preserves audience checkbox focus and viewport 
 });
 
 test('reply focus preservation respects a newly focused control, detached card, or changed context', async () => {
-  for (const interruption of ['focus', 'detached', 'account', 'source']) {
+  for (const interruption of ['focus', 'detached', 'account', 'source', 'branch']) {
     const state = fixture();
     const { app, document } = state;
     const { input, root, focusCalls } = activeReplyInput(state);
@@ -395,12 +396,31 @@ test('reply focus preservation respects a newly focused control, detached card, 
       if (interruption === 'detached') input.isConnected = false;
       if (interruption === 'account') app.cloudUser.id = 'account-b';
       if (interruption === 'source') app.sourceIdentity = HASH_B;
+      if (interruption === 'branch') app.branchId = 'review';
       input.top = 100;
     };
     await app.commentsRestoreReplyFocus(saved);
     assert.equal(focusCalls.length, 0);
     assert.equal(root.scrollTop, 500);
     assert.equal(document.activeElement, interruption === 'focus' ? anotherControl : document.body);
+  }
+});
+
+test('ClientText reply focus uses its descriptor hash independently of the retained SD source', async () => {
+  for (const change of ['retained SD source', 'ClientText descriptor']) {
+    const state = fixture(), { app, document } = state;
+    app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'client-group', versionId: 'version-a',
+      filepath: 'unit-a', sourceHash: HASH_B, language: 'Thai' };
+    const { input, root, focusCalls } = activeReplyInput(state), saved = app.commentsCaptureReplyFocus();
+    assert.equal(saved.sourceHash, HASH_B);
+    app.$nextTick = async () => {
+      document.activeElement = document.body; input.top = 100;
+      if (change === 'retained SD source') app.sourceIdentity = 'c'.repeat(64);
+      else app.sharedCommentIdentity = { ...app.sharedCommentIdentity, sourceHash: HASH_A };
+    };
+    await app.commentsRestoreReplyFocus(saved);
+    assert.equal(focusCalls.length, change === 'retained SD source' ? 1 : 0);
+    assert.equal(root.scrollTop, change === 'retained SD source' ? 200 : 500);
   }
 });
 
@@ -673,22 +693,72 @@ test('a late file fetch cannot overwrite a switched file, including return to th
   assert.equal(app.commentsFileLoading, false);
 });
 
-test('account and game round trips invalidate old responses', async () => {
-  for (const field of ['account', 'game']) {
+test('account, game and branch round trips invalidate old responses', async () => {
+  for (const field of ['account', 'game', 'branch']) {
     const pending = deferred();
     const { app } = fixture(() => pending.promise);
+    app.branchId = 'default';
     const load = app.commentsRefreshFile();
     app.sideTab = 'dictionary'; app.commentsPoll = async () => {};
     if (field === 'account') app.cloudUser = { ...app.cloudUser, id: 'account-b' };
-    else app.gameVersion = 'poe2';
+    else if (field === 'game') app.gameVersion = 'poe2';
+    else app.branchId = 'review';
     app.commentsResetContext();
     if (field === 'account') app.cloudUser = { ...app.cloudUser, id: 'account-a' };
-    else app.gameVersion = 'poe1';
+    else if (field === 'game') app.gameVersion = 'poe1';
+    else app.branchId = 'default';
     app.commentsResetContext();
     pending.resolve({ items: [comment(1)], nextCursor: null });
     await load;
     assert.equal(app.commentsFileItems.length, 0);
   }
+});
+
+test('selected and active branch transitions reject late lists, unread counts and posts before group activation', async () => {
+  for (const mode of ['statdescription', 'clienttext']) for (const branch of ['selected', 'active']) {
+    for (const surface of ['file', 'all', 'unread', 'post']) {
+      const held = deferred(), { app } = fixture(() => held.promise);
+      app.branchId = 'default';
+      app.sharedCommentIdentity = { mode, groupId: 'group-a', versionId: 'version-a', branchId: 'default',
+        filepath: mode === 'clienttext' ? 'unit-a' : 'Metadata/test.txt', sourceHash: HASH_A, language: 'Thai' };
+      app.editorVisible = false; app.commentsAllVisible = true; app.sharedEditorToolsVisible = true;
+      app.commentsFileFeed.items = [comment(9)]; app.commentsAllFeed.items = [comment(9)];
+      app.commentsUnreadTotal = 2; app.commentsUnreadFiles = { [app.commentsFilepath]: 2 };
+      app.commentsFileDraft = 'Post before the branch changes';
+      if (mode === 'clienttext') app.ctPostComment = () => held.promise;
+      const pending = surface === 'file' ? app.commentsRefreshFile() : surface === 'all' ? app.commentsRefreshAll()
+        : surface === 'unread' ? app.commentsRefreshUnread() : app.commentsSubmit();
+      const captured = app.commentsCapture();
+      if (branch === 'selected') app.branchId = 'review';
+      else app.sharedCommentIdentity = { ...app.sharedCommentIdentity, branchId: 'review' };
+      assert.equal(app.commentsCurrent(captured), false, `${mode} ${branch} branch must fence before its group changes`);
+      app.commentsFileDraft = 'Keep the current branch thought';
+      held.resolve({ items: [comment(99)], item: comment(99), nextCursor: null,
+        total: 7, files: [{ filepath: app.commentsFilepath, count: 7 }] });
+      await pending;
+      assert.deepEqual(Array.from(app.commentsFileItems, item => item.id), [9], `${mode}/${branch}/${surface}`);
+      assert.deepEqual(Array.from(app.commentsAllItems, item => item.id), [9], `${mode}/${branch}/${surface}`);
+      assert.equal(app.commentsUnreadTotal, 2, `${mode}/${branch}/${surface}`);
+      assert.equal(app.commentsFileDraft, 'Keep the current branch thought', `${mode}/${branch}/${surface}`);
+    }
+  }
+});
+
+test('comment session fences retain legacy draft keys and polling across ordinary file and field changes', () => {
+  const { app } = fixture(), context = app.commentsContextKey;
+  const draftKey = JSON.stringify(['account-a', 'Thai', 'poe1', 'Metadata/test.txt', HASH_A]);
+  const replyKey = JSON.stringify(['reply', 'account-a', 'Thai', 'poe1', 'Metadata/test.txt', HASH_A]);
+  assert.equal(app.commentsDraftKey, draftKey); assert.equal(app.commentsReplyKey('Metadata/test.txt'), replyKey);
+  app.branchId = 'default'; assert.equal(app.commentsContextKey, context, 'implicit and explicit default branches are equivalent');
+  app.editorCurrentEditingDesc = { filepath: 'Metadata/other.txt' }; app.editorFocusedIndex = 4;
+  assert.equal(app.commentsContextKey, context);
+  app.editorCurrentEditingDesc = { filepath: 'Metadata/test.txt' };
+  assert.equal(app.commentsDraftKey, draftKey); assert.equal(app.commentsReplyKey('Metadata/test.txt'), replyKey);
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'group-a', versionId: 'version-a', branchId: 'default',
+    filepath: 'unit-a', fieldId: 'text', sourceHash: HASH_A, language: 'Thai' };
+  const clientContext = app.commentsContextKey;
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, filepath: 'unit-b', fieldId: 'plural' };
+  assert.equal(app.commentsContextKey, clientContext, 'unit and field changes do not restart group polling');
 });
 
 test('comment drafts survive file switching and stay isolated by account, game, and source hash', async () => {
@@ -938,6 +1008,123 @@ test('visible comments require a file and retain access and blocking guards with
   assert.equal(app.commentsSurfaceVisible('file'), false);
   await app.commentsRefreshFile();
   assert.equal(calls.length, 0);
+});
+
+test('ClientText shares silent lists, unread counts and read receipts using its group and exact unit identity', async () => {
+  const unitId = 'normal|Sheet|record', groupId = 'client-group';
+  const { app, calls, observers } = fixture(async (url, options) => options.method === 'POST'
+    ? { total: 0, files: [] } : url.includes('/unread') ? { total: 1, files: [{ filepath: unitId, count: 1 }] }
+      : { items: [comment(7, { filepath: unitId, groupId })], nextCursor: null });
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId, versionId: 'version-a', filepath: unitId,
+    sourceHash: HASH_A, language: 'Thai', label: 'Sheet / record' };
+  app.editorCurrentEditingDesc = null; app.editorVisible = false; app.sideTab = 'dictionary';
+  app.sharedEditorToolsVisible = true; app.sharedEditorController = { sideTab: 'comments', editorVisible: false };
+  const element = node(7); app.$refs.commentsFileList = { querySelectorAll: () => [element] };
+  assert.equal(app.commentsFilepath, unitId); assert.equal(app.commentsFileLabel, 'Sheet / record');
+  assert.equal(app.commentsSurfaceVisible('file'), true);
+  await app.commentsRefreshUnread(); await app.commentsRefreshFile();
+  assert.equal(app.commentsFileUnread, 1);
+  const request = new URL('https://fixture.invalid' + calls.find(call => call.url.startsWith('/v1/comments?')).url);
+  assert.equal(request.searchParams.get('groupId'), groupId); assert.equal(request.searchParams.get('filepath'), unitId);
+  observers.at(-1).emit([{ target: element, isIntersecting: true, intersectionRatio: 1 }]);
+  await app.commentsMarkVisibleRead();
+  assert.deepEqual(calls.at(-1).options.body, { game: 'poe1', ids: [7], groupId });
+  assert.equal(app.commentsFileUnread, 0);
+});
+
+test('ClientText composer delegates exact raw drafts and audience to its existing durable POST journal', async () => {
+  const { app, calls } = fixture();
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'client-group', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.ctCommentText = ''; app.ctCommentGlobal = false; let queued = 0, posted;
+  app.ctQueueCommentDraft = () => queued++;
+  app.ctPostComment = async () => { posted = [app.ctCommentText, app.ctCommentGlobal]; app.ctCommentText = ''; app.ctCommentGlobal = false; return true; };
+  app.commentsFileDraft = '  raw @ literal\\n\ncomment  '; app.commentsFileAllLanguages = true;
+  assert.equal(queued, 2); assert.equal(app.commentsFileDraft, '  raw @ literal\\n\ncomment  ');
+  assert.equal(await app.commentsSubmit(), true);
+  assert.deepEqual(posted, ['  raw @ literal\\n\ncomment  ', true]);
+  assert.equal(calls.some(call => call.options.method === 'POST'), false, 'the shared UI must not send a second POST');
+  assert.equal(app.commentsFileDraft, ''); assert.equal(app.commentsFileAllLanguages, false);
+});
+
+test('ClientText failed journal posts preserve composer state and the warning until a successful send', async () => {
+  const { app } = fixture();
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'client-group', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.ctCommentText = 'kept'; app.ctCommentGlobal = true; app.ctCommentPostError = 'offline';
+  app.ctPostComment = async () => false;
+  assert.equal(await app.commentsSubmit(), false); assert.match(app.commentsPostError, /offline/);
+  assert.equal(app.commentsFileDraft, 'kept'); assert.equal(app.commentsFileAllLanguages, true);
+  const held = deferred(); app.ctPostComment = () => held.promise;
+  const retry = app.commentsSubmit(); assert.match(app.commentsPostError, /offline/);
+  held.resolve(true); assert.equal(await retry, true); assert.equal(app.commentsPostError, '');
+});
+
+test('ClientText local groups and foreign translator languages cannot request shared comments', async () => {
+  const { app, calls } = fixture();
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'local:workbook', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  assert.equal(app.commentsEligible, false); await app.commentsPoll(); assert.equal(calls.length, 0);
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, groupId: 'published-group', language: 'German' };
+  assert.equal(app.commentsEligible, false); await app.commentsPoll(); assert.equal(calls.length, 0);
+  app.cloudCanAccessAllLanguages = true;
+  assert.equal(app.commentsEligible, true); assert.equal(app.commentsLanguage, 'German');
+});
+
+test('quick replies isolate duplicate unit IDs by content group and use the target descriptor hash', async () => {
+  const { app, calls } = fixture(); let posted;
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'group-a', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.sharedCommentIdentityFor = filepath => ({ ...app.sharedCommentIdentity, filepath, sourceHash: filepath === 'unit-b' ? HASH_B : HASH_A });
+  app.ctPostReplyComment = async (filepath, draft) => { posted = { ...app.commentsIdentityFor(filepath), ...draft }; return true; };
+  app.commentsSetReplyDraft('unit-b', 'reply to paired workbook');
+  const firstKey = app.commentsReplyKey('unit-b');
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, groupId: 'group-b' };
+  assert.notEqual(app.commentsReplyKey('unit-b'), firstKey); assert.equal(app.commentsReplyDraft('unit-b'), '');
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, groupId: 'group-a' };
+  assert.equal(await app.commentsSubmitReply('unit-b'), true);
+  assert.equal(posted.groupId, 'group-a'); assert.equal(posted.filepath, 'unit-b');
+  assert.equal(posted.sourceHash, HASH_B); assert.equal(calls.some(call => call.options.method === 'POST'), false);
+});
+
+test('ClientText quick replies persist and submit exact durable drafts, retaining failures across retries', async () => {
+  const { app, calls } = fixture(); const queued = [], posted = [];
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'group-a', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.ctQueueReplyCommentDraft = (filepath, draft) => queued.push([filepath, draft]);
+  app.commentsSetReplyDraft('unit-b', '  exact @ literal\\n\nreply  '); app.commentsSetReplyAllLanguages('unit-b', true);
+  assert.deepEqual(copy(queued[1]), ['unit-b', { body: '  exact @ literal\\n\nreply  ', allLanguages: true }]);
+  app.ctCommentPostError = 'offline'; app.ctPostReplyComment = async (filepath, draft) => { posted.push([filepath, draft]); return false; };
+  assert.equal(await app.commentsSubmitReply('unit-b'), false); assert.match(app.commentsReplyError('unit-b'), /offline/);
+  assert.equal(app.commentsReplyDraft('unit-b'), '  exact @ literal\\n\nreply  ');
+  const held = deferred(); app.ctPostReplyComment = () => held.promise;
+  const retry = app.commentsSubmitReply('unit-b'); assert.match(app.commentsReplyError('unit-b'), /offline/);
+  held.resolve(true); assert.equal(await retry, true); assert.equal(app.commentsReplyError('unit-b'), '');
+  assert.equal(app.commentsReplyDraft('unit-b'), ''); assert.equal(calls.some(call => call.options.method === 'POST'), false);
+  assert.deepEqual(copy(posted[0]), copy(queued[1]));
+});
+
+test('ClientText All-comments restores durable quick replies without overwriting typing or another scope', async () => {
+  const { app } = fixture(async () => ({ items: [comment(7, { filepath: 'unit-b' })], nextCursor: null }));
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'group-a', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.editorVisible = false; app.commentsAllVisible = true;
+  app.ctLoadReplyCommentDraft = async () => ({ body: '  restored raw\\n  ', allLanguages: true });
+  await app.commentsRefreshAll(); assert.equal(app.commentsReplyDraft('unit-b'), '  restored raw\\n  '); assert.equal(app.commentsReplyAllLanguages('unit-b'), true);
+  const held = deferred(); app._commentsReplyLoaded = new Set();
+  app.ctLoadReplyCommentDraft = () => held.promise;
+  const load = app.commentsRestoreReplyDrafts([comment(7, { filepath: 'unit-a' })], app.commentsCapture());
+  app.commentsSetReplyDraft('unit-a', 'typed meanwhile'); held.resolve({ body: 'stale disk text' }); await load;
+  assert.equal(app.commentsReplyDraft('unit-a'), 'typed meanwhile');
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, groupId: 'group-b' };
+  assert.equal(app.commentsReplyDraft('unit-a'), ''); assert.equal(app.commentsReplyDraft('unit-b'), '');
+});
+
+test('late ClientText journal replies clear only their original draft and audience after a group switch', async () => {
+  const { app } = fixture(); const held = deferred();
+  app.sharedCommentIdentity = { mode: 'clienttext', groupId: 'group-a', versionId: 'version-a', filepath: 'unit-a', sourceHash: HASH_A, language: 'Thai' };
+  app.commentsSetReplyDraft('unit-b', 'first group reply'); app.commentsSetReplyAllLanguages('unit-b', true);
+  const key = app.commentsReplyKey('unit-b'); app.ctPostReplyComment = () => held.promise;
+  const sending = app.commentsSubmitReply('unit-b');
+  app.sharedCommentIdentity = { ...app.sharedCommentIdentity, groupId: 'group-b' };
+  app.commentsSetReplyDraft('unit-b', 'new group reply');
+  held.resolve(true); assert.equal(await sending, true);
+  assert.equal(app.commentsDrafts[key], ''); assert.equal(app.commentsDraftScopes[key], undefined);
+  assert.equal(app.commentsReplyDraft('unit-b'), 'new group reply');
 });
 
 test('unmount invalidates pending responses and disconnects the visibility observer', async () => {

@@ -36,6 +36,14 @@ Disable auto-open for automation runs with:
 
 Enable request logging without opening a browser with `node server.js --no-open --log-requests`.
 
+## Shared editor fixtures
+
+`node scripts/shared-editor-browser-fixture.cjs` exercises the real app in test mode with synthetic ClientText fields. It checks shared panels, source/target controls, autocomplete, exact native CRLF Undo/Redo, inline/full sidebar and Preview continuity, and all four themes. It reports browser warnings and exceptions; test mode does not exercise authenticated persistence.
+
+`node scripts/editor-lookup-browser-fixture.cjs` uses a disposable normal-mode app, local API, authenticated account, worker and IndexedDB. It checks cross-mode cached references, blank Saved overlays, excluded drafts, offline lookup and cancelled preparation while asserting that workspace pointers and collaboration rooms stay unchanged.
+
+`node scripts/clienttext-layout-browser-fixture.cjs` validates ClientText's shared native fields in a disposable desktop browser: full English above translation, inline English beside translation, grammatical form grids, worksheet tooltips and all four themes at wide and resized desktop widths. It extracts the actual editor templates but supplies fixture data and omits persistence, API and account lifecycle; use the normal-mode ClientText fixture in [Cloud Backup](cloud_backup.md#local-validation) for those checks. `node scripts/test-editor-session.cjs` separately checks escaped raw highlights, CRLF edits/insertion, IME handling and stale controller suppression.
+
 ## Large Dictionary Opening Fixture
 
 Run `node scripts/editor-opening-browser-fixture.cjs` and open the loopback URL it prints. This uses test mode without storage or cloud synchronization. Click **Load 20,000 dictionary entries**, then open a dummy file by mouse or Enter. The fixture reports text-visible and ready times, retained input nodes, the largest field position/size change, and rendered dictionary rows. Matching entries are deliberately placed at the end of the dictionary; confirm they appear first, search can find the last unrelated entry, and paging keeps the list at 40 rows.

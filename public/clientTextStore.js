@@ -544,6 +544,9 @@
             },options);
         }
         const getDraft=(rawScope,unitId,options)=>one(capture(rawScope).id,stores.drafts,unitId,options);
+        const getDraftSummaries=(rawScope,options)=>readRows(capture(rawScope).id,stores.drafts,row=>({
+            unitId:row.value.unitId,revision:row.value.revision,updatedAt:row.value.updatedAt
+        }),options);
         async function discardDraft(rawScope,unitId,options={}){
             const scope=capture(rawScope).id;
             return transaction([stores.drafts],'readwrite',async tx=>{
@@ -555,10 +558,12 @@
         async function save(rawScope,unitId,input,options={}){
             const captured=capture(rawScope),scope=captured.id;
             if(!input?.jobId||typeof input.jobId!=='string')throw new TypeError('ClientText save requires a stable job ID.');
+            if(own(input,'origin') && !['save','restore'].includes(input.origin))throw new TypeError('ClientText save origin must be save or restore.');
             const metadata=await requireReady(scope,options);
             const unit=await getUnit(rawScope,unitId,options);if(!unit)throw new Error('ClientText save source is unavailable.');
             const values=S.normalizeValues(unit,input.values), reviewed=S.normalizeReviewed(unit,input.reviewed||{});
             const command={scope:captured.scope,unitId,values,reviewed,
+                ...(own(input,'origin')?{origin:input.origin}:{}),
                 ...(own(input,'baseRevision')?{baseRevision:input.baseRevision}:{}),
                 ...(own(input,'expectedRevision')?{expectedRevision:input.expectedRevision}:{}),
                 ...(own(input,'expectedDraftRevision')?{expectedDraftRevision:input.expectedDraftRevision}:{})};
@@ -574,7 +579,7 @@
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:true,revision:(before?.revision||0)+1,
                     serverRevision:before?.serverRevision||input.baseRevision||0,baseRevision:before?.serverRevision||input.baseRevision||0,
-                    savedAt:Date.now(),jobId:input.jobId,origin:options.origin||'save',outdated:before?.outdated||[]};
+                    savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[]};
                 put(tx,stores.saved,scope,unitId,after);
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
                 put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt},{unitKey:key(scope,unitId)});
@@ -583,6 +588,7 @@
                     const pending=await get(tx,stores.outbox,key(scope,unitId));
                     const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
                     const operation={unitId,mutationId:input.jobId,storageProtocol:S.STORAGE_PROTOCOL,role:unit.role,assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
+                        ...(own(input,'origin')?{origin:input.origin}:{}),
                         clientFacts:S.clientFacts(unit),originalValues:S.originalValues(unit),values:copy(values),reviewed:copy(after.reviewed),baseRevision:after.serverRevision,
                         base:pending?.base||{values:before?.values||S.valuesFor(unit),reviewed:before?.reviewed||{},revision:after.serverRevision},state:'queued',createdAt:Date.now()};
                     // An uncertain submission remains byte-identical until its
@@ -638,19 +644,20 @@
                     if(!Number.isSafeInteger(revision)||revision<1)throw new Error('Invalid ClientText shared revision.');
                     if(before?.serverRevision>revision)continue;
                     if(before?.serverRevision===revision&&S.stableStringify(before.remoteBase?.values||before.values)===S.stableStringify(values))continue;
-                    const accepted={unitId,values,reviewed,revision},merged=pending?mergeRemote(unit,before,pending.base,accepted):{values,conflicts:[]};
+                    const sharedOrigin=remote.origin==='restore'?'restore':'shared';
+                    const accepted={unitId,values,reviewed,revision,...(own(remote,'origin')?{origin:remote.origin}:{})},merged=pending?mergeRemote(unit,before,pending.base,accepted):{values,conflicts:[]};
                     const inherited=remote.conflicts||remote.provenance?.conflicts||[];
                     const conflicts=[...new Map([...inherited,...merged.conflicts].map(conflict=>[S.stableStringify(conflict),copy(conflict)])).values()];
                     const after={...before,unitId,values:merged.values,reviewed:pending?{...reviewed,...before?.reviewed}:reviewed,saved:pending?true:remote.saved!==false,
                         outdated:remote.outdated||Object.keys(remote.provenance?.requiredReview||{}),provenance:copy(remote.provenance||before?.provenance||{}),
-                        revision:(before?.revision||0)+1,serverRevision:revision,baseRevision:revision,remoteBase:accepted,conflicts,savedAt:remote.updatedAt||Date.now(),origin:'shared'};
+                        revision:(before?.revision||0)+1,serverRevision:revision,baseRevision:revision,remoteBase:accepted,conflicts,savedAt:remote.updatedAt||Date.now(),origin:sharedOrigin};
                     put(tx,stores.saved,scope,unitId,after);
                     await learnMemory(tx,captured.scope,unit,{...after,values,reviewed,saved:remote.saved!==false,conflicts:inherited},'remote:'+revision+':'+unitId,'shared');
                     if(pending&&!pending.predecessor&&!['sending','uncertain'].includes(pending.state)){
                         pending.values=copy(after.values);pending.reviewed=copy(after.reviewed);pending.baseRevision=revision;pending.base=accepted;
                         pending.state=merged.conflicts.length?'conflict':'queued';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
                     }
-                    put(tx,stores.history,scope,'remote:'+revision+':'+unitId,{unitId,before:before||null,after,origin:'shared',createdAt:Date.now()},{unitKey:key(scope,unitId)});changed.push(unitId);
+                    put(tx,stores.history,scope,'remote:'+revision+':'+unitId,{unitId,before:before||null,after,origin:sharedOrigin,createdAt:Date.now()},{unitKey:key(scope,unitId)});changed.push(unitId);
                 }
                 if(!Array.isArray(input)&&own(input,'sequence')){if(!Number.isSafeInteger(input.sequence)||input.sequence<(metadata.sequence||0))throw new Error('ClientText event cursor moved backwards.');metadata.sequence=input.sequence;}
                 put(tx,stores.meta,scope,'meta',metadata,{accountId:captured.scope.accountId});return {changed,sequence:metadata.sequence||0};
@@ -679,7 +686,7 @@
                 return row;
             },options);
         }
-        return { import:importContent,importContent,save,getMetadata,getUnits,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,discardDraft,
+        return { import:importContent,importContent,save,getMetadata,getUnits,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
             listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,create };

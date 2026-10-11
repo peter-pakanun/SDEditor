@@ -333,6 +333,7 @@ test('TM scripts load after tag diagnostics and before storage consumers; diff r
   const tagPosition = html.indexOf('<script src="translationDiagnostics.js"'), corePosition = html.indexOf('<script src="translationMemory.js"');
   assert.ok(tagPosition >= 0 && corePosition > tagPosition);
   assert.ok(html.indexOf('<script src="normalizedStore.js"') > corePosition);
-  const panel = html.slice(html.indexOf('id="tmResultsPanel"'), html.indexOf('id="editorLookupPanel"'));
+  const components = fs.readFileSync(path.join(__dirname, '..', 'public', 'editorComponents.js'), 'utf8');
+  const panel = components.slice(components.indexOf('id="tmResultsPanel"'), components.indexOf('id="editorLookupPanel"'));
   assert.match(panel, /part\.changed/); assert.doesNotMatch(panel, /v-html/);
 });

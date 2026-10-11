@@ -144,7 +144,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}],
+  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -504,6 +504,7 @@ const config = Vue.defineComponent({
     highlightDict() {
       this.saveSettings();
       this.scheduleEditorHLterRefresh();
+      this.scheduleClientTextDictionaryMatches?.();
     },
     hlPopupSelectedItem() {
       this.$nextTick(() => {
@@ -3805,7 +3806,7 @@ const config = Vue.defineComponent({
     setDictionaryPage(page) {
       this.endDictionaryEdit();
       this.dictionaryPage = Math.max(1, Math.min(page, this.dictionaryPageCount));
-      this.$nextTick(() => { const side = this.$refs.editorSide; if (side) side.scrollTop = 0; });
+      this.$nextTick(() => { const side = this.getEditorComponentRef?.('editorSide') || this.$refs.editorSide; if (side) side.scrollTop = 0; });
     },
     revealDictionaryEntry(dictId) {
       const dictionary = this.filteredDictionary;
@@ -3905,6 +3906,7 @@ const config = Vue.defineComponent({
       }));
     },
     renderTextRanges(text, ranges) {
+      if(window.EditorSession)return window.EditorSession.renderAnnotatedRanges(text,ranges);
       const source = String(text ?? "");
       const length = source.length;
       const cleanRanges = (Array.isArray(ranges) ? ranges : [])
@@ -4308,9 +4310,9 @@ const config = Vue.defineComponent({
       let margin = 8;
       let viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
       let viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-      let popupEl = this.$refs?.hlPopupPanel;
+      let popupEl = this.getEditorComponentRef?.('hlPopupPanel') || this.$refs?.hlPopupPanel;
       let list = popupEl?.querySelector?.('.hlPopupList');
-      let filterHeight = this.$refs?.hlPopupFilter?.getBoundingClientRect?.().height || 42;
+      let filterHeight = (this.getEditorComponentRef?.('hlPopupFilter') || this.$refs?.hlPopupFilter)?.getBoundingClientRect?.().height || 42;
       let popupHeight = Math.ceil(list ? Math.min(list.scrollHeight, viewportHeight * 0.4) + filterHeight + 24 : Math.min(360, Math.max(180, viewportHeight * 0.48)));
       let width = Math.min(Math.max(rect.width, 260), 640, Math.max(0, viewportWidth - margin * 2));
       let left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
@@ -4396,7 +4398,7 @@ const config = Vue.defineComponent({
       let focusFilter = options.focusFilter !== false;
       this.$nextTick(() => {
         this.positionHlPopup(editorIndex, columnIndex);
-        if (focusFilter) this.$refs.hlPopupFilter?.focus();
+        if (focusFilter) (this.getEditorComponentRef?.('hlPopupFilter') || this.$refs.hlPopupFilter)?.focus();
       });
     },
     closeHlPopup(options = {}) {
@@ -4629,7 +4631,7 @@ const config = Vue.defineComponent({
       else if (targetRect.bottom > bottom) side.scrollTop += targetRect.bottom - bottom;
     },
     scrollHlPopupSelectionIntoView() {
-      const panel = this.$refs?.hlPopupPanel;
+      const panel = this.getEditorComponentRef?.('hlPopupPanel') || this.$refs?.hlPopupPanel;
       const list = panel?.querySelector?.('.hlPopupList');
       const item = panel?.querySelector?.('.hlPopupItem.active');
       if (!list?.getBoundingClientRect || !item?.getBoundingClientRect) return;
@@ -4959,13 +4961,14 @@ const config = Vue.defineComponent({
     isActiveElementInSearchBox() {
       let el = document.activeElement;
       if (!el) return false;
-      return [this.$refs.searchInput, this.$refs.dictionaryFilterInput, this.$refs.regexFilterInput, this.$refs.lookupSearchInput].includes(el);
+      return [this.$refs.searchInput, ...['dictionaryFilterInput','regexFilterInput','lookupSearchInput'].map(name=>this.getEditorComponentRef?.(name) || this.$refs[name])].includes(el);
     },
     focusSidebarFilterInput() {
-      if (!this.editorSessionActive) return false;
-      if (this.sideTab === 'tm') { this.openTMManager?.(); return true; }
-      let ref = this.sideTab === "lookup" ? this.$refs.lookupSearchInput
-        : this.sideTab === "regex" ? this.$refs.regexFilterInput : this.$refs.dictionaryFilterInput;
+      if (!(this.ctActive ? this.sharedEditorToolsMounted : this.editorSessionActive)) return false;
+      const tab=this.ctActive ? this.ctTool : this.sideTab;
+      if (tab === 'tm') { if(!this.ctActive)this.openTMManager?.(); return true; }
+      const name=tab === 'lookup' ? 'lookupSearchInput' : tab === 'regex' ? 'regexFilterInput' : 'dictionaryFilterInput';
+      const ref=this.getEditorComponentRef?.(name) || this.$refs[name];
       if (!ref) return false;
       ref.focus?.();
       ref.select?.();
@@ -4975,8 +4978,9 @@ const config = Vue.defineComponent({
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
     },
     openEditorLookup() {
-      this.sideTab = 'lookup';
-      this.$nextTick(() => this.lookupFocusSearch?.());
+      const scope=window.EditorSession.key(this,false);
+      if(this.ctActive)this.ctTool='lookup';else this.sideTab='lookup';
+      this.$nextTick(() => {if(window.EditorSession.key(this,false)===scope)this.lookupFocusSearch?.();});
     },
     lookupPanelKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
@@ -5002,6 +5006,7 @@ const config = Vue.defineComponent({
         && (e.code === "KeyI" || String(e.key || "").toLowerCase() === "i");
     },
     handleKeydown(e) {
+      if(window.EditorSession?.dispatchShortcut(this,e))return;
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
       if (window.AppDialogs?.isOpen) return;
@@ -6295,6 +6300,15 @@ const config = Vue.defineComponent({
       return index === undefined ? undefined : this.descs[index];
     },
     async commentsOpenFile(filepath) {
+      if(this.ctActive){
+        const unit=this._ctUnitIndex?.get(filepath),ctx=this.ctContext();if(!unit || this.ctBusy || this.navigationBusy)return;
+        this.navigationBusy=true;
+        try {
+          if(!await this.ctSelect(unit,this.ctEditor || !this.inlineEditor) || !this.ctCurrent(ctx) || this.ctSelection!==filepath)return;
+          this.commentsAllVisible=false;this.ctTool='comments';await this.$nextTick();
+          if(this.ctCurrent(ctx) && this.ctSelection===filepath)(this.getEditorComponentRef?.('commentsFileList') || this.$refs.commentsFileList)?.focus();
+        }finally{this.navigationBusy=false;}return;
+      }
       if (this.editorLoading || this.navigationBusy || this.editorSaving || !this.getDescByFilepath(filepath)) return;
       const context = this.captureCollaborationContext();
       this.navigationBusy = true;
@@ -6308,7 +6322,7 @@ const config = Vue.defineComponent({
         this.commentsAllVisible = false;
         this.sideTab = 'comments';
         await this.$nextTick();
-        this.$refs.commentsFileList?.focus();
+        (this.getEditorComponentRef?.('commentsFileList') || this.$refs.commentsFileList)?.focus();
       } finally { this.navigationBusy = false; }
     },
     editFile(filepath, returnToFileList = false, options = {}) {
@@ -7776,6 +7790,11 @@ if (window.EditorComponents?.TextField) app.component('editor-text-field', windo
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
 if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary-entries', window.EditorComponents.DictionaryEntries);
+if (window.EditorComponents?.Tools) app.component('editor-tools', window.EditorComponents.Tools);
+if (window.EditorComponents?.Autocomplete) app.component('editor-autocomplete', window.EditorComponents.Autocomplete);
+if (window.EditorComponents?.NativeField) app.component('editor-native-field', window.EditorComponents.NativeField);
+if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-shell', window.EditorComponents.WorkspaceShell);
+if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);

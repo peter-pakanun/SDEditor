@@ -355,6 +355,7 @@
         this.dictionarySnapshotGeneration = generation;
         clearPreparationError(this);
         this.scheduleEditorHLterRefresh?.({ dictionaryGeneration: generation });
+        this.scheduleClientTextDictionaryMatches?.();
       },
     },
   };

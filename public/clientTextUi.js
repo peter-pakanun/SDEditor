@@ -14,7 +14,7 @@
         {key:'missing',label:'Missing translation',tone:'missing'}, {key:'saved',label:'Saved changes',tone:'saved'},
         {key:'revised',label:'Revised translations',tone:'revised'}, {key:'outdated',label:'Outdated translation',tone:'outdated'},
         {key:'error',label:'Diagnostic errors',tone:'error'}, {key:'warning',label:'Diagnostic warnings',tone:'warning'},
-        {key:'unchanged',label:'Unchanged',tone:'unchanged'}
+        {key:'draft',label:'Local drafts',tone:'draft'}, {key:'unchanged',label:'Unchanged',tone:'unchanged'}
     ];
     // Start with workload and saved changes; complete originals remain
     // available through the Unchanged filter.
@@ -76,7 +76,7 @@
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
             ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
             ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
-            ctPreviewGggVars: {},
+            ctPreviewGggVars: {}, ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false,
             ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
@@ -175,7 +175,7 @@
                 return counts;
             },
             ctStatusFilterOptions() {
-                const counts={...this.ctCounts,error:0,warning:0};
+                const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount};
                 for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
                 return statusFilters.map(item=>({...item,count:counts[item.key] || 0}));
             },
@@ -189,9 +189,10 @@
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
-                    } else if (this.ctFilter && !status[this.ctFilter]) return false;
+                    } else if (this.ctFilter === 'draft' ? !this.ctDraftUnitIds.has(unit.id) : this.ctFilter && !status[this.ctFilter]) return false;
                     if(!this.ctFilter && !this.ctSelectedFilters.some(key=>key==='error'||key==='warning'
-                        ? (this.ctDiagnostics[unit.id] || []).some(issue=>issue.severity===key) : status[key]))return false;
+                        ? (this.ctDiagnostics[unit.id] || []).some(issue=>issue.severity===key) : key==='draft'
+                            ? this.ctDraftUnitIds.has(unit.id) : status[key]))return false;
                     if (!query) return true;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
                     return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => String(text).toLocaleLowerCase().includes(query));
@@ -199,6 +200,8 @@
             },
             ctPageRows() { return this.ctRows.slice((this.ctPage - 1) * this.ctEffectivePageSize, this.ctPage * this.ctEffectivePageSize); },
             ctPageCount() { return Math.max(1, Math.ceil(this.ctRows.length / this.ctEffectivePageSize)); },
+            ctDraftUnitIds() {const ids=new Set(this.ctDraftSummaries.map(draft=>draft.unitId));if(this.ctDraftDirty && this.ctSelection)ids.add(this.ctSelection);return ids;},
+            ctDraftCount() {return this.ctDraftUnitIds.size;},
             ctCounts() {
                 this.ctRevision;
                 const counts={total:this.ctUnits.length,missing:0,outdated:0,revised:0,saved:0,unchanged:0};
@@ -234,19 +237,29 @@
                 }
                 return output;
             },
-            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctMemory,unit,field,{game:this.gameVersion,limit:20}) : [];},
+            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctMemory,unit,field,{game:this.gameVersion,limit:20,threshold:this.tmThreshold || 75}) : [];},
             ctDictionaryMatches() {
                 return (this.dictionary || []).filter(entry=>this.ctDictionaryMatchedDefinitions.has(String(entry?._id || '')));
             },
             ctDictionaryReady() {
-                return !!(this.ctActive && this.ctWorkspace && this.ctCurrentUnit && !this.ctBusy && !this.ctHistoryViewer
+                return !!(this.ctActive && this.ctWorkspace && !this.ctBusy && !this.ctHistoryViewer
                     && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting
                     && (!this.lang || this.lang===this.ctWorkspace.scope.language)
                     && this.gameVersion===this.ctWorkspace.scope.game && (this.branchId || 'default')===(this.ctWorkspace.scope.branchId || 'default'));
             },
             ctDictionaryScopeKey() {return JSON.stringify([this.ctContext(),this.ctSelection]);},
             ctDictionaryMatchedDefinitions() {
-                const map=new Map(),texts=this.ctFieldsFor().filter(field=>field.kind!=='gender').map(field=>String(field.source || ''));
+                const map=new Map(),fields=this.ctFieldsFor().filter(field=>field.kind!=='gender'),texts=fields.map(field=>String(field.source || ''));
+                if(this.ensureDictionaryWorker){
+                    for(const unit of this.ctDictionaryPack?.units || []){
+                        if(!fields.some(field=>field.id===unit.key && field.source===unit.english))continue;
+                        for(const hl of unit.HLs || []){
+                            if(!hl.dictId)continue;const id=String(hl.dictId);if(!map.has(id))map.set(id,new Set());
+                            const word=this.ctDictionaryPack.entriesById?.[id];map.get(id).add(String(hl.dictDefFind || word?.find || '').trim().toLowerCase());
+                        }
+                    }
+                    return map;
+                }
                 const keywordNames=new Set(texts.flatMap(text=>root.ClientTextState.tokenize(text).filter(token=>token.kind==='keyword')
                     .map(token=>this.ctDictionaryKeywordName(token.identity).toLowerCase())));
                 const active=this.getActiveDictionaryEntries?.() || root.DictionaryScope?.activeEntries(this.dictionary || [],this.gameVersion) || this.dictionary || [];
@@ -342,6 +355,76 @@
         mounted() { this._ctStore = root.ClientTextStore.create(); this._ctWorker = root.ClientTextWorkerClient.create(); },
         beforeUnmount() { this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
         methods: {
+            ctFieldController(field) {return root.EditorSession.fieldController(this,field);},
+            ctSourceFieldController(group,source) {
+                const displayed=this.ctDisplayedFields(),field=group.fields.find(field=>field.id===this.ctFocusedField && field.source===source.text && displayed.includes(field))
+                    || group.fields.find(field=>field.id===source.key) || group.fields[0];
+                const controller=root.EditorSession.fieldController(this,field,source.text),focus=controller.focus;
+                controller.focus=event=>{this.ctFocusSource(group,source);focus(event);};return controller;
+            },
+            async scheduleClientTextDictionaryMatches() {
+                if(!this.ctActive || !this.ctWorkspace || !this.ensureDictionaryWorker)return;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,run=this._ctDictionaryRun={},fields=this.ctFieldsFor().filter(field=>field.kind!=='gender');
+                this._ctDictionaryRequest?.cancel?.();
+                const current=()=>this._ctDictionaryRun===run && this.ctCurrent(ctx) && this.ctCurrentUnit===unit;
+                try {
+                    await this.ensureDictionarySnapshot();if(!current())return;
+                    const request=this._ctDictionaryRequest=this.ensureDictionaryWorker().match(fields.map(field=>({key:field.id,english:field.source,tokens:root.ClientTextState.tokenize(field.source)})),
+                        {contentMode:'clienttext',highlightDict:!!this.highlightDict});
+                    const pack=await request;if(!current())return;
+                    if(this.ctCompletion)this._ctPendingDictionaryPack=raw(pack);else this.ctDictionaryPack=raw(pack);
+                } catch(error) {if(current() && error.name!=='AbortError')this.ctError='Could not prepare Dictionary matches: '+error.message;}
+            },
+            async ctRefreshDraftSummaries(ctx=this.ctContext()) {
+                if(!this._ctStore?.getDraftSummaries)return;
+                try {const summaries=await this._ctStore.getDraftSummaries(ctx.scope);if(this.ctCurrent(ctx))this.ctDraftSummaries=raw(summaries);}
+                catch(error){if(this.ctCurrent(ctx))this.ctError='Could not load local drafts: '+error.message;}
+            },
+            ctOpenHighlightDictionary(field,range) {
+                if(!this.ctActive || this.ctBusy)return;
+                let word=(this.dictionary || []).find(word=>String(word._id)===String(range.dictId));
+                if(!word && range.kind==='keyword'){
+                    const name=this.ctDictionaryKeywordName(range.identity),token=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(range.value),replacement=token?.[2] || name;
+                    word=(this.dictionary || []).find(word=>String(word.find).trim().toLowerCase()===name.toLowerCase());
+                    if(!word){word=this.createDictionaryEntry({find:name,replace:replacement,alts:[],tlnote:''});this.dictionary.unshift(word);this.dictionaryEntryInput?.(word);}
+                }
+                if(!word)return;this.ctTool='dictionary';this.ctDictionaryFilter='';this.ctDictionaryBeginEdit(word._id);
+                const index=this.ctDictionaryFiltered.indexOf(word);this.ctDictionaryPage=Math.floor(Math.max(0,index)/this.ctDictionaryPageSize)+1;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,dictionary=this.dictionary;
+                this.$nextTick?.(()=>{if(this.ctCurrent(ctx) && this.ctCurrentUnit===unit && this.dictionary===dictionary && this.ctTool==='dictionary')this.focusDictionaryEntryReplaceInput?.(word._id);});
+            },
+            clientTextPopupController() {
+                if(this._clientTextPopupController)return this._clientTextPopupController;
+                const host=this,base=root.EditorSession.create(this),names=['hlPopup','hlPopupTlnote','closeHlPopup','applyHlPopupFilter','hlPopupFilterKeydown','insertHlPopupItem','hlPopupCtrlEnterPillText'];
+                const field=()=>host.ctCurrentUnit?.fields.find(field=>field.id===host.ctCompletion?.fieldId);
+                const popup=()=>{
+                    const completion=host.ctCompletion,rect=host._ctCompletionInput?.getBoundingClientRect?.() || {left:0,bottom:0,width:320};
+                    return {get visible(){return !!host.ctCompletion;},x:Math.min(rect.left,Math.max(0,(root.innerWidth || 1280)-Math.max(320,rect.width))),
+                        y:Math.min(rect.bottom,(root.innerHeight || 900)-220),width:Math.max(320,Math.min(rect.width,520)),maxHeight:220,
+                        noteX:Math.max(0,rect.left-300),noteY:rect.bottom,noteWidth:280,noteMaxHeight:220,
+                        get filter(){return host.ctCompletion?.filter || '';},set filter(value){if(host.ctCompletion)host.ctCompletion.filter=value;},
+                        get items(){return host.ctCompletion?.allItems || host.ctCompletion?.items || [];},get filtered(){return host.ctCompletion?.items || [];},
+                        get selectedIndex(){return host.ctCompletion?.selectedIndex || 0;},set selectedIndex(value){if(host.ctCompletion)host.ctCompletion.selectedIndex=value;}};
+                };
+                const actions={
+                    closeHlPopup:options=>{const input=host._ctCompletionInput;host.ctCloseCompletion();if(options?.refocus)input?.focus?.();},
+                    applyHlPopupFilter:()=>{const completion=host.ctCompletion;if(!completion)return;const query=(completion.filter || '').toLowerCase();
+                        completion.items=(completion.allItems || completion.items).filter(item=>!query || (item.label+' '+item.value).toLowerCase().includes(query));completion.selectedIndex=0;},
+                    insertHlPopupItem:item=>field() && host.ctApplyCompletion(field(),item),
+                    hlPopupFilterKeydown:event=>{
+                        if(event.isComposing || event.keyCode===229)return;
+                        if(event.key==='Escape'){event.preventDefault();event.stopPropagation?.();actions.closeHlPopup({refocus:true});return;}
+                        const completion=host.ctCompletion;if(!completion)return;
+                        if(['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const count=completion.items.length;if(count)completion.selectedIndex=(completion.selectedIndex+(event.key==='ArrowDown'?1:-1)+count)%count;}
+                        else if(event.key==='Enter'){event.preventDefault();const item=completion.items[completion.selectedIndex];
+                            if(event.ctrlKey && item){host.ctOpenHighlightDictionary(field(),{value:item.value,identity:/^\[([^\]|]+)/.exec(item.value)?.[1],kind:'keyword',dictId:item.dictEntryId});actions.closeHlPopup();}
+                            else if(item)actions.insertHlPopupItem(item);}
+                    },hlPopupCtrlEnterPillText:item=>item.dictEntryId?'Ctrl+Enter · Dictionary':/^\[/.test(item.value)?'Ctrl+Enter · Add Dictionary':'',
+                };
+                this._clientTextPopupController=new Proxy(base,{get(target,name){if(name==='hlPopup')return popup();if(name==='hlPopupTlnote')return host.ctCompletion?.items[host.ctCompletion.selectedIndex]?.tlnote || '';
+                    return name in actions ? actions[name]:target[name];},ownKeys:()=>[...new Set([...Reflect.ownKeys(base),...names])],getOwnPropertyDescriptor:()=>({enumerable:true,configurable:true})});
+                return this._clientTextPopupController;
+            },
             ctDictionaryKeywordName(identity) {return root.getKeywordPopupLookupName?.(identity) || String(identity).trim().replace(/<gemlevel=(?:\d+|\{\d+\})>$/i,'').trim();},
             ctDictionaryPairs(word) {
                 return this.getDictionaryDefinitionPairs?.(word) || [{find:word.find,replace:word.replace,isMain:true},...(word.alts || []).map(alt=>({...alt,isMain:false}))];
@@ -391,6 +474,7 @@
                 if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || !this.ctDictionaryReady || !dictionary.includes(word) || alt && !word.alts?.includes(alt))return false;
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField),input=this.ctDictionaryTarget(field?.id),replacement=(alt || word).replace;
                 if(!field || field.kind==='gender' || !input || input.isConnected===false || typeof replacement!=='string')return false;
+                if(root.EditorSession)return root.EditorSession.insert(this,field,replacement,{input});
                 const text=this.ctValues[field.id],start=input.selectionStart,end=input.selectionEnd;
                 if(typeof text!=='string' || input.value!==text || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>text.length)return false;
                 const next=text.slice(0,start)+replacement+text.slice(end);this.ctValues[field.id]=next;this.ctCloseCompletion();this.ctEdited(field);
@@ -460,6 +544,24 @@
                 if(this.ctBusy)return false;
                 return this.ctSelect(unit,true);
             },
+            ctInlineFocusContains(target) {
+                return target?.closest?.('tr[data-unit-id]')?.dataset.unitId===this.ctSelection
+                    || !!target?.closest?.('[data-inline-focus-surface], .appDialogOverlay, .appDialog');
+            },
+            ctInlineFocusOut(event) {
+                if(!this.ctInlineUnitVisible() || this.ctKeyboardBlocked() || this._ctCloseRun || this.ctInlineFocusContains(event.relatedTarget))return;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,selection=this._ctSelectRun;
+                setTimeout(async()=>{
+                    if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || !this.ctInlineUnitVisible()
+                        || this.ctKeyboardBlocked() || root.document?.hidden || root.document?.hasFocus?.()===false
+                        || event.target?.composing || this.ctInlineFocusContains(root.document?.activeElement))return;
+                    if(this.ctHasEditorChanges() && !await this.ctSave())return;
+                    if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctEditor
+                        || this.ctKeyboardBlocked() || this.ctInlineFocusContains(root.document?.activeElement))return;
+                    if(!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection)return;
+                    this.ctInlineClosed=true;this.ctCloseCompletion();this.ctDictionaryEndEdit();this.ctRefreshLayout();
+                },0);
+            },
             async ctRowKeydown(unit,event) {
                 if(!event || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
                     || this.ctBusy || this.ctEditor || this.ctHistoryViewer || this.$refs?.ctDiagnosticDialog?.open || rowControl(event))return false;
@@ -522,7 +624,7 @@
                     if(this._ctDraftRevision===revision){this._ctDraftRevision=null;const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     if(signature!==JSON.stringify([this.ctValues,this.ctReviewed])){this.ctQueueDraft();return false;}
                     this.ctValues=this.ctValuesFor(this.ctCurrentUnit);this.ctReviewed={...(this.ctSaved[unitId]?.reviewed || {})};
-                    this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctCompletion=null;return true;
+                    this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctCloseCompletion();await this.ctRefreshDraftSummaries(ctx);return true;
                 } catch(error){if(this.ctCurrent(ctx))this.ctError='Draft was not discarded: '+error.message;return false;}
                 finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
             },
@@ -567,7 +669,9 @@
             ctFence() {
                 this.ctFlushDraft().catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
+                this.ctFlushReplyCommentDrafts().catch(()=>{});
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);
+                this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this.ctInlineClosed=false;
@@ -795,11 +899,11 @@
                 this.ctBusy = true; this.ctError = '';
                 this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
                 this.clearEditorToolsFile?.();
-                    const [units, saved] = await this.ctInitializationStep('Loading cached translations',async report=>{
-                        const result=await Promise.all([this._ctStore.getUnits(scope,{guard:current,onProgress:progress=>report({...progress,completed:progress.completed ?? progress.processed})}), this._ctStore.getSaved(scope,{guard:current})]);check();return result;
+                    const [units, saved, drafts] = await this.ctInitializationStep('Loading cached translations',async report=>{
+                        const result=await Promise.all([this._ctStore.getUnits(scope,{guard:current,onProgress:progress=>report({...progress,completed:progress.completed ?? progress.processed})}), this._ctStore.getSaved(scope,{guard:current}),this._ctStore.getDraftSummaries?.(scope,{guard:current})]);check();return result;
                     },initialization);
                     check();
-                    this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved); this.ctRevision++;
+                    this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved);this.ctDraftSummaries=raw(drafts || []); this.ctRevision++;
                     const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
                     this._ctSheets = raw([...new Set(visibleUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
@@ -846,7 +950,6 @@
                         if(issue){this._ctSyncError=issue;this.ctError=issue;}
                         else {if(this.ctError===this._ctSyncError)this.ctError='';this._ctSyncError='';}
                         await this.ctPresence(ctx);
-                        if(this.ctSelection)await this.ctLoadComments(ctx);
                     } catch (error) { if (this.ctCurrent(ctx) && !error.stale){this._ctSyncError=error.message;this.ctError=error.message;} }
                 })();
                 const run={sync,promise:operation};this._ctSyncRun=run;
@@ -882,7 +985,8 @@
                 this.ctInitializeVariants(unit);const displayed=this.ctDisplayedFields(unit);
                 this.ctFocusedField=this.ctTabFields(unit).find(field=>displayed.includes(field))?.id || '';
                 this.ctResetHistory(); this.ctComments = [];
-                this.ctLoadHistory(ctx, unit.id); this.ctLoadComments(ctx, unit.id); this.ctPresence(ctx);
+                this.ctLoadHistory(ctx, unit.id); this.ctPresence(ctx);
+                this.scheduleClientTextDictionaryMatches();this.ctRefreshDraftSummaries(ctx);
                 this.ctLoadCommentDraft(ctx,unit.id);
                 await this.$nextTick?.();if(!current() || this.ctSelection!==unit.id)return false;
                 run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget();return true;
@@ -1137,7 +1241,7 @@
                 if(next)return this.ctFocusTarget(false,next.id);
                 return this.ctSaveAndNavigate(direction<0,{inline:true,focusEnd:direction<0});
             },
-            ctCloseCompletion() {this.ctCompletion=null;this._ctCompletionInput=null;},
+            ctCloseCompletion() {this.ctCompletion=null;this._ctCompletionInput=null;if(this._ctPendingDictionaryPack){this.ctDictionaryPack=this._ctPendingDictionaryPack;this._ctPendingDictionaryPack=null;}},
             ctCompletionValid(field,input=this._ctCompletionInput) {
                 const completion=this.ctCompletion,current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id);
                 return !!(completion && completion.items?.length && this.ctActive && !this.ctBusy && !this.ctHistoryViewer
@@ -1146,7 +1250,7 @@
                     && current && current.kind!=='gender' && current.source===completion.source
                     && (!this.ctFocusedField || this.ctFocusedField===field.id) && this.ctValues[field.id]===completion.text
                     && input && input.isConnected!==false && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
-                    && (typeof input.value!=='string' || input.value===completion.text));
+                    && (typeof input.value!=='string' || input.value===completion.text.replace(/\r\n?/g,'\n')));
             },
             ctCompletionSelectionChanged(field,event) {
                 if(this.ctCompletion && !this.ctCompletionValid(field,event.target))this.ctCloseCompletion();
@@ -1165,7 +1269,7 @@
                             const pairs=this.getDictionaryDefinitionPairs?.(entry) || [{find:entry.find,replace:entry.replace},...(entry.alts || []).map(alt=>({...alt,replace:alt.replace ?? entry.replace}))];
                             for(const pair of pairs){
                                 const display=pair.replace;if(typeof display!=='string' || !display.trim() || /[\[\]]/.test(display))continue;
-                                candidates.push({value:'['+identity+'|'+display+']',label:'['+identity+'|'+String(pair.find ?? '')+'] → ['+identity+'|'+display+']',
+                                candidates.push({value:'['+identity+'|'+display+']',label:'['+identity+'|'+String(pair.find ?? '')+'] → ['+identity+'|'+display+']',dictEntryId:entry._id,tlnote:entry.tlnote || '',
                                     dictionaryKey:JSON.stringify([entry._id || entry.id || entry.find,pair._id || '',pair.find,display]),
                                     exact:String(pair.find ?? '').trim().toLocaleLowerCase()===String(keyword[2] || identity).trim().toLocaleLowerCase()});
                             }
@@ -1184,25 +1288,27 @@
                 const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
                 if(!current || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
                     || !Number.isInteger(caret) || !Number.isInteger(selectionEnd) || !options.manual && selectionEnd!==caret)return false;
-                const before=text.slice(0,caret),match=selectionEnd===caret ? /([\[<{])([^\]\}>\r\n]*)$/.exec(before) : null;
+                const rawCaret=root.EditorSession?.rawOffset(text,caret) ?? caret,rawEnd=root.EditorSession?.rawOffset(text,selectionEnd) ?? selectionEnd;
+                const before=text.slice(0,rawCaret),match=selectionEnd===caret ? /([\[<{])([^\]\}>\r\n]*)$/.exec(before) : null;
                 const wholeForm=field.kind==='form' && caret===text.length && selectionEnd===caret && 'NONEXISTENT'.startsWith(text.toUpperCase());
-                let start=caret,end=selectionEnd,items;
-                if(match){start=caret-match[0].length;items=this.ctCompletionItems(field,match[1],match[0]);}
+                let start=rawCaret,end=rawEnd,items;
+                if(match){start=rawCaret-match[0].length;items=this.ctCompletionItems(field,match[1],match[0]);}
                 else if(wholeForm && (text || options.manual)){start=0;end=text.length;items=options.manual && !text ? this.ctCompletionItems(field) : root.ClientTextState.suggestions(field).filter(item=>item.replaceWholeField);}
                 else if(options.manual)items=this.ctCompletionItems(field).filter(item=>!item.replaceWholeField);
                 else return false;
                 if(!items.length)return false;
                 this._ctCompletionInput=input;
                 this.ctCompletion={fieldId:field.id,unitId:this.ctSelection,context:this.ctContext(),source:current.source,text,
-                    selectionStart:caret,selectionEnd,start,end,items,selectedIndex:0};return true;
+                    selectionStart:caret,selectionEnd,start,end,items,allItems:items.slice(),filter:'',selectedIndex:0};return true;
             },
             ctApplyCompletion(field,item,input) {
                 const completion=this.ctCompletion,target=input || this._ctCompletionInput;
                 if(!this.ctCompletionValid(field,target) || !completion.items.includes(item)
                     || item.replaceWholeField && (field.kind!=='form' || completion.start!==0 || completion.end!==completion.text.length)
-                    || item.dictionaryKey && !this.ctCompletionItems(field).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
+                    || item.dictionaryKey && !(completion.allItems || completion.items).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
                     this.ctCloseCompletion();return false;
                 }
+                if(root.EditorSession)return root.EditorSession.insert(this,field,item.value,{input:target,start:completion.start,end:completion.end,raw:true});
                 const text=completion.text.slice(0,completion.start)+item.value+completion.text.slice(completion.end);
                 this.ctValues[field.id]=text;this.ctCloseCompletion();this.ctEdited(field);
                 this.$nextTick?.(()=>{
@@ -1226,7 +1332,7 @@
                         if(head.signature===signature)return;
                         const saved = await this._ctStore.putDraft(ctx.scope, unitId, { values, reviewed }, { expectedRevision: head.revision });
                         head.revision=saved.revision;head.signature=signature;
-                        if(this.ctCurrent(ctx) && this.ctSelection===unitId)this._ctDraftRevision=saved.revision;
+                        if(this.ctCurrent(ctx) && this.ctSelection===unitId){this._ctDraftRevision=saved.revision;this.ctRefreshDraftSummaries(ctx);}
                     });head.queue=pending;
                     this._ctDraftQueue=Promise.all([...heads.values()].map(value=>value.queue));this._ctDraftQueue.catch(()=>{});
                     await pending; return true;
@@ -1234,7 +1340,7 @@
                 catch (error) { if (this.ctCurrent(ctx)) this.ctError = 'Draft was not stored: ' + error.message; return false; }
                 finally{head.pending--;}
             },
-            async ctSave(close = false) {
+            async ctSave(close = false, options = {}) {
                 if (this.ctBusy || !this.ctCurrentUnit) return false;
                 if(this.ctChoices.length){this.ctError='Choose between the retained alternatives before saving this ID.';return false;}
                 const ctx=this.ctContext(),unitId=this.ctSelection,scopeKey=root.ClientTextStore.scopeKey(ctx.scope);
@@ -1246,7 +1352,8 @@
                 const job=existing?.unitId===unitId && existing.scopeKey===scopeKey ? existing : {unitId,scopeKey,id:uuid()};
                 this._ctSaveJob=job;this.ctBusy = true;
                 try {
-                    const command=job.command ||= { jobId:job.id, values: copy(this.ctValues), reviewed: copy(this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null };
+                    const command=job.command ||= { jobId:job.id, values: copy(this.ctValues), reviewed: copy(this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
+                        ...(options.origin ? {origin:options.origin}: {}) };
                     const result = await this._ctStore.save(ctx.scope, unitId, command);
                     if (!this.ctCurrent(ctx)) return false;
                     const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===JSON.stringify([command.values,command.reviewed]);
@@ -1254,7 +1361,7 @@
                     this._ctEditRevision=result.saved.revision;
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
-                    this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);
+                    this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);this.ctRefreshDraftSummaries(ctx);
                     if (close && sameEditor) {
                         this.ctEditor = false;this.ctInlineClosed=false;this._ctInlineReturn=null;this.ctCompletion=null;await this.$nextTick?.();
                         if(!this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
@@ -1343,7 +1450,9 @@
                     else if(['F1','F2'].includes(event.key) || ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase()==='s' || ['Comma','Period'].includes(event.code))))event.preventDefault();
                     return;
                 }
-                if(event.ctrlKey && event.code===(this.filterShortcutCtrlD?'KeyD':'KeyF')){event.preventDefault();this.$refs.ctSearchInput?.focus();return;}
+                if(event.ctrlKey && event.code===(this.filterShortcutCtrlD?'KeyD':'KeyF')){
+                    event.preventDefault();if(this.ctEditor || event.target?.closest?.('.ctTools'))this.focusSidebarFilterInput?.();else this.$refs.ctSearchInput?.focus();return;
+                }
                 if(event.target?.closest?.('.ctTools')){if(['F1','F2'].includes(event.key) || (event.ctrlKey || event.metaKey) && (event.key.toLowerCase()==='s' || ['Comma','Period'].includes(event.code)))event.preventDefault();return;}
                 if(['F1','F2'].includes(event.key) || event.ctrlKey && ['Comma','Period'].includes(event.code)){
                     event.preventDefault();await this.ctSaveAndNavigate(event.key==='F1' || event.code==='Comma');
@@ -1518,18 +1627,34 @@
                 this.ctHistoryCompareB = entry.key + ':after'; this.ctOpenHistoryViewer(); return true;
             },
             async ctLoadMemory(ctx=this.ctContext()) {if(!this._ctStore?.getMemory)return;try{const memory=await this._ctStore.getMemory(ctx.scope);if(this.ctCurrent(ctx))this.ctMemory=raw(memory.units);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;}},
-            ctApplyMemory(match) {const field=this.ctPreviewField;if(!field || this.ctBusy)return;this.ctValues[field.id]=match.target;this.ctEdited(field);},
+            async ctApplyMemory(match) {
+                const field=this.ctPreviewField;if(!field || !match || typeof match.target!=='string' || this.ctBusy || this.ctHistoryViewer)return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=this.ctValues[field.id],selection=this._ctSelectRun,target=match.target,
+                    current=()=>!match.id || this.ctMemoryResults?.some(candidate=>candidate.id===match.id && candidate.target===target);
+                if(!current())return false;
+                if(String(value || '').trim() && value!==target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?',{title:'Use TM translation?',confirmLabel:'Replace draft',danger:false}))return false;
+                if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctPreviewField!==field || this.ctValues[field.id]!==value
+                    || this.ctBusy || this.ctHistoryViewer || match.target!==target || !current())return false;
+                const input=this.ctDictionaryTarget(field.id);
+                if(input && root.EditorSession)return root.EditorSession.insert(this,field,target,{input,whole:true});
+                this.ctValues[field.id]=target;this.ctEdited(field);this.ctFocusTarget(false,field.id);return true;
+            },
             async ctRestoreHistory(entry, side = 'after') {
                 if (this.ctBusy || !['before', 'after'].includes(side) || !this.ctHistoryEntryCurrent(entry) || !entry[side].available) return false;
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, snapshot = entry[side];
                 const editor = JSON.stringify([this.ctValues, this.ctReviewed]);
+                if(!String(ctx.scope.groupId).startsWith('local:') && !this.ctPolicy?.clientTextSaveOrigins?.includes('restore')){
+                    this.ctHistoryError='The API must support ClientText restores before restoring this revision.';return false;
+                }
+                if(!await this.appConfirm('Restore this revision? A new saved revision will be created.',{title:'Restore saved revision?',confirmLabel:'Restore revision'}))return false;
+                if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || !this.ctHistoryEntryCurrent(entry) || JSON.stringify([this.ctValues,this.ctReviewed])!==editor)return false;
                 if (!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || !this.ctHistoryEntryCurrent(entry)
                     || JSON.stringify([this.ctValues, this.ctReviewed]) !== editor) return false;
                 this.ctValues = Object.fromEntries(unit.fields.map(field => [field.id,
-                    typeof snapshot.values[field.id] === 'string' ? snapshot.values[field.id] : String(field.target ?? '')]));
+                    typeof snapshot.values[field.id] === 'string' ? snapshot.values[field.id] : String(this.ctValues[field.id] ?? field.target ?? '')]));
                 this.ctReviewed = Object.fromEntries(Object.entries(snapshot.reviewed).filter(([id, hash]) => unit.fields.some(field => field.id === id && this.ctReviewHash(field) === hash)));
                 this.ctDraftDirty = true;
-                return await this.ctFlushDraft();
+                return await this.ctSave(false,{origin:'restore'});
             },
             ctRefreshDiagnostics(ids) {
                 if (!this.ctScanDone) return;
@@ -1663,15 +1788,83 @@
             async ctFlushCommentDraft() {
                 clearTimeout(this._ctCommentTimer);if(!this._ctStore || !this.ctWorkspace || !this.ctSelection)return;
                 const ctx=this.ctContext(),unitId=this.ctSelection,scope={accountId:ctx.scope.accountId,game:ctx.scope.game,branchId:ctx.scope.branchId},key=this.ctCommentKey(ctx,unitId),text=this.ctCommentText,audience=this.ctCommentGlobal?'global':'language';
-                const pending=(this._ctCommentQueue || Promise.resolve()).catch(()=>{}).then(async()=>{const previous=await this._ctStore.getRequest(scope,key);if(!text.trim()&&!previous)return;const old=previous?.payload;await this._ctStore.putRequest(scope,key,{kind:'comment',groupId:ctx.scope.groupId,language:ctx.scope.language,unitId,text,audience,idempotencyKey:old?.text===text && old?.audience===audience?old.idempotencyKey:uuid()});});
-                this._ctCommentQueue=pending;await pending;
+                const pending=(this._ctCommentQueue || Promise.resolve()).catch(()=>{}).then(async()=>{
+                    const previous=await this._ctStore.getRequest(scope,key);if(!text.trim()&&!previous)return;const old=previous?.payload;
+                    const command={kind:'comment',groupId:ctx.scope.groupId,language:ctx.scope.language,unitId,text,audience,idempotencyKey:old?.text===text && old?.audience===audience?old.idempotencyKey:uuid()};
+                    await this._ctStore.putRequest(scope,key,command);return command;
+                });this._ctCommentQueue=pending;return await pending;
             },
             async ctLoadCommentDraft(ctx,unitId) {const before=JSON.stringify([this.ctCommentText,this.ctCommentGlobal]);try{const request=await this._ctStore.getRequest({accountId:ctx.scope.accountId,game:ctx.scope.game,branchId:ctx.scope.branchId},this.ctCommentKey(ctx,unitId));if(this.ctCurrent(ctx)&&this.ctSelection===unitId && before===JSON.stringify([this.ctCommentText,this.ctCommentGlobal])){this.ctCommentText=request?.payload.text || '';this.ctCommentGlobal=request?.payload.audience==='global';}}catch(error){if(this.ctCurrent(ctx))this.ctError='Comment draft was not restored: '+error.message;}},
+            ctReplyCommentKey(ctx,unitId) {return 'comment-reply:'+root.ClientTextState.hash([root.ClientTextStore.scopeKey(ctx.scope),unitId]);},
+            ctQueueReplyCommentDraft(unitId,draft) {
+                const ctx=this.ctContext(),key=this.ctReplyCommentKey(ctx,unitId);
+                this._ctReplyDraftPending ||= new Map();const previous=this._ctReplyDraftPending.get(key);clearTimeout(previous?.timer);
+                const pending={ctx,unitId,draft:{body:String(draft.body ?? ''),allLanguages:draft.allLanguages===true}};
+                pending.timer=setTimeout(()=>{this._ctReplyDraftPending.delete(key);this.ctFlushReplyCommentDraft(pending).catch(error=>{if(this.ctCurrent(ctx))this.ctCommentPostError='Comment draft was not stored: '+error.message;});},200);
+                this._ctReplyDraftPending.set(key,pending);
+            },
+            async ctFlushReplyCommentDraft(pending) {
+                const {ctx,unitId,draft}=pending,key=this.ctReplyCommentKey(ctx,unitId),scope={accountId:ctx.scope.accountId,game:ctx.scope.game,branchId:ctx.scope.branchId};
+                const operation=(this._ctReplyQueue || Promise.resolve()).catch(()=>{}).then(async()=>{
+                    const previous=await this._ctStore.getRequest(scope,key),old=previous?.payload;if(!draft.body && !old)return;
+                    await this._ctStore.putRequest(scope,key,{kind:'comment-reply',groupId:ctx.scope.groupId,language:ctx.scope.language,unitId,
+                        text:draft.body,audience:draft.allLanguages?'global':'language',...(old?.post?{post:old.post}:{})});
+                });this._ctReplyQueue=operation;return operation;
+            },
+            async ctFlushReplyCommentDrafts() {
+                const pending=[...(this._ctReplyDraftPending?.values() || [])];this._ctReplyDraftPending?.clear();
+                for(const item of pending){clearTimeout(item.timer);await this.ctFlushReplyCommentDraft(item);}await this._ctReplyQueue;
+            },
+            async ctLoadReplyCommentDraft(unitId) {
+                const ctx=this.ctContext(),scope={accountId:ctx.scope.accountId,game:ctx.scope.game,branchId:ctx.scope.branchId};
+                const request=await this._ctStore.getRequest(scope,this.ctReplyCommentKey(ctx,unitId));
+                return this.ctCurrent(ctx) && request ? {body:request.payload.text,allLanguages:request.payload.audience==='global'}:null;
+            },
+            async ctPostReplyComment(unitId,draft) {
+                const ctx=this.ctContext(),client=this._cloud,key=this.ctReplyCommentKey(ctx,unitId),scope={accountId:ctx.scope.accountId,game:ctx.scope.game,branchId:ctx.scope.branchId},
+                    submitted={body:String(draft.body ?? ''),allLanguages:draft.allLanguages===true};
+                if(!this.ctActive || !this.managedOnlineAvailable || !this._ctUnitIndex?.has(unitId) || /^(?:local|staged):/.test(ctx.scope.groupId)
+                    || !this.cloudCanAccessAllLanguages && ctx.scope.language!==this.cloudUser?.language)return false;
+                this.ctQueueReplyCommentDraft(unitId,submitted);
+                try {
+                    await this.ctFlushReplyCommentDrafts();if(!this.ctCurrent(ctx) || this._cloud!==client)return false;
+                    let command;
+                    const freeze=(this._ctReplyQueue || Promise.resolve()).catch(()=>{}).then(async()=>{
+                        const journal=(await this._ctStore.getRequest(scope,key))?.payload;if(!journal || !journal.post && !submitted.body.trim())return;
+                        command=journal.post || {text:submitted.body,language:ctx.scope.language,audience:submitted.allLanguages?'global':'language',idempotencyKey:uuid()};
+                        if(!journal.post)await this._ctStore.putRequest(scope,key,{...journal,post:command});
+                    });this._ctReplyQueue=freeze;await freeze;if(!command)return false;
+                    if(!this.ctCurrent(ctx) || this._cloud!==client)return false;
+                    await client.request('/v1/content-groups/'+encodeURIComponent(ctx.scope.groupId)+'/units/'+encodeURIComponent(unitId)+'/comments',{method:'POST',body:copy(command)});
+                    // Serialize acknowledgement with newer typing. The frozen POST
+                    // survives an uncertain response while the authored draft can grow.
+                    const acknowledge=(this._ctReplyQueue || Promise.resolve()).catch(()=>{}).then(async()=>{
+                        const latest=(await this._ctStore.getRequest(scope,key))?.payload;if(!latest || latest.post?.idempotencyKey!==command.idempotencyKey)return;
+                        if(latest.text===command.text && latest.audience===command.audience)await this._ctStore.deleteRequest(scope,key);
+                        else{const {post,...newer}=latest;await this._ctStore.putRequest(scope,key,newer);}
+                    });this._ctReplyQueue=acknowledge;await acknowledge;
+                    if(!this.ctCurrent(ctx))return false;
+                    const sentRequested=command.text===submitted.body && command.audience===(submitted.allLanguages?'global':'language');
+                    this.ctCommentPostError=sentRequested?'':'The earlier comment was confirmed. Your newer draft is kept; post it to send it.';
+                    return sentRequested;
+                }catch(error){if(this.ctCurrent(ctx))this.ctCommentPostError=error.message;return false;}
+            },
             async ctPostComment() {
-                if (!this.ctCommentText.trim() || this.ctBusy) return;
+                if (!this.ctCommentText.trim() || this.ctBusy) return false;
                 const ctx = this.ctContext(), unitId = this.ctSelection,scope=this.ctRequestScope(),key=this.ctCommentKey(ctx,unitId),client=this._cloud; this.ctBusy = true;
-                try {await this.ctFlushCommentDraft();const request=await this._ctStore.getRequest(scope,key),command=request.payload;if(!this.ctCurrent(ctx) || unitId!==this.ctSelection)return;await client.request('/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/units/' + encodeURIComponent(unitId) + '/comments', { method: 'POST', body: { text: command.text, language: ctx.scope.language, audience: command.audience, idempotencyKey: command.idempotencyKey } });await this._ctStore.deleteRequest(scope,key,{expectedIdempotencyKey:command.idempotencyKey});if (this.ctCurrent(ctx) && this.ctSelection === unitId) {if(this.ctCommentText===command.text && (this.ctCommentGlobal?'global':'language')===command.audience){this.ctCommentText = '';this.ctCommentGlobal=false;}await this.ctLoadComments(ctx, unitId); } }
-                catch (error) { if (this.ctCurrent(ctx)) this.ctError = error.message; } finally { if (this.ctCurrent(ctx)) this.ctBusy = false; }
+                try {
+                    const command=await this.ctFlushCommentDraft();
+                    if(!command || !this.ctCurrent(ctx) || unitId!==this.ctSelection)return false;
+                    await client.request('/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/units/' + encodeURIComponent(unitId) + '/comments', {
+                        method:'POST',body:{text:command.text,language:ctx.scope.language,audience:command.audience,idempotencyKey:command.idempotencyKey}});
+                    await this._ctStore.deleteRequest(scope,key,{expectedIdempotencyKey:command.idempotencyKey});
+                    if(this.ctCurrent(ctx) && this.ctSelection===unitId){
+                        if(this.ctCommentText===command.text && (this.ctCommentGlobal?'global':'language')===command.audience){this.ctCommentText='';this.ctCommentGlobal=false;}
+                        this.ctCommentPostError='';
+                    }
+                    return true;
+                } catch(error){if(this.ctCurrent(ctx) && this.ctSelection===unitId)this.ctCommentPostError=error.message;return false;}
+                finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
             },
             async ctPresence(ctx = this.ctContext()) {
                 if (!this.managedOnlineAvailable || (!this.cloudCanAccessAllLanguages && ctx.scope.language!==this.cloudUser?.language) || String(ctx.scope.groupId).startsWith('local:')) return;
@@ -1966,7 +2159,7 @@
                     <template v-if="group.fields.some(field=>field.kind !== 'gender' || field.source)">
                     <div v-for="source in host.ctGroupSources(group)" :key="source.key" class="ctSourceBlock inputField">
                         <label v-if="side === 'both' || host.ctGroupSources(group).length > 1" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
-                        <div class="textHL editorTextField multiline"><textarea :value="source.text" :data-ct-source="source.key" @focus="host.ctFocusSource(group,source)" readonly tabindex="-1" :aria-label="source.label+' English'" placeholder="English" lang="en" spellcheck="false" rows="1"></textarea></div>
+                        <editor-native-field :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
                     </div>
                     </template>
                 </div>
@@ -2006,63 +2199,11 @@
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
             </template>
-            <div v-else class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" v-model="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id;host.ctCompletionSelectionChanged(field,$event)" @blur="host.ctCloseCompletion()" @select="host.ctCompletionSelectionChanged(field,$event)" @click="host.ctCompletionSelectionChanged(field,$event)" @keyup="host.ctCompletionSelectionChanged(field,$event)" @input="host.ctResizeField($event.target);host.ctEdited(field);host.ctSuggest(field,$event)" @keydown="host.ctTargetKeydown(field,$event)" :aria-expanded="host.ctCompletion?.fieldId===field.id" :aria-controls="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell : undefined" :aria-activedescendant="host.ctCompletion?.fieldId===field.id ? 'ct-completion-'+field.targetCell+'-'+host.ctCompletion.selectedIndex : undefined" :aria-label="field.name + (field.form ? ' '+field.form : '')" :lang="host.translationEditorBcp47 || undefined" :placeholder="field.kind === 'form' && !field.required ? 'Optional translation' : 'Translation'" spellcheck="false" rows="1"></textarea></div>
-            <div v-if="host.ctCompletion?.fieldId===field.id" :id="'ct-completion-'+field.targetCell" class="ctCompletion" role="listbox" aria-label="Source and Dictionary completions"><button v-for="(item,index) in host.ctCompletion.items" :key="item.value" :id="'ct-completion-'+field.targetCell+'-'+index" type="button" role="option" tabindex="-1" :class="{selected:host.ctCompletion.selectedIndex===index}" :aria-selected="host.ctCompletion.selectedIndex===index" @mousedown.prevent @click="host.ctApplyCompletion(field,item)">{{ item.label }}</button></div>
+            <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :compact="compact"></editor-native-field>
             <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button></div>
             <p v-for="(issue,index) in (host.ctDiagnostics[host.ctSelection] || []).filter(item=>item.fieldId === field.id)" :key="index" :class="'ctDiagnostic '+issue.severity">{{ issue.message }}</p>
         </div>` };
-    const toolsComponent = { props: ['host'], components:{'editor-dictionary-entries':root.EditorComponents?.DictionaryEntries}, template: `
-        <aside class="side sharedEditorSidebar ctTools" :class="{commentsActive:host.ctTool === 'comments',lookupActive:host.ctTool === 'lookup'}" aria-label="File tools">
-            <div class="sideHeader"><div class="sideTabs" aria-label="Editor tools">
-                <button v-if="!host.ctEditor" type="button" class="tabBtn" :class="{active:host.ctTool === 'preview'}" :aria-pressed="host.ctTool === 'preview'" aria-label="Preview" @click="host.ctTool='preview'">Preview</button>
-                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'dictionary'}" :aria-pressed="host.ctTool === 'dictionary'" aria-label="Dictionary" @click="host.ctTool='dictionary'">📚 Dictionary</button>
-                <button type="button" class="tabBtn lookupTab" :class="{active:host.ctTool === 'lookup'}" :aria-pressed="host.ctTool === 'lookup'" aria-label="Lookup" title="Lookup" @click="host.ctTool='lookup'">Lookup</button>
-                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'tm'}" :aria-pressed="host.ctTool === 'tm'" aria-label="TM" title="Translation memory" @click="host.ctTool='tm'">TM</button>
-                <button type="button" class="tabBtn" :class="{active:host.ctTool === 'history'}" :aria-pressed="host.ctTool === 'history'" aria-label="History" title="History" @click="host.ctTool='history'">🕒 History</button>
-                <button type="button" class="tabBtn commentsTab" :class="{active:host.ctTool === 'comments'}" :aria-pressed="host.ctTool === 'comments'" aria-label="Comments" title="Comments" @click="host.ctTool='comments'">Comments</button>
-            </div>
-            <div v-if="host.ctTool === 'dictionary'" class="dictionaryControls sideControls">
-                <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="host.ctDictionaryFilter" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="host.ctDictionaryFilter=''" :disabled="!host.ctDictionaryReady"><button type="button" @click="host.ctDictionaryAdd()" title="Add a Dictionary entry" :disabled="!host.ctDictionaryReady">Add entry</button></div>
-                <div class="dictionaryPagination sidePagination" aria-label="Dictionary pages"><span>{{ host.ctDictionaryRangeLabel }}<template v-if="host.ctCurrentUnit"> · Matches in this file first</template></span><button type="button" @click="host.ctSetDictionaryPage(host.ctDictionaryPage-1)" :disabled="!host.ctDictionaryReady || host.ctDictionaryPage<=1" aria-label="Previous dictionary page">Previous</button><button type="button" @click="host.ctSetDictionaryPage(host.ctDictionaryPage+1)" :disabled="!host.ctDictionaryReady || host.ctDictionaryPage>=host.ctDictionaryPageCount" aria-label="Next dictionary page">Next</button></div>
-            </div></div>
-            <div v-show="!host.ctEditor && host.ctTool === 'preview'" id="ctInlineEditorPreviewHost" class="inlinePreviewHost"></div>
-            <section v-if="host.ctTool === 'tm'" class="tmResultsPanel"><h3>Translation memory</h3><p class="tmEmpty">Accepted text from this language, matched by field kind and grammatical form.</p><div class="tmResultList"><article v-for="match in host.ctMemoryResults" :key="match.id" class="tmMatchDetail" @dblclick.prevent="host.ctApplyMemory(match)" title="Double-click to use translation"><strong>{{ match.kind }} · {{ Math.min(100,match.score) }}%</strong><pre class="tmSourceSnippet">{{ match.source }}</pre><pre class="tmTargetSnippet">{{ match.target }}</pre><button @click="host.ctApplyMemory(match)" @dblclick.stop :disabled="host.ctBusy">Use translation</button><p v-for="(warning,index) in match.warnings" :key="index">{{ warning.message }}</p></article></div><p v-if="!host.ctMemoryResults.length" class="tmEmpty">No memory matches.</p></section>
-            <section v-if="host.ctTool === 'lookup'" class="editorLookupPanel"><div class="lookupControls sideControls"><h3>Lookup</h3><div class="sideSearchRow"><input class="sideFilter" v-model="host.ctLookup" placeholder="Exact text lookup" aria-label="Lookup text"></div></div><div class="lookupResults"><article v-for="(match,index) in host.ctLookupResults" :key="index" class="editBlock"><button @click="host.ctSelect(host._ctUnitIndex.get(match.unitId),host.ctEditor)">{{ match.sheet }} · {{ match.recordId }} · {{ match.name }} {{ match.form }}</button><pre>{{ match.source }}</pre><pre>{{ match.target }}</pre></article><p v-if="!host.ctLookupResults.length" class="tmEmpty">No matches.</p></div></section>
-            <template v-if="host.ctTool === 'dictionary'"><editor-dictionary-entries :controller="host.ctDictionaryController"></editor-dictionary-entries><p v-if="!host.ctDictionaryFiltered.length" class="tmEmpty">{{ host.ctDictionaryFilter ? 'No Dictionary entries match your search.' : 'No Dictionary entries. Add an entry to get started.' }}</p></template>
-            <section v-if="host.ctTool === 'history'" class="ctHistoryPanel historyPanel"><h3>History</h3>
-                <p>Local and shared saved changes for this group and language.</p>
-                <button @click="host.ctOpenHistoryViewer()">Compare original and current</button>
-                <button v-if="host.ctHistoryPreviousProvenance" class="ctHistoryPrevious" @click="host.ctLoadPreviousHistory()" :disabled="host.ctBusy || host.ctHistoryPreviousLoading">{{ host.ctHistoryPreviousLoading ? 'Preparing previous version…' : 'Compare previous version' }}</button>
-                <p v-if="host.ctHistoryError" class="ctHistoryError" role="alert">{{ host.ctHistoryError }}</p>
-                <article v-for="entry in host.ctHistory" :key="entry.key" class="ctHistoryEvent" :data-history-origin="entry.origin">
-                    <p>{{ host.ctHistoryLabel(entry) }}</p><small>{{ entry.action }}</small>
-                    <div class="ctHistoryActions"><button @click="host.ctPickHistory(entry)">Compare change</button><button @click="host.ctPickHistory(entry,'current')">Compare with current</button>
-                    <button @click="host.ctRestoreHistory(entry,'before')" :disabled="host.ctBusy || !entry.before.available">Restore before as draft</button><button @click="host.ctRestoreHistory(entry,'after')" :disabled="host.ctBusy || !entry.after.available">Restore after as draft</button></div>
-                </article>
-                <p v-if="host.ctHistoryLoading" role="status">Loading history…</p><p v-else-if="!host.ctHistory.length">No saved history for this ID.</p>
-                <button v-if="host.ctHistoryCursor || host.ctHistoryLocalMore" class="ctHistoryOlder" @click="host.ctLoadOlderHistory()" :disabled="host.ctHistoryLoading">Load older history</button>
-                <Teleport to="body"><div v-if="host.ctHistoryViewer" class="ctHistoryBackdrop" @keydown.esc.stop.prevent="host.ctCloseHistoryViewer()" @keydown.tab="host.ctTrapHistoryFocus($event)">
-                    <section class="ctHistoryViewer" role="dialog" aria-modal="true" aria-labelledby="ctHistoryTitle">
-                        <header><h3 id="ctHistoryTitle">Compare · {{ host.ctCurrentUnit.sheet }} · {{ host.ctCurrentUnit.recordId }}</h3><button id="ctHistoryClose" @click="host.ctCloseHistoryViewer()" aria-label="Close history comparison">Close</button></header>
-                        <div class="ctHistoryCompareControls"><label>Before<select v-model="host.ctHistoryCompareA"><option v-for="choice in host.ctHistoryChoices" :key="choice.key" :value="choice.key" :disabled="choice.unavailable">{{ choice.label }}</option></select></label>
-                        <label>After<select v-model="host.ctHistoryCompareB"><option v-for="choice in host.ctHistoryChoices" :key="choice.key" :value="choice.key" :disabled="choice.unavailable">{{ choice.label }}</option></select></label><label><input type="checkbox" v-model="host.ctHistoryWhitespace"> Show whitespace</label><label><input type="checkbox" v-model="host.ctHistoryCharacters"> Character differences</label></div>
-                        <p class="ctHistoryContext">English, field layout and Developer notes come from verified originals. This group's history uses its immutable original; Compare previous version explicitly loads the earlier original and accepted revision. Unavailable saved revisions are labelled. This comparison is read only; restoring creates a draft.</p>
-                        <p v-if="host.ctHistoryError" class="ctHistoryError" role="alert">{{ host.ctHistoryError }}</p>
-                        <div v-if="host.ctHistoryComparison" class="ctHistoryComparison">
-                            <article v-for="row in host.ctHistoryComparison.rows" :key="row.id" class="ctHistoryDiffField" :data-field-id="row.id" :data-field-kind="row.kind" :data-form="row.form">
-                                <h4>{{ host.ctHistoryFieldLabel(row) }}</h4><p v-if="row.added || row.removed">{{ row.added ? 'Added field' : 'Removed field' }}</p>
-                                <div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side" :class="'ctHistory-'+side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5>
-                                    <label>English source</label><pre class="ctHistorySource"><span v-for="(part,index) in row.sourceParts.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre>
-                                    <label>{{ row.kind === 'gender' ? 'Gender metadata' : 'Translation · '+host.ctWorkspace.scope.language }}</label><pre class="ctHistoryTarget"><span v-for="(part,index) in row.targetParts.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre>
-                                </section></div>
-                            </article>
-                            <article v-if="host.ctHistoryComparison.hasNotes" class="ctHistoryNotes"><h4>Developer notes</h4><div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5><pre><span v-for="(part,index) in host.ctHistoryComparison.notes.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre></section></div></article>
-                        </div>
-                    </section>
-                </div></Teleport>
-            </section>
-            <section v-if="host.ctTool === 'comments'" class="commentsPanel"><h3 class="commentsPanelHeader">Comments</h3><div class="commentsList"><article v-for="comment in host.ctComments" :key="comment.id" class="commentCard"><strong>{{ comment.actor?.name || comment.authorName || comment.actor?.id || comment.authorId }}</strong><small>{{ comment.audience }}</small><pre class="commentBody">{{ comment.text }}</pre></article></div><textarea v-model="host.ctCommentText" @input="host.ctQueueCommentDraft()" aria-label="Comment" placeholder="Write a comment" rows="3"></textarea><label class="commentsScopeOption"><input type="checkbox" v-model="host.ctCommentGlobal" @change="host.ctQueueCommentDraft()"> All language teams</label><button @click="host.ctPostComment" :disabled="!host.managedOnlineAvailable || host.ctBusy || !host.ctCommentText.trim()">Post comment</button></section>
-        </aside>` };
+    const toolsComponent = root.EditorComponents?.Tools;
     return { mixin, teams, detect, groupFields, mode, fieldsComponent, targetComponent, toolsComponent };
 });
 

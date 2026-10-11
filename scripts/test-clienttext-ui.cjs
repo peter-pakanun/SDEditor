@@ -9,10 +9,12 @@ function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
-        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
+        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
+        appConfirm:async()=>true,
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
@@ -33,7 +35,7 @@ function listHarness(changes={}){
     // Mechanics fixtures deliberately show complete records; product defaults
     // are asserted separately from mixin.data() in the status-filter test.
     const h=harness({inlineEditor:false,pageSize:2,ctSelectedFilters:['missing','saved','revised','outdated','error','warning','unchanged'],$nextTick:async()=>{},$refs:{},...changes});
-    for(const name of ['ctRows','ctPageRows','ctPageCount','ctEffectivePageSize','ctCounts','ctStatusFilterOptions','ctDiagnosticCounts'])
+    for(const name of ['ctRows','ctPageRows','ctPageCount','ctEffectivePageSize','ctCounts','ctStatusFilterOptions','ctDiagnosticCounts','ctDraftUnitIds','ctDraftCount'])
         Object.defineProperty(h.app,name,{get:()=>h.mixin.computed[name].call(h.app)});
     return h;
 }
@@ -75,14 +77,14 @@ test('ClientText list omits all-blank units and ignores hidden targets in search
     app.ctSearch='Visible translation';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);
     assert.deepEqual([mixed,blank],snapshot);assert.equal(app.ctCounts.total,2,'status totals continue to describe the retained originals');
 });
-test('blank-first-field preview, Lookup and TM fall back to real English while hidden authored text stays intact',()=>{
+test('blank-first-field preview, Lookup and TM fall back to real English while hidden authored text stays intact',async()=>{
     const original=blankEnglishUnit(),reference=blankEnglishUnit('Reference'),{app,window}=visibleFieldsHarness(original,{ctUnits:[original,reference],
         _ctUnitIndex:new Map([[original.id,original],[reference.id,reference]]),ctFocusedField:original.fields[0].id});
     reference.fields[1].target='Reference translation';const seen=[];
     window.ContentAdapters={clienttext:{findMemory(memory,unit,field){seen.push(field);return[{target:'TM@literal\\n\ntranslation'}];}}};
     assert.equal(app.ctPreviewField,original.fields[1]);assert.equal(app.ctMemoryResults.length,1);assert.equal(seen[0],original.fields[1]);
     assert.deepEqual(Array.from(app.ctLookupResults,match=>match.name),['Text']);assert.equal(app.ctLookupResults[0].target,'Reference translation');
-    app.ctEdited=field=>{assert.equal(field,original.fields[1]);app.ctDraftDirty=true;};app.ctApplyMemory({target:'TM@literal\\n\ntranslation'});
+    app.ctEdited=field=>{assert.equal(field,original.fields[1]);app.ctDraftDirty=true;};await app.ctApplyMemory({target:'TM@literal\\n\ntranslation'});
     assert.equal(app.ctValues[original.fields[1].id],'TM@literal\\n\ntranslation');assert.equal(app.ctValues[original.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
     app.ctFocusedField=original.fields[2].id;assert.equal(app.ctPreviewField,original.fields[1],'Gender focus retains a prose preview');
 });
@@ -93,6 +95,50 @@ test('initial ClientText selection focuses later real English and hydrates hidde
     assert.equal(await app.ctSelect(original,true),true);assert.equal(app.ctFocusedField,visible.id);assert.deepEqual(focus,[visible.id]);
     assert.equal(app.ctValues[hidden.id],'Hidden durable draft');assert.equal(app.ctValues[visible.id],'Visible durable draft');assert.equal(app.ctValues[original.fields[2].id],'F');
     assert.deepEqual(original,before);
+});
+
+test('TM replacement cancellation and late confirmation preserve changed draft, field and scope',async()=>{
+    for(const change of ['cancel','draft','field','account','group','unit','selection','history']){
+        const {app,original}=harness(),held=deferred(),match={id:'memory-id',target:'Raw TM@literal\\n\r\ntranslation'};
+        const second={...original.fields[0],id:JSON.stringify(['Other',null]),name:'Other',target:'Other draft'};
+        original.fields.push(second);app.ctValues= S.valuesFor(original);app.ctFocusedField=fieldId;app.ctMemoryResults=[match];
+        const values=app.ctValues,baseline=clone(original);let edits=0,focus=0;
+        app.appConfirm=()=>held.promise;app.ctEdited=()=>edits++;app.ctFocusTarget=()=>focus++;
+        const applying=app.ctApplyMemory(match);await settle();
+        if(change==='draft')app.ctValues[fieldId]='New typing';
+        else if(change==='field')app.ctFocusedField=second.id;
+        else if(change==='unit')app.ctSelection='replacement';
+        else if(change==='selection')app._ctSelectRun={unitId:original.id};
+        else if(change==='history')app.ctHistoryViewer=true;
+        else if(['account','group'].includes(change))app.ctWorkspace={scope:{...scope,[change==='account'?'accountId':'groupId']:'replacement'}};
+        held.resolve(change!=='cancel');assert.equal(await applying,false,change);
+        assert.equal(app.ctValues,values);assert.equal(app.ctValues[fieldId],change==='draft'?'New typing':baseline.fields[0].target);
+        assert.equal(app.ctValues[second.id],'Other draft');assert.equal(edits,0);assert.equal(focus,0);assert.deepEqual(original,baseline);
+    }
+});
+
+test('TM confirmation rejects changed and removed background matches but accepts an equivalent refreshed match',async()=>{
+    for(const change of ['mutated','removed','replaced','equivalent']){
+        const {app,original}=harness(),held=deferred(),match={id:'memory-id',target:'Raw TM@literal\\n\r\ntranslation'};
+        app.ctFocusedField=fieldId;app.ctMemoryResults=[match];app.appConfirm=()=>held.promise;let edits=0,focus=0;
+        app.ctEdited=field=>{assert.equal(field,original.fields[0]);edits++;};app.ctFocusTarget=(full,id)=>{assert.equal(id,fieldId);focus++;};
+        const applying=app.ctApplyMemory(match);await settle();
+        if(change==='mutated')match.target='Changed after confirmation';
+        else if(change==='removed')app.ctMemoryResults=[];
+        else app.ctMemoryResults=[{...match,target:change==='replaced'?'Replacement target':match.target}];
+        held.resolve(true);assert.equal(await applying,change==='equivalent',change);
+        assert.equal(app.ctValues[fieldId],change==='equivalent'?'Raw TM@literal\\n\r\ntranslation':original.fields[0].target);
+        assert.equal(edits,change==='equivalent'?1:0);assert.equal(focus,change==='equivalent'?1:0);
+    }
+});
+
+test('TM refuses stale match IDs and modal or busy editor before requesting replacement confirmation',async()=>{
+    for(const state of ['stale','history','busy']){
+        const {app,original}=harness(),match={id:'memory-id',target:'TM translation'};
+        app.ctMemoryResults=state==='stale'?[]:[match];app.ctHistoryViewer=state==='history';app.ctBusy=state==='busy';
+        app.appConfirm=()=>assert.fail('Ineligible TM insertion cannot ask to replace a draft');app.ctEdited=()=>assert.fail('Ineligible TM insertion cannot mutate');
+        assert.equal(await app.ctApplyMemory(match),false);assert.equal(app.ctValues[fieldId],original.fields[0].target);
+    }
 });
 test('hidden English fields remain in real durable saves, immutable originals and recoverable history',async()=>{
     const original=blankEnglishUnit(),snapshot=clone(original),hidden=original.fields[0],visible=original.fields[1],f=fixture();
@@ -143,7 +189,7 @@ test('ClientText status chips default Unchanged off and use OR matching with sco
     const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
         {app,mixin}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
     app.ctSelectedFilters=mixin.data().ctSelectedFilters;
-    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning']);
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning','draft']);
     assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id,outdated.id]);
     app.ctSelectedFilters.push('unchanged');assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
     app.ctSelectedFilters=['unchanged'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id]);
@@ -153,6 +199,20 @@ test('ClientText status chips default Unchanged off and use OR matching with sco
     assert.equal(app.ctStatusFilterOptions.find(option=>option.key==='warning').count,2);
     app.ctSelectedFilters=[];assert.equal(app.ctRows.length,0);
     app.ctFilter='missing';assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id],'legacy scalar filters remain compatible');
+});
+
+test('ClientText Local drafts filter and counter include scoped durable and current drafts without changing committed status',async()=>{
+    const first=namedUnit('DraftOne'),second=namedUnit('DraftTwo'),third=namedUnit('Clean'),
+        {app}=listHarness({ctUnits:[first,second,third],_ctUnitIndex:new Map([first,second,third].map(unit=>[unit.id,unit])),ctSelection:second.id});
+    app._ctStore={async getDraftSummaries(captured){assert.equal(captured.groupId,scope.groupId);return[{unitId:first.id,revision:3,updatedAt:1}];}};
+    await app.ctRefreshDraftSummaries();app.ctDraftDirty=true;app.ctSelectedFilters=['draft'];
+    assert.deepEqual(Array.from(app.ctRows,row=>row.id),[first.id,second.id]);assert.equal(app.ctDraftCount,2);
+    assert.equal(app.ctStatusFilterOptions.find(option=>option.key==='draft').count,2);
+    assert.equal(app.ctStatus(first).saved,false);assert.equal(app.ctStatus(first).unchanged,true);
+    app.ctSelection=first.id;assert.equal(app.ctDraftCount,1,'the selected private draft is not double-counted');
+    const pending=deferred();app._ctStore.getDraftSummaries=()=>pending.promise;const loading=app.ctRefreshDraftSummaries();
+    app.ctWorkspace={scope:{...scope,groupId:'replacement'}};const current=[{unitId:third.id,revision:1,updatedAt:2}];app.ctDraftSummaries=current;
+    pending.resolve([{unitId:first.id,revision:9,updatedAt:3}]);await loading;assert.equal(app.ctDraftSummaries,current,'late old-group draft summaries cannot publish into the replacement group');
 });
 test('ClientText table sorting and search preserve raw @, literal escapes, newlines and committed values',()=>{
     const first=namedUnit('ID10','A@literal\\nactual\nline','Z'),second=namedUnit('ID2','B','A'),
@@ -216,6 +276,36 @@ test('page changes and Close preserve durable drafts and cannot alter a replacem
     app.ctWorkspace={scope:{...scope,groupId:'newer'}};closing.resolve(true);assert.equal(await close,false);assert.equal(app.ctEditor,true);
     app.ctFlushDraft=async()=>true;let focused=0;app.ctFocusRow=()=>focused++;
     assert.equal(await app.ctCloseEditor(),true);assert.equal(app.ctEditor,false);assert.equal(focused,1);assert.ok(app.ctCurrentUnit);
+});
+
+test('leaving a ClientText inline row stages changed work through its save owner and closes only after success',async()=>{
+    const {app,window}=listHarness({inlineEditor:true,ctDraftDirty:true}),calls=[];
+    window.document={activeElement:{closest:()=>null},hidden:false,hasFocus:()=>true};
+    app.ctHasEditorChanges=()=>true;app.ctSave=async()=>{calls.push('save');return true;};app.ctFlushDraft=async()=>{calls.push('checkpoint');return true;};app.ctRefreshLayout=()=>calls.push('layout');
+    app.ctInlineFocusOut({target:{},relatedTarget:null});await new Promise(resolve=>setTimeout(resolve,10));
+    assert.deepEqual(calls,['save','checkpoint','layout']);assert.equal(app.ctInlineClosed,true);
+});
+
+test('failed inline promotion and a replaced scope preserve the recoverable editor without a late close',async()=>{
+    for(const replace of [false,true]){
+        const {app,window}=listHarness({inlineEditor:true,ctDraftDirty:true}),held=deferred(),entered=deferred(),text=app.ctValues;
+        window.document={activeElement:{closest:()=>null},hidden:false,hasFocus:()=>true};app.ctHasEditorChanges=()=>true;
+        app.ctSave=async()=>{entered.resolve();return held.promise;};app.ctFlushDraft=()=>assert.fail('Failed or stale promotion cannot checkpoint another scope');app.ctRefreshLayout=()=>assert.fail('Failed or stale promotion cannot change layout');
+        app.ctInlineFocusOut({target:{},relatedTarget:null});await entered.promise;
+        if(replace)app.ctWorkspace={scope:{...scope,groupId:'replacement'}};
+        held.resolve(replace);await new Promise(resolve=>setTimeout(resolve,10));assert.equal(app.ctInlineClosed,false);assert.equal(app.ctValues,text);assert.equal(app.ctDraftDirty,true);
+    }
+});
+
+test('moving focus inside the selected row, shared tools or modal preserves ClientText inline editing',async()=>{
+    const {app,window}=listHarness({inlineEditor:true});let saves=0;app.ctSave=async()=>{saves++;return true;};app.ctHasEditorChanges=()=>true;
+    window.document={activeElement:null,hidden:false,hasFocus:()=>true};
+    for(const surface of ['row','tools','dialog']){
+        const target={closest:selector=>surface==='row'&&selector==='tr[data-unit-id]'?{dataset:{unitId:app.ctSelection}}
+            :surface!=='row'&&selector.includes('data-inline-focus-surface')?{}:null};
+        app.ctInlineFocusOut({target:{},relatedTarget:target});
+    }
+    await new Promise(resolve=>setTimeout(resolve,10));assert.equal(saves,0);assert.equal(app.ctInlineClosed,false);
 });
 test('Discard draft is revision-checked, preserves saved work and retains typing that arrived during deletion',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});
@@ -640,9 +730,27 @@ test('ClientText Dictionary completions preserve keyword metadata and exact tran
     const malformed=completionHarness('[FireDamage<gemlevel=oops>|Burning damage]','[','text',{dictionary});
     malformed.app.ctSuggest(malformed.field,{target:malformed.input});assert.equal(malformed.app.ctCompletion.items.length,1);
     assert.equal(malformed.app.ctCompletion.items[0].value,'[FireDamage<gemlevel=oops>|Burning damage]');
-    const stale=completionHarness('[FireDamage|Burning damage]','[','text',{dictionary:clone(dictionary)});
-    stale.app.ctSuggest(stale.field,{target:stale.input});const item=stale.app.ctCompletion.items[0];stale.app.dictionary[0].alts[0].replace='New shared display';
-    assert.equal(stale.app.ctApplyCompletion(stale.field,item,stale.input),false);assert.equal(stale.app.ctValues[stale.field.id],'[');
+    const held=completionHarness('[FireDamage|Burning damage]','[','text',{dictionary:clone(dictionary)});
+    held.app.ctSuggest(held.field,{target:held.input});const item=held.app.ctCompletion.items[0],selected=item.value;
+    held.app.dictionary[0].alts[0].replace='New shared display';
+    assert.equal(held.app.ctApplyCompletion(held.field,item,held.input),true);assert.equal(held.app.ctValues[held.field.id],selected,'an open popup inserts its captured exact result');
+    held.app.ctValues[held.field.id]='[';held.input.value='[';held.input.selectionStart=held.input.selectionEnd=1;
+    held.app.ctSuggest(held.field,{target:held.input});assert.ok(held.app.ctCompletion.items.some(item=>item.value==='[FireDamage|New shared display]'),'the next popup uses the updated Dictionary');
+});
+
+test('Dictionary background preparation pins open completion and highlights until close, then applies the newest scoped pack',async()=>{
+    const h=completionHarness('[Fire|Burning]','[','text',{dictionary:[{_id:'fire',find:'Fire',replace:'Captured flame'}],highlightDict:true}),{app,field,input}=h;
+    const first={units:[{key:field.id,HLs:[]}],entriesById:{fire:{find:'Fire',replace:'Captured flame'}}},
+        next={units:[{key:field.id,HLs:[{rawStart:0,rawEnd:14,dictId:'fire',replace:'New flame'}]}],entriesById:{fire:{find:'Fire',replace:'New flame'}}};
+    app.ctDictionaryPack=first;app.ctSuggest(field,{target:input});const popup=app.ctCompletion,values=app.ctValues,caret=[input.selectionStart,input.selectionEnd];
+    app.ensureDictionarySnapshot=async()=>{};app.ensureDictionaryWorker=()=>({match(fields,options){assert.equal(fields[0].english,field.source);assert.equal(options.contentMode,'clienttext');return Promise.resolve(next);}});
+    app.dictionary[0].replace='New flame';await app.scheduleClientTextDictionaryMatches();
+    assert.equal(app.ctCompletion,popup);assert.equal(app.ctDictionaryPack,first);assert.equal(app._ctPendingDictionaryPack,next);
+    assert.equal(app.ctValues,values);assert.deepEqual([input.selectionStart,input.selectionEnd],caret);assert.equal(h.edits(),0);
+    assert.equal(app.ctApplyCompletion(field,popup.items[0],input),true);assert.equal(app.ctValues[field.id],'[Fire|Captured flame]');assert.equal(app.ctDictionaryPack,next);
+    const held=deferred();app.ensureDictionaryWorker=()=>({match:()=>held.promise});const preparing=app.scheduleClientTextDictionaryMatches();await settle();
+    app.ctWorkspace={scope:{...scope,groupId:'new-group'}};const replacement={units:[],entriesById:{}};app.ctDictionaryPack=replacement;
+    held.resolve(first);await preparing;assert.equal(app.ctDictionaryPack,replacement,'late same-ID match preparation is scope fenced');
 });
 test('NONEXISTENT completion is form-only, whole-cell and never consumes backward traversal',()=>{
     const h=completionHarness('{0}','NON','form');h.app.ctSuggest(h.field,{target:h.input});h.app.ctTargetKeydown(h.field,h.event('Tab'));
@@ -663,10 +771,11 @@ test('NONEXISTENT completion is form-only, whole-cell and never consumes backwar
     moved.app.ctTargetKeydown(moved.field,moved.event('Tab'));assert.equal(moved.app.ctValues[moved.field.id],'NON');
 });
 test('ClientText completion options use escaped bindings and expose keyboard selection to assistive technology',()=>{
-    const {window}=harness(),template=window.ClientTextUI.targetComponent.template;
+    const {window}=harness(),template=window.EditorComponents.Autocomplete.template,native=window.EditorComponents.NativeField.template;
     assert.match(template,/role="listbox"/);assert.match(template,/role="option"/);assert.match(template,/:aria-selected=/);
-    assert.match(template,/:aria-activedescendant=/);assert.match(template,/@blur="host.ctCloseCompletion\(\)"/);
+    assert.match(template,/:aria-activedescendant=/);
     assert.match(template,/\{\{ item.label \}\}/);assert.doesNotMatch(template,/v-html/);
+    assert.match(native,/v-bind="field.dataAttrs"/,'both native modes expose the field controller accessibility attributes');
 });
 function dictionaryHarness(source,dictionary,changes={}){
     const h=listHarness({dictionary,dictionaryPageSize:2,$nextTick:fn=>{fn?.();return Promise.resolve();},...changes});
@@ -1019,8 +1128,9 @@ test('ClientText Dictionary inserts exact multiline text at the focused translat
 test('SD and ClientText share single-line Dictionary inputs and retain multiline TL notes',()=>{
     const {window}=harness(),shared=window.EditorComponents.DictionaryEntries.template,tools=window.ClientTextUI.toolsComponent,
         html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
-    assert.equal(tools.components['editor-dictionary-entries'],window.EditorComponents.DictionaryEntries);
-    assert.match(html,/<editor-dictionary-entries v-if="sideTab === 'dictionary'" :controller="\$root">/);
+    assert.equal(tools,window.EditorComponents.Tools,'both content modes use the same tools component');
+    assert.match(tools.template,/<editor-dictionary-entries v-if="sideTab === 'dictionary'" :controller="\$props.controller">/);
+    assert.match(html,/<editor-tools v-if="sharedEditorToolsMounted" :target="sharedEditorToolsTarget" :controller="sharedEditorController">/);
     for(const feature of ['dictRow','dictScopeSelect','dictHistoryBtn','dictAltRow','dictTlnote','dictDeleteBtn'])assert.equal(shared.includes(feature),true);
     for(const value of ['word.find','word.replace','alt.find','alt.replace'])assert.ok(shared.includes('<input type="text" v-model="'+value+'"'),'both modes share input geometry for '+value);
     assert.match(shared,/@keydown.enter="controller.onDictionaryReplaceEnter\(\$event,word\)"/);
@@ -1037,11 +1147,15 @@ test('shared field components preserve distinct form sources and autosizing chan
     assert.deepEqual(Array.from(groups,entry=>entry.text),['Masculine','Feminine']);assert.deepEqual(Array.from(groups,entry=>entry.label),['MS','FS']);
     const fields=window.ClientTextUI.fieldsComponent,target=window.ClientTextUI.targetComponent,tools=window.ClientTextUI.toolsComponent;
     assert.equal(fields.props.side.default,'both');assert.match(fields.template,/side !== 'translation'/);assert.match(fields.template,/side !== 'source'/);
-    assert.match(fields.template,/textHL editorTextField multiline/);assert.match(fields.template,/:value="source.text"[^>]* readonly/);
+    assert.match(fields.template,/<editor-native-field :controller="host.ctSourceFieldController\(group,source\)" kind="english"/);
     assert.match(fields.template,/field.kind !== 'gender' \|\| field.source/,'blank enum metadata has no fake English textarea');
-    assert.match(target.template,/v-model="host.ctValues\[field.id\]"/);assert.match(target.template,/ctTargetKeydown/);
-    assert.match(tools.template,/side sharedEditorSidebar ctTools/);assert.match(tools.template,/sideHeader/);assert.match(tools.template,/sideTabs/);assert.match(tools.template,/aria-label="TM"/);
-    assert.match(tools.template,/class="lookupResults"/,'Lookup follows the shared scroll layout');
+    assert.match(target.template,/<editor-native-field v-else :controller="host.ctFieldController\(field\)" kind="translation"/);
+    const raw='Masculine@literal\\n\r\nraw',rawField={...app.ctCurrentUnit.fields[0],source:raw};app.ctCurrentUnit.fields=[rawField];app.ctValues=S.valuesFor(app.ctCurrentUnit);app.ctDisplayedFields=()=>[rawField];
+    const controller=app.ctSourceFieldController({fields:[rawField]},{key:rawField.id,text:raw});assert.equal(controller.field.english,raw);assert.equal(controller.field.readonly,true);
+    assert.match(window.EditorComponents.NativeField.template,/:value="nativeValue"[^>]* readonly/);
+    assert.match(window.EditorComponents.NativeField.template,/class="HLter"/);
+    assert.match(tools.template,/side sharedEditorSidebar/);assert.match(tools.template,/ctTools: historyClientText/);assert.match(tools.template,/sideHeader/);assert.match(tools.template,/sideTabs/);assert.match(tools.template,/aria-controls="tmResultsPanel"/);
+    assert.match(tools.template,/<editor-lookup-panel :controller="\$props.controller"/);assert.match(window.EditorComponents.Lookup.template,/class="lookupResults"/,'Lookup follows the shared scroll layout');
 });
 test('save navigation captures candidates before current work disappears from Missing filters',async()=>{
     const rows=[namedUnit('ID1','First',''),namedUnit('ID2','Second',''),namedUnit('ID3','Third','')],
@@ -1269,7 +1383,8 @@ test('history normalizes local and shared before/after values with verified raw 
     assert.ok(calls.some(call=>call.after==='Literal \\n and real\n@<img>'));
     app.ctHistoryWhitespace=true;
     assert.equal(app.ctHistoryDisplay('x@\\n y\nz'),'x@\\n·y↵\nz');
-    assert.ok(!window.ClientTextUI.toolsComponent.template.includes('v-html'), 'Vue text interpolation escapes source, notes and target HTML');
+    const template=window.EditorComponents.History.template,ctHistory=template.slice(template.indexOf('class="ctHistoryPanel historyPanel"'),template.indexOf("sideTab === 'history' && editorReady && !historyClientText"));
+    assert.ok(ctHistory.includes('{{ ctHistoryDisplay(part.value) }}'));assert.equal(ctHistory.includes('v-html'),false,'CT history uses Vue text interpolation to escape source, notes and target HTML');
     app.ctHistoryCompareA=shared.key+':before';app.ctHistoryCompareB=local.key+':after';
     assert.equal(app.ctHistoryComparison.rows[0].beforeTarget,'Shared before');
     assert.equal(app.ctHistoryComparison.rows[0].afterTarget,local.after.values[fieldId]);
@@ -1299,10 +1414,11 @@ test('late history loads cannot replace another unit, account or group timeline'
         assert.equal(await loading,false);assert.equal(app.ctHistory,current);assert.equal(app.ctHistoryLoading,true);
     }
 });
-test('history restore creates an exact durable draft and retains only current field review hashes',async()=>{
+test('confirmed history restore creates an exact durable saved revision and retains only current field review hashes',async()=>{
     const f=fixture(),{app,original}=enableHistory(harness());await f.store.import(scope,{units:[original],assets:[asset]});
     const saved=await f.store.save(scope,original.id,{jobId:'saved',values:{[fieldId]:'Committed'},reviewed:{}});
-    app.ctSaved={[original.id]:saved.saved};app._ctStore=f.store;
+    app.ctSaved={[original.id]:saved.saved};app.ctValues={...saved.saved.values};app._ctEditRevision=saved.saved.revision;app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    const confirmations=[];app.appConfirm=async(message,options)=>{confirmations.push({message,options});return true;};
     const raw='Restored @literal\\nreal\n<script>x</script>';
     app._ctStore={...f.store,async listHistory(){return[{id:'valid',unitId:original.id,createdAt:1,after:{values:{[fieldId]:raw,removed:'Do not restore'},reviewed:{[fieldId]:S.sourceHash(original.fields[0].source),removed:'hash'}}},
         {id:'stale',unitId:original.id,createdAt:2,after:{values:{[fieldId]:'Older'},reviewed:{[fieldId]:'f'.repeat(64)}}}];}};
@@ -1310,13 +1426,18 @@ test('history restore creates an exact durable draft and retains only current fi
     assert.equal(await app.ctRestoreHistory(valid),true);
     assert.equal(app.ctValues[fieldId],raw);assert.equal(app.ctValues.removed,undefined);
     assert.equal(app.ctReviewed[fieldId],S.sourceHash(original.fields[0].source));assert.equal(app.ctReviewed.removed,undefined);
-    const draft=await f.store.getDraft(scope,original.id);assert.equal(draft.values[fieldId],raw);
-    assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'Committed', 'History restore does not commit or export work');
+    assert.match(confirmations[0].message,/new saved revision/);assert.equal(confirmations[0].options.confirmLabel,'Restore revision');
+    assert.equal(await f.store.getDraft(scope,original.id),undefined,'confirmed successful restore consumes its own checkpoint');
+    const restored=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id),outbox=await f.store.getOutbox(scope);
+    assert.equal(restored.values[fieldId],raw);assert.equal(restored.origin,'restore');assert.equal(restored.revision,saved.saved.revision+1);
+    const restoreEvent=history.find(entry=>entry.origin==='restore');assert.ok(restoreEvent);assert.equal(restoreEvent.before.values[fieldId],'Committed');assert.equal(restoreEvent.after.values[fieldId],raw);
+    assert.equal(outbox.at(-1).origin,'restore');assert.equal((await f.store.getUnit(scope,original.id)).fields[0].target,original.fields[0].target,'restore keeps the workbook baseline immutable');
+    await settle();
     assert.equal(await app.ctRestoreHistory(app.ctHistory.find(entry=>entry.id==='stale')),true);
     assert.deepEqual(clone(app.ctReviewed),{});
 });
 
-test('history restores hidden class variants as exact durable drafts without saving or changing display selections',async()=>{
+test('confirmed history restores hidden class variants in one saved revision without changing display selections',async()=>{
     const original=classVariantUnit(),hidden=original.fields.find(field=>field.form==='IntFour'),f=fixture(),
         {app,mixin}=enableHistory(keyboardHarness(original));await f.store.import(scope,{units:[original],assets:[{...asset,role:'gender'}]});
     const oldValues={...S.valuesFor(original),[hidden.id]:'Old@literal\\n\n[Keyword] {0}'},newValues={...oldValues,[hidden.id]:'New@literal\\n\n[Keyword] {0}'};
@@ -1326,18 +1447,62 @@ test('history restores hidden class variants as exact durable drafts without sav
     // keyboardHarness substitutes a no-op checkpoint for navigation tests;
     // restore exercises the actual durable command instead.
     app.ctFlushDraft=mixin.methods.ctFlushDraft.bind(app);
-    app.ctSaved={[original.id]:saved.saved};app.ctValues=newValues;app.ctInitializeVariants();
+    app.ctSaved={[original.id]:saved.saved};app._ctEditRevision=saved.saved.revision;app.ctValues=newValues;app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctInitializeVariants();
     const group=app.ctFieldGroups[0];app.ctSelectVariant(group,group.fields.find(field=>field.form==='StrFourb').id,{focus:false});
     const selected=app.ctSelectedVariant(group);assert.notEqual(selected.id,hidden.id);
     const outbox=clone(await f.store.getOutbox(scope)),history=clone(await f.store.listHistory(scope,original.id));
     await app.ctLoadHistory();const entry=app.ctHistory.find(entry=>entry.after.values[hidden.id]===oldValues[hidden.id]);assert.ok(entry);
-    assert.equal(await app.ctRestoreHistory(entry),true);const draft=await f.store.getDraft(scope,original.id);
-    assert.equal(draft.values[hidden.id],oldValues[hidden.id]);assert.equal(draft.reviewed[hidden.id],S.sourceHash(hidden.source));
-    assert.equal(Object.keys(draft.values).length,original.fields.length);assert.equal(app.ctSelectedVariant(group).id,selected.id);
+    assert.equal(await app.ctRestoreHistory(entry),true);const restored=(await f.store.getSaved(scope))[original.id];
+    assert.equal(restored.values[hidden.id],oldValues[hidden.id]);assert.equal(restored.reviewed[hidden.id],S.sourceHash(hidden.source));
+    assert.equal(Object.keys(restored.values).length,original.fields.length);assert.equal(app.ctSelectedVariant(group).id,selected.id);
     assert.equal(app.ctDefaultsOpen(group),false);assert.equal(app.ctDisplayedFields().includes(hidden),false);
-    assert.equal((await f.store.getSaved(scope))[original.id].values[hidden.id],newValues[hidden.id]);
-    assert.deepEqual(await f.store.getOutbox(scope),outbox);assert.deepEqual(await f.store.listHistory(scope,original.id),history);
+    assert.equal(await f.store.getDraft(scope,original.id),undefined);assert.equal(restored.origin,'restore');
+    const queued=await f.store.getOutbox(scope);assert.equal(queued.length,outbox.length,'unclaimed sparse work coalesces per ID');assert.equal(queued[0].origin,'restore');
+    assert.equal(queued[0].values[hidden.id],oldValues[hidden.id]);assert.equal((await f.store.listHistory(scope,original.id)).length,history.length+1);
 });
+test('history restore cancellation and late confirmation cannot replace a newer draft or scoped editor',async()=>{
+    for(const change of ['cancel','text','account','group','unit']){
+        const {app,original}=enableHistory(harness()),held=deferred();
+        app._ctStore={async listHistory(){return[{id:'entry',unitId:original.id,after:{values:{[fieldId]:'Historical'}}}];}};
+        await app.ctLoadHistory();const entry=app.ctHistory[0],before=app.ctValues;let checkpoints=0,saves=0;
+        app.appConfirm=()=>held.promise;app.ctFlushDraft=async()=>{checkpoints++;return true;};app.ctSave=async()=>{saves++;return true;};
+        const restoring=app.ctRestoreHistory(entry);await settle();
+        if(change==='text')app.ctValues[fieldId]='New typing';
+        else if(change==='unit')app.ctSelection='other';
+        else if(['account','group'].includes(change))app.ctWorkspace={scope:{...scope,[change==='account'?'accountId':'groupId']:'replacement'}};
+        held.resolve(change!=='cancel');assert.equal(await restoring,false,change);assert.equal(app.ctValues,before);assert.equal(checkpoints,0);assert.equal(saves,0);
+        assert.equal(app.ctValues[fieldId],change==='text'?'New typing':original.fields[0].target);
+    }
+});
+
+test('history restore requires the shared API capability but local restore uses the same confirmed save command',async()=>{
+    for(const policy of [{}, {clientTextSaveOrigins:['save']}]){
+        const {app,original}=enableHistory(harness({ctPolicy:policy}));
+        app._ctStore={async listHistory(){return[{id:'entry',unitId:original.id,after:{values:{[fieldId]:'Historical'}}}];}};
+        await app.ctLoadHistory();let confirmed=0;app.appConfirm=async()=>{confirmed++;return true;};
+        const values=app.ctValues;assert.equal(await app.ctRestoreHistory(app.ctHistory[0]),false);assert.equal(app.ctValues,values);
+        assert.equal(confirmed,0);assert.match(app.ctHistoryError,/API.*support.*restore/);
+    }
+    const {app,original}=enableHistory(harness({ctPolicy:{},ctWorkspace:{scope:{...scope,groupId:'local:group'}}}));
+    app._ctStore={async listHistory(){return[{id:'entry',unitId:original.id,after:{values:{[fieldId]:'Local raw@value\\n\r\nrestored'}}}];}};
+    await app.ctLoadHistory();app.ctFlushDraft=async()=>true;const calls=[];
+    app.ctSave=async(close,options)=>{calls.push({close,options,values:clone(app.ctValues)});return true;};
+    assert.equal(await app.ctRestoreHistory(app.ctHistory[0]),true);assert.deepEqual(clone(calls[0].options),{origin:'restore'});
+    assert.equal(calls[0].close,false);assert.equal(calls[0].values[fieldId],'Local raw@value\\n\r\nrestored');
+});
+
+test('a failed confirmed restore retains its exact recoverable checkpoint and retry command',async()=>{
+    const f=fixture(),{app,original}=enableHistory(harness());await f.store.import(scope,{units:[original],assets:[asset]});
+    const raw='Recoverable@raw\\n\r\nrestore';app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    app._ctStore={...f.store,async listHistory(){return[{id:'entry',unitId:original.id,after:{values:{[fieldId]:raw}}}];},async save(){throw Error('Storage unavailable');}};
+    await app.ctLoadHistory();assert.equal(await app.ctRestoreHistory(app.ctHistory[0]),false);
+    assert.equal(app.ctValues[fieldId],raw);assert.equal(app.ctDraftDirty,true);assert.equal((await f.store.getDraft(scope,original.id)).values[fieldId],raw);
+    assert.equal(app._ctSaveJob.command.origin,'restore');assert.match(app.ctError,/Storage unavailable/);
+    const command=clone(app._ctSaveJob.command);app._ctStore.save=async(captured,id,input)=>{assert.deepEqual(clone(input),command);return f.store.save(captured,id,input);};
+    assert.equal(await app.ctSave(),true,'retry resolves the captured restore command even when ordinary Save is chosen');
+    assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],raw);assert.equal((await f.store.listHistory(scope,original.id)).at(-1).origin,'restore');
+});
+
 test('history restore refuses stale rows and rechecks unit/account/group after draft preservation',async()=>{
     for(const changed of ['unit','account','group']){
         const {app,original}=enableHistory(harness()),held=deferred(),entered=deferred();
@@ -1896,7 +2061,8 @@ test('uncertain legacy finalization uses live accepted upload state before any c
 
 
 test('ClientText history comparison teleports outside the sticky editor sidebar stacking context',()=>{
-    const {window}=harness(),template=window.ClientTextUI.toolsComponent.template;
-    assert.match(template,/<Teleport to="body"><div v-if="host.ctHistoryViewer"/);assert.match(template,/<\/div><\/Teleport>\s*<\/section>/);
+    const {window}=harness(),template=window.EditorComponents.History.template;
+    assert.equal(window.ClientTextUI.toolsComponent,window.EditorComponents.Tools);
+    assert.match(template,/<Teleport to="body"><div v-if="ctHistoryViewer"/);assert.match(template,/<\/div><\/Teleport>\s*<\/section>/);
     assert.match(fs.readFileSync(path.join(__dirname,'../public/client-text.css'),'utf8'),/\.ctHistoryBackdrop[^}]*z-index:16000/);
 });

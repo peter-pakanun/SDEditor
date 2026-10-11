@@ -29,10 +29,7 @@ function between(source, start, end) {
 }
 const navigation = between(html, '<nav class="ctNavigation"', '</nav>') + '</nav>';
 const table = between(html, '<table class="display compact cell-border fileTable ctTable"', '</table>') + '</table>';
-const fullEditor = between(html, '<div v-else class="editor ctFull ctFullEditor', '      <dialog ref="ctDiagnosticDialog"')
-    // The application Teleports its 200px preview into this host. Reserve that
-    // same real CSS shell so the sticky actions do not obscure this fixture.
-    .replace('<div id="ctFullEditorPreviewHost"></div>', '<div id="ctFullEditorPreviewHost"><div class="gamePreviewStrip"><strong class="gamePreviewLabel">Preview</strong><p>English source for the current record.</p></div></div>');
+const fullEditor = between(html, '<editor-full-shell v-else class="ctFull ctFullEditor', '      <dialog ref="ctDiagnosticDialog"');
 const tooltipComponent = between(indexJs, 'const AppTooltip = {', 'function escapeTooltipAttr');
 const tooltipMethods = between(indexJs, '    normalizeTooltipText(value) {', '    htmlTooltipMouseMove(e) {');
 const tooltipDirective = between(indexJs, "app.directive('tooltip', {", "app.mount('#app');");
@@ -57,11 +54,11 @@ const app = Vue.createApp({
         ctSheet:sheets[0].key,ctSearch:'Main search retained',ctAppliedSearch:'',ctSelectedFilters:['unchanged','missing','saved'],
         ctValues:Object.fromEntries(fields.map(field=>[field.id,field.target])),
         inlineEditor:true,inlineSidebarVisible:false,lang:'Thai',translationEditorBcp47:'th',
-        gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,
+        gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,hideEditorClipboard:true,
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
-    computed:Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize']
-        .map(key=>[key,ct.computed[key]])),
+    computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount']
+        .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
     methods:{...ct.methods,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
     },
@@ -69,6 +66,9 @@ const app = Vue.createApp({
 });
 app.component('ct-fields',window.ClientTextUI.fieldsComponent);
 app.component('ct-target',window.ClientTextUI.targetComponent);
+app.component('editor-native-field',window.EditorComponents.NativeField);
+// Reserve the actual preview shell without invoking the app preview lifecycle.
+app.component('editor-full-shell',{...window.EditorComponents.FullEditorShell,template:window.EditorComponents.FullEditorShell.template.replace('<div :id="previewHostId"></div>','<div :id="previewHostId"><div class="gamePreviewStrip"><strong class="gamePreviewLabel">Preview</strong><p>English source for the current record.</p></div></div>')});
 app.component('ct-tools',{props:['host'],template:'<aside class="side sharedEditorSidebar ctTools"><h3>File tools</h3><p>Disposable layout fixture</p></aside>'});
 app.component('app-tooltip',AppTooltip);
 ${tooltipDirective}
@@ -83,7 +83,7 @@ async function run() {
         <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div class="fileTableScroll">${table}</div></div></div>
         </main></div>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
-        <script src="/clientTextState.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/clientTextState.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -159,6 +159,20 @@ async function run() {
             assert.equal(await tooltip.evaluate(element=>[...element.children].map(line=>line.textContent).join('\n')),expected,name+': keyboard tooltip');
             await filter.focus();await tooltip.waitFor({state:'detached'});
         };
+        const checkFieldLayout=async (full,name)=>{
+            const geometry=await page.locator('.ctFields[data-side="source"] .ctFieldSource, .ctFullEditor .ctFieldSource').evaluate(element=>{
+                const rect=node=>{const value=node.getBoundingClientRect();return {left:value.left,right:value.right,top:value.top,bottom:value.bottom,width:value.width};};
+                const source=element.closest('.ctBlock'),target=source.closest('.ctFullEditor')?source.querySelector('.ctFieldTranslation')
+                    :document.querySelector('.ctFields[data-side="translation"] .ctFieldTranslation');
+                return {source:rect(element),target:rect(target),highlights:document.querySelectorAll('.ctFields .HLter').length};
+            });
+            if(full){
+                assert.ok(geometry.source.bottom<=geometry.target.top,name+': English source stacks above translation as in SD full editor');
+                assert.ok(Math.abs(geometry.source.left-geometry.target.left)<1 && Math.abs(geometry.source.right-geometry.target.right)<1,name+': source and translation share block width');
+            }else assert.ok(geometry.source.right<=geometry.target.left,name+': inline English and translation retain separate table columns');
+            assert.equal(geometry.highlights,7,name+': source and all six form targets use shared highlight overlays');
+            results.push({name:name+' native field layout',sourceWidth:Math.round(geometry.source.width),targetWidth:Math.round(geometry.target.width)});
+        };
         for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100]) {
             await page.setViewportSize({width,height:900});
             await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);window.__ctLayoutFixture.ctEditor=false;},theme);
@@ -169,6 +183,7 @@ async function run() {
             assert.ok(ellipsis.scroll>ellipsis.client,theme+'/'+width+': long sheet is truncated without widening navigation');
             await checkTooltip(longButton,longSheet+'\nNormal workbook',theme+'/'+width);
             await checkGrid(theme+'/'+width+' inline');
+            await checkFieldLayout(false,theme+'/'+width+' inline');
             if(theme==='modern-dark' && width===1100) {
                 await longButton.hover();await tooltip.waitFor();await settle();
                 const path=join(tmpdir(),'sdeditor-clienttext-inline-'+randomUUID()+'.png');
@@ -179,9 +194,14 @@ async function run() {
             assert.deepEqual(errors,[],theme+'/'+width+': no browser errors switching to full editor');
             assert.equal(await page.locator('.ctFullEditor').count(),1,theme+'/'+width+': full editor template mounted');
             await checkGrid(theme+'/'+width+' full');
-            const gutter=await page.locator('.ctFullEditor > .edit').evaluate(element=>({left:element.getBoundingClientRect().left,padding:getComputedStyle(element).paddingLeft,margin:getComputedStyle(element).marginLeft}));
+            await checkFieldLayout(true,theme+'/'+width+' full');
+            const gutter=await page.locator('.ctFullEditor > .edit').evaluate(element=>{
+                const probe=document.createElement('div');probe.className='editor';probe.style.cssText='position:absolute;left:-10000px;visibility:hidden';
+                const edit=document.createElement('div');edit.className='edit';probe.append(edit);element.closest('[data-density]').append(probe);
+                const result={left:element.getBoundingClientRect().left,padding:getComputedStyle(element).paddingLeft,margin:getComputedStyle(element).marginLeft,shellPadding:getComputedStyle(edit).paddingLeft};probe.remove();return result;
+            });
             assert.equal(gutter.left,0,theme+'/'+width+': full editor begins at left edge');
-            assert.equal(gutter.padding,'0px',theme+'/'+width+': full editor has no left padding');
+            assert.equal(gutter.padding,gutter.shellPadding,theme+'/'+width+': full editor keeps the shared shell gutter');
             assert.equal(gutter.margin,'0px',theme+'/'+width+': full editor has no left margin');
             if(theme==='modern-dark' && width===1440) {
                 const path=join(tmpdir(),'sdeditor-clienttext-full-'+randomUUID()+'.png');

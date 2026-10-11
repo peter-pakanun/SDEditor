@@ -5,7 +5,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const publicDir = path.join(__dirname, '..', 'public');
-const template = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8');
+const template = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+  + fs.readFileSync(path.join(publicDir, 'editorComponents.js'), 'utf8');
 const panelStart = template.indexOf('<section v-show="sideTab === \'lookup\'');
 const panelEnd = template.indexOf('<section v-if="sideTab === \'comments\'', panelStart);
 const lookupPanel = template.slice(panelStart, panelEnd);
@@ -23,7 +24,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'editorLookup.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'editorLookup.js', 'editorSession.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -259,10 +260,10 @@ test('Lookup panel uses literal text, independent controls, and persistent acces
   assert.doesNotMatch(lookupPanel, /Search all loaded files without leaving your draft\.|Loaded source and saved translations/);
   assert.doesNotMatch(lookupPanel, /v-model="(?:lang|editorBlocks[^" ]*)"/);
   assert.doesNotMatch(lookupPanel, /(?:editFile|editorSave|saveAndSkipFile|commentsOpenFile)\(/);
-  const sidebar = template.slice(template.indexOf('<div class="sideTabs">'), template.indexOf('<div v-if="sideTab === \'dictionary\'">'));
-  const orderedTabs = ['dictionary', 'lookup', 'regex', 'history', 'comments']
+  const sidebar = template.slice(template.indexOf('<div class="sideTabs">'), template.indexOf('<div v-if="sideTab === \'dictionary\'"'));
+  const orderedTabs = ['dictionary', 'lookup', 'tm', 'history', 'comments']
     .map(tab => sidebar.indexOf(`sideTab === '${tab}'`));
   assert.ok(orderedTabs.every((position, index) => position >= 0 && (!index || position > orderedTabs[index - 1])),
-    'Sidebar tabs must remain Dictionary, Lookup, Regex, History, Comments');
+    'Shared sidebar tabs must retain the SD Dictionary, Lookup, TM, History, Comments order');
   assert.ok(template.indexOf('src="editorLookup.js"') < template.indexOf('src="index.js"'));
 });

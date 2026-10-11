@@ -17,7 +17,7 @@
 .ctTable tr.isOutdated > td { background-color:color-mix(in srgb,var(--ui-dropped) 8%,transparent); }
 .statusPill.outdated .statusDot,.filterChip.outdated { --filter-color:var(--ui-dropped); color:var(--ui-dropped); }
 .filterChip.outdated.selected { border-color:var(--ui-dropped); background:color-mix(in srgb,var(--ui-dropped) 10%,var(--color-element)); }
-.ctFullEditor { --clipboard-height:0px; }.ctFullEditor > .edit { padding:0 18px 24px 0; }.ctFullEditor .editorActions { align-items:center; }.ctFullEditor .editorActions h1 { flex:1; font-size:1.4em; margin:10px 0; }
+.ctFullEditor.clipboardHidden { --clipboard-height:0px; }
 .ctEditorNavigation { display:flex; align-items:center; gap:12px; margin:12px 0; }.ctEditorNavigation strong { flex:1; overflow-wrap:anywhere; }
 .ctFields pre,.ctTools pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; tab-size:4; }.ctBlock h3 { margin:0 0 6px; font-size:12px; color:var(--ui-muted); }
 .ctFields[data-side] .ctBlock { padding:0; margin:0 0 6px; background:transparent; }.ctFields[data-side] .ctBlock:last-child { margin-bottom:0; }
@@ -26,7 +26,7 @@
 .inlineEditorMode :is(#table,.fileTable).ctTable .ctFields .editorTextField > textarea { min-height:calc(40px * var(--density)); }
 .ctTable .ctReadPreview { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
 .ctFieldPair > * { min-width:0; }
-.ctFullFieldPair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start; }
+.ctFullFieldPair { display:flex; flex-direction:column; gap:12px; align-items:stretch; }
 .ctFields .ctSourceBlock { display:block; }
 .ctFields .ctSourceLabel { display:block; font-size:12px; line-height:1.4; margin:0 0 4px; }
 .ctFields .ctTarget > label:not(.srOnly) { line-height:1.4; }
@@ -39,14 +39,6 @@
 .ctVariantTabs { display:flex; flex-wrap:wrap; gap:4px; margin:8px 0; }.ctVariantTabs button { padding:4px 7px; font-size:11px; line-height:1.4; }.ctVariantTabs button.active { border-color:var(--color-accent); background:var(--ui-accent-soft); }.ctVariantTabs button.missing .ctVariantDot { color:var(--ui-missing); }.ctVariantTabs button.outdated:not(.missing) .ctVariantDot { color:var(--ui-dropped); }.ctVariantDot { margin-left:5px; color:var(--ui-warning); font-size:9px; }
 .ctVariantPicker { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 0; font-size:12px; color:var(--ui-muted); }.ctVariantPicker select { max-width:100%; min-width:0; flex:1; }.ctVariantPicker small { font-size:11px; }.ctClassVariants > .ctTarget > label { display:none; }
 .ctDeveloperNotes { padding:10px; border-left:3px solid var(--color-accent); background:color-mix(in srgb,var(--color-accent) 8%,var(--color-element)); margin-bottom:12px; }.ctDeveloperNotes pre { margin:6px 0 0; }.ctDiagnostic { margin:5px 0; font-size:12px; }.ctDiagnostic.error { color:var(--ui-error); }.ctDiagnostic.warning { color:var(--ui-warning); }
-.ctTools .sideTabs { flex-wrap:wrap; }.ctTools > section { padding:0 10px 12px; }.ctTools section > input,.ctTools textarea { width:100%; }.ctTools article { margin:10px 0; }.ctTools h3 { font-size:1em; }.ctToolsEmpty { color:var(--ui-muted); padding:12px; }
-.ctTools .dictAltRow { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; align-items:start; }
-.ctTools .dictAltRow > input { width:100%; min-width:0; box-sizing:border-box; }
-.ctTools .dictUseBtn { margin-top:5px; padding:3px 7px; font-size:12px; white-space:normal; }
-.ctTools .dictAltRow > .dictUseBtn { grid-column:2; grid-row:2; justify-self:start; margin:0; max-width:100%; }
-.ctTools .dictAltRow > button:not(.dictUseBtn) { grid-column:3; grid-row:1; }
-.ctTools.commentsActive > .commentsPanel { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }.ctTools .commentsPanel > :not(.commentsList) { flex-shrink:0; }.ctTools .commentsList { flex:1; min-height:0; overflow-y:auto; }
-.ctTools.lookupActive > .editorLookupPanel { overflow:hidden; }.ctTools .lookupControls { flex-shrink:0; }.ctTools .lookupResults { flex:1; min-height:0; max-height:none; overflow-y:auto; }
 .ctProgress { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:20px; margin:16px 0; padding:12px; background:var(--color-element); border:1px solid var(--ui-border); border-radius:6px; }
 .ctProgressMain { display:grid; gap:8px; min-width:0; }
 .ctProgressLabel { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }

@@ -206,11 +206,12 @@
           const key = this.tmEditorKey, capture = this.tmCaptureEditor();
           await this.$nextTick();
           if (key === this.tmEditorKey && this.tmEditorCurrent(capture) && this.sideTab === 'tm') {
-            this.$refs?.tmResultsPanel?.focus?.({ preventScroll: true });
+            (this.getEditorComponentRef?.('tmResultsPanel') || this.$refs?.tmResultsPanel)?.focus?.({ preventScroll: true });
           }
         }
       },
       tmPanelKeydown(event) {
+        if(window.EditorSession)return window.EditorSession.memoryKeydown(this.sharedEditorController || this,event);
         if (this.isFilterFocusShortcut?.(event)) { event.preventDefault(); this.openTMManager(); return; }
         if (this.isImeComposingEvent?.(event) || event.target?.matches?.('input,textarea,select')) return;
         if (event.target?.matches?.('button') && event.target.getAttribute?.('role') !== 'option') return;
@@ -248,7 +249,7 @@
       async previewTMPrefill() {
         if (this.tmBusy || this.editorTranslationReadOnly || !this.editorCurrentEditingDesc) return;
         // Keep inline focus inside the sidebar when preparation disables its button.
-        if (this.inlineActive) this.$refs?.tmResultsPanel?.focus?.({ preventScroll: true });
+        if (this.inlineActive) (this.getEditorComponentRef?.('tmResultsPanel') || this.$refs?.tmResultsPanel)?.focus?.({ preventScroll: true });
         this.tmBusy = true;
         const scopeKey = this.tmScopeKey, capture = this.tmCaptureEditor(), key = capture.key, language = this.lang;
         const before = this.serializeEditorTranslations();

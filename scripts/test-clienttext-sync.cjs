@@ -25,6 +25,19 @@ test('uncertain trusted uploads retry the exact sparse mutation body without ori
     await sync.flush();assert.deepEqual(calls[1],calls[0]);assert.deepEqual(await f.store.getOutbox(scope),[]);
     assert.equal((await f.store.getMetadata(scope)).sequence,0,'Write acknowledgement must not skip unseen events');
 });
+test('uncertain restore uploads retain origin while a later ordinary save waits behind their exact command',async()=>{
+    const f=await prepared(),calls=[];
+    await f.store.save(scope,unit().id,{jobId:'restored',origin:'restore',values:{[fieldId]:'Restored'},reviewed:{}});
+    const sync=Sync.create({scope,store:f.store,isCurrent:()=>true,request:async(_,init)=>{
+        calls.push(structuredClone(init.body));if(calls.length===1)throw new Error('Accepted restore response lost');
+        return {unit:{unitId:unit().id,origin:init.body.origin||'save',values:init.body.values,reviewed:init.body.reviewed,revision:calls.length-1},mutationId:init.body.mutationId};}});
+    await assert.rejects(sync.flush(),/lost/);
+    await f.store.save(scope,unit().id,{jobId:'new-save',values:{[fieldId]:'Newer saved text'},reviewed:{}});
+    await sync.flush();assert.deepEqual(calls[1],calls[0]);assert.equal(calls[1].origin,'restore');
+    assert.equal(calls[2].mutationId,'new-save');assert.equal(Object.hasOwn(calls[2],'origin'),false);
+    assert.equal(calls[2].baseRevision,1);assert.deepEqual(await f.store.getOutbox(scope),[]);
+    assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Newer saved text');
+});
 test('source/account changes fence late replay and preserve pending local work',async()=>{
     const f=await prepared();let current=true;
     const sync=Sync.create({scope,store:f.store,isCurrent:()=>current,request:async()=>{current=false;return {events:[{sequence:1,unitId:unit().id,unit:{values:{[fieldId]:'Wrong'},reviewed:{},revision:1}}],sequence:1};}});
@@ -39,7 +52,7 @@ test('shared conflicts preserve current local text and stop automatic retry',asy
 
 test('legacy uncertain requests replay their durable exact body and ID after cache cleanup',async()=>{
     const baseline=unit(),manifest=await S.buildManifest([baseline],[asset]),body={mutationId:'legacy-uncertain',baseRevision:3,values:{[fieldId]:'Legacy saved'},reviewed:{},baseline,proof:S.proofFor(manifest,baseline.id)},calls=[];
-    let pending={unitId:baseline.id,mutationId:body.mutationId,requestBody:structuredClone(body),state:'uncertain'};
+    let pending={unitId:baseline.id,mutationId:body.mutationId,origin:'restore',requestBody:structuredClone(body),state:'uncertain'};
     const store={async getOutbox(){return pending?[pending]:[];},async markSending(){return pending;},async getUnit(){throw Error('Original reads are forbidden');},async getProof(){throw Error('Proof cache was cleaned');},async acknowledge(){pending=null;}};
     const sync=Sync.create({scope,store,request:async(_,options)=>{calls.push(structuredClone(options));if(calls.length===1)throw Error('Lost acknowledgement');return{unit:{id:baseline.id,values:body.values,reviewed:{},revision:4}};}});
     await assert.rejects(sync.flush(),/Lost/);await sync.flush();

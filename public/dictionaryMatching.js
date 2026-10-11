@@ -311,12 +311,43 @@
     return highlights;
   }
 
+  function* matchClientTextUnit(snapshot, source, tokens, options) {
+    const escaped = yield* escapeSource(source), highlights = [];
+    const add = (start,end,extra={}) => highlights.push({index:escaped.offsets[start],find:escaped.text.slice(escaped.offsets[start],escaped.offsets[end]),rawStart:start,rawEnd:end,...extra});
+    for(const token of tokens || []) {
+      yield;
+      if(!Number.isInteger(token.start) || !Number.isInteger(token.end) || token.start<0 || token.end>source.length || token.end<=token.start)continue;
+      let extra={replace:source.slice(token.start,token.end)};
+      if(token.kind==='keyword') {
+        const full=source.slice(token.start,token.end),parts=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(full);
+        if(parts){const info=yield* keywordInfo(snapshot,parts[1],parts[2] || '',parts[2] || parts[1]);
+          extra={...extra,isKeywordPopup:true,tagName:parts[1],replace:info.entry && info.text ? info.text:full,
+            dictId:info.entry?._id,dictDefFind:info.matchedFind || '',dictIds:info.dictIds};}
+      }
+      if(!highlights.some(hl=>token.start<hl.rawEnd && hl.rawStart<token.end))add(token.start,token.end,extra);
+    }
+    if(options.highlightDict!==false){
+      for(const definition of yield* findDefinitions(snapshot,source)){
+        yield;const find=definition.pair.find;
+        for(let at=0;at<=source.length-find.length;at++){
+          if(!(at%32))yield;
+          if(source[at]!==find[0] || !(yield* literalAt(source,find,at)))continue;
+          if(!highlights.some(hl=>at<hl.rawEnd && hl.rawStart<at+find.length))add(at,at+find.length,{replace:definition.pair.replace,dictId:definition.entry._id,dictDefFind:find});
+          at+=find.length-1;
+        }
+      }
+    }
+    return highlights.sort((a,b)=>a.rawStart-b.rawStart);
+  }
+
   function* matchSnapshot(snapshot, units, options = {}) {
     const result = [], entriesById = Object.create(null);
     for (const unit of Array.isArray(units) ? units : []) {
       yield;
       const english = String(unit?.english ?? '');
-      const HLs = yield* matchUnit(snapshot, english, options);
+      const HLs = options.contentMode==='clienttext'
+        ? yield* matchClientTextUnit(snapshot,english,unit.tokens,options)
+        : yield* matchUnit(snapshot, english, options);
       result.push({ key: unit?.key, english, HLs });
       for (const hl of HLs) {
         for (const id of [hl.dictId, ...(hl.dictIds || [])]) {

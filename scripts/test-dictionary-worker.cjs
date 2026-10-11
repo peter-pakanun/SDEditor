@@ -411,3 +411,31 @@ test('dispose prevents queued tasks from publishing', () => {
   h.runtime.dispose(); h.flush();
   assert.deepEqual(h.messages, []);
 });
+
+test('ClientText prepared matches retain raw token ranges and literal workbook characters independently of SD decoding', () => {
+  const state = require('../public/clientTextState.js'), english = '<tag>& Fire@literal\\n\r\n[Cold<gemlevel={0}>|Ice] <<icon:fire>> {1}';
+  const snapshot = drain(matching.buildSnapshot([
+    { _id:'fire', find:'Fire', replace:'ไฟ', alts:[], tlnote:'Use Fire' },
+    { _id:'cold', find:'Cold', replace:'เย็น', alts:[], tlnote:'Cold note' },
+  ], 'poe2', 1));
+  const result = drain(matching.matchSnapshot(snapshot, [{ key:'raw', english, tokens:state.tokenize(english) }], { contentMode:'clienttext', highlightDict:true }));
+  assert.equal(result.units[0].english, english);
+  for (const range of result.units[0].HLs) {
+    assert.equal(matching.unescapeHtml(range.find), english.slice(range.rawStart, range.rawEnd));
+    assert.equal(range.index, matching.escapeHtml(english.slice(0, range.rawStart)).length);
+  }
+  const fire = result.units[0].HLs.find(range=>range.dictId==='fire'), cold = result.units[0].HLs.find(range=>range.dictId==='cold');
+  assert.equal(fire.rawStart, english.indexOf('Fire'));assert.equal(fire.replace,'ไฟ');
+  assert.equal(cold.replace,'[Cold<gemlevel={0}>|เย็น]');assert.equal(result.entriesById.cold.tlnote,'Cold note');
+  assert.equal(result.units[0].HLs.some(range=>english.slice(range.rawStart,range.rawEnd).includes('@literal')),false);
+  const tagsOnly = drain(matching.matchSnapshot(snapshot, [{ english, tokens:state.tokenize(english) }], { contentMode:'clienttext', highlightDict:false }));
+  assert.equal(tagsOnly.units[0].HLs.some(range=>range.dictId==='fire'),false);
+  assert.ok(tagsOnly.units[0].HLs.some(range=>range.dictId==='cold'));
+});
+
+test('ClientText matching ignores malformed and overlapping supplied ranges without mutating the source snapshot', () => {
+  const english='[Tag|A&B] {0}', tokens=[{kind:'keyword',start:0,end:9}, {kind:'variable',start:1,end:4}, {start:-1,end:1}, {start:10,end:99}],
+    snapshot=drain(matching.buildSnapshot([], 'poe2', 1)), before=structuredClone(tokens);
+  const result=drain(matching.matchSnapshot(snapshot,[{english,tokens}],{contentMode:'clienttext'}));
+  assert.deepEqual(tokens,before);assert.equal(result.units[0].HLs.length,1);assert.equal(result.units[0].HLs[0].find,'[Tag|A&amp;B]');
+});

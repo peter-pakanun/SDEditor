@@ -413,8 +413,8 @@
       </section>
     </div>
     <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="ctWorkspace" :inert="showSetting || workspaceInitializationActive" aria-label="ClientText workspace">
-      <div v-if="!ctEditor" class="workspace ctListWorkspace" :class="{ inlineEditorMode: inlineEditor }">
-        <header class="workspaceHeader">
+      <editor-workspace-shell v-if="!ctEditor" class="ctListWorkspace" :inline="inlineEditor">
+        <template #header>
           <div class="workspaceBrand">
             <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
             <div><strong>SDEditor</strong><span><a class="workspaceContextLink" href="#settingsGameVersion" @click.prevent="openSettings('general','settingsGameVersion')" title="Change game version">{{ gameVersionLabel }}</a> <span aria-hidden="true">·</span> <a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#settingsLanguage" @click.prevent="openSettings('general','settingsLanguage')" title="Change translation language">{{ lang }}</a><template v-else>{{ lang }}</template></span></div>
@@ -439,8 +439,8 @@
             <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctSelectedFilters.length===ctStatusFilterOptions.length">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
           </div></fieldset>
           <workspace-alerts></workspace-alerts>
-        </header>
-        <main class="workspaceContent">
+        </template>
+        <template #content>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <div v-if="ctProgress" class="ctProgress" role="status"><div class="ctProgressMain"><span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span><progress :value="ctProgress.completed || 0" :max="ctProgress.total || 1" aria-label="Workbook operation progress"></progress><span class="ctProgressCount">{{ Math.round(ctProgress.completed || 0) }} / {{ ctProgress.total || '…' }}</span></div><button class="ctProgressCancel" @click="ctCancel">Cancel</button></div>
           <div class="ctWorkspaceBody" :class="{ctToolsOpen:inlineEditor && inlineSidebarVisible}">
@@ -465,8 +465,8 @@
                     <th scope="col" :aria-sort="ctSort==='english' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('english')">English <span aria-hidden="true">{{ ctSort==='english' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
                     <th scope="col" :aria-sort="ctSort==='translation' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('translation')">{{ lang }} translation <span aria-hidden="true">{{ ctSort==='translation' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
                   </tr></thead>
-                  <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)">
-                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctSelection===unit.id && ctDraftDirty" class="fileDraftLabel">Local draft</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" class="inlineFileActions" @click.stop><button @click="ctSave()" :disabled="ctBusy">Stage draft</button><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
+                  <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)" @focusout="ctInlineFocusOut">
+                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDraftUnitIds.has(unit.id)" class="fileDraftLabel">Local draft</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" class="inlineFileActions" @click.stop><button @click="ctSave()" :disabled="ctBusy">Stage draft</button><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
                     <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
                     <td class="translationTr inlineTranslationCell" :data-label="lang+' translation'"><ct-fields v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
                   </tr></tbody>
@@ -474,10 +474,10 @@
               </div>
               <div v-if="!ctRows.length" class="workspaceEmpty" role="status"><h2>{{ ctSelectedFilters.length ? 'No files match your search' : 'Choose a status to show files' }}</h2><p>Try another search or open Filters to select more statuses.</p><button @click="ctResetFilters">Reset search and filters</button></div>
             </div>
-            <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="ctInlineEditorSidebar" aria-label="Selected file tools"><ct-tools v-if="ctCurrentUnit" :host="$root"></ct-tools><p v-else class="ctToolsEmpty">Select a file to see its tools.</p></aside>
+            <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="ctInlineEditorSidebar" aria-label="Selected file tools"><div id="ctInlineEditorSidebarHost" class="inlineEditorSidebarHost"></div></aside>
           </div>
-        </main>
-        <footer class="workspaceFooter">
+        </template>
+        <template #footer>
           <div class="workspaceFooterSummary"><div class="workspaceStatus" aria-label="Workspace status counts">
             <button class="collaborationVersion versionStatusName" @click="ctShowVersionChooser" aria-label="Versions" v-tooltip="ctWorkspace.metadata.version?.name+' · ClientText'">{{ ctWorkspace.metadata.version?.name }}</button>
             <span class="workspaceLoaded"><strong>{{ ctCounts.total.toLocaleString() }}</strong> loaded IDs</span>
@@ -486,22 +486,21 @@
             <span class="statusPill revised"><span class="statusDot" aria-hidden="true"></span>Revised <strong>{{ ctCounts.revised }}</strong></span>
             <span class="statusPill saved"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ ctCounts.saved }}</strong></span>
             <span v-if="ctScanDone" class="statusPill error"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ ctDiagnosticCounts.error }}</strong></span><span v-if="ctScanDone" class="statusPill warning"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ ctDiagnosticCounts.warning }}</strong></span>
-            <span v-if="ctDraftDirty" class="fileDraftLabel">Local draft</span>
+            <button v-if="ctDraftCount" type="button" class="statusPill draft inlineDraftCount" @click="ctSelectedFilters=['draft']" title="Show local drafts">Drafts <strong>{{ ctDraftCount }}</strong></button>
           </div><p class="collaborationFooterMessage">{{ ctWorkProgress.resolved.toLocaleString() }} / {{ ctWorkProgress.total.toLocaleString() }} initial workload fields resolved · {{ ctWorkProgress.percent }}%</p></div>
-          <div class="workspaceFooterRight"><ul v-if="ctPeers.length" class="collaborationAvatars" aria-label="Collaborators in this workspace"><li v-for="peer in ctPeers" :key="peer.sessionId || peer.id"><span class="collaborationAvatar" :class="{away:peer.away}" :style="{'--collaboration-color':collaborationPeerColor(peer)}" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(peer)" v-tooltip="collaborationParticipantLabel(peer)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(peer) }}</span></span></li></ul><nav class="workspacePagination" aria-label="File pagination"><span class="fileRange" role="status" aria-live="polite">Page {{ ctPage }} / {{ ctPageCount }} · {{ ctRows.length.toLocaleString() }} IDs</span><button class="paginationArrow" @click="ctSetPage(ctPage-1)" :disabled="ctPage<=1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button><button class="paginationArrow" @click="ctSetPage(ctPage+1)" :disabled="ctPage>=ctPageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button></nav></div>
-        </footer>
-      </div>
-      <div v-else class="editor ctFull ctFullEditor clipboardHidden" aria-label="Translation editor">
-        <div class="edit">
-          <div id="ctFullEditorPreviewHost"></div>
+          <div class="workspaceFooterRight"><ul v-if="ctPeers.length" class="collaborationAvatars" aria-label="Collaborators in this workspace"><li v-for="peer in ctPeers" :key="peer.sessionId || peer.id"><span class="collaborationAvatar" :class="{away:peer.away}" :style="{'--collaboration-color':collaborationPeerColor(peer)}" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(peer)" v-tooltip="collaborationParticipantLabel(peer)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(peer) }}</span></span></li></ul>        <button type="button" class="commentsIconButton" :class="{ active: commentsAllVisible }" @click="commentsToggleAll" :aria-expanded="commentsAllVisible" aria-controls="allCommentsSidebar" :aria-label="'Show all comments' + (commentsUnreadTotal ? ', ' + commentsUnreadTotal + ' unread' : '')" title="Show all comments">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg>
+          <span v-if="commentsUnreadTotal" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsUnreadTotal) }}</span>
+        </button><nav class="workspacePagination" aria-label="File pagination"><span class="fileRange" role="status" aria-live="polite">Page {{ ctPage }} / {{ ctPageCount }} · {{ ctRows.length.toLocaleString() }} IDs</span><button class="paginationArrow" @click="ctSetPage(ctPage-1)" :disabled="ctPage<=1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button><button class="paginationArrow" @click="ctSetPage(ctPage+1)" :disabled="ctPage>=ctPageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button></nav></div>
+        </template>
+      </editor-workspace-shell>
+      <editor-full-shell v-else class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation <span class="editorVersionContext"><button class="collaborationVersion versionStatusName" @click="ctShowVersionChooser" aria-label="Versions">{{ ctWorkspace.metadata.version?.name }}</button></span></h1><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep its local draft">Close</button></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button></div>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <ct-fields ref="ctEditorRegion" :host="$root"></ct-fields>
-        </div>
-        <div class="side fixed editorSidebarHost"><ct-tools v-if="ctCurrentUnit" :host="$root"></ct-tools></div>
-      </div>
+      </editor-full-shell>
       <dialog ref="ctDiagnosticDialog" class="diagnosticScanDialog" aria-labelledby="ctDiagnosticScanTitle" @cancel.prevent="ctCloseScanDialog" @keydown.stop>
         <form class="diagnosticScanForm" @submit.prevent="ctStartScan"><header class="diagnosticScanHeading"><div><h2 id="ctDiagnosticScanTitle">Scan diagnostics</h2><p>Check every loaded {{ lang }} record, including records hidden by search or status filters.</p></div><button type="button" class="diagnosticScanClose" @click="ctCloseScanDialog" aria-label="Close diagnostic scan">Close</button></header><div class="diagnosticScanBody"><fieldset class="diagnosticScanOptions"><legend>Diagnostic checks</legend><label class="diagnosticScanOption"><input type="checkbox" checked disabled><span><strong>Source tokens and required fields</strong><small>Check brackets, substitutions, controls, and required translations.</small></span></label><label class="diagnosticScanOption"><input type="checkbox" v-model="ctIncludeConsistency"><span><strong>Consistency</strong><small>Compare accepted translations with matching field kind and grammatical form.</small></span></label></fieldset></div><footer class="diagnosticScanFooter"><button type="submit" class="btnPrimary" :disabled="ctBusy">Start scan</button><button type="button" @click="ctCloseScanDialog">Cancel</button></footer></form>
       </dialog>
@@ -625,8 +624,8 @@
     </div>
 
 
-    <div class="workspace" :class="{ inlineEditorMode: inlineEditor }" v-if="!ctActive && gameVersionSelected && !versionChooserVisible && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" :inert="showSetting || workspaceInitializationActive">
-      <header class="workspaceHeader">
+    <editor-workspace-shell :inline="inlineEditor" :content-class="{ inlineWorkspaceLayout: inlineEditor, inlineSidebarOpen: inlineEditor && inlineSidebarVisible }" v-if="!ctActive && gameVersionSelected && !versionChooserVisible && loadingProgress >= 100 && !editorVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" :inert="showSetting || workspaceInitializationActive">
+      <template #header>
         <div class="workspaceBrand">
           <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
           <div><strong>SDEditor</strong><span><a class="workspaceContextLink" href="#settingsGameVersion" @click.prevent="openSettings('general', 'settingsGameVersion')" title="Change game version" :aria-label="'Change game version, current game ' + gameVersionLabel">{{ gameVersionLabel }}</a> <span aria-hidden="true">·</span> <a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#settingsLanguage" @click.prevent="openSettings('general', 'settingsLanguage')" title="Change translation language" :aria-label="'Change translation language, current language ' + lang">{{ lang }}</a><template v-else>{{ lang }}</template></span></div>
@@ -664,9 +663,9 @@
           </div>
         </fieldset>
         <workspace-alerts v-if="!workspaceInitializationActive"></workspace-alerts>
-      </header>
+      </template>
 
-      <main class="workspaceContent" :class="{ inlineWorkspaceLayout: inlineEditor, inlineSidebarOpen: inlineEditor && inlineSidebarVisible }">
+      <template #content>
       <div class="workspaceMain">
 
       <div v-if="importDialogVisible" class="importDialogOverlay" @click.self="closeImportDialog">
@@ -775,9 +774,9 @@
       <aside v-if="inlineEditor" v-show="inlineSidebarVisible" class="inlineEditorSidebar" id="inlineEditorSidebar" tabindex="-1" data-inline-focus-surface @pointerdown="inlineFocusSurfacePointerDown" @focusout="inlineRowFocusOut" aria-label="Selected file tools">
         <div id="inlineEditorSidebarHost"></div>
       </aside>
-      </main>
+      </template>
 
-      <footer class="workspaceFooter">
+      <template #footer>
         <div class="workspaceFooterSummary">
         <div class="workspaceStatus" aria-label="Workspace status counts">
           <span v-if="collaborationHashing" class="collaborationVersion collaborationHashing" role="status" aria-live="polite"><span class="collaborationHashSpinner" aria-hidden="true"></span>Hashing…</span>
@@ -820,8 +819,11 @@
           <button type="button" class="paginationArrow" @click="nextPage" :disabled="currentPage >= pageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
         </nav>
         </div>
-      </footer>
-      <aside v-if="commentsAllVisible" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc="!$event.isComposing && $event.keyCode !== 229 && ($event.preventDefault(), commentsCloseAll())">
+      </template>
+
+    </editor-workspace-shell>
+
+      <aside v-if="commentsAllVisible && !versionChooserVisible && !needsInitialSettings && (ctActive ? !!ctWorkspace && !ctEditor : gameVersionSelected && loadingProgress >= 100 && !editorVisible)" v-show="!workspaceInitializationActive" :inert="showSetting || workspaceInitializationActive" id="allCommentsSidebar" class="commentsSidebar" aria-labelledby="allCommentsTitle" @keydown.stop @keydown.esc="!$event.isComposing && $event.keyCode !== 229 && ($event.preventDefault(), commentsCloseAll())">
         <header class="commentsPanelHeader">
           <div><h2 id="allCommentsTitle">All comments</h2><p>{{ gameVersionLabel }}</p></div>
           <button type="button" ref="commentsAllClose" class="commentsClose" @click="commentsCloseAll" aria-label="Close all comments" title="Close all comments"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"></path></svg></button>
@@ -831,15 +833,15 @@
           <p v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</p>
           <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
           <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllBusy">
-            <section v-for="group in commentsAllGroups" :key="group.filepath" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
-              <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!getDescByFilepath(group.filepath) || navigationBusy" :title="getDescByFilepath(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ group.filepath }}</button>
+            <section v-for="group in commentsAllGroups" :key="group.key" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
+              <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!commentsFileAvailable(group.filepath) || navigationBusy" :title="commentsFileAvailable(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ commentsFileDisplayLabel(group.filepath) }}</button>
               <article v-for="comment in group.items" :key="comment.id" class="commentGroupEntry" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="all">
                 <div class="commentByline"><strong>{{ comment.actorName }}</strong><span v-if="comment.language" class="commentLanguage" title="Comment language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
                 <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
                 <p class="commentBody">{{ comment.body }}</p>
               </article>
               <form class="commentsQuickReply" :aria-label="'Reply to ' + group.filepath" :aria-busy="commentsReplyPosting(group.filepath)" @submit.prevent="commentsSubmitReply(group.filepath)">
-                <input type="text" :value="commentsReplyDraft(group.filepath)" @input="commentsSetReplyDraft(group.filepath, $event.target.value)" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()" placeholder="Reply..." maxlength="10000" :aria-label="'Reply to ' + group.filepath" :disabled="!commentsCanReply(group.filepath)" :title="!sourceIdentity ? 'Load a source version to reply.' : ''">
+                <input type="text" :value="commentsReplyDraft(group.filepath)" @input="commentsSetReplyDraft(group.filepath, $event.target.value)" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()" placeholder="Reply..." maxlength="10000" :aria-label="'Reply to ' + group.filepath" :disabled="!commentsCanReply(group.filepath)" :title="!commentsIdentityFor(group.filepath).sourceHash ? 'Load a source version to reply.' : ''">
                 <button type="submit" class="commentsSendReply btnPrimary" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath) || !commentsReplyDraft(group.filepath).trim()" :aria-label="(commentsReplyPosting(group.filepath) ? 'Sending reply to ' : 'Send reply to ') + group.filepath" :title="commentsReplyPosting(group.filepath) ? 'Sending reply…' : 'Send reply'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 3 18 9-18 9 4-9-4-9Z"></path><path d="M7 12h14"></path></svg></button>
                 <label class="commentsScopeOption"><input type="checkbox" :checked="commentsReplyAllLanguages(group.filepath)" @change="commentsSetReplyAllLanguages(group.filepath, $event.target.checked)" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath)">Post to all languages</label>
               </form>
@@ -850,11 +852,8 @@
           </div>
         </template>
       </aside>
-    </div>
 
-    <div class="editor" :class="{ clipboardHidden: hideEditorClipboard }" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
-      <div class="edit">
-        <div id="fullEditorPreviewHost"></div>
+    <editor-full-shell :controller="sharedEditorController" preview-host-id="fullEditorPreviewHost" sidebar-host-id="fullEditorSidebarHost" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
         <div class="twoSided editorActions">
           <h1 style="flex-grow: 1;">🧾 Translation <span v-if="managedStatusName" class="editorVersionContext"><button type="button" class="collaborationVersion versionStatusName" @click="showVersionChooser" :disabled="testMode" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">{{ managedStatusName }}</button><span v-if="managedActiveTeam?.ended" class="versionBadge ended" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Ended</span><span v-if="managedActiveVersion?.status === 'withdrawn'" class="versionBadge withdrawn" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Withdrawn</span></span></h1>
           <span class="browserWorkSlot"><span v-if="browserWorkTooltip" class="browserWorkStatus" tabindex="0" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></span>
@@ -982,248 +981,11 @@
           <div v-for="(diagnostic, diagnosticIndex) in blockTerminologyDiagnostics(editorBlock)" :key="'term-' + diagnosticIndex" class="terminologyWarning" role="note">{{ Number.isInteger(diagnostic.columnIndex) ? ('Column ' + (diagnostic.columnIndex + 1) + ': ') : '' }}{{ diagnostic.message }}</div>
         </div>
         </template>
-      </div>
+    </editor-full-shell>
 
-      <div id="fullEditorSidebarHost" class="side fixed editorSidebarHost"></div>
-
-      <div class="fixed clipboard" v-show="!hideEditorClipboard">
-        <textarea placeholder="📋 Clipboard" aria-label="Editor clipboard" v-model.lazy="editorClipboard" :lang="translationEditorBcp47"></textarea>
-      </div>
-
-    </div>
-
-    <editor-assistance v-if="editorToolsMounted" :target="editorVisible ? '#fullEditorSidebarHost' : '#inlineEditorSidebarHost'">
-      <div class="side sharedEditorSidebar" ref="editorSide" data-inline-focus-surface @focusout="inlineRowFocusOut" :inert="!editorReady" :class="{ commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup' }">
-        <div class="sideHeader">
-          <div class="sideTabs">
-            <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
-            <button type="button" class="tabBtn lookupTab" :class="{ active: sideTab === 'lookup' }" @click="openEditorLookup" :aria-pressed="sideTab === 'lookup'" aria-controls="editorLookupPanel"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg> Lookup</button>
-            <button type="button" class="tabBtn" :class="{ active: sideTab === 'tm' }" @click="sideTab = 'tm'" aria-controls="tmResultsPanel">TM<span v-if="tmConflicts.length"> ⚡ {{ tmConflicts.length }}</span></button>
-            <button v-if="editorVisible" class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
-            <button v-if="!editorVisible" type="button" class="tabBtn" :class="{ active: sideTab === 'preview' }" @click="sideTab = 'preview'">Preview</button>
-            <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
-          </div>
-          <div v-if="sideTab === 'dictionary'" class="dictionaryControls sideControls">
-            <div class="sideSearchRow"><input class="sideFilter" type="search" v-model="dictionaryFilter" ref="dictionaryFilterInput" placeholder="Search dictionary…" aria-label="Search dictionary entries" @keydown.esc="dictionaryFilter = ''"><button type="button" @click="sideAddClicked()" title="Add a Dictionary entry">Add entry</button></div>
-            <div class="dictionaryPagination sidePagination" aria-label="Dictionary pages">
-              <span><template v-if="editorReady">{{ dictionaryRangeLabel }}<template v-if="editorCurrentEditingDesc"> · Matches in this file first</template></template><template v-else>&nbsp;</template></span>
-              <button type="button" @click="setDictionaryPage(Math.min(dictionaryPage, dictionaryPageCount) - 1)" :disabled="!editorReady || dictionaryPage <= 1" aria-label="Previous dictionary page">Previous</button>
-              <button type="button" @click="setDictionaryPage(dictionaryPage + 1)" :disabled="!editorReady || dictionaryPage >= dictionaryPageCount" aria-label="Next dictionary page">Next</button>
-            </div>
-          </div>
-        </div>
-
-        <div v-show="!editorVisible && sideTab === 'preview'" id="inlineEditorPreviewHost" class="inlinePreviewHost"></div>
-        <editor-dictionary-entries v-if="sideTab === 'dictionary'" :controller="$root"></editor-dictionary-entries>
-
-        <section v-if="sideTab === 'tm'" id="tmResultsPanel" ref="tmResultsPanel" class="tmResultsPanel" tabindex="0" @keydown.stop="tmPanelKeydown" aria-label="Translation memory suggestions">
-          <div class="tmToolbar"><label>Minimum match <input type="number" v-model.number="tmThreshold" min="1" max="99" aria-label="Minimum TM match percentage">%</label><button @click="openTMManager">Manage TM</button></div>
-          <div class="tmToolbar"><span>Entry {{ (editorFocusedIndex || 0) + 1 }} · {{ tmUnits.length.toLocaleString() }} remembered</span><button @click="previewTMPrefill" :disabled="tmBusy || editorTranslationReadOnly">Prefill blanks…</button></div>
-          <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
-          <p v-if="!tmEditorKey" class="tmEmpty">Focus an entry to see remembered translations.</p>
-          <p v-else-if="!tmMatches.length" class="tmEmpty">No matching translation. Save translated entries or build TM from existing work.</p>
-          <div class="tmResultList" role="listbox" aria-label="TM matches">
-            <button v-for="(match, matchIndex) in tmMatches" :key="match.id" type="button" role="option" :aria-selected="tmSelectedIndex === matchIndex" :class="{ selected: tmSelectedIndex === matchIndex }" @focus="tmSelectedIndex = matchIndex" @click="tmSelectedIndex = matchIndex" @dblclick.prevent="useTMMatch(match)" title="Double-click to use translation">
-              <span class="tmMatchHeading"><strong>{{ match.score }}%</strong><span>{{ tmMatchLabel(match) }}</span><small>{{ tmGameLabel(match.unit.gameScope) }}</small></span>
-              <span class="tmSourceSnippet">{{ tmText(match.source) }}</span><span class="tmTargetSnippet" :lang="translationEditorBcp47">{{ tmText(match.target) }}</span>
-            </button>
-          </div>
-          <section v-if="tmSelectedMatch" class="tmMatchDetail" aria-label="Selected TM match comparison">
-            <h4>Remembered English</h4><div class="tmDiff"><template v-for="(part, partIndex) in tmSelectedMatch.diff.oldSource" :key="partIndex"><span :class="{ tmRemoved: part.changed }">{{ part.text }}</span></template></div>
-            <h4>Current English</h4><div class="tmDiff"><template v-for="(part, partIndex) in tmSelectedMatch.diff.currentSource" :key="partIndex"><span :class="{ tmAdded: part.changed }">{{ part.text }}</span></template></div>
-            <h4>Suggested translation</h4><div class="tmTargetPreview" :lang="translationEditorBcp47">{{ tmText(tmSelectedMatch.target) }}</div>
-            <ul v-if="tmSelectedMatch.warnings.length" class="tmWarnings"><li v-for="warning in tmSelectedMatch.warnings" :key="warning.code">{{ warning.message }}</li></ul>
-            <p class="tmProvenance">{{ tmMatchContext(tmSelectedMatch.unit) }}<br><span v-if="tmSelectedMatch.unit.author">{{ tmSelectedMatch.unit.author.name || tmSelectedMatch.unit.author }}</span><span v-if="tmSelectedMatch.unit.provenance?.sourceHash" :title="tmSelectedMatch.unit.provenance.sourceHash"> · Source {{ tmSelectedMatch.unit.provenance.sourceHash.slice(0, 12) }}</span></p>
-            <button class="tmUseButton" @click="useTMMatch()" :disabled="editorTranslationReadOnly || editorCompareActive || tmLastMatchKey !== tmEditorKey">Use translation</button>
-          </section>
-        </section>
-
-        <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
-          <div class="lookupControls sideControls">
-            <div class="sideSearchRow">
-              <label class="srOnly" for="editorLookupSearch">Search reference files</label>
-              <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
-              <button v-if="lookupQuery" type="button" @click="lookupClearSearch">Clear</button>
-            </div>
-            <div class="lookupOptions">
-              <label for="editorLookupLanguage">Reference language<select id="editorLookupLanguage" v-model="lookupLanguage"><option value="">{{ lang }} (editor language)</option><option v-for="language in lookupLanguages" :key="language" :value="language">{{ language }}</option></select></label>
-              <label for="editorLookupScope">Search in<select id="editorLookupScope" v-model="lookupScope"><option value="all">All text</option><option value="path">Filename / stat</option><option value="english">English</option><option value="translation">Translation</option></select></label>
-            </div>
-            <label class="lookupTranslationFilter"><input type="checkbox" v-model="lookupTranslatedOnly"> Only with translation</label>
-            <div class="lookupPagination sidePagination" aria-label="Reference result pages">
-              <span role="status">{{ lookupRangeLabel }}</span>
-              <button type="button" @click="lookupGoToPage(lookupPage - 1)" :disabled="lookupPage <= 1" aria-label="Previous reference results">Previous</button>
-              <button type="button" @click="lookupGoToPage(lookupPage + 1)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results">Next</button>
-            </div>
-          </div>
-          <div class="lookupResults" ref="lookupResultsList" tabindex="0" aria-label="Reference search results">
-            <button v-for="result in lookupVisibleResults" :key="result.filepath" type="button" class="lookupResult" :class="{ active: lookupSelectedFilepath === result.filepath }" :aria-pressed="lookupSelectedFilepath === result.filepath" @click="lookupSelect(result.filepath)">
-              <strong><template v-for="(part, pi) in result.filepathParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></strong>
-              <span v-if="result.statsParts.length" class="lookupResultStats">Stat: <template v-for="(part, pi) in result.statsParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
-              <span class="lookupResultEnglish" lang="en"><template v-for="(part, pi) in result.englishParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.englishPreview">(No English text)</template></span>
-              <span :lang="lookupReferenceBcp47"><template v-for="(part, pi) in result.translationParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template><template v-if="!result.translationPreview">(No translation)</template></span>
-            </button>
-            <p v-if="!lookupHasAppliedQuery" class="lookupEmpty">Enter a query to search reference files.</p>
-            <p v-else-if="!lookupResultCount" class="lookupEmpty">No reference files match. Try another search or language.</p>
-          </div>
-          <section class="lookupReference" ref="lookupReference" tabindex="0" aria-label="Selected reference">
-            <template v-if="lookupSelectedReference">
-              <header><h3>{{ lookupSelectedReference.filepath }}</h3><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
-              <article v-for="block in lookupSelectedReference.blocks" :key="block.index" class="lookupReferenceBlock">
-                <h4>Block {{ block.index + 1 }}<span v-if="block.isTable"> · Table (@ separates columns)</span></h4>
-                <div class="lookupTextLabel">English</div><pre class="lookupText" lang="en">{{ block.english || '(No English text)' }}</pre>
-                <div class="lookupTextLabel">{{ lookupActiveLanguage }}</div><pre class="lookupText" :lang="lookupReferenceBcp47">{{ block.translation || '(No translation)' }}</pre>
-              </article>
-              <p v-if="!lookupSelectedReference.blocks.length" class="lookupEmpty">This file has no text blocks.</p>
-            </template>
-            <p v-else class="lookupEmpty">Select a result to read its full text. You can select and copy reference text.</p>
-          </section>
-        </section>
-
-        <section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
-          <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFilepath }}</p></div></header>
-          <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
-          <template v-else>
-            <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
-            <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
-            <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
-              <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
-                <div class="commentByline"><strong>{{ comment.actorName }}</strong><span v-if="comment.language" class="commentLanguage" title="Comment language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
-                <div class="commentMeta"><span v-if="comment.unread" class="commentUnreadLabel">Unread</span><time>{{ commentsTime(comment) }}</time><span v-if="commentsDifferentHash(comment)" class="commentVersionIcon" tabindex="0" role="img" :aria-label="'Different version. This comment was posted from another source version. Source hash: ' + comment.sourceHash" v-tooltip="'Different version. This comment was posted from another source version.\nSource hash: ' + comment.sourceHash"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path class="commentVersionSymbol" d="M11 6h2v2h-2zM11 10h2v7h-2z"></path></svg></span></div>
-                <p class="commentBody">{{ comment.body }}</p>
-              </article>
-              <p v-if="commentsFileFeed.loaded && !commentsFileItems.length && !commentsFileError" class="commentsEmpty">No comments yet. Share a thought about this file.</p>
-              <button v-if="commentsFileHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreFile" :disabled="commentsFileFeed.loadingMore">Load older comments</button>
-            </div>
-            <form class="commentsComposer" @submit.prevent="commentsSubmit">
-              <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" aria-label="Add a comment" placeholder="Add a comment..." :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
-              <p v-if="!sourceIdentity" class="commentsEmpty">Load a source version to post a comment.</p>
-              <p v-if="commentsPostError" class="commentsError" role="alert">{{ commentsPostError }}</p>
-              <div class="commentsComposerActions">
-                <label class="commentsScopeOption"><input type="checkbox" v-model="commentsFileAllLanguages" :disabled="!commentsCanPost || commentsPosting">Post to all languages</label>
-                <button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button>
-              </div>
-            </form>
-          </template>
-        </section>
-
-        <div v-if="sideTab === 'history' && editorReady" class="historyPanel">
-          <div v-if="!editorCurrentEditingDesc" class="historyEmpty">Open a file to see history</div>
-          <div v-else>
-            <div class="historyMeta">
-              <div class="historyTitle">{{ editorCurrentEditingDesc.filename }}</div>
-              <p class="collaborationLocalHistoryLabel">Local history · saved in this browser</p>
-              <label class="collaborationLocalHistoryLabel"><input type="checkbox" v-model="historyIncludeLegacy" @change="refreshHistory"> Show legacy local references</label>
-              <p v-if="historyIncludeLegacy" class="collaborationLocalHistoryLabel">Older or ambiguous source records are retained for comparison. These reference copies cannot be restored directly into this version.</p>
-              <button class="collaborationHistoryButton" @click="collaborationOpenHistory(editorCurrentEditingDesc.filepath)" :disabled="!collaborationAvailable" :title="collaborationAvailable ? 'View shared translation changes for this source version' : 'Sign in with language access and load a matching source version'">Shared translation history</button>
-              <div class="historySubtitle">
-                <button class="historyModeBtn" :class="{ active: historyMode === 'translation' }" @click="setHistoryMode('translation')">Translation</button>
-                <button class="historyModeBtn" :class="{ active: historyMode === 'source' }" @click="setHistoryMode('source')">Source</button>
-                <span>{{ historyMode === 'source' ? 'English' : lang }}</span>
-              </div>
-            </div>
-            <div v-if="historyLoading" class="historyLoading">Loading…</div>
-            <div v-else>
-              <div class="historyList">
-                <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
-                  <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)" :disabled="!!entryAlignment">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
-                  <button v-if="historyMode !== 'source' && !rev.legacyReference" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)" :disabled="!!entryAlignment">↩</button>
-                  <button v-if="historyMode !== 'source' && String(rev.note || '').startsWith('Before entry alignment')" type="button" @click="alignHistoryRevision(rev)" :disabled="editorSaving || !!entryAlignment">Align these blocks</button>
-                </div>
-                <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
-              </div>
-              <div class="historyCompareBar" v-if="historyItems.length > 0">
-                <button @click="clearHistorySelection()">Clear</button>
-                <span v-if="!historySelectedB">Click a revision to compare against current</span>
-                <span v-else>Comparing current → {{ formatHistoryTime(historySelectedB.savedAt) }}</span>
-              </div>
-              <div v-if="historyDiffHtml" class="historyDiff" v-html="historyDiffHtml"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-    </editor-assistance>
-    <editor-preview v-if="gamePreviewMounted" :target="gamePreviewTarget">
-        <div class="gamePreviewStrip">
-          <div v-if="gamePreviewFullEditor" class="gamePreviewToolbar twoSided">
-            <span class="gamePreviewLabel">Preview size</span>
-            <div class="gamePreviewFrameBtns">
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" :aria-pressed="gamePreviewFrame === 's'" title="Use a small preview frame" @click="setGamePreviewFrame('s')">Small</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'm' }" :aria-pressed="gamePreviewFrame === 'm'" title="Use a medium preview frame" @click="setGamePreviewFrame('m')">Medium</button>
-              <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 'l' }" :aria-pressed="gamePreviewFrame === 'l'" title="Use a large preview frame" @click="setGamePreviewFrame('l')">Large</button>
-            </div>
-          </div>
-          <div class="gamePreviewMainRow">
-            <div class="gamePreviewFrameWrap">
-              <div class="gamePreviewFramesColumn">
-                <div v-if="!hideSourceInPreviewPanel" class="gamePreviewLine">
-                  <div class="gamePreviewLineLabel">EN</div>
-                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily }">
-                    <template v-for="(seg, si) in gamePreviewDisplaySource" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
-                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" v-tooltip="seg.full">{{ gamePreviewKeywordText(seg) }}</span>
-                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">
-                        <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
-                      </span>
-                      <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
-                      <span v-else-if="seg.type === 'break'" class="gamePreviewBreak"></span>
-                    </template>
-                    <span v-if="gamePreviewDisplaySource.length === 0" class="gamePreviewEmpty">(empty)</span>
-                  </div>
-                </div>
-                <div class="gamePreviewLine">
-                  <div class="gamePreviewLineLabel">{{ translationEditorBcp47 || lang || 'TL' }}</div>
-                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
-                    <template v-for="(seg, si) in gamePreviewDisplayTarget" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
-                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" v-tooltip="seg.full">{{ gamePreviewKeywordText(seg) }}</span>
-                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">
-                        <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
-                      </span>
-                      <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
-                      <span v-else-if="seg.type === 'break'" class="gamePreviewBreak"></span>
-                    </template>
-                    <span v-if="gamePreviewDisplayTarget.length === 0" class="gamePreviewEmpty">(empty)</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="gamePreviewVarsColumn" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
-              <div class="gamePreviewVarsPanel" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
-                <div v-if="gamePreviewVarKeyList.length === 0" class="gamePreviewVarField gamePreviewVarsPlaceholder">
-                  <div class="gamePreviewVarLabel">{}</div>
-                  <div class="gamePreviewVarInput gamePreviewVarInputPlaceholder">No variables</div>
-                </div>
-                <template v-else>
-                  <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
-                    <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
-                    <input type="text" class="gamePreviewVarInput" v-model="gamePreviewVarValues[k]" :lang="translationEditorBcp47"
-                      :aria-label="'Variable {' + k + '}'">
-                  </div>
-                </template>
-              </div>
-            </div>
-          </div>
-        </div>
-    </editor-preview>
-      <div v-if="hlPopup.visible" class="hlPopupBackdrop" data-inline-focus-surface @focusout="inlineRowFocusOut" @mousedown="closeHlPopup">
-        <div class="hlPopup" ref="hlPopupPanel" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px', maxHeight: hlPopup.maxHeight ? hlPopup.maxHeight + 'px' : '' }" @mousedown.stop>
-          <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">
-          <div class="hlPopupList">
-            <div v-for="(item, i) in hlPopup.filtered" class="hlPopupItem" :class="{ active: i === hlPopup.selectedIndex, alt: item.isAlt, exact: item.exactMatch, mustCreate: item.mustCreate }" @mouseenter="hlPopup.selectedIndex = i" @mousedown.prevent="insertHlPopupItem(item)">
-              <span class="hlPopupItemLabel">{{ item.label }}</span>
-              <span v-if="i === hlPopup.selectedIndex && hlPopupCtrlEnterPillText(item)" class="hlPopupHotkeyPill">{{ hlPopupCtrlEnterPillText(item) }}</span>
-            </div>
-            <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
-          </div>
-        </div>
-        <aside v-if="hlPopupTlnote" class="hlPopupTlnote" :style="{ left: hlPopup.noteX + 'px', top: hlPopup.noteY + 'px', width: hlPopup.noteWidth + 'px', maxHeight: hlPopup.noteMaxHeight + 'px' }" role="note" aria-label="TL note" @mousedown.stop>
-          <strong>TL note</strong>
-          <div class="hlPopupTlnoteText" :lang="translationEditorBcp47">{{ hlPopupTlnote }}</div>
-        </aside>
-      </div>
-
+    <editor-tools v-if="sharedEditorToolsMounted" :target="sharedEditorToolsTarget" :controller="sharedEditorController"></editor-tools>
+    <editor-preview v-if="sharedEditorPreviewMounted" :target="sharedEditorPreviewTarget" :controller="sharedEditorPreviewController"></editor-preview>
+    <editor-autocomplete :controller="sharedEditorPopupController"></editor-autocomplete>
     <dialog ref="rawFileDialog" class="rawFileDialog" aria-labelledby="rawFileDialogTitle" aria-describedby="rawFileDialogDescription" @cancel.prevent="closeRawFileDialog" @close="rawFileDialogClosed" @keydown.stop="rawFileDialogKeydown">
       <template v-if="rawFilePreview">
         <header class="rawFileHeading">
@@ -1665,6 +1427,7 @@
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>
   <script src="commentsUi.js"></script>
+  <script src="editorReferenceCatalog.js"></script>
   <script src="editorLookup.js"></script>
   <script src="editorComponents.js"></script>
   <script src="inlineEditor.js"></script>
@@ -1673,6 +1436,7 @@
   <script src="managedCollectionExports.js"></script>
   <script src="managedVersions.js"></script>
   <script src="clientTextUi.js"></script>
+  <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>
   <script type="text/x-template" id="workspace-alerts-template">
     <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError" class="workspaceAlerts" role="group" aria-label="Workspace errors">

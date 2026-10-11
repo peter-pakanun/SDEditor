@@ -248,6 +248,45 @@ test('save, history, exact draft consumption, outbox and receipt share one affec
     assert.equal(replay.replayed,true);assert.equal((await f.store.listHistory(scope,unit().id)).length,1);
     await assert.rejects(f.store.save(scope,unit().id,{jobId:'job1',values:{[fieldId]:'Different'},reviewed:{}}),error=>error.code==='SAVE_RECEIPT_MISMATCH');
 });
+test('explicit restore origins bind exact receipts and outbox while omitted-origin legacy signatures stay unchanged',async()=>{
+    const f=await prepared(),original=unit(),values={[fieldId]:'Restored raw@value\\n\n'},reviewed={};
+    const omitted={jobId:'legacy-origin',values,reviewed};
+    const first=await f.store.save(scope,original.id,omitted);
+    assert.equal(first.receipt.signature,S.hash({scope:CT.normalizeScope(scope),unitId:original.id,values,reviewed}));
+    assert.equal(Object.hasOwn((await f.store.getOutbox(scope))[0],'origin'),false);
+    assert.equal((await f.store.save(scope,original.id,omitted)).replayed,true);
+    const command={jobId:'restore-origin',origin:'restore',values,reviewed};
+    const restored=await f.store.save(scope,original.id,command);
+    assert.equal(restored.saved.origin,'restore');assert.equal(restored.receipt.saved.origin,'restore');
+    assert.equal((await f.store.getOutbox(scope))[0].origin,'restore');
+    assert.equal((await f.store.listHistory(scope,original.id)).find(entry=>entry.id===command.jobId).origin,'restore');
+    assert.equal((await f.store.save(scope,original.id,command)).replayed,true);
+    await assert.rejects(f.store.save(scope,original.id,{...command,origin:'save'}),error=>error.code==='SAVE_RECEIPT_MISMATCH');
+    await assert.rejects(f.store.save(scope,original.id,{...command,jobId:'invalid-origin',origin:'import'}),/origin/);
+    assert.equal((await f.store.getUnit(scope,original.id)).fields[0].target,original.fields[0].target);
+});
+test('draft summaries page only the captured draft scope and expose no values or original reads',async()=>{
+    const f=fixture(),drafts=f.tables.get(CT.stores.drafts),current=CT.scopeKey(scope);
+    const put=(owner,unitId,revision)=>drafts.set(JSON.stringify([CT.scopeKey(owner),unitId]),{key:JSON.stringify([CT.scopeKey(owner),unitId]),scope:CT.scopeKey(owner),
+        value:{unitId,revision,updatedAt:revision,values:{[fieldId]:'Private text '+revision},reviewed:{[fieldId]:'private-review'}}});
+    for(let index=0;index<140;index++)put(scope,'unit-'+index,index+1);
+    for(const owner of [{...scope,accountId:'bob'},{...scope,game:'poe1'},{...scope,branchId:'other'},
+        {...scope,versionId:'other'},{...scope,groupId:'other'},{...scope,language:'German'}])put(owner,'foreign',99);
+    const summaries=await f.store.getDraftSummaries(scope);
+    assert.equal(summaries.length,140);assert.ok(summaries.every(row=>Object.keys(row).sort().join(',')==='revision,unitId,updatedAt'));
+    assert.ok(summaries.every(row=>row.unitId!=='foreign'));assert.equal(drafts.size,146);
+    assert.ok(f.operations.every(operation=>operation.name===CT.stores.drafts && operation.mode==='readonly'));
+    assert.equal(f.operations.filter(operation=>operation.method==='getAll').length,2);
+    assert.equal(f.operations[0].arg.count,128);assert.equal(f.operations[0].arg.query.lower,JSON.stringify([current]).slice(0,-1)+',');
+    await assert.rejects(f.store.getDraftSummaries(scope,{guard:()=>false}),error=>error.stale===true);
+    await assert.rejects(f.store.getDraftSummaries(scope,{signal:AbortSignal.abort()}),error=>error.name==='AbortError');
+});
+test('remote restore event metadata remains visible in local shared history',async()=>{
+    const f=await prepared(),original=unit();
+    await f.store.applyRemote(scope,{events:[{unitId:original.id,unit:{revision:1,origin:'restore',values:{[fieldId]:'Remote restored'},reviewed:{}}}],sequence:1});
+    const saved=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id);
+    assert.equal(saved.origin,'restore');assert.equal(saved.remoteBase.origin,'restore');assert.equal(history[0].origin,'restore');
+});
 test('failed storage atomically preserves draft and avoids false saved/history/receipt',async()=>{
     const f=await prepared();await f.store.putDraft(scope,unit().id,{values:{[fieldId]:'Recoverable'},reviewed:{}});
     f.fail(CT.stores.history);

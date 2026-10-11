@@ -7,15 +7,21 @@
   const caches = new WeakMap();
   const languageCaches = new WeakMap();
   const raw = value => typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(value) : value;
-  const lookupActive = model => !!(model.editorToolsVisible ?? model.editorSessionActive ?? model.editorVisible) && model.sideTab === 'lookup';
+  const sessionFor = model => window.EditorReferenceCatalog?.sessionFor(model) || (typeof model.editorLookupSession === 'function'
+    ? model.editorLookupSession() : { mode: 'statdescription', language: model.lang, scope: {},
+      toolsVisible: !!(model.editorToolsVisible ?? model.editorSessionActive ?? model.editorVisible), tool: model.sideTab });
+  const sessionKey = model => window.EditorReferenceCatalog?.contextKey(model) || JSON.stringify([sessionFor(model).mode, sessionFor(model).scope, sessionFor(model).language]);
+  const lookupActive = model => { const session = sessionFor(model); return !!session.toolsVisible && session.tool === 'lookup'; };
+  const componentRef = (model, name) => model.getEditorComponentRef?.(name) || model.$refs?.[name];
   const asLines = value => Array.isArray(value) ? value.map(line => String(line ?? '')) : [];
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
-  const compactText = value => readableText(value).replace(/\s+/gu, ' ').trim();
-  const foldText = value => compactText(value).normalize('NFC').toLocaleLowerCase();
+  const compactText = (value, literal = false) => (literal ? String(value ?? '') : readableText(value)).replace(/\s+/gu, ' ').trim();
+  const foldText = (value, literal = false) => compactText(value, literal).normalize('NFC').toLocaleLowerCase();
+  const hasQuery = (model, value) => !!foldText(value, sessionFor(model).mode === 'clienttext' || !!model.lookupCatalogSources?.some(source => source.mode === 'clienttext'));
   const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-  function queryRanges(text, query) {
-    const needle = foldText(query);
+  function queryRanges(text, query, literal = false) {
+    const needle = foldText(query, literal);
     if (!needle) return [];
     // Keep original offsets when normalization, case folding or whitespace
     // changes the length of the searchable text. Reference text stays literal.
@@ -72,9 +78,9 @@
     return textParts(text, queryRanges(text, query));
   }
 
-  function excerptParts(value, query, limit = 150, matches = null) {
-    const text = compactText(value);
-    const ranges = matches || queryRanges(text, query);
+  function excerptParts(value, query, limit = 150, matches = null, literal = false) {
+    const text = compactText(value, literal);
+    const ranges = matches || queryRanges(text, query, literal);
     const wantedStart = Math.max(0, (ranges[0]?.start || 0) - 35);
     const wantedEnd = Math.min(text.length, wantedStart + limit);
     let start = wantedStart, end = wantedEnd;
@@ -113,16 +119,19 @@
     return entries;
   }
 
-  function searchIndex(index, query, scope = 'all', translatedOnly = false) {
+  function searchIndex(index, query, scope = 'all', translatedOnly = false, mixed = false) {
     const needle = foldText(query);
-    if (!needle) return [];
+    const literalNeedle = foldText(query, true);
+    if (!needle && (!mixed || !literalNeedle)) return [];
     return index.filter(entry => {
+      const wanted = entry.literal ? literalNeedle : needle;
+      if (!wanted) return false;
       if (translatedOnly && !entry.translationText) return false;
-      if (scope === 'path') return entry.pathText.includes(needle);
-      if (scope === 'english') return entry.englishText.includes(needle);
-      if (scope === 'translation') return entry.translationText.includes(needle);
-      return entry.pathText.includes(needle) || entry.englishText.includes(needle)
-        || entry.translationText.includes(needle);
+      if (scope === 'path' || scope === 'metadata') return entry.pathText.includes(wanted);
+      if (scope === 'english') return entry.englishText.includes(wanted);
+      if (scope === 'translation') return entry.translationText.includes(wanted);
+      return entry.pathText.includes(wanted) || entry.englishText.includes(wanted)
+        || entry.translationText.includes(wanted);
     });
   }
 
@@ -148,16 +157,58 @@
     };
   }
 
+  function buildCatalogIndex(sources, lang) {
+    const output = [];
+    for (const source of sources || []) {
+      const scope = window.EditorReferenceCatalog?.scopeKey(source.scope) || JSON.stringify(source.scope || {});
+      const common = { mode: source.mode, groupId: source.groupId || '', groupLabel: source.groupLabel || '', language: source.language || lang };
+      if (source.mode !== 'clienttext') {
+        for (const entry of buildIndex(source.descs, lang, source.workspace)) output.push({ ...entry, ...common,
+          key: JSON.stringify(['statdescription', scope, entry.filepath]), metadata: asLines(entry.desc.stats).join(' ') });
+        continue;
+      }
+      if (source.language !== lang) continue;
+      for (const unit of source.units || []) {
+        const values = window.ContentAdapters?.clienttext?.values(unit, source.saved?.[unit.id])
+          || window.ClientTextState?.valuesFor(unit, source.saved?.[unit.id]) || { ...Object.fromEntries((unit.fields || []).map(field => [field.id, field.target])), ...source.saved?.[unit.id]?.values };
+        for (const field of unit.fields || []) {
+          const filepath = [unit.role, unit.sheet, unit.recordId, field.name || field.id, field.form].filter(value => value != null && value !== '').join(' · ');
+          const english = String(field.source ?? ''), translation = String(values[field.id] ?? '');
+          const metadata = [unit.id, field.id, field.kind,
+            ...Object.entries(unit.metadata || {}).flatMap(([name, value]) => [name, String(value ?? '')]),
+            unit.developerNotes].filter(Boolean).join(' ');
+          const reference = { ...common, filepath, filename: String(unit.recordId), lang, stats: [], isDNT: false,
+            developerNotes: String(unit.developerNotes ?? ''), blocks: [{ index: 0, fieldId: field.id,
+              label: [field.name || field.id, field.form].filter(Boolean).join(' · '), kind: field.kind, form: field.form,
+              english, translation, isTable: false, englishColumns: [english], translationColumns: [translation] }] };
+          output.push({ ...common, key: JSON.stringify(['clienttext', scope, unit.id, field.id]),
+            filepath, filename: String(unit.recordId), unit, field, metadata, reference,
+            literal: true, english, translation, pathText: foldText(filepath + ' ' + metadata, true),
+            englishText: foldText(english, true), translationText: foldText(translation, true) });
+        }
+      }
+    }
+    return output;
+  }
+
   const mixin = {
     data() {
       return {
         lookupQuery: '', lookupAppliedQuery: '', lookupLanguage: '', lookupScope: 'all', lookupTranslatedOnly: false,
         lookupPage: 1, lookupPageSize: PAGE_SIZE, lookupSelectedFilepath: '', lookupRevision: 0,
+        lookupModeFilter: 'all', lookupGroupFilter: '', lookupCatalogSources: [], lookupCatalogGroups: [],
+        lookupMissingReferences: [], lookupPreparing: false, lookupPreparationError: '', lookupCatalogKey: '',
       };
     },
     computed: {
-      lookupActiveLanguage() { return this.lookupLanguage || this.lang || ''; },
-      lookupHasAppliedQuery() { return !!foldText(this.lookupAppliedQuery); },
+      lookupSessionKey() { return sessionKey(this); },
+      lookupPanelActive() { return lookupActive(this); },
+      lookupSelectedKey() { return this.lookupSelectedFilepath; },
+      lookupGroups() { return this.lookupCatalogGroups; },
+      lookupPreparationAvailable() { return this.lookupMissingReferences.length > 0 && !!this.managedOnlineAvailable; },
+      lookupMissingReferenceCount() { return this.lookupMissingReferences.length; },
+      lookupActiveLanguage() { return this.lookupLanguage || sessionFor(this).language || this.lang || ''; },
+      lookupHasAppliedQuery() { return hasQuery(this, this.lookupAppliedQuery); },
       lookupLanguages() {
         const source = this.descs, workspace = this.localDescs, lang = this.lang;
         let cache = languageCaches.get(this);
@@ -169,6 +220,12 @@
         const revision = this.lookupRevision;
         if (sameSource && cache.revision === revision) return cache.languages;
         const languages = new Set(lang && lang !== 'English' ? [lang] : []);
+        for (const item of this.lookupCatalogSources || []) if (item.language && item.language !== 'English') languages.add(item.language);
+        for (const group of window.EditorReferenceCatalog?.groupsFor(this, sessionFor(this)) || []) {
+          if (group.language && group.language !== 'English') languages.add(group.language);
+          for (const team of group.teams || []) if (team.language && team.language !== 'English'
+            && (!this.cloudSignedIn || this.cloudCanAccessAllLanguages || team.language === this.cloudUser?.language)) languages.add(team.language);
+        }
         const saved = new Map();
         const localDescs = raw(raw(workspace)?.descs);
         for (const value of Array.isArray(localDescs) ? localDescs : []) {
@@ -178,7 +235,7 @@
         // Committed workspace/source invalidations advance lookupRevision.
         // Read raw rows here so hidden typing cannot register thousands of
         // deep dependencies or copy every translation object's values.
-        for (const value of Array.isArray(source) ? raw(source) : []) {
+        for (const value of sessionFor(this).mode === 'clienttext' ? [] : Array.isArray(source) ? raw(source) : []) {
           const desc = raw(value);
           const original = raw(desc?.translations) || {};
           const overlay = raw(saved.get(desc?.filepath)?.translations) || {};
@@ -200,14 +257,24 @@
         const lang = this.lookupActiveLanguage;
         const source = this.descs;
         const workspace = this.localDescs;
+        const catalog = this.lookupCatalogSources, key = sessionKey(this);
         let cache = caches.get(this);
         if (!cache || cache.source !== source || cache.workspace !== workspace
-          || cache.lang !== lang || cache.revision !== revision) {
-          cache = { source, workspace, lang, revision, entries: buildIndex(source, lang, workspace) };
-          cache.byPath = new Map(cache.entries.map(entry => [entry.filepath, entry]));
+          || cache.lang !== lang || cache.revision !== revision || cache.catalog !== catalog || cache.key !== key) {
+          const active = window.EditorReferenceCatalog?.activeSource(this, sessionFor(this), lang);
+          // The active committed view can be replaced after a durable save.
+          // Keep cached sibling groups while refreshing that live source only.
+          const sources = catalog?.length && this.lookupCatalogKey === key
+            ? catalog.map(item => active && item.groupId === active.groupId && item.mode === active.mode ? active : item)
+            : active ? [active] : null;
+          cache = { source, workspace, lang, revision, catalog, key,
+            entries: sources ? buildCatalogIndex(sources, lang) : sessionFor(this).mode === 'clienttext' ? [] : buildIndex(source, lang, workspace) };
+          cache.byPath = new Map(cache.entries.map(entry => [entry.key || entry.filepath, entry]));
           caches.set(this, cache);
         }
-        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope, this.lookupTranslatedOnly);
+        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope, this.lookupTranslatedOnly, true)
+          .filter(entry => (!this.lookupModeFilter || this.lookupModeFilter === 'all' || (entry.mode || 'statdescription') === this.lookupModeFilter)
+            && (!this.lookupGroupFilter || entry.groupId === this.lookupGroupFilter));
       },
       lookupResultCount() { return this.lookupResults.length; },
       lookupPageCount() { return Math.max(1, Math.ceil(this.lookupResultCount / this.lookupPageSize)); },
@@ -222,17 +289,18 @@
         const start = (this.lookupCurrentPage - 1) * this.lookupPageSize;
         const queryFor = scope => this.lookupScope === 'all' || this.lookupScope === scope ? this.lookupAppliedQuery : '';
         return this.lookupResults.slice(start, start + this.lookupPageSize).map(entry => {
-          const englishParts = excerptParts(entry.english, queryFor('english'));
-          const translationParts = excerptParts(entry.translation, queryFor('translation'));
-          const statsText = compactText(asLines(entry.desc.stats).join(' '));
+          const englishParts = excerptParts(entry.english, queryFor('english'), 150, null, entry.literal);
+          const translationParts = excerptParts(entry.translation, queryFor('translation'), 150, null, entry.literal);
+          const statsText = compactText(entry.metadata || asLines(entry.desc?.stats).join(' '), entry.literal);
           const pathText = entry.filepath + ' ' + statsText;
-          const pathRanges = queryRanges(pathText, queryFor('path'));
+          const pathRanges = queryRanges(pathText, queryFor('path') || queryFor('metadata'), entry.literal);
           const statsOffset = entry.filepath.length + 1;
           const statRanges = pathRanges.filter(range => range.end > statsOffset)
             .map(range => ({ start: Math.max(0, range.start - statsOffset), end: range.end - statsOffset }));
-          const statsParts = excerptParts(statsText, '', 150, statRanges);
+          const statsParts = excerptParts(statsText, '', 150, statRanges, entry.literal);
           return {
-            filepath: entry.filepath, filename: entry.filename, isDNT: !!entry.desc.isDNT,
+            key: entry.key || entry.filepath, mode: entry.mode || 'statdescription', groupId: entry.groupId || '', groupLabel: entry.groupLabel || '',
+            filepath: entry.filepath, filename: entry.filename, isDNT: !!entry.desc?.isDNT,
             filepathParts: textParts(pathText, pathRanges, 0, entry.filepath.length),
             englishPreview: englishParts.map(part => part.text).join(''), englishParts,
             translationPreview: translationParts.map(part => part.text).join(''), translationParts,
@@ -246,14 +314,20 @@
         // translations update both matching results and the selected reference.
         this.lookupResults;
         const entry = caches.get(this)?.byPath.get(this.lookupSelectedFilepath);
-        return buildReference(entry?.desc, this.lookupActiveLanguage, entry?.local);
+        return entry?.reference || (entry ? { ...buildReference(entry.desc, this.lookupActiveLanguage, entry.local),
+          mode: entry.mode || 'statdescription', groupId: entry.groupId || '', groupLabel: entry.groupLabel || '' } : null);
       },
     },
     watch: {
       descs() { this.invalidateEditorLookupIndex(); },
       localDescs() { this.invalidateEditorLookupIndex(); },
       lang() { this.invalidateEditorLookupIndex(); },
-      lookupLanguage() { this.lookupApplySearch(); },
+      lookupLanguage() { this.lookupCancelPreparation(); this.lookupApplySearch(); this.lookupLoadCatalog(); },
+      lookupModeFilter() { this.lookupApplySearch(); },
+      lookupGroupFilter() { this.lookupApplySearch(); },
+      lookupSessionKey() { this.lookupResetCatalog(); if (lookupActive(this)) this.lookupLoadCatalog(); },
+      lookupPanelActive(active) { if (active) this.lookupLoadCatalog(); },
+      ctRevision() { this.invalidateEditorLookupIndex(); if (lookupActive(this) && !this.lookupPreparing) this.lookupLoadCatalog(); },
       lookupScope() { this.lookupApplySearch(); },
       lookupTranslatedOnly() { this.lookupApplySearch(); },
       lookupPageCount(count) {
@@ -264,22 +338,65 @@
       },
       lookupResults(results) {
         if (lookupActive(this) && this.lookupSelectedFilepath
-          && !results.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
+          && !results.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
-    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); caches.delete(this); languageCaches.delete(this); },
+    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); this.lookupCancelPreparation(); this._editorReferenceCatalog?.dispose(); caches.delete(this); languageCaches.delete(this); },
     methods: {
       invalidateEditorLookupIndex() {
         caches.delete(this);
         this.lookupRevision++;
       },
+      lookupResetCatalog() {
+        clearTimeout(this._editorLookupSearchTimer); this._editorLookupSearchTimer = null;
+        this.lookupCancelPreparation(); this._lookupCatalogRun = null; this._editorReferenceCatalog?.dispose();
+        this.lookupCatalogSources = []; this.lookupCatalogGroups = []; this.lookupMissingReferences = [];
+        this.lookupCatalogKey = ''; this.lookupSelectedFilepath = ''; this.lookupGroupFilter = ''; this.lookupPreparationError = '';
+        this.invalidateEditorLookupIndex(); languageCaches.delete(this);
+      },
+      async lookupLoadCatalog(options = {}) {
+        if (!window.EditorReferenceCatalog || !lookupActive(this)) return false;
+        const session = sessionFor(this), key = sessionKey(this), language = this.lookupActiveLanguage;
+        const run = this._lookupCatalogRun = {}, signal = options.signal;
+        const current = () => this._lookupCatalogRun === run && sessionKey(this) === key && this.lookupActiveLanguage === language && !signal?.aborted;
+        this._editorReferenceCatalog ||= window.EditorReferenceCatalog.create(this);
+        try {
+          const result = await this._editorReferenceCatalog.load(session, language, { ...options, current });
+          if (!current()) return false;
+          const mark = value => typeof Vue !== 'undefined' && Vue.markRaw ? Vue.markRaw(value) : value;
+          this.lookupCatalogSources = mark(result.sources); this.lookupCatalogGroups = result.groups;
+          this.lookupMissingReferences = result.missing; this.lookupCatalogKey = key;
+          if (options.prepare || result.errors.length) this.lookupPreparationError = result.errors.join('\n');
+          this.invalidateEditorLookupIndex(); languageCaches.delete(this);
+          return !result.errors.length;
+        } catch (error) {
+          if (current() && !error.stale && error.name !== 'AbortError') this.lookupPreparationError = error.message;
+          return false;
+        }
+      },
+      async lookupPrepareReferences() {
+        if (this.lookupPreparing || !this.lookupPreparationAvailable) return false;
+        const aborter = this._lookupPreparationAbort = new AbortController(), key = sessionKey(this);
+        this.lookupPreparing = true;
+        const work = String(this._lookupPreparationSequence = (this._lookupPreparationSequence || 0) + 1);
+        this.setBrowserWork?.('references', { key: work, label: 'Preparing reference originals', active: true, immediate: true });
+        try { return await this.lookupLoadCatalog({ prepare: true, signal: aborter.signal }); }
+        finally {
+          this.setBrowserWork?.('references', { key: work, active: false });
+          if (this._lookupPreparationAbort === aborter) { this._lookupPreparationAbort = null; if (key === sessionKey(this)) this.lookupPreparing = false; }
+        }
+      },
+      lookupCancelPreparation() {
+        this._lookupPreparationAbort?.abort(); this._lookupPreparationAbort = null; this.lookupPreparing = false;
+      },
       lookupSearchChanged() {
         clearTimeout(this._editorLookupSearchTimer);
-        if (!foldText(this.lookupQuery)) {
+        if (!hasQuery(this, this.lookupQuery)) {
           this.lookupApplySearch();
           return;
         }
-        this._editorLookupSearchTimer = setTimeout(() => this.lookupApplySearch(), SEARCH_DELAY);
+        const key = sessionKey(this);
+        this._editorLookupSearchTimer = setTimeout(() => { if (sessionKey(this) === key) this.lookupApplySearch(); }, SEARCH_DELAY);
       },
       lookupApplySearch() {
         clearTimeout(this._editorLookupSearchTimer);
@@ -287,14 +404,17 @@
         this.lookupAppliedQuery = this.lookupQuery;
         this.lookupPage = 1;
         if (lookupActive(this) && this.lookupSelectedFilepath
-          && !this.lookupResults.some(entry => entry.filepath === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
-        this.$nextTick(() => { if (this.$refs.lookupResultsList) this.$refs.lookupResultsList.scrollTop = 0; });
+          && !this.lookupResults.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
+        const key = sessionKey(this);
+        this.$nextTick(() => { const list = componentRef(this, 'lookupResultsList'); if (sessionKey(this) === key && list) list.scrollTop = 0; });
       },
       lookupSelect(filepath) {
-        if (filepath === this.lookupSelectedFilepath || !this.lookupResults.some(entry => entry.filepath === filepath)) return;
+        if (filepath === this.lookupSelectedFilepath || !this.lookupResults.some(entry => (entry.key || entry.filepath) === filepath)) return;
         this.lookupSelectedFilepath = filepath;
+        const key = sessionKey(this);
         this.$nextTick(() => {
-          if (this.lookupSelectedFilepath === filepath && this.$refs.lookupReference) this.$refs.lookupReference.scrollTop = 0;
+          const reference = componentRef(this, 'lookupReference');
+          if (sessionKey(this) === key && this.lookupSelectedFilepath === filepath && reference) reference.scrollTop = 0;
         });
       },
       lookupGoToPage(value) {
@@ -302,7 +422,8 @@
         const next = Math.max(1, Math.min(this.lookupPageCount, Number.isFinite(page) ? Math.trunc(page) : 1));
         if (next === this.lookupPage) return;
         this.lookupPage = next;
-        this.$nextTick(() => { if (this.$refs.lookupResultsList) this.$refs.lookupResultsList.scrollTop = 0; });
+        const key = sessionKey(this);
+        this.$nextTick(() => { const list = componentRef(this, 'lookupResultsList'); if (sessionKey(this) === key && list) list.scrollTop = 0; });
       },
       lookupClearSearch() {
         this.lookupQuery = '';
@@ -310,10 +431,11 @@
         this.lookupFocusSearch();
       },
       lookupFocusSearch() {
-        this.$nextTick(() => this.$refs.lookupSearchInput?.focus());
+        const key = sessionKey(this);
+        this.$nextTick(() => { if (sessionKey(this) === key) componentRef(this, 'lookupSearchInput')?.focus(); });
       },
     },
   };
 
-  window.EditorLookup = { mixin, buildIndex, searchIndex, buildReference, highlightParts, excerptParts };
+  window.EditorLookup = { mixin, buildIndex, buildCatalogIndex, searchIndex, buildReference, highlightParts, excerptParts };
 })();

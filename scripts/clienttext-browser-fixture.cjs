@@ -26,6 +26,13 @@ const cell = (r, value, s = 0) => `<c r="${r}" s="${s}" t="inlineStr"><is><t xml
 const blank = (r, s = 0) => `<c r="${r}" s="${s}"/>`;
 const row = (r, cells) => `<row r="${r}">${cells.join('')}</row>`;
 const sheet = rows => `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${rows.join('')}</sheetData></worksheet>`;
+// waitForFunction polls a truthy Promise rather than its eventual value. Durable
+// IndexedDB predicates must be awaited outside the browser polling callback.
+async function waitForAsync(page,predicate,arg,timeout=30000){
+    const deadline=Date.now()+timeout;
+    do {if(await page.evaluate(predicate,arg))return;await new Promise(resolve=>setTimeout(resolve,50));}while(Date.now()<deadline);
+    throw new Error('Timed out waiting for durable ClientText state.');
+}
 async function inlineGeometry(row) {
     await row.page().evaluate(async () => { await document.fonts.ready; await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); });
     return row.evaluate(row => {
@@ -245,9 +252,9 @@ async function run() {
             // Migration begins with an uncertain operation already present.
             // Wait for the deliberately lost *new* acknowledgement before
             // retrying so this check cannot join the first automatic sync.
-            await target.waitForFunction(async()=>{const vm=window.__clientFixtureApp,metadata=await vm._ctStore.getMetadata(vm.ctWorkspace.scope),operations=await vm._ctStore.getOutbox(vm.ctWorkspace.scope);return vm.ctError==='Lost legacy acknowledgement' && metadata?.cacheMigration==='complete' && operations[0]?.state==='uncertain' && !!operations[0].requestBody;});
+            await waitForAsync(target,async()=>{const vm=window.__clientFixtureApp,metadata=await vm._ctStore.getMetadata(vm.ctWorkspace.scope),operations=await vm._ctStore.getOutbox(vm.ctWorkspace.scope);return vm.ctError==='Lost legacy acknowledgement' && metadata?.cacheMigration==='complete' && operations[0]?.state==='uncertain' && !!operations[0].requestBody;});
             await target.evaluate(async()=>{const vm=window.__clientFixtureApp;clearInterval(vm._ctSyncTimer);await vm._ctSyncRun?.promise;await vm._ctSync.flush();await vm.ctSync();});
-            await target.waitForFunction(async()=>{const vm=window.__clientFixtureApp;return !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length;});
+            await waitForAsync(target,async()=>{const vm=window.__clientFixtureApp;return !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length;});
             const ownPatches=patches.filter(patch=>patch.mutationId===mutationId);assert.ok(ownPatches.length>=2);assert.deepEqual(ownPatches[0],body);assert.deepEqual(ownPatches[1],body);
             const recovered=await target.evaluate(async id=>{const vm=window.__clientFixtureApp,scope=vm.ctWorkspace.scope,metadata=await vm._ctStore.getMetadata(scope),history=await vm._ctStore.listHistory(scope,id),original=await vm._ctStore.getUnit(scope,id);return{descriptors:metadata.descriptors,history:history.length,source:original.fields[0].source,saved:vm.ctSaved[id]?.values};},legacyUnit.id);
             assert.deepEqual(recovered.descriptors,legacyManifest.descriptors);assert.equal(recovered.history,1);assert.deepEqual(recovered.saved,values);
@@ -333,7 +340,7 @@ async function run() {
             assert.equal(await target('StrFourb').inputValue(), secondText); assert.deepEqual(await target('StrFourb').evaluate(input => [input.selectionStart,input.selectionEnd]), [4,9], 'Escape returns the current full-editor caret to the exact inline variant');
             await target('StrFourb').press('Control+s'); assert.equal((await saved('variant-fixture','StrFourb',secondText)).history, secondText);
             await picker().selectOption(fieldId('DexIntFour')); await active('DexIntFour'); await target('DexIntFour').fill('[');
-            const completion = workspace.getByRole('listbox', { name: 'Source and Dictionary completions', exact: true }); await completion.waitFor();
+            const completion = page.getByRole('listbox', { name: 'Highlights', exact: true }); await completion.waitFor();
             await target('DexIntFour').press('Enter'); assert.equal(await target('DexIntFour').inputValue(), '[keyword|Display]', 'Class form [] completion preserves raw keyword syntax');
             await target('DexIntFour').fill('{'); await completion.waitFor(); await target('DexIntFour').press('Enter');
             assert.equal(await target('DexIntFour').inputValue(), '{0}', 'Class form {} completion preserves raw source placeholder');
@@ -344,7 +351,7 @@ async function run() {
             await saved('variant-fixture','StrFourb','Final draft to restore');
             await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').press('Control+Enter');
             await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
-            await workspace.getByRole('button', { name: 'History', exact: true }).click();
+            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
             await page.waitForFunction(field => !window.__clientFixtureApp.ctHistoryLoading && window.__clientFixtureApp.ctHistory.some(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
             const eventIndex = await page.evaluate(field => window.__clientFixtureApp.ctHistory.findIndex(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
             const event = workspace.locator('.ctHistoryEvent').nth(eventIndex); await event.getByRole('button', { name: 'Compare change', exact: true }).click();
@@ -354,10 +361,12 @@ async function run() {
             assert.equal(await diff.locator('.ctHistory-after .ctHistoryTarget').textContent(), 'Final draft to restore');
             assert.equal(await diff.locator('.ctHistory-before .ctHistorySource').textContent(), '[keyword|Display] {0}\nSecond source line');
             await viewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
-            await event.getByRole('button', { name: 'Restore before as draft', exact: true }).click();
-            await page.waitForFunction(({ field, value }) => window.__clientFixtureApp.ctValues[field] === value && window.__clientFixtureApp.ctDraftDirty, { field: fieldId('StrFourb'), value: secondText });
-            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').press('Control+s');
-            await saved('variant-fixture','StrFourb',secondText); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
+            await event.getByRole('button', { name: 'Restore before', exact: true }).click();
+            await page.locator('.appDialog[open]').getByRole('button', { name: 'Restore revision', exact: true }).click();
+            await page.waitForFunction(({ field, value }) => { const vm=window.__clientFixtureApp;return vm.ctValues[field]===value && vm.ctSaved[vm.ctSelection]?.values[field]===value && !vm.ctDraftDirty && !vm.ctBusy;}, { field: fieldId('StrFourb'), value: secondText });
+            await saved('variant-fixture','StrFourb',secondText);
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctSaved[window.__clientFixtureApp.ctSelection].origin),'restore','history restoration is already saved without another manual save');
+            await page.keyboard.press('Escape');await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
             await choose(classSample.recordId); await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
             const themeChecks = [], checkThemes = async editor => {
                 for (const theme of ['light','grey','dark','modern-dark']) {
@@ -370,8 +379,9 @@ async function run() {
                         return { viewport:innerWidth,source:box(source),target:box(target),controls:elements.map(box) };
                     });
                     assert.equal(facts.controls.every(control => control.visible && control.width>0 && control.height>0 && control.x>=0 && control.right<=facts.viewport),true,editor+' '+theme+': class controls stay visible within desktop columns');
-                    assert.ok(facts.source.right<=facts.target.x,editor+' '+theme+': English stays left of the selected class translation');
-                    themeChecks.push({editor,theme,controlsVisible:true,englishLeft:true});
+                    if(editor==='full')assert.ok(facts.source.bottom<=facts.target.y,editor+' '+theme+': English stays above the selected class translation');
+                    else assert.ok(facts.source.right<=facts.target.x,editor+' '+theme+': English stays left of the selected class translation');
+                    themeChecks.push({editor,theme,controlsVisible:true,sourcePosition:editor==='full'?'above':'left'});
                 }
                 await page.evaluate(() => document.documentElement.setAttribute('data-theme','light'));
             };
@@ -665,7 +675,7 @@ async function run() {
                 await page.waitForFunction(id => { const vm = window.__clientFixtureApp; return vm.ctSelection === id && !vm.ctEditor && !vm.ctBusy && !vm._ctSelectRun?.pending; }, candidate.id);
                 await page.evaluate(fieldId => { window.__clientFixtureApp.ctFocusedField = fieldId; }, candidate.fieldId);
                 await captureWorkspace.locator('.ctTools').getByRole('button', { name: 'Preview', exact: true }).click();
-                await captureWorkspace.locator('#ctInlineEditorPreviewHost .gamePreviewStrip').waitFor();
+                await captureWorkspace.locator('#inlineEditorPreviewHost .gamePreviewStrip').waitFor();
                 const geometry = await inlineGeometry(row);
                 assertInlineAlignment(geometry, 'Real French ' + candidate.role + ' inline');
                 if (candidate.role === 'normal') {
@@ -1004,51 +1014,56 @@ async function run() {
             await open('Normal', 'complete', true);
             const description = inputFor('Description'), rawDraft = 'raw @\\n [Keyword|display] {0}\nsecond line';
             await description.fill(rawDraft);
-            const beforeExternalArrows = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { selection: vm.ctSelection, values: JSON.stringify(vm.ctValues),
-                saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)), history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length }; });
+            const keyboardSnapshot=()=>page.evaluate(async()=>{const vm=window.__clientFixtureApp;return{selection:vm.ctSelection,values:JSON.stringify(vm.ctValues),
+                saved:JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),history:(await vm._ctStore.listHistory(vm.ctWorkspace.scope,vm.ctSelection)).length,
+                inline:!vm.ctEditor&&!vm.ctInlineClosed,navigating:!!vm._ctNavigationRun,busy:vm.ctBusy};});
             for (const [label, control] of [['search', workspace.getByRole('searchbox', { name: 'Search ClientText' })],
                 ['readonly English', workspace.getByRole('textbox', { name: 'Description English', exact: true })],
                 ['toolbar', workspace.getByRole('button', { name: 'Download workbooks', exact: true })]]) {
-                await control.focus();
+                await open('Normal','complete',true);await control.focus();
+                await page.waitForFunction(label=>{const vm=window.__clientFixtureApp;return !vm.ctBusy && (label==='readonly English'?!vm.ctInlineClosed:vm.ctInlineClosed);},label);
+                const beforeExternalArrows=await keyboardSnapshot();
                 for (const key of ['Control+ArrowUp', 'Control+ArrowDown']) {
                     await control.press(key);
                     const state = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { selection: vm.ctSelection, values: JSON.stringify(vm.ctValues),
                         saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)), history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length,
                         inline: !vm.ctEditor && !vm.ctInlineClosed, navigating: !!vm._ctNavigationRun, busy: vm.ctBusy }; });
-                    assert.deepEqual(state, { ...beforeExternalArrows, inline: true, navigating: false, busy: false }, label + ' ' + key + ' cannot navigate or save the underlying private inline draft');
+                    assert.deepEqual(state,beforeExternalArrows,label+' '+key+' cannot trigger another save or navigate after the normal focus handoff');
                 }
             }
-            await description.focus(); await page.evaluate(async () => window.__clientFixtureApp.cloudOpenHistory());
+            await open('Normal','complete',true);await description.focus();await page.evaluate(async()=>window.__clientFixtureApp.cloudOpenHistory());
             const dictionaryHistory = page.getByRole('dialog', { name: 'Shared dictionary history', exact: true });
             await dictionaryHistory.waitFor();
             const historyClose = dictionaryHistory.getByRole('button', { name: 'Close shared dictionary history', exact: true });
             await historyClose.focus();
+            const beforeDictionaryKeys=await keyboardSnapshot();
             for (const key of ['Control+s', 'F2']) {
                 await historyClose.press(key);
                 const state = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { selection: vm.ctSelection, values: JSON.stringify(vm.ctValues),
                     saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)), history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length,
                     overlay: vm.cloudHistoryVisible, inline: !vm.ctEditor && !vm.ctInlineClosed, navigating: !!vm._ctNavigationRun, busy: vm.ctBusy }; });
-                assert.deepEqual(state, { ...beforeExternalArrows, overlay: true, inline: true, navigating: false, busy: false }, 'Dictionary history ' + key + ' cannot save or navigate the underlying private inline draft');
+                assert.deepEqual(state,{...beforeDictionaryKeys,overlay:true},'Dictionary history '+key+' cannot save or navigate the underlying inline editor');
             }
             await historyClose.press('Escape'); await page.waitForFunction(() => !window.__clientFixtureApp.cloudHistoryVisible);
             assert.equal(await page.evaluate(() => { const vm = window.__clientFixtureApp; return !vm.ctEditor && !vm.ctInlineClosed && vm.ctValues[JSON.stringify(['Description', null])]; }), rawDraft, 'Overlay Escape closes only Dictionary history and preserves the active inline draft');
-            await description.focus(); await description.evaluate(input => input.setSelectionRange(2, 7, 'backward'));
+            const handoffDraft=rawDraft+'\nprivate handoff';await description.fill(handoffDraft);await description.focus();await description.evaluate(input=>input.setSelectionRange(2,7,'backward'));
             const beforeHandoff = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { values: JSON.stringify(vm.ctValues), reviewed: JSON.stringify(vm.ctReviewed), history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length }; });
+            const handoffCommitted=await page.evaluate(async()=>{const vm=window.__clientFixtureApp;return{saved:JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),outbox:(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length};});
             await description.press('Control+Enter'); await waitTarget('complete', true, fieldKey('Description'));
-            assert.deepEqual(await description.evaluate(input => [input.value, input.selectionStart, input.selectionEnd, input.selectionDirection]), [rawDraft, 2, 7, 'backward'], 'Ctrl+Enter opens the exact inline field and text selection in the full editor');
+            assert.deepEqual(await description.evaluate(input => [input.value, input.selectionStart, input.selectionEnd, input.selectionDirection]), [handoffDraft, 2, 7, 'backward'], 'Ctrl+Enter opens the exact inline field and text selection in the full editor');
             await description.press('Escape'); await waitTarget('complete', false, fieldKey('Description'));
-            assert.deepEqual(await description.evaluate(input => [input.value, input.selectionStart, input.selectionEnd, input.selectionDirection]), [rawDraft, 2, 7, 'backward'], 'Escape returns to the exact inline field, caret range and raw private draft');
+            assert.deepEqual(await description.evaluate(input => [input.value, input.selectionStart, input.selectionEnd, input.selectionDirection]), [handoffDraft, 2, 7, 'backward'], 'Escape returns to the exact inline field, caret range and raw private draft');
             const afterHandoff = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { values: JSON.stringify(vm.ctValues), reviewed: JSON.stringify(vm.ctReviewed), history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length,
                 saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)), outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length, draft: (await vm._ctStore.getDraft(vm.ctWorkspace.scope, vm.ctSelection))?.values[JSON.stringify(['Description', null])] }; });
             assert.deepEqual({ values: afterHandoff.values, reviewed: afterHandoff.reviewed, history: afterHandoff.history }, beforeHandoff, 'Inline/full handoff preserves field values/reviews and creates no saved history');
-            assert.equal(afterHandoff.draft, rawDraft, 'The private raw draft remains durable through the handoff');
-            assert.deepEqual({ saved: afterHandoff.saved, outbox: afterHandoff.outbox }, initial, 'Tab, guarded keys and inline/full handoff never save unchanged work or publish the private draft');
+            assert.equal(afterHandoff.draft,handoffDraft,'The private raw draft remains durable through the handoff');
+            assert.deepEqual({saved:afterHandoff.saved,outbox:afterHandoff.outbox},handoffCommitted,'Inline/full handoff never stages the private draft');
             await description.press('Escape');
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return vm.ctInlineClosed && !vm.ctEditor && document.activeElement?.dataset.unitId === vm.ctSelection; });
             assert.equal(await workspace.locator('[data-ct-target]').count(), 0, 'Inline Escape closes translation controls and returns focus to the exact file row');
             const reopenedRow = workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'complete', exact: true }) });
             await reopenedRow.click(); await waitTarget('complete', false, fieldKey('Description'));
-            assert.equal(await description.inputValue(), rawDraft, 'Reopening an escaped inline row preserves its exact private draft');
+            assert.equal(await description.inputValue(),handoffDraft,'Reopening an escaped inline row preserves its exact private draft');
             await workspace.getByRole('button', { name: 'Discard draft', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctDraftDirty);
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.inlineEditor = false; vm.ctNotice = ''; await vm.$nextTick(); });
@@ -1126,17 +1141,20 @@ async function run() {
             await viewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
             assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), currentText, 'Read-only comparison leaves the editor unchanged');
             const beforeRestore = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length, outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length }; });
-            await event.getByRole('button', { name: 'Restore before as draft', exact: true }).click();
-            await page.waitForFunction(async ({ fieldId, previousText }) => { const vm = window.__clientFixtureApp, draft = await vm._ctStore.getDraft(vm.ctWorkspace.scope, vm.ctSelection); return vm.ctDraftDirty && draft?.values[fieldId] === previousText; }, { fieldId, previousText });
+            await event.getByRole('button', { name: 'Restore before', exact: true }).click();
+            await page.locator('.appDialog[open]').getByRole('button', { name: 'Restore revision', exact: true }).click();
+            await page.waitForFunction(({ fieldId, previousText }) => { const vm=window.__clientFixtureApp,saved=vm.ctSaved[vm.ctSelection];return !vm.ctBusy && !vm.ctDraftDirty && vm.ctValues[fieldId]===previousText && saved?.values[fieldId]===previousText && saved.origin==='restore';}, { fieldId, previousText });
             const restored = await page.evaluate(async fieldId => {
                 const vm = window.__clientFixtureApp, saved = await vm._ctStore.getSaved(vm.ctWorkspace.scope);
-                return { editor: vm.ctValues[fieldId], saved: saved[vm.ctSelection].values[fieldId], history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length, outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length, error: vm.ctHistoryError };
+                const history=await vm._ctStore.listHistory(vm.ctWorkspace.scope,vm.ctSelection),restore=history.find(entry=>entry.origin==='restore');
+                return { editor: vm.ctValues[fieldId], saved: saved[vm.ctSelection].values[fieldId], history:history.length,origin:restore?.origin,before:restore?.before.values[fieldId],after:restore?.after.values[fieldId],draft:!!await vm._ctStore.getDraft(vm.ctWorkspace.scope,vm.ctSelection),error:vm.ctHistoryError };
             }, fieldId);
-            assert.deepEqual(restored, { editor: previousText, saved: currentText, history: beforeRestore.history, outbox: beforeRestore.outbox, error: '' }, 'History restore writes only a durable draft');
-            await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
+            assert.equal(restored.editor,previousText);assert.equal(restored.saved,previousText);assert.ok(restored.history>=beforeRestore.history+1,'restore appends history while background shared acknowledgement may also append its event');
+            assert.deepEqual({origin:restored.origin,before:restored.before,after:restored.after,draft:restored.draft,error:restored.error},{origin:'restore',before:currentText,after:previousText,draft:false,error:''},'confirmed restore durably saves exact text and consumes its checkpoint');
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
-            if (historyOrigin === 'shared') await page.waitForFunction(async ({ fieldId, previousText }) => { const vm = window.__clientFixtureApp; return !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(saved => saved.serverRevision > 0 && saved.values[fieldId] === previousText); }, { fieldId, previousText });
-            results.push(historyOrigin + ' ClientText history compares saved revisions/original/current; Restore before creates a durable draft without changing saved work' + (emptyOlder ? '; empty older pagination keeps existing rows' : ''));
+            if (historyOrigin === 'shared') await waitForAsync(page,async ({ fieldId, previousText }) => { const vm = window.__clientFixtureApp; return !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(saved => saved.serverRevision > 0 && saved.values[fieldId] === previousText); }, { fieldId, previousText });
+            results.push(historyOrigin + ' ClientText history compares saved revisions/original/current; confirmed Restore before creates a durable saved revision and retains earlier history' + (emptyOlder ? '; empty older pagination keeps existing rows' : ''));
         };
         await navigation.getByRole('button', { name: 'Normal', exact: true }).click();
         await workspace.locator('.ctTable tbody > tr').filter({ has: page.getByRole('button', { name: 'record', exact: true }) }).first().click();
@@ -1167,7 +1185,7 @@ async function run() {
             console.log(JSON.stringify({ status: 'AUDIT', original: summary(geometry), wrapped: summary(wrappedGeometry), restored: summary(restoredGeometry) }, null, 2)); return;
         }
         const name = workspace.getByRole('textbox', { name: 'Name', exact: true });
-        const memoryMatch = workspace.locator('.ctTools article').filter({ has: page.locator('pre').filter({ hasText: /^Épée$/ }) });
+        const memoryMatch=workspace.locator('.ctTools .tmResultList [role=option]').filter({has:page.locator('.tmTargetSnippet').filter({hasText:/^Épée$/})});
         if (!dictionaryOnly) {
         await name.fill('Épée'); await workspace.getByRole('button', { name: 'Save', exact: true }).click();
         await page.waitForFunction(() => Object.values(window.__clientFixtureApp.ctSaved).some(saved => Object.values(saved.values).includes('Épée')));
@@ -1195,7 +1213,7 @@ async function run() {
             await target.fill('Première ligne'); await target.press('End'); await target.press('Enter'); await target.pressSequentially('Deuxième ligne');
             assert.equal(await target.inputValue(), 'Première ligne\nDeuxième ligne', editorMode + ': plain Enter inserts a raw newline in translation text');
             await target.fill(original);
-            await tools.getByRole('button', { name: 'Dictionary', exact: true }).click();
+            await tools.getByRole('button', { name: /Dictionary$/ }).click();
             const search = tools.getByRole('searchbox', { name: 'Search dictionary entries', exact: true });
             await search.waitFor();
             assert.equal(await search.evaluate(input => input.tagName), 'INPUT', 'Dictionary search retains its search-input semantics');
@@ -1283,7 +1301,7 @@ async function run() {
                         await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
                         assert.equal(await inlineRow.locator('td:nth-child(2) .ctFields[data-side="source"]').count(), 1);
                         assert.equal(await inlineRow.locator('td:nth-child(3) .ctFields[data-side="translation"]').count(), 1);
-                        assert.equal(await workspace.locator('.ctTools .sideTabs .tabBtn').count(), 6, 'Inline CT tools reuse the familiar sidebar tabs including Preview');
+                        assert.equal(await workspace.locator('.ctTools .sideTabs .tabBtn').count(),5,'Inline CT tools reuse the SD sidebar tabs including Preview');
                         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth <= 1), theme + ': inline CT table/tools remain inside the desktop');
                         const target = inlineRow.locator('td:nth-child(3)').getByRole('textbox', { name: 'Name', exact: true });
                         await target.scrollIntoViewIfNeeded();
@@ -1310,9 +1328,10 @@ async function run() {
                 return Object.fromEntries(Object.entries(vm.ctValues).filter(([id]) => id !== JSON.stringify(['Name', null])));
             });
             await name.fill('A private ' + editorMode + ' draft');
-            await memoryMatch.locator('pre').first().click();
+            await memoryMatch.click();
             assert.equal(await name.inputValue(), 'A private ' + editorMode + ' draft', 'One click does not insert a ClientText memory');
-            await memoryMatch.locator('pre').last().dblclick();
+            await memoryMatch.dblclick();
+            await page.locator('.appDialog[open]').getByRole('button',{name:'Replace draft',exact:true}).click();
             assert.equal(await name.inputValue(), 'Épée', editorMode + ': a TM match double-click inserts into the focused Name field');
             assert.deepEqual(await page.evaluate(() => {
                 const vm = window.__clientFixtureApp;
@@ -1344,7 +1363,9 @@ async function run() {
         await fullPreview.locator('.gamePreviewStrip').waitFor();
         assert.equal(await fullPreview.locator('.gamePreviewWindow').count(), 2, 'Full ClientText preview shows English and translation using the shared renderer');
         await fullPreview.getByRole('textbox', { name: 'Variable {0:+d}', exact: true }).fill('37');
-        assert.deepEqual(await fullPreview.locator('.gamePreviewVarValue').allTextContents(), ['37', '37'], 'The shared {} input resolves the complete SD-format variable identity in both preview frames');
+        assert.deepEqual(await fullPreview.locator('.gamePreviewVarValue').allTextContents(), ['37', '10'], 'Distinct complete variable identities keep independent values in the English and translation frames');
+        await fullPreview.getByRole('textbox', { name: 'Variable {0}', exact: true }).fill('41');
+        assert.deepEqual(await fullPreview.locator('.gamePreviewVarValue').allTextContents(), ['37', '41'], 'The translation variable resolves its own exact identity');
         await fullPreview.getByRole('button', { name: 'Small', exact: true }).click();
         assert.equal(await fullPreview.locator('.gamePreviewWindow--s').count(), 2);
         await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.hideSourceInPreviewPanel = true; await vm.$nextTick(); });
@@ -1358,10 +1379,12 @@ async function run() {
         await workspace.getByRole('textbox', { name: 'Description', exact: true }).focus();
         assertInlineAlignment(await inlineGeometry(workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'complete', exact: true }) })), 'Ordinary multi-field record without developer notes');
         await workspace.locator('.ctTools').getByRole('button', { name: 'Preview', exact: true }).click();
-        const inlinePreview = workspace.locator('#ctInlineEditorPreviewHost');
+        const inlinePreview = workspace.locator('#inlineEditorPreviewHost');
         await inlinePreview.locator('.gamePreviewStrip').waitFor();
         await inlinePreview.getByRole('textbox', { name: 'Variable {0:+d}', exact: true }).fill('84');
-        assert.deepEqual(await inlinePreview.locator('.gamePreviewVarValue').allTextContents(), ['84', '84']);
+        assert.deepEqual(await inlinePreview.locator('.gamePreviewVarValue').allTextContents(), ['84', '41'],'Inline preview retains both exact variable values across the full/inline handoff');
+        await inlinePreview.getByRole('textbox', { name: 'Variable {0}', exact: true }).fill('42');
+        assert.deepEqual(await inlinePreview.locator('.gamePreviewVarValue').allTextContents(), ['84', '42']);
         await page.screenshot({ path: join(directory, 'clienttext-inline-game-preview.png'), fullPage: true });
         await workspace.getByRole('button', { name: 'complete', exact: true }).click();
         await page.waitForFunction(() => window.__clientFixtureApp.ctEditor);
@@ -1371,6 +1394,7 @@ async function run() {
         await page.screenshot({ path: join(directory, 'clienttext-full-game-preview.png'), fullPage: true });
         results.push('Full and inline ClientText reuse game preview and {} variables; frame sizing/hide-source work and preview changes preserve raw translations/Saved state');
         await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.inlineEditor = false; await vm.$nextTick(); });
+        const beforePrivateDraft=await page.evaluate(async()=>{const vm=window.__clientFixtureApp;return{saved:JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),history:(await vm._ctStore.listHistory(vm.ctWorkspace.scope,vm.ctSelection)).length,outbox:(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length};});
         await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('Bouclier brouillon');
         await workspace.getByRole('button', { name: 'Close', exact: true }).click();
         await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
@@ -1379,7 +1403,8 @@ async function run() {
         await workspace.getByRole('button', { name: 'complete', exact: true }).click();
         await page.waitForFunction(() => window.__clientFixtureApp.ctDraftDirty);
         assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'Bouclier brouillon', 'Draft survives reload in real IndexedDB');
-        assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctStatus().saved), false, 'Recovered draft is not committed Saved work');
+        const afterPrivateDraft=await page.evaluate(async()=>{const vm=window.__clientFixtureApp;return{saved:JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)),history:(await vm._ctStore.listHistory(vm.ctWorkspace.scope,vm.ctSelection)).length,outbox:(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length};});
+        assert.deepEqual(afterPrivateDraft,beforePrivateDraft,'Recovering a private draft preserves existing committed Saved work, history and outbox');
         await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('Bouclier');
         await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
         await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
@@ -1442,8 +1467,8 @@ async function run() {
                     const source = elements.find(element => element.value === 'Sword'); if (!source) return null;
                     const box = source.getBoundingClientRect(); return { x: box.x, y: box.y, right: box.right, height: box.height, bottom: box.bottom };
                 });
-                assert.ok(sourceBounds && sourceBounds.right <= bounds.x, 'Readonly English is on the left of the editable translation in the shared full-editor block');
-                assert.ok(Math.abs(sourceBounds.y - bounds.y) <= 1 && Math.abs(sourceBounds.height - bounds.height) <= 1, 'Full-editor English and translation inputs share aligned tops and heights');
+                assert.ok(sourceBounds && sourceBounds.bottom <= bounds.y, 'Readonly English is above the editable translation in the shared full-editor block');
+                assert.ok(Math.abs(sourceBounds.x - bounds.x) <= 1, 'Full-editor English and translation inputs share their left edge');
                 assert.deepEqual((await workspace.locator('.ctTools .sideTabs .tabBtn').allTextContents()).map(text => text.replace(/[📚🕒]/gu, '').trim()), ['Dictionary', 'Lookup', 'TM', 'History', 'Comments']);
                 assert.equal(await workspace.locator('.side.fixed.editorSidebarHost').count(), 1);
                 assert.match(await workspace.locator('.editorActions h1').textContent(), /Translation/);
@@ -1453,7 +1478,7 @@ async function run() {
                 const formBounds = await workspace.getByRole('textbox', { name: 'Text FS', exact: true }).boundingBox();
                 assert.ok(formBounds && formBounds.width > 80 && formBounds.x >= 0 && formBounds.x + formBounds.width <= size.width, theme + ': six-form text fits the shared full editor');
                 const fullFormSource = await workspace.getByRole('textbox', { name: 'Text English', exact: true }).boundingBox(), fullFormGrid = await workspace.locator('.ctFormGrid').boundingBox();
-                assert.ok(fullFormSource && fullFormGrid && fullFormSource.x + fullFormSource.width <= fullFormGrid.x, 'Gender source stays in the left English column beside its six-form translation grid');
+                assert.ok(fullFormSource && fullFormGrid && fullFormSource.y + fullFormSource.height <= fullFormGrid.y, 'Gender source stays above its six-form translation grid');
                 await page.screenshot({ path: join(directory, `clienttext-shared-gender-${size.width}-${theme}.png`), fullPage: true });
                 await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             }
@@ -1463,20 +1488,18 @@ async function run() {
         await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return vm.ctEditor && vm.ctCurrentUnit?.recordId === 'record' && !vm.ctBusy && !vm._ctSelectRun?.pending; });
         await page.evaluate(async () => {
             const vm = window.__clientFixtureApp;
-            window.__fixtureToolContent = { units: vm.ctUnits, comments: vm.ctComments, tool: vm.ctTool, lookup: vm.ctLookup, focusedField: vm.ctFocusedField };
+            window.__fixtureToolContent = { units: vm.ctUnits, tool: vm.ctTool, lookup: vm.lookupQuery, pageSize:vm.lookupPageSize, focusedField: vm.ctFocusedField };
             const template = vm.ctUnits.find(unit => unit.recordId === 'complete');
             vm.ctUnits = Vue.markRaw([...vm.ctUnits, ...Array.from({ length: 40 }, (_, index) => ({ ...template,
                 id: 'fixture-lookup-' + index, recordId: 'fixture-lookup-' + index,
-                fields: template.fields.map(field => ({ ...field, source: 'Fixture lookup source ' + index,
-                    target: 'Fixture lookup translation ' + index + '\n' + 'A long reference result. '.repeat(15) })) }))]);
-            vm.ctLookup = 'Fixture lookup source';
+                fields: template.fields.map(field => field.name==='Name' ? ({ ...field, source: 'Fixture lookup source ' + index,
+                    target: 'Fixture lookup translation ' + index + '\n' + 'A long reference result. '.repeat(15) }) : field) }))]);
+            vm.lookupQuery = 'Fixture lookup source';vm.lookupPageSize=40;
             vm.ctFocusedField = JSON.stringify(['Name', null]);
-            vm.ctComments = Array.from({ length: 100 }, (_, index) => ({ id: 'fixture-comment-' + index,
-                authorName: 'Fixture author', audience: 'language', text: 'Fixture comment ' + index + '\n' + 'A long scoped comment. '.repeat(15) }));
-            await vm.$nextTick();
+            vm.ctTool='lookup';await vm.$nextTick();await vm.lookupLoadCatalog();vm.lookupApplySearch();await vm.$nextTick();
         });
         const tools = workspace.locator('.ctTools');
-        assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctLookupResults.length), 40, 'Long Lookup fixture is scoped to the focused text field');
+        assert.equal(await page.evaluate(() => window.__clientFixtureApp.lookupResultCount), 40, 'Shared Lookup searches the active committed ClientText group');
         for (const size of desktopSizes) {
             await page.setViewportSize(size);
             for (const theme of themes) {
@@ -1492,30 +1515,21 @@ async function run() {
                 await page.screenshot({ path: join(directory, `clienttext-shared-lookup-${size.width}-${theme}.png`), fullPage: true });
                 assert.ok(lookupGeometry.scrollable && lookupGeometry.lastTop >= lookupGeometry.top - 1 && lookupGeometry.lastBottom <= lookupGeometry.bottom + 1, 'The last long Lookup result remains reachable by its own scroll area: ' + JSON.stringify(lookupGeometry));
                 await tools.getByRole('button', { name: 'Comments', exact: true }).click();
-                const commentsList = tools.locator('.commentsList');
-                const beforeScrollComposer = await tools.getByRole('textbox', { name: 'Comment', exact: true }).boundingBox();
-                await commentsList.evaluate(async element => { await new Promise(requestAnimationFrame); element.scrollTop = element.scrollHeight; await new Promise(requestAnimationFrame); });
-                const commentsGeometry = await commentsList.evaluate(element => {
-                    const box = element.getBoundingClientRect(), last = element.lastElementChild.getBoundingClientRect();
-                    return { scrollable: element.scrollHeight > element.clientHeight, top: box.top, bottom: box.bottom, lastTop: last.top, lastBottom: last.bottom };
-                });
-                const composer = await tools.getByRole('textbox', { name: 'Comment', exact: true }).boundingBox();
-                assert.ok(commentsGeometry.scrollable && commentsGeometry.lastTop >= commentsGeometry.top - 1 && commentsGeometry.lastBottom <= commentsGeometry.bottom + 1, 'The last scoped comment remains reachable by its own scroll area');
-                assert.ok(composer && Math.abs(composer.y - beforeScrollComposer.y) < 1 && composer.y >= commentsGeometry.bottom && composer.y + composer.height <= size.height, 'The comment composer stays visible and fixed while comments scroll');
+                assert.match(await tools.locator('.commentsEmpty').textContent(),/Select a published ClientText group/,'Local groups retain the shared scoped-comments guidance');
+                assert.equal(await tools.getByRole('textbox',{name:'Add a comment',exact:true}).count(),0,'Local groups do not render a shared comment composer');
                 for (const button of await tools.locator('.sideTabs .tabBtn').all()) {
                     const bounds = await button.boundingBox(); assert.ok(bounds && bounds.y >= 0 && bounds.x >= 0 && bounds.x + bounds.width <= size.width, 'Shared tool tabs remain visible in the resized full editor');
                 }
-                await page.screenshot({ path: join(directory, `clienttext-shared-comments-${size.width}-${theme}.png`), fullPage: true });
             }
         }
         await page.evaluate(async () => {
             const vm = window.__clientFixtureApp, previous = window.__fixtureToolContent;
-            vm.ctUnits = previous.units; vm.ctComments = previous.comments; vm.ctTool = previous.tool; vm.ctLookup = previous.lookup; vm.ctFocusedField = previous.focusedField;
-            delete window.__fixtureToolContent; await vm.$nextTick();
+            vm.ctUnits=previous.units;vm.ctTool=previous.tool;vm.lookupQuery=previous.lookup;vm.lookupPageSize=previous.pageSize;vm.ctFocusedField=previous.focusedField;
+            delete window.__fixtureToolContent;vm.invalidateEditorLookupIndex();await vm.$nextTick();
         });
         await workspace.getByRole('button', { name: 'Close', exact: true }).click();
         await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
-        results.push('Shared full-editor Lookup and Comments keep long content in inner scroll areas, last entries reachable, and composer/tool tabs visible in both desktop widths and all themes');
+        results.push('Shared full-editor Lookup keeps long results in its own scroll area with the last entry and tool tabs reachable in both desktop widths and all themes; local Comments require a published group');
         const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
         const download = await downloaded, path = await download.path();
         assert.match(download.suggestedFilename(), /ClientText\.zip$/);
@@ -1619,13 +1633,41 @@ async function run() {
             await navigation.getByRole('button', { name: 'Normal', exact: true }).click(); await workspace.getByRole('button', { name: 'record', exact: true }).click();
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('En ligne');
             await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
-            await page.waitForFunction(async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne')); });
+            await waitForAsync(page,async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne')); });
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'ClientText trusted sparse save is accepted');
             await workspace.getByRole('button', { name: 'record', exact: true }).click();
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('En ligne temporaire');
             await workspace.getByRole('button', { name: 'Save', exact: true }).click();
-            await page.waitForFunction(async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne temporaire')); });
+            await waitForAsync(page,async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne temporaire')); });
             await checkClientHistory({ historyOrigin: 'shared', currentText: 'En ligne temporaire', previousText: 'En ligne', emptyOlder: true });
+            await workspace.getByRole('button',{name:'record',exact:true}).click();
+            await workspace.locator('.ctTools').getByRole('button',{name:'Comments',exact:true}).click();
+            await page.waitForFunction(()=>window.__clientFixtureApp.commentsEligible && window.__clientFixtureApp.commentsFileFeed.loaded && !window.__clientFixtureApp.commentsFileFeed.loading);
+            // Exercise long-list layout on the same published group and real shared
+            // comments surface. Pin transport only while synthetic cards are visible.
+            await page.evaluate(async()=>{const vm=window.__clientFixtureApp;
+                window.__fixtureCommentLayout={feed:vm.commentsFileFeed,refresh:vm.commentsRefreshFile,observe:vm.commentsObserveVisible};
+                vm.commentsRefreshFile=async()=>true;vm.commentsObserveVisible=()=>{};vm._commentsObserver?.disconnect();clearTimeout(vm._commentsReadTimer);
+                vm.commentsFileFeed={...vm.commentsFileFeed,loaded:true,loading:false,cursor:null,items:Array.from({length:100},(_,index)=>({id:10000+index,actorName:'Fixture author',scopeLanguage:'French',language:'French',allLanguages:false,
+                    groupId:vm.commentsIdentity.groupId,filepath:vm.commentsFilepath,sourceHash:vm.commentsIdentity.sourceHash,createdAt:new Date().toISOString(),body:'Fixture comment '+index+'\n'+'A long scoped comment. '.repeat(15)}))};await vm.$nextTick();});
+            const publishedTools=workspace.locator('.ctTools');
+            for(const size of desktopSizes){await page.setViewportSize(size);for(const theme of themes){
+                await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
+                const commentsList=publishedTools.locator('.commentsList'),composerControl=publishedTools.getByRole('textbox',{name:'Add a comment',exact:true});
+                const before=await composerControl.boundingBox();
+                await commentsList.evaluate(async element=>{await new Promise(requestAnimationFrame);element.scrollTop=element.scrollHeight;await new Promise(requestAnimationFrame);});
+                const geometry=await commentsList.evaluate(element=>{const box=element.getBoundingClientRect(),last=element.lastElementChild.getBoundingClientRect();return{scrollable:element.scrollHeight>element.clientHeight,top:box.top,bottom:box.bottom,lastTop:last.top,lastBottom:last.bottom};});
+                const after=await composerControl.boundingBox();
+                assert.ok(geometry.scrollable && geometry.lastTop>=geometry.top-1 && geometry.lastBottom<=geometry.bottom+1,'Last long published comment is reachable by its own scroll area');
+                assert.ok(before && after && Math.abs(before.y-after.y)<1 && after.y>=geometry.bottom && after.y+after.height<=size.height,'Shared comment composer stays fixed and visible while comments scroll');
+                for(const button of await publishedTools.locator('.sideTabs .tabBtn').all()){const bounds=await button.boundingBox();assert.ok(bounds && bounds.y>=0 && bounds.x>=0 && bounds.x+bounds.width<=size.width,'Shared comment tool tabs stay visible');}
+                await page.screenshot({path:join(directory,`clienttext-shared-comments-${size.width}-${theme}.png`),fullPage:true});
+            }}
+            await page.evaluate(async()=>{const vm=window.__clientFixtureApp,previous=window.__fixtureCommentLayout;
+                vm.commentsFileFeed=previous.feed;vm.commentsRefreshFile=previous.refresh;vm.commentsObserveVisible=previous.observe;delete window.__fixtureCommentLayout;await vm.$nextTick();vm.commentsObserveVisible();});
+            await workspace.getByRole('button',{name:'Close',exact:true}).click();
+            await page.setViewportSize(desktopSizes[0]);await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),'modern-dark');
+            results.push('Published ClientText shared Comments retain100 long cards in an inner scroll area with the composer and tool tabs fixed at both desktop widths in all four themes');
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             const acceptedEvent = page.waitForEvent('download'); await details.getByRole('button', { name: 'Download accepted work', exact: true }).click();
             const acceptedDownload = await acceptedEvent, acceptedArchive = await JSZip.loadAsync(readFileSync(await acceptedDownload.path()));
@@ -2058,7 +2100,7 @@ async function run() {
             await navigation.getByRole('button', { name: 'Normal', exact: true }).click(); await workspace.getByRole('button', { name: 'record', exact: true }).click();
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('En ligne avant omission');
             await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
-            await page.waitForFunction(async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne avant omission')); });
+            await waitForAsync(page,async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne avant omission')); });
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
             await upload.locator('input[type=text]').fill('Gap version B: Thai only');
@@ -2106,7 +2148,7 @@ async function run() {
             assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'En ligne avant omission', 'Returning French content carries the latest matching accepted work');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctCurrentUnit.fields.find(field => field.name === 'Name').source), 'New Sword');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctStatus().outdated), true, 'Changed English retains carried target as Outdated');
-            await workspace.getByRole('button', { name: /^history$/i }).click();
+            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
             const beforePreviousCompare = await page.evaluate(() => { const vm = window.__clientFixtureApp; return { groupId: vm.ctWorkspace.scope.groupId, unitId: vm.ctSelection, target: vm.ctValues[JSON.stringify(['Name', null])], draft: vm.ctDraftDirty, saved: JSON.stringify(vm.ctSaved[vm.ctSelection]) }; });
             await workspace.getByRole('button', { name: 'Compare previous version', exact: true }).click();
             const previousViewer = page.getByRole('dialog', { name: 'Compare · Normal · record', exact: true }); await previousViewer.waitFor();
