@@ -71,7 +71,7 @@ async function run() {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
-    await page.goto(origin + '/?cloudApi=' + encodeURIComponent(origin));
+    await page.goto(origin + '/?cloudApi=' + encodeURIComponent(origin), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__deferredSaveApp?.offlineStoreReady && window.__deferredSaveApp?.startupReady
       && window.__deferredSaveApp?._cloud?.state && !window.__deferredSaveApp._cloudInitializing
       && !window.__deferredSaveApp._cloudApplying, null, { timeout: 30000 });
@@ -102,7 +102,8 @@ async function run() {
       const clone = item => JSON.parse(JSON.stringify(item));
       await vm.importUpdateZipFile(file, clone(source), { identity, rawSource: clone(source) });
       if (vm.descs.length !== 3 || !vm.sourceIdentity) throw new Error('Source fixture import failed.');
-      vm.showSetting = false; vm.needsInitialSettings = false; vm.selectAllFileFilters(); vm.applyFileSearch();
+      vm.showSetting = false; vm.needsInitialSettings = false; vm.versionChooserVisible = false;
+      vm.selectAllFileFilters(); vm.applyFileSearch();
       await vm.loadEditorDrafts(); await vm.$nextTick();
     });
     const first = 'deferred-fixture/01_first.txt', second = 'deferred-fixture/02_second.txt', third = 'deferred-fixture/03_third.txt';
@@ -133,7 +134,137 @@ async function run() {
       await page.evaluate(() => window.__deferredSaveGate.release());
       await page.waitForFunction(() => !window.__deferredSaveApp.pendingLocalSaves && !window.__deferredSaveApp._pendingSaves.snapshot().jobs.length);
     };
+    const layoutErrors = active => ({
+      localSaveError: active ? 'A staged translation deletion requires its captured saved translation.' : '',
+      dictionaryWorkerError: active ? 'Dictionary preparation failed for ' + 'LongDictionaryEntry'.repeat(14) : '',
+      cloudStorageError: active ? 'Fixture local storage error. Keep this tab open and retry the failed operation.' : '',
+      inlineDraftError: active ? 'Fixture draft conflict. Review the saved translation and the local draft.' : '',
+      inlineDraftFindings: active ? { 'layout-fixture': [{ level: 'error', deferredSave: true,
+        message: 'Fixture deferred draft save needs review before staging.' }] } : {},
+    });
+    const setLayoutErrors = async active => page.evaluate(async errors => {
+      const vm = window.__deferredSaveApp; Object.assign(vm, errors); await vm.$nextTick();
+    }, layoutErrors(active));
+    await page.evaluate(() => { window.__deferredSaveApp._cloudApplying = true; });
+    await setLayoutErrors(true);
+    await page.evaluate(() => {
+      const vm = window.__deferredSaveApp; vm.fileFiltersVisible = true;
+      document.querySelector('.workspaceMain').style.minHeight = '1400px';
+    });
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      for (const density of ['compact', 'spacious']) {
+        for (const width of [1440, 1000, 800]) {
+          await page.setViewportSize({ width, height: 760 });
+          await page.evaluate(async ({ theme, density }) => {
+            const vm = window.__deferredSaveApp; vm.theme = theme; vm.uiDensity = density;
+            document.documentElement.setAttribute('data-theme', theme);
+            await vm.$nextTick(); window.scrollTo(0, 800);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          }, { theme, density });
+          const geometry = await page.evaluate(async errors => {
+            const vm = window.__deferredSaveApp; Object.assign(vm, errors); await vm.$nextTick();
+            const alerts = document.querySelector('.workspaceAlerts'), header = document.querySelector('.workspaceHeader');
+            const nav = header.querySelector('.workspaceActions'), rect = element => {
+              const box = element.getBoundingClientRect();
+              return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height };
+            };
+            return { stackCount: document.querySelectorAll('.workspaceAlerts').length,
+              alertCount: alerts.querySelectorAll('[role="alert"]').length, header: rect(header), nav: rect(nav), stack: rect(alerts),
+              banners: [...alerts.children].map(rect), viewportWidth: innerWidth, viewportHeight: innerHeight,
+              navHit: [...nav.querySelectorAll('button')].every(button => {
+                const box = button.getBoundingClientRect();
+                return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+              }) };
+          }, layoutErrors(true));
+          const label = theme + '/' + density + '/' + width;
+          assert.equal(geometry.stackCount, 1, label + ': exactly one error stack is rendered');
+          assert.equal(geometry.alertCount, 5, label + ': every error remains available');
+          assert.ok(Math.abs(geometry.header.top) < 1, label + ': header sticks at viewport top after scrolling');
+          assert.ok(geometry.stack.top >= geometry.nav.bottom, label + ': errors stay beneath navbar');
+          assert.ok(geometry.stack.height <= geometry.viewportHeight * .32 + 1, label + ': long error stack has bounded scrolling');
+          assert.ok(geometry.stack.left >= 0 && geometry.stack.right <= geometry.viewportWidth, label + ': error stack fits resized desktop');
+          assert.equal(geometry.navHit, true, label + ': all navbar buttons remain pointer accessible');
+          for (let at = 1; at < geometry.banners.length; at++) {
+            assert.ok(geometry.banners[at].top >= geometry.banners[at - 1].bottom - 1, label + ': errors do not overlap');
+          }
+        }
+      }
+    }
+    const screenshotAt = process.argv.indexOf('--layout-screenshot');
+    if (screenshotAt >= 0) {
+      if (!process.argv[screenshotAt + 1]) throw new Error('--layout-screenshot requires a file path.');
+      await page.setViewportSize({ width: 1000, height: 760 });
+      await setLayoutErrors(true);
+      await page.screenshot({ path: process.argv[screenshotAt + 1] });
+      results.push('Stacked workspace error screenshot: ' + process.argv[screenshotAt + 1]);
+    }
+    const settingsButton = page.getByRole('button', { name: 'Settings', exact: true });
+    await settingsButton.click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.waitFor();
+    assert.equal(await settings.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(box.left + 20, box.top + 20));
+    }), true, 'Settings modal displays above errors');
+    await page.keyboard.press('Escape'); await settings.waitFor({ state: 'hidden' });
+    await settingsButton.focus(); await page.keyboard.press('Enter'); await settings.waitFor();
+    await page.keyboard.press('Escape'); await settings.waitFor({ state: 'hidden' });
+    await page.locator('.workspaceAlerts').getByRole('button', { name: 'View local drafts', exact: true }).last().click();
+    const draftsDialog = page.getByRole('dialog', { name: 'Local drafts', exact: true });
+    await draftsDialog.waitFor();
+    assert.equal(await draftsDialog.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(box.left + 20, box.top + 20));
+    }), true, 'Local drafts modal displays above errors');
+    await draftsDialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.evaluate(async filepath => {
+      const vm = window.__deferredSaveApp;
+      vm.inlineDraftFindings = { [filepath]: [{ level: 'error', deferredSave: true, submissionReset: true,
+        message: 'Fixture staged deletion needs review before retrying.' }] };
+      await vm.$nextTick();
+    }, first);
+    const deletionBanner = page.locator('.workspaceAlerts [role="alert"]').filter({ hasText: 'Fixture staged deletion needs review' });
+    assert.equal(await deletionBanner.getByRole('button', { name: 'View local drafts', exact: true }).count(), 0,
+      'Rejected deletion directs to saved translation instead of a missing draft');
+    for (const name of ['Review saved translation', 'Cancel deletion requests']) {
+      assert.equal(await deletionBanner.getByRole('button', { name, exact: true }).isEnabled(), true, name + ' available for rejected deletion');
+    }
+    await page.evaluate(async () => {
+      const vm = window.__deferredSaveApp; vm.stagedDeletionReviewBusy = true; await vm.$nextTick();
+    });
+    for (const name of ['Review saved translation', 'Cancel deletion requests']) {
+      assert.equal(await deletionBanner.getByRole('button', { name, exact: true }).isDisabled(), true, name + ' prevents duplicate recovery actions');
+    }
+    await page.evaluate(async filepath => {
+      const vm = window.__deferredSaveApp; vm.stagedDeletionReviewBusy = false;
+      vm.inlineDraftFindings = { ...vm.inlineDraftFindings, [filepath]: [{ level: 'error', deferredSave: true,
+        message: 'Fixture deferred draft save needs review before staging.' }] };
+      await vm.$nextTick();
+    }, second);
+    assert.equal(await deletionBanner.getByRole('button', { name: 'View local drafts', exact: true }).isEnabled(), true,
+      'Mixed deletion and draft reviews retain both recovery routes');
+    results.push('Rejected deletion banner offers Review saved translation and Cancel deletion requests; busy state prevents duplicates and mixed draft reviews preserve View local drafts.');
+    await setLayoutErrors(false);
+    await page.evaluate(() => {
+      const vm = window.__deferredSaveApp; vm.fileFiltersVisible = false; vm.uiDensity = 'compact'; vm._cloudApplying = false;
+      document.querySelector('.workspaceMain').style.minHeight = ''; window.scrollTo(0, 0);
+    });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    results.push('Navbar remained pointer/keyboard accessible with five stacked errors while scrolled, in four themes, both densities and 1440/1000/800 px desktop windows; Settings and Local drafts dialogs displayed above the banners.');
     await open(first);
+    await setLayoutErrors(true);
+    assert.equal(await page.locator('.workspaceHeader').count(), 0, 'Full editor has no workspace navbar');
+    assert.equal(await page.locator('.workspaceAlerts').count(), 1, 'Full editor renders one fallback error stack');
+    assert.equal(await page.locator('.workspaceAlertsFallback [role="alert"]').count(), 5, 'Fallback preserves every error in the full editor');
+    assert.equal(await page.evaluate(() => {
+      document.querySelector('.editor .edit').style.minHeight = '1400px'; window.scrollTo(0, 800);
+      const button = [...document.querySelectorAll('.editorActions button')].find(element => element.textContent === 'Save & close');
+      const box = button.getBoundingClientRect();
+      return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+    }), true, 'Full editor Save control remains pointer accessible below fallback errors after scrolling');
+    await setLayoutErrors(false);
+    await page.evaluate(() => { document.querySelector('.editor .edit').style.minHeight = ''; window.scrollTo(0, 0); });
+    results.push('Full editor retained a single visible fallback error stack without duplicating the navbar banners.');
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await page.evaluate(theme => { window.__deferredSaveApp.theme = theme; document.documentElement.setAttribute('data-theme', theme); }, theme);
       assert.equal(await field().isVisible(), true, theme + ': editable field visible');

@@ -503,6 +503,21 @@ test('staged deletion requires a danger confirmation and declining retains stage
   assert.equal(editor.editorVisible, true);
 });
 
+test('an untracked shared baseline cannot become a staged deletion while private drafts stay recoverable', async () => {
+  const h = enableDeletionWorker(await stagedDeletionFixture()), { editor, desc, calls, records } = h;
+  editor.editorBlocks[0].translation = 'keep private typing'; await editor.flushEditorDraft();
+  const before = copy(editor.localDescs), drafts = copy([...records.entries()]);
+  const shared = { ...copy(editor.collaborationFile(desc)), revision: 1, trackedForExport: false };
+  editor._collaboration = { fileBase: () => copy(shared) };
+  editor.appConfirm = async () => { assert.fail('A mismatched snapshot must be rejected before confirmation'); };
+  assert.equal(await editor.deleteEditorStagedTranslation(), false);
+  assert.equal(calls.submissions.length, 0); assert.equal(calls.storage.length, 0);
+  assert.equal(editor.pendingLocalSaves, 0); assert.equal(editor.localSaveError, '');
+  assert.match(editor.collaborationNotice, /local and shared saved translations do not match/);
+  assert.deepEqual(copy(editor.localDescs), before); assert.deepEqual(copy([...records.entries()]), drafts);
+  assert.equal(editor.editorBlocks[0].translation, 'keep private typing'); assert.equal(editor.editorHasStagedTranslation, true);
+});
+
 test('confirmed staged deletion bypasses translation validation and resets a clean editor to its ZIP translation', async t => {
   for (const inline of [false, true]) await t.test(inline ? 'inline editor' : 'full editor', async () => {
     const { editor, calls, desc } = await stagedDeletionFixture({ inline });
@@ -649,13 +664,14 @@ test('staged deletion confirmations expire after any editor, access, scope or co
     openRun: h => { h.editor._editorOpenRun++; },
     file: h => { h.editor.editorCurrentEditingDesc = h.editor.descs[1]; },
     stage: h => { h.editor.localDescs.staged.Thai[h.desc.filepath].translations[0] = 'new peer stage'; },
+    localStageWithUnchangedSharedBase: h => { h.editor.localDescs.staged.Thai[h.desc.filepath].translations[0] = 'new local save'; },
     base: h => { h.currentBase.revision++; },
   };
   for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
     const h = await stagedDeletionFixture(), { editor, calls, desc } = h, gate = deferred();
     editor.cloudUser = { id: 'first-account', role: 'translator', assignmentVersion: 1 };
     editor.cloudCanAccessAllLanguages = false;
-    if (name === 'base') {
+    if (name === 'base' || name === 'localStageWithUnchangedSharedBase') {
       h.currentBase = { ...copy(editor.collaborationFile(desc)), revision: 1 };
       editor._collaboration = { fileBase: () => copy(h.currentBase) };
     }

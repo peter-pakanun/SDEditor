@@ -7779,6 +7779,7 @@ if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);
+app.component('workspace-alerts', { template: '#workspace-alerts-template' });
 app.component('app-dialog', window.AppDialogs?.component || {});
 
 app.directive('tooltip', {

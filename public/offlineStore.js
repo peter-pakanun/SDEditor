@@ -1080,7 +1080,11 @@
     const resetBase = resetStaging ? batch.bases?.[files[0].filepath] : null;
     if (resetStaging && (!resetBase || !resetBase.trackedForExport || !Array.isArray(resetBase.translations)
       || resetBase.translations.some(line => typeof line !== 'string'))) {
-      throw new TypeError('A staged translation deletion requires its captured saved translation.');
+      // Older clients could capture an untracked shared baseline while the
+      // workspace still had a staged save. Retrying that exact command cannot
+      // fix its capture. Reject it for review before any transaction starts.
+      throw Object.assign(new Error('The saved translation could not be verified for this deletion.'),
+        { code: 'DELETE_STAGED_BASE_CHANGED', stale: true, filepath: files[0].filepath });
     }
     const draft = batch.draft;
     const checkpoint = batch.checkpoint || draft;

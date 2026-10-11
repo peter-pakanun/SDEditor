@@ -1,4 +1,4 @@
-// Disposable real IndexedDB / authenticated API acceptance fixture for v9.
+// Disposable real IndexedDB / authenticated API acceptance fixture for normalized storage.
 // No production account, browser profile or storage is used.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
@@ -325,7 +325,7 @@ async function runFixture({ storageOnly = false } = {}) {
             finally { IDBIndex.prototype.getAll = originalGetAll; }
             const conversionHistoryBefore = await OfflineStore.listRevisions(conversionSource[2].filepath, 'German', 100, conversionScope);
             const legacyHistory = await OfflineStore.listRevisions(source[0].filepath, 'Thai', 100, historyScope);
-            const read = indexedDB.open('sdeditor', 9), upgraded = await new Promise((resolve, reject) => {
+            const read = indexedDB.open('sdeditor'), upgraded = await new Promise((resolve, reject) => {
                 read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error);
             });
             const frozen = {}, inspect = upgraded.transaction(['kv', 'collaboration_rooms', 'collaboration_records', 'storage_migrations', 'workspace_records'], 'readonly');
@@ -341,7 +341,7 @@ async function runFixture({ storageOnly = false } = {}) {
             window.__normalizedProbe.operations = [];
             const converted = await OfflineStore.getVersionWorkspace(conversionScope, 'Thai'), conversionRetryOperations = window.__normalizedProbe.operations.slice();
             const conversionHistoryAfter = await OfflineStore.listRevisions(conversionSource[2].filepath, 'German', 100, conversionScope);
-            const finalRead = indexedDB.open('sdeditor', 9), finalDb = await new Promise((resolve, reject) => {
+            const finalRead = indexedDB.open('sdeditor'), finalDb = await new Promise((resolve, reject) => {
                 finalRead.onsuccess = () => resolve(finalRead.result); finalRead.onerror = () => reject(finalRead.error);
             });
             const finalEvidence = finalDb.transaction(['kv'], 'readonly'), conversionFrozen = finalEvidence.objectStore('kv').get('workspace_version_v1:' + conversionSuffix);
@@ -378,7 +378,7 @@ async function runFixture({ storageOnly = false } = {}) {
         for (const activity of migrationActivity.values()) assert.equal(activity.started, activity.completed + activity.failed,
             'Every conversion attempt completes or fails, including interruption and retry');
         const schemaEvents = migration.migrationEvents.filter(event => event.kind === 'schema');
-        assert.deepEqual(schemaEvents.map(event => event.state), ['started', 'completed'], 'Real v8-to-v9 schema upgrade emits one balanced activity');
+        assert.deepEqual(schemaEvents.map(event => event.state), ['started', 'completed'], 'Real v8-to-current schema upgrade emits one balanced activity');
         const workspaceEvents = migration.migrationEvents.filter(event => event.kind === 'workspace' && event.scope.sourceHash === 'fixture-v8');
         assert.equal(workspaceEvents.filter(event => event.state === 'started').length, 2, 'Workspace interruption and retry start separate activity attempts');
         assert.equal(workspaceEvents.filter(event => event.state === 'failed').length, 1, 'Failed workspace conversion ends its activity');
@@ -535,18 +535,30 @@ async function runFixture({ storageOnly = false } = {}) {
         results.push({ scenario: 'same-ID receipt replay reconciles later saved text and staged deletion without writes' });
         const absence = await page.evaluate(async () => {
             const scope = window.__storageScope, filepath = 'storage/0.txt', original = window.__storageSource[0];
-            await OfflineStore.saveTranslationBatch({ jobId: 'delete-original-v8-save', ...scope, workspaceScope: scope, language: 'Thai',
+            const batch = { jobId: 'delete-original-v8-save', ...scope, workspaceScope: scope, language: 'Thai',
                 origin: 'delete_staged', resetStaging: true,
                 files: [{ filepath, translations: original.translations.Thai, trackedForExport: false, stagingReset: true }],
                 bases: { [filepath]: { filepath, translations: ['Saved Thai'], trackedForExport: true, revision: 0 } },
-                revisions: [{ filepath, lang: 'Thai', savedAt: 3, translations: original.translations.Thai, note: 'Delete staged translation' }] });
+                revisions: [{ filepath, lang: 'Thai', savedAt: 3, translations: original.translations.Thai, note: 'Delete staged translation' }] };
+            await OfflineStore.saveTranslationBatch(batch);
+            const beforeHistory = await OfflineStore.listRevisions(filepath, 'Thai', 100, scope);
+            window.__normalizedProbe.operations = [];
+            const replay = await OfflineStore.saveTranslationBatch(batch), replayOperations = window.__normalizedProbe.operations.slice();
+            const afterHistory = await OfflineStore.listRevisions(filepath, 'Thai', 100, scope);
             const first = await OfflineStore.getVersionWorkspace(scope, 'Thai'), activated = await OfflineStore.activateVersion(scope),
                 second = await OfflineStore.getVersionWorkspace(scope, 'Thai');
             return { first: first.staged.Thai?.[filepath], second: second.staged.Thai?.[filepath],
-                activated: activated.workspace.staged.Thai?.[filepath], committed: second.descs.find(desc => desc.filepath === filepath).translations.Thai };
+                activated: activated.workspace.staged.Thai?.[filepath], committed: second.descs.find(desc => desc.filepath === filepath).translations.Thai,
+                replay, replayOperations, beforeHistory, afterHistory };
         });
         assert.equal(absence.first, undefined); assert.equal(absence.second, undefined); assert.equal(absence.activated, undefined);
         assert.deepEqual(absence.committed, ['Thai 0'], 'Normalized absence stays authoritative across reads and activation');
+        assert.equal(absence.replay.duplicate, true, 'A committed deletion receipt acknowledges the original command after staging is absent');
+        assert.deepEqual(absence.replay.files[0].translations, ['Thai 0'], 'Committed deletion receipt replay returns the retained ZIP translation');
+        assert.equal(absence.replay.files[0].trackedForExport, false); assert.equal(absence.replay.files[0].stagingReset, true);
+        assert.equal(absence.replayOperations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+            'Committed deletion receipt replay performs zero writes');
+        assert.deepEqual(absence.afterHistory, absence.beforeHistory, 'Committed deletion receipt replay cannot duplicate deletion history');
         results.push({ scenario: 'deleted staged work is never resurrected from frozen v8 evidence' });
         const journal = await page.evaluate(async () => {
             const scope = window.__storageScope, batch = { jobId: 'journal-recovery', ...scope, workspaceScope: scope, language: 'Thai',
@@ -678,6 +690,7 @@ async function runFixture({ storageOnly = false } = {}) {
         });
         assert.deepEqual(preservedGroup, originalRoom.recovery.find(record => record.id === 'retained-many-file-recovery'),
             'Hot shared save, events and acknowledgments preserve every unselected recovery member');
+        await malformedDeletionRecoveryChecks(page, results);
         console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
         if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
         assert.deepEqual(errors, []);
@@ -703,6 +716,213 @@ async function runFixture({ storageOnly = false } = {}) {
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
         rmSync(absolute, { recursive: true, force: true });
     }
+}
+
+async function malformedDeletionRecoveryChecks(page, results) {
+    const prepared = await page.evaluate(async () => {
+        const scope = window.__storageScope, paths = ['storage/6.txt', 'storage/10.txt'];
+        const originals = paths.map(filepath => window.__storageSource.find(file => file.filepath === filepath));
+        for (const [index, filepath] of paths.entries()) await OfflineStore.saveTranslationBatch({
+            jobId: 'malformed-deletion-seed-' + index, ...scope, workspaceScope: scope, language: 'Thai',
+            files: [{ filepath, translations: ['Retained staged text ' + index] }],
+            revisions: [{ filepath, lang: 'Thai', savedAt: 40 + index, translations: ['Retained staged text ' + index], note: 'save' }],
+        });
+        const draft = { profile: scope.accountId, game: scope.game, branchId: scope.branchId,
+            sourceHash: scope.sourceHash, language: 'Thai', filepath: paths[0], id: 'retained-deletion-draft', revision: 'retained-deletion-draft-revision',
+            translations: ['Retained unfinished text'], base: { translations: ['Retained staged text 0'] }, source: originals[0], updatedAt: 42 };
+        await OfflineStore.putTranslationDraft(draft);
+        const snapshot = async () => ({ workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'),
+            source: await OfflineStore.getSource(scope),
+            drafts: await OfflineStore.listTranslationDrafts({ ...scope, profile: scope.accountId, language: 'Thai' }),
+            history: await Promise.all(paths.map(filepath => OfflineStore.listRevisions(filepath, 'Thai', 100, scope))),
+            resetDraft: await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey({ ...draft, filepath: paths[1] })) });
+        const batches = paths.map((filepath, index) => ({ jobId: 'malformed-deletion-' + index, ...scope, workspaceScope: scope, language: 'Thai',
+            origin: 'delete_staged', resetStaging: true,
+            files: [{ filepath, translations: originals[index].translations.Thai, trackedForExport: false, stagingReset: true }],
+            ...(index === 0 ? { bases: { [filepath]: { filepath, translations: originals[index].translations.Thai,
+                trackedForExport: false, revision: 0 } } } : {}),
+            revisions: [{ filepath, lang: 'Thai', savedAt: 50 + index, translations: originals[index].translations.Thai, note: 'Delete staged translation' }],
+        }));
+        for (const batch of batches) await OfflineStore.putSaveSubmission(batch);
+        const before = await snapshot(), attempts = [];
+        for (const batch of batches) {
+            window.__normalizedProbe.operations = [];
+            let rejection;
+            try { await OfflineStore.saveTranslationBatch(batch); }
+            catch (error) { rejection = { code: error.code, message: error.message, stale: error.stale, filepath: error.filepath }; }
+            const rejectedOperations = window.__normalizedProbe.operations.slice();
+            window.__normalizedProbe.operations = [];
+            const review = rejection && await OfflineStore.updateSaveSubmission(batch, { state: 'review', error: rejection });
+            attempts.push({ rejection, rejectedOperations, review, reviewOperations: window.__normalizedProbe.operations.slice() });
+        }
+        return { scope, room: window.__storageRoom, paths, batches, before, after: await snapshot(), attempts,
+            queued: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }) };
+    });
+    for (const [index, attempt] of prepared.attempts.entries()) {
+        const kind = index === 0 ? 'Untracked' : 'Missing';
+        assert.equal(attempt.rejection?.code, 'DELETE_STAGED_BASE_CHANGED', kind + ' deletion base requires a fresh review');
+        assert.equal(attempt.rejection?.stale, true, kind + ' deletion base is a permanent captured-state rejection');
+        assert.deepEqual(attempt.rejectedOperations, [], kind + ' deletion base is rejected before any IndexedDB request or mutation');
+        assert.equal(attempt.review.state, 'review', kind + ' deletion remains durably reviewable');
+        assert.deepEqual(attempt.review.batch, prepared.batches[index], kind + ' deletion review retains the exact originally submitted command');
+        assert.ok(attempt.reviewOperations.filter(operation => ['put', 'add', 'delete'].includes(operation.method))
+            .every(operation => operation.store === 'save_submissions'), kind + ' deletion review changes only its submission journal');
+    }
+    assert.deepEqual(prepared.after, prepared.before, 'Rejected deletions and review preserve immutable source, staged work, drafts and history');
+    assert.equal(prepared.before.resetDraft, null, 'The missing-base deletion starts without a private draft');
+    assert.equal(prepared.after.resetDraft, null, 'Review never manufactures a translation draft from the intended ZIP reset');
+    assert.deepEqual(prepared.after.history.map(rows => rows.map(row => row.note)), [['save'], ['save']],
+        'Rejected deletion creates no deletion history');
+    assert.deepEqual(prepared.queued.map(submission => submission.batch), prepared.batches,
+        'Scope listing retains both exact malformed commands in authored order');
+    assert.ok(prepared.queued.every(submission => submission.state === 'review'), 'Every rejected deletion is listed for review');
+
+    const restored = await page.context().newPage(), browserErrors = [];
+    restored.on('pageerror', error => browserErrors.push(error.message));
+    try {
+        await restored.goto(new URL('/fixture/storage', page.url()).href);
+        await restored.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        await restored.reload();
+        await restored.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const recovery = await restored.evaluate(async ({ scope, paths }) => {
+            const draftScope = { ...scope, profile: scope.accountId, language: 'Thai', filepath: paths[1] };
+            return { queued: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }),
+                isolated: await OfflineStore.listSaveSubmissions({ ...scope, accountId: 'another-deletion-account', language: 'Thai' }),
+                snapshot: { workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'), source: await OfflineStore.getSource(scope),
+                    drafts: await OfflineStore.listTranslationDrafts({ ...scope, profile: scope.accountId, language: 'Thai' }),
+                    history: await Promise.all(paths.map(filepath => OfflineStore.listRevisions(filepath, 'Thai', 100, scope))),
+                    resetDraft: await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey(draftScope)) } };
+        }, { scope: prepared.scope, paths: prepared.paths });
+        assert.deepEqual(recovery.queued, prepared.queued, 'Reload preserves review state, rejection reason, sequence and exact deletion commands');
+        assert.deepEqual(recovery.isolated, [], 'Deletion review remains isolated to the original account');
+        assert.deepEqual(recovery.snapshot, prepared.before, 'Reload preserves staged translations, source, existing draft and history without a ZIP-reset draft');
+
+        const cancellation = await restored.evaluate(async ({ scope, paths, batches }) => {
+            const attempts = [];
+            for (const batch of batches) {
+                window.__normalizedProbe.operations = [];
+                const patch = { state: 'cancelled', cancelledAt: 60 }, cancelled = await OfflineStore.updateSaveSubmission(batch, patch);
+                const operations = window.__normalizedProbe.operations.slice();
+                window.__normalizedProbe.operations = [];
+                const repeated = await OfflineStore.updateSaveSubmission(batch, patch);
+                const retryOperations = window.__normalizedProbe.operations.slice();
+                window.__normalizedProbe.operations = [];
+                const lateReview = await OfflineStore.updateSaveSubmission(batch, { state: 'review', error: { code: 'DELETE_STAGED_BASE_CHANGED', message: 'Late other-tab rejection' } });
+                attempts.push({ cancelled, repeated, operations, retryOperations, lateReview, lateReviewOperations: window.__normalizedProbe.operations.slice() });
+            }
+            return { attempts, listed: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }),
+                snapshot: { workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'), source: await OfflineStore.getSource(scope),
+                    drafts: await OfflineStore.listTranslationDrafts({ ...scope, profile: scope.accountId, language: 'Thai' }),
+                    history: await Promise.all(paths.map(filepath => OfflineStore.listRevisions(filepath, 'Thai', 100, scope))),
+                    resetDraft: await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey({ ...scope,
+                        profile: scope.accountId, language: 'Thai', filepath: paths[1] })) } };
+        }, { scope: prepared.scope, paths: prepared.paths, batches: prepared.batches });
+        for (const [index, attempt] of cancellation.attempts.entries()) {
+            assert.equal(attempt.cancelled.state, 'cancelled', 'Explicit cancellation changes only the rejected deletion request state');
+            assert.deepEqual(attempt.cancelled.batch, prepared.batches[index], 'Cancellation retains the exact original command as recovery evidence');
+            assert.deepEqual(attempt.cancelled.error, prepared.attempts[index].rejection, 'Cancellation retains the original rejection reason');
+            assert.deepEqual(attempt.repeated, attempt.cancelled, 'A repeated cancellation returns the same retained journal');
+            assert.deepEqual(attempt.lateReview, attempt.cancelled, 'Late other-tab review updates cannot resurrect a cancelled deletion journal');
+            assert.ok(attempt.operations.filter(operation => ['put', 'add', 'delete'].includes(operation.method))
+                .every(operation => operation.store === 'save_submissions'), 'Cancellation writes only the rejected submission journal');
+            assert.equal(attempt.retryOperations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+                'Repeated cancellation performs zero writes');
+            assert.equal(attempt.lateReviewOperations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+                'Late review of a cancelled request performs zero writes');
+        }
+        assert.deepEqual(cancellation.listed, [], 'Cancelled rejected deletions are absent from active submission listing');
+        assert.deepEqual(cancellation.snapshot, prepared.before, 'Cancelling rejected deletions retains source, valid staged work, draft and history exactly');
+        await restored.reload();
+        await restored.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const cancelledReload = await restored.evaluate(async ({ scope, batches }) => {
+            const opening = indexedDB.open('sdeditor'), db = await new Promise((resolve, reject) => {
+                opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+            });
+            const tx = db.transaction('save_submissions', 'readonly'), reading = tx.objectStore('save_submissions').index('by_scope').getAll(NormalizedStore.scopeKey(scope));
+            const rows = await new Promise((resolve, reject) => {
+                tx.oncomplete = () => { db.close(); resolve(reading.result); };
+                tx.onabort = () => { db.close(); reject(tx.error); };
+            });
+            return { retained: rows.map(row => row.value).filter(value => batches.some(batch => batch.jobId === value.batch.jobId)),
+                listed: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }) };
+        }, { scope: prepared.scope, batches: prepared.batches });
+        assert.deepEqual(cancelledReload.retained, cancellation.attempts.map(attempt => attempt.cancelled),
+            'Reload retains the exact cancelled journals, captured command and rejection evidence');
+        assert.deepEqual(cancelledReload.listed, [], 'Cancelled requests stay outside active reload recovery');
+
+        const cancelledCommit = await restored.evaluate(async ({ scope, paths, batch, room }) => {
+            const filepath = paths[0], valid = { ...batch, jobId: 'cancelled-matching-base-deletion',
+                bases: { [filepath]: { filepath, translations: ['Retained staged text 0'], trackedForExport: true, revision: 0 } } };
+            await OfflineStore.putSaveSubmission(valid);
+            await OfflineStore.updateSaveSubmission(valid, { state: 'review', error: { code: 'DELETE_STAGED_BASE_CHANGED' } });
+            const read = async () => ({ workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'),
+                drafts: await OfflineStore.listTranslationDrafts({ ...scope, profile: scope.accountId, language: 'Thai' }),
+                history: await Promise.all(paths.map(filepath => OfflineStore.listRevisions(filepath, 'Thai', 100, scope))),
+                room: await OfflineStore.getCollaborationState({ key: room.key, scope: room.identity }),
+                submissions: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }) });
+            const reviewBefore = await read();
+            window.__normalizedProbe.operations = [];
+            let reviewRejection;
+            try { await OfflineStore.saveTranslationBatch(valid); }
+            catch (error) { reviewRejection = { code: error.code, stale: error.stale }; }
+            const reviewOperations = window.__normalizedProbe.operations.slice(), reviewAfter = await read();
+            const cancelled = await OfflineStore.updateSaveSubmission(valid, { state: 'cancelled', cancelledAt: 61 });
+            const before = await read();
+            window.__normalizedProbe.operations = [];
+            let rejection;
+            try { await OfflineStore.saveTranslationBatch(valid); }
+            catch (error) { rejection = { code: error.code, stale: error.stale }; }
+            const operations = window.__normalizedProbe.operations.slice();
+            const lateReview = await OfflineStore.updateSaveSubmission(valid, { state: 'review', error: rejection });
+            return { valid, reviewBefore, reviewAfter, reviewRejection, reviewOperations, cancelled, before, after: await read(), rejection, operations, lateReview };
+        }, { scope: prepared.scope, paths: prepared.paths, batch: prepared.batches[0], room: prepared.room });
+        assert.deepEqual(cancelledCommit.before.workspace.staged.Thai[prepared.paths[0]].translations,
+            cancelledCommit.valid.bases[prepared.paths[0]].translations, 'Cancelled deletion has a valid captured base matching the current staged save');
+        assert.equal(cancelledCommit.valid.bases[prepared.paths[0]].trackedForExport, true, 'Cancelled deletion passes the staged-presence capture guard');
+        assert.equal(cancelledCommit.reviewRejection?.code, 'DELETE_STAGED_BASE_CHANGED', 'Previously rejected deletion requires new confirmation even when its captured base matches again');
+        assert.equal(cancelledCommit.reviewRejection?.stale, true, 'A deletion awaiting review cannot be automatically replayed');
+        assert.equal(cancelledCommit.reviewOperations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+            'A deletion awaiting review never mutates the staged save, history, outbox, journal or receipt');
+        assert.deepEqual(cancelledCommit.reviewAfter, cancelledCommit.reviewBefore,
+            'The durable review guard preserves exact staged work, drafts, history, collaboration outbox and active review journal');
+        assert.equal(cancelledCommit.rejection?.code, 'DELETE_STAGED_CANCELLED', 'Atomic save transaction rejects an otherwise valid cancelled deletion');
+        assert.equal(cancelledCommit.rejection?.stale, true, 'Cancelled deletion requires no automatic replay');
+        assert.equal(cancelledCommit.operations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+            'Cancelled deletion never mutates the staged save, history, outbox or receipt');
+        assert.deepEqual(cancelledCommit.lateReview, cancelledCommit.cancelled, 'Late worker rejection retains the terminal cancelled journal unchanged');
+        assert.deepEqual(cancelledCommit.after, cancelledCommit.before, 'Cancelled cross-tab replay preserves staged work, drafts, history, collaboration outbox and active journals');
+
+        const guards = await restored.evaluate(async ({ scope, batch }) => {
+            const queuedDeletion = { ...batch, jobId: 'queued-deletion-cannot-cancel' };
+            const filepath = 'storage/11.txt', ordinary = { jobId: 'ordinary-review-cannot-cancel', ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath, translations: ['Recoverable ordinary review'] }], bases: { [filepath]: { translations: ['Thai 11'] } }, revisions: [] };
+            await OfflineStore.putSaveSubmission(queuedDeletion);
+            await OfflineStore.putSaveSubmission(ordinary);
+            await OfflineStore.updateSaveSubmission(ordinary, { state: 'review', error: { code: 'DRAFT_BASE_CHANGED' } });
+            const read = async () => ({ submissions: await OfflineStore.listSaveSubmissions({ ...scope, language: 'Thai' }),
+                workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'),
+                drafts: await OfflineStore.listTranslationDrafts({ ...scope, profile: scope.accountId, language: 'Thai' }),
+                history: await OfflineStore.listRevisions(filepath, 'Thai', 100, scope) });
+            const before = await read(), attempts = [];
+            for (const batch of [queuedDeletion, ordinary]) {
+                window.__normalizedProbe.operations = [];
+                let rejection;
+                try { await OfflineStore.updateSaveSubmission(batch, { state: 'cancelled' }); }
+                catch (error) { rejection = error.message; }
+                attempts.push({ rejection, operations: window.__normalizedProbe.operations.slice() });
+            }
+            return { before, after: await read(), attempts };
+        }, { scope: prepared.scope, batch: prepared.batches[0] });
+        for (const [index, attempt] of guards.attempts.entries()) {
+            assert.match(attempt.rejection || '', /Only a rejected staged deletion request can be cancelled/,
+                (index ? 'Ordinary reviewed save' : 'Queued deletion') + ' cannot use the rejected-deletion cancellation');
+            assert.equal(attempt.operations.some(operation => ['put', 'add', 'delete'].includes(operation.method)), false,
+                'Invalid cancellation performs no writes');
+        }
+        assert.deepEqual(guards.after, guards.before, 'Cancellation guards preserve pending intent, staged work, all drafts and history');
+        assert.deepEqual(browserErrors, []);
+    } finally { await restored.close(); }
+    results.push({ scenario: 'journaled malformed staged deletions retain exact review/cancelled evidence across reload without invented drafts or lost work', cases: 2 });
 }
 
 async function denseSelectionChecks(page, results) {
@@ -751,7 +971,7 @@ async function denseSelectionChecks(page, results) {
 async function activationPointerChecks(page, scope, results) {
     const result = await page.evaluate(async scope => {
         const previousContext = OfflineStore.captureWorkspaceScope({}), pointer = 'workspace_active_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId]);
-        const opening = indexedDB.open('sdeditor', 9), db = await new Promise((resolve, reject) => {
+        const opening = indexedDB.open('sdeditor'), db = await new Promise((resolve, reject) => {
             opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
         });
         const complete = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); });
@@ -823,7 +1043,7 @@ async function sameBaselineImportChecks(page, results) {
     const repeated = await page.evaluate(async () => {
         const copy = value => JSON.parse(JSON.stringify(value));
         const readRows = async names => {
-            const opening = indexedDB.open('sdeditor', 9);
+            const opening = indexedDB.open('sdeditor');
             const db = await new Promise((resolve, reject) => { opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error); });
             const tx = db.transaction(names, 'readonly'), rows = {};
             for (const name of names) {
@@ -911,7 +1131,7 @@ async function sameBaselineImportChecks(page, results) {
             ['version_metadata_v1:' + suffix]: { ...legacyScope, name: 'Legacy same-baseline workspace' },
             ['import_baseline_poe2_' + archive.baselineId]: { ...copy(baseline), source: copy(legacySource), rawSource: copy(legacySource) },
         };
-        const opening = indexedDB.open('sdeditor', 9);
+        const opening = indexedDB.open('sdeditor');
         const db = await new Promise((resolve, reject) => { opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error); });
         const write = db.transaction('kv', 'readwrite');
         for (const [key, value] of Object.entries(legacyEvidence)) write.objectStore('kv').put({ key, value });
@@ -1097,7 +1317,7 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
         await vm.importUpdateZipFile(file, copy(acceptedSource), { identity, rawSource: copy(source), decisions });
         const importOperations = copy(window.__normalizedProbe.operations), scope = vm.managedWorkspaceScope();
         const persisted = await new Promise((resolve, reject) => {
-            const opening = indexedDB.open('sdeditor', 9);
+            const opening = indexedDB.open('sdeditor');
             opening.onerror = () => reject(opening.error);
             opening.onsuccess = () => {
                 const db = opening.result, tx = db.transaction(['translation_workspaces', 'baseline_assets', 'kv'], 'readonly');
@@ -1140,7 +1360,7 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     const persistedRoom = await page.evaluate(async () => {
         const client = window.__normalizedApp._collaboration, identity = JSON.parse(JSON.stringify(client.room().identity));
         const metadata = await new Promise((resolve, reject) => {
-            const opening = indexedDB.open('sdeditor', 9);
+            const opening = indexedDB.open('sdeditor');
             opening.onerror = () => reject(opening.error);
             opening.onsuccess = () => {
                 const db = opening.result, tx = db.transaction('collaboration_rooms', 'readonly'), reading = tx.objectStore('collaboration_rooms').get(client.key);

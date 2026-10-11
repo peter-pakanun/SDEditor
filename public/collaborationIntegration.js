@@ -4,7 +4,15 @@
   const initializationTask = (app, label, callback, session) => typeof app.runWorkspaceInitializationTask === 'function'
     ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
   const mixin = {
-    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', importBaseline: null, importBaselineHashing: false, pendingLocalSaves: 0, localSaveError: '' }; },
+    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', importBaseline: null, importBaselineHashing: false, pendingLocalSaves: 0, localSaveError: '', stagedDeletionReviewBusy: false }; },
+    computed: {
+      hasStagedDeletionReview() {
+        return Object.values(this.inlineDraftFindings || {}).some(findings => findings.some(finding => finding.deferredSave && finding.submissionReset));
+      },
+      hasDeferredDraftReview() {
+        return Object.values(this.inlineDraftFindings || {}).some(findings => findings.some(finding => finding.deferredSave && !finding.submissionReset));
+      },
+    },
     watch: {
       cloudSignedIn() { this.scheduleCollaboration(); },
       'cloudUser.id'() { this.scheduleCollaboration(); },
@@ -357,9 +365,13 @@
             if (job.durable || !window.PendingSaves.requiresReview(error)) return;
             // Retain a reviewable checkpoint even when Save went directly to
             // its submission journal without creating a recovery draft first.
-            await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review',
+            const review = await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review',
               error: { code: error.code, message: error.message } });
             try {
+              if (review?.state === 'cancelled') {
+                if (this.collaborationContextCurrent(job.context)) this.clearStagedDeletionReview(job.batch);
+                return;
+              }
               if (this.collaborationContextCurrent(job.context)) this.showSaveSubmissionReview({ batch: job.batch, error });
               await job.onRejected?.(error);
               if (!job.batch.resetStaging && this.collaborationContextCurrent(job.context)) await this.loadEditorDrafts?.();
@@ -464,13 +476,57 @@
       },
       showSaveSubmissionReview(record) {
         const advice = record.batch.resetStaging
-          ? 'Review the current saved translation and confirm deletion again.'
+          ? 'Review the current saved translation and confirm deletion again, or cancel the deletion request to keep it.'
           : record.error?.code === 'DROPPED_PROMOTION_CHANGED'
           ? 'Open the full editor to review the current Dropped translation before saving again.'
           : 'Open Local drafts to review this submitted translation.';
         for (const file of record.batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
-          [file.filepath]: [{ level: 'error', deferredSave: true, ...(record.batch.resetStaging ? { submissionReset: true } : {}),
+          [file.filepath]: [{ level: 'error', deferredSave: true, ...(record.batch.resetStaging ? { submissionReset: true, submissionJobId: record.batch.jobId } : {}),
             message: file.filepath + ': ' + [record.error?.message, advice].filter(Boolean).join(' ') }] };
+      },
+      async reviewStagedDeletion() {
+        if (this.stagedDeletionReviewBusy) return false;
+        const filepath = Object.keys(this.inlineDraftFindings || {}).find(path => this.inlineDraftFindings[path]
+          .some(finding => finding.deferredSave && finding.submissionReset));
+        if (!filepath) return false;
+        if (!this.getDescByFilepath(filepath)) {
+          await this.appAlert('This file is absent from the current source. Cancel its rejected deletion request to keep the saved work.');
+          return false;
+        }
+        return this.editFile(filepath, true);
+      },
+      clearStagedDeletionReview(batch) {
+        for (const file of batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
+          [file.filepath]: (this.inlineDraftFindings?.[file.filepath] || []).filter(finding => !finding.submissionReset
+            || finding.submissionJobId !== batch.jobId) };
+      },
+      async cancelStagedDeletionReviews() {
+        if (this.stagedDeletionReviewBusy) return false;
+        const context = this.captureCollaborationContext(), scope = this.pendingSaveScope();
+        this.stagedDeletionReviewBusy = true;
+        try {
+          const records = await window.OfflineStore.listSaveSubmissions(scope);
+          if (!this.collaborationContextCurrent(context)) return false;
+          const activeIds = new Set(records.map(record => record.batch.jobId));
+          // Another tab may already have cancelled or completed this request.
+          // Its exact warning is obsolete once authoritative recovery omits it.
+          for (const [path, findings] of Object.entries(this.inlineDraftFindings || {})) this.inlineDraftFindings = { ...this.inlineDraftFindings,
+            [path]: findings.filter(finding => !finding.submissionReset || !finding.submissionJobId || activeIds.has(finding.submissionJobId)) };
+          for (const record of records.filter(record => record.state === 'review' && record.batch.resetStaging
+            && window.PendingSaves.scopeKey(record.batch) === window.PendingSaves.scopeKey(scope))) {
+            const cancelled = await window.OfflineStore.updateSaveSubmission(record.batch, { state: 'cancelled' });
+            if (!this.collaborationContextCurrent(context)) return false;
+            if (cancelled?.state !== 'cancelled') throw new Error('The rejected deletion request changed. Review it again.');
+            this.clearStagedDeletionReview(record.batch);
+          }
+          return true;
+        } catch (error) {
+          if (this.collaborationContextCurrent(context)) for (const [path, findings] of Object.entries(this.inlineDraftFindings || {})) {
+            this.inlineDraftFindings = { ...this.inlineDraftFindings, [path]: findings.map(finding => finding.submissionReset
+              ? { ...finding, deletionCancelError: 'Could not cancel deletion requests. ' + error.message } : finding) };
+          }
+          return false;
+        } finally { this.stagedDeletionReviewBusy = false; }
       },
       pendingDraftSaveFor(filepath) {
         if (!this._pendingSaves || !window.PendingSaves) return null;
@@ -890,28 +946,40 @@
       },
       async persistStagedDeletion(desc, base, ctx = this.captureCollaborationContext(), onCommitted) {
         if (this._reconcilingImport || this._importingSource || !this.collaborationContextCurrent(ctx)) return { stale: true };
+        const capturedBase = copy(base);
+        const sharedRoom = ctx.client?.room();
+        const sharedBase = sharedRoom ? copy(ctx.client.fileBase(desc.filepath)) : null;
         this._translationWrites = (this._translationWrites || 0) + 1;
         try {
           if (!await this.waitForPendingSaves()) throw new Error('Retry the pending local saves before deleting this staged translation.');
           if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          const current = this.collaborationFile(desc, ctx.language);
+          if (!capturedBase?.trackedForExport || !current.trackedForExport || !arrayEquals(current.translations, capturedBase.translations)
+            || !!sharedRoom !== !!ctx.client?.room()
+            || (sharedRoom && (!sharedBase?.trackedForExport || !arrayEquals(sharedBase.translations, capturedBase.translations)
+              || JSON.stringify(sharedBase) !== JSON.stringify(ctx.client.fileBase(desc.filepath))))) {
+            throw Object.assign(new Error('The saved translation changed or does not match the shared workspace. Review and save the translation you want to keep before deleting.'),
+              { code: 'DELETE_STAGED_BASE_CHANGED', stale: true, filepath: desc.filepath });
+          }
           const source = this.workspaceSourceFile(desc.filepath);
           if (!source) throw new Error('The original ZIP translation is unavailable. Reimport the original ZIP before deleting this staged translation.');
           const translations = [...(source.translations?.[ctx.language] || [])];
           while (translations.length < source.translations.English.length) translations.push('');
-          const file = { filepath: desc.filepath, translations, needsReview: false, trackedForExport: false, stagingReset: true, revision: Number(base.revision) || 0 };
+          const file = { filepath: desc.filepath, translations, needsReview: false, trackedForExport: false, stagingReset: true, revision: Number(sharedBase?.revision ?? capturedBase.revision) || 0 };
           const now = Date.now();
           const metadata = { filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: ctx.language, sourceHash: ctx.source };
-          const bases = { [desc.filepath]: copy(base) };
+          const bases = { [desc.filepath]: capturedBase };
           const batch = { jobId: crypto.randomUUID(), game: ctx.game, branchId: ctx.branchId || 'default', language: ctx.language, sourceHash: ctx.source, accountId: ctx.account,
             ...(ctx.groupId ? { versionId: ctx.versionId, groupId: ctx.groupId } : {}),
             resetStaging: true, origin: 'delete_staged', deferDisplay: true, bases, files: [file],
             descriptions: [makeLocalDesc(source, ctx.language, translations, { derivedStatus: true })],
             statuses: { [desc.filepath]: window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language, { lastEditedAt: now }) },
             revisions: [
-              { ...metadata, savedAt: now - 1, note: 'Before delete staged translation', translations: [...base.translations], isMissing: computeIsMissing(source.translations.English.length, base.translations) },
+              { ...metadata, savedAt: now - 1, note: 'Before delete staged translation', translations: [...capturedBase.translations], isMissing: computeIsMissing(source.translations.English.length, capturedBase.translations) },
               { ...metadata, savedAt: now, note: 'Delete staged translation', translations, isMissing: computeIsMissing(source.translations.English.length, translations) },
             ],
-            ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity), bases, origin: 'delete_staged' } } : {}),
+            ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity),
+              bases: { [desc.filepath]: sharedBase }, origin: 'delete_staged' } } : {}),
           };
           if (this.testMode) {
             const current = this.collaborationFile(desc, ctx.language);
@@ -929,8 +997,11 @@
             try { await queue.drain(); }
             catch (error) {
               if (!job.durable && window.PendingSaves.requiresReview(error)) {
-                await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review', error: { code: error.code, message: error.message } });
-                if (this.collaborationContextCurrent(ctx)) this.showSaveSubmissionReview({ batch: job.batch, error });
+                const review = await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review', error: { code: error.code, message: error.message } });
+                if (this.collaborationContextCurrent(ctx)) {
+                  if (review?.state === 'cancelled') this.clearStagedDeletionReview(job.batch);
+                  else this.showSaveSubmissionReview({ batch: job.batch, error });
+                }
                 queue.discardRejectedSubmission?.(job.id);
               }
               throw error;

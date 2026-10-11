@@ -161,7 +161,8 @@ function enablePending(h) {
     submissions.set(batch.jobId, record); journals.push(record); return structuredClone(record);
   };
   window.OfflineStore.listSaveSubmissions = async scope => [...submissions.values()].filter(record =>
-    window.PendingSaves.scopeKey(record.batch) === window.PendingSaves.scopeKey(scope)).map(structuredClone);
+    ['queued', 'pending', 'review'].includes(record.state)
+    && window.PendingSaves.scopeKey(record.batch) === window.PendingSaves.scopeKey(scope)).map(record => structuredClone(record));
   window.OfflineStore.updateSaveSubmission = async (batch, patch) => {
     const record = { ...submissions.get(batch.jobId), ...structuredClone(patch) }; submissions.set(batch.jobId, record); return record;
   };
@@ -359,6 +360,135 @@ test('staged deletion storage failure keeps the visible stage and retains the id
   acknowledge(calls[1]); await retrying;
   assert.equal(e.pendingLocalSaves, 0); assert.equal(e.localSaveError, '');
   assert.equal(e.localDescs.staged.Thai[desc.filepath], undefined);
+});
+
+test('staged deletion captures local saved text separately from the shared revision', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, desc, calls, acknowledge, base } = h;
+  const sharedBase = { ...structuredClone(base), revision: 17 }, room = { identity: { sourceHash: e.sourceIdentity } };
+  e._collaboration = { key: 'room', room: () => room, fileBase: () => structuredClone(sharedBase),
+    withLocalWrite: write => write(), acceptLocalSave() {} };
+  const deleting = e.persistStagedDeletion(desc, base); await pendingTick();
+  assert.equal(calls.length, 1); const batch = calls[0].batch;
+  assert.deepEqual(JSON.parse(JSON.stringify(batch.bases[desc.filepath])), base);
+  assert.deepEqual(JSON.parse(JSON.stringify(batch.collaboration.bases[desc.filepath])), sharedBase);
+  assert.equal(batch.files[0].revision, 17); acknowledge(calls[0]);
+  assert.equal((await deleting).durable, true); e._pendingSaves.dispose();
+});
+
+test('untracked or changed shared deletion captures never enter the durable save journal', async () => {
+  for (const changed of ['untracked', 'differentText', 'revisionDuringWait', 'localDuringWait']) {
+    const h = pendingStagedDeletionFixture(), { editor: e, desc, base, calls, submissions } = h;
+    const sharedBase = { ...structuredClone(base), revision: 17 }, room = { identity: { sourceHash: e.sourceIdentity } };
+    e._collaboration = { key: 'room', room: () => room, fileBase: () => structuredClone(sharedBase) };
+    if (changed === 'untracked') sharedBase.trackedForExport = false;
+    if (changed === 'differentText') sharedBase.translations[0] = 'Different shared text';
+    e.waitForPendingSaves = async () => {
+      if (changed === 'revisionDuringWait') sharedBase.revision++;
+      if (changed === 'localDuringWait') e.localDescs.staged.Thai[desc.filepath].translations[0] = 'New local save';
+      return true;
+    };
+    await assert.rejects(e.persistStagedDeletion(desc, base), error => error.code === 'DELETE_STAGED_BASE_CHANGED');
+    assert.equal(calls.length, 0); assert.equal(submissions.size, 0); assert.equal(e.pendingLocalSaves, 0);
+    assert.ok(e.localDescs.staged.Thai[desc.filepath]); assert.equal(e.editorBlocks[0].translation, 'Keep local typing');
+  }
+});
+
+test('a recovered malformed deletion becomes durable review evidence and releases independent saves', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, window, desc, baseline, base, submissions, calls, acknowledge } = h;
+  e.offlineStoreReady = true;
+  const malformed = { jobId: 'old-malformed-delete', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+    origin: 'delete_staged', resetStaging: true, deferDisplay: true,
+    bases: { [desc.filepath]: { ...structuredClone(base), trackedForExport: false } },
+    files: [{ filepath: desc.filepath, translations: baseline.translations.Thai, trackedForExport: false, stagingReset: true }] };
+  const other = description(2); e.descs.push(other);
+  const independent = { jobId: 'independent-save', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+    files: [{ filepath: other.filepath, translations: ['Independent edit', 'Second'], trackedForExport: true }] };
+  submissions.set(malformed.jobId, { batch: structuredClone(malformed), state: 'queued' });
+  submissions.set(independent.jobId, { batch: structuredClone(independent), state: 'queued' });
+  const validator = { WorkspaceState: window.WorkspaceState };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/offlineStore.js'), 'utf8'), { window: validator, Error, TypeError });
+  window.SaveWorkerClient.create = () => ({ save: batch => batch.resetStaging ? validator.OfflineStore.saveTranslationBatch(batch)
+    : new Promise((resolve, reject) => calls.push({ batch, resolve, reject })) });
+  const stageBefore = JSON.stringify(e.localDescs.staged), malformedBefore = JSON.stringify(malformed);
+  await e.recoverPendingSaves(); await pendingTick(); await pendingTick();
+  assert.equal(submissions.get(malformed.jobId).state, 'review');
+  assert.equal(JSON.stringify(submissions.get(malformed.jobId).batch), malformedBefore);
+  assert.equal(calls.length, 1); assert.equal(calls[0].batch.jobId, independent.jobId);
+  assert.equal(JSON.stringify(e.localDescs.staged), stageBefore); assert.equal(e.editorBlocks[0].translation, 'Keep local typing');
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /verified.*confirm deletion again/);
+  acknowledge(calls[0]); await e._pendingSaves.drain();
+  assert.equal(e.localSaveError, ''); assert.equal(e.pendingLocalSaves, 0);
+  e._recoveredSaveScope = null; await e.recoverPendingSaves(); await pendingTick();
+  assert.equal(calls.length, 1, 'Reviewed deletion must not be resubmitted after a new recovery pass.');
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /confirm deletion again/); e._pendingSaves.dispose();
+});
+
+test('cancelling a rejected deletion keeps saved text and resolves only its exact durable review', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, desc, base, submissions, window } = h;
+  const batch = { jobId: 'delete-review', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+    resetStaging: true, bases: { [desc.filepath]: base }, files: [{ filepath: desc.filepath, translations: ['ZIP original'] }] };
+  submissions.set(batch.jobId, { state: 'review', batch });
+  e.showSaveSubmissionReview({ batch, error: { message: 'The saved translation could not be verified.' } });
+  e.inlineDraftFindings[desc.filepath].push({ deferredSave: true, message: 'Separate local draft review' });
+  const workspace = JSON.stringify(e.localDescs), blocks = JSON.stringify(e.editorBlocks), original = JSON.stringify(batch);
+  let opened; e.editFile = async filepath => { opened = filepath; return true; };
+  assert.equal(e.hasStagedDeletionReview, true); assert.equal(e.hasDeferredDraftReview, true);
+  assert.equal(await e.reviewStagedDeletion(), true); assert.equal(opened, desc.filepath);
+  assert.equal(await e.cancelStagedDeletionReviews(), true);
+  assert.equal(submissions.get(batch.jobId).state, 'cancelled'); assert.equal(JSON.stringify(submissions.get(batch.jobId).batch), original);
+  assert.equal(JSON.stringify(e.localDescs), workspace); assert.equal(JSON.stringify(e.editorBlocks), blocks);
+  assert.equal(e.hasStagedDeletionReview, false); assert.equal(e.hasDeferredDraftReview, true);
+  assert.equal(e.inlineDraftFindings[desc.filepath][0].message, 'Separate local draft review');
+  assert.deepEqual(await window.OfflineStore.listSaveSubmissions(e.pendingSaveScope()), []);
+});
+
+test('failed deletion review cancellation retains its warning and a scope change cannot clear another workspace', async () => {
+  for (const changeScope of [false, true]) {
+    const h = pendingStagedDeletionFixture(), { editor: e, desc, window, submissions } = h;
+    const batch = { jobId: 'review', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+      resetStaging: true, files: [{ filepath: desc.filepath }] };
+    submissions.set(batch.jobId, { state: 'review', batch }); e.showSaveSubmissionReview({ batch });
+    const original = JSON.stringify(e.inlineDraftFindings);
+    const gate = {}; gate.promise = new Promise(resolve => { gate.resolve = resolve; });
+    window.OfflineStore.updateSaveSubmission = async () => { await gate.promise; if (!changeScope) throw new Error('Storage full'); return { state: 'cancelled' }; };
+    const cancelling = e.cancelStagedDeletionReviews(); await pendingTick();
+    assert.equal(e.stagedDeletionReviewBusy, true); assert.equal(JSON.stringify(e.inlineDraftFindings), original);
+    if (changeScope) { e.lang = 'German'; e.inlineDraftFindings = { [desc.filepath]: [{ message: 'New language warning' }] }; }
+    gate.resolve(); assert.equal(await cancelling, false); assert.equal(e.stagedDeletionReviewBusy, false);
+    if (changeScope) assert.equal(e.inlineDraftFindings[desc.filepath][0].message, 'New language warning');
+    else {
+      assert.equal(e.hasStagedDeletionReview, true);
+      assert.match(e.inlineDraftFindings[desc.filepath][0].deletionCancelError, /Storage full/);
+      assert.equal(submissions.get(batch.jobId).state, 'review');
+    }
+  }
+});
+
+test('another tab cancelling a rejected deletion clears only its obsolete warning', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, desc } = h;
+  e.showSaveSubmissionReview({ batch: { jobId: 'already-cancelled', resetStaging: true, files: [{ filepath: desc.filepath }] } });
+  e.inlineDraftFindings[desc.filepath].push({ deferredSave: true, message: 'Keep ordinary draft review' });
+  const stageBefore = JSON.stringify(e.localDescs.staged);
+  assert.equal(await e.cancelStagedDeletionReviews(), true);
+  assert.equal(e.hasStagedDeletionReview, false); assert.equal(e.hasDeferredDraftReview, true);
+  assert.equal(e.inlineDraftFindings[desc.filepath][0].message, 'Keep ordinary draft review');
+  assert.equal(JSON.stringify(e.localDescs.staged), stageBefore);
+});
+
+test('a late worker rejection of a cancelled deletion cannot revive its review banner', async () => {
+  const h = pendingStagedDeletionFixture(), { editor: e, desc, calls, submissions, window } = h;
+  const batch = { jobId: 'cancelled-delete', game: e.gameVersion, language: e.lang, sourceHash: e.sourceIdentity, accountId: '',
+    resetStaging: true, files: [{ filepath: desc.filepath, translations: ['ZIP original'] }] };
+  const queue = e.initializePendingSaves(), job = queue.enqueue(batch, { context: e.captureCollaborationContext() }); job.journaled = true;
+  await pendingTick(); submissions.set(batch.jobId, { batch, state: 'cancelled' });
+  window.OfflineStore.updateSaveSubmission = async () => submissions.get(batch.jobId);
+  e.showSaveSubmissionReview({ batch });
+  e.inlineDraftFindings[desc.filepath].push({ deferredSave: true, message: 'Keep new private typing' });
+  calls[0].reject(Object.assign(new Error('This deletion request was cancelled.'), { code: 'DELETE_STAGED_CANCELLED' }));
+  await pendingTick(); await pendingTick(); await queue.drain();
+  assert.equal(submissions.get(batch.jobId).state, 'cancelled'); assert.equal(e.hasStagedDeletionReview, false);
+  assert.equal(e.inlineDraftFindings[desc.filepath][0].message, 'Keep new private typing');
+  assert.equal(e.pendingLocalSaves, 0); assert.equal(e.localSaveError, ''); queue.dispose();
 });
 
 test('a staged deletion acknowledgement awaits its captured editor hook before the queue finishes', async () => {

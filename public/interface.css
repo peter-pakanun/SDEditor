@@ -122,6 +122,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   box-shadow: 0 3px 12px rgba(0, 0, 0, .04);
 }
 .workspaceBrand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.workspaceHeader > .workspaceAlerts { grid-column: 1 / -1; }
 .brandMark {
   display: block;
   width: 34px;

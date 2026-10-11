@@ -207,6 +207,21 @@ test('changed or removed staged text rejects deletion transactionally and retain
   }
 });
 
+test('malformed saved captures from older deletion commands require review before any storage mutation', async () => {
+  for (const captured of [undefined, { ...file(), trackedForExport: false }, { trackedForExport: true, translations: [null] }]) {
+    const f = deletionFixture(), before = copy(Object.fromEntries(f.kv));
+    const request = deletionBatch({ bases: captured ? { 'stat.txt': captured } : {} });
+    await assert.rejects(f.store.saveTranslationBatch(request), error => {
+      assert.equal(error.code, 'DELETE_STAGED_BASE_CHANGED');
+      assert.equal(error.stale, true); assert.equal(error.filepath, 'stat.txt');
+      assert.equal(require('../public/pendingSaves.js').requiresReview(error), true);
+      return true;
+    });
+    assert.equal(f.transactions.length, 0); assert.equal(f.revisions.length, 0);
+    assert.deepEqual(Object.fromEntries(f.kv), before);
+  }
+});
+
 test('changed shared revision or an unresolved conflict rejects deletion without rewriting the outbox', async () => {
   for (const conflict of [false, true]) {
     const f = deletionFixture({ collaboration: true }), room = f.kv.get('collaboration_v1').rooms[key];
@@ -572,6 +587,20 @@ test('serial worker messages preserve save order and continue after an acknowled
   worker.emit({ type: 'error', id: 'save-1', error: { name: 'QuotaExceededError', message: 'Quota exceeded' } }); await rejection;
   await queued(); assert.equal(worker.messages.length, 2); assert.equal(worker.messages[1].id, 'save-2');
   worker.emit({ type: 'saved', id: 'save-2', result: { status: 'local' } }); await second; client.dispose();
+});
+
+test('worker deletion rejection keeps its review code and never becomes an uncertain or successful save', async () => {
+  const f = deletionFixture({ worker: true }), messages = [];
+  const worker = { OfflineStore: f.store, postMessage: message => messages.push(message) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/saveWorker.js'), 'utf8'), { self: worker, importScripts() {} });
+  const client = create({ Worker: null, store: {} });
+  client.fallback = false; client.worker = { postMessage: message => worker.onmessage({ data: message }), terminate() {} };
+  worker.postMessage = message => { messages.push(message); client.receive(message); };
+  await assert.rejects(client.save(deletionBatch({ bases: { 'stat.txt': { ...file(), trackedForExport: false } } })), error => {
+    assert.equal(error.code, 'DELETE_STAGED_BASE_CHANGED'); assert.equal(error.stale, true);
+    assert.equal(error.durableUnknown, undefined); return true;
+  });
+  assert.equal(messages.at(-1).type, 'error'); assert.equal(f.transactions.length, 0); client.dispose();
 });
 
 test('non-plain worker payload errors are surfaced without falling back or acknowledging success', async () => {

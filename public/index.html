@@ -48,11 +48,7 @@
       <span v-if="storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
       <span>{{ storageMigrationMessage }}</span>
     </div>
-    <div v-if="localSaveError" class="cloudStorageError" role="alert">Could not finish saving your translations. Your edits remain in this tab. {{ localSaveError }} <button @click="retryPendingSaves">Retry saving</button> <button @click="downloadPendingSaves">Download pending edits</button></div>
-    <div v-if="dictionaryWorkerError" class="cloudStorageError" role="alert">Could not prepare Dictionary matches. {{ dictionaryWorkerError }} <button @click="retryDictionaryPreparation" :disabled="dictionaryPreparationRetrying">Retry preparation</button></div>
-    <div v-if="cloudStorageError && !dictionaryPreparationOwnsStorageError" class="cloudStorageError" role="alert">{{ cloudStorageError }} <button @click="saveSettings">Retry local save</button></div>
-    <div v-if="inlineDraftError" class="cloudStorageError" role="alert">{{ inlineDraftError }} <button @click="openDraftRecovery">View local drafts</button></div>
-    <div v-if="deferredDraftSaveError" class="cloudStorageError" role="alert">{{ deferredDraftSaveError }} <button @click="openDraftRecovery">View local drafts</button></div>
+    <workspace-alerts v-if="versionChooserVisible || needsInitialSettings || (ctActive ? ctEditor : !gameVersionSelected || loadingProgress < 100 || editorVisible || workspaceInitializationActive)" class="workspaceAlertsFallback"></workspace-alerts>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
@@ -442,6 +438,7 @@
             <label v-for="option in ctStatusFilterOptions" :key="option.key" class="filterChip" :class="[{selected:ctSelectedFilters.includes(option.key)},option.tone]"><input type="checkbox" v-model="ctSelectedFilters" :value="option.key"><span>{{ option.label }}</span></label>
             <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctSelectedFilters.length===ctStatusFilterOptions.length">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
           </div></fieldset>
+          <workspace-alerts></workspace-alerts>
         </header>
         <main class="workspaceContent">
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
@@ -657,6 +654,7 @@
             <div class="filterSelectionActions"><button @click="selectAllFileFilters" :disabled="allFileFiltersSelected">Select all</button><button @click="selectedFileFilters = []" :disabled="selectedFileFilters.length === 0">Clear filters</button></div>
           </div>
         </fieldset>
+        <workspace-alerts v-if="!workspaceInitializationActive"></workspace-alerts>
       </header>
 
       <main class="workspaceContent" :class="{ inlineWorkspaceLayout: inlineEditor, inlineSidebarOpen: inlineEditor && inlineSidebarVisible }">
@@ -1667,6 +1665,36 @@
   <script src="managedVersions.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="tmUi.js"></script>
+  <script type="text/x-template" id="workspace-alerts-template">
+    <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError" class="workspaceAlerts" role="group" aria-label="Workspace errors">
+      <div v-if="$root.localSaveError" class="cloudStorageError" role="alert">
+        <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
+        <div class="workspaceAlertActions"><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></div>
+      </div>
+      <div v-if="$root.dictionaryWorkerError" class="cloudStorageError" role="alert">
+        <span>Could not prepare Dictionary matches. {{ $root.dictionaryWorkerError }}</span>
+        <div class="workspaceAlertActions"><button @click="$root.retryDictionaryPreparation" :disabled="$root.dictionaryPreparationRetrying">Retry preparation</button></div>
+      </div>
+      <div v-if="$root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError" class="cloudStorageError" role="alert">
+        <span>{{ $root.cloudStorageError }}</span>
+        <div class="workspaceAlertActions"><button @click="$root.saveSettings">Retry local save</button></div>
+      </div>
+      <div v-if="$root.inlineDraftError" class="cloudStorageError" role="alert">
+        <span>{{ $root.inlineDraftError }}</span>
+        <div class="workspaceAlertActions"><button @click="$root.openDraftRecovery">View local drafts</button></div>
+      </div>
+      <div v-if="$root.deferredDraftSaveError" class="cloudStorageError" role="alert">
+        <span>{{ $root.deferredDraftSaveError }}</span>
+        <div class="workspaceAlertActions">
+          <button v-if="!$root.hasStagedDeletionReview || $root.hasDeferredDraftReview" @click="$root.openDraftRecovery">View local drafts</button>
+          <template v-if="$root.hasStagedDeletionReview">
+            <button @click="$root.reviewStagedDeletion" :disabled="$root.stagedDeletionReviewBusy">Review saved translation</button>
+            <button @click="$root.cancelStagedDeletionReviews" :disabled="$root.stagedDeletionReviewBusy">Cancel deletion requests</button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </script>
   <script src="index.js"></script>
 </body>
 </html>

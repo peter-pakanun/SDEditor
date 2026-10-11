@@ -9,7 +9,7 @@
   const plain = value => JSON.parse(JSON.stringify(value));
   const asError = value => value instanceof Error ? value : new Error(value?.message || String(value));
   const reviewCodes = new Set(['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT', 'SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED',
-    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']);
+    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']);
   const requiresReview = error => reviewCodes.has(error?.code) && !error?.durableUnknown;
   let fallbackId = 0;
   const contentScope = value => value.workspaceScope || value;
@@ -166,7 +166,7 @@
       const index = jobs.findIndex(job => job.id === id);
       const job = jobs[index];
       if (!job || job.durable || job.status !== 'failed' || !job.batch.resetStaging || job.error?.durableUnknown
-        || !['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT'].includes(job.error?.code)) return false;
+        || !['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED'].includes(job.error?.code)) return false;
       // A stale deletion was rejected before the storage transaction committed.
       // A new explicit confirmation must capture the file's current saved text.
       jobs.splice(index, 1);

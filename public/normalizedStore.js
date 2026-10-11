@@ -1089,7 +1089,22 @@
           return synthetic(async () => {
             if (logicalKey === logical.workspace) return readWorkspace(tx, scope, paths);
             if (logicalKey === logical.source) return copy((await Promise.all(paths.map(path => get(tx, stores.baseline, key(baselineKey(scope), path))))).filter(Boolean));
-            if (logicalKey === logical.receipts) { const receipt = await get(tx, stores.receipts, key(id, batch.jobId)); return receipt ? [receipt] : []; }
+            if (logicalKey === logical.receipts) {
+              const receipt = await get(tx, stores.receipts, key(id, batch.jobId));
+              if (receipt) return [receipt];
+              if (batch.resetStaging) {
+                const submission = await get(tx, stores.submissions, key(id, batch.jobId));
+                if (submission?.state === 'cancelled') {
+                  throw Object.assign(new Error('This deletion request was cancelled. The saved translation was kept.'),
+                    { code: 'DELETE_STAGED_CANCELLED', stale: true });
+                }
+                if (submission?.state === 'review') {
+                  throw Object.assign(new Error('This deletion request needs a fresh review and confirmation.'),
+                    { code: 'DELETE_STAGED_BASE_CHANGED', stale: true });
+                }
+              }
+              return [];
+            }
             if (logicalKey === 'collaboration_v1') {
               const read = await rooms.readRoom(tx, batch.collaboration.key, paths, { includeOutbox: 'paths', includeConflicts: true, includeDropped: true });
               roomSelection = read.selection;
@@ -1264,6 +1279,12 @@
         const current = await get(tx, stores.submissions, key(id, batch.jobId));
         if (!current) return;
         if (!same(current.batch, batch)) throw new Error('A submitted save cannot be updated with different content.');
+        // Cancellation is terminal for this exact command, including a late
+        // worker rejection or another tab's stale recovery callback.
+        if (current.state === 'cancelled') return current;
+        if (patch.state === 'cancelled' && (!batch.resetStaging || !['review', 'cancelled'].includes(current.state))) {
+          throw new Error('Only a rejected staged deletion request can be cancelled.');
+        }
         const value = { ...current, ...copy(patch), batch: current.batch, createdAt: current.createdAt };
         if (!same(value, current)) tx.objectStore(stores.submissions).put(row(id, batch.jobId, value, { paths: batch.files.map(file => key(id, batch.language, file.filepath)) }));
         if (patch.state === 'review' && !batch.resetStaging && batch.files.length === 1) {

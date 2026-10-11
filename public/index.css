@@ -210,7 +210,12 @@ input:focus, button:focus, textarea:focus {
 .cloudHelp, .cloudStatus { line-height: 1.65; }
 .cloudActions { display: flex; flex-wrap: wrap; gap: 8px; }
 .cloudWarning { color: var(--color-accent); font-weight: 600; }
-.cloudStorageError { position: fixed; top: 0; left: 0; right: 0; z-index: 20000; background: var(--color-element); border-bottom: 3px solid var(--color-diagnostic-error-border); padding: 12px 20px; }
+.workspaceAlerts { min-width: 0; max-height: min(240px, 32dvh); overflow-y: auto; overscroll-behavior: contain; }
+.workspaceAlertsFallback { position: sticky; top: 0; z-index: 42; max-height: min(calc(160px * var(--density)), 32dvh); }
+.cloudStorageError { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; background: var(--color-element); border-bottom: 3px solid var(--color-diagnostic-error-border); padding: 12px 20px; line-height: 1.65; }
+.cloudStorageError > span { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.workspaceAlertActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.workspaceAlertActions button { max-width: 100%; white-space: normal; }
 .cloudAdmin { margin-top: 18px; }
 .cloudAdminRow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-top: 1px solid var(--color-element-alt); padding: 10px 0; }
 .cloudAdminRow small { display: block; overflow-wrap: anywhere; }

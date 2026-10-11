@@ -282,7 +282,7 @@ test('storage failures and uncertain completion cannot be discarded as rejected 
 });
 
 test('a rejected staged deletion releases the queue for a newly confirmed decision and unrelated saves', async () => {
-  for (const code of ['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']) {
+  for (const code of ['DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']) {
     const calls = [], queue = PendingSaves.create({ save: async payload => {
       calls.push(payload.jobId);
       if (payload.resetStaging) throw Object.assign(new Error('Delete rejected'), { code });
@@ -342,7 +342,7 @@ test('uncertain, unjournaled or durable failed submissions cannot be removed as 
 });
 
 test('captured scope and stale deletion rejections require review before journaled jobs release', async () => {
-  for (const code of ['SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED', 'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT']) {
+  for (const code of ['SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED', 'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']) {
     const error = Object.assign(new Error('A fresh decision is required'), { code });
     assert.equal(PendingSaves.requiresReview(error), true);
     assert.equal(PendingSaves.requiresReview({ ...error, durableUnknown: true }), false);

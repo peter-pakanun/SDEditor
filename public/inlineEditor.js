@@ -15,7 +15,7 @@
       inlineDraftCount() { return Object.keys(this.inlineDraftRows).length; },
       deferredDraftSaveError() {
         return Object.values(this.inlineDraftFindings).flat().filter(finding => finding.deferredSave)
-          .map(finding => finding.message).join('\n');
+          .map(finding => [finding.message, finding.deletionCancelError].filter(Boolean).join(' ')).join('\n');
       },
       editorHasStagedTranslation() {
         const desc = this.editorCurrentEditingDesc;
@@ -714,14 +714,20 @@
         const desc = this.editorCurrentEditingDesc, session = this._draftSession, blocks = this.editorBlocks;
         const context = this.captureCollaborationContext();
         const scope = this.editorDraftScope(desc.filepath), openRun = this._editorOpenRun;
-        const base = copy(context.client?.fileBase(desc.filepath) || this.collaborationFile(desc));
+        const base = copy(this.collaborationFile(desc, context.language));
+        const sharedBase = copy(context.client?.fileBase(desc.filepath) || null);
         const current = () => this.editorCurrentEditingDesc === desc && this.editorBlocks === blocks && this._draftSession === session
           && this._editorOpenRun === openRun && this.draftScopeCurrent(scope)
           && this.collaborationContextCurrent(context) && !this.editorTranslationReadOnly && this.editorHasStagedTranslation
-          && equal(base, context.client?.fileBase(desc.filepath) || this.collaborationFile(desc));
+          && equal(base, this.collaborationFile(desc, context.language))
+          && equal(sharedBase, context.client?.fileBase(desc.filepath) || null);
         const token = this._editorSaveToken = {};
         this.editorSaving = true;
         try {
+          if (sharedBase && (!sharedBase.trackedForExport || !equal(base.translations, sharedBase.translations))) {
+            throw Object.assign(new Error('The local and shared saved translations do not match. Review and save the translation you want to keep before deleting it. Use Local drafts to resolve unsaved copies.'),
+              { code: 'DELETE_STAGED_BASE_CHANGED' });
+          }
           if (!await this.flushEditorDraft() || !current()) return false;
           const shared = context.client ? '\n\nThis deletion will also be shared with your language team.' : '';
           if (!await this.appConfirm('Delete the staged ' + context.language + ' translation for ' + desc.filepath
