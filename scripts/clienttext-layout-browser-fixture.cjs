@@ -28,8 +28,9 @@ function between(source, start, end) {
     return source.slice(first, last);
 }
 const navigation = between(html, '<nav class="ctNavigation"', '</nav>') + '</nav>';
+const workspaceShell = between(html, '<editor-workspace-shell ', '>') + '>';
 const table = between(html, '<table class="display compact cell-border fileTable ctTable"', '</table>') + '</table>';
-const fullEditor = between(html, '<editor-full-shell v-else class="ctFull ctFullEditor', '      <dialog ref="ctDiagnosticDialog"');
+const fullEditor = between(html, '<editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor', '      <dialog ref="ctDiagnosticDialog"');
 const tooltipComponent = between(indexJs, 'const AppTooltip = {', 'function escapeTooltipAttr');
 const tooltipMethods = between(indexJs, '    normalizeTooltipText(value) {', '    htmlTooltipMouseMove(e) {');
 const tooltipDirective = between(indexJs, "app.directive('tooltip', {", "app.mount('#app');");
@@ -37,7 +38,8 @@ const longSheet = 'A very long ClientText sheet name that must remain readable t
 const sheetData = [
     ['normal', longSheet], ['normal', 'QuestDialogues'], ['normal', 'ItemNames'],
     ['gender', longSheet], ['gender', 'ItemNames'],
-].map(([role, name]) => ({ role, name, key: JSON.stringify([role, name]) }));
+].concat(Array.from({length:60},(_,index)=>['normal','Sheet '+String(index+1).padStart(3,'0')]))
+    .map(([role, name]) => ({ role, name, key: JSON.stringify([role, name]) }));
 
 const fixtureJs = `${tooltipComponent}
 const ct = window.ClientTextUI.mixin;
@@ -61,9 +63,13 @@ const app = Vue.createApp({
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
     methods:{...ct.methods,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
+        async ctFlushDraft(){return true;},async ctFlushCommentDraft(){},
     },
-    created(){this._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));this._ctSheets=Vue.markRaw(sheets);}
+    created(){this._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));this._ctSheets=Vue.markRaw(sheets);},
+    mounted(){this._fixtureKey=event=>this.ctKey(event);document.addEventListener('keydown',this._fixtureKey);},
+    beforeUnmount(){document.removeEventListener('keydown',this._fixtureKey);}
 });
+app.component('editor-workspace-shell',window.EditorComponents.WorkspaceShell);
 app.component('ct-fields',window.ClientTextUI.fieldsComponent);
 app.component('ct-target',window.ClientTextUI.targetComponent);
 app.component('editor-native-field',window.EditorComponents.NativeField);
@@ -79,9 +85,9 @@ async function run() {
     frontend.get('/', (req, res) => res.type('html').send(`<!doctype html><html data-theme="dark"><head>
         <meta charset="utf-8">${stylesheets}</head><body><div id="app"><div class="appRoot" data-density="compact">
         <section class="ctWorkspace" aria-label="ClientText workspace">
-        <div v-if="!ctEditor" class="workspace ctListWorkspace inlineEditorMode"><main class="workspaceContent">
-        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div class="fileTableScroll">${table}</div></div></div>
-        </main></div>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
+        ${workspaceShell}<template #content>
+        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
+        </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
         <script src="/clientTextState.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
@@ -192,9 +198,42 @@ async function run() {
                 await page.screenshot({path});screenshots.push(path);
                 await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});
             }
-            await page.evaluate(()=>{window.__ctLayoutFixture.ctEditor=true;});await settle();
+            const scrollBefore=await nav.evaluate(element=>{
+                const list=element.querySelector('.ctSheetList'),filter=element.querySelector('.ctSheetFilter'),top=filter.getBoundingClientRect().top;
+                window.__ctSheetNodes={nav:element,list,filter,button:list.querySelector('button')};
+                list.scrollTop=413;
+                return {top:list.scrollTop,filterTopBefore:top,filterTopAfter:filter.getBoundingClientRect().top,
+                    filterInsideList:list.contains(filter),navScrollTop:element.scrollTop,client:list.clientHeight,height:list.scrollHeight};
+            });
+            assert.ok(scrollBefore.top>0 && scrollBefore.height>scrollBefore.client,theme+'/'+width+': sheet list scrolls');
+            assert.equal(scrollBefore.filterInsideList,false,theme+'/'+width+': filter is outside the scroll container');
+            assert.equal(scrollBefore.filterTopBefore,scrollBefore.filterTopAfter,theme+'/'+width+': sheet scrolling keeps the filter fixed');
+            assert.equal(scrollBefore.navScrollTop,0,theme+'/'+width+': navigation shell does not scroll');
+            const inlineField=page.locator('.ctListWorkspace [data-ct-target="form-FS"]');
+            await inlineField.focus();await inlineField.evaluate(input=>input.setSelectionRange(2,5,'backward'));
+            await inlineField.press('Control+Enter');await page.locator('.ctFullEditor').waitFor();await settle();
             assert.deepEqual(errors,[],theme+'/'+width+': no browser errors switching to full editor');
             assert.equal(await page.locator('.ctFullEditor').count(),1,theme+'/'+width+': full editor template mounted');
+            assert.equal(await page.locator('.ctListWorkspace').evaluate(element=>getComputedStyle(element).display),'none');
+            assert.equal(await page.locator('.ctListWorkspace [data-ct-target]').count(),0,theme+'/'+width+': hidden workspace cannot compete for field refs');
+            const fullField=page.locator('.ctFullEditor [data-ct-target="form-FS"]');
+            const caret=()=>fullField.evaluate(input=>({active:input===document.activeElement,start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection}));
+            assert.deepEqual(await caret(),{active:true,start:2,end:5,direction:'backward'},theme+'/'+width+': Ctrl+Enter retains field and selection');
+            await fullField.press('Escape');await page.locator('.ctFullEditor').waitFor({state:'detached'});await settle();
+            assert.deepEqual(await inlineField.evaluate(input=>({active:input===document.activeElement,start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection})),
+                {active:true,start:2,end:5,direction:'backward'},theme+'/'+width+': Escape restores inline field and selection');
+            const retained=await nav.evaluate(element=>{
+                const saved=window.__ctSheetNodes,list=element.querySelector('.ctSheetList');
+                return {nav:element===saved.nav,list:list===saved.list,filter:element.querySelector('.ctSheetFilter')===saved.filter,
+                    button:list.querySelector('button')===saved.button,top:list.scrollTop};
+            });
+            assert.deepEqual(retained,{nav:true,list:true,filter:true,button:true,top:scrollBefore.top},theme+'/'+width+': returning preserves original Sheets DOM and scroll');
+            await page.locator('.ctID').click();await page.locator('.ctFullEditor').waitFor();
+            await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Close',exact:true}).click();await settle();
+            assert.equal(await page.locator('.ctSheetList').evaluate(element=>element.scrollTop),scrollBefore.top,theme+'/'+width+': pointer open and Close retain Sheets scroll');
+            await assertPreserved();
+            results.push({name:theme+'/'+width+' Sheets DOM, fixed filter, scroll and keyboard focus retention',scrollTop:retained.top});
+            await page.locator('.ctID').click();await page.locator('.ctFullEditor').waitFor();await settle();
             await checkGrid(theme+'/'+width+' full');
             await checkFieldLayout(true,theme+'/'+width+' full');
             const lastFormLabel=page.locator('.ctFullEditor .ctFormGrid tbody tr:last-child > th');

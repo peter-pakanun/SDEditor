@@ -413,7 +413,7 @@
       </section>
     </div>
     <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="ctWorkspace" :inert="showSetting || workspaceInitializationActive" aria-label="ClientText workspace">
-      <editor-workspace-shell v-if="!ctEditor" class="ctListWorkspace" :inline="inlineEditor">
+      <editor-workspace-shell v-show="!ctEditor" class="ctListWorkspace" :inline="inlineEditor">
         <template #header>
           <div class="workspaceBrand">
             <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
@@ -445,15 +445,19 @@
           <div v-if="ctProgress" class="ctProgress" role="status"><div class="ctProgressMain"><span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span><progress :value="ctProgress.completed || 0" :max="ctProgress.total || 1" aria-label="Workbook operation progress"></progress><span class="ctProgressCount">{{ Math.round(ctProgress.completed || 0) }} / {{ ctProgress.total || '…' }}</span></div><button class="ctProgressCancel" @click="ctCancel">Cancel</button></div>
           <div class="ctWorkspaceBody" :class="{ctToolsOpen:inlineEditor && inlineSidebarVisible}">
             <nav class="ctNavigation" aria-label="Workbook sheets">
-              <strong>Sheets</strong>
-              <label class="srOnly" for="ctSheetFilter">Filter sheets</label>
-              <input id="ctSheetFilter" class="ctSheetFilter" type="search" v-model="ctSheetFilter" placeholder="Filter sheets…" @keydown.esc.stop.prevent="ctSheetFilter=''">
-              <button @click="ctSheet=''" :class="{active:!ctSheet}">All sheets</button>
-              <template v-for="role in [...new Set(ctFilteredSheets.map(sheet=>sheet.role))]" :key="role">
-                <h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3>
-                <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" @click="ctSheet=sheet.key" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
-              </template>
-              <p v-if="!ctFilteredSheets.length" class="ctSheetEmpty" role="status">No sheets match.</p>
+              <div class="ctSheetControls">
+                <strong>Sheets</strong>
+                <label class="srOnly" for="ctSheetFilter">Filter sheets</label>
+                <input id="ctSheetFilter" class="ctSheetFilter" type="search" v-model="ctSheetFilter" placeholder="Filter sheets…" @keydown.esc.stop.prevent="ctSheetFilter=''">
+              </div>
+              <div class="ctSheetList">
+                <button @click="ctSheet=''" :class="{active:!ctSheet}">All sheets</button>
+                <template v-for="role in [...new Set(ctFilteredSheets.map(sheet=>sheet.role))]" :key="role">
+                  <h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3>
+                  <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" @click="ctSheet=sheet.key" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
+                </template>
+                <p v-if="!ctFilteredSheets.length" class="ctSheetEmpty" role="status">No sheets match.</p>
+              </div>
             </nav>
             <div class="workspaceMain ctList">
               <p id="ctFileTableKeyboardHelp" class="srOnly">Arrow keys move between records while the list is focused. Enter or a filename opens the full editor. In inline mode, clicking a row edits its translation in the table. Text fields retain normal arrow keys and newlines.</p>
@@ -467,8 +471,8 @@
                   </tr></thead>
                   <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)" @focusout="ctInlineFocusOut">
                     <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDraftUnitIds.has(unit.id)" class="fileDraftLabel">Local draft</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" class="inlineFileActions" @click.stop><button @click="ctSave()" :disabled="ctBusy">Stage draft</button><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
-                    <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
-                    <td class="translationTr inlineTranslationCell" :data-label="lang+' translation'"><ct-fields v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
+                    <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
+                    <td class="translationTr inlineTranslationCell" :data-label="lang+' translation'"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
                   </tr></tbody>
                 </table>
               </div>
@@ -494,7 +498,7 @@
         </button><nav class="workspacePagination" aria-label="File pagination"><span class="fileRange" role="status" aria-live="polite">Page {{ ctPage }} / {{ ctPageCount }} · {{ ctRows.length.toLocaleString() }} IDs</span><button class="paginationArrow" @click="ctSetPage(ctPage-1)" :disabled="ctPage<=1" aria-label="Previous page" title="Previous page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button><button class="paginationArrow" @click="ctSetPage(ctPage+1)" :disabled="ctPage>=ctPageCount" aria-label="Next page" title="Next page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button></nav></div>
         </template>
       </editor-workspace-shell>
-      <editor-full-shell v-else class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
+      <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation <span class="editorVersionContext"><button class="collaborationVersion versionStatusName" @click="ctShowVersionChooser" aria-label="Versions">{{ ctWorkspace.metadata.version?.name }}</button></span></h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep its local draft">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button></div>
