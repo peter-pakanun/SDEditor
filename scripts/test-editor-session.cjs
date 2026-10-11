@@ -288,6 +288,86 @@ test('shared component ref registry survives overlapping teleport surfaces and l
     proxy.unregisterRefs(third);assert.equal(host._sharedEditorRefs.commentsFileList,undefined);assert.deepEqual(host.$refs,{native});
 });
 
+function toolsLifecycleHarness(mode='clienttext'){
+    const h=harness(),{host,session}=h,offsets={top:300,left:19},writes=[],node={isConnected:true};
+    for(const [property,key] of [['scrollTop','top'],['scrollLeft','left']])Object.defineProperty(node,property,{
+        get:()=>offsets[key],set:value=>{offsets[key]=value;writes.push([property,value]);},
+    });
+    host.ctTool=host.sideTab='dictionary';host.cloudProfileId='alice';host.managedCatalogScope='alice:poe2:Thai';
+    host.cloudSignedIn=true;host.cloudUser={id:'alice',role:'translator',language:'Thai',assignmentVersion:1};
+    host.ctWorkspace.scope.sourceHash='baseline-one';host._sharedEditorRefs={editorSide:node};
+    host.getEditorComponentRef=session.mixin.methods.getEditorComponentRef.bind(host);
+    if(mode==='statdescription'){
+        host.ctActive=false;host.managedWorkspaceScope={...host.ctWorkspace.scope};host.editorVisible=false;
+        host.editorCurrentEditingDesc={filepath:'folder/file.txt'};host._editorOpenCancelRevision=1;
+    }
+    Object.defineProperty(host,'sharedEditorToolsTarget',{get:()=>session.mixin.computed.sharedEditorToolsTarget.call(host)});
+    const hooks=session.mixin;hooks.mounted.call(host);
+    return {...h,node,writes,offsets,hooks,scope:host.ctActive?host.ctWorkspace.scope:host.managedWorkspaceScope,
+        switchSurface(){if(host.ctActive)host.ctEditor=!host.ctEditor;else host.editorVisible=!host.editorVisible;},
+        // Removing a Teleport host clamps native offsets before its child updates.
+        clamp(){offsets.top=offsets.left=0;},
+    };
+}
+
+test('shared Tools retain native sidebar offsets across actual mode surface handoffs within one unit',()=>{
+    for(const mode of ['clienttext','statdescription']){
+        const h=toolsLifecycleHarness(mode),before=h.host.ctValues.text;
+        h.switchSurface();h.hooks.beforeUpdate.call(h.host);h.clamp();h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[300,19],`${mode} inline to full`);
+        h.offsets.top=522;h.offsets.left=7;h.writes.length=0;
+        if(h.host.ctActive)h.host.ctFocusedField='another-field';else h.host.editorFocusedIndex=2;
+        h.switchSurface();h.hooks.beforeUpdate.call(h.host);h.clamp();h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[522,7],`${mode} full to inline may change focused field`);
+        assert.deepEqual(h.writes,[['scrollTop',522],['scrollLeft',7]]);
+        assert.equal(h.host.ctValues.text,before);assert.deepEqual(h.calls,[],'sidebar restoration cannot edit or reclaim native field focus');
+    }
+});
+
+test('ordinary Tools updates preserve explicit page resets and background scroll changes without assigning old offsets',()=>{
+    for(const mode of ['clienttext','statdescription']){
+        const h=toolsLifecycleHarness(mode);
+        h.hooks.beforeUpdate.call(h.host);h.clamp();h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[0,0],`${mode} Dictionary page reset`);assert.deepEqual(h.writes,[]);
+        h.offsets.top=87;h.offsets.left=2;h.hooks.beforeUpdate.call(h.host);h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[87,2],`${mode} background update`);assert.deepEqual(h.writes,[]);
+        h.switchSurface();h.hooks.beforeUpdate.call(h.host);h.clamp();h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[87,2],'a later handoff uses the current live offsets');
+    }
+});
+
+test('Tools surface restoration is fenced against every workspace, account, access and selected-tool transition',()=>{
+    const changes=[
+        ['unit',h=>h.host.ctActive?h.host.ctSelection='other-record':h.host.editorCurrentEditingDesc={filepath:'other.txt'}],
+        ['account',h=>h.scope.accountId='bob'],['profile',h=>h.host.cloudProfileId='bob'],['catalog',h=>h.host.managedCatalogScope='bob:poe2:Thai'],
+        ['language',h=>h.scope.language='German'],['mode',h=>h.host.ctActive=!h.host.ctActive],['game',h=>h.scope.game='poe1'],
+        ['branch',h=>h.scope.branchId='branch-two'],['group',h=>h.scope.groupId='group-two'],['version',h=>h.scope.versionId='v2'],
+        ['baseline',h=>h.scope.sourceHash='baseline-two'],['generation',h=>h.host.ctActive?h.host._ctEpoch++:h.host._editorOpenCancelRevision++],
+        ['sign-in',h=>h.host.cloudSignedIn=false],['role',h=>h.host.cloudUser.role='manager'],
+        ['assignment',h=>h.host.cloudUser.assignmentVersion=2],['access',h=>h.host.cloudCanAccessAllLanguages=true],
+        ['tool',h=>{h.host.ctTool=h.host.sideTab='history';}],
+    ];
+    for(const mode of ['clienttext','statdescription'])for(const [name,change] of changes){
+        const h=toolsLifecycleHarness(mode);h.switchSurface();change(h);
+        h.hooks.beforeUpdate.call(h.host);h.clamp();h.hooks.updated.call(h.host);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[0,0],`${mode}: ${name}`);assert.deepEqual(h.writes,[],`${mode}: ${name} cannot restore another scope's offsets`);
+    }
+});
+
+test('Tools restoration cannot transfer offsets to replaced, detached or unmounted sidebar nodes',()=>{
+    for(const disposition of ['replaced','detached-before','detached-after','unmounted']){
+        const h=toolsLifecycleHarness();h.switchSurface();
+        if(disposition==='detached-before')h.node.isConnected=false;
+        h.hooks.beforeUpdate.call(h.host);h.clamp();
+        if(disposition==='replaced')h.host._sharedEditorRefs.editorSide={isConnected:true,scrollTop:41,scrollLeft:3};
+        if(disposition==='detached-after')h.node.isConnected=false;
+        if(disposition==='unmounted')h.hooks.beforeUnmount.call(h.host);
+        h.hooks.updated.call(h.host);assert.deepEqual(h.writes,[],disposition);
+        assert.deepEqual([h.node.scrollTop,h.node.scrollLeft],[0,0],disposition);
+        if(disposition==='replaced')assert.deepEqual([h.host._sharedEditorRefs.editorSide.scrollTop,h.host._sharedEditorRefs.editorSide.scrollLeft],[41,3]);
+    }
+});
+
 test('ClientText format adapter retains all raw and hidden fields while selection and save actions use mode owners',()=>{
     const {session,host,field,unit,input,calls}=harness('Raw@text\\n\r\nunchanged');
     const hidden={id:'hidden',name:'Hidden',source:'',kind:'text',target:'Kept'},gender={id:'gender',name:'Gender',source:'',kind:'gender',target:' F '};

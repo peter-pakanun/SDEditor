@@ -14,6 +14,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 ].find(existsSync);
 const publicDir = join(__dirname, '../public');
 const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
+const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-check.cjs');
 const { thaiEnglish, germanEnglish, germanTarget, dictionary: shredDictionary } = require('./clienttext-highlight-fixture.cjs');
 
 async function run() {
@@ -29,7 +30,7 @@ async function run() {
   let browser, page;
   const failures = [];
   try {
-    browser = await chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
+    browser = await chromium.launch({ executablePath, headless: true, ignoreDefaultArgs: ['--hide-scrollbars'], args: ['--disable-gpu'] });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
     page = await context.newPage();
     page.on('pageerror', error => failures.push(error.message));
@@ -117,6 +118,7 @@ async function run() {
     });
     alignedGlyphs += await checkHighlightGeometry(page, '.editor .editorTextField > input, .editor .editorTextField > textarea', 'SD native scroll');
     console.log('SD multiline/table wrapping, native input/textarea scrolling and all four themes aligned.');
+    await checkInlineDictionaryScroll(page, 'statdescription', { requireScrollRetention: true });
 
     await page.evaluate(async () => {
       const host = window.__sharedFixtureApp;
@@ -365,6 +367,7 @@ async function run() {
       await page.screenshot({ path }); console.log('Shred screenshot: ' + path);
     }
     console.log('PASS ' + alignedGlyphs + ' annotated glyph positions: SD and Shred ClientText inline/full, four themes, resized desktop widths, native scrolling and tabs.');
+    await checkInlineDictionaryScroll(page, 'clienttext', { negativeControl: true, requireScrollRetention: true });
     const screenshot = join(tmpdir(), 'sdeditor-shared-components-clienttext.png');
     await page.screenshot({ path: screenshot }); console.log('Desktop screenshot: ' + screenshot);
     assert.deepEqual(failures, []);

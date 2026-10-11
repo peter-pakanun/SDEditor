@@ -279,7 +279,29 @@
       getOwnPropertyDescriptor(){return {enumerable:true,configurable:true};},
     });extra.controller=proxy;return proxy;
   }
-  const mixin={computed:{
+  function toolsView(host) {
+    const scope={...context(host),profileId:host.cloudProfileId || '',catalogScope:host.managedCatalogScope || ''};delete scope.fieldId;
+    return {scope:JSON.stringify(scope),target:host.sharedEditorToolsTarget,
+      tool:host.ctActive ? host.ctTool : host.sideTab,node:host.getEditorComponentRef('editorSide')};
+  }
+  const mixin={
+    mounted(){this._sharedEditorToolsView=toolsView(this);},
+    beforeUpdate(){
+      // Capture before the root removes the old host; a detached scrollport
+      // loses its offsets before the Teleport child updates.
+      const view=this._sharedEditorToolsView,node=view?.node;
+      this._sharedEditorToolsScroll=node?.isConnected ? {...view,top:node.scrollTop,left:node.scrollLeft}:null;
+    },
+    updated(){
+      const view=toolsView(this),saved=this._sharedEditorToolsScroll;
+      if(saved && saved.node===view.node && view.node?.isConnected && saved.target!==view.target
+        && saved.scope===view.scope && saved.tool===view.tool){
+        view.node.scrollTop=saved.top;view.node.scrollLeft=saved.left;
+      }
+      this._sharedEditorToolsView=view;this._sharedEditorToolsScroll=null;
+    },
+    beforeUnmount(){this._sharedEditorToolsView=null;this._sharedEditorToolsScroll=null;},
+    computed:{
     sharedEditorController(){return this._sharedEditorController ||= create(this);},
     sharedEditorPreviewController(){return this.sharedEditorController;},sharedEditorPopupController(){return this.ctActive ? this.clientTextPopupController() : this.sharedEditorController;},
     sharedEditorToolsMounted(){return this.ctActive ? !!this.ctWorkspace && !this.versionChooserVisible && (this.ctEditor || this.inlineEditor) : this.editorToolsMounted;},
