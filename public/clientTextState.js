@@ -371,10 +371,12 @@
         if (field.kind === 'gender') return result;
         if (field.kind === 'form' && text.trim() === 'NONEXISTENT') return result;
         if (audioOnly(field.source)) return result;
-        const add = (level, code, message, start = 0, end = Math.max(1, text.length)) => result.push({ level, code, message, start, end });
+        const add = (level, code, message, start, end) => result.push({ level, code, message,
+            ...(Number.isInteger(start) && Number.isInteger(end) ? {start,end} : {}) });
         const source = tokenize(canonicalSource(field.source)), target = tokenize(text);
         if (options.tagSyntax !== false) {
-            for(const token of [...source,...target].filter(token=>token.kind==='stage-direction'))if(!result.some(issue=>issue.code==='clienttext-unknown-syntax' && issue.token===token.full))result.push({level:'warning',code:'clienttext-unknown-syntax',token:token.full,message:'Unrecognized ClientText syntax '+token.full+'. Verify the upstream control or formatting rule; this text is preserved.',start:token.start,end:token.end});
+            for(const token of [...target,...source].filter(token=>token.kind==='stage-direction'))if(!result.some(issue=>issue.code==='clienttext-unknown-syntax' && issue.token===token.full))result.push({level:'warning',code:'clienttext-unknown-syntax',token:token.full,message:'Unrecognized ClientText syntax '+token.full+'. Verify the upstream control or formatting rule; this text is preserved.',
+                ...(target.includes(token) ? {start:token.start,end:token.end} : {})});
             for (const token of target.filter(token => token.kind === 'keyword')) {
                 // Keep the same narrow nested-brace exceptions as SD. These
                 // braces belong to the immutable reference, never a variable.
@@ -403,12 +405,23 @@
             }
         }
         if (text.trim() && options.identity !== false) {
+            const settings={keyword:['keywords','KeywordPopups tagName'],variable:['variables','Variable tag'],
+                substitution:['substitutions','ClientText substitution tag'],format:['decorations','Text decoration tagName'],control:['controls','ClientText control tag']};
             for (const kind of ['keyword','variable','substitution','format','control']) {
-                const sourceIds = new Map(), targetIds = new Map();
-                for (const token of source.filter(token => token.kind === kind)) sourceIds.set(token.identity, (sourceIds.get(token.identity) || 0) + 1);
-                for (const token of target.filter(token => token.kind === kind)) targetIds.set(token.identity, (targetIds.get(token.identity) || 0) + 1);
-                for (const id of new Set([...sourceIds.keys(),...targetIds.keys()])) if ((sourceIds.get(id)||0)!==(targetIds.get(id)||0))
-                    add(['variable','substitution'].includes(kind)?'error':'warning', 'clienttext-token-identity', 'Match the source ' + kind + ' tag: ' + id);
+                if(options[settings[kind][0]]===false)continue;
+                const tokens=target.filter(token=>token.kind===kind),sourceIds=new Map(),targetIds=new Map(),identity=token=>kind==='keyword'?token.identity.trim():token.identity;
+                for(const token of source.filter(token=>token.kind===kind)){const id=identity(token);sourceIds.set(id,(sourceIds.get(id)||0)+1);}
+                for(const token of tokens){const id=identity(token);targetIds.set(id,(targetIds.get(id)||0)+1);}
+                if(![...new Set([...sourceIds.keys(),...targetIds.keys()])].some(id=>(sourceIds.get(id)||0)!==(targetIds.get(id)||0)))continue;
+                const counts=ids=>[...ids.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))
+                    .map(id=>(kind==='keyword'?'['+id+']':id)+(ids.get(id)>1?' x'+ids.get(id):'')).join(', ') || 'none';
+                const seen=new Map(),range=tokens.find(token=>{const id=identity(token),count=(seen.get(id)||0)+1;seen.set(id,count);return count>(sourceIds.get(id)||0);}) || tokens[0];
+                // SD locates a tag-count mismatch on the first excess target
+                // tag, or an existing counterpart. Missing tags have no text
+                // range when the target contains none of that kind.
+                result.push({level:'error',code:'clienttext-token-identity',kind,
+                    message:settings[kind][1]+' mismatch: English has '+counts(sourceIds)+'; translation has '+counts(targetIds)+'.',
+                    ...(range ? {start:range.start,end:range.end} : {})});
             }
         }
         return result;

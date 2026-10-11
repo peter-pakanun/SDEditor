@@ -75,6 +75,24 @@ test('manual scan defaults select every category except dictionary terminology',
   for (const key of CHECKS) assert.equal(editor.diagnosticScanChecks[key], key !== 'terminology', key);
 });
 
+test('shared scanner refs preserve SD modal heading and return focus without root DOM refs', () => {
+  const { editor, dialog } = loadEditor();
+  const focused = [], heading = { focus() { focused.push('heading'); } };
+  const trigger = { isConnected: true, focus(options) { focused.push(options.preventScroll ? 'trigger' : 'scroll'); } };
+  editor.getEditorComponentRef = name => ({ diagnosticScanDialog: dialog, diagnosticScanHeading: heading })[name];
+  editor.$refs = {};
+  editor.$nextTick = callback => { callback(); return Promise.resolve(); };
+  editor.openDiagnosticScanDialog();
+  assert.equal(dialog.open, true);
+  assert.deepEqual(focused, ['heading']);
+  editor._diagnosticScanReturnFocus = trigger;
+  editor.closeDiagnosticScanDialog();
+  assert.equal(dialog.open, false);
+  editor.diagnosticScanDialogClosed();
+  assert.deepEqual(focused, ['heading', 'trigger']);
+  assert.equal(editor._diagnosticScanReturnFocus, null);
+});
+
 test('selector waits for Start scan and retains choices and results when reopened', async () => {
   const { editor, calls, dialog } = loadEditor();
   conflictingEntries(editor);

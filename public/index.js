@@ -664,7 +664,7 @@ const config = Vue.defineComponent({
     browserWorkTooltip() {
       const labels = Object.values(this.browserWorkItems);
       if (this.editorLoading) labels.push('Preparing translation fields and Dictionary matches');
-      if (this.diagnosticScanRunning) labels.push('Checking translation diagnostics');
+      if (this.diagnosticScanRunning || this.ctScanRunning) labels.push('Checking translation diagnostics');
       return labels.length ? 'Work in progress\n' + [...new Set(labels)].join('\n') : '';
     },
     settingsDialogVisible() {
@@ -752,6 +752,14 @@ const config = Vue.defineComponent({
           .find(diagnostic => diagnostic.blockIndex === blockIndex) || null
       );
     },
+    diagnosticScanDescription() {
+      return `Check every loaded ${this.lang} file, including files hidden by search or status filters. DNT files are skipped when Hide DNT is enabled.`;
+    },
+    diagnosticScanCheckHint() { return 'Dictionary terminology and inconsistent translations are checked only by a manual scan.'; },
+    diagnosticScanProgressLabel() { return 'Files scanned'; },
+    diagnosticScanResultsTitle() { return 'Files with findings'; },
+    openDiagnosticResultLabel() { return 'Open file'; },
+    diagnosticScanTruncatedHint() { return 'Open the file to review all entries.'; },
     hasDiagnosticScanSelection() {
       return this.diagnosticScanTypes.some(type => this.diagnosticScanChecks[type.key]);
     },
@@ -2764,15 +2772,15 @@ const config = Vue.defineComponent({
         return this.finishInlineSession({ promote: true }).then(done => done && this.openDiagnosticScanDialog());
       }
       this.hideTooltip();
-      const dialog = this.$refs.diagnosticScanDialog;
+      const dialog = this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog;
       if (!dialog || dialog.open) return;
       this._diagnosticScanReturnFocus = document.activeElement;
       dialog.showModal();
-      this.$nextTick(() => this.$refs.diagnosticScanHeading?.focus());
+      this.$nextTick(() => (this.getEditorComponentRef?.('diagnosticScanHeading') || this.$refs.diagnosticScanHeading)?.focus());
     },
     closeDiagnosticScanDialog(restoreFocus = true) {
       if (restoreFocus === false) this._diagnosticScanReturnFocus = null;
-      this.$refs.diagnosticScanDialog?.close();
+      (this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog)?.close();
     },
     diagnosticScanDialogClosed() {
       const target = this._diagnosticScanReturnFocus;
@@ -2802,6 +2810,7 @@ const config = Vue.defineComponent({
       if (Number.isInteger(diagnostic.columnIndex)) location += ` · column ${diagnostic.columnIndex + 1}`;
       return location;
     },
+    diagnosticScanUnitLabel(count) { return count === 1 ? 'file' : 'files'; },
     async scanAllDiagnostics() {
       if (this.diagnosticScanRunning || !this.hasDiagnosticScanSelection) return;
       const descs = this.diagnosticScanDescs;
@@ -5939,7 +5948,7 @@ const config = Vue.defineComponent({
       const region = this.$refs.fileTableRegion;
       return !region || (region.getClientRects && !region.getClientRects().length)
         || window.AppDialogs?.isOpen
-        || this.editorVisible || this.settingsDialogVisible || this.$refs.diagnosticScanDialog?.open
+        || this.editorVisible || this.settingsDialogVisible || (this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog)?.open
         || this.importDialogVisible || this.consistencyResolver || this.cloudResolverVisible
         || this.cloudHistoryVisible || this.duplicateLangImportWarning || this.showMultiInstanceGate
         || this.settingsImportDraft || this.pendingSingleVersionMigration
@@ -7796,6 +7805,8 @@ if (window.EditorComponents?.Autocomplete) app.component('editor-autocomplete', 
 if (window.EditorComponents?.NativeField) app.component('editor-native-field', window.EditorComponents.NativeField);
 if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-shell', window.EditorComponents.WorkspaceShell);
 if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
+if (window.EditorComponents?.DiagnosticMeta) app.component('editor-diagnostic-meta', window.EditorComponents.DiagnosticMeta);
+if (window.EditorComponents?.DiagnosticScan) app.component('editor-diagnostic-scan', window.EditorComponents.DiagnosticScan);
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);

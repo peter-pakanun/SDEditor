@@ -28,7 +28,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'clientTextUi.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -568,8 +568,9 @@ test('ClientText shares preview hosts and settings while isolating field values 
   editor.versionChooserVisible=true;assert.equal(editor.gamePreviewMounted,false);
   editor.ctActive=false;assert.equal(editor.gamePreviewDisplayTarget[0].text,'Retained SD preview');
   const html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
-  assert.ok(html.includes('id="ctFullEditorPreviewHost"'));
-  assert.ok(context.window.ClientTextUI.toolsComponent.template.includes('id="ctInlineEditorPreviewHost"'));
-  assert.ok(html.includes('v-model="gamePreviewVarValues[k]"'));
+  assert.ok(html.includes('preview-host-id="ctFullEditorPreviewHost"'));
+  assert.equal(context.window.ClientTextUI.toolsComponent, context.window.EditorComponents.Tools);
+  assert.ok(context.window.EditorComponents.Tools.template.includes('id="inlineEditorPreviewHost"'));
+  assert.ok(context.window.EditorComponents.Preview.template.includes('v-model="gamePreviewVarValues[k]"'));
   assert.ok(!html.includes('aria-label="Content group"'),'group selection belongs in the Versions Assignment table');
 });

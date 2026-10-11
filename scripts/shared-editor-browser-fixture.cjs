@@ -15,6 +15,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 const publicDir = join(__dirname, '../public');
 const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
 const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-check.cjs');
+const { checkDiagnosticScanner } = require('./diagnostic-scanner-browser-check.cjs');
 const { thaiEnglish, germanEnglish, germanTarget, dictionary: shredDictionary } = require('./clienttext-highlight-fixture.cjs');
 
 async function run() {
@@ -46,6 +47,9 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if (process.env.SDEDITOR_SCANNER_ONLY === '1') {
+      await checkDiagnosticScanner(page); assert.deepEqual(failures, []); return;
+    }
     const sd = page.locator('.editor [data-editor-ref="translation_1"]');
     await sd.fill('SD retained draft');
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Lookup', exact: true }).click();
@@ -368,6 +372,7 @@ async function run() {
     }
     console.log('PASS ' + alignedGlyphs + ' annotated glyph positions: SD and Shred ClientText inline/full, four themes, resized desktop widths, native scrolling and tabs.');
     await checkInlineDictionaryScroll(page, 'clienttext', { negativeControl: true, requireScrollRetention: true });
+    await checkDiagnosticScanner(page);
     const screenshot = join(tmpdir(), 'sdeditor-shared-components-clienttext.png');
     await page.screenshot({ path: screenshot }); console.log('Desktop screenshot: ' + screenshot);
     assert.deepEqual(failures, []);

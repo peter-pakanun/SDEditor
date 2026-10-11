@@ -489,7 +489,7 @@
             <span class="statusPill outdated" v-tooltip="'IDs with fields whose English needs review'"><span class="statusDot" aria-hidden="true"></span>Outdated <strong>{{ ctCounts.outdated }}</strong></span>
             <span class="statusPill revised"><span class="statusDot" aria-hidden="true"></span>Revised <strong>{{ ctCounts.revised }}</strong></span>
             <span class="statusPill saved"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ ctCounts.saved }}</strong></span>
-            <span v-if="ctScanDone" class="statusPill error"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ ctDiagnosticCounts.error }}</strong></span><span v-if="ctScanDone" class="statusPill warning"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ ctDiagnosticCounts.warning }}</strong></span>
+            <span v-if="ctScanRunning || ctScanDone" class="statusPill error" title="Records with errors from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan errors <strong>{{ ctScanErrorFileCount }}</strong></span><span v-if="ctScanRunning || ctScanDone" class="statusPill warning" title="Records with warnings from the diagnostic scan"><span class="statusDot" aria-hidden="true"></span>Scan warnings <strong>{{ ctScanWarningFileCount }}</strong></span>
             <button v-if="ctDraftCount" type="button" class="statusPill draft inlineDraftCount" @click="ctSelectedFilters=['draft']" title="Show local drafts">Drafts <strong>{{ ctDraftCount }}</strong></button>
           </div><p class="collaborationFooterMessage">{{ ctWorkProgress.resolved.toLocaleString() }} / {{ ctWorkProgress.total.toLocaleString() }} initial workload fields resolved · {{ ctWorkProgress.percent }}%</p></div>
           <div class="workspaceFooterRight"><ul v-if="ctPeers.length" class="collaborationAvatars" aria-label="Collaborators in this workspace"><li v-for="peer in ctPeers" :key="peer.sessionId || peer.id"><span class="collaborationAvatar" :class="{away:peer.away}" :style="{'--collaboration-color':collaborationPeerColor(peer)}" role="img" tabindex="0" :aria-label="collaborationParticipantLabel(peer)" v-tooltip="collaborationParticipantLabel(peer)"><span class="collaborationAvatarFace" aria-hidden="true">{{ collaborationParticipantInitials(peer) }}</span></span></li></ul>        <button type="button" class="commentsIconButton" :class="{ active: commentsAllVisible }" @click="commentsToggleAll" :aria-expanded="commentsAllVisible" aria-controls="allCommentsSidebar" :aria-label="'Show all comments' + (commentsUnreadTotal ? ', ' + commentsUnreadTotal + ' unread' : '')" title="Show all comments">
@@ -505,9 +505,7 @@
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <ct-fields ref="ctEditorRegion" :host="$root"></ct-fields>
       </editor-full-shell>
-      <dialog ref="ctDiagnosticDialog" class="diagnosticScanDialog" aria-labelledby="ctDiagnosticScanTitle" @cancel.prevent="ctCloseScanDialog" @keydown.stop>
-        <form class="diagnosticScanForm" @submit.prevent="ctStartScan"><header class="diagnosticScanHeading"><div><h2 id="ctDiagnosticScanTitle">Scan diagnostics</h2><p>Check every loaded {{ lang }} record, including records hidden by search or status filters.</p></div><button type="button" class="diagnosticScanClose" @click="ctCloseScanDialog" aria-label="Close diagnostic scan">Close</button></header><div class="diagnosticScanBody"><fieldset class="diagnosticScanOptions"><legend>Diagnostic checks</legend><label class="diagnosticScanOption"><input type="checkbox" checked disabled><span><strong>Source tokens and required fields</strong><small>Check brackets, substitutions, controls, and required translations.</small></span></label><label class="diagnosticScanOption"><input type="checkbox" v-model="ctIncludeConsistency"><span><strong>Consistency</strong><small>Compare accepted translations with matching field kind and grammatical form.</small></span></label></fieldset></div><footer class="diagnosticScanFooter"><button type="submit" class="btnPrimary" :disabled="ctBusy">Start scan</button><button type="button" @click="ctCloseScanDialog">Cancel</button></footer></form>
-      </dialog>
+
     </section>
     <div v-if="managedManagerAccess && managedUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!managedVersionBusy && (managedUploadVisible = false)">
       <section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="managerUploadTitle">
@@ -975,8 +973,7 @@
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" v-tooltip="'Variable tags (translation / english)'"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" v-tooltip="'Keyword tags (translation / english)'"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaDecorTr !== editorBlock.metaDecorEn }" v-tooltip="'Text decoration tags (translation / english)'"><span class="metaIcon">&lt;&gt;</span><span class="metaNum">{{ editorBlock.metaDecorTr }}/{{ editorBlock.metaDecorEn }}</span></span>
-            <span v-if="blockDiagnosticWarningCount(editorBlock, index) > 0" class="metaPill diagnosticWarningPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'warning', index)"><span class="metaIcon">!</span><span class="metaNum">{{ blockDiagnosticWarningCount(editorBlock, index) }}</span></span>
-            <span v-if="editorBlock.diagnosticErrorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="blockDiagnosticTitle(editorBlock, 'error')"><span class="metaIcon">x</span><span class="metaNum">{{ editorBlock.diagnosticErrorCount }}</span></span>
+            <editor-diagnostic-meta :presentation="{ warningCount: blockDiagnosticWarningCount(editorBlock, index), warningTitle: blockDiagnosticTitle(editorBlock, 'warning', index), errorCount: editorBlock.diagnosticErrorCount, errorTitle: blockDiagnosticTitle(editorBlock, 'error') }"></editor-diagnostic-meta>
           </div>
           <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning consistencyPrompt" role="note">
             <div><strong>Inconsistent translations</strong><span>{{ editorConsistencyDiagnostics[index].variantCount }} versions across {{ editorConsistencyDiagnostics[index].entryCount }} entries with identical English</span></div>
@@ -1009,91 +1006,7 @@
       </template>
     </dialog>
 
-    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @close="diagnosticScanDialogClosed" @keydown.stop="diagnosticScanDialogKeydown">
-      <form class="diagnosticScanForm" @submit.prevent="startDiagnosticScan">
-        <header class="diagnosticScanHeading">
-          <div>
-            <h2 id="diagnosticScanDialogTitle" ref="diagnosticScanHeading" tabindex="-1">Scan diagnostics</h2>
-            <p id="diagnosticScanDialogDescription">Check every loaded {{ lang }} file, including files hidden by search or status filters. DNT files are skipped when Hide DNT is enabled.</p>
-          </div>
-          <button type="button" class="diagnosticScanClose" @click="closeDiagnosticScanDialog" aria-label="Close diagnostic scan (Esc)">Close</button>
-        </header>
-        <div class="diagnosticScanBody">
-          <section v-if="diagnosticScanRunning || diagnosticScanCompleted || diagnosticScanStopped || diagnosticScanError" class="diagnosticScanStatus" :class="{ diagnosticScanFailed: diagnosticScanError }" aria-label="Scan status">
-            <p class="diagnosticScanStatusText" role="status" aria-live="polite" aria-atomic="true">
-              <template v-if="diagnosticScanRunning">{{ diagnosticScanPhase }} {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }} · {{ diagnosticScanPercent }}%</template>
-              <template v-else-if="diagnosticScanCompleted">Scan complete · {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }} checked</template>
-              <template v-else-if="diagnosticScanStopped">Scan stopped after {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanTotal === 1 ? 'file' : 'files' }}. Start again to get complete results.</template>
-              <template v-else>{{ diagnosticScanError }}</template>
-            </p>
-            <progress v-if="diagnosticScanRunning" :value="diagnosticScanProcessed" :max="Math.max(1, diagnosticScanTotal)" aria-label="Files scanned"></progress>
-            <div v-if="diagnosticScanRunning || diagnosticScanCompleted" class="diagnosticScanCounts">
-              <span class="diagnosticScanCount diagnosticScanCountError"><strong>{{ diagnosticScanErrorFileCount }}</strong> {{ diagnosticScanErrorFileCount === 1 ? 'file' : 'files' }} with errors<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.errors }} {{ diagnosticScanIssueCounts.errors === 1 ? 'issue' : 'issues' }}</span></span>
-              <span class="diagnosticScanCount diagnosticScanCountWarning"><strong>{{ diagnosticScanWarningFileCount }}</strong> {{ diagnosticScanWarningFileCount === 1 ? 'file' : 'files' }} with warnings<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.warnings }} {{ diagnosticScanIssueCounts.warnings === 1 ? 'issue' : 'issues' }}</span></span>
-              <span v-if="diagnosticScanCompleted" class="diagnosticScanCount"><strong>{{ diagnosticScanTotal - diagnosticScanResultFiles.length }}</strong> {{ diagnosticScanTotal - diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }} without findings</span>
-            </div>
-            <p v-if="diagnosticScanRunning" class="diagnosticScanBackgroundHint">You can close this window while the scan runs and reopen it from Scan diagnostics.</p>
-          </section>
-          <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
-            <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>
-            <fieldset class="diagnosticScanOptions" :disabled="diagnosticScanRunning">
-              <legend class="visuallyHidden">Diagnostic types</legend>
-              <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
-                <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
-                <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
-              </label>
-            </fieldset>
-            <p class="diagnosticScanHint">Dictionary terminology and inconsistent translations are checked only by a manual scan.</p>
-          </details>
-          <section v-if="diagnosticScanCompleted" class="diagnosticScanResults" aria-label="Scan results">
-            <div class="diagnosticScanResultsHeading">
-              <h3>{{ diagnosticScanResultFiles.length ? 'Files with findings' : 'No issues found' }}</h3>
-              <span v-if="diagnosticScanResultFiles.length">{{ diagnosticScanResultFiles.length }} {{ diagnosticScanResultFiles.length === 1 ? 'file' : 'files' }}</span>
-            </div>
-            <nav v-if="diagnosticScanResultPageCount > 1" class="diagnosticScanResultPagination" aria-label="Scan result pages">
-              <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ diagnosticScanResultRangeLabel }}</span>
-              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage <= 1" @click="diagnosticScanResultsPage--" aria-label="Previous scan results" title="Previous scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
-              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage >= diagnosticScanResultPageCount" @click="diagnosticScanResultsPage++" aria-label="Next scan results" title="Next scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
-            </nav>
-            <p v-if="!diagnosticScanResultFiles.length" class="diagnosticScanEmpty">The selected checks found no errors or warnings.</p>
-            <article v-for="entry in diagnosticScanVisibleResults" :key="entry.filepath" class="diagnosticScanResultCard">
-              <div class="diagnosticScanResultHeading">
-                <div>
-                  <h4><bdi>{{ entry.filepath }}</bdi></h4>
-                  <div class="diagnosticScanResultCounts">
-                    <span v-if="entry.result.errorCount" class="diagnosticScanResultError">{{ entry.result.errorCount }} {{ entry.result.errorCount === 1 ? 'error' : 'errors' }}</span>
-                    <span v-if="entry.result.warningCount" class="diagnosticScanResultWarning">{{ entry.result.warningCount }} {{ entry.result.warningCount === 1 ? 'warning' : 'warnings' }}</span>
-                  </div>
-                </div>
-                <button type="button" @click="openDiagnosticResult(entry.filepath)" :aria-label="'Open ' + entry.filepath">Open file</button>
-              </div>
-              <ul class="diagnosticScanIssues">
-                <li v-for="(issue, index) in entry.result.diagnostics.slice(0, 3)" :key="index">
-                  <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
-                  <span>{{ issue.message || issue.code }}</span>
-                </li>
-              </ul>
-              <details v-if="entry.result.diagnostics.length > 3" class="diagnosticScanMoreIssues">
-                <summary>{{ entry.result.diagnostics.length - 3 }} more {{ entry.result.diagnostics.length - 3 === 1 ? 'issue' : 'issues' }}</summary>
-                <ul class="diagnosticScanIssues">
-                  <li v-for="(issue, index) in entry.result.diagnostics.slice(3)" :key="index">
-                    <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
-                    <span>{{ issue.message || issue.code }}</span>
-                  </li>
-                </ul>
-              </details>
-              <p v-if="entry.result.diagnosticsTruncated" class="diagnosticScanTruncated">{{ entry.result.diagnosticsTruncated }} more {{ entry.result.diagnosticsTruncated === 1 ? 'finding' : 'findings' }}. Open the file to review all entries.</p>
-            </article>
-          </section>
-        </div>
-        <footer class="diagnosticScanActions">
-          <span class="diagnosticScanEscapeHint">Esc to close</span>
-          <button type="button" @click="closeDiagnosticScanDialog">Close</button>
-          <button v-if="diagnosticScanRunning" type="button" class="diagnosticScanStop" @click="stopDiagnosticScan">Stop scan</button>
-          <button v-else type="submit" class="diagnosticScanStart" :disabled="!hasDiagnosticScanSelection">{{ diagnosticScanCompleted ? 'Scan again' : 'Start scan' }}</button>
-        </footer>
-      </form>
-    </dialog>
+    <editor-diagnostic-scan :controller="ctActive ? ctDiagnosticScanController : sharedEditorController"></editor-diagnostic-scan>
 
     <dialog ref="consistencyDialog" class="consistencyDialog" aria-labelledby="consistencyDialogTitle" @cancel.prevent="closeConsistencyResolver" @keydown.stop="consistencyDialogKeydown">
       <template v-if="consistencyResolver">

@@ -6,6 +6,14 @@ const path=require('node:path');
 const vm=require('node:vm');
 const S=require('../public/clientTextState.js');
 const {unit,fieldId,asset}=require('./clienttext-storage-fixture.cjs');
+function sdKeywordDiagnostics(source,target){
+    const context=vm.createContext({}),code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8');
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);
+    const methods=['splitLinesWithOffsets','extractKeywordPopupIdentityTags','countKeywordPopupIdentityTags','formatKeywordPopupIdentityCounts','findKeywordPopupTagNameMismatchRange','buildKeywordPopupTagNameDiagnostics']
+        .map(name=>{const start=code.indexOf('    '+name+'('),end=code.indexOf('\n    },',start);assert.ok(start>=0 && end>start,name);return code.slice(start,end+7);});
+    context.source=source;context.target=target;
+    return JSON.parse(vm.runInContext('JSON.stringify(({'+methods.join('\n')+'}).buildKeywordPopupTagNameDiagnostics(source,target))',context));
+}
 test('SHA256 and canonical hashes match Node crypto including Unicode and long blocks',()=>{
     for(const text of ['', 'abc', 'ไทย é 🦁', 'A'.repeat(10000)])assert.equal(S.sha256(new TextEncoder().encode(text)),crypto.createHash('sha256').update(text).digest('hex'));
     assert.equal(S.hash({z:1,a:{b:2,a:3}}),crypto.createHash('sha256').update('{"a":{"a":3,"b":2},"z":1}').digest('hex'));
@@ -119,6 +127,47 @@ test('ClientText raw values retain @, literal backslash-n and actual line breaks
     assert.ok(S.diagnose(field,'[Keyword').some(item=>item.level==='error'));
     assert.deepEqual(S.diagnose({...field,kind:'form'},'NONEXISTENT'),[]);
 });
+
+test('ClientText missing and excess keyword diagnostics follow the actual SD range, error and count policy',()=>{
+    const cases=[
+        ['[Fire] damage and [Cold] chance','Feu damage and [Cold|Froid] chance'],
+        ['[Fire] damage','Plain translation without tags'],
+        ['[Fire] damage','[Fire|Feu] and [Fire|Feu] damage'],
+        ['[Fire] damage and [Cold] chance','[Fire|Feu] and [Wrong|Froid] chance'],
+        ['[Fire] damage\r\n[Cold] chance','& <raw> @literal\\n\r\n[Cold|Froid] chance'],
+        ['[Skill::{0}|Name] [Skill<gemlevel={2}>]','[Skill::{1}|Nom] [Skill<gemlevel={2}>]'],
+    ];
+    for(const [source,target] of cases){
+        const field={...unit().fields[0],source},before=structuredClone(field),actual=S.diagnose(field,target).filter(issue=>issue.kind==='keyword'),expected=sdKeywordDiagnostics(source,target);
+        assert.equal(actual.length,1);assert.equal(expected.length,1);assert.equal(actual[0].level,'error');
+        assert.deepEqual({start:actual[0].start,end:actual[0].end,message:actual[0].message},{start:expected[0].start,end:expected[0].end,message:expected[0].message},target);
+        if(actual[0].start!==undefined)assert.ok(target.slice(actual[0].start,actual[0].end).startsWith('['));
+        else assert.equal(Object.hasOwn(actual[0],'end'),false,'a missing counterpart cannot paint unrelated translation text');
+        assert.deepEqual(field,before);assert.equal(S.normalizeValues({...unit(),fields:[field]},{[fieldId]:target})[fieldId],target);
+    }
+});
+
+test('ClientText variable, format, substitution and control mismatches only annotate a relevant target token',()=>{
+    const field={...unit().fields[0],source:'{0}% {0}% <size:16> <<Icon>> <continue>'},target='prefix@literal\\n\r\n{0}% <size:20> <<Other>> <continue> <continue>';
+    const issues=S.diagnose(field,target).filter(issue=>issue.code==='clienttext-token-identity');
+    assert.deepEqual(issues.map(issue=>[issue.kind,issue.level,target.slice(issue.start,issue.end)]),[
+        ['variable','error','{0}%'],['substitution','error','<<Other>>'],['format','error','<size:20>'],['control','error','<continue>'],
+    ]);
+    assert.equal(issues.find(issue=>issue.kind==='control').start,target.lastIndexOf('<continue>'));
+    const absent=S.diagnose(field,'plain target').filter(issue=>issue.code==='clienttext-token-identity');
+    assert.equal(absent.length,4);assert.ok(absent.every(issue=>!Object.hasOwn(issue,'start')&&!Object.hasOwn(issue,'end')));
+});
+
+test('ClientText source-only opaque syntax has no fabricated target range and categories can be explicitly disabled',()=>{
+    const field={...unit().fields[0],source:'prefix <future-control> [Fire] {0} <size:16> <<Icon>> <continue>'},target='Court <future-control> [Cold] {1} <size:20> <<Other>>';
+    const unknown=S.diagnose(field,target).find(issue=>issue.code==='clienttext-unknown-syntax');
+    assert.equal(target.slice(unknown.start,unknown.end),'<future-control>');
+    const sourceOnly=S.diagnose(field,'plain target').find(issue=>issue.code==='clienttext-unknown-syntax');
+    assert.equal(sourceOnly.level,'warning');assert.equal(Object.hasOwn(sourceOnly,'start'),false);assert.equal(Object.hasOwn(sourceOnly,'end'),false);
+    const options={tagSyntax:false,variables:false,keywords:false,decorations:false,substitutions:false,controls:false};
+    assert.deepEqual(S.diagnose(field,target,options),[]);
+    assert.deepEqual(S.diagnose(field,'  '),[sourceOnly],'intentional blanks retain the existing non-blocking opaque syntax warning');
+});
 test('nested localizable formatting braces are separate from immutable numeric and double-angle substitutions',()=>{
     const source="<<ExpedRuneFire>><rgb(219,217,206)>{Fire Rune}\n<font:'fontin'>{<italic>{<rgb(110,87,66)>{Monsters gain:}}}\n<rgb(135,134,253)>{Extra Fire Damage} {0:+d}";
     const translated="<<ExpedRuneFire>><rgb(219,217,206)>{รูนไฟ}\n<font:'fontin'>{<italic>{<rgb(110,87,66)>{มอนสเตอร์ได้รับ:}}}\n<rgb(135,134,253)>{ความเสียหายไฟเพิ่ม} {0:+d}";
@@ -203,7 +252,7 @@ test('keyword ID braces are immutable reference metadata and display variables r
     const field={...unit().fields[0],source};
     assert.deepEqual(S.extractVariables(source).map(token=>token.full),['{1}%','{}']);
     assert.deepEqual(S.diagnose(field,'[Skill::{0}|Nom +{1}%] [Skill_2<gemlevel={12}>|Niveau {}] [Bare]'),[]);
-    assert.ok(S.diagnose(field,source.replace('::{0}','::{1}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='warning'));
+    assert.ok(S.diagnose(field,source.replace('::{0}','::{1}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
     assert.ok(S.diagnose(field,source.replace('Name {1}%','Nom')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
     for(const identity of ['Skill:{0}','Skill:::{0}','Skill::{d}','Skill::{0}%','Skill<gemlevel={d}>','Skill<gemlevel={0}>suffix','Skill{{0}}']){
         const malformed='['+identity+'|Name]';

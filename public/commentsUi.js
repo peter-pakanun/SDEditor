@@ -114,7 +114,7 @@
       };
       document.addEventListener('visibilitychange', this._commentsVisibility);
       window.addEventListener('online', this._commentsVisibility);
-      const dialog = this.$refs.diagnosticScanDialog;
+      const dialog = this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog;
       if (dialog && typeof MutationObserver !== 'undefined') {
         this._commentsDialogObserver = new MutationObserver(() => this.commentsSurfaceChanged());
         this._commentsDialogObserver.observe(dialog, { attributes: true, attributeFilter: ['open'] });
@@ -157,7 +157,7 @@
         this.commentsSurfaceChanged();
       },
       commentsSurfaceVisible(surface) {
-        if (document.hidden || this.commentsUiBlocked || this.$refs.diagnosticScanDialog?.open || !this.commentsEligible) return false;
+        if (document.hidden || this.commentsUiBlocked || (this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog)?.open || !this.commentsEligible) return false;
         const fullEditor = this.sharedEditorController?.editorVisible ?? this.editorVisible;
         const tool = this.sharedEditorController?.sideTab ?? this.sideTab;
         return surface === 'file' ? !!(this.sharedEditorToolsVisible ?? this.editorToolsVisible ?? this.editorSessionActive ?? this.editorVisible) && tool === 'comments' && !!this.commentsFilepath

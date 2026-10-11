@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
 const State=require('../public/clientTextState.js');
+const Diagnostics=require('../public/translationDiagnostics.js');
 const Matching=require('../public/dictionaryMatching.js');
 const Shred=require('./clienttext-highlight-fixture.cjs');
 const drain=iterator=>{let result;do{result=iterator.next();}while(!result.done);return result.value;};
@@ -15,7 +16,7 @@ const highlightSpans=html=>Array.from(html.matchAll(/<span\b([^>]*)>([^<]*)<\/sp
 }));
 
 function harness(text='First\r\nSecond\r\nThird',source='Fire [ColdDamage|Cold] {0}'){
-    const calls=[],ticks=[],copied=[],window={ClientTextState:State,navigator:{clipboard:{writeText(value){copied.push(value);return Promise.resolve();}}}};
+    const calls=[],ticks=[],copied=[],window={ClientTextState:State,TranslationDiagnostics:Diagnostics,navigator:{clipboard:{writeText(value){copied.push(value);return Promise.resolve();}}}};
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),{window});
     const session=window.EditorSession,field={id:'text',name:'Text',kind:'text',source,targetCell:'C2',required:true},unit={id:'record',fields:[field]};
     const input={value:text.replace(/\r\n?/g,'\n'),selectionStart:0,selectionEnd:0,isConnected:true,
@@ -62,6 +63,48 @@ test('annotation spans never divide raw CRLF, lone CR or LF newlines from their 
     assert.equal(html.replace(/<[^>]*>/g,''),text,'rendering preserves raw text while the browser normalizes each complete newline');
     for(const [,content] of html.matchAll(/<span[^>]*>([^<]*)<\/span>/g))assert.doesNotMatch(content,/[\r\n]/,'native newline segments remain outside annotation spans');
     assert.match(html,/<\/span>\r\n<span/);assert.match(html,/<\/span>\r<span/);assert.match(html,/<\/span>\n<span/);
+});
+
+test('ClientText diagnostic overlays and shared pills locate missing keyword counterparts without painting the whole target',()=>{
+    for(const target of ['Feu & <raw & "quote" @literal\\n\r\n[Cold|Froid] chance','Plain translation without tags']){
+        const h=harness(target,'[Fire] damage and [Cold] chance'),control=h.session.fieldController(h.host,h.field),spans=highlightSpans(control.highlight),presentation=control.diagnosticPresentation;
+        assert.equal(highlightedText(control.highlight),target);assert.equal(presentation.errorCount,1);assert.equal(presentation.warningCount,0);assert.equal(presentation.notes.length,0);
+        assert.equal(control.field.dataAttrs['aria-invalid'],true);assert.match(presentation.errorTitle,/English has \[Cold\], \[Fire\]; translation has/);
+        assert.deepEqual(spans.filter(span=>span.classes.includes('diagnosticRange')).map(span=>[span.text,span.classes.includes('diagError')]),target.includes('[Cold')?[['[Cold|Froid]',true]]:[]);
+        assert.equal(h.host.ctValues.text,target);assert.deepEqual(h.calls,[]);
+    }
+});
+
+test('shared diagnostic presentation normalizes legacy severity and displays only manual notes alongside count hover titles',()=>{
+    const {session}=harness(),issues=[{severity:'error',message:'Legacy error'},{level:'warning',severity:'error',message:'Canonical warning'},
+        {severity:'warning',code:'clienttext-consistency',message:'Saved translations differ'},
+        {level:'warning',code:'dictionary-terminology',message:'Use Dictionary spelling'},...Array.from({length:8},(_,index)=>({level:'warning',message:'Warning '+index}))],before=structuredClone(issues);
+    const presentation=session.diagnosticPresentation(issues);
+    assert.equal(presentation.errorCount,1);assert.equal(presentation.warningCount,11);assert.equal(presentation.errorTitle,'Legacy error');
+    assert.match(presentation.warningTitle,/Canonical warning/);assert.match(presentation.warningTitle,/\.\.\.and 3 more$/);
+    assert.deepEqual(Array.from(presentation.notes,issue=>issue.kind),['consistency','terminology']);assert.deepEqual(issues,before);
+});
+
+test('ClientText live field diagnostics refresh independently of saved scan issues and suppress stale manual notes',()=>{
+    const h=harness('  [Cold|Froid] chance\r\n','[Fire] damage and [Cold] chance'),control=h.session.fieldController(h.host,h.field);
+    h.host.ctDiagnostics={record:[{fieldId:'text',severity:'error',message:'Old saved automatic issue'},
+        {fieldId:'text',severity:'warning',code:'clienttext-consistency',message:'Saved translations differ'}]};
+    h.host.ctValuesFor=()=>({text:'  [Cold|Froid] chance\r\n'});
+    assert.equal(control.diagnosticPresentation.warningCount,2);assert.equal(control.diagnosticPresentation.errorCount,1);assert.equal(control.diagnosticPresentation.notes.length,1);
+    assert.doesNotMatch(control.diagnosticPresentation.errorTitle,/Old saved/);assert.ok(highlightSpans(control.highlight).some(span=>span.text==='  '&&span.classes.includes('diagWarning')));
+    h.host.ctValues.text='[Fire|Feu] damage and [Cold|Froid] chance';
+    assert.equal(control.diagnosticPresentation.errorCount,0);assert.equal(control.diagnosticPresentation.warningCount,0);assert.equal(control.diagnosticPresentation.notes.length,0);
+    assert.equal(control.field.dataAttrs['aria-invalid'],undefined);assert.equal(h.host.ctDiagnostics.record.length,2,'draft presentation does not rewrite committed scan results');
+});
+
+test('ClientText live common whitespace and dash diagnostics retain workbook gender, form sentinel and audio-only exemptions',()=>{
+    for(const exemption of ['gender','sentinel','audio']){
+        const h=harness('  - NONEXISTENT \r\n','source {0}');
+        if(exemption==='gender')h.field.kind='gender';
+        if(exemption==='sentinel'){h.field.kind='form';h.host.ctValues.text='  NONEXISTENT \r\n';}
+        if(exemption==='audio')h.field.source='[NOAUDIO]';
+        const control=h.session.fieldController(h.host,h.field);assert.equal(control.diagnostics.length,0);assert.equal(control.diagnosticPresentation.errorCount,0);assert.equal(control.diagnosticPresentation.warningCount,0);
+    }
 });
 
 test('ActiveSkills shred source highlights retain whole original keywords and every surrounding character',()=>{
@@ -371,11 +414,11 @@ test('Tools restoration cannot transfer offsets to replaced, detached or unmount
 test('ClientText format adapter retains all raw and hidden fields while selection and save actions use mode owners',()=>{
     const {session,host,field,unit,input,calls}=harness('Raw@text\\n\r\nunchanged');
     const hidden={id:'hidden',name:'Hidden',source:'',kind:'text',target:'Kept'},gender={id:'gender',name:'Gender',source:'',kind:'gender',target:' F '};
-    unit.fields.push(hidden,gender);host.ctValues.hidden='Hidden authored';host.ctValues.gender=' F ';host.ctDiagnostics={record:[{fieldId:field.id,severity:'warning',message:'Visible issue'}]};
+    unit.fields.push(hidden,gender);host.ctValues.hidden='Hidden authored';host.ctValues.gender=' F ';host.ctDiagnostics={record:[{fieldId:field.id,severity:'warning',code:'dictionary-terminology',message:'Visible issue'}]};
     host.ctSave=(...args)=>calls.push(['save',...args]);host.ctSaveAndNavigate=reverse=>calls.push(['navigate',reverse]);host.ctFocusTarget=(...args)=>calls.push(['target',...args]);
     const adapter=session.formatAdapter(host,'clienttext'),fields=adapter.fields,visible=fields[0],snapshot=structuredClone(unit);
     assert.equal(fields.length,3);assert.equal(fields[1].target,'Hidden authored');assert.equal(fields[2].control,'input');assert.equal(visible.target,'Raw@text\\n\r\nunchanged');
-    assert.equal(visible.diagnostics[0].message,'Visible issue');assert.equal(adapter.capabilities.forms,true);assert.ok(adapter.slots.includes('developerNotes'));
+    assert.ok(visible.diagnostics.some(issue=>issue.message==='Visible issue'));assert.equal(adapter.capabilities.forms,true);assert.ok(adapter.slots.includes('developerNotes'));
     input.selectionStart=1;input.selectionEnd=4;input.selectionDirection='backward';input.scrollTop=12;input.scrollLeft=3;
     const selected=adapter.actions.captureSelection(visible);input.selectionStart=input.selectionEnd=0;assert.equal(adapter.actions.restoreSelection(visible,selected),true);
     assert.deepEqual([input.selectionStart,input.selectionEnd,input.scrollTop,input.scrollLeft],[1,4,12,3]);

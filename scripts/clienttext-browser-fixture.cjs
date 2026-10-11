@@ -379,9 +379,8 @@ async function run() {
                         return { viewport:innerWidth,source:box(source),target:box(target),controls:elements.map(box) };
                     });
                     assert.equal(facts.controls.every(control => control.visible && control.width>0 && control.height>0 && control.x>=0 && control.right<=facts.viewport),true,editor+' '+theme+': class controls stay visible within desktop columns');
-                    if(editor==='full')assert.ok(facts.source.bottom<=facts.target.y,editor+' '+theme+': English stays above the selected class translation');
-                    else assert.ok(facts.source.right<=facts.target.x,editor+' '+theme+': English stays left of the selected class translation');
-                    themeChecks.push({editor,theme,controlsVisible:true,sourcePosition:editor==='full'?'above':'left'});
+                    assert.ok(facts.source.right<=facts.target.x,editor+' '+theme+': English stays left of the selected class translation');
+                    themeChecks.push({editor,theme,controlsVisible:true,sourcePosition:'left'});
                 }
                 await page.evaluate(() => document.documentElement.setAttribute('data-theme','light'));
             };
@@ -847,9 +846,10 @@ async function run() {
         assert.match(await workspace.locator('.workspaceFooter .collaborationFooterMessage').textContent(), /0\s*\/\s*5.*initial.*fields/i, 'The shared footer labels field workload explicitly');
         await workspace.getByRole('button', { name: 'Scan diagnostics', exact: true }).click();
         const scanDialog = page.getByRole('dialog', { name: 'Scan diagnostics', exact: true });
-        await scanDialog.waitFor(); assert.equal(await scanDialog.locator('.diagnosticScanForm .diagnosticScanFooter').count(), 1);
-        assert.equal(await scanDialog.getByRole('checkbox', { name: /^Consistency/ }).isChecked(), false, 'The shared diagnostic dialog leaves optional consistency unchecked');
-        await scanDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await scanDialog.waitFor(); assert.equal(await scanDialog.locator('.diagnosticScanForm .diagnosticScanActions').count(), 1);
+        assert.equal(await scanDialog.getByRole('checkbox', { name: 'Inconsistent translations', exact: true }).isChecked(), true, 'The shared diagnostic dialog retains the SD consistency default');
+        assert.equal(await scanDialog.getByRole('checkbox', { name: 'Dictionary terminology', exact: true }).isChecked(), false, 'Dictionary terminology remains optional and unchecked');
+        await scanDialog.getByRole('button', { name: 'Close', exact: true }).last().click();
         assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctScanDone), false, 'Opening or cancelling diagnostics does not run a scan');
         const visibilityId = JSON.stringify(['normal', 'Visibility', 'visible-raw']);
         await navigation.getByRole('button', { name: 'Visibility', exact: true }).click();
@@ -959,7 +959,7 @@ async function run() {
             const keyboardModal = page.getByRole('dialog', { name: 'Scan diagnostics', exact: true }); await keyboardModal.waitFor();
             await guardedEvent({ key: 'Enter', ctrlKey: true });
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), false, 'An open modal prevents a background inline target from opening a full editor');
-            await keyboardModal.getByRole('button', { name: 'Cancel', exact: true }).click();
+            await keyboardModal.getByRole('button', { name: 'Close', exact: true }).last().click();
             await open('Normal', 'record', true); await inputFor('Name').focus(); await inputFor('Name').press('Shift+Tab');
             await waitTarget('noaudio', false, fieldKey('Gender'));
             await inputFor('Gender').press('Tab'); await waitTarget('record', false, fieldKey('Name'));
@@ -1253,12 +1253,7 @@ async function run() {
                 await page.screenshot({ path: join(directory, `clienttext-dictionary-${editorMode}-${theme}.png`), fullPage: true });
             }
             await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
-            await target.focus(); await target.press('Control+A');
-            await entry.locator('.dictUseBtn').first().click();
-            assert.equal(await target.inputValue(), 'Épée Forgée', 'Use translation inserts the main definition into the focused target');
-            await target.focus(); await target.press('Control+A');
-            await alternate.getByRole('button', { name: 'Use translation', exact: true }).click();
-            assert.equal(await target.inputValue(), 'Bouclier Fort', 'Use translation inserts the alternate definition into the focused target');
+            assert.equal(await entry.locator('.dictUseBtn').count(), 0, 'ClientText Dictionary retains the SD row controls without extra Use translation buttons');
             for (const shortcut of ['Control+Enter', 'Meta+Enter']) {
                 await target.focus(); await target.press('Control+A');
                 await replace.press(shortcut);
@@ -1348,7 +1343,7 @@ async function run() {
             assert.deepEqual(appliedMemory, { ...beforeMemory, target: 'Épée', dirty: true }, 'TM insertion persists only a private draft');
         }
         if (!dictionaryOnly) results.push('ClientText TM double-click inserts into the focused target in full and inline editors; one click preserves typing, other fields and committed work stay unchanged');
-        results.push('Full/inline Dictionary uses the shared SD single-line Find/Replace inputs and multiline TL notes; main/alternate Use buttons and Ctrl/Meta+Enter insert privately while plain Enter leaves translation work unchanged');
+        results.push('Full/inline Dictionary uses the shared SD row controls, single-line Find/Replace inputs and multiline TL notes; main/alternate Ctrl/Meta+Enter insert privately while uncaptured plain Enter leaves translation work unchanged');
         if (dictionaryOnly) {
             assert.deepEqual(failures, [], 'Focused Dictionary fixture has no browser script errors');
             const report = { status: 'PASS', dictionaryOnly: true, normalMode: true, browser: executablePath, results };
@@ -1467,8 +1462,8 @@ async function run() {
                     const source = elements.find(element => element.value === 'Sword'); if (!source) return null;
                     const box = source.getBoundingClientRect(); return { x: box.x, y: box.y, right: box.right, height: box.height, bottom: box.bottom };
                 });
-                assert.ok(sourceBounds && sourceBounds.bottom <= bounds.y, 'Readonly English is above the editable translation in the shared full-editor block');
-                assert.ok(Math.abs(sourceBounds.x - bounds.x) <= 1, 'Full-editor English and translation inputs share their left edge');
+                assert.ok(sourceBounds && sourceBounds.right <= bounds.x, 'Readonly English is left of the editable translation in the shared full-editor block');
+                assert.ok(Math.abs(sourceBounds.y - bounds.y) <= 1, 'Full-editor English and translation inputs share their top edge');
                 assert.deepEqual((await workspace.locator('.ctTools .sideTabs .tabBtn').allTextContents()).map(text => text.replace(/[📚🕒]/gu, '').trim()), ['Dictionary', 'Lookup', 'TM', 'History', 'Comments']);
                 assert.equal(await workspace.locator('.side.fixed.editorSidebarHost').count(), 1);
                 assert.match(await workspace.locator('.editorActions h1').textContent(), /Translation/);
@@ -1478,7 +1473,7 @@ async function run() {
                 const formBounds = await workspace.getByRole('textbox', { name: 'Text FS', exact: true }).boundingBox();
                 assert.ok(formBounds && formBounds.width > 80 && formBounds.x >= 0 && formBounds.x + formBounds.width <= size.width, theme + ': six-form text fits the shared full editor');
                 const fullFormSource = await workspace.getByRole('textbox', { name: 'Text English', exact: true }).boundingBox(), fullFormGrid = await workspace.locator('.ctFormGrid').boundingBox();
-                assert.ok(fullFormSource && fullFormGrid && fullFormSource.y + fullFormSource.height <= fullFormGrid.y, 'Gender source stays above its six-form translation grid');
+                assert.ok(fullFormSource && fullFormGrid && fullFormSource.x + fullFormSource.width <= fullFormGrid.x, 'Gender source stays left of its six-form translation grid');
                 await page.screenshot({ path: join(directory, `clienttext-shared-gender-${size.width}-${theme}.png`), fullPage: true });
                 await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             }

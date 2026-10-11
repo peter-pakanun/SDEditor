@@ -30,7 +30,7 @@ function between(source, start, end) {
 const navigation = between(html, '<nav class="ctNavigation"', '</nav>') + '</nav>';
 const workspaceShell = between(html, '<editor-workspace-shell ', '>') + '>';
 const table = between(html, '<table class="display compact cell-border fileTable ctTable"', '</table>') + '</table>';
-const fullEditor = between(html, '<editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor', '      <dialog ref="ctDiagnosticDialog"');
+const fullEditor = between(html, '<editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor', '</editor-full-shell>') + '</editor-full-shell>';
 const tooltipComponent = between(indexJs, 'const AppTooltip = {', 'function escapeTooltipAttr');
 const tooltipMethods = between(indexJs, '    normalizeTooltipText(value) {', '    htmlTooltipMouseMove(e) {');
 const tooltipDirective = between(indexJs, "app.directive('tooltip', {", "app.mount('#app');");
@@ -73,6 +73,7 @@ app.component('editor-workspace-shell',window.EditorComponents.WorkspaceShell);
 app.component('ct-fields',window.ClientTextUI.fieldsComponent);
 app.component('ct-target',window.ClientTextUI.targetComponent);
 app.component('editor-native-field',window.EditorComponents.NativeField);
+app.component('editor-diagnostic-meta',window.EditorComponents.DiagnosticMeta);
 // Reserve the actual preview shell without invoking the app preview lifecycle.
 app.component('editor-full-shell',{...window.EditorComponents.FullEditorShell,template:window.EditorComponents.FullEditorShell.template.replace('<div :id="previewHostId"></div>','<div :id="previewHostId"><div class="gamePreviewStrip"><strong class="gamePreviewLabel">Preview</strong><p>English source for the current record.</p></div></div>')});
 app.component('ct-tools',{props:['host'],template:'<aside class="side sharedEditorSidebar ctTools"><h3>File tools</h3><p>Disposable layout fixture</p></aside>'});

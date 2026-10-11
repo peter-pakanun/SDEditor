@@ -7,7 +7,7 @@ const vm = require('node:vm');
 
 const window = {};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), { window });
-const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History } = window.EditorComponents;
+const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
 test('shared native fields keep raw ClientText characters and publish committed IME text only', () => {
   const calls = [];
@@ -134,8 +134,17 @@ test('Dictionary uses the compact SD controls unless insertion buttons are expli
   assert.equal(entries.computed.useButtons.call({ controller: { dictionaryUseButtons: true, useDictionaryTranslation } }), true);
 });
 
+test('diagnostic badges delegate hover details to the shared application tooltip', () => {
+  const calls = [], event = { clientX: 120, clientY: 240 }, component = {
+    $root: { showTooltip: (...args) => calls.push(['show', ...args]), hideTooltip: () => calls.push(['hide']) },
+  };
+  window.EditorComponents.DiagnosticMeta.methods.showTooltip.call(component, event, 'Missing [Trigger]');
+  window.EditorComponents.DiagnosticMeta.methods.hideTooltip.call(component);
+  assert.deepEqual(calls, [['show', event, 'Missing [Trigger]'], ['hide']]);
+});
+
 test('shared surfaces publish DOM refs after mounting and updates and release their owner on unmount', () => {
-  for (const surface of [Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History]) {
+  for (const surface of [Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan]) {
     const refs = [], removed = [], controller = { registerRefs: (value, owner) => refs.push([value, owner]), unregisterRefs: owner => removed.push(owner) };
     const component = { $props: { controller }, $refs: { editorSide: {} } };
     const props = { controller }, bindings = surface.setup(props);

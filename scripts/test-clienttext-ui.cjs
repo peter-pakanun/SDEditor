@@ -7,7 +7,8 @@ const clone=value=>structuredClone(value),settle=async()=>{for(let i=0;i<8;i++)a
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 function harness(changes={}){
     let nextId=0;
-    const window={ClientTextState:S,ClientTextStore:Store,Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
+    const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+        TerminologyDiagnostics:require('../public/terminologyDiagnostics.js'),Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
@@ -19,6 +20,8 @@ function harness(changes={}){
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
+    for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController'])
+        Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
 }
@@ -330,7 +333,7 @@ test('inline translation shortcuts respect autocomplete, raw text and read-only 
     const composing=event(field,'Enter',{ctrlKey:true,isComposing:true});app.ctTargetKeydown(field,composing);assert.equal(selects,1);
     let saves=0;app.ctSave=async()=>saves++;app.$refs.ctDiagnosticDialog={open:true,close(){this.open=false;}};
     const save=rowEvent('F2');await app.ctKey(save);assert.equal(saves,0);
-    let scanned;app.ctIncludeConsistency=false;app.ctScan=value=>scanned=value;app.ctStartScan();assert.equal(scanned,false);assert.equal(app.$refs.ctDiagnosticDialog.open,false);
+    let scanned=false;app.ctScan=()=>scanned=true;app.ctStartScan();assert.equal(scanned,true);assert.equal(app.$refs.ctDiagnosticDialog.open,true,'scan progress stays in the shared modal');
     const sideSave=rowEvent('F2',true);await app.ctKey(sideSave);assert.equal(saves,0,'sidebar controls never save the underlying translation');
 });
 test('ClientText target navigation uses numeric worksheet columns without changing immutable export coordinates',()=>{
@@ -1969,6 +1972,156 @@ test('unchanged sync remains silent, retains saved identity and actionable confl
     const pending=deferred();let pulls=0;app._ctSync={async flush(){flushes++;await pending.promise;return{};},async pull(){pulls++;}};
     const a=app.ctSync(),b=app.ctSync();await settle();assert.equal(flushes,2,'Concurrent polls share one in-flight operation');
     app.ctFence();pending.resolve();await Promise.all([a,b]);assert.equal(pulls,0);assert.equal(Object.keys(app.ctSaved).length,0);assert.equal(app.ctUnits.length,0);assert.equal(app.ctWorkspace,null);assert.equal(app.ctRevision,3);
+});
+
+function scanHarness(rows=[namedUnit('Scan','English','Translation')],changes={}) {
+    const h=harness({ctUnits:rows,_ctUnitIndex:new Map(rows.map(row=>[row.id,row])),ctSelection:rows[0]?.id || '',lang:scope.language,
+        $refs:{},$nextTick:async()=>{},dictionary:[],editorDictionaryRevision:0,...changes});
+    h.app.ctRefreshDiagnostics=h.mixin.methods.ctRefreshDiagnostics.bind(h.app);
+    return h;
+}
+function onlyScanChecks(app,...keys) {app.ctScanChecks=Object.fromEntries(app.ctScanTypes.map(type=>[type.key,keys.includes(type.key)]));}
+
+test('ClientText scanner forwards the SD dialog contract and exposes supported CT checks without saving drafts',async()=>{
+    const {app,window}=scanHarness(),refs={},unrefs={},controller=app.ctDiagnosticScanController;
+    app.sharedEditorController={registerRefs:refs,unregisterRefs:unrefs};
+    assert.equal(controller.registerRefs,refs);assert.equal(controller.unregisterRefs,unrefs);
+    assert.equal(controller,app.ctDiagnosticScanController);assert.equal(controller.diagnosticScanTypes,app.ctScanTypes);
+    assert.deepEqual(Array.from(app.ctScanTypes,type=>type.key),['whitespace','dash','tagSyntax','variables','keywords','decorations','consistency','terminology','substitutions','controls']);
+    assert.equal(controller.diagnosticScanChecks.terminology,false);assert.equal(controller.diagnosticScanChecks.consistency,true);
+    assert.match(controller.diagnosticScanDescription,/all loaded records.*Local drafts are excluded/);assert.equal(controller.openDiagnosticResultLabel,'Open record');
+    assert.equal(controller.diagnosticScanProgressLabel,'Records scanned');assert.equal('diagnosticScanProgressLabel' in controller,true);
+    assert.equal(controller.diagnosticScanUnitLabel(1),'record');assert.equal(controller.diagnosticScanUnitLabel(0),'records');
+    controller.diagnosticScanResultsPage=3;assert.equal(app.ctScanResultsPage,3);
+    app.ctSave=()=>assert.fail('a diagnostic scan cannot save');app.ctFlushDraft=()=>assert.fail('a diagnostic scan cannot stage drafts');
+    app.ctValues[fieldId]='unsaved [Broken';app.ctDraftDirty=true;const before=clone(app.ctUnits);
+    assert.equal(await controller.startDiagnosticScan(),true);assert.equal(app.ctBusy,false);assert.equal(app.ctScanDone,true);
+    assert.deepEqual(app.ctUnits,before);assert.equal(app.ctValues[fieldId],'unsaved [Broken');assert.equal(app.ctDraftDirty,true);
+    assert.equal(controller.diagnosticScanResultFiles.length,0);assert.equal(controller.diagnosticScanPercent,100);
+    assert.match(window.EditorComponents.DiagnosticScan.template,/entry.label \|\| entry.filepath/);
+});
+test('ClientText scan categories reuse SD whitespace and dash checks and select precise CT token kinds',async()=>{
+    const row=namedUnit('Categories','[Power] {0} <red> <<button_x>> <continue>','  Incorrect -text  '),{app}=scanHarness([row]);
+    for(const [key,kind] of [['variables','variable'],['keywords','keyword'],['decorations','format'],['substitutions','substitution'],['controls','control']]) {
+        onlyScanChecks(app,key);assert.equal(await app.ctStartScan(),true);
+        assert.deepEqual(Array.from(app.ctDiagnostics[row.id],issue=>issue.kind),[kind],key+' excludes every other token identity category');
+        assert.equal(app.ctDiagnostics[row.id][0].severity,'error');
+    }
+    onlyScanChecks(app,'whitespace');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].length);assert.ok(app.ctDiagnostics[row.id].every(issue=>!issue.kind && /space/.test(issue.code)));
+    onlyScanChecks(app,'dash');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].some(issue=>/dash/.test(issue.code)));assert.ok(app.ctDiagnostics[row.id].every(issue=>!issue.kind));
+    row.fields[0].target='[Broken';onlyScanChecks(app,'tagSyntax');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].some(issue=>issue.code==='missing-closing-tag'));
+    onlyScanChecks(app);assert.equal(app.ctHasScanSelection,false);assert.equal(await app.ctStartScan(),undefined);
+});
+test('scanner reads exact committed raw values across hidden worklist records and excludes hidden English, audio, Gender and NONEXISTENT forms',async()=>{
+    const first=namedUnit('First','[Power]@literal\\n\r\n{0}','original [Power] {0}'),hidden=namedUnit('Hidden','[Power] {0}','saved without tags'),
+        excluded=blankEnglishUnit('Excluded','[Power] {0}'),{app,window}=scanHarness([first,hidden,excluded],{ctSearch:'no matching records',ctSheet:'not a sheet',ctSelectedFilters:[],ctFilter:'missing'});
+    excluded.fields[1].kind='form';excluded.fields[1].target='NONEXISTENT';excluded.fields[1].form='M';
+    excluded.fields.push({...excluded.fields[0],id:'audio',source:'[NOAUDIO]',target:'[Broken',kind:'text'},
+        {...excluded.fields[0],id:'gender',source:'[Power]',target:'[Broken',kind:'gender'});
+    const accepted=' raw@literal\\n\r\n[Power|คำ] {0} ',draft='unsaved [Broken';app.ctSaved={[first.id]:{values:{[fieldId]:accepted}}};app.ctValues={[fieldId]:draft};app.ctDraftDirty=true;
+    let inputs=[];const analyze=window.TranslationDiagnostics.analyze;window.TranslationDiagnostics={...window.TranslationDiagnostics,analyze(text,options){inputs.push(text);return analyze(text,options);}};
+    onlyScanChecks(app,'whitespace','tagSyntax','variables','keywords');const original=clone(app.ctUnits),saved=clone(app.ctSaved);
+    assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanTotal,3);assert.deepEqual(inputs,[accepted,hidden.fields[0].target]);
+    assert.equal(app.ctDiagnostics[excluded.id].length,0);assert.ok(app.ctDiagnostics[hidden.id].some(issue=>issue.code==='clienttext-token-identity'));
+    assert.deepEqual(app.ctUnits,original);assert.deepEqual(app.ctSaved,saved);assert.equal(app.ctValues[fieldId],draft);
+});
+test('optional ClientText consistency and terminology stay manual and scan only saved values',async()=>{
+    const first=namedUnit('One','Power','Incorrect'),second=namedUnit('Two','Power','Force'),{app,mixin}=scanHarness([first,second]);
+    app.getActiveDictionaryEntries=()=>[{find:'Power',replace:'Force'}];let runs=0;const scan=app.ctScan;app.ctScan=(...args)=>{runs++;return scan(...args);};
+    onlyScanChecks(app,'keywords');await app.ctStartScan();assert.equal(app.ctScanIssueCounts.warnings,0);
+    app.ctScanChecks.consistency=true;app.ctScanChecks.terminology=true;assert.equal(runs,1,'checking optional boxes does not run them');
+    await app.ctStartScan();assert.equal(runs,2);assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='clienttext-consistency'));
+    assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='dictionary-terminology'));assert.ok(!app.ctDiagnostics[second.id].some(issue=>issue.code==='dictionary-terminology'));
+    app.ctScanResultsPage=2;mixin.watch.editorDictionaryRevision.call(app);assert.equal(runs,2);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);
+});
+test('ClientText consistency results identify grammatical forms and exclude other forms from the comparison',async()=>{
+    const first=namedUnit('MasculineOne','Power','Force'),second=namedUnit('MasculineTwo','Power','Strength'),other=namedUnit('Feminine','Power','Different'),
+        rows=[first,second,other];
+    for(const row of rows){row.fields[0].kind='form';row.fields[0].form=row===other ? 'FS' : 'MS';}
+    const {app}=scanHarness(rows);onlyScanChecks(app,'consistency');
+    assert.equal(await app.ctStartScan(),true);
+    for(const row of [first,second]){
+        const issue=app.ctDiagnostics[row.id].find(item=>item.code==='clienttext-consistency');
+        assert.equal(issue.form,'MS');assert.equal(app.ctScanIssueLocation(issue),issue.fieldName+' · MS');
+    }
+    assert.equal(app.ctDiagnostics[other.id].length,0,'A different grammatical form is an independent consistency group');
+});
+
+test('ClientText scanner keeps shared modal progress and completed results when closed and reopened',async()=>{
+    const pending=deferred(),returnFocus={isConnected:true,focusCalls:[],focus(options){this.focusCalls.push(options);}},
+        dialog={open:false,showModal(){this.open=true;},close(){this.open=false;}},heading={count:0,focus(){this.count++;}},
+        {app,window}=scanHarness(undefined,{$nextTick:callback=>pending.promise.then(()=>callback?.())});
+    window.document={activeElement:returnFocus};app.getEditorComponentRef=name=>name==='diagnosticScanDialog'?dialog:heading;
+    app.$refs.ctDiagnosticDialog={open:false,showModal:()=>assert.fail('shared ref should win')};
+    assert.equal(app.ctOpenScanDialog(),true);assert.equal(dialog.open,true);const scanning=app.ctStartScan();assert.equal(app.ctScanRunning,true);assert.equal(app.ctBusy,false);
+    app.ctCloseScanDialog();app.ctScanDialogClosed();assert.equal(dialog.open,false);assert.equal(app.ctScanRunning,true);assert.equal(returnFocus.focusCalls.length,1);
+    assert.equal(app.ctOpenScanDialog(),true);pending.resolve();assert.equal(await scanning,true);assert.equal(app.ctScanDone,true);assert.ok(heading.count);
+    app.ctCloseScanDialog();app.ctOpenScanDialog();assert.equal(app.ctScanDone,true);assert.equal(app.ctScanProcessed,1);
+    const event={ctrlKey:true,code:'KeyS',preventDefault(){this.prevented=true;}};app.ctScanDialogKeydown(event);assert.equal(event.prevented,true);
+    app.ctCloseScanDialog(false);app.ctScanDialogClosed();assert.equal(returnFocus.focusCalls.length,1,'Open record does not restore the old focus');
+});
+test('ClientText Stop discards partial output without aborting workspace requests and a second scan can complete',async()=>{
+    const rows=Array.from({length:75},(_,i)=>namedUnit('Row'+i,'{0}','Wrong')),{app}=scanHarness(rows),abort=new AbortController();app._ctAbort=abort;
+    const analyze=app.ctAnalyzeScanUnit;app.ctAnalyzeScanUnit=(...args)=>{const result=analyze(...args);if(app.ctScanProcessed===24)app.ctStopScan();return result;};
+    assert.equal(await app.ctStartScan(),false);assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanStopped,true);assert.equal(app.ctScanDone,false);
+    assert.equal(Object.keys(app.ctDiagnostics).length,0);assert.equal(app.ctScanErrorFileCount,0);assert.equal(app._ctScanCache,null);assert.equal(abort.signal.aborted,false);
+    app.ctAnalyzeScanUnit=analyze;assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanProcessed,75);assert.equal(app.ctScanErrorFileCount,75);
+});
+test('shared ClientText scanner scope transitions close the modal and stale focus cannot enter a replacement account',async()=>{
+    const pending=deferred(),focus={isConnected:true,count:0,focus(){this.count++;}},heading={count:0,focus(){this.count++;}},
+        dialog={open:false,showModal(){this.open=true;},close(){this.open=false;}},{app,mixin,window}=scanHarness(undefined,{$nextTick:callback=>pending.promise.then(()=>callback?.())});
+    window.document={activeElement:focus};app.getEditorComponentRef=name=>name==='diagnosticScanDialog'?dialog:heading;
+    const scopeKey=app.ctScanScopeKey;app.ctWorkspace={scope:clone(scope)};assert.equal(app.ctScanScopeKey,scopeKey,'equivalent scope refresh keeps settled results');
+    app.ctOpenScanDialog();app.cloudProfileId='other';pending.resolve();await settle();assert.equal(heading.count,0);
+    app.ctCloseScanDialog();app.ctScanDialogClosed();assert.equal(focus.count,0);
+    app.ctOpenScanDialog();app.ctActive=false;mixin.watch.ctScanScopeKey.call(app);assert.equal(dialog.open,false);assert.equal(app.ctScanDone,false);
+});
+for(const change of ['Stop','account change'])test('ClientText consistency phase yields for '+change+' without publishing partial findings',async()=>{
+    const rows=Array.from({length:60},(_,i)=>namedUnit('Peer'+i,'English '+Math.floor(i/2),i%2?'First translation':'Second translation')),
+        {app}=scanHarness(rows),abort=new AbortController();app._ctAbort=abort;onlyScanChecks(app,'consistency');
+    let groups=0,seenPhase='',liveWarnings=0;const add=app.ctAddConsistency;
+    app.ctAddConsistency=(...args)=>{
+        const output=add(...args);groups++;
+        if(groups===1)setTimeout(()=>{seenPhase=app.ctScanPhase;liveWarnings=app.ctScanWarningFileCount;if(change==='Stop')app.ctStopScan();else app.cloudProfileId='other';},0);
+        return output;
+    };
+    assert.equal(await app.ctStartScan(),false);assert.equal(seenPhase,'Checking consistency…');assert.equal(groups,25);assert.equal(liveWarnings,50);
+    assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);assert.equal(app.ctScanWarningFileCount,0);
+    assert.equal(abort.signal.aborted,false);assert.equal(app._ctScanCache,null);
+});
+for(const changed of ['account','game','branch','language','group','version','mode','units','saved','dictionary','dictionary-revision','hideDNT'])
+test('ClientText scanner rejects a late '+changed+' scope without publishing partial results',async()=>{
+    const pending=deferred(),{app}=scanHarness(undefined,{$nextTick:()=>pending.promise});const scanning=app.ctStartScan();
+    if(changed==='account')app.cloudProfileId='other';else if(changed==='game')app.gameVersion='poe1';else if(changed==='branch')app.branchId='other';
+    else if(changed==='language')app.lang='German';else if(changed==='group')app.ctWorkspace={scope:{...scope,groupId:'other'}};
+    else if(changed==='version')app.ctWorkspace={scope:{...scope,versionId:'other'}};else if(changed==='mode')app.ctActive=false;
+    else if(changed==='units')app.ctUnits=app.ctUnits.slice();else if(changed==='saved')app.ctSaved={};else if(changed==='dictionary')app.dictionary=[];
+    else if(changed==='dictionary-revision')app.editorDictionaryRevision++;else app.hideDNT=true;
+    pending.resolve();assert.equal(await scanning,false);assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);
+});
+test('ClientText result cards keep exact issue counts, bounded details, pages and guarded record identities',async()=>{
+    const rows=Array.from({length:23},(_,i)=>namedUnit('Row'+i,'{0}','Wrong')),{app}=scanHarness(rows);
+    onlyScanChecks(app,'variables');await app.ctStartScan();const controller=app.ctDiagnosticScanController;
+    assert.equal(controller.diagnosticScanIssueCounts.errors,23);assert.equal(controller.diagnosticScanResultPageCount,2);assert.equal(controller.diagnosticScanVisibleResults.length,20);
+    controller.diagnosticScanResultsPage=2;assert.equal(controller.diagnosticScanResultRangeLabel,'21–23 of 23');assert.equal(controller.diagnosticScanVisibleResults.length,3);
+    const card=controller.diagnosticScanVisibleResults[0];assert.equal(card.filepath,rows.find(row=>[row.role,row.sheet,row.recordId].join(' / ')===card.label).id);
+    let opened;app.ctSelect=async(row,full)=>{opened={row,full};return true;};assert.equal(await controller.openDiagnosticResult(card.filepath),true);assert.equal(opened.full,true);assert.equal(opened.row.id,card.filepath);
+    app.ctWorkspace={scope:{...scope,groupId:'other'}};opened=null;assert.equal(await controller.openDiagnosticResult(card.filepath),false);assert.equal(opened,null);
+    const diagnostic={severity:'warning',fieldId:fieldId,fieldName:'Text',message:'Finding'};app.ctDiagnostics={[rows[0].id]:Array.from({length:61},()=>diagnostic)};
+    const result=app.ctScanResultFiles[0].result;assert.equal(result.warningCount,61);assert.equal(result.diagnostics.length,40);assert.equal(result.diagnosticsTruncated,21);
+});
+test('completed ClientText scans retain applied checks and page while refreshing one saved record',async()=>{
+    const rows=Array.from({length:24},(_,i)=>namedUnit('Row'+i,'{0}','Wrong')),{app}=scanHarness(rows);onlyScanChecks(app,'variables');await app.ctStartScan();
+    app.ctScanResultsPage=2;const unrelated=app.ctDiagnostics[rows[1].id];onlyScanChecks(app,'whitespace');
+    app.ctSaved={[rows[0].id]:{values:{[fieldId]:'{0}'}}};app.ctRefreshDiagnostics([rows[0].id]);
+    assert.equal(app.ctScanDone,true);assert.equal(app.ctScanAppliedChecks.variables,true);assert.equal(app.ctDiagnostics[rows[0].id].length,0);
+    assert.equal(app.ctDiagnostics[rows[1].id],unrelated);assert.equal(app.ctScanResultsPage,2);assert.equal(app.ctScanErrorFileCount,23);
+});
+test('a saved update cancels an unfinished ClientText scan and fencing closes the shared dialog',async()=>{
+    const pending=deferred(),dialog={open:true,close(){this.open=false;}},{app}=scanHarness(undefined,{$nextTick:()=>pending.promise});
+    app.getEditorComponentRef=()=>dialog;const scanning=app.ctStartScan();app.ctRefreshDiagnostics([app.ctUnits[0].id]);
+    pending.resolve();assert.equal(await scanning,false);assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanDone,false);
+    app.ctFence();assert.equal(dialog.open,false);assert.equal(app.ctScanTotal,0);assert.equal(app.ctScanAppliedChecks,null);
 });
 
 test('completed consistency scans refresh changed rows and their peers without clearing unrelated diagnostics',async()=>{

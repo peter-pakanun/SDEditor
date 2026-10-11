@@ -20,6 +20,19 @@
     // Start with workload and saved changes; complete originals remain
     // available through the Unchanged filter.
     const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
+    const scanTypes = [
+        {key:'whitespace',label:'Whitespace',description:'Leading, trailing, and repeated spaces.'},
+        {key:'dash',label:'Dash spacing',description:'Dashes at line boundaries or next to spaces.'},
+        {key:'tagSyntax',label:'Tag syntax',description:'Missing, extra, nested, or malformed tags.'},
+        {key:'variables',label:'Variable tags',description:'Variable identities and counts compared with English.'},
+        {key:'keywords',label:'Keyword popup tags',description:'Keyword identities and counts compared with English.'},
+        {key:'decorations',label:'Text decoration tags',description:'Decoration names and counts compared with English.'},
+        {key:'consistency',label:'Inconsistent translations',description:'Different translations of identical English fields and grammatical forms.'},
+        {key:'terminology',label:'Dictionary terminology',description:'Terms that do not use an approved dictionary translation.'},
+        {key:'substitutions',label:'ClientText substitutions',description:'Icon and substitution identities and counts compared with English.'},
+        {key:'controls',label:'ClientText controls',description:'Control identities and counts compared with English.'}
+    ];
+    const defaultScanChecks = () => Object.fromEntries(scanTypes.map(type=>[type.key,type.key!=='terminology']));
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
     const classForms = new Set(['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
@@ -69,10 +82,13 @@
         data() { return {
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
-            ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false, ctIncludeConsistency: false,
+            ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
             ctVariantSelections: {}, ctDefaultsExpanded: {},
             ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
+            ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
+            ctScanProcessed:0,ctScanTotal:0,ctScanRunId:0,ctScanError:'',ctScanPhase:'',ctScanErrorFileCount:0,ctScanWarningFileCount:0,
+            ctScanResultsPage:1,ctScanResultsPageSize:20,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
             ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
@@ -171,9 +187,59 @@
                 return query ? this.ctSheets.filter(sheet=>sheet.name.toLowerCase().includes(query)) : this.ctSheets;
             },
             ctDiagnosticCounts() {
+                if(this.ctScanRunning)return {error:this.ctScanErrorFileCount,warning:this.ctScanWarningFileCount};
                 const counts={error:0,warning:0};
                 for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
                 return counts;
+            },
+            ctHasScanSelection() {return this.ctScanTypes.some(type=>this.ctScanChecks[type.key]);},
+            ctScanScopeKey() {return JSON.stringify([this.ctActive,this.ctContext(),this.cloudProfileId || this.cloudUser?.id || 'guest',this.gameVersion,this.branchId || 'default',this.lang]);},
+            ctScanPercent() {return this.ctScanTotal ? Math.round(this.ctScanProcessed/this.ctScanTotal*100) : this.ctScanDone ? 100 : 0;},
+            ctScanResultFiles() {
+                return Object.entries(this.ctDiagnostics).filter(([,issues])=>issues.length).map(([filepath,issues])=>{
+                    const unit=this._ctUnitIndex?.get(filepath),errors=issues.filter(issue=>issue.severity==='error'),warnings=issues.filter(issue=>issue.severity==='warning');
+                    // Keep exact counts, with the same bounded card output as SD.
+                    const diagnostics=[...errors,...warnings].slice(0,40).map(issue=>({...issue,level:issue.severity || issue.level}));
+                    return {filepath,label:unit ? [unit.role,unit.sheet,unit.recordId].filter(Boolean).join(' / ') : filepath,
+                        result:{errorCount:errors.length,warningCount:warnings.length,hasDiagnosticError:!!errors.length,hasDiagnosticWarning:!!warnings.length,
+                            diagnostics,diagnosticsTruncated:issues.length-diagnostics.length}};
+                }).sort((a,b)=>Number(b.result.hasDiagnosticError)-Number(a.result.hasDiagnosticError) || a.label.localeCompare(b.label,undefined,{numeric:true}) || a.filepath.localeCompare(b.filepath));
+            },
+            ctScanResultPageCount() {return Math.max(1,Math.ceil(this.ctScanResultFiles.length/this.ctScanResultsPageSize));},
+            ctScanResultRangeLabel() {
+                const total=this.ctScanResultFiles.length,page=Math.min(this.ctScanResultsPage,this.ctScanResultPageCount),size=this.ctScanResultsPageSize;
+                const start=total ? (page-1)*size+1 : 0,end=Math.min(page*size,total);
+                return `${start.toLocaleString('en-US')}–${end.toLocaleString('en-US')} of ${total.toLocaleString('en-US')}`;
+            },
+            ctScanVisibleResults() {const page=Math.min(this.ctScanResultsPage,this.ctScanResultPageCount);return this.ctScanResultFiles.slice((page-1)*this.ctScanResultsPageSize,page*this.ctScanResultsPageSize);},
+            ctScanIssueCounts() {return Object.values(this.ctDiagnostics).reduce((counts,issues)=>{for(const issue of issues)if(issue.severity==='error')counts.errors++;else if(issue.severity==='warning')counts.warnings++;return counts;},{errors:0,warnings:0});},
+            ctDiagnosticScanController() {
+                if(this._ctDiagnosticScanController)return this._ctDiagnosticScanController;
+                const host=this,aliases={diagnosticScanTypes:'ctScanTypes',diagnosticScanChecks:'ctScanChecks',diagnosticScanAppliedChecks:'ctScanAppliedChecks',
+                    diagnosticScanRunning:'ctScanRunning',diagnosticScanCompleted:'ctScanDone',diagnosticScanStopped:'ctScanStopped',diagnosticScanProcessed:'ctScanProcessed',
+                    diagnosticScanTotal:'ctScanTotal',diagnosticScanRunId:'ctScanRunId',diagnosticScanError:'ctScanError',diagnosticScanPhase:'ctScanPhase',
+                    diagnosticScanErrorFileCount:'ctScanErrorFileCount',diagnosticScanWarningFileCount:'ctScanWarningFileCount',diagnosticScanResultsPage:'ctScanResultsPage',
+                    diagnosticScanResultsPageSize:'ctScanResultsPageSize',hasDiagnosticScanSelection:'ctHasScanSelection',diagnosticScanPercent:'ctScanPercent',
+                    diagnosticScanResultFiles:'ctScanResultFiles',diagnosticScanResultPageCount:'ctScanResultPageCount',diagnosticScanResultRangeLabel:'ctScanResultRangeLabel',
+                    diagnosticScanVisibleResults:'ctScanVisibleResults',diagnosticScanIssueCounts:'ctScanIssueCounts',openDiagnosticScanDialog:'ctOpenScanDialog',
+                    closeDiagnosticScanDialog:'ctCloseScanDialog',diagnosticScanDialogClosed:'ctScanDialogClosed',diagnosticScanDialogKeydown:'ctScanDialogKeydown',
+                    startDiagnosticScan:'ctStartScan',stopDiagnosticScan:'ctStopScan',scanAllDiagnostics:'ctScan',openDiagnosticResult:'ctOpenDiagnosticResult',
+                    diagnosticScanIssueLocation:'ctScanIssueLocation',diagnosticScanUnitLabel:'ctScanUnitLabel'};
+                this._ctDiagnosticScanController=raw(new Proxy({}, {
+                    get(_target,key) {
+                        if(key==='registerRefs' || key==='unregisterRefs')return host.sharedEditorController?.[key];
+                        if(key==='diagnosticScanDescription')return `Run selected checks for ${host.ctWorkspace?.scope.language || host.lang || 'the selected language'} across all loaded records, including records hidden by worklist filters. Local drafts are excluded.`;
+                        if(key==='diagnosticScanCheckHint')return 'Inconsistent translations and Dictionary terminology run only when you start a scan. Audio-only fields, Gender metadata, and NONEXISTENT forms are excluded.';
+                        if(key==='diagnosticScanResultsTitle')return 'Records with findings';
+                        if(key==='diagnosticScanProgressLabel')return 'Records scanned';
+                        if(key==='diagnosticScanTruncatedHint')return 'Open the record to inspect every affected field.';
+                        if(key==='openDiagnosticResultLabel')return 'Open record';
+                        if(key==='diagnosticScanResults')return Object.fromEntries(host.ctScanResultFiles.map(entry=>[entry.filepath,entry.result]));
+                        const value=host[aliases[key] || key];return typeof value==='function' ? value.bind(host) : value;
+                    },
+                    set(_target,key,value) {host[aliases[key] || key]=value;return true;},
+                    has(_target,key) {return key in aliases || key in host || ['registerRefs','unregisterRefs','diagnosticScanDescription','diagnosticScanCheckHint','diagnosticScanResultsTitle','diagnosticScanProgressLabel','diagnosticScanTruncatedHint','openDiagnosticResultLabel','diagnosticScanResults'].includes(key);}
+                }));return this._ctDiagnosticScanController;
             },
             ctStatusFilterOptions() {
                 const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount};
@@ -355,6 +421,10 @@
             inlineEditor() { this.ctFlushDraft().catch(()=>{});this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctFiltersVisible() { this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
+            ctScanResultPageCount(value) {this.ctScanResultsPage=Math.min(this.ctScanResultsPage,value);},
+            ctScanScopeKey() {this.ctCloseScanDialog(false);this.ctClearScanResults();},
+            editorDictionaryRevision() {if(this.ctActive)this.ctClearScanResults();},
+            hideDNT() {if(this.ctActive)this.ctClearScanResults();},
             managedCatalogScope() { this.ctFence(); this.ctRefreshLocal(); },
             lang() { if (this.ctActive && this.ctWorkspace?.scope.language !== this.lang) this.ctFence(); },
             gameVersion() { if (this.ctActive && this.ctWorkspace?.scope.game !== this.gameVersion) this.ctFence(); },
@@ -605,9 +675,25 @@
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
             ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
             ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=defaultFilters();this.ctSearch='';this.ctApplySearch();},
-            ctOpenScanDialog() {if(!this.ctBusy)this.$refs?.ctDiagnosticDialog?.showModal();},
-            ctCloseScanDialog() {this.$refs?.ctDiagnosticDialog?.close();},
-            ctStartScan() {this.ctCloseScanDialog();return this.ctScan(this.ctIncludeConsistency);},
+            ctDiagnosticDialog() {return this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs?.ctDiagnosticDialog;},
+            ctOpenScanDialog() {
+                if(!this.ctActive || this.ctBusy)return false;
+                const dialog=this.ctDiagnosticDialog();if(!dialog || dialog.open)return false;
+                this.ctCloseCompletion();this.hideTooltip?.();this._ctScanReturnFocus=root.document?.activeElement;
+                const scopeKey=this._ctScanReturnScope=this.ctScanScopeKey,unitId=this._ctScanReturnUnitId=this.ctSelection;
+                dialog.showModal();this.$nextTick?.(()=>{
+                    if(this.ctActive && this.ctScanScopeKey===scopeKey && this.ctSelection===unitId && this.ctDiagnosticDialog()===dialog && dialog.open)
+                        (this.getEditorComponentRef?.('diagnosticScanHeading') || this.$refs?.ctDiagnosticScanHeading)?.focus();
+                });return true;
+            },
+            ctCloseScanDialog(restoreFocus=true) {if(restoreFocus===false){this._ctScanReturnFocus=null;this._ctScanReturnScope=null;}this.ctDiagnosticDialog()?.close();},
+            ctScanDialogClosed() {
+                const element=this._ctScanReturnFocus,scopeKey=this._ctScanReturnScope,unitId=this._ctScanReturnUnitId;
+                this._ctScanReturnFocus=null;this._ctScanReturnScope=null;
+                if(element?.isConnected && this.ctActive && scopeKey===this.ctScanScopeKey && this.ctSelection===unitId)element.focus({preventScroll:true});
+            },
+            ctScanDialogKeydown(event) {if((event.ctrlKey || event.metaKey) && event.code==='KeyS')event.preventDefault();},
+            ctStartScan() {if(!this.ctHasScanSelection || this.ctScanRunning)return;return this.ctScan();},
             async ctShowVersionChooser() {
                 if(!this.ctActive || this.ctBusy)return false;
                 const ctx=this.ctContext(),unitId=this.ctSelection,current=()=>this.ctActive && !this.ctBusy && this.ctCurrent(ctx) && this.ctSelection===unitId;
@@ -659,7 +745,7 @@
             },
             async ctRowKeydown(unit,event) {
                 if(!event || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
-                    || this.ctBusy || this.ctEditor || this.ctHistoryViewer || this.$refs?.ctDiagnosticDialog?.open || rowControl(event))return false;
+                    || this.ctBusy || this.ctEditor || this.ctHistoryViewer || this.ctDiagnosticDialog()?.open || rowControl(event))return false;
                 const keys=['ArrowUp','ArrowDown','Home','End','PageUp','PageDown','ArrowLeft','ArrowRight','Enter'];
                 if(!keys.includes(event.key))return false;
                 unit ||= this.ctCurrentUnit || this.ctPageRows[0];if(!unit)return false;
@@ -762,6 +848,7 @@
             ctContext() { return { key: this.managedCatalogScope, scope: copy(this.ctWorkspace?.scope || {}), epoch: this._ctEpoch || 0 }; },
             ctCurrent(ctx) { return ctx.key === this.managedCatalogScope && ctx.epoch === (this._ctEpoch || 0) && JSON.stringify(ctx.scope) === JSON.stringify(this.ctWorkspace?.scope || {}); },
             ctFence() {
+                this.ctCloseScanDialog(false);this.ctClearScanResults();
                 this.ctFlushDraft().catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
@@ -1125,7 +1212,7 @@
             ctKeyboardOverlayOpen() {
                 return !!(root.AppDialogs?.isOpen
                     || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctUploadVisible
-                    || this.$refs?.ctDiagnosticDialog?.open || this.workspaceInitializationActive || this._importingSource
+                    || this.ctDiagnosticDialog()?.open || this.workspaceInitializationActive || this._importingSource
                     || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft || this.draftRecoveryVisible);
             },
             ctKeyboardBlocked() {
@@ -1307,7 +1394,7 @@
                 if(this.ctCompletion && (event.key==='Tab' || event.key==='Enter' || ['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)))this.ctCloseCompletion();
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id);
                 if (field.kind !== 'form' || event.key !== 'Tab' || !plain || !this.ctActive || this.ctBusy
-                    || this.ctHistoryViewer || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.$refs?.ctDiagnosticDialog?.open
+                    || this.ctHistoryViewer || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctDiagnosticDialog()?.open
                     || !current || current.source!==field.source || current.kind!==field.kind) return;
                 const value = this.ctValues[field.id];
                 const caret=event.target?.selectionStart,end=event.target?.selectionEnd;
@@ -1344,7 +1431,7 @@
             ctCompletionValid(field,input=this._ctCompletionInput) {
                 const completion=this.ctCompletion,current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id);
                 return !!(completion && completion.items?.length && this.ctActive && !this.ctBusy && !this.ctHistoryViewer
-                    && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting && !this.$refs?.ctDiagnosticDialog?.open
+                    && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting && !this.ctDiagnosticDialog()?.open
                     && completion.fieldId===field?.id && completion.unitId===this.ctSelection && this.ctCurrent(completion.context)
                     && unproxy(completion.unit)===unproxy(this.ctCurrentUnit) && unproxy(completion.field)===unproxy(current)
                     && current && current.kind!=='gender' && current.source===completion.source
@@ -1771,36 +1858,129 @@
                 return await this.ctSave(false,{origin:'restore'});
             },
             ctRefreshDiagnostics(ids) {
+                if(this.ctScanRunning){this.ctClearScanResults();return;}
                 if (!this.ctScanDone) return;
+                if(!this._ctScanCache || !this.ctScanEnvironmentCurrent(this._ctScanCache.environment,false)){this.ctClearScanResults();return;}
                 const next = { ...this.ctDiagnostics };
                 const affected=new Set(ids),keys=new Set(ids.flatMap(id=>[...(this._ctConsistencyByUnit?.get(id) || [])]));
                 for(const key of keys)for(const entry of this._ctConsistencyIndex.get(key))affected.add(entry.unitId);
-                for (const id of affected) { const unit = this._ctUnitIndex.get(id); if (unit) next[id] = this.ctDiagnose(unit); }
+                for (const id of affected) { const unit = this._ctScanCache.units.get(id); if (unit) next[id] = this.ctAnalyzeScanUnit(unit,this.ctScanAppliedChecks,this._ctScanCache.terminology); }
                 if(this._ctConsistencyIndex){const allKeys=new Set([...affected].flatMap(id=>[...(this._ctConsistencyByUnit.get(id) || [])]));for(const key of allKeys)this.ctAddConsistency(next,key,affected);}
-                this.ctDiagnostics = raw(next);
+                this.ctDiagnostics = raw(next);this.ctUpdateScanCounts(next);
             },
             ctConsistencyKey(field) {return JSON.stringify([field.kind,field.form || null,root.ClientTextState.canonicalSource(field.source)]);},
-            ctAddConsistency(results,key,allowed) {
-                const entries=(this._ctConsistencyIndex?.get(key)||[]).map(entry=>({...entry,target:this.ctValuesFor(this._ctUnitIndex.get(entry.unitId))[entry.fieldId]})).filter(entry=>entry.target?.trim() && entry.target.trim()!=='NONEXISTENT');
+            ctAddConsistency(results,key,allowed,index=this._ctConsistencyIndex,units=this._ctUnitIndex) {
+                const peers=index?.get(key)||[];if(peers.length<2)return;
+                const entries=peers.map(entry=>({...entry,target:this.ctValuesFor(units.get(entry.unitId))[entry.fieldId]})).filter(entry=>entry.target?.trim() && entry.target.trim()!=='NONEXISTENT');
                 if(new Set(entries.map(entry=>entry.target)).size<2)return;
-                for(const entry of entries)if(!allowed || allowed.has(entry.unitId))results[entry.unitId].push({code:'clienttext-consistency',severity:'warning',fieldId:entry.fieldId,message:'Same English and grammatical form have different saved translations.'});
+                for(const entry of entries)if(!allowed || allowed.has(entry.unitId)){
+                    const field=units.get(entry.unitId).fields.find(field=>field.id===entry.fieldId);
+                    results[entry.unitId].push({code:'clienttext-consistency',severity:'warning',level:'warning',fieldId:entry.fieldId,
+                        fieldName:field?.name,form:field?.form || '',message:'Same English and grammatical form have different saved translations.'});
+                }
+                return entries;
             },
-            async ctScan(consistency = false) {
-                const ctx = this.ctContext(), results = {}, consistencyMap = new Map(),byUnit=new Map(); this.ctBusy = true; this._ctAbort = new AbortController();
+            ctClearScanResults() {
+                this.ctScanRunId++;this.ctDiagnostics=raw({});this.ctScanDone=false;this.ctScanAppliedChecks=null;this.ctScanRunning=false;
+                this.ctScanStopped=false;this.ctScanProcessed=0;this.ctScanTotal=0;this.ctScanErrorFileCount=0;this.ctScanWarningFileCount=0;
+                this.ctScanError='';this.ctScanPhase='';this.ctScanResultsPage=1;this._ctScanCache=null;this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;
+            },
+            ctStopScan() {
+                if(!this.ctScanRunning)return false;
+                const processed=this.ctScanProcessed,total=this.ctScanTotal;this.ctClearScanResults();
+                this.ctScanStopped=true;this.ctScanProcessed=processed;this.ctScanTotal=total;return true;
+            },
+            ctScanEnvironment() {
+                return {ctx:this.ctContext(),units:unproxy(this.ctUnits),saved:unproxy(this.ctSaved),dictionary:unproxy(this.dictionary),dictionaryRevision:this.editorDictionaryRevision,
+                    language:this.lang,game:this.gameVersion,branch:this.branchId || 'default',account:this.cloudProfileId || this.cloudUser?.id || 'guest',hideDNT:this.hideDNT};
+            },
+            ctScanEnvironmentCurrent(environment,includeSaved=true) {
+                return this.ctActive && this.ctCurrent(environment.ctx) && unproxy(this.ctUnits)===environment.units
+                    && (!includeSaved || unproxy(this.ctSaved)===environment.saved) && unproxy(this.dictionary)===environment.dictionary
+                    && this.editorDictionaryRevision===environment.dictionaryRevision && this.lang===environment.language && this.gameVersion===environment.game
+                    && (this.branchId || 'default')===environment.branch && (this.cloudProfileId || this.cloudUser?.id || 'guest')===environment.account && this.hideDNT===environment.hideDNT;
+            },
+            ctAnalyzeScanUnit(unit,checks,terminology) {
+                const values=this.ctValuesFor(unit),state=root.ClientTextState,lang=this.ctWorkspace?.scope.language || this.lang;
+                return this.ctFieldsFor(unit).flatMap(field=>{
+                    const text=String(values[field.id] ?? '');
+                    if(field.kind==='gender' || state.audioOnly(field.source) || field.kind==='form' && text.trim()==='NONEXISTENT')return [];
+                    const issues=state.diagnose(field,text,{tagSyntax:!!checks.tagSyntax,variables:!!checks.variables,keywords:!!checks.keywords,
+                        decorations:!!checks.decorations,substitutions:!!checks.substitutions,controls:!!checks.controls});
+                    if(checks.whitespace || checks.dash){
+                        if(!root.TranslationDiagnostics?.analyze)throw new Error('Translation diagnostic checks are unavailable.');
+                        issues.push(...root.TranslationDiagnostics.analyze(text,{lang,checks:{whitespace:!!checks.whitespace,dash:!!checks.dash,tagSyntax:false}}).diagnostics);
+                    }
+                    if(checks.terminology)issues.push(...root.TerminologyDiagnostics.analyze(state.canonicalSource(field.source),text,terminology,{lang}));
+                    return issues.map(issue=>({...issue,level:issue.level || issue.severity,severity:issue.level || issue.severity,fieldId:field.id,fieldName:field.name,form:field.form || ''}));
+                });
+            },
+            ctUpdateScanCounts(results) {
+                this.ctScanErrorFileCount=Object.values(results).filter(issues=>issues.some(issue=>issue.severity==='error')).length;
+                this.ctScanWarningFileCount=Object.values(results).filter(issues=>issues.some(issue=>issue.severity==='warning')).length;
+            },
+            ctScanIssueLocation(issue) {return (issue.fieldName || 'Field')+(issue.form ? ' · '+issue.form : '')+(Number.isInteger(issue.line) ? ' · line '+(issue.line+1) : '');},
+            ctScanUnitLabel(count) {return count===1 ? 'record' : 'records';},
+            async ctOpenDiagnosticResult(id) {
+                const cache=this._ctScanCache,unit=cache?.units.get(id);if(!unit || !this.ctScanDone || !this.ctScanEnvironmentCurrent(cache.environment,false))return false;
+                const ctx=this.ctContext();this.ctCloseScanDialog(false);
+                if(!this.ctCurrent(ctx) || this._ctUnitIndex?.get(id)!==unit)return false;
+                return this.ctSelect(unit,true);
+            },
+            async ctScan(options) {
+                if(!this.ctActive || this.ctScanRunning)return false;
+                const checks={...this.ctScanChecks,...(typeof options==='boolean' ? {consistency:options} : options || {})};
+                if(!this.ctScanTypes.some(type=>checks[type.key]))return false;
+                const environment=this.ctScanEnvironment(),units=this.ctUnits.filter(unit=>this.ctFieldsFor(unit).length && !(this.hideDNT && unit.isDNT)),
+                    unitMap=new Map(units.map(unit=>[unit.id,unit])),results={},consistencyMap=new Map(),byUnit=new Map(),warningUnits=new Set();
+                this.ctClearScanResults();const runId=this.ctScanRunId;
+                const current=()=>runId===this.ctScanRunId && this.ctScanEnvironmentCurrent(environment);
+                const check=()=>{if(current())return true;if(runId===this.ctScanRunId)this.ctClearScanResults();return false;};
+                this.ctScanRunning=true;this.ctScanTotal=units.length;this.ctScanPhase='Preparing checks…';
                 try {
-                    for (let i = 0; i < this.ctUnits.length; i++) {
-                        const unit = this.ctUnits[i]; results[unit.id] = this.ctDiagnose(unit);
-                        if (consistency) {
-                            for (const field of unit.fields) {
-                                if (field.kind === 'gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source)) continue;
+                    await this.$nextTick?.();await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;
+                    let terminology=null;
+                    if(checks.terminology){
+                        if(!root.TerminologyDiagnostics?.analyze || !root.TerminologyDiagnostics?.compileDictionary)throw new Error('Dictionary terminology checks are unavailable.');
+                        terminology=this.terminologyDictionary || root.TerminologyDiagnostics.compileDictionary(this.getActiveDictionaryEntries?.() || []);
+                    }
+                    this.ctScanPhase='Checking records…';await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;
+                    for (let i = 0; i < units.length; i++) {
+                        if(!check())return false;
+                        const unit=units[i];results[unit.id]=this.ctAnalyzeScanUnit(unit,checks,terminology);if(!check())return false;
+                        if (checks.consistency) {
+                            for (const field of this.ctFieldsFor(unit)) {
+                                if (field.kind==='gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source))continue;
                                 const key = this.ctConsistencyKey(field),entries=consistencyMap.get(key) || [];entries.push({unitId:unit.id,fieldId:field.id});consistencyMap.set(key,entries);
                                 const keys=byUnit.get(unit.id)||new Set();keys.add(key);byUnit.set(unit.id,keys);
                             }
                         }
-                        if (i % 200 === 0) { this.ctReport({ phase: 'Diagnostics', completed: i, total: this.ctUnits.length, sheet: unit.sheet }); await new Promise(resolve => setTimeout(resolve, 0)); if (!this.ctCurrent(ctx) || this._ctAbort.signal.aborted) return; }
+                        this.ctScanProcessed=i+1;
+                        if(results[unit.id].some(issue=>issue.severity==='error'))this.ctScanErrorFileCount++;
+                        if(results[unit.id].some(issue=>issue.severity==='warning')){warningUnits.add(unit.id);this.ctScanWarningFileCount=warningUnits.size;}
+                        if((i+1)%25===0){await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;}
                     }
-                    if (this.ctCurrent(ctx)) {if(consistency){this._ctConsistencyIndex=consistencyMap;this._ctConsistencyByUnit=byUnit;for(const key of consistencyMap.keys())this.ctAddConsistency(results,key);}else{this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;}this.ctDiagnostics = raw(results); this.ctScanDone = true; this.ctNotice = 'Diagnostic scan complete.'; }
-                } finally { if (this.ctCurrent(ctx)) { this.ctBusy = false; this.ctProgress = null; } }
+                    if(!check())return false;
+                    if(checks.consistency){
+                        this.ctScanPhase='Checking consistency…';await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;
+                        let checked=0;
+                        for(const [key,peers] of consistencyMap){
+                            // A singleton cannot have divergent translations. Only
+                            // matching peers need the more expensive value pass.
+                            if(peers.length<2)continue;
+                            const mismatched=this.ctAddConsistency(results,key,null,consistencyMap,unitMap);if(!check())return false;
+                            for(const entry of mismatched || [])warningUnits.add(entry.unitId);
+                            this.ctScanWarningFileCount=warningUnits.size;
+                            if(++checked%25===0){await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;}
+                        }
+                    }
+                    if(!check())return false;
+                    this._ctConsistencyIndex=checks.consistency ? raw(consistencyMap) : null;this._ctConsistencyByUnit=checks.consistency ? raw(byUnit) : null;
+                    this._ctScanCache=raw({environment,units:unitMap,terminology});this.ctScanAppliedChecks=raw({...checks});
+                    this.ctDiagnostics=raw(results);this.ctUpdateScanCounts(results);this.ctScanDone=true;this.ctScanRunning=false;this.ctScanPhase='';return true;
+                } catch(error) {
+                    if(check()){this.ctClearScanResults();this.ctScanError=error.message || 'The diagnostic scan failed.';}return false;
+                }
             },
             async ctOpenGroup(version, group, language = this.lang, activate = true) {
                 if (!group || this.ctBusy || this.managedVersionBusy) return;
@@ -2302,6 +2482,7 @@
         computed: {
             genderMultilineRequired() {return this.field.kind==='gender' && this.host.ctGenderMultiline(this.field);},
             genderMultiline() {return this.genderMultilineRequired || this.genderMultilineLatched;},
+            diagnosticPresentation() {return this.host.ctFieldController(this.field).diagnosticPresentation;},
         },
         watch: {
             field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
@@ -2314,8 +2495,8 @@
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
             </template>
             <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :compact="compact"></editor-native-field>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button></div>
-            <p v-for="(issue,index) in (host.ctDiagnostics[host.ctSelection] || []).filter(item=>item.fieldId === field.id)" :key="index" :class="'ctDiagnostic '+issue.severity">{{ issue.message }}</p>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const toolsComponent = root.EditorComponents?.Tools;
     return { mixin, teams, detect, groupFields, mode, fieldsComponent, targetComponent, toolsComponent };

@@ -906,7 +906,7 @@ test('only intersecting unread rows are acknowledged; loaded and future comments
 
 test('hidden pages, closed surfaces, and detached rows never clear unread state', async () => {
   for (const state of ['hidden', 'closed', 'detached', 'importDialogVisible', 'consistencyResolver', 'cloudResolverVisible',
-    'cloudHistoryVisible', 'duplicateLangImportWarning', 'settingsImportDraft', 'collaborationConflictVisible', 'collaborationHistoryVisible', 'diagnostic']) {
+    'cloudHistoryVisible', 'duplicateLangImportWarning', 'settingsImportDraft', 'collaborationConflictVisible', 'collaborationHistoryVisible', 'diagnostic', 'sharedDiagnostic']) {
     const { app, document, calls } = fixture();
     app.commentsFileFeed.items = [comment(5)];
     const element = node(5);
@@ -915,6 +915,7 @@ test('hidden pages, closed surfaces, and detached rows never clear unread state'
     if (state === 'closed') app.sideTab = 'dictionary';
     if (state === 'detached') element.isConnected = false;
     if (state === 'diagnostic') app.$refs.diagnosticScanDialog = { open: true };
+    else if (state === 'sharedDiagnostic') app.getEditorComponentRef = name => name === 'diagnosticScanDialog' ? { open: true } : null;
     else if (!['hidden', 'closed', 'detached'].includes(state)) app[state] = true;
     await app.commentsMarkVisibleRead();
     assert.equal(calls.length, 0);

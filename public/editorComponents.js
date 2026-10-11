@@ -551,5 +551,100 @@
           <div class="hlPopupTlnoteText" :lang="translationEditorBcp47">{{ hlPopupTlnote }}</div>
         </aside>
       </div>`);
-  global.EditorComponents = { NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete };
+  const DiagnosticMeta = {
+    name: 'EditorDiagnosticMeta',
+    props: { presentation: { type: Object, required: true } },
+    methods: {
+      showTooltip(event, text) { this.$root.showTooltip(event, text); },
+      hideTooltip() { this.$root.hideTooltip(); },
+    },
+    template: `<span v-if="presentation.warningCount > 0" class="metaPill diagnosticWarningPill" v-tooltip="presentation.warningTitle"><span class="metaIcon">!</span><span class="metaNum">{{ presentation.warningCount }}</span></span>
+      <span v-if="presentation.errorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="presentation.errorTitle"><span class="metaIcon">x</span><span class="metaNum">{{ presentation.errorCount }}</span></span>`,
+  };
+  const DiagnosticScan = sharedSurface('EditorDiagnosticScan', String.raw`    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @close="diagnosticScanDialogClosed" @keydown.stop="diagnosticScanDialogKeydown">
+      <form class="diagnosticScanForm" @submit.prevent="startDiagnosticScan">
+        <header class="diagnosticScanHeading">
+          <div>
+            <h2 id="diagnosticScanDialogTitle" ref="diagnosticScanHeading" tabindex="-1">Scan diagnostics</h2>
+            <p id="diagnosticScanDialogDescription">{{ diagnosticScanDescription }}</p>
+          </div>
+          <button type="button" class="diagnosticScanClose" @click="closeDiagnosticScanDialog" aria-label="Close diagnostic scan (Esc)">Close</button>
+        </header>
+        <div class="diagnosticScanBody">
+          <section v-if="diagnosticScanRunning || diagnosticScanCompleted || diagnosticScanStopped || diagnosticScanError" class="diagnosticScanStatus" :class="{ diagnosticScanFailed: diagnosticScanError }" aria-label="Scan status">
+            <p class="diagnosticScanStatusText" role="status" aria-live="polite" aria-atomic="true">
+              <template v-if="diagnosticScanRunning">{{ diagnosticScanPhase }} {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanUnitLabel(diagnosticScanTotal) }} · {{ diagnosticScanPercent }}%</template>
+              <template v-else-if="diagnosticScanCompleted">Scan complete · {{ diagnosticScanTotal }} {{ diagnosticScanUnitLabel(diagnosticScanTotal) }} checked</template>
+              <template v-else-if="diagnosticScanStopped">Scan stopped after {{ diagnosticScanProcessed }} of {{ diagnosticScanTotal }} {{ diagnosticScanUnitLabel(diagnosticScanTotal) }}. Start again to get complete results.</template>
+              <template v-else>{{ diagnosticScanError }}</template>
+            </p>
+            <progress v-if="diagnosticScanRunning" :value="diagnosticScanProcessed" :max="Math.max(1, diagnosticScanTotal)" :aria-label="diagnosticScanProgressLabel"></progress>
+            <div v-if="diagnosticScanRunning || diagnosticScanCompleted" class="diagnosticScanCounts">
+              <span class="diagnosticScanCount diagnosticScanCountError"><strong>{{ diagnosticScanErrorFileCount }}</strong> {{ diagnosticScanUnitLabel(diagnosticScanErrorFileCount) }} with errors<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.errors }} {{ diagnosticScanIssueCounts.errors === 1 ? 'issue' : 'issues' }}</span></span>
+              <span class="diagnosticScanCount diagnosticScanCountWarning"><strong>{{ diagnosticScanWarningFileCount }}</strong> {{ diagnosticScanUnitLabel(diagnosticScanWarningFileCount) }} with warnings<span v-if="diagnosticScanCompleted"> · {{ diagnosticScanIssueCounts.warnings }} {{ diagnosticScanIssueCounts.warnings === 1 ? 'issue' : 'issues' }}</span></span>
+              <span v-if="diagnosticScanCompleted" class="diagnosticScanCount"><strong>{{ diagnosticScanTotal - diagnosticScanResultFiles.length }}</strong> {{ diagnosticScanUnitLabel(diagnosticScanTotal - diagnosticScanResultFiles.length) }} without findings</span>
+            </div>
+            <p v-if="diagnosticScanRunning" class="diagnosticScanBackgroundHint">You can close this window while the scan runs and reopen it from Scan diagnostics.</p>
+          </section>
+          <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
+            <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>
+            <fieldset class="diagnosticScanOptions" :disabled="diagnosticScanRunning">
+              <legend class="visuallyHidden">Diagnostic types</legend>
+              <label v-for="type in diagnosticScanTypes" :key="type.key" class="diagnosticScanOption">
+                <input type="checkbox" v-model="diagnosticScanChecks[type.key]" :aria-labelledby="'diagnosticScanLabel-' + type.key" :aria-describedby="'diagnosticScanHint-' + type.key">
+                <span><strong :id="'diagnosticScanLabel-' + type.key">{{ type.label }}</strong><small :id="'diagnosticScanHint-' + type.key">{{ type.description }}</small></span>
+              </label>
+            </fieldset>
+            <p class="diagnosticScanHint">{{ diagnosticScanCheckHint }}</p>
+          </details>
+          <section v-if="diagnosticScanCompleted" class="diagnosticScanResults" aria-label="Scan results">
+            <div class="diagnosticScanResultsHeading">
+              <h3>{{ diagnosticScanResultFiles.length ? diagnosticScanResultsTitle : 'No issues found' }}</h3>
+              <span v-if="diagnosticScanResultFiles.length">{{ diagnosticScanResultFiles.length }} {{ diagnosticScanUnitLabel(diagnosticScanResultFiles.length) }}</span>
+            </div>
+            <nav v-if="diagnosticScanResultPageCount > 1" class="diagnosticScanResultPagination" aria-label="Scan result pages">
+              <span class="fileRange" role="status" aria-live="polite" aria-atomic="true">{{ diagnosticScanResultRangeLabel }}</span>
+              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage <= 1" @click="diagnosticScanResultsPage--" aria-label="Previous scan results" title="Previous scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 7-5 5 5 5"></path></svg></button>
+              <button type="button" class="paginationArrow" :disabled="diagnosticScanResultsPage >= diagnosticScanResultPageCount" @click="diagnosticScanResultsPage++" aria-label="Next scan results" title="Next scan results"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 7 5 5-5 5"></path></svg></button>
+            </nav>
+            <p v-if="!diagnosticScanResultFiles.length" class="diagnosticScanEmpty">The selected checks found no errors or warnings.</p>
+            <article v-for="entry in diagnosticScanVisibleResults" :key="entry.filepath" class="diagnosticScanResultCard">
+              <div class="diagnosticScanResultHeading">
+                <div>
+                  <h4><bdi>{{ entry.label || entry.filepath }}</bdi></h4>
+                  <div class="diagnosticScanResultCounts">
+                    <span v-if="entry.result.errorCount" class="diagnosticScanResultError">{{ entry.result.errorCount }} {{ entry.result.errorCount === 1 ? 'error' : 'errors' }}</span>
+                    <span v-if="entry.result.warningCount" class="diagnosticScanResultWarning">{{ entry.result.warningCount }} {{ entry.result.warningCount === 1 ? 'warning' : 'warnings' }}</span>
+                  </div>
+                </div>
+                <button type="button" @click="openDiagnosticResult(entry.filepath)" :aria-label="'Open ' + (entry.label || entry.filepath)">{{ openDiagnosticResultLabel }}</button>
+              </div>
+              <ul class="diagnosticScanIssues">
+                <li v-for="(issue, index) in entry.result.diagnostics.slice(0, 3)" :key="index">
+                  <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
+                  <span>{{ issue.message || issue.code }}</span>
+                </li>
+              </ul>
+              <details v-if="entry.result.diagnostics.length > 3" class="diagnosticScanMoreIssues">
+                <summary>{{ entry.result.diagnostics.length - 3 }} more {{ entry.result.diagnostics.length - 3 === 1 ? 'issue' : 'issues' }}</summary>
+                <ul class="diagnosticScanIssues">
+                  <li v-for="(issue, index) in entry.result.diagnostics.slice(3)" :key="index">
+                    <span class="diagnosticScanIssueLocation">{{ diagnosticScanIssueLocation(issue) }} · {{ issue.level }}</span>
+                    <span>{{ issue.message || issue.code }}</span>
+                  </li>
+                </ul>
+              </details>
+              <p v-if="entry.result.diagnosticsTruncated" class="diagnosticScanTruncated">{{ entry.result.diagnosticsTruncated }} more {{ entry.result.diagnosticsTruncated === 1 ? 'finding' : 'findings' }}. {{ diagnosticScanTruncatedHint }}</p>
+            </article>
+          </section>
+        </div>
+        <footer class="diagnosticScanActions">
+          <span class="diagnosticScanEscapeHint">Esc to close</span>
+          <button type="button" @click="closeDiagnosticScanDialog">Close</button>
+          <button v-if="diagnosticScanRunning" type="button" class="diagnosticScanStop" @click="stopDiagnosticScan">Stop scan</button>
+          <button v-else type="submit" class="diagnosticScanStart" :disabled="!hasDiagnosticScanSelection">{{ diagnosticScanCompleted ? 'Scan again' : 'Start scan' }}</button>
+        </footer>
+      </form>
+    </dialog>`);
+  global.EditorComponents = { NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan };
 })(typeof window !== 'undefined' ? window : globalThis);

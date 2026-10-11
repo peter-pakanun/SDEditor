@@ -95,6 +95,15 @@
     }
     return html;
   }
+  function diagnosticPresentation(issues) {
+    const diagnostics=(Array.isArray(issues)?issues:[]).filter(issue=>issue && typeof issue==='object')
+      .map(issue=>({...issue,level:issue.level || issue.severity || 'warning',severity:issue.level || issue.severity || 'warning'}));
+    const title=level=>{const matching=diagnostics.filter(issue=>issue.level===level),lines=matching.slice(0,8).map(issue=>issue.message || issue.code || 'Translation diagnostic');
+      if(matching.length>8)lines.push('...and '+(matching.length-8)+' more');return lines.join('\n');};
+    return {diagnostics,warningCount:diagnostics.filter(issue=>issue.level==='warning').length,errorCount:diagnostics.filter(issue=>issue.level==='error').length,
+      warningTitle:title('warning'),errorTitle:title('error'),notes:diagnostics.filter(issue=>['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))
+        .map(issue=>({...issue,kind:issue.code==='dictionary-terminology'?'terminology':'consistency'}))};
+  }
   function ranges(host, field, text, source) {
     const tokens=root.ClientTextState?.tokenize(text) || [],output=tokens.map(token=>({start:token.start,end:token.end,value:token.full,
       identity:token.identity,kind:token.kind,className:token.kind==='keyword'?'hl keywordHL':'hl',replace:token.full}));
@@ -148,16 +157,24 @@
       set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer)host.ctValues[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer;},
       get placeholder(){return source?'English':field.kind==='form' && !field.required?'Optional translation':'Translation';},
       get lang(){return source?'en':host.translationEditorBcp47;},
-      get dataAttrs(){const issues=(host.ctDiagnostics?.[unit?.id] || []).filter(issue=>issue.fieldId===fieldId);
+      get dataAttrs(){const issues=diagnostics();
         return source ? {'data-ct-source':fieldId,'aria-label':field.name+' English'}
         : {'data-ct-target':fieldId,id:'ctfield-'+field.targetCell,'aria-label':field.name+(field.form?' '+field.form:''),
-          title:issues.map(issue=>issue.message).join('\n') || undefined,'aria-invalid':issues.some(issue=>issue.severity==='error') || undefined,
+          title:issues.map(issue=>issue.message).join('\n') || undefined,'aria-invalid':issues.some(issue=>(issue.level || issue.severity)==='error') || undefined,
           'aria-autocomplete':'list','aria-controls':'sharedEditorAutocompleteList','aria-expanded':host.ctCompletion?.fieldId===fieldId,
           'aria-activedescendant':host.ctCompletion?.fieldId===fieldId && host.ctCompletion?.items?.length?'sharedEditorAutocompleteOption-'+(host.ctCompletion.selectedIndex || 0):undefined};}};
-    const diagnostics=()=>root.ClientTextState?.diagnose(field,value()) || [];
-    const controller={field:descriptor,get ready(){return valid();},get highlight(){return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
+    const diagnostics=()=>{
+      const text=value(),exempt=field.kind==='gender' || field.kind==='form' && text.trim()==='NONEXISTENT' || root.ClientTextState?.audioOnly(field.source);
+      if(exempt)return [];
+      const common=root.TranslationDiagnostics?.analyze(text,{lang:host.lang,checks:{whitespace:true,dash:true,tagSyntax:false}})?.diagnostics || [],
+        manualCurrent=!host.ctValuesFor || host.ctValuesFor(unit)[fieldId]===text;
+      return [...(root.ClientTextState?.diagnose(field,text) || []),...common,
+        ...(manualCurrent ? host.ctDiagnostics?.[unit?.id] || [] : []).filter(issue=>issue.fieldId===fieldId && ['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))];
+    };
+    const controller={field:descriptor,get ready(){return valid();},get diagnostics(){return diagnosticPresentation(diagnostics()).diagnostics;},
+      get diagnosticPresentation(){return diagnosticPresentation(diagnostics());},get highlight(){return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
       ...list().map(range=>({...range,classes:['tagRange',...(range.kind==='keyword'?['vocab']:[])]})),
-      ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',issue.level==='error'?'diagError':'diagWarning']})),
+      ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
     ]);},highlightAttrs:{},
       input(event){if(!valid() || host.ctBusy || host.ctHistoryViewer || event.isComposing || event.keyCode===229)return;
         host.ctValues[fieldId]=applyRawInput(host,field,event.target.value,event.inputType);host.ctEdited(field);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
@@ -205,7 +222,7 @@
       sessionKey:key(host,false),unitId:host.ctSelection,
       identity:JSON.stringify([host.ctSelection,field.id]),id:field.id,source:field.source,target:host.ctValues[field.id] ?? '',
       control:field.kind==='gender' && !host.ctGenderMultiline?.(field)?'input':'textarea',tokens:root.ClientTextState?.tokenize(field.source) || [],
-      diagnostics:(host.ctDiagnostics?.[host.ctSelection] || []).filter(issue=>issue.fieldId===field.id),metadata:field,
+      diagnostics:fieldController(host,field).diagnostics,metadata:field,
     })) : (host.editorBlocks || []).flatMap((block,index)=>(block.isTable?block.tableColumns:[block]).map((field,column)=>({
       sessionKey:key(host,false),unitId:host.editorCurrentEditingDesc?.filepath,
       identity:JSON.stringify([host.editorCurrentEditingDesc?.filepath,index,block.isTable?column:null]),id:index+':'+column,
@@ -321,5 +338,5 @@
       toolsVisible:this.sharedEditorToolsMounted && (this.ctEditor || this.editorVisible || this.inlineSidebarVisible),tool:this.ctActive?this.ctTool:this.sideTab,
       version:this.ctActive ? this.ctWorkspace?.metadata?.version || this.ctWorkspace?.version : this.managedActiveVersion,group:this.activeContentGroup};},
   }};
-  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut};
+  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,diagnosticPresentation,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut};
 });
