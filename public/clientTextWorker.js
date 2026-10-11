@@ -8,7 +8,7 @@ self.onmessage = event => {
     let message = event.data;
     if (message?.type === 'cancel' && typeof message.id === 'string') { cancelled.add(message.id); incoming.delete(message.id); return; }
     if (message?.type === 'request-start') {
-        if (!['buildManifest', 'exportWorkbook'].includes(message.operation) || typeof message.id !== 'string' || incoming.has(message.id)) return;
+        if (!['buildManifest', 'buildDescriptors', 'exportWorkbook'].includes(message.operation) || typeof message.id !== 'string' || incoming.has(message.id)) return;
         incoming.set(message.id, { message, collector: self.ClientTextTransport.collector(message) }); return;
     }
     if (message?.type?.startsWith('stream-')) {
@@ -26,13 +26,15 @@ self.onmessage = event => {
         message.type = message.operation;
         if (message.type === 'exportWorkbook') { message.saved = Object.fromEntries(message.savedEntries); delete message.savedEntries; }
     }
-    if (!['parseWorkbook', 'exportWorkbook', 'buildManifest'].includes(message?.type) || typeof message.id !== 'string') return;
+    if (!['parseWorkbook', 'exportWorkbook', 'buildManifest', 'buildDescriptors'].includes(message?.type) || typeof message.id !== 'string') return;
     const operation = queue.then(async () => {
         const onProgress = value => { if (!cancelled.has(message.id)) self.postMessage({ type: 'progress', id: message.id, value }); };
         if (cancelled.has(message.id)) throw Object.assign(new Error('ClientText work was cancelled.'), { name: 'AbortError' });
         const options = { ...(message.options || {}), onProgress };
         const result = message.type === 'parseWorkbook'
             ? await self.ClientTextCodec.parseWorkbook(message.bytes, options)
+            : message.type === 'buildDescriptors'
+                ? await self.ClientTextState.buildDescriptors(message.units, message.assets, { onProgress, guard: () => !cancelled.has(message.id) })
             : message.type === 'buildManifest'
                 ? await self.ClientTextState.buildManifest(message.units, message.assets, { onProgress, guard: () => !cancelled.has(message.id) })
                 : await self.ClientTextCodec.exportWorkbook(message.bytes, message.parsed, message.saved, options);

@@ -165,10 +165,10 @@ async function run() {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, ignoreHTTPSErrors: true });
         const page = await context.newPage(); page.on('pageerror', error => failures.push(error.message));
-        const bootstrap = async () => {
-            await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
-            await page.waitForFunction(() => window.__clientFixtureApp?.offlineStoreReady && window.__clientFixtureApp?._cloud?.state, { timeout: 30000 });
-            await page.evaluate(async secret => {
+        const bootstrap = async (target=page) => {
+            await target.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+            await target.waitForFunction(() => window.__clientFixtureApp?.offlineStoreReady && window.__clientFixtureApp?._cloud?.state, { timeout: 30000 });
+            await target.evaluate(async secret => {
                 const vm = window.__clientFixtureApp, response = await fetch('/fixture/session', { method: 'POST', headers: { 'X-Fixture-Key': secret } });
                 await vm._cloud.acceptLogin(await response.json()); await vm.cloudApply(vm._cloud.snapshot());
                 vm.lang = 'French'; vm.needsInitialSettings = false; vm.showSetting = false; vm.inlineEditor = false;
@@ -177,9 +177,87 @@ async function run() {
                 const report = vm.ctReport.bind(vm); window.__ctProgressEvents = [];
                 vm.ctReport = value => { window.__ctProgressEvents.push(JSON.parse(JSON.stringify(value))); report(value); };
             }, secret);
-            await page.getByRole('region', { name: 'Source versions' }).waitFor();
+            await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap();
+        const captureTrustedCache = async () => {
+            const preparedUnits=[],preparedAssets=[],legacyAssets=[];
+            const created=api.locals.content.createUpload('fixture-admin',{game:'poe2',name:'Trusted initialization fixture',contentMode:'clienttext',language:'French',storageProtocol:ClientState.STORAGE_PROTOCOL,idempotencyKey:randomUUID()});
+            for(const [role,bytes]of [['normal',normal],['gender',gender]]){
+                const parsed=await Codec.parseWorkbook(bytes,{filename:role==='normal'?'French_PoE2.xlsm':'French_Gender_PoE2.xlsm',role,parserVersion:'clienttext-v1'});
+                preparedUnits.push(...parsed.units);preparedAssets.push({role,hash:parsed.artifactHash,parserVersion:parsed.parserVersion});
+                legacyAssets.push({role,name:parsed.filename,hash:parsed.artifactHash,parserVersion:parsed.parserVersion,blob:new Blob([bytes]),parsed:{...parsed,units:undefined}});
+                await api.locals.content.receiveAsset(created.upload.id,role,'fixture-admin',Readable.from([bytes]),parsed.filename);
+            }
+            const originals=await ClientState.buildDescriptors(preparedUnits,preparedAssets),accepted=await api.locals.content.finalize(created.upload.id,'fixture-admin',{storageProtocol:ClientState.STORAGE_PROTOCOL,descriptors:originals.descriptors,summaries:originals.summaries,idempotencyKey:randomUUID()}),
+                isolated=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true,ignoreHTTPSErrors:true}),target=await isolated.newPage(),requests=[],patches=[];
+            target.on('pageerror',error=>failures.push(error.message));target.on('request',request=>{requests.push(request.url());if(request.method()==='PATCH' && /\/content-groups\/.*\/units\//.test(request.url()))patches.push(request.postDataJSON());});
+            await bootstrap(target);
+            await target.evaluate(({version,group})=>{
+                const vm=window.__clientFixtureApp,parse=vm._ctWorker.parseWorkbook.bind(vm._ctWorker);let first=true;
+                window.__fixtureParseGate=new Promise(resolve=>window.__fixtureReleaseParse=resolve);
+                vm._ctWorker.parseWorkbook=async(...args)=>{const result=await parse(...args);if(first){first=false;window.__fixtureParseHeld=true;await window.__fixtureParseGate;}return result;};
+                window.__fixtureOpening=vm.ctOpenGroup(version,group,'French');
+            },accepted);
+            await target.waitForFunction(()=>{const vm=window.__clientFixtureApp;if(vm.ctError)throw Error(vm.ctError);return window.__fixtureParseHeld && vm.workspaceInitializationRows.some(row=>/^Parsing original/.test(row.label) && row.status==='running');});
+            const init=target.getByRole('log',{name:'Workspace initialization activity'});
+            assert.equal(await target.getByRole('heading',{name:'Initializing workspace',exact:true}).isVisible(),true);
+            assert.equal(await target.getByRole('region',{name:'ClientText workspace'}).isVisible(),false);
+            assert.match(await init.textContent(),/French_PoE2.xlsm/s);
+            for(const theme of ['light','grey','dark','modern-dark']){await target.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);await target.screenshot({path:join(directory,'clienttext-initialization-cold-'+theme+'.png'),fullPage:true});}
+            await target.evaluate(async()=>{window.__fixtureReleaseParse();await window.__fixtureOpening;});
+            await target.waitForFunction(()=>window.__clientFixtureApp.ctActive && !window.__clientFixtureApp.workspaceInitializationActive && !window.__clientFixtureApp.ctBusy);
+            assert.equal(requests.filter(url=>url.endsWith('/original')).length,2);
+            const coldLog=await target.evaluate(()=>window.__clientFixtureApp.workspaceInitializationLogText);assert.match(coldLog,/Parsing original: French_Gender_PoE2.xlsm/);
+            await target.getByRole('region',{name:'ClientText workspace'}).getByRole('button',{name:'Versions',exact:true}).click();
+            const originalRequests=requests.filter(url=>url.endsWith('/original')).length;
+            await target.evaluate(({version,group})=>{
+                const vm=window.__clientFixtureApp,read=vm._ctStore.getUnits.bind(vm._ctStore);let first=true;
+                window.__fixtureReadGate=new Promise(resolve=>window.__fixtureReleaseRead=resolve);
+                vm._ctStore.getUnits=async(...args)=>{const result=await read(...args);if(first){first=false;await window.__fixtureReadGate;}return result;};window.__fixtureOpening=vm.ctOpenGroup(version,group,'French');
+            },accepted);
+            await target.waitForFunction(()=>window.__clientFixtureApp.workspaceInitializationRows.some(row=>row.label==='Loading cached translations' && row.status==='running'));
+            assert.equal(await target.getByRole('heading',{name:'Initializing workspace',exact:true}).isVisible(),true);
+            await target.screenshot({path:join(directory,'clienttext-initialization-cache.png'),fullPage:true});
+            await target.evaluate(async()=>{window.__fixtureReleaseRead();await window.__fixtureOpening;});
+            const warmLog=await target.evaluate(()=>window.__clientFixtureApp.workspaceInitializationLogText);assert.doesNotMatch(warmLog,/Downloading original|Parsing original/);assert.equal(requests.filter(url=>url.endsWith('/original')).length,originalRequests);
+            // Convert this disposable origin into a genuine old aggregate CT
+            // cache, including an uncertain operation with its original body.
+            const legacyManifest=await ClientState.buildManifest(preparedUnits,preparedAssets),legacyUnit=preparedUnits.find(unit=>unit.role==='normal' && unit.recordId==='record'),mutationId=randomUUID(),values=ClientState.valuesFor(legacyUnit);
+            values[JSON.stringify(['Name',null])]='Legacy uncertain exact raw@\\n\nvalue';
+            const body={mutationId,baseRevision:0,values,reviewed:{},baseline:legacyUnit,proof:ClientState.proofFor(legacyManifest,legacyUnit.id)};
+            await target.evaluate(async({units,assets,descriptors,trees,body})=>{
+                const vm=window.__clientFixtureApp,scope=vm.ctWorkspace.scope,id=ClientTextStore.scopeKey(scope);vm._ctSync?.stop();clearInterval(vm._ctSyncTimer);vm._ctSync=null;
+                await vm._ctStore.save(scope,body.baseline.id,{jobId:body.mutationId,values:body.values,reviewed:body.reviewed});
+                const metadata=await vm._ctStore.getMetadata(scope),db=await OfflineStore.openClientTextDb(),names=ClientTextStore.stores,
+                    tx=db.transaction([names.meta,names.originals,names.assets,names.outbox],'readwrite'),put=(name,recordId,value,extra={})=>tx.objectStore(name).put({key:JSON.stringify([id,recordId]),scope:id,value,...extra});
+                delete metadata.originalCaches;delete metadata.cacheMigration;delete metadata.storageProtocol;metadata.descriptors=descriptors;metadata.signature=ClientTextState.hash({descriptors,unitCount:units.length});
+                put(names.meta,'meta',metadata,{accountId:scope.accountId});for(const unit of units)put(names.originals,unit.id,{unit,compact:ClientTextState.compactUnit(unit)});
+                for(const asset of assets){const raw=Uint8Array.from(asset.bytes),descriptor=descriptors.find(descriptor=>descriptor.role===asset.role);put(names.assets,asset.role,{...asset,blob:new Blob([raw]),descriptor,tree:trees[asset.role]});}
+                put(names.outbox,body.baseline.id,{unitId:body.baseline.id,mutationId:body.mutationId,baseRevision:0,values:body.values,reviewed:body.reviewed,base:{values:ClientTextState.valuesFor(body.baseline),reviewed:{},revision:0},state:'uncertain',createdAt:Date.now()},{unitKey:JSON.stringify([id,body.baseline.id])});
+                await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error);});
+            },{units:preparedUnits,assets:legacyAssets.map(asset=>({...asset,blob:undefined,bytes:Array.from(files[asset.role==='normal'?0:1].buffer)})),descriptors:legacyManifest.descriptors,trees:legacyManifest.trees,body});
+            await bootstrap(target);
+            let interrupted=false;await target.route(apiOrigin+'/v1/content-groups/'+accepted.group.id+'/units/*',async route=>{
+                if(route.request().method()!=='PATCH' || interrupted)return route.continue();interrupted=true;const response=await route.fetch();if(response.status()!==200){console.error('Legacy replay response:',response.status(),await response.text());return route.fulfill({response});}return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'Lost legacy acknowledgement'}})});
+            });
+            await target.evaluate(async({version,group})=>{await window.__clientFixtureApp.ctOpenGroup(version,group,'French');},accepted);
+            // Migration begins with an uncertain operation already present.
+            // Wait for the deliberately lost *new* acknowledgement before
+            // retrying so this check cannot join the first automatic sync.
+            await target.waitForFunction(async()=>{const vm=window.__clientFixtureApp,metadata=await vm._ctStore.getMetadata(vm.ctWorkspace.scope),operations=await vm._ctStore.getOutbox(vm.ctWorkspace.scope);return vm.ctError==='Lost legacy acknowledgement' && metadata?.cacheMigration==='complete' && operations[0]?.state==='uncertain' && !!operations[0].requestBody;});
+            await target.evaluate(async()=>{const vm=window.__clientFixtureApp;clearInterval(vm._ctSyncTimer);await vm._ctSyncRun?.promise;await vm._ctSync.flush();await vm.ctSync();});
+            await target.waitForFunction(async()=>{const vm=window.__clientFixtureApp;return !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length;});
+            const ownPatches=patches.filter(patch=>patch.mutationId===mutationId);assert.ok(ownPatches.length>=2);assert.deepEqual(ownPatches[0],body);assert.deepEqual(ownPatches[1],body);
+            const recovered=await target.evaluate(async id=>{const vm=window.__clientFixtureApp,scope=vm.ctWorkspace.scope,metadata=await vm._ctStore.getMetadata(scope),history=await vm._ctStore.listHistory(scope,id),original=await vm._ctStore.getUnit(scope,id);return{descriptors:metadata.descriptors,history:history.length,source:original.fields[0].source,saved:vm.ctSaved[id]?.values};},legacyUnit.id);
+            assert.deepEqual(recovered.descriptors,legacyManifest.descriptors);assert.equal(recovered.history,1);assert.deepEqual(recovered.saved,values);
+            await target.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','saved','revised','outdated','unchanged'];vm.ctSheet=JSON.stringify(['normal','Normal']);});
+            await target.getByRole('region',{name:'ClientText workspace'}).getByRole('button',{name:'record',exact:true}).click();await target.screenshot({path:join(directory,'clienttext-trusted-editor.png'),fullPage:true});
+            assert.equal(requests.some(url=>/\/content-uploads\/[^/]+\/manifests\//.test(url)),false);
+            results.push('Shared cold/cache initialization, four-theme cold screenshots, v1 original replay, native old aggregate migration and exact uncertain legacy body acknowledgement without manifest upload');
+            writeFileSync(join(directory,'trusted-cache-report.json'),JSON.stringify({status:'PASS',coldLog,warmLog,legacyMutation:mutationId,legacyAttempts:ownPatches.length,history:recovered.history,noManifestUploads:true},null,2));await isolated.close();
+        };
+        if(process.argv.includes('--trusted-cache-only')){await captureTrustedCache();assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',results},null,2));return;}
         if (classOnly) {
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
             await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
@@ -188,7 +266,7 @@ async function run() {
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click(); await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
             const prepared = await page.evaluate(() => ({ warnings: window.__clientFixtureApp.ctPrepared[0].assets.flatMap(asset => asset.parsed.warnings),
-                versions: window.__clientFixtureApp.ctPrepared[0].manifest.descriptors.map(descriptor => descriptor.parserVersion) }));
+                versions: window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(descriptor => descriptor.parserVersion) }));
             assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v2','clienttext-v2'] });
             await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
@@ -319,18 +397,17 @@ async function run() {
             for (const part of Object.keys(originalZip.files).filter(part => !originalZip.files[part].dir && !['xl/worksheets/sheet4.xml','xl/styles.xml'].includes(part)))
                 assert.deepEqual(await exportedZip.file(part).async('uint8array'), await originalZip.file(part).async('uint8array'), 'Only edited worksheet/style parts can change: ' + part);
             // Real accepted v1 group is replayed using its immutable parser version after the v2 editor has been used.
-            const legacyUnits = [], legacyAssets = [], created = api.locals.content.createUpload('fixture-admin', { game: 'poe2', name: 'Accepted legacy v1', contentMode: 'clienttext', language: 'German', idempotencyKey: randomUUID() });
+            const legacyUnits = [], legacyAssets = [], created = api.locals.content.createUpload('fixture-admin', { game: 'poe2', name: 'Accepted legacy v1', storageProtocol:ClientState.STORAGE_PROTOCOL, contentMode: 'clienttext', language: 'German', idempotencyKey: randomUUID() });
             for (const [role, bytes] of [['normal',normal],['gender',gender]]) {
                 const parsed = await Codec.parseWorkbook(bytes, { filename: role === 'normal' ? 'German.xlsm' : 'German_Gender.xlsm', role, parserVersion: 'clienttext-v1' });
                 legacyUnits.push(...parsed.units); legacyAssets.push({ role, hash: parsed.artifactHash, parserVersion: parsed.parserVersion });
                 await api.locals.content.receiveAsset(created.upload.id, role, 'fixture-admin', Readable.from([bytes]), parsed.filename);
             }
-            const legacyManifest = await ClientState.buildManifest(legacyUnits, legacyAssets);
-            for (const role of ['normal','gender']) api.locals.content.putManifest(created.upload.id,role,'fixture-admin',{index:0,units:legacyManifest.units.filter(unit=>unit.role===role)});
-            const accepted = await api.locals.content.finalize(created.upload.id,'fixture-admin',{descriptors:legacyManifest.descriptors,idempotencyKey:randomUUID()}), legacyUnit = legacyUnits.find(unit => unit.role === 'normal' && unit.recordId === 'record');
+            const legacyManifest = await ClientState.buildDescriptors(legacyUnits, legacyAssets);
+            const accepted = await api.locals.content.finalize(created.upload.id,'fixture-admin',{storageProtocol:ClientState.STORAGE_PROTOCOL,descriptors:legacyManifest.descriptors,summaries:legacyManifest.summaries,idempotencyKey:randomUUID()}), legacyUnit = legacyUnits.find(unit => unit.role === 'normal' && unit.recordId === 'record');
             const legacyValues = ClientState.valuesFor(legacyUnit); legacyValues[JSON.stringify(['Name',null])] = 'Accepted v1 saved text';
             const review = { [JSON.stringify(['Description',null])]: ClientState.sourceHash(legacyUnit.fields.find(field => field.name === 'Description').source) };
-            api.locals.content.save(accepted.group.id,legacyUnit.id,'German','fixture-admin',{mutationId:randomUUID(),baseRevision:0,values:legacyValues,reviewed:review,baseline:legacyUnit,proof:ClientState.proofFor(legacyManifest,legacyUnit.id)});
+            api.locals.content.save(accepted.group.id,legacyUnit.id,'German','fixture-admin',{mutationId:randomUUID(),baseRevision:0,values:legacyValues,reviewed:review,storageProtocol:ClientState.STORAGE_PROTOCOL,role:legacyUnit.role,assetHash:legacyAssets.find(asset=>asset.role===legacyUnit.role).hash,parserVersion:'clienttext-v1',clientFacts:ClientState.clientFacts(legacyUnit),originalValues:ClientState.originalValues(legacyUnit)});
             await page.evaluate(async ({version,group}) => { const vm = window.__clientFixtureApp; await vm.ctOpenGroup(version,group,'German'); }, accepted);
             await page.waitForFunction(id => window.__clientFixtureApp.ctWorkspace?.scope.groupId === id && !window.__clientFixtureApp.ctBusy, accepted.group.id);
             await page.waitForFunction(id => window.__clientFixtureApp.ctSaved[id]?.serverRevision > 0, legacyUnit.id);
@@ -462,7 +539,7 @@ async function run() {
             await upload.locator('input[type=file]').first().setInputFiles(originals.map(original => ({ name: original.name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: original.bytes })));
             const detected = await page.evaluate(() => window.__clientFixtureApp.ctUploadFiles.map(candidate => ({ filename: candidate.file.name, language: candidate.language, role: candidate.role })));
             assert.deepEqual(detected, [{ filename: 'German.xlsm', language: 'German', role: 'normal' }, { filename: 'German_Gender.xlsm', language: 'German', role: 'gender' }], 'Neutral production filenames auto-detect German and both workbook roles');
-            const started = Date.now(); console.log('German import audit: preparing actual neutral filenames through the normal browser worker/manifest route.');
+            const started = Date.now(); console.log('German import audit: preparing actual neutral filenames through the normal browser worker/trusted descriptor route.');
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading, null, { timeout: 300000 });
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'The actual German pair prepares without a filename game marker');
@@ -471,13 +548,13 @@ async function run() {
                 return { game: vm.gameVersion, groups: groups.length, language: groups[0]?.language, mode: groups[0]?.contentMode, units: groups[0]?.units.length,
                     records: groups[0]?.units.reduce((counts, unit) => (counts[unit.role] = (counts[unit.role] || 0) + 1, counts), {}),
                     assets: groups[0]?.assets.map(asset => ({ filename: asset.name, role: asset.role, hash: asset.parsed.artifactHash, sheets: asset.parsed.sheets.length, warnings: asset.parsed.warnings.length })),
-                    manifestUnits: groups[0]?.manifest.units.length,
+                    descriptorUnits: groups[0]?.originals.descriptors.reduce((total,descriptor)=>total+descriptor.unitCount,0),
                     saved: groups[0]?.cacheScope ? Object.keys(await vm._ctStore.getSaved(groups[0].cacheScope)).length : 0 };
             });
             assert.equal(facts.game, 'poe2', 'Import uses the selected release game scope');
             assert.equal(facts.groups, 1); assert.equal(facts.language, 'German'); assert.equal(facts.mode, 'clienttext');
             assert.equal(facts.units, 158386); assert.deepEqual(facts.records, { normal: 89902, gender: 68484 });
-            assert.equal(facts.manifestUnits, facts.units, 'The browser worker builds a compact manifest for every parsed German record');
+            assert.equal(facts.descriptorUnits, facts.units, 'The browser worker counts each German original without per-record manifest hashing');
             assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: 0 })));
             assert.equal(facts.saved, 0, 'Preparation creates no Saved translation work'); assert.deepEqual(publications, [], 'Audit never publishes content to an API');
             for (const original of originals) assert.equal(createHash('sha256').update(readFileSync(original.path)).digest('hex'), original.sha256, 'German original remains unchanged');
@@ -751,7 +828,7 @@ async function run() {
         const clientFilters = workspace.locator('.workspaceHeader fieldset.fileFilters');
         assert.equal(await clientFilters.isVisible(), true);
         assert.ok(await clientFilters.locator('.filterChip input[type=checkbox]').count() >= 5, 'ClientText uses the shared checkbox status filters');
-        assert.equal(await clientFilters.getByRole('checkbox', { name: 'Unchanged', exact: true }).isChecked(), true, 'Complete records and their durable drafts remain discoverable in the default ClientText filter');
+        assert.equal(await clientFilters.getByRole('checkbox', { name: 'Unchanged', exact: true }).isChecked(), false, 'Unchanged records stay off by default and can be included explicitly');
         const selectAllClientFilters = clientFilters.getByRole('button', { name: 'Select all', exact: true });
         if (await selectAllClientFilters.isEnabled()) await selectAllClientFilters.click();
         assert.equal(await clientFilters.locator('.filterChip input[type=checkbox]').evaluateAll(inputs => inputs.every(input => input.checked)), true);
@@ -1020,6 +1097,8 @@ async function run() {
             if (historyOrigin === 'shared') assert.match(await event.textContent(), /ClientText Fixture Admin/);
             await event.getByRole('button', { name: 'Compare change', exact: true }).click();
             const viewer = page.getByRole('dialog', { name: 'Compare · Normal · record', exact: true }); await viewer.waitFor();
+            const historyHeader=await viewer.evaluate(dialog=>{const close=dialog.querySelector('#ctHistoryClose'),box=close.getBoundingClientRect();return{atBody:dialog.closest('.ctHistoryBackdrop').parentElement===document.body,unobscured:close.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2))};});
+            assert.deepEqual(historyHeader,{atBody:true,unobscured:true},'History comparison escapes editor-sidebar stacking and its close control stays on top of preview/actions');
             const nameField = viewer.locator('.ctHistoryDiffField').filter({ has: page.getByRole('heading', { name: 'Name', exact: true }) });
             assert.equal(await nameField.locator('.ctHistory-before .ctHistoryTarget').textContent(), previousText);
             assert.equal(await nameField.locator('.ctHistory-after .ctHistoryTarget').textContent(), currentText);
@@ -1541,7 +1620,7 @@ async function run() {
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('En ligne');
             await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.waitForFunction(async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne')); });
-            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'ClientText proof-backed save is accepted');
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'ClientText trusted sparse save is accepted');
             await workspace.getByRole('button', { name: 'record', exact: true }).click();
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('En ligne temporaire');
             await workspace.getByRole('button', { name: 'Save', exact: true }).click();
@@ -1554,7 +1633,7 @@ async function run() {
             const acceptedField = get(acceptedNormal, 'record', 'Name'); assert.equal(acceptedField.target, 'En ligne'); assert.equal(acceptedField.originalFill, 'D9D9D9');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'Immutable accepted-work collection downloads');
             results.push('Metadata-only version draft; publication resumes after interrupted upload and reload using cached original files');
-            results.push('Real API complete-group publication, proof-backed save/acknowledgement and immutable accepted-work collection');
+            results.push('Real API complete-group publication, trusted sparse save/acknowledgement and immutable accepted-work collection');
             await details.getByRole('button', { name: 'Add content group', exact: true }).click();
             await upload.locator('input[type=file]').first().setInputFiles(statFile);
             assert.equal(await upload.getByRole('checkbox').count(), 12); assert.equal(await upload.getByRole('checkbox').evaluateAll(inputs => inputs.every(input => input.checked)), true, 'StatDescription defaults to all teams');
@@ -2209,7 +2288,7 @@ async function run() {
         assert.deepEqual(failures, [], 'All normal-mode browser script errors');
         console.log(JSON.stringify({ status: 'PASS', normalMode: true, browser: executablePath, results }, null, 2));
     } catch (error) {
-        const failedPage = browser?.contexts()[0]?.pages()[0];
+        const failedPage = browser?.contexts().at(-1)?.pages().at(-1);
         if (failedPage && !failedPage.isClosed()) {
             const state = await failedPage.evaluate(async scopes => {
                 const vm = window.__clientFixtureApp;

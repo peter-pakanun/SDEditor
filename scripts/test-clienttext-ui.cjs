@@ -12,7 +12,7 @@ function harness(changes={}){
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
-        ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
+        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
@@ -1548,7 +1548,7 @@ test('late journal hydration cannot open publication controls after an account c
     assert.equal(opens,0);assert.equal(app._ctPublicationRequest,undefined);
 });
 
-test('cached publication resume reuses bounded accepted compact data without rehashing original units',async()=>{
+test('cached publication resume reuses small accepted descriptors without compact reads or proof trees',async()=>{
     const {app,window,original}=harness(),compact=S.compactUnit(original),metadata={descriptors:[{...asset,baselineId:'accepted',root:'accepted-root'}]},tree={ids:[original.id],levels:[['leaf']]};let compactReads=0;
     const payload={kind:'publication',name:'Release',groups:[{contentMode:'clienttext',language:scope.language,cacheScope:scope,carry:[]}]};
     window.ClientTextState={...S,compactUnit(){throw new Error('Resume must not rehash originals on the UI thread.');}};
@@ -1557,8 +1557,8 @@ test('cached publication resume reuses bounded accepted compact data without reh
         async getCompactUnits(captured,options){assert.equal(options.guard(),true);assert.equal(captured.groupId,scope.groupId);compactReads++;return[compact];}};
     app.ctOpenUpload=async()=>{};
     await app.ctResumePublication({requestId:'publication-id',payload:{kind:'publication'}});
-    assert.equal(compactReads,1);assert.equal(app.ctPrepared[0].manifest.units[0],compact);
-    assert.equal(app.ctPrepared[0].manifest.trees.normal,tree);assert.equal(app.ctPrepared[0].manifest.descriptors[0].baselineId,'accepted');
+    assert.equal(compactReads,0);assert.equal(app.ctPrepared[0].originals.descriptors[0].baselineId,'accepted');
+    assert.equal(app.ctPrepared[0].originals.units,undefined);assert.equal(app.ctPrepared[0].originals.trees,undefined);
     assert.equal(await app.ctPrepared[0].candidates[0].file.text(),'original bytes');assert.equal(app.ctUploadError,'');
 });
 
@@ -1604,8 +1604,8 @@ test('published originals replay each accepted parser version instead of reinter
         const descriptor={role:'normal',baselineId:'accepted-baseline',artifactHash:'verified',...(parserVersion?{parserVersion}:{})},
             group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:scope.language,
                 assets:[{filename:'Thai_PoE2.xlsx',descriptor}]};
-        app.cloudCanAccessAllLanguages=true;app._ctStore={async listWorkspaces(){return[];},async import(captured,payload){imports.push({captured,payload});}};
-        app._cloud={async request(route){return route.endsWith('/original')?new Blob(['original bytes']):{group};}};
+        app.cloudCanAccessAllLanguages=true;app._ctStore={async getMetadata(){return null;},async import(captured,payload){imports.push({captured,payload});}};
+        app._cloud={async request(route){return route==='/v1/content-policy'?{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]}:route.endsWith('/original')?new Blob(['original bytes']):{group};}};
         app._ctWorker={async parseWorkbook(bytes,options){parsedWith.push(options.parserVersion);return{units:[original],artifactHash:'verified',
             filename:'Thai_PoE2.xlsx',parserVersion:options.parserVersion,sheets:[]};},async buildManifest(units,assets){return{descriptors:[descriptor]};}};
         await app.ctOpenGroup(version,group,scope.language,false);
@@ -1645,7 +1645,7 @@ test('a fetched workbook group must belong to the selected version before parser
 
 test('local multi-team imports retain complete content membership in every cached workspace',async()=>{
     const {app}=harness(),imports=[];
-    app.ctUploadLocal=true;app.ctUploadName='Local release';app.ctPrepared=['Thai','French'].map(language=>({language,units:[],assets:[{role:'normal'}],manifest:{}}));
+    app.ctUploadLocal=true;app.ctUploadName='Local release';app.ctPrepared=['Thai','French'].map(language=>({language,units:[],assets:[{role:'normal'}],originals:{descriptors:[],summaries:{}}}));
     app._ctStore={async import(captured,payload){imports.push({captured:clone(captured),metadata:clone(payload.metadata)});}};app.ctRefreshLocal=async()=>{};
     await app.ctPublishPrepared();
     assert.equal(app.ctUploadError,'');assert.equal(imports.length,2);
@@ -1665,15 +1665,15 @@ function uploadPreparationHarness(names,game='poe2'){
     h.app._ctWorker={
         async parseWorkbook(bytes,options){
             parseCalls.push({bytes:Buffer.from(bytes).toString('utf8'),filename:options.filename,role:options.role,language:options.language,signal:options.signal});
-            const original={...unit(),role:options.role,id:JSON.stringify([options.role,'ClientStrings','ID/1'])},artifactHash=S.hash(Buffer.from(bytes).toString('utf8'));
+            const original={...unit(),role:options.role,id:JSON.stringify([options.role,'ClientStrings','ID/1'])},artifactHash=S.sha256(bytes);
             return{units:[original],artifactHash,assetHash:artifactHash,sheets:[{name:'ClientStrings',headers:[]}],warnings:[]};
         },
-        async buildManifest(units,assets,options){
-            manifestCalls.push({units:units.slice(),assets:assets.slice(),signal:options.signal});return S.buildManifest(units,assets);
+        async buildDescriptors(units,assets,options){
+            manifestCalls.push({units:units.slice(),assets:assets.slice(),signal:options.signal});return S.buildDescriptors(units,assets);
         }
     };
-    h.app._ctStore=new Proxy({}, {get(_target,name){return async()=>{storeCalls.push(String(name));throw Error('Preparation must not write to storage: '+String(name));};}});
-    h.app._cloud={async request(url,options){requests.push({url,options});assert.match(url,/^\/v1\/content-predecessor\?/);
+    h.app._ctStore=new Proxy({}, {get(_target,name){return async()=>{if(name==='getCachedOriginal')return null;storeCalls.push(String(name));throw Error('Preparation must not write to storage: '+String(name));};}});
+    h.app._cloud={async request(url,options){if(url==='/v1/content-policy')return{...h.app.ctPolicy,clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};requests.push({url,options});assert.match(url,/^\/v1\/content-predecessor\?/);
         assert.equal(options?.method,undefined,'preparation only reads predecessor metadata');return{version:null,group:null};}};
     h.app.ctChooseFiles({target:{files}});return{...h,files,parseCalls,manifestCalls,requests,storeCalls};
 }
@@ -1687,7 +1687,7 @@ for(const game of ['poe1','poe2'])test('neutral German normal/Gender filenames p
     assert.deepEqual(Array.from(group.assets,asset=>[asset.role,asset.name]),[['normal','German.xlsm'],['gender','German_Gender.xlsm']]);
     assert.deepEqual(parseCalls.map(call=>[call.filename,call.role,call.language]),[['German.xlsm','normal','German'],['German_Gender.xlsm','gender','German']]);
     for(const asset of group.assets){const original=files.find(file=>file.name===asset.name);assert.equal(asset.blob,original);assert.equal(await asset.blob.text(),'Exact original bytes: '+asset.name);}
-    assert.equal(manifestCalls.length,1);assert.equal(group.manifest.descriptors.length,2);assert.equal(storeCalls.length,0);assert.equal(requests.length,1);
+    assert.equal(manifestCalls.length,1);assert.equal(group.originals.descriptors.length,2);assert.equal(storeCalls.length,0);assert.equal(requests.length,1);
     assert.ok(requests[0].url.includes('game='+game));assert.ok(requests[0].url.includes('versionId=selected-release'));
 });
 
@@ -1763,4 +1763,119 @@ test('paired neutral originals prepare while Missing text files are ignored with
     assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>candidate.file.name),['German.xlsm','German_Gender.xlsm']);
     await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(parseCalls.length,2);
     assert.deepEqual(Array.from(app.ctPrepared[0].assets,asset=>asset.name),['German.xlsm','German_Gender.xlsm']);
+});
+
+
+function initializationHarness(changes={}){
+    const initialization=require('../public/workspaceInitialization.js').mixin,h=harness({managedOnlineAvailable:false,$nextTick:async()=>{},...changes});
+    Object.assign(h.app,initialization.data());
+    for(const[name,method]of Object.entries(initialization.methods))h.app[name]=method.bind(h.app);
+    for(const[name,getter]of Object.entries(initialization.computed))Object.defineProperty(h.app,name,{get:()=>getter.call(h.app)});
+    h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};h.app.ctRefreshLayout=()=>{};h.app.ctLoadMemory=async()=>{};
+    return h;
+}
+test('cached ClientText opening uses the shared initialization owner and skips workbook parsing and downloads',async()=>{
+    const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app}=initializationHarness({_ctStore:f.store}),dictionary=[];
+    app.ensureDictionarySnapshot=async()=>dictionary.push('ready');
+    app._ctWorker={parseWorkbook(){throw Error('Cache hit must not parse');}};
+    assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope)),true);
+    assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);
+    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving local drafts','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+    assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
+});
+test('a nested cached ClientText owner cannot release the shared foreground preparation gate',async()=>{
+    const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app}=initializationHarness({_ctStore:f.store});
+    const outer=app.beginWorkspaceInitialization({label:'Outer selected workspace',plan:['Outer preparation']});
+    assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope),outer),true);assert.equal(app.workspaceInitializationActive,true);
+    assert.deepEqual(Array.from(app.workspaceInitializationPlan,step=>step.label),['Outer preparation']);app.finishWorkspaceInitialization(outer);
+    assert.equal(app.workspaceInitializationActive,false);
+});
+function coldOpeningHarness({cache=false}={}){
+    const {app,original}=initializationHarness({cloudCanAccessAllLanguages:true}),f=fixture(),calls=[],parse=[];
+    const descriptor={format:S.TRUSTED_FORMAT,role:'normal',assetHash:asset.hash,parserVersion:S.PARSER_VERSION,unitCount:1,baselineId:S.hash('small')},
+        version={id:scope.versionId,game:scope.game,branchId:scope.branchId,name:'Cold version'},group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:scope.language,assets:[{role:'normal',filename:'Thai.xlsx',artifactHash:asset.hash,descriptor}]};
+    const originalAsset={...asset,parserVersion:S.PARSER_VERSION,parsed:{parserVersion:S.PARSER_VERSION,sheets:[]}};
+    app._ctStore={...f.store,async getCachedOriginal(...args){return cache?{units:[original],asset:originalAsset,summary:S.emptySummary()}:null;}};
+    app._cloud={async request(route,options){calls.push(route);if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};if(route.endsWith('/original')){options.onDownloadProgress(8,8);return asset.blob;}return{group};}};
+    app._ctWorker={async parseWorkbook(bytes,options){parse.push(options);options.onProgress({phase:'Parsing sheet',processed:1,total:1,sheet:'ClientStrings'});return{...originalAsset.parsed,artifactHash:asset.hash,filename:'Thai.xlsx',units:[original]};},buildManifest(){throw Error('Trusted openings must not build manifests');}};
+    return{app,original,f,calls,parse,version,group};
+}
+test('cold ClientText preparation reports real workbook/sheet context and imports small accepted descriptors',async()=>{
+    const {app,calls,parse,version,group}=coldOpeningHarness();assert.equal(await app.ctOpenGroup(version,group,scope.language),true);
+    assert.equal(parse.length,1);assert.equal(app.ctActive,true);assert.equal(app.workspaceInitializationActive,false);
+    assert.match(app.workspaceInitializationLogText,/Parsing sheet · Thai.xlsx · ClientStrings/);
+    assert.equal(app.workspaceInitializationRows.some(row=>row.label==='Downloading original: Thai.xlsx'),true);
+    assert.equal(calls.some(route=>route.includes('/manifests/')),false);
+});
+test('reusable originals skip cold parse/download phases while keeping selected group descriptor authority',async()=>{
+    const {app,calls,parse,version,group}=coldOpeningHarness({cache:true});assert.equal(await app.ctOpenGroup(version,group,scope.language),true);
+    assert.equal(parse.length,0);assert.equal(calls.some(route=>route.endsWith('/original')),false);
+    assert.equal(app.workspaceInitializationRows.some(row=>/^Downloading original|^Parsing original/.test(row.label)),false);
+    assert.equal((await app._ctStore.getMetadata(scope)).descriptors[0].baselineId,group.assets[0].descriptor.baselineId);
+});
+test('cancelled cold parsing keeps a stopped shared log and never activates or commits a partial workspace',async()=>{
+    const {app,version,group}=coldOpeningHarness(),pending=deferred(),started=deferred();
+    app._ctWorker.parseWorkbook=async()=>{started.resolve();await pending.promise;return{artifactHash:asset.hash,filename:'Thai.xlsx',units:[unit()],parserVersion:S.PARSER_VERSION};};
+    const opening=app.ctOpenGroup(version,group,scope.language);await started.promise;
+    assert.equal(app.workspaceInitializationActive,true);app.ctCancel();pending.resolve();assert.equal(await opening,false);
+    assert.equal(app.workspaceInitializationActive,false);assert.equal(app.workspaceInitializationRows.at(-1).status,'cancelled');assert.equal(await app._ctStore.getMetadata(scope),undefined);
+});
+test('old API capability blocks a cold ClientText import before original download and leaves cached work readable',async()=>{
+    const {app,version,group}=coldOpeningHarness();let requests=0;
+    app._cloud={async request(route){requests++;assert.equal(route,'/v1/content-policy');return{};}};
+    assert.equal(await app.ctOpenGroup(version,group,scope.language),false);assert.match(app.ctError,/trusted ClientText API update/);assert.equal(requests,1);
+    assert.equal(await app._ctStore.getMetadata(scope),undefined);
+});
+test('trusted publication sends only original assets, small descriptors and sparse work without manifest endpoints',async()=>{
+    const f=fixture(),original=unit(),originalAsset={...asset,parsed:{parserVersion:S.PARSER_VERSION,sheets:[]}},originals=await S.buildDescriptors([original],[originalAsset]),
+        {app}=harness({_ctStore:f.store,ctUploadVersion:{id:'v1',game:'poe2',branchId:'default',membershipRevision:0},ctUploadName:'Trusted release'}),requests=[];
+    app.ctPrepared=[{contentMode:'clienttext',storageProtocol:S.STORAGE_PROTOCOL,language:'Thai',assignments:['Thai'],units:[original],assets:[originalAsset],originals,
+        candidates:[{file:new File(['original'],'Thai.xlsx'),role:'normal',language:'Thai'}],carry:[],warnings:[]}];
+    app._cloud={async request(route,options){requests.push({route,body:clone(options?.body)});if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};
+        if(route==='/v1/content-uploads' || route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'awaiting_assets'}};
+        if(route.endsWith('/finalize'))return{version:{...app.ctUploadVersion,membershipRevision:1},group:{id:'published-group',contentMode:'clienttext',language:'Thai'}};return{};}};
+    app.refreshManagedVersions=async()=>{};app.managedReadDetails=async()=>{};await app.ctPublishPrepared();assert.equal(app.ctUploadError,'');
+    assert.equal(requests.some(request=>request.route.includes('/manifests/')),false);
+    const create=requests.find(request=>request.route==='/v1/content-uploads'),finalize=requests.find(request=>request.route.endsWith('/finalize'));
+    assert.equal(create.body.storageProtocol,S.STORAGE_PROTOCOL);assert.deepEqual(finalize.body.descriptors,originals.descriptors);
+    assert.deepEqual(finalize.body.summaries,originals.summaries);assert.equal(finalize.body.storageProtocol,S.STORAGE_PROTOCOL);
+    assert.equal(finalize.body.descriptors[0].root,undefined);assert.equal(await f.store.getRequest(app.ctRequestScope(),app._ctPublicationRequest || 'unused'),undefined);
+});
+test('unfinished legacy publication conversion retains exact old bodies and creates new trusted request identities',async()=>{
+    const {app}=harness(),createBody={idempotencyKey:'old-group-command',contentMode:'clienttext'},finalizeBody={idempotencyKey:'old-group-command',descriptors:[{root:'retained-root'}]},
+        prepared={contentMode:'clienttext',language:'Thai',assignments:['Thai'],units:[unit()],assets:[{...asset,parsed:{parserVersion:'clienttext-v1'}}],candidates:[{role:'normal'}],requestId:'old-group-command',createBody:clone(createBody),finalizeBody:clone(finalizeBody)},writes=[];
+    app._ctPublicationRequest='old-publication';app._ctAbort=new AbortController();app._ctStore={async getRequest(){return{payload:{kind:'publication',groups:[{createBody,finalizeBody}]}};},async putRequest(scope,id,payload){writes.push({id,payload:clone(payload)});}};
+    app.ctPrepareCarry=async group=>{group.carry=[];};app.ctRememberPublication=async()=>{};
+    await app.ctConvertLegacyPublication(prepared,{id:'v1',membershipRevision:2});
+    assert.equal(writes[0].id,'old-publication');assert.equal(writes[0].payload.kind,'publication-recovery');assert.deepEqual(writes[0].payload.groups[0],{createBody,finalizeBody});
+    assert.notEqual(prepared.requestId,'old-group-command');assert.notEqual(app._ctPublicationRequest,'old-publication');assert.equal(prepared.createBody.storageProtocol,S.STORAGE_PROTOCOL);
+    assert.equal(prepared.finalizeBody,null);assert.equal(prepared.originals.descriptors[0].parserVersion,'clienttext-v1');
+});
+
+
+test('opening another language preserves the current translator draft before changing selected language',async()=>{
+    const {app,version,group}=coldOpeningHarness({cache:true}),order=[];app.lang='German';app.ctWorkspace.scope.language='German';app.ctDraftDirty=true;
+    app.ctFlushDraft=async()=>{order.push(app.lang);app.ctDraftDirty=false;return true;};app.ctFlushCommentDraft=async()=>order.push('comment:'+app.lang);app.ensureDictionarySnapshot=async()=>{assert.equal(app.lang,'Thai');};
+    assert.equal(await app.ctOpenGroup(version,group,'Thai'),true);
+    assert.equal(order[0],'German');assert.equal(order[1],'comment:German');assert.equal(app.lang,'Thai');assert.equal(app.ctWorkspace.scope.language,'Thai');
+});
+test('uncertain legacy finalization uses live accepted upload state before any conversion or original reupload',async()=>{
+    const {app}=harness(),calls=[],create={contentMode:'clienttext',idempotencyKey:'old-command'},version={id:'accepted-version',membershipRevision:1};
+    app.ctPrepared=[{contentMode:'clienttext',language:'Thai',assignments:['Thai'],requestId:'old-command',createBody:clone(create),published:false}];
+    app.ctUploadVersion={id:'accepted-version',membershipRevision:0};app._ctPublicationRequest='old-journal';app.ctRememberPublication=async()=>{};app._ctStore={async deleteRequest(){}};
+    app._cloud={async request(route,options){calls.push({route,body:clone(options?.body)});if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};
+        if(route==='/v1/content-uploads')return{upload:{id:'old-upload',status:'uploading'}};
+        if(route==='/v1/content-uploads/old-upload')return{upload:{id:'old-upload',status:'accepted',groupId:'accepted-group'}};
+        if(route==='/v1/content-groups/accepted-group')return{group:{id:'accepted-group',version}};throw Error('Must not convert or reupload');}};
+    app.ctConvertLegacyPublication=()=>{throw Error('Already accepted');};app.refreshManagedVersions=async()=>{};app.managedReadDetails=async()=>{};
+    await app.ctPublishPrepared();assert.equal(app.ctUploadError,'');assert.deepEqual(calls.find(call=>call.route==='/v1/content-uploads').body,create);
+    assert.equal(calls.some(call=>/assets|finalize|manifest/.test(call.route)),false);assert.equal(app.ctUploadVersion.id,version.id);
+});
+
+
+test('ClientText history comparison teleports outside the sticky editor sidebar stacking context',()=>{
+    const {window}=harness(),template=window.ClientTextUI.toolsComponent.template;
+    assert.match(template,/<Teleport to="body"><div v-if="host.ctHistoryViewer"/);assert.match(template,/<\/div><\/Teleport>\s*<\/section>/);
+    assert.match(fs.readFileSync(path.join(__dirname,'../public/client-text.css'),'utf8'),/\.ctHistoryBackdrop[^}]*z-index:16000/);
 });

@@ -2,7 +2,7 @@
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
 .ctListWorkspace { padding-bottom:var(--workspace-footer-height,110px); }
 .ctHistoryActions {display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.ctHistoryError {color:var(--ui-error)}
-.ctHistoryBackdrop {position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;background:#0009;padding:24px}
+.ctHistoryBackdrop {position:fixed;inset:0;z-index:16000;display:flex;align-items:center;justify-content:center;background:#0009;padding:24px}
 .ctHistoryViewer {width:min(1120px,95vw);max-height:90vh;overflow:auto;padding:18px;background:var(--color-element);color:var(--color-font);border:1px solid var(--ui-border);border-radius:8px;box-shadow:0 12px 40px #0005}
 .ctHistoryViewer header {position:sticky;top:-18px;z-index:1;display:flex;align-items:center;gap:12px;padding:8px 0;background:inherit}.ctHistoryViewer header h3 {flex:1;margin:0;font-size:1.12em}
 .ctHistoryCompareControls {display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:14px 0}.ctHistoryCompareControls label {display:flex;flex-direction:column;gap:5px;min-width:0}.ctHistoryCompareControls select {max-width:min(430px,38vw)}.ctHistoryCompareControls label:has(input) {flex-direction:row;align-items:center}

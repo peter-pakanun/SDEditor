@@ -6,6 +6,7 @@
 })(typeof window === 'object' ? window : globalThis, function (root) {
     'use strict';
     const now = () => root.performance?.now?.() ?? Date.now();
+    const phaseLabels = { 'loading-cached-originals': 'Loading cached originals' };
     const mixin = {
         data() {
             return { workspaceInitializationActive: false, workspaceInitializationLabel: '',
@@ -50,6 +51,7 @@
                 for (const row of this.workspaceInitializationRows) {
                     lines.push(`${statuses[row.status] || row.status}: ${row.label} ${this.workspaceInitializationDuration(row.startedAt, row.endedAt)}`);
                     if (row.progress) lines.push('    ' + this.workspaceInitializationTaskProgress(row).label);
+                    if (row.detail) lines.push('    ' + row.detail);
                     if (row.error) lines.push('    ' + row.error);
                 }
                 return lines.join('\n');
@@ -138,7 +140,7 @@
                 const log = this.$refs?.workspaceInitializationLog;
                 const follow = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
                 const id = ++run.sequence;
-                this.workspaceInitializationRows.push({ id, label, startedAt: now(), endedAt: null, status: 'running', error: '', progress: null });
+                this.workspaceInitializationRows.push({ id, label, startedAt: now(), endedAt: null, status: 'running', error: '', progress: null, detail: '' });
                 if (follow) this.$nextTick?.(() => {
                     const currentLog = this.$refs?.workspaceInitializationLog;
                     if (run === this._workspaceInitializationRun && currentLog) currentLog.scrollTop = currentLog.scrollHeight;
@@ -160,6 +162,12 @@
                 if (!task || task.run !== this._workspaceInitializationRun) return;
                 const row = this.workspaceInitializationRows.find(item => item.id === task.id);
                 if (!row || row.endedAt !== null) return;
+                row.context ||= {};
+                for (const name of ['phase','workbook','sheet','detail']) {
+                    if (typeof progress[name] === 'string' && progress[name].length) row.context[name] = name === 'phase'
+                        ? phaseLabels[progress[name]] || progress[name] : progress[name];
+                }
+                row.detail = ['phase','workbook','sheet','detail'].map(name => row.context[name]).filter(Boolean).join(' · ');
                 const completed = Number.isFinite(progress.completed) && progress.completed >= 0 ? progress.completed : 0;
                 const total = Number.isFinite(progress.total) && progress.total > 0 ? progress.total : null;
                 const percent = Number.isFinite(progress.percent) ? progress.percent : total ? completed / total * 100 : null;

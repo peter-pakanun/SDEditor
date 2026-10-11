@@ -5,7 +5,7 @@
     else root.ClientTextState = api;
 })(typeof globalThis === 'object' ? globalThis : self, function () {
     'use strict';
-    const FORMAT = 'clienttext-v1', PARSER_VERSION = 'clienttext-v2';
+    const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v2';
     const PARSER_VERSIONS = Object.freeze(['clienttext-v1', PARSER_VERSION]);
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
@@ -112,6 +112,61 @@
             id: field.id, kind: field.kind, sourceHash: sourceHash(field.source), originalHash: hash(field.target),
             required: field.required && !markerOnly, originalMissing: field.originalMissing && !markerOnly,
             outdated: field.outdated && !markerOnly, audioOnly: markerOnly }); }) };
+    }
+    // Trusted originals are described once per workbook. Only an authored unit
+    // needs field fingerprints; importing a corpus never hashes every unit.
+    function clientFacts(input) {
+        const unit = normalizeUnit(input);
+        return { id: unit.id, role: unit.role, sheet: unit.sheet, recordId: unit.recordId,
+            fields: unit.fields.map(field => { const markerOnly = audioOnly(field.source); return {
+                id: field.id, kind: field.kind, sourceHash: sourceHash(field.source), originalHash: hash(field.target),
+                required: field.required && !markerOnly, originalMissing: field.originalMissing && !markerOnly,
+                outdated: field.outdated && !markerOnly, audioOnly: markerOnly }; }) };
+    }
+    function originalValues(input) { return Object.fromEntries(input.fields.map(field => [field.id, String(field.target ?? '')])); }
+    const emptySummary = () => ({ loaded: 0, eligible: 0, missing: 0, outdated: 0, saved: 0, revised: 0, dropped: 0,
+        workload: 0, resolved: 0, fields: 0, missingFields: 0, outdatedFields: 0, savedFields: 0, revisedFields: 0, workloadFields: 0, resolvedFields: 0 });
+    function addOriginalSummary(summary, unit) {
+        summary.loaded++;
+        let eligible = false, missing = false, outdated = false, workload = false;
+        for (const field of unit.fields) {
+            if (audioOnly(field.source)) continue;
+            eligible = true; summary.fields++;
+            const absent = !!field.required && !!field.originalMissing, stale = !!field.outdated, assigned = !!field.originalMissing || stale;
+            summary.missingFields += Number(absent); summary.outdatedFields += Number(stale); summary.workloadFields += Number(assigned);
+            summary.resolvedFields += Number(assigned && !absent && !stale);
+            missing ||= absent; outdated ||= stale; workload ||= assigned;
+        }
+        summary.eligible += Number(eligible); summary.missing += Number(missing); summary.outdated += Number(outdated);
+        summary.workload += Number(workload); summary.resolved += Number(workload && !missing && !outdated);
+        return summary;
+    }
+    function originalCacheKey(assetHash, parserVersion, role, options = {}) {
+        if (assetHash && typeof assetHash === 'object') {
+            const asset = assetHash; options = parserVersion || {}; role = asset.role;
+            parserVersion = asset.parserVersion || asset.parsed?.parserVersion || asset.descriptor?.parserVersion || PARSER_VERSION;
+            assetHash = asset.hash || asset.assetHash || asset.artifactHash || asset.descriptor?.assetHash;
+        }
+        if (!hex(assetHash) || !PARSER_VERSIONS.includes(parserVersion) || !['normal','gender'].includes(role)) throw new TypeError('Invalid ClientText original cache identity.');
+        return stableStringify([assetHash, parserVersion, role, options.schemaHash || null, options.importOptionsHash || null]);
+    }
+    async function buildDescriptors(inputs, assets = [], options = {}) {
+        const summaries = {}, used = new Set(), pause = options.yield || (() => new Promise(resolve => setTimeout(resolve, 0)));
+        for (let index = 0; index < inputs.length; index++) {
+            if (options.guard && !options.guard()) throw Object.assign(new Error('ClientText import context changed.'), { stale: true });
+            const unit = inputs[index];
+            if (!unit || unit.id !== JSON.stringify([unit.role, unit.sheet, unit.recordId]) || used.has(unit.id) || !Array.isArray(unit.fields) || !unit.fields.length) throw new TypeError('Invalid or duplicate ClientText original unit.');
+            used.add(unit.id); addOriginalSummary(summaries[unit.role] ||= emptySummary(), unit);
+            if (index % 256 === 255) { options.onProgress?.({ phase: 'originals', processed: index + 1, total: inputs.length, sheet: unit.sheet }); await pause(); }
+        }
+        const descriptors = Object.entries(summaries).map(([role, summary]) => {
+            const asset = Array.isArray(assets) ? assets.find(value => value.role === role) : assets[role];
+            const assetHash = asset?.hash || asset?.assetHash || asset?.artifactHash, parserVersion = asset?.parserVersion || asset?.parsed?.parserVersion || asset?.descriptor?.parserVersion || PARSER_VERSION;
+            originalCacheKey(assetHash, parserVersion, role, asset);
+            const descriptor = { format: TRUSTED_FORMAT, role, assetHash, parserVersion, unitCount: summary.loaded };
+            descriptor.baselineId = hash(descriptor); return descriptor;
+        });
+        return { storageProtocol: STORAGE_PROTOCOL, descriptors, summaries };
     }
     const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
     function normalizeCompact(input) {
@@ -370,7 +425,8 @@
         if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
-    return { FORMAT, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
+    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
+        clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

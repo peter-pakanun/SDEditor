@@ -6,9 +6,10 @@
   // cannot preserve named-version/profile isolation; v8 writers would replace
   // normalized facts with stale aggregates. v11 writers cannot read bounded
   // ClientText journal/proof fragments. v12 editors cannot render class-variant
-  // fields accepted by the v2 workbook parser. Keep every
+  // fields accepted by the v2 workbook parser. v13 writers cannot read reusable
+  // trusted-original cache bindings. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 13;
+  const DB_VERSION = 14;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -211,7 +212,8 @@
         // Every page and legacy SD save worker creates the same additive stores.
         // ClientTextStore need not be loaded in the SD-only worker to fence old writers.
         for (const name of ['clienttext_workspaces','clienttext_assets','clienttext_units','clienttext_saved',
-          'clienttext_drafts','clienttext_history','clienttext_outbox','clienttext_receipts','clienttext_requests','clienttext_memory','clienttext_memory_history']) {
+          'clienttext_drafts','clienttext_history','clienttext_outbox','clienttext_receipts','clienttext_requests','clienttext_memory','clienttext_memory_history',
+          'clienttext_original_caches','clienttext_original_assets','clienttext_original_units']) {
           const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath:'key' });
           if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope','scope');
           if (name === 'clienttext_workspaces' && !store.indexNames.contains('by_account')) store.createIndex('by_account','accountId');

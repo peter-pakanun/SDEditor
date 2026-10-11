@@ -4,6 +4,21 @@ const S=require('../public/clientTextState.js');
 const CT=require('../public/clientTextStore.js');
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 async function prepared(){const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});return f;}
+async function legacyPrepared(units=[unit()],dependencies={}){
+    const f=fixture(dependencies),manifest=await S.buildManifest(units,[{...asset,parserVersion:'clienttext-v1'}]),id=CT.scopeKey(scope);
+    const put=(name,unitId,value,extras={})=>{const row={key:JSON.stringify([id,unitId]),scope:id,value,...extras};f.tables.get(name).set(row.key,row);};
+    put(CT.stores.meta,'meta',{...scope,state:'ready',signature:S.hash({descriptors:manifest.descriptors,unitCount:units.length}),unitCount:units.length,descriptors:manifest.descriptors,sequence:3},{accountId:scope.accountId});
+    put(CT.stores.assets,'normal',{...asset,parsed:{parserVersion:'clienttext-v1',sheets:[{name:'ClientStrings'}]},descriptor:manifest.descriptors[0],tree:manifest.trees.normal});
+    for(const original of units)put(CT.stores.originals,original.id,{unit:S.normalizeUnit(original),compact:S.compactUnit(original),proofIndex:manifest.trees.normal.ids.indexOf(original.id)});
+    return {...f,manifest,put,id};
+}
+test('cancelled original-cache operations neither publish a view nor write a workspace',async()=>{
+    const f=await prepared(),signal=AbortSignal.abort();f.operations.length=0;
+    await assert.rejects(f.store.getCachedOriginal(asset.hash,S.PARSER_VERSION,'normal',{signal}),error=>error.name==='AbortError'&&error.stale===true);
+    await assert.rejects(f.store.import({...scope,groupId:'cancelled'},{units:[unit()],assets:[asset]},{signal}),error=>error.name==='AbortError');
+    assert.equal(f.operations.length,0);assert.equal((await f.store.listWorkspaces({accountId:'alice'})).length,1);
+});
+
 test('durable upload request journals preserve binary originals and isolate account and game',async()=>{
     const f=fixture(),owner={accountId:'alice',game:'poe2',branchId:'default'},payload={requestId:'upload',assets:[asset],units:[unit()]};
     const first=await f.store.putRequest(owner,'upload',payload);payload.units[0].fields[0].target='Mutated after queue';
@@ -106,53 +121,112 @@ test('workspaces read immutable units and Saved records in bounded exact-scope p
     const f=fixture(),units=Array.from({length:270},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index}));
     await f.store.import(scope,{units,assets:[asset]});
     assert.equal(f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='get').length,0,'fresh immutable import does not await 270 per-unit existence reads');
-    await f.store.import({...scope,groupId:'another-group'},{units:[unit('Other group')],assets:[asset]});
+    await f.store.import({...scope,groupId:'another-group'},{units:[unit('Other group')],assets:[{...asset,hash:'b'.repeat(64)}]});
     f.operations.length=0;const loaded=await f.store.getUnits(scope);
     assert.equal(loaded.length,270);assert.equal(new Set(loaded.map(value=>value.id)).size,270);assert.ok(loaded.every(value=>value.fields[0].source==='Source'));
-    const pages=f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='getAll');
+    const pages=f.operations.filter(operation=>operation.name===CT.stores.cacheUnits&&operation.method==='getAll');
     assert.equal(pages.length,3);assert.ok(pages.every(operation=>operation.arg.count===128));
     assert.equal(f.operations.some(operation=>operation.name===CT.stores.originals&&operation.method==='index.getAll'),false);
-    f.operations.length=0;const compact=await f.store.getCompactUnits(scope);
-    assert.equal(compact.length,270);assert.deepEqual(compact.find(value=>value.id===units[0].id),S.compactUnit(units[0]));
-    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.originals&&operation.method==='getAll').length,3);
+    f.operations.length=0;const warm=await f.store.getUnits(scope);
+    assert.equal(warm.length,270);assert.equal(warm[0],loaded[0],'immutable hot cache is reused');
+    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.cacheUnits&&operation.method==='getAll').length,0);
     await assert.rejects(f.store.getCompactUnits({...scope,language:'French'}),/prepared/);
     const id=CT.scopeKey(scope);
     for(let index=0;index<270;index++)f.tables.get(CT.stores.saved).set(JSON.stringify([id,units[index].id]),{key:JSON.stringify([id,units[index].id]),scope:id,value:{unitId:units[index].id,values:{[fieldId]:'Saved '+index}}});
     f.operations.length=0;assert.equal(Object.keys(await f.store.getSaved(scope)).length,270);
     assert.equal(f.operations.filter(operation=>operation.name===CT.stores.saved&&operation.method==='getAll').length,3);
 });
-test('bounded proof tree assets keep retained binary originals and return identical point proofs',async()=>{
-    const f=fixture({requestChunkBytes:2048}),units=Array.from({length:75},(_,index)=>({...unit('Source '+index),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index})),
-        original={...asset,name:'Thai.xlsm',blob:new Blob([new Uint8Array([0,255,13,10,42])]),parsed:{units,marker:'Workbook schema',sheets:[{name:'ClientStrings'}]}},
-        manifest=await S.buildManifest(units,[original]);
-    await f.store.import(scope,{units,assets:[original],manifest});
-    const stored=f.tables.get(CT.stores.assets).get(JSON.stringify([CT.scopeKey(scope),'normal'])).value;
-    assert.equal(stored.tree,undefined);assert.equal(stored.parsed.units,undefined);assert.ok(stored.treeStorage.ids.parts.length>1);
-    const reconstructed=await f.store.getAsset(scope,'normal');assert.deepEqual(reconstructed.tree,manifest.trees.normal);
-    assert.deepEqual([...new Uint8Array(await reconstructed.blob.arrayBuffer())],[0,255,13,10,42]);
-    f.operations.length=0;
-    for(const index of [0,1,33,74]){
-        const actual=await f.store.getProof(scope,units[index].id);
-        assert.deepEqual(actual.proof,S.proofFor(manifest,units[index].id));assert.deepEqual(actual.descriptor,manifest.descriptors[0]);
-        assert.equal(S.verifyWitness(units[index],S.compactUnit(units[index]),actual.proof,actual.descriptor),true);
-    }
-    assert.equal(f.operations.some(operation=>operation.method==='getAll'||operation.method==='index.getAll'),false,'single-unit proof reads only its bounded tree path');
-    // A pre-upgrade partial unit lacks proofIndex, so search bounded ID chunks.
-    const row=f.tables.get(CT.stores.originals).get(JSON.stringify([CT.scopeKey(scope),units[33].id]));delete row.value.proofIndex;
-    assert.deepEqual((await f.store.getProof(scope,units[33].id)).proof,S.proofFor(manifest,units[33].id));
-    // Existing v11 whole-tree records remain readable without rewriting them.
-    stored.tree=manifest.trees.normal;delete stored.treeStorage;
-    assert.deepEqual((await f.store.getAsset(scope,'normal')).tree,manifest.trees.normal);
-    assert.deepEqual((await f.store.getProof(scope,units[74].id)).proof,S.proofFor(manifest,units[74].id));
+test('trusted caches retain binary/native context without any compact rows or proof trees',async()=>{
+    const f=fixture(),original={...asset,name:'Thai.xlsm',blob:new Blob([new Uint8Array([0,255,13,10,42])]),parsed:{units:[unit()],marker:'Native workbook context',sheets:[{name:'ClientStrings'}]}};
+    const result=await f.store.import(scope,{units:[unit()],assets:[original]});
+    assert.equal(result.storageProtocol,S.STORAGE_PROTOCOL);assert.equal(f.tables.get(CT.stores.originals).size,0);assert.equal(f.tables.get(CT.stores.assets).size,0);
+    const cached=await f.store.getAsset(scope,'normal');
+    assert.equal(cached.tree,undefined);assert.equal(cached.treeStorage,undefined);assert.equal(cached.parsed.units,undefined);assert.equal(cached.parsed.marker,original.parsed.marker);
+    assert.deepEqual([...new Uint8Array(await cached.blob.arrayBuffer())],[0,255,13,10,42]);
+    for(const row of f.tables.get(CT.stores.cacheUnits).values()){assert.equal(row.value.compact,undefined);assert.equal(row.value.proofIndex,undefined);}
+    await assert.rejects(f.store.getProof(scope,unit().id),/do not use/);
 });
 test('originals/assets activate only when complete and remain scoped and immutable',async()=>{
     const f=await prepared();assert.equal((await f.store.getUnits(scope))[0].fields[0].source,'Source');
     assert.equal((await f.store.getAsset(scope,'normal')).blob.size,asset.blob.size);
-    await assert.rejects(f.store.import(scope,{units:[unit('Other')],assets:[asset]}),/immutable/);
+    await f.store.import(scope,{units:[unit('Other')],assets:[asset]});assert.equal((await f.store.getUnits(scope))[0].fields[0].source,'Source','same original identity cannot rewrite its parsed baseline');
+    await assert.rejects(f.store.import(scope,{units:[unit('Other')],assets:[{...asset,hash:'b'.repeat(64)}]}),/immutable/);
     await assert.rejects(f.store.getUnits({...scope,language:'French'}),/prepared/);
     assert.deepEqual(await f.store.getSaved({...scope,accountId:'bob'}),{});
     assert.equal((await f.store.listWorkspaces({accountId:'alice'})).length,1);
     assert.equal((await f.store.listWorkspaces({accountId:'bob'})).length,0);
+});
+test('identical originals reuse one cache across accounts and groups while drafts, saves and filenames stay scoped',async()=>{
+    const f=await prepared(),other={...scope,accountId:'bob',versionId:'v2',groupId:'group2'};
+    await f.store.save(scope,unit().id,{jobId:'alice',values:{[fieldId]:'Alice work'},reviewed:{}});
+    await f.store.putDraft(scope,unit().id,{values:{[fieldId]:'Alice private draft'},reviewed:{}});
+    f.operations.length=0;await f.store.import(other,{units:[unit()],assets:[{...asset,name:'Renamed.xlsx'}]});
+    assert.equal(f.tables.get(CT.stores.cacheMeta).size,1);assert.equal(f.tables.get(CT.stores.cacheUnits).size,1);
+    assert.equal(f.operations.some(operation=>operation.name===CT.stores.cacheUnits && operation.method==='put'),false);
+    assert.deepEqual(await f.store.getSaved(other),{});assert.equal(await f.store.getDraft(other,unit().id),undefined);
+    assert.equal((await f.store.getAsset(other)).name,'Renamed.xlsx');assert.equal((await f.store.getAsset(scope)).name,'Thai.xlsx');
+    await f.store.save(other,unit().id,{jobId:'bob',values:{[fieldId]:'Bob work'},reviewed:{}});
+    assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Alice work');
+    const original=await f.store.getCachedOriginal(asset.hash,'clienttext-v2','normal');assert.equal(original.units[0].fields[0].target,'Thai');
+    const v1={...other,groupId:'legacy-parser'};await f.store.import(v1,{units:[unit('Legacy source')],assets:[{...asset,parserVersion:'clienttext-v1'}]});
+    assert.equal(f.tables.get(CT.stores.cacheMeta).size,2);assert.equal((await f.store.getUnits(v1))[0].fields[0].source,'Legacy source');
+    const operation=(await f.store.getOutbox(other))[0];assert.equal(operation.storageProtocol,S.STORAGE_PROTOCOL);assert.equal(operation.proof,undefined);assert.equal(operation.baseline,undefined);
+    assert.deepEqual(operation.clientFacts,S.clientFacts(unit()));assert.deepEqual(operation.originalValues,S.originalValues(unit()));
+});
+test('legacy ready work migrates offline, preserving accepted identity, receipts and exact queued HTTP bodies before deleting proofs',async()=>{
+    const original=unit(' Original\nEnglish ',' original\r\n target ');original.metadata={StrFour:'Legacy class metadata'};
+    const f=await legacyPrepared([original]),saved={unitId:original.id,values:{[fieldId]:'Saved'},reviewed:{},revision:4,serverRevision:2},draft={unitId:original.id,values:{[fieldId]:'Draft'},revision:7};
+    f.put(CT.stores.saved,original.id,saved);f.put(CT.stores.drafts,original.id,draft);
+    f.put(CT.stores.history,'history',{unitId:original.id,before:'Before',after:'After'},{unitKey:JSON.stringify([f.id,original.id])});
+    const receipt={jobId:'keep-receipt',signature:'exact-old-command',saved};f.put(CT.stores.receipts,'keep-receipt',receipt);
+    const pending={unitId:original.id,mutationId:'latest',baseRevision:2,values:{[fieldId]:'Latest'},reviewed:{},state:'queued',
+        predecessor:{unitId:original.id,mutationId:'uncertain',baseRevision:1,values:{[fieldId]:'Uncertain'},reviewed:{},state:'uncertain'}};
+    f.put(CT.stores.outbox,original.id,pending,{unitKey:JSON.stringify([f.id,original.id])});
+    const body=item=>({mutationId:item.mutationId,baseRevision:item.baseRevision||0,values:item.values,reviewed:item.reviewed||{},baseline:S.normalizeUnit(original),proof:S.proofFor(f.manifest,original.id)});
+    const metadata=await f.store.migrateWorkspace(scope);
+    assert.equal(metadata.descriptors[0].baselineId,f.manifest.descriptors[0].baselineId);assert.equal(metadata.descriptors[0].parserVersion,'clienttext-v1');
+    assert.equal(metadata.sequence,3);assert.equal(metadata.cacheMigration,'complete');assert.equal(f.tables.get(CT.stores.originals).size,0);assert.equal(f.tables.get(CT.stores.assets).size,0);
+    const queue=(await f.store.getOutbox(scope))[0];assert.deepEqual(queue.requestBody,body(pending));assert.deepEqual(queue.predecessor.requestBody,body(pending.predecessor));
+    assert.equal(queue.predecessor.mutationId,'uncertain');assert.equal(queue.predecessor.state,'uncertain');
+    assert.deepEqual(await f.store.getDraft(scope,original.id),draft);assert.deepEqual((await f.store.getSaved(scope))[original.id],saved);
+    assert.deepEqual(f.tables.get(CT.stores.receipts).get(JSON.stringify([f.id,'keep-receipt'])).value,receipt);
+    assert.equal((await f.store.listHistory(scope,original.id)).length,1);assert.equal(await (await f.store.getAsset(scope)).blob.text(),'original');
+    assert.deepEqual((await f.store.getUnit(scope,original.id)).metadata,original.metadata);
+});
+test('an interrupted worksheet-order cache resumes through ID-sorted legacy migration without losing records',async()=>{
+    let interrupted=false,current=true;
+    const units=Array.from({length:140},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index}));
+    const f=await legacyPrepared(units,{yield:async()=>{if(interrupted)current=false;}});
+    interrupted=true;
+    await assert.rejects(f.store.import({...scope,groupId:'fresh-parse'},{units,assets:[{...asset,parserVersion:'clienttext-v1'}]},{guard:()=>current}),error=>error.stale===true);
+    assert.equal(f.tables.get(CT.stores.cacheUnits).size,128);
+    interrupted=false;current=true;f.operations.length=0;
+    await f.store.migrateWorkspace(scope);
+    const loaded=await f.store.getUnits(scope);
+    assert.deepEqual(new Set(loaded.map(value=>value.id)),new Set(units.map(value=>value.id)));
+    assert.equal(f.tables.get(CT.stores.cacheUnits).size,140);assert.equal(f.tables.get(CT.stores.originals).size,0);
+    assert.equal(f.operations.filter(operation=>operation.name===CT.stores.cacheUnits&&operation.method==='put').length,140,'an incomplete cache rewrites every immutable ID in bounded batches');
+    f.operations.length=0;await f.store.import({...scope,groupId:'ready-reuse'},{units,assets:[{...asset,parserVersion:'clienttext-v1'}]});
+    assert.equal(f.operations.some(operation=>operation.name===CT.stores.cacheUnits&&operation.method==='put'),false,'a durably ready cache still reuses originals without writes');
+});
+
+test('durable cache completeness is checked before ready metadata and legacy proof cleanup',async()=>{
+    let f,drop=true;
+    const units=Array.from({length:140},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index}));
+    f=await legacyPrepared(units,{yield:async()=>{if(drop){drop=false;const table=f.tables.get(CT.stores.cacheUnits);table.delete(table.keys().next().value);}}});
+    await assert.rejects(f.store.migrateWorkspace(scope),/durable record count differs/);
+    const header=f.tables.get(CT.stores.meta).get(JSON.stringify([f.id,'meta'])).value;
+    assert.equal(header.originalCaches,undefined);assert.equal(f.tables.get(CT.stores.originals).size,140);assert.equal(f.tables.get(CT.stores.assets).size,1);
+    assert.equal([...f.tables.get(CT.stores.cacheMeta).values()][0].value.state,'importing');
+    await f.store.migrateWorkspace(scope);assert.equal((await f.store.getUnits(scope)).length,140);
+});
+
+test('interrupted legacy migration retains complete old originals and retries safely before proof cleanup',async()=>{
+    const units=Array.from({length:140},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID'+index]),recordId:'ID'+index})),f=await legacyPrepared(units);let current=true;
+    await assert.rejects(f.store.migrateWorkspace(scope,{guard:()=>current,onProgress:event=>{if(event.phase==='storage' && event.processed>=128)current=false;}}),error=>error.stale===true);
+    assert.equal(f.tables.get(CT.stores.originals).size,140);assert.equal(f.tables.get(CT.stores.assets).size,1);
+    assert.equal((await f.store.getMetadata(scope)).originalCaches,undefined);assert.equal([...f.tables.get(CT.stores.cacheMeta).values()][0].value.state,'importing');
+    current=true;await f.store.migrateWorkspace(scope,{guard:()=>current});assert.equal((await f.store.getUnits(scope)).length,140);assert.equal(f.tables.get(CT.stores.originals).size,0);
 });
 test('source-only remote reviews retain carry conflicts and manual saves become Saved',async()=>{
     const f=await prepared(),original=unit(),conflict={fieldId,base:'Existing',local:'Preserved',upstream:'Existing'};
@@ -218,6 +292,15 @@ test('uncertain remote job remains immutable while later edits wait, ACK rebases
     await f.store.acknowledge(scope,first,{revision:1,values:first.values,reviewed:{}});
     const pending=(await f.store.getOutbox(scope))[0];assert.equal(pending.mutationId,'second');assert.equal(pending.baseRevision,1);assert.equal(pending.predecessor,undefined);
     assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Second');
+});
+test('repeated local edits cannot discard an uncertain predecessor while coalescing unsent successors',async()=>{
+    const f=await prepared();await f.store.save(scope,unit().id,{jobId:'first',values:{[fieldId]:'First'},reviewed:{}});
+    const first=await f.store.markSending(scope,unit().id,'first');
+    await f.store.save(scope,unit().id,{jobId:'second',values:{[fieldId]:'Second'},reviewed:{}});
+    await f.store.save(scope,unit().id,{jobId:'third',values:{[fieldId]:'Third'},reviewed:{}});
+    const latest=(await f.store.getOutbox(scope))[0];assert.equal(latest.predecessor.mutationId,'first');assert.deepEqual(latest.predecessor,first);
+    await f.store.acknowledge(scope,first,{revision:1,values:first.values,reviewed:{}});
+    const rebased=(await f.store.getOutbox(scope))[0];assert.equal(rebased.predecessor,undefined);assert.equal(rebased.baseRevision,1);assert.equal(rebased.values[fieldId],'Third');
 });
 test('shared event page commits its cursor with values, preserves local conflicts, and rejects invalid fields',async()=>{
     const f=await prepared();await f.store.save(scope,unit().id,{jobId:'local',values:{[fieldId]:'Local'},reviewed:{}});

@@ -297,6 +297,10 @@
             ...(options.rawBody ? { 'Content-Type': 'application/zip' } : {}), ...(ctx.token ? { Authorization: 'Bearer ' + ctx.token } : {}),
             ...(gzip ? { 'Content-Encoding': 'gzip' } : {}),
             ...(path.startsWith('/v1/dictionaries/') ? { 'X-SDEditor-Dictionary-Version': '2' } : {}),
+            // Legacy ClientText retries keep their original signed JSON body.
+            // Forward only this negotiated protocol header; auth stays owned here.
+            ...(path.startsWith('/v1/content-groups/') && options.headers?.['X-SDEditor-ClientText-Protocol'] === 'clienttext-trusted-v1'
+              ? { 'X-SDEditor-ClientText-Protocol': 'clienttext-trusted-v1' } : {}),
             ...(/^\/v1\/(collaboration|versions|version-uploads|collections)(\/|\?|$)/.test(path) ? { 'X-SDEditor-Workspace-Version': '2' } : {}) },
           ...(body !== undefined ? { body } : {}) };
         const response = (options.onUploadProgress || options.onDownloadProgress) && typeof XMLHttpRequest === 'function'

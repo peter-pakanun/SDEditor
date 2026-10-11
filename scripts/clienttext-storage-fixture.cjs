@@ -18,7 +18,8 @@ function fixture(dependencies = {}) {
                 getAll:(query,count)=>run('getAll',{query,count},()=>[...working.get(name).values()].filter(row=>matches(row.key,query)).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0).slice(0,count).map(clone)),
                 put:row=>run('put',row.key,()=>{if(mode!=='readwrite')throw new Error('Readonly write');working.get(name).set(row.key,clone(row));writes.push({name,key:row.key});return row.key;}),
                 delete:id=>run('delete',id,()=>{if(mode!=='readwrite')throw new Error('Readonly delete');working.get(name).delete(id);writes.push({name,key:id});}),
-                index:index=>({getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(clone)),
+                index:index=>({count:value=>run('index.count',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).length),
+                    getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(clone)),
                     getAllKeys:value=>run('index.getAllKeys',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(row=>row.key))})};
         },abort(){if(ended)return;ended=true;clearImmediate(timer);queueMicrotask(()=>tx.onabort?.());}};
         function finish(){if(ended||pending)return;clearImmediate(timer);timer=setImmediate(()=>{if(ended||pending)return;ended=true;

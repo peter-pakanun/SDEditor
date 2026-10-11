@@ -45,6 +45,25 @@ test('nested preparation stays active until every owner finishes and retains com
     assert.equal(editor._workspaceInitializationTimer, null);
 });
 
+test('workbook and sheet progress retains plain context through completion, failure and cancellation logs',()=>{
+    for(const result of [{},{cancelled:true},{error:new Error('Interrupted')}]){
+        const editor=app(),owner=editor.beginWorkspaceInitialization({plan:['Parsing originals']}),task=editor.beginWorkspaceInitializationTask('Parsing originals',owner);
+        editor.updateWorkspaceInitializationTaskProgress(task,{phase:'Reading cells',workbook:'German_Gender.xlsm',sheet:'NPCTextAudio_Gender',processed:12,completed:12,total:24});
+        assert.equal(editor.workspaceInitializationRows[0].label,'Parsing originals');
+        assert.equal(editor.workspaceInitializationRows[0].detail,'Reading cells · German_Gender.xlsm · NPCTextAudio_Gender');
+        editor.finishWorkspaceInitializationTask(task,result);editor.finishWorkspaceInitialization(owner);
+        assert.match(editor.workspaceInitializationLogText,/German_Gender\.xlsm · NPCTextAudio_Gender/);
+    }
+});
+
+test('cached workbook progress uses a readable phase while retaining sheet detail',()=>{
+    const editor=app(),owner=editor.beginWorkspaceInitialization(),task=editor.beginWorkspaceInitializationTask('Loading cached translations',owner);
+    editor.updateWorkspaceInitializationTaskProgress(task,{phase:'loading-cached-originals',sheet:'Visibility',completed:2,total:4});
+    assert.equal(editor.workspaceInitializationRows[0].detail,'Loading cached originals · Visibility');
+    editor.finishWorkspaceInitializationTask(task);editor.finishWorkspaceInitialization(owner);
+    assert.match(editor.workspaceInitializationLogText,/Loading cached originals · Visibility/);
+});
+
 test('overall progress counts planned stages and measured work without double-counting nested rows', () => {
     const editor = app(), owner = editor.beginWorkspaceInitialization({ plan: ['Read source', { label: 'Parse files', weight: 3 }] });
     const nested = editor.beginWorkspaceInitialization({ session: owner, plan: ['Ignored nested plan'] });

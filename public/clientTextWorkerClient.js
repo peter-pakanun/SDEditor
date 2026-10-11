@@ -102,13 +102,15 @@
             });
         }
         parseWorkbook(bytes, options) { return this.request('parseWorkbook', bytes, options); }
-        buildManifest(units, assets = [], options) {
+        buildDescriptors(units, assets = [], options) { return this.buildOriginals('buildDescriptors', units, assets, options); }
+        buildManifest(units, assets = [], options) { return this.buildOriginals('buildManifest', units, assets, options); }
+        buildOriginals(operation, units, assets = [], options) {
             const originals = Array.isArray(assets) ? assets : Object.entries(assets).map(([role, asset]) => ({ role, ...asset }));
             const detached = { units: [], assets: originals.map(asset => ({ role: asset.role, hash: asset.hash || asset.assetHash,
-                parserVersion: asset.parserVersion || asset.parsed?.parserVersion,
-                ...(asset.schemaHash ? { schemaHash: asset.schemaHash } : {}) })) };
-            if (!Transport.shouldStream(units)) { detached.units = plain(units); return this.request('buildManifest', undefined, options, detached); }
-            return this.request('buildManifest', undefined, options, detached, [{ path: ['units'], values: units }]);
+                parserVersion: asset.parserVersion || asset.parsed?.parserVersion || asset.descriptor?.parserVersion,
+                ...(asset.schemaHash ? { schemaHash: asset.schemaHash } : {}), ...(asset.importOptionsHash ? {importOptionsHash:asset.importOptionsHash} : {}) })) };
+            if (!Transport.shouldStream(units)) { detached.units = plain(units); return this.request(operation, undefined, options, detached); }
+            return this.request(operation, undefined, options, detached, [{ path: ['units'], values: units }]);
         }
         exportWorkbook(bytes, parsed, saved, options) {
             if (Transport.shouldStream(parsed.units || [])) {

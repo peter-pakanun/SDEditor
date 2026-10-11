@@ -336,6 +336,11 @@ test('worker client forwards scoped progress and rejects/ignores cancelled respo
     await new Promise(resolve => setImmediate(resolve)); const request = worker.messages.at(-1);
     assert.equal(request.type, 'buildManifest'); assert.deepEqual(request.assets, [{ role: 'normal', hash: 'a'.repeat(64), parserVersion: 'clienttext-v1' }]);
     worker.onmessage({ data: { type: 'result', id: request.id, result: { format: 'clienttext-v1' } } }); assert.deepEqual(await manifest, { format: 'clienttext-v1' });
+    const trusted=client.buildDescriptors([{id:'unit'}],[{role:'normal',hash:'a'.repeat(64),parsed:{parserVersion:'clienttext-v1'}}]);
+    await new Promise(resolve=>setImmediate(resolve));const trustedRequest=worker.messages.at(-1);
+    assert.equal(trustedRequest.type,'buildDescriptors');assert.equal(trustedRequest.assets[0].parserVersion,'clienttext-v1');
+    worker.onmessage({data:{type:'result',id:trustedRequest.id,result:{storageProtocol:State.STORAGE_PROTOCOL,descriptors:[],summaries:{}}}});
+    assert.equal((await trusted).storageProtocol,State.STORAGE_PROTOCOL);
     client.dispose(); assert.equal(worker.terminated, true);
 });
 test('manifest worker computes the same proofs and cancels cooperatively', async () => {
@@ -346,6 +351,8 @@ test('manifest worker computes the same proofs and cancels cooperatively', async
     const assets = [{ role: 'normal', hash: parsed.artifactHash }];
     self.onmessage({ data: { type: 'buildManifest', id: 'one', units: parsed.units, assets } }); await runInContext('queue', context);
     assert.deepEqual(messages.find(message => message.id === 'one').result, await State.buildManifest(parsed.units, assets));
+    self.onmessage({data:{type:'buildDescriptors',id:'trusted',units:parsed.units,assets}});await runInContext('queue',context);
+    assert.deepEqual(messages.find(message=>message.id==='trusted').result,await State.buildDescriptors(parsed.units,assets));
     const units = Array.from({ length: 600 }, (_, index) => ({ ...parsed.units[0], id: JSON.stringify(['normal', 'Normal', String(index)]), recordId: String(index) }));
     self.postMessage = value => { messages.push(value); if (value.id === 'cancelled' && value.type === 'progress') self.onmessage({ data: { type: 'cancel', id: 'cancelled' } }); };
     self.onmessage({ data: { type: 'buildManifest', id: 'cancelled', units, assets } }); await runInContext('queue', context);
@@ -415,6 +422,8 @@ test('bounded worker collections preserve manifests, trees, parses and export in
     assert.deepEqual(originalBytes, new Uint8Array([7, 1, 5]), 'Private transfer copies preserve retained originals and subview boundaries');
     const manifest = await client.buildManifest(units, assets);
     assert.deepEqual(manifest, await State.buildManifest(units, assets));
+    const trusted=await client.buildDescriptors(units,assets);assert.deepEqual(trusted,await State.buildDescriptors(units,assets));
+    assert.equal(trusted.units,undefined);assert.equal(trusted.trees,undefined);
     assert.equal(State.verifyWitness(units[700], manifest.units[700], State.proofFor(manifest, units[700].id), manifest.descriptors[0]), true);
     assert.deepEqual(await client.exportWorkbook(new Uint8Array([1]), parsed, { [units[1099].id]: { values: { Name: 'Raw @ value\\n\nไทย' } } }), new Uint8Array([8, 9]));
     assert.ok(directions.some(([direction, type]) => direction === 'input' && type === 'request-start'));

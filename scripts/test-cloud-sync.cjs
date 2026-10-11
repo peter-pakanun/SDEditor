@@ -262,6 +262,42 @@ test('archive progress transport retains upload totals and JSON server failures'
   assert.deepEqual(progress, [[5, body.size]]);
 });
 
+const legacyClientTextRetry = () => ({ mutationId: 'original-retry', baseRevision: 3,
+  values: { text: ' @ literal\\n\n line ' }, reviewed: { text: 'source-hash' },
+  baseline: { id: 'old-baseline', fields: [{ id: 'text', source: 'Original English' }] },
+  proof: ['old-proof'] });
+const trustedClientTextHeaders = () => ({ 'X-SDEditor-ClientText-Protocol': 'clienttext-trusted-v1',
+  Authorization: 'Bearer forged', 'Content-Type': 'text/plain' });
+
+test('trusted ClientText fetch replay forwards the negotiated header without changing legacy JSON or authentication', async t => {
+  const h = await harness(t, { state: authenticatedState() }), calls = [], body = legacyClientTextRetry();
+  h.client.fetcher = async (url, options) => { calls.push(options); return reply({ accepted: true }); };
+  await h.client.request('/v1/content-groups/group/units/old-id?language=Thai', {
+    method: 'PATCH', body, headers: trustedClientTextHeaders() });
+  assert.equal(calls[0].body, JSON.stringify(body));
+  assert.equal(calls[0].headers['X-SDEditor-ClientText-Protocol'], 'clienttext-trusted-v1');
+  assert.equal(calls[0].headers.Authorization, 'Bearer token-alice');
+  assert.equal(calls[0].headers['Content-Type'], 'application/json');
+  await h.client.request('/v1/versions/version', { headers: trustedClientTextHeaders() });
+  assert.equal(calls[1].headers['X-SDEditor-ClientText-Protocol'], undefined);
+  assert.equal(calls[1].headers['X-SDEditor-Workspace-Version'], '2');
+  await h.client.request('/v1/content-groups/group/units/old-id', {});
+  assert.equal(calls[2].headers['X-SDEditor-ClientText-Protocol'], undefined);
+});
+
+test('trusted ClientText progress replay preserves the same compatibility header and exact legacy body', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() }), body = legacyClientTextRetry();
+  const pending = h.client.request('/v1/content-groups/group/units/old-id?language=Thai', {
+    method: 'PATCH', body, headers: trustedClientTextHeaders(), onUploadProgress() {} });
+  const xhr = requests[0];
+  assert.equal(xhr.body, JSON.stringify(body));
+  assert.equal(xhr.headers['X-SDEditor-ClientText-Protocol'], 'clienttext-trusted-v1');
+  assert.equal(xhr.headers.Authorization, 'Bearer token-alice');
+  assert.equal(xhr.headers['Content-Type'], 'application/json');
+  xhr.complete(new Blob([JSON.stringify({ accepted: true })]));
+  assert.deepEqual(await pending, { accepted: true });
+});
+
 test('opt-in gzip manifest transport preserves exact JSON, authentication and raw original uploads', async t => {
   const h = await harness(t, { state: authenticatedState() }), calls = [];
   h.client.fetcher = async (url, options) => { calls.push(options); return reply({ accepted: true }); };

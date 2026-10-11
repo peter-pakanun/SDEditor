@@ -13,11 +13,12 @@ test('paged events commit only the consumed cursor and replay durable saved unit
     const result=await sync.pull();assert.equal(result.sequence,10);assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Peer second');
     assert.ok(calls.every(path=>path.includes('language=Thai')));
 });
-test('uncertain uploads retry the exact mutation body and original proof until acknowledged',async()=>{
+test('uncertain trusted uploads retry the exact sparse mutation body without originals or proofs',async()=>{
     const f=await prepared(),calls=[];await f.store.save(scope,unit().id,{jobId:'durable',values:{[fieldId]:'Saved'},reviewed:{}});
     const sync=Sync.create({scope,store:f.store,isCurrent:()=>true,request:async(path,init)=>{calls.push(structuredClone(init.body));
-        const compact=S.compactUnit(init.body.baseline),stored=await f.store.getProof(scope,unit().id);
-        assert.equal(S.verifyWitness(init.body.baseline,compact,init.body.proof,stored.descriptor),true);
+        assert.equal(init.body.storageProtocol,S.STORAGE_PROTOCOL);assert.deepEqual(init.body.clientFacts,S.clientFacts(unit()));
+        assert.deepEqual(init.body.originalValues,S.originalValues(unit()));assert.equal(init.body.baseline,undefined);assert.equal(init.body.proof,undefined);
+        assert.equal(init.headers['X-SDEditor-ClientText-Protocol'],S.STORAGE_PROTOCOL);
         if(calls.length===1)throw new Error('Response lost after server accepted');
         return {unit:{unitId:unit().id,values:init.body.values,reviewed:init.body.reviewed,revision:1},sequence:1,mutationId:'durable'};}});
     await assert.rejects(sync.flush(),/lost/);assert.equal((await f.store.getOutbox(scope))[0].state,'uncertain');
@@ -34,4 +35,21 @@ test('shared conflicts preserve current local text and stop automatic retry',asy
     const sync=Sync.create({scope,store:f.store,isCurrent:()=>true,request:async()=>{calls++;throw Object.assign(new Error('Peer changed the unit'),{status:409,current:{unitId:unit().id,values:{[fieldId]:'Peer'},reviewed:{},revision:1}});}});
     await assert.rejects(sync.flush(),/Peer/);assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Local');
     const second=await sync.flush();assert.equal(second.conflicts,1);assert.equal(calls,1);
+});
+
+test('legacy uncertain requests replay their durable exact body and ID after cache cleanup',async()=>{
+    const baseline=unit(),manifest=await S.buildManifest([baseline],[asset]),body={mutationId:'legacy-uncertain',baseRevision:3,values:{[fieldId]:'Legacy saved'},reviewed:{},baseline,proof:S.proofFor(manifest,baseline.id)},calls=[];
+    let pending={unitId:baseline.id,mutationId:body.mutationId,requestBody:structuredClone(body),state:'uncertain'};
+    const store={async getOutbox(){return pending?[pending]:[];},async markSending(){return pending;},async getUnit(){throw Error('Original reads are forbidden');},async getProof(){throw Error('Proof cache was cleaned');},async acknowledge(){pending=null;}};
+    const sync=Sync.create({scope,store,request:async(_,options)=>{calls.push(structuredClone(options));if(calls.length===1)throw Error('Lost acknowledgement');return{unit:{id:baseline.id,values:body.values,reviewed:{},revision:4}};}});
+    await assert.rejects(sync.flush(),/Lost/);await sync.flush();
+    assert.deepEqual(calls[0].body,body);assert.deepEqual(calls[1].body,body);assert.equal(calls[0].headers['X-SDEditor-ClientText-Protocol'],S.STORAGE_PROTOCOL);
+});
+
+test('missing legacy replay material blocks the upload instead of rebuilding a different request',async()=>{
+    let requests=0,state;
+    const pending={unitId:unit().id,mutationId:'old-id',values:{[fieldId]:'Unsynced'}};
+    const store={async getOutbox(){return[pending];},async markSending(_,__,___,value){state=value;return pending;},async getUnit(){throw Error('Do not rebuild');},async getProof(){throw Error('Do not rebuild');}};
+    const sync=Sync.create({scope,store,request:async()=>requests++});
+    await assert.rejects(sync.flush(),/cache migration/);assert.equal(requests,0);assert.equal(state,'uncertain');
 });

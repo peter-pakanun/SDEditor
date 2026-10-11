@@ -292,6 +292,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceInitializationTerminal { min-height: min(200px, 30vh); max-height: min(55vh, 560px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--color-element); color: var(--color-font); box-shadow: var(--ui-shadow); font-size: 13px; line-height: 1.7; box-sizing: border-box; }
 .workspaceInitializationTerminal:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .workspaceInitializationRow { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; padding: 4px 0; align-items: start; }
+.workspaceInitializationContext { display: block; margin-top: 3px; color: var(--ui-muted); overflow-wrap: anywhere; }
+.workspaceInitializationHeadingActions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .workspaceInitializationMarker { color: var(--ui-muted); font-weight: bold; }
 .workspaceInitializationRow.running .workspaceInitializationMarker { color: var(--ui-accent); }
 .workspaceInitializationRow.done .workspaceInitializationMarker { color: var(--ui-saved); }

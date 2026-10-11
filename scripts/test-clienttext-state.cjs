@@ -10,6 +10,30 @@ test('SHA256 and canonical hashes match Node crypto including Unicode and long b
     for(const text of ['', 'abc', 'ไทย é 🦁', 'A'.repeat(10000)])assert.equal(S.sha256(new TextEncoder().encode(text)),crypto.createHash('sha256').update(text).digest('hex'));
     assert.equal(S.hash({z:1,a:{b:2,a:3}}),crypto.createHash('sha256').update('{"a":{"a":3,"b":2},"z":1}').digest('hex'));
 });
+test('trusted descriptors describe original bytes and parser authority without any corpus fingerprints or trees',async()=>{
+    const originals=[unit(),{...unit('[NOAUDIO]',''),id:JSON.stringify(['normal','ClientStrings','Audio']),recordId:'Audio',fields:[{...unit().fields[0],source:'[NOAUDIO]',target:'',required:true,originalMissing:true,outdated:true}]}];
+    const result=await S.buildDescriptors(originals,[asset]);
+    assert.equal(result.storageProtocol,'clienttext-trusted-v1');assert.equal(result.units,undefined);assert.equal(result.trees,undefined);
+    assert.equal(result.descriptors[0].format,S.TRUSTED_FORMAT);assert.equal(result.descriptors[0].root,undefined);assert.equal(result.descriptors[0].unitCount,2);
+    const {baselineId,...identity}=result.descriptors[0];assert.equal(baselineId,S.hash(identity));
+    assert.deepEqual(result.summaries.normal,{...S.emptySummary(),loaded:2,eligible:1,fields:1});
+    const v1=await S.buildDescriptors(originals,[{...asset,parserVersion:'clienttext-v1'}]);assert.notEqual(v1.descriptors[0].baselineId,baselineId);
+    assert.notEqual(S.originalCacheKey(asset.hash,'clienttext-v1','normal'),S.originalCacheKey(asset.hash,'clienttext-v2','normal'));
+    assert.notEqual(S.originalCacheKey(asset.hash,'clienttext-v2','normal'),S.originalCacheKey(asset.hash,'clienttext-v2','gender'));
+    assert.notEqual(S.originalCacheKey(asset.hash,'clienttext-v2','normal'),S.originalCacheKey(asset.hash,'clienttext-v2','normal',{schemaHash:'b'.repeat(64)}));
+    await assert.rejects(S.buildDescriptors([unit(),unit()],[asset]),/duplicate/i);
+    await assert.rejects(S.buildDescriptors([unit()],[{...asset,parserVersion:'future'}]),/cache identity/);
+});
+test('sparse trusted facts preserve source reviews and original raw target fingerprints without retaining full witnesses',()=>{
+    const original=unit(' [NOAUDIO] Raw  English\n',' @raw\\n target\r\n '),facts=S.clientFacts(original);
+    assert.equal(facts.hash,undefined);assert.equal(facts.developerNotes,undefined);assert.equal(facts.fields[0].source,undefined);
+    assert.deepEqual(facts.fields,S.compactUnit(original).fields);
+    assert.equal(facts.fields[0].originalHash,S.hash(original.fields[0].target));
+    assert.equal(facts.fields[0].sourceHash,S.sourceHash(original.fields[0].source));
+    assert.deepEqual(S.originalValues(original),{[fieldId]:original.fields[0].target});
+    const marked=unit('Source','',true),summary=S.addOriginalSummary(S.emptySummary(),marked);
+    assert.equal(summary.workloadFields,1);assert.equal(summary.missingFields,1);assert.equal(summary.outdatedFields,1);assert.equal(summary.resolvedFields,0);
+});
 test('NOAUDIO exemption is exact, single, uppercase and only at the beginning',()=>{
     assert.equal(S.canonicalSource('[NOAUDIO] Source'),'Source');assert.equal(S.canonicalSource(' [NOAUDIO] Source'),'Source');
     for(const source of ['  [NOAUDIO] Source','[NOAUDIO]Source','Source [NOAUDIO]','[noaudio] Source','[NOAUDIO] [NOAUDIO] Source'])assert.equal(S.canonicalSource(source),source);

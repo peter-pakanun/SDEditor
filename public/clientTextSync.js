@@ -6,6 +6,7 @@
     else root.ClientTextSync = api;
 })(typeof globalThis === 'object' ? globalThis : self, function (root, Storage) {
     'use strict';
+    const PROTOCOL = 'clienttext-trusted-v1';
     function create(options) {
         if (!options?.request) throw new TypeError('ClientText sync requires a request function.');
         const scope = Object.freeze(Storage.normalizeScope(options.scope)), store = options.store || Storage.create();
@@ -67,13 +68,20 @@
                     const operation=oldest(pending);
                     const claimed=await store.markSending(scope,operation.unitId,operation.mutationId,'sending',{guard:current});guard();
                     if(!claimed)continue;
-                    const baseline=await store.getUnit(scope,claimed.unitId,{guard:current});
-                    const witness=await store.getProof(scope,claimed.unitId,{guard:current});guard();
-                    if(!baseline)throw new Error('ClientText upload original is unavailable.');
-                    const body={mutationId:claimed.mutationId,baseRevision:claimed.baseRevision||0,values:claimed.values,
-                        reviewed:claimed.reviewed||{},baseline,proof:witness.proof};
                     try{
-                        const data=await request(base+'/units/'+encodeURIComponent(claimed.unitId)+'?'+language,{method:'PATCH',body});
+                        // Old uncertain requests retain their exact body and receipt
+                        // signature. Migration captures that body before removing
+                        // proof caches; new operations never transport originals.
+                        let body=claimed.requestBody;
+                        if(!body && claimed.storageProtocol===PROTOCOL){
+                            body={storageProtocol:PROTOCOL,mutationId:claimed.mutationId,baseRevision:claimed.baseRevision||0,
+                                role:claimed.role,assetHash:claimed.assetHash,parserVersion:claimed.parserVersion,
+                                values:claimed.values,reviewed:claimed.reviewed||{},clientFacts:claimed.clientFacts,
+                                originalValues:claimed.originalValues};
+                        }
+                        if(!body)throw new Error('This pending ClientText save needs its local cache migration before synchronization.');
+                        const data=await request(base+'/units/'+encodeURIComponent(claimed.unitId)+'?'+language,{method:'PATCH',body,
+                            headers:{'X-SDEditor-ClientText-Protocol':PROTOCOL}});
                         const accepted=data?.unit||data;
                         if(!accepted||accepted.unitId&&accepted.unitId!==claimed.unitId||accepted.id&&accepted.id!==claimed.unitId)throw new Error('ClientText save acknowledgement identifies another unit.');
                         await store.acknowledge(scope,claimed,accepted,{guard:current});guard();uploaded++;
@@ -105,5 +113,5 @@
             root.removeEventListener?.('online',tick);root.document?.removeEventListener('visibilitychange',tick);}
         return {scope,pull,flush,start,stop,snapshot};
     }
-    return {create};
+    return {create,PROTOCOL};
 });

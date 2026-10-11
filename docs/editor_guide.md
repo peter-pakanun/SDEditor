@@ -61,6 +61,8 @@ For more details, see the [**Import Workflow**](import_workflow.md).
 
 Select a ClientText group and language from Versions, or import its workbooks locally. ClientText uses the same workspace toolbar, status filters, file table, footer and editor-tool tabs as StatDescription. The file list's left pane selects a worksheet. Sheets act as paths, record IDs as filenames, and each source/translation pair as an editable block. Search includes ID, sheet, source, current translation and Developer notes. Notes remain visible for translators and are preserved in the workbook.
 
+Opening a workbook uses the same workspace initialization screen as StatDescription. First opening reports original download, workbook/sheet parsing, local caching and editor preparation. Later openings reuse the cached parsed workbook and load that version's independent saved work. Initialization timings remain available in Settings. Saving translations does not invalidate the original cache.
+
 All ClientText status filters start selected, including Unchanged, so complete records with durable drafts remain visible. Use the shared Filters control to narrow the list.
 
 **Settings → Editor & shortcuts → Inline editor** applies to both content modes. When enabled, clicking a ClientText row shows English beside its editable translation in the table cells; click its ID to open the full editor. When disabled, clicking the row opens the full editor directly. **Close** or Escape returns to the table and keeps the record's draft. Dictionary, Lookup, TM, History and Comments use the familiar editor tools sidebar.

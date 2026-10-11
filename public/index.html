@@ -412,7 +412,7 @@
         <footer class="versionActions"><button v-if="!ctUploadLocal && !ctUploadVersion" @click="ctSaveMetadataDraft" :disabled="ctUploading || !ctUploadName.trim()">Save version draft</button><button @click="ctPrepareUpload" :disabled="ctUploading || !ctUploadFiles.length">Prepare and validate</button><button class="primaryAction" @click="ctPublishPrepared" :disabled="ctUploading || !ctPrepared.length">{{ ctUploadLocal ? 'Store local workspaces' : 'Publish complete groups' }}</button><button @click="ctUploadVisible=false" :disabled="ctUploading">Close</button></footer>
       </section>
     </div>
-    <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" class="ctWorkspace" :inert="showSetting" aria-label="ClientText workspace">
+    <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="ctWorkspace" :inert="showSetting || workspaceInitializationActive" aria-label="ClientText workspace">
       <div v-if="!ctEditor" class="workspace ctListWorkspace" :class="{ inlineEditorMode: inlineEditor }">
         <header class="workspaceHeader">
           <div class="workspaceBrand">
@@ -556,7 +556,7 @@
       <div class="workspaceInitializationPanel">
         <header class="workspaceInitializationHeading">
           <div><h1 id="workspaceInitializationTitle">Initializing workspace</h1><p>{{ workspaceInitializationLabel }}</p></div>
-          <span class="workspaceInitializationTotal" aria-label="Total elapsed time">{{ workspaceInitializationElapsed }}</span>
+          <div class="workspaceInitializationHeadingActions"><span class="workspaceInitializationTotal" aria-label="Total elapsed time">{{ workspaceInitializationElapsed }}</span><button v-if="ctInitializing" @click="ctCancel">Cancel</button></div>
         </header>
         <div class="workspaceInitializationOverallProgress">
           <div class="workspaceInitializationProgressSummary"><span>Overall progress</span><span>{{ workspaceInitializationProgress.label }}</span></div>
@@ -565,7 +565,7 @@
         <div ref="workspaceInitializationLog" class="workspaceInitializationTerminal" role="log" aria-label="Workspace initialization activity" aria-live="polite" aria-relevant="additions" tabindex="0">
           <div v-for="row in workspaceInitializationRows" :key="row.id" class="workspaceInitializationRow" :class="row.status">
             <span class="workspaceInitializationMarker" aria-hidden="true">{{ row.status === 'running' ? '›' : row.status === 'done' ? '✓' : row.status === 'failed' ? '!' : '–' }}</span>
-            <span class="workspaceInitializationTask"><span class="srOnly">{{ row.status === 'running' ? 'In progress: ' : row.status === 'done' ? 'Completed: ' : row.status === 'failed' ? 'Failed: ' : 'Stopped: ' }}</span>{{ row.label }}<span v-if="row.error" class="workspaceInitializationError">{{ row.error }}</span><span v-if="row.status === 'running' || row.progress" class="workspaceInitializationTaskProgress"><progress class="workspaceInitializationProgressBar" max="100" :value="workspaceInitializationTaskProgress(row).value === null ? undefined : workspaceInitializationTaskProgress(row).value" :aria-label="row.label + ' progress'" :aria-valuetext="workspaceInitializationTaskProgress(row).label"></progress><span class="workspaceInitializationProgressDetail">{{ workspaceInitializationTaskProgress(row).label }}</span></span></span>
+            <span class="workspaceInitializationTask"><span class="srOnly">{{ row.status === 'running' ? 'In progress: ' : row.status === 'done' ? 'Completed: ' : row.status === 'failed' ? 'Failed: ' : 'Stopped: ' }}</span>{{ row.label }}<span v-if="row.detail" class="workspaceInitializationContext">{{ row.detail }}</span><span v-if="row.error" class="workspaceInitializationError">{{ row.error }}</span><span v-if="row.status === 'running' || row.progress" class="workspaceInitializationTaskProgress"><progress class="workspaceInitializationProgressBar" max="100" :value="workspaceInitializationTaskProgress(row).value === null ? undefined : workspaceInitializationTaskProgress(row).value" :aria-label="row.label + ' progress'" :aria-valuetext="workspaceInitializationTaskProgress(row).label"></progress><span class="workspaceInitializationProgressDetail">{{ workspaceInitializationTaskProgress(row).label }}</span></span></span>
             <span class="workspaceInitializationTime" aria-hidden="true">{{ workspaceInitializationDuration(row.startedAt, row.endedAt) }}</span>
           </div>
         </div>

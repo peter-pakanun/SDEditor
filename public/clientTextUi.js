@@ -9,14 +9,15 @@
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
     const uuid = () => root.crypto.randomUUID();
     const mode = group => String(group?.contentMode || group?.mode || '').toLowerCase();
+    const trustedProtocol = 'clienttext-trusted-v1';
     const statusFilters = [
         {key:'missing',label:'Missing translation',tone:'missing'}, {key:'saved',label:'Saved changes',tone:'saved'},
         {key:'revised',label:'Revised translations',tone:'revised'}, {key:'outdated',label:'Outdated translation',tone:'outdated'},
         {key:'error',label:'Diagnostic errors',tone:'error'}, {key:'warning',label:'Diagnostic warnings',tone:'warning'},
         {key:'unchanged',label:'Unchanged',tone:'unchanged'}
     ];
-    // CT drafts currently have no sparse list index. Keep complete records
-    // visible so a durable draft can always be reopened after a reload.
+    // Start with workload and saved changes; complete originals remain
+    // available through the Unchanged filter.
     const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
@@ -70,7 +71,7 @@
             ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false, ctIncludeConsistency: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
             ctVariantSelections: {}, ctDefaultsExpanded: {},
-            ctBusy: false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
+            ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
             ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
@@ -702,40 +703,121 @@
             },
             ctNotes(unit = this.ctCurrentUnit) { return (Array.isArray(unit?.developerNotes) ? unit.developerNotes : unit?.developerNotes ? [unit.developerNotes] : []).map(note => typeof note === 'string' ? note : note.text || note.value || '').filter(Boolean); },
             ctReport(progress) { this.ctProgress = { ...this.ctProgress, ...progress, completed: progress.completed ?? progress.processed ?? this.ctProgress?.completed ?? 0 }; },
+            ctBeginInitialization(label,session,plan=[]) {
+                const owner=this.beginWorkspaceInitialization?.({label,session,plan});
+                if(owner){(this._ctInitializationOwners ||= new Set()).add(owner);this.ctInitializing=true;}
+                return owner;
+            },
+            ctFinishInitialization(owner) {
+                this.finishWorkspaceInitialization?.(owner);this._ctInitializationOwners?.delete(owner);
+                this.ctInitializing=!!this._ctInitializationOwners?.size;
+            },
+            ctInitializationStep(label,callback,owner) {
+                return owner && this.runWorkspaceInitializationTask ? this.runWorkspaceInitializationTask(label,callback,owner) : callback(()=>{});
+            },
+            async ctRequireTrustedProtocol(signal) {
+                const key=this.managedCatalogScope,client=this._cloud;
+                const policy=await client.request('/v1/content-policy',{signal});
+                if(key!==this.managedCatalogScope || client!==this._cloud || signal?.aborted)throw Object.assign(new Error('ClientText context changed.'),{stale:true});
+                if(!policy.clientTextStorageProtocols?.includes(trustedProtocol))throw new Error('This server needs the trusted ClientText API update before workbook publication or synchronization. Cached local work remains available.');
+                this.ctPolicy=policy;return policy;
+            },
+            async ctOriginalHash(bytes) {
+                if(root.crypto?.subtle){const digest=await root.crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');}
+                return root.ClientTextState.sha256(bytes);
+            },
+            ctDescribeOriginals(units,assets,options) {
+                return this._ctWorker?.buildDescriptors ? this._ctWorker.buildDescriptors(units,assets,options) : root.ClientTextState.buildDescriptors(units,assets,options);
+            },
+            async ctCacheGroup(version,full,scope,{signal,current,initialization}={}) {
+                const guard=current || (()=>!signal?.aborted),check=()=>{if(!guard())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});},
+                    units=[],assets=[],descriptors=(full.assets || []).map(asset=>({...asset,...asset.descriptor})),cached=[];
+                if(!descriptors.length)throw new Error('This content group has no original workbook descriptors.');
+                await this.ctInitializationStep('Checking reusable workbook cache',async report=>{
+                    for(let index=0;index<descriptors.length;index++){const descriptor=descriptors[index],hash=descriptor.assetHash || descriptor.artifactHash || descriptor.hash;
+                        cached[index]=await this._ctStore.getCachedOriginal?.(hash,descriptor.parserVersion || 'clienttext-v1',descriptor.role,{schemaHash:descriptor.schemaHash,importOptionsHash:descriptor.importOptionsHash,guard});check();
+                        report({completed:index+1,total:descriptors.length,unit:'files',workbook:descriptor.filename || descriptor.name || descriptor.role,detail:cached[index]?'Reusable original found':'Original needs preparation'});
+                    }
+                },initialization);
+                if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,[
+                    'Preserving local drafts','Checking selected workspace','Checking reusable workbook cache',
+                    ...descriptors.flatMap((descriptor,index)=>cached[index]?[]:[{label:'Downloading original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:2},{label:'Parsing original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:4}]),
+                    {label:'Caching selected workspace',weight:3},'Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                for(let index=0;index<descriptors.length;index++){
+                    const descriptor=descriptors[index],name=descriptor.filename || descriptor.name || descriptor.role,hash=descriptor.assetHash || descriptor.artifactHash || descriptor.hash;
+                    let asset,originals;
+                    if(cached[index]){asset={...cached[index].asset,descriptor:descriptor.descriptor || full.assets[index]?.descriptor || descriptor,role:descriptor.role,name};originals=cached[index].units;}
+                    else{
+                        const blob=await this.ctInitializationStep('Downloading original: '+name,async report=>{
+                            const result=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(full.id)+'/assets/'+encodeURIComponent(descriptor.role)+'/original',
+                                {responseType:'blob',timeout:180000,signal,onDownloadProgress:(completed,total)=>{if(!guard())return;report({completed,total,unit:'bytes',workbook:name});this.ctReport({phase:'Downloading original',completed,total,workbook:name,sheet:''});}});check();return result;
+                        },initialization);
+                        const parsed=await this.ctInitializationStep('Parsing original: '+name,async report=>{
+                            const result=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
+                                onProgress:progress=>{if(!guard())return;const detail={...progress,completed:progress.completed ?? progress.processed,workbook:name};report(detail);this.ctReport(detail);}});check();return result;
+                        },initialization);
+                        if(hash && parsed.artifactHash!==hash)throw new Error('The original workbook hash differs from its published descriptor.');
+                        originals=parsed.units;asset={role:descriptor.role,blob,hash:parsed.artifactHash,name:parsed.filename,parserVersion:parsed.parserVersion,parsed:{...parsed,units:undefined},descriptor:full.assets[index]?.descriptor || descriptor};
+                    }
+                    if(Number.isSafeInteger(descriptor.unitCount) && originals.length!==descriptor.unitCount)throw new Error('Workbook record count differs from the accepted descriptor.');
+                    for(const unit of originals)units.push(unit);assets.push(asset);check();
+                }
+                const metadata={version,group:full,storageProtocol:trustedProtocol};
+                await this.ctInitializationStep('Caching selected workspace',async report=>{
+                    await this._ctStore.import(scope,{units,assets,descriptors:descriptors.map((descriptor,index)=>full.assets[index]?.descriptor || descriptor),metadata},
+                        {guard,onProgress:progress=>{if(!guard())return;report({...progress,completed:progress.completed ?? progress.processed});this.ctReport(progress);}});check();
+                },initialization);
+                return metadata;
+            },
             ctCancel() { this._ctAbort?.abort(); this.ctNotice = 'Cancelled. Saved work is retained.'; },
             async ctRefreshLocal() {
                 if (!this._ctStore) return;
                 const key = this.managedCatalogScope;
                 try { const [rows,requests] = await Promise.all([this._ctStore.listWorkspaces({ accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion }),this._ctStore.listRequests(this.ctRequestScope())]); if (key === this.managedCatalogScope) {this.ctLocalWorkspaces = raw(rows.filter(row => row.state === 'ready' && !row.groupId.startsWith('staged:')));this.ctRequests=raw(requests);} } catch (_) { /* Startup storage owns the actionable error. */ }
             },
-            async ctActivate(scope, metadata) {
+            async ctActivate(scope, metadata, initializationSession) {
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
-                if(!await this.ctFlushDraft() || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return false;
-                this.ctFence(); this.ctWorkspace = { scope: copy(scope), metadata: metadata || {} };
-                const ctx = this.ctContext(); this.ctBusy = true; this.ctError = '';
+                const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
+                    ['Preserving local drafts','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                let ctx;
+                try{
+                if(!await this.ctInitializationStep('Preserving local drafts',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
+                    || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return false;
+                this.ctFence(); this._ctAbort=new AbortController();const signal=this._ctAbort.signal;
+                this.ctWorkspace = { scope: copy(scope), metadata: metadata || {} };
+                ctx = this.ctContext();const current=()=>this.ctCurrent(ctx) && !signal.aborted,check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
+                this.lang=scope.language;
+                this.ctBusy = true; this.ctError = '';
                 this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
                 this.clearEditorToolsFile?.();
-                try {
-                    const [units, saved] = await Promise.all([this._ctStore.getUnits(scope), this._ctStore.getSaved(scope)]);
-                    if (!this.ctCurrent(ctx)) return false;
+                    const [units, saved] = await this.ctInitializationStep('Loading cached translations',async report=>{
+                        const result=await Promise.all([this._ctStore.getUnits(scope,{guard:current,onProgress:progress=>report({...progress,completed:progress.completed ?? progress.processed})}), this._ctStore.getSaved(scope,{guard:current})]);check();return result;
+                    },initialization);
+                    check();
                     this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved); this.ctRevision++;
                     const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
                     this._ctSheets = raw([...new Set(visibleUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
                     this.ctSheet = visibleUnits.length ? JSON.stringify([visibleUnits[0].role, visibleUnits[0].sheet]) : ''; this.ctPage = 1;
                     this.ctDiagnostics = raw({}); this.ctScanDone = false; this.ctSearch = ''; this.ctAppliedSearch = '';
-                    this.ctActive = true; this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
-                    this.ctLoadMemory(ctx);
+                    await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();},initialization);
+                    await this.ctInitializationStep('Opening ClientText workspace',async()=>{
+                    check();this.ctActive = true; this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
+                    const memory=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctLoadMemory(ctx);};
+                    if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-memory',memory);else setTimeout(memory,0);
                     this.activeContentGroup = metadata?.group || { id: scope.groupId, contentMode: 'clienttext' };
                     if (this.managedOnlineAvailable && (this.cloudCanAccessAllLanguages || scope.language===this.cloudUser?.language) && !String(scope.groupId).startsWith('local:')) {
                         const request = (path, options) => this._cloud.request(path, options);
                         this._ctSync = root.ClientTextSync.create({ scope, store: this._ctStore, request, isCurrent: () => this.ctCurrent(ctx) && this.ctActive });
-                        this.ctSync(ctx); this._ctSyncTimer = setInterval(() => { if (!root.document.hidden) this.ctSync(ctx); }, 20000);
+                        const background=()=>{if(this.ctCurrent(ctx) && this.ctActive)this.ctSync(ctx);};
+                        if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-sync',background);else background();
+                        this._ctSyncTimer = setInterval(() => { if (!root.document.hidden) this.ctSync(ctx); }, 20000);
                     }
-                    await this.$nextTick?.();if(!this.ctCurrent(ctx))return false;this.ctRefreshLayout();return true;
-                } catch (error) { if (this.ctCurrent(ctx)) this.ctError = error.message; return false; }
-                finally { if (this.ctCurrent(ctx)) this.ctBusy = false; }
+                    await this.$nextTick?.();check();this.ctRefreshLayout();return true;
+                    },initialization);return true;
+                } catch (error) { if ((!ctx && openingKey===this.managedCatalogScope || ctx && this.ctCurrent(ctx)) && !error.stale && error.name!=='AbortError') this.ctError = error.message; return false; }
+                finally { if (ctx && this.ctCurrent(ctx)) this.ctBusy = false;this.ctFinishInitialization(initialization); }
             },
             async ctOpenCached(row) { const scope = this._ctStore.normalizeScope(row.scope || row); return this.ctActivate(scope, row.metadata || row); },
             async ctSync(ctx = this.ctContext()) {
@@ -743,6 +825,8 @@
                 const sync=this._ctSync;if(this._ctSyncRun?.sync===sync)return this._ctSyncRun.promise;
                 const operation=(async()=>{
                     try {
+                        if(!this.ctPolicy?.clientTextStorageProtocols?.includes(trustedProtocol))await this.ctRequireTrustedProtocol();
+                        if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         const flushed=await sync.flush();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         await sync.pull();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         const saved = await this._ctStore.getSaved(ctx.scope);
@@ -1482,37 +1566,30 @@
                 if(group.teams?.length && !group.teams.some(team=>team.language===language) || mode(group)==='clienttext' && group.language && group.language!==language){this.ctError='This content group is not assigned to '+language+'.';return;}
                 if (mode(group) !== 'clienttext') { if(!await this.ctFlushDraft() || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return;const previousGroup=this.activeContentGroup?.contentMode==='statdescription'?this.activeContentGroup:null;this.ctFence(); return this.managedOpenStatGroup(version, group, language,previousGroup); }
                 if (!this.cloudCanAccessAllLanguages && language !== this.cloudUser?.language) return;
-                if(activate)this.lang = language;
                 version={...version,contentGroups:this.managedSelectedDetails?.version?.id===version.id?this.managedSelectedDetails.contentGroups:version.contentGroups || []};
-                const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope; this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
-                const signal=this._ctAbort.signal,current=()=>key===this.managedCatalogScope && openingEpoch===(this._ctEpoch || 0) && !signal.aborted;
+                const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
+                const opening=this._ctOpenRun={};
+                const initialization=activate ? this.ctBeginInitialization('Opening '+(version.name || 'selected version')+' · '+language+' ClientText',null,
+                    ['Preserving local drafts','Checking selected workspace','Checking reusable workbook cache','Caching selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']) : null;
+                this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
+                const signal=this._ctAbort.signal,current=()=>this._ctOpenRun===opening && key===this.managedCatalogScope && openingEpoch===(this._ctEpoch || 0) && !signal.aborted,
+                    check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
                 try {
-                    const cached = (await this._ctStore.listWorkspaces({ accountId: scope.accountId })).find(row => root.ClientTextStore.scopeKey(row) === root.ClientTextStore.scopeKey(scope) && row.state === 'ready');
-                    if(!current())return;
-                    if (cached) return activate ? await this.ctActivate(scope, {...cached,version}) : cached;
-                    const response = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id),{signal:this._ctAbort.signal}); const full = response.group || response.contentGroup || response;
-                    if (!current()) return;
+                    if(activate && !await this.ctInitializationStep('Preserving local drafts',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();check();return true;},initialization))return false;
+                    const cached=await this.ctInitializationStep('Checking selected workspace',async report=>{
+                        const result=await this._ctStore.getMetadata(scope,{guard:current});check();report({detail:result?.state==='ready'?'Selected workspace is cached':'Preparing selected originals'});return result;
+                    },initialization);
+                    if(cached?.state==='ready'){
+                        if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,['Preserving local drafts','Checking selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                        return activate ? await this.ctActivate(scope,{...cached,version},initialization) : cached;
+                    }
+                    await this.ctRequireTrustedProtocol(signal);check();
+                    const response=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(group.id),{signal}),full=response.group || response.contentGroup || response;check();
                     if(full.id!==group.id || full.versionId!==version.id || full.contentMode!=='clienttext' || full.language!==language || full.game && full.game!==scope.game || full.branchId && full.branchId!==scope.branchId)throw new Error('The returned content group differs from the selected version, team, game or branch.');
-                    const units = [], assets = [], descriptors = (full.assets || []).map(asset=>({...asset,...asset.descriptor}));
-                    for (const descriptor of descriptors) {
-                        const role = descriptor.role;
-                        const blob = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/' + encodeURIComponent(role) + '/original', { responseType: 'blob', timeout: 180000,signal:this._ctAbort.signal });
-                        if (!current()) return;
-                        const parsed = await this._ctWorker.parseWorkbook(await blob.arrayBuffer(), { filename: descriptor.filename || descriptor.name, role, language, parserVersion:descriptor.parserVersion || 'clienttext-v1', signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:descriptor.filename}) });
-                        if ((descriptor.artifactHash || descriptor.hash) && parsed.artifactHash !== (descriptor.artifactHash || descriptor.hash)) throw new Error('The original workbook hash differs from the published manifest.');
-                        for(const unit of parsed.units)units.push(unit); assets.push({ role, blob, hash: parsed.artifactHash, name: parsed.filename, parsed: { ...parsed, units: undefined } });
-                    }
-                    const manifest = await this._ctWorker.buildManifest(units, assets, {signal:this._ctAbort.signal,onProgress:progress=>this.ctReport(progress)});
-                    for (const expected of descriptors) {
-                        const actual = manifest.descriptors.find(item => item.role === expected.role);
-                        if (expected.baselineId && actual.baselineId !== expected.baselineId) throw new Error('Workbook parsing differs from the manager’s accepted manifest. Import has been blocked.');
-                    }
-                    if (!current()) return;
-                    const metadata = { version, group: full };
-                    await this._ctStore.import(scope, { units, assets, manifest, metadata },{guard:current,onProgress:progress=>{if(current())this.ctReport(progress);}});
-                    return activate ? await this.ctActivate(scope, metadata) : metadata;
-                } catch (error) { if (key === this.managedCatalogScope && error.name !== 'AbortError') this.ctError = error.message; }
-                finally { if (key === this.managedCatalogScope) { this.ctBusy = false; this.ctProgress = null; } }
+                    const metadata=await this.ctCacheGroup(version,full,scope,{signal,current,initialization});check();
+                    return activate ? await this.ctActivate(scope,metadata,initialization) : metadata;
+                } catch(error){if(key===this.managedCatalogScope && !error.stale && error.name!=='AbortError')this.ctError=error.message;return false;}
+                finally{this.ctFinishInitialization(initialization);if(this._ctOpenRun===opening && key===this.managedCatalogScope){this.ctBusy=false;this.ctProgress=null;this._ctOpenRun=null;}}
             },
             async ctDownload(collection, group = this.ctWorkspace?.metadata.group, language = this.lang, version = this.ctWorkspace?.metadata.version) {
                 if (this.ctBusy || !group) return;
@@ -1602,7 +1679,7 @@
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 const key=this.managedCatalogScope;
-                if (!local) try { const policy = await this._cloud.request('/v1/content-policy');if(key!==this.managedCatalogScope)return;this.ctPolicy=policy;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
+                if (!local) try { const policy = await this.ctRequireTrustedProtocol();if(key!==this.managedCatalogScope)return;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
                 else this.ctPolicy = { clientTextRoles: { default: ['normal'], French: ['normal', 'gender'], German: ['normal', 'gender'] } };
             },
             ctChooseFiles(event) {
@@ -1613,7 +1690,7 @@
                 if (this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; this._ctAbort = new AbortController();
                 const key = this.managedCatalogScope, prepared = [];
                 try {
-                    if (!this.ctUploadFiles.length) throw new Error('Select original workbook files or StatDescriptions.zip. Missing_XXX.txt is ignored.');
+                    if (!this.ctUploadFiles.length) throw new Error('Select original workbook files or StatDescriptions.zip.');
                     const groups = new Map();
                     for (const candidate of this.ctUploadFiles) {
                         if (/\.zip$/i.test(candidate.file.name)) {
@@ -1632,20 +1709,27 @@
                     for (const [language, candidates] of groups) {
                         const required = this.ctPolicy.clientTextRoles[language] || this.ctPolicy.clientTextRoles.default || ['normal'];
                         if (required.some(role => !candidates.some(item => item.role === role)) || candidates.some(item => !required.includes(item.role))) throw new Error(language + ' requires exactly these workbook roles: ' + required.join(', ') + '.');
+                        if(!this.ctUploadLocal)await this.ctRequireTrustedProtocol(this._ctAbort.signal);
                         candidates.sort((a,b)=>required.indexOf(a.role)-required.indexOf(b.role));
                         const units = [], assets = [];
                         for (const candidate of candidates) {
                             // ClientText filenames are optional naming hints.
                             // The selected release supplies the game scope.
                             const bytes = await candidate.file.arrayBuffer();
-                            const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport(progress) });
-                            for(const unit of parsed.units)units.push(unit);
-                            assets.push({ role: candidate.role, blob: candidate.file, name: candidate.file.name, hash: parsed.artifactHash, parsed: { ...parsed, units: undefined } });
+                            this.ctReport({phase:'Checking reusable original',workbook:candidate.file.name,sheet:'',completed:0,total:null});
+                            const hash=await this.ctOriginalHash(bytes),cached=await this._ctStore.getCachedOriginal?.(hash,root.ClientTextState.PARSER_VERSION,candidate.role,{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted});
+                            if(cached){for(const unit of cached.units)units.push(unit);assets.push({...cached.asset,role:candidate.role,blob:candidate.file,name:candidate.file.name,hash});}
+                            else{
+                                const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:candidate.file.name}) });
+                                if(parsed.artifactHash!==hash)throw new Error('Workbook original changed while preparing the selected file.');
+                                for(const unit of parsed.units)units.push(unit);
+                                assets.push({ role: candidate.role, blob: candidate.file, name: candidate.file.name, hash,parserVersion:parsed.parserVersion, parsed: { ...parsed, units: undefined } });
+                            }
                             if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
                         }
-                        this.ctReport({ phase: 'Building compact manifest', workbook: language, sheet: '' });
-                        const manifest = await this._ctWorker.buildManifest(units, assets,{signal:this._ctAbort.signal,onProgress:progress=>this.ctReport(progress)});
-                        const preparedGroup={ contentMode: 'clienttext', language, assignments: [language], candidates, units, assets, manifest, warnings: assets.flatMap(asset => asset.parsed.warnings || []) };
+                        this.ctReport({ phase: 'Counting initial workbook workload', workbook: language, sheet: '' });
+                        const originals = await this.ctDescribeOriginals(units, assets,{signal:this._ctAbort.signal,onProgress:progress=>this.ctReport(progress)});
+                        const preparedGroup={ contentMode: 'clienttext',storageProtocol:trustedProtocol, language, assignments: [language], candidates, units, assets, originals, warnings: assets.flatMap(asset => asset.parsed.warnings || []) };
                         if(!this.ctUploadLocal)await this.ctPrepareCarry(preparedGroup);
                         prepared.push(preparedGroup);
                     }
@@ -1676,10 +1760,10 @@
                     const prepared=this.ctPrepared[index];
                     if(prepared.contentMode==='clienttext' && (!prepared.cacheScope || (await this._ctStore.getMetadata(prepared.cacheScope))?.state!=='ready')){
                         prepared.cacheScope ||= this.ctScope('upload:'+this._ctPublicationRequest,'staged:'+this._ctPublicationRequest+':'+index,prepared.language);
-                        await this._ctStore.import(prepared.cacheScope,{units:prepared.units,assets:prepared.assets,manifest:prepared.manifest,metadata:{name:this.ctUploadName}},{guard:()=>key===this.managedCatalogScope && !signal.aborted,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
+                        await this._ctStore.import(prepared.cacheScope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata:{name:this.ctUploadName}},{guard:()=>key===this.managedCatalogScope && !signal.aborted,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
                     }
                 }
-                const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,cacheScope:prepared.cacheScope,carry:prepared.carry,
+                const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,storageProtocol:prepared.storageProtocol,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,cacheScope:prepared.cacheScope,carry:prepared.carry,
                     requestId:prepared.requestId,uploadId:prepared.uploadId,createBody:prepared.createBody,finalizeBody:prepared.finalizeBody,published:prepared.published,
                     candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups}));
                 if(key!==this.managedCatalogScope || signal.aborted)throw Object.assign(new Error('Publication context changed'),{stale:true});
@@ -1697,11 +1781,8 @@
                         if(group.cacheScope){
                             const units=await this._ctStore.getUnits(group.cacheScope,{guard:current}),metadata=await this._ctStore.getMetadata(group.cacheScope,{guard:current}),assets=[];
                             for(const descriptor of metadata.descriptors)assets.push(await this._ctStore.getAsset(group.cacheScope,descriptor.role,{guard:current}));
-                            // Reuse the accepted immutable compact records. A
-                            // resume must not rehash the workbook on the UI thread.
-                            const compact=await this._ctStore.getCompactUnits(group.cacheScope,{guard:current});
-                            const manifest={format:root.ClientTextState.FORMAT,units:compact,descriptors:assets.map(asset=>asset.descriptor),trees:Object.fromEntries(assets.map(asset=>[asset.role,asset.tree]))};
-                            prepared.push({...group,units,assets,manifest,candidates:assets.map(asset=>({file:new File([assetBytes(asset)],asset.name),role:asset.role,language:group.language}))});
+                            const originals={storageProtocol:trustedProtocol,descriptors:metadata.descriptors,summaries:metadata.summaries};
+                            prepared.push({...group,units,assets,originals,candidates:assets.map(asset=>({file:new File([assetBytes(asset)],asset.name),role:asset.role,language:group.language}))});
                         }else prepared.push(group);
                     }
                     if(current())this.ctPrepared=raw(prepared);
@@ -1724,26 +1805,12 @@
                 let metadata=await this._ctStore.getMetadata(scope);
                 current();
                 if(metadata?.state!=='ready'){
-                    const group=(await this._cloud.request('/v1/content-groups/'+encodeURIComponent(previousGroup.id),{signal})).group;
-                    current();
-                    const units=[],assets=[];
-                    for(const asset of group.assets){
-                        const blob=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(group.id)+'/assets/'+encodeURIComponent(asset.role)+'/original',{responseType:'blob',timeout:180000,signal});
-                        current();
-                        const parsed=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:asset.filename,role:asset.role,language:prepared.language,parserVersion:asset.descriptor?.parserVersion || 'clienttext-v1',signal:this._ctAbort.signal,onProgress:progress=>this.ctReport({...progress,workbook:'Previous '+asset.filename})});
-                        if(parsed.artifactHash!==asset.artifactHash)throw new Error('The previous original hash differs from its accepted manifest.');
-                        for(const unit of parsed.units)units.push(unit);assets.push({role:asset.role,blob,name:asset.filename,hash:parsed.artifactHash,parsed:{...parsed,units:undefined}});
-                    }
-                    const manifest=await this._ctWorker.buildManifest(units,assets,{signal:this._ctAbort.signal,onProgress:progress=>this.ctReport(progress)});
-                    for(const asset of group.assets)if(manifest.descriptors.find(item=>item.role===asset.role)?.baselineId!==asset.descriptor.baselineId)throw new Error('The previous workbook parser does not reproduce the accepted manifest.');
-                    metadata={version:previousVersion,group};await this._ctStore.import(scope,{units,assets,manifest,metadata},{guard:()=>key===this.managedCatalogScope});
+                    const group=(await this._cloud.request('/v1/content-groups/'+encodeURIComponent(previousGroup.id),{signal})).group;current();
+                    metadata=await this.ctCacheGroup(previousVersion,group,scope,{signal,current:()=>key===this.managedCatalogScope && !signal.aborted});current();
                 }
-                const previousUnits=new Map((await this._ctStore.getUnits(scope)).map(unit=>[unit.id,unit])),accepted={},previousTrees={};let after=0;
+                const previousUnits=new Map((await this._ctStore.getUnits(scope)).map(unit=>[unit.id,unit])),accepted={},previousAssets={};let after=0;
                 current();
-                // Hydrate each immutable proof tree once for this comparison.
-                // Reading the entire workbook asset per carried ID makes this
-                // loop grow with record count times workbook size.
-                for(const asset of prepared.assets){const previous=await this._ctStore.getAsset(scope,asset.role);current();previousTrees[asset.role]=previous?.tree;const before=new Map((previous?.parsed?.sheets || []).map(sheet=>[sheet.name,sheet]));for(const sheet of asset.parsed.sheets){const old=before.get(sheet.name);before.delete(sheet.name);if(!old){prepared.warnings.push({message:asset.role+' / '+sheet.name+': added sheet.'});continue;}const oldHeaders=new Map(old.headers.map(header=>[header.name,header.column])),changes=[];for(const header of sheet.headers){const column=oldHeaders.get(header.name);oldHeaders.delete(header.name);if(column===undefined)changes.push('added '+header.name);else if(column!==header.column)changes.push(header.name+' moved from column '+column+' to '+header.column);}for(const heading of oldHeaders.keys())changes.push('removed '+heading);if(changes.length)prepared.warnings.push({message:asset.role+' / '+sheet.name+': '+changes.join('; ')+'. Recognized fields retain their identity.'});}for(const sheet of before.keys())prepared.warnings.push({message:asset.role+' / '+sheet+': removed sheet; previous work remains in history.'});}
+                for(const asset of prepared.assets){const previous=await this._ctStore.getAsset(scope,asset.role);current();previousAssets[asset.role]=previous;const before=new Map((previous?.parsed?.sheets || []).map(sheet=>[sheet.name,sheet]));for(const sheet of asset.parsed.sheets){const old=before.get(sheet.name);before.delete(sheet.name);if(!old){prepared.warnings.push({message:asset.role+' / '+sheet.name+': added sheet.'});continue;}const oldHeaders=new Map(old.headers.map(header=>[header.name,header.column])),changes=[];for(const header of sheet.headers){const column=oldHeaders.get(header.name);oldHeaders.delete(header.name);if(column===undefined)changes.push('added '+header.name);else if(column!==header.column)changes.push(header.name+' moved from column '+column+' to '+header.column);}for(const heading of oldHeaders.keys())changes.push('removed '+heading);if(changes.length)prepared.warnings.push({message:asset.role+' / '+sheet.name+': '+changes.join('; ')+'. Recognized fields retain their identity.'});}for(const sheet of before.keys())prepared.warnings.push({message:asset.role+' / '+sheet+': removed sheet; previous work remains in history.'});}
                 do{
                     const result=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(previousGroup.id)+'/events?language='+encodeURIComponent(prepared.language)+'&after='+after+'&limit=100',{signal});
                     current();
@@ -1755,24 +1822,54 @@
                 for(let index=0;index<prepared.units.length;index++){
                     const next=prepared.units[index],old=previousUnits.get(next.id);if(!old)continue;
                     const before=accepted[next.id],state=root.ClientTextState.carryForward(old,next,before);
-                    const markerReview=next.fields.some(field=>{const previous=old.fields.find(item=>item.id===field.id);return previous && previous.source!==field.source && root.ClientTextState.canonicalSource(previous.source)===root.ClientTextState.canonicalSource(field.source) && field.outdated;});
+                    let markerReview=false;
+                    for(const field of next.fields){const previous=old.fields.find(item=>item.id===field.id);
+                        // Only verified raw predecessor/current originals can
+                        // establish this strict marker-only equivalence.
+                        if(previous && previous.source!==field.source && field.outdated && !root.ClientTextState.audioOnly(field.source)
+                            && root.ClientTextState.canonicalSource(field.source).trim() && root.ClientTextState.canonicalSource(previous.source)===root.ClientTextState.canonicalSource(field.source)){
+                            state.reviewed[field.id]=root.ClientTextState.sourceHash(field.source);markerReview=true;
+                        }
+                    }
                     if(before || state.outdated.length || markerReview){
-                        const previousProof=root.ClientTextState.proofFor({trees:previousTrees},next.id);
-                        carry.push({id:next.id,role:next.role,language:prepared.language,values:state.values,reviewed:state.reviewed,baseline:next,proof:root.ClientTextState.proofFor(prepared.manifest,next.id),previousBaseline:old,previousProof,sourceOnly:!before || before.saved===false,provenance:{groupId:previousGroup.id,unitId:next.id,revision:before?.revision||0}});
+                        const asset=prepared.assets.find(asset=>asset.role===next.role),previousAsset=previousAssets[next.role];
+                        carry.push({id:next.id,role:next.role,assetHash:asset.hash,parserVersion:asset.parserVersion || asset.parsed?.parserVersion || root.ClientTextState.PARSER_VERSION,
+                            clientFacts:root.ClientTextState.clientFacts(next),originalValues:root.ClientTextState.originalValues(next),values:state.values,reviewed:state.reviewed,
+                            previousFacts:root.ClientTextState.clientFacts(old),previousOriginalValues:root.ClientTextState.originalValues(old),
+                            previousAssetHash:previousAsset.hash,previousParserVersion:previousAsset.parserVersion || previousAsset.parsed?.parserVersion || previousAsset.descriptor?.parserVersion || 'clienttext-v1',
+                            provenance:{groupId:previousGroup.id,unitId:next.id,revision:before?.revision||0}});
                     }
                     if(index%256===255){this.ctReport({phase:'Comparing verified source',completed:index,total:prepared.units.length,sheet:next.sheet});await new Promise(resolve=>setTimeout(resolve,0));current();}
                 }
                 prepared.parentGroupId=previousGroup.id;prepared.carry=carry;prepared.warnings.push({message:'Previous accepted work will carry forward independently: '+carry.length+' affected IDs. Removed IDs remain accessible in the previous version.'});
             },
+            async ctConvertLegacyPublication(prepared,version) {
+                const key=this.managedCatalogScope,signal=this._ctAbort.signal,current=()=>key===this.managedCatalogScope && !signal.aborted,
+                    scope=this.ctRequestScope(),oldRequest=this._ctPublicationRequest;
+                const retained=await this._ctStore.getRequest(scope,oldRequest,{guard:current});
+                if(!retained)throw new Error('The legacy upload recovery journal is unavailable. Its original request must be retained before conversion.');
+                // The old bodies, IDs, assets and witness payloads stay as
+                // recovery evidence. Conversion owns new request identities.
+                await this._ctStore.putRequest(scope,oldRequest,{...retained.payload,kind:'publication-recovery'},{guard:current,immutablePublicationData:true});
+                this._ctPublicationRequest=uuid();prepared.requestId=uuid();prepared.uploadId=null;prepared.finalizeBody=null;prepared.cacheScope=null;
+                prepared.storageProtocol=trustedProtocol;prepared.originals=await this.ctDescribeOriginals(prepared.units,prepared.assets,{signal,onProgress:progress=>this.ctReport(progress)});
+                prepared.carry=[];await this.ctPrepareCarry(prepared);
+                if(!current())throw Object.assign(new Error('Legacy upload conversion was superseded.'),{stale:true});
+                prepared.createBody={versionId:version.id,game:this.gameVersion,branchId:this.branchId,contentMode:'clienttext',storageProtocol:trustedProtocol,
+                    language:prepared.language,assignments:prepared.assignments,roles:prepared.candidates.map(item=>item.role),parentGroupId:prepared.parentGroupId,
+                    expectedMembershipRevision:version.membershipRevision || 0,idempotencyKey:prepared.requestId};
+                await this.ctRememberPublication();
+            },
             async ctPublishPrepared() {
                 if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; const key = this.managedCatalogScope,client=this._cloud; this._ctAbort = new AbortController();
                 try {
+                    if(!this.ctUploadLocal && this.ctPrepared.some(group=>group.contentMode==='clienttext'))await this.ctRequireTrustedProtocol(this._ctAbort.signal);
                     if (this.ctUploadLocal) {
                         const versionId = 'local:' + uuid(), metadataVersion = { id: versionId, game: this.gameVersion, branchId: this.branchId, name: this.ctUploadName, contentGroups: this.ctPrepared.map(prepared=>({ id: 'local:' + uuid(), versionId, contentMode: 'clienttext', language: prepared.language, roles: prepared.assets.map(asset=>asset.role) })) };
                         for (let index=0;index<this.ctPrepared.length;index++) {
                             const prepared=this.ctPrepared[index],group=metadataVersion.contentGroups[index];
                             const scope = this.ctScope(versionId, group.id, prepared.language), metadata = { version: metadataVersion, group };
-                            await this._ctStore.import(scope, { units: prepared.units, assets: prepared.assets, manifest: prepared.manifest, metadata },{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
+                            await this._ctStore.import(scope, { units: prepared.units, assets: prepared.assets, descriptors: prepared.originals.descriptors,summaries: prepared.originals.summaries, metadata },{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
                         }
                         this.ctUploadVisible = false; await this.ctRefreshLocal(); return;
                     }
@@ -1789,36 +1886,37 @@
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         if (prepared.published) continue;
                         prepared.requestId ||= uuid();
-                        prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode, language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
+                        prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         const response = await this._cloud.request('/v1/content-uploads', { method: 'POST', body: prepared.createBody,signal:this._ctAbort.signal });
-                        const upload = response.upload; prepared.uploadId = upload.id;
+                        let upload = response.upload; prepared.uploadId = upload.id;
+                        // A creation receipt freezes its original response.
+                        // Resolve live state before replaying assets/converting
+                        // an upload whose finalize may already have succeeded.
+                        upload=(await client.request('/v1/content-uploads/'+encodeURIComponent(upload.id),{signal:this._ctAbort.signal})).upload;
+                        if(!upload || upload.id!==prepared.uploadId)throw new Error('The upload state identifies another publication.');
                         await this.ctRememberPublication();
                         if(upload.status==='accepted'){
                             prepared.published=true;version=(await this._cloud.request('/v1/content-groups/'+encodeURIComponent(upload.groupId))).group.version;this.ctUploadVersion=version;await this.ctRememberPublication();continue;
+                        }
+                        if(prepared.contentMode==='clienttext' && (upload.legacyConversionRequired || prepared.createBody.storageProtocol!==trustedProtocol)){
+                            await this.ctConvertLegacyPublication(prepared,version);
+                            if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
+                            upload=(await client.request('/v1/content-uploads',{method:'POST',body:prepared.createBody,signal:this._ctAbort.signal})).upload;prepared.uploadId=upload.id;await this.ctRememberPublication();
                         }
                         for (const candidate of prepared.candidates) {
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                             this.ctReport({ phase: 'Uploading original', workbook: candidate.file.name, sheet: '', completed: 0, total: candidate.file.size });
                             await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
                         }
-                        if (prepared.contentMode === 'clienttext') for (const descriptor of prepared.manifest.descriptors) {
-                            const units = prepared.manifest.units.filter(unit => unit.role === descriptor.role);
-                            for (let start = 0, index = 0; start < units.length; index++) {
-                                let end=start,bytes=0;while(end<units.length && end-start<2000){const size=new TextEncoder().encode(JSON.stringify(units[end])).length+1;if(bytes+size>1800000 && end>start)break;bytes+=size;end++;}
-                                this.ctReport({ phase: 'Uploading compact manifest', workbook: descriptor.role, completed: start, total: units.length });
-                                await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/manifests/' + encodeURIComponent(descriptor.role) + '/chunks', { method: 'POST', body: { index, units: units.slice(start, end) },compressJson:this.ctPolicy.uploadEncodings?.includes('gzip'),signal:this._ctAbort.signal,timeout:180000 });start=end;
-                                if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
-                            }
-                        }
                         for(let start=0,index=0;start<(prepared.carry?.length||0);index++){
                             let end=start,bytes=0;while(end<prepared.carry.length && end-start<2000){const size=new TextEncoder().encode(JSON.stringify(prepared.carry[end])).length+1;if(bytes+size>1800000 && end>start)break;bytes+=size;end++;}
                             this.ctReport({phase:'Uploading carry-forward work',workbook:prepared.language,completed:start,total:prepared.carry.length,sheet:''});
-                            await this._cloud.request('/v1/content-uploads/'+encodeURIComponent(upload.id)+'/carry/chunks',{method:'POST',body:{index,units:prepared.carry.slice(start,end)},compressJson:this.ctPolicy.uploadEncodings?.includes('gzip'),signal:this._ctAbort.signal,timeout:180000});start=end;
+                            await this._cloud.request('/v1/content-uploads/'+encodeURIComponent(upload.id)+'/carry/chunks',{method:'POST',body:{storageProtocol:trustedProtocol,index,units:prepared.carry.slice(start,end)},compressJson:this.ctPolicy.uploadEncodings?.includes('gzip'),signal:this._ctAbort.signal,timeout:180000});start=end;
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         }
                         const decisions=[];for(const duplicate of prepared.duplicateGroups || []){const choice=this.ctDuplicateChoices[duplicate.filepath+'|'+(duplicate.language || duplicate.lang)],option=duplicate.options.find(option=>String(option.occurrence)===String(choice));if(!option)throw new Error('Choose one block for '+duplicate.filepath+' · '+(duplicate.language || duplicate.lang));decisions.push({filepath:duplicate.filepath,language:duplicate.language || duplicate.lang,occurrence:option.occurrence,blockHash:option.blockHash || await root.CollaborationProtocol.blockHash(option)});}
-                        prepared.finalizeBody ||= { descriptors: prepared.manifest?.descriptors,decisions, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
+                        prepared.finalizeBody ||= { ...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries}:{}),decisions, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         let result;
                         try{result=await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST', body: prepared.finalizeBody,signal:this._ctAbort.signal, timeout: 180000 });}
@@ -1826,7 +1924,7 @@
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         prepared.published = true; version = result.version || { ...version, membershipRevision: (version.membershipRevision || 0) + 1 }; this.ctUploadVersion = version;
                         const group = result.group || result.contentGroup;
-                        if (prepared.contentMode === 'clienttext' && group) await this._ctStore.import(this.ctScope(version.id, group.id, prepared.language), { units: prepared.units, assets: prepared.assets, manifest: prepared.manifest, metadata: { version, group } },{guard:()=>key===this.managedCatalogScope,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
+                        if (prepared.contentMode === 'clienttext' && group) await this._ctStore.import(this.ctScope(version.id, group.id, prepared.language), { units: prepared.units, assets: prepared.assets, descriptors: prepared.originals.descriptors,summaries: prepared.originals.summaries, metadata: { version, group } },{guard:()=>key===this.managedCatalogScope,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
                         await this.ctRememberPublication();
                         if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
                     }
@@ -1939,7 +2037,7 @@
                 </article>
                 <p v-if="host.ctHistoryLoading" role="status">Loading history…</p><p v-else-if="!host.ctHistory.length">No saved history for this ID.</p>
                 <button v-if="host.ctHistoryCursor || host.ctHistoryLocalMore" class="ctHistoryOlder" @click="host.ctLoadOlderHistory()" :disabled="host.ctHistoryLoading">Load older history</button>
-                <div v-if="host.ctHistoryViewer" class="ctHistoryBackdrop" @keydown.esc.stop.prevent="host.ctCloseHistoryViewer()" @keydown.tab="host.ctTrapHistoryFocus($event)">
+                <Teleport to="body"><div v-if="host.ctHistoryViewer" class="ctHistoryBackdrop" @keydown.esc.stop.prevent="host.ctCloseHistoryViewer()" @keydown.tab="host.ctTrapHistoryFocus($event)">
                     <section class="ctHistoryViewer" role="dialog" aria-modal="true" aria-labelledby="ctHistoryTitle">
                         <header><h3 id="ctHistoryTitle">Compare · {{ host.ctCurrentUnit.sheet }} · {{ host.ctCurrentUnit.recordId }}</h3><button id="ctHistoryClose" @click="host.ctCloseHistoryViewer()" aria-label="Close history comparison">Close</button></header>
                         <div class="ctHistoryCompareControls"><label>Before<select v-model="host.ctHistoryCompareA"><option v-for="choice in host.ctHistoryChoices" :key="choice.key" :value="choice.key" :disabled="choice.unavailable">{{ choice.label }}</option></select></label>
@@ -1957,7 +2055,7 @@
                             <article v-if="host.ctHistoryComparison.hasNotes" class="ctHistoryNotes"><h4>Developer notes</h4><div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5><pre><span v-for="(part,index) in host.ctHistoryComparison.notes.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre></section></div></article>
                         </div>
                     </section>
-                </div>
+                </div></Teleport>
             </section>
             <section v-if="host.ctTool === 'comments'" class="commentsPanel"><h3 class="commentsPanelHeader">Comments</h3><div class="commentsList"><article v-for="comment in host.ctComments" :key="comment.id" class="commentCard"><strong>{{ comment.actor?.name || comment.authorName || comment.actor?.id || comment.authorId }}</strong><small>{{ comment.audience }}</small><pre class="commentBody">{{ comment.text }}</pre></article></div><textarea v-model="host.ctCommentText" @input="host.ctQueueCommentDraft()" aria-label="Comment" placeholder="Write a comment" rows="3"></textarea><label class="commentsScopeOption"><input type="checkbox" v-model="host.ctCommentGlobal" @change="host.ctQueueCommentDraft()"> All language teams</label><button @click="host.ctPostComment" :disabled="!host.managedOnlineAvailable || host.ctBusy || !host.ctCommentText.trim()">Post comment</button></section>
         </aside>` };
