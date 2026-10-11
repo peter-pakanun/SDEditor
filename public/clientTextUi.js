@@ -67,7 +67,7 @@
     const mixin = {
         data() { return {
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
-            ctSheet: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
+            ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false, ctIncludeConsistency: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
             ctVariantSelections: {}, ctDefaultsExpanded: {},
@@ -165,6 +165,10 @@
                 return { before, after, rows, notes: this.ctHistoryDiffParts(aNotes, bNotes), hasNotes: !!(aNotes || bNotes) };
             },
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
+            ctFilteredSheets() {
+                const query = this.ctSheetFilter.trim().toLowerCase();
+                return query ? this.ctSheets.filter(sheet=>sheet.name.toLowerCase().includes(query)) : this.ctSheets;
+            },
             ctDiagnosticCounts() {
                 const counts={error:0,warning:0};
                 for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
@@ -573,7 +577,7 @@
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
                 this.ctPreviewGggVars={};this.ctFocusedField='';
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
-                this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);
+                this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);this.ctSheetFilter='';
                 this.ctResetHistory();
                 this.ctUploadVisible=false;this.ctUploading=false;this.ctRequests=[];
             },

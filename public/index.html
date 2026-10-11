@@ -444,7 +444,17 @@
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <div v-if="ctProgress" class="ctProgress" role="status"><div class="ctProgressMain"><span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span><progress :value="ctProgress.completed || 0" :max="ctProgress.total || 1" aria-label="Workbook operation progress"></progress><span class="ctProgressCount">{{ Math.round(ctProgress.completed || 0) }} / {{ ctProgress.total || '…' }}</span></div><button class="ctProgressCancel" @click="ctCancel">Cancel</button></div>
           <div class="ctWorkspaceBody" :class="{ctToolsOpen:inlineEditor && inlineSidebarVisible}">
-            <nav class="ctNavigation" aria-label="Workbook sheets"><strong>Sheets</strong><button @click="ctSheet=''" :class="{active:!ctSheet}">All sheets</button><template v-for="role in [...new Set(ctSheets.map(sheet=>sheet.role))]" :key="role"><h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3><button v-for="sheet in ctSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" @click="ctSheet=sheet.key" :class="{active:ctSheet===sheet.key}">{{ sheet.name }}</button></template></nav>
+            <nav class="ctNavigation" aria-label="Workbook sheets">
+              <strong>Sheets</strong>
+              <label class="srOnly" for="ctSheetFilter">Filter sheets</label>
+              <input id="ctSheetFilter" class="ctSheetFilter" type="search" v-model="ctSheetFilter" placeholder="Filter sheets…" @keydown.esc.stop.prevent="ctSheetFilter=''">
+              <button @click="ctSheet=''" :class="{active:!ctSheet}">All sheets</button>
+              <template v-for="role in [...new Set(ctFilteredSheets.map(sheet=>sheet.role))]" :key="role">
+                <h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3>
+                <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" @click="ctSheet=sheet.key" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
+              </template>
+              <p v-if="!ctFilteredSheets.length" class="ctSheetEmpty" role="status">No sheets match.</p>
+            </nav>
             <div class="workspaceMain ctList">
               <p id="ctFileTableKeyboardHelp" class="srOnly">Arrow keys move between records while the list is focused. Enter or a filename opens the full editor. In inline mode, clicking a row edits its translation in the table. Text fields retain normal arrow keys and newlines.</p>
               <div ref="ctFileTableRegion" class="fileTableScroll" role="region" aria-label="ClientText IDs" aria-describedby="ctFileTableKeyboardHelp" tabindex="0" @keydown="ctRowKeydown(null,$event)">

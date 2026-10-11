@@ -118,6 +118,27 @@ test('late same-ID hydration cannot publish old blank-field drafts or focus into
     assert.equal(app.ctValues[replacement.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
 });
 
+test('sheet filtering matches names without changing workbook identities, selection or record filters',()=>{
+    const sheets=[{key:JSON.stringify(['normal','Shared']),role:'normal',name:'Shared'},
+        {key:JSON.stringify(['gender','Shared']),role:'gender',name:'Shared'},
+        {key:JSON.stringify(['normal','Quest Text']),role:'normal',name:'Quest Text'},
+        {key:JSON.stringify(['gender','NPCDialogue']),role:'gender',name:'NPCDialogue'}],
+        {app,mixin}=harness({_ctSheets:sheets,ctSheet:sheets[2].key,ctSearch:'retained record query',ctAppliedSearch:'retained record query',
+            ctSelectedFilters:['missing','warning']});
+    Object.defineProperty(app,'ctSheets',{get:()=>mixin.computed.ctSheets.call(app)});
+    Object.defineProperty(app,'ctFilteredSheets',{get:()=>mixin.computed.ctFilteredSheets.call(app)});
+    assert.equal(app.ctSheetFilter,'');assert.deepEqual(Array.from(app.ctFilteredSheets),sheets);
+    app.ctSheetFilter='  sHaR  ';assert.deepEqual(Array.from(app.ctFilteredSheets),sheets.slice(0,2));
+    assert.equal(app.ctFilteredSheets[0],sheets[0]);assert.equal(app.ctFilteredSheets[1],sheets[1]);
+    assert.notEqual(app.ctFilteredSheets[0].key,app.ctFilteredSheets[1].key,'same-named workbook roles remain separate selectable sheets');
+    app.ctSheetFilter='quest';assert.deepEqual(Array.from(app.ctFilteredSheets),[sheets[2]]);
+    app.ctSheetFilter='gender';assert.equal(app.ctFilteredSheets.length,0,'role labels are not sheet names');
+    app.ctSheetFilter=' \t ';assert.deepEqual(Array.from(app.ctFilteredSheets),sheets);
+    assert.equal(app.ctSheet,sheets[2].key);assert.equal(app.ctSearch,'retained record query');assert.equal(app.ctAppliedSearch,'retained record query');
+    assert.deepEqual(app.ctSelectedFilters,['missing','warning']);
+    app.ctSheetFilter='stale sheet query';app.ctFence();assert.equal(app.ctSheetFilter,'');
+});
+
 test('ClientText status chips default Unchanged off and use OR matching with scoped diagnostic IDs',()=>{
     const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
         {app,mixin}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
@@ -1776,11 +1797,11 @@ function initializationHarness(changes={}){
 }
 test('cached ClientText opening uses the shared initialization owner and skips workbook parsing and downloads',async()=>{
     const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
-    const {app}=initializationHarness({_ctStore:f.store}),dictionary=[];
+    const {app}=initializationHarness({_ctStore:f.store,ctSheetFilter:'previous workspace sheet query'}),dictionary=[];
     app.ensureDictionarySnapshot=async()=>dictionary.push('ready');
     app._ctWorker={parseWorkbook(){throw Error('Cache hit must not parse');}};
     assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope)),true);
-    assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);
+    assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);assert.equal(app.ctSheetFilter,'');
     assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving local drafts','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
     assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
 });
