@@ -29,6 +29,34 @@ test('proofs protect all original source, target, metadata, field layout and ass
     assert.throws(()=>S.normalizeUnit({...unit(),fields:[unit().fields[0],unit().fields[0]]}),/Duplicate/);
     await assert.rejects(S.buildManifest([unit(),unit()],[asset]),/Duplicate/);
 });
+test('parser revisions keep legacy proofs reproducible and commit new parsing authority separately',async()=>{
+    const original=unit(), legacy=await S.buildManifest([original],[{...asset,parsed:{parserVersion:'clienttext-v1'}}]);
+    const current=await S.buildManifest([original],[{...asset,parsed:{parserVersion:'clienttext-v2'}}]);
+    assert.equal(legacy.descriptors[0].parserVersion,'clienttext-v1');
+    assert.equal(current.descriptors[0].parserVersion,'clienttext-v2');
+    assert.equal(legacy.descriptors[0].root,current.descriptors[0].root);
+    assert.notEqual(legacy.descriptors[0].baselineId,current.descriptors[0].baselineId);
+    for(const manifest of [legacy,current])assert.equal(S.verifyWitness(original,manifest.units[0],S.proofFor(manifest,original.id),manifest.descriptors[0]),true);
+    assert.equal(S.verifyWitness(original,current.units[0],S.proofFor(current,original.id),{...current.descriptors[0],parserVersion:'future-parser'}),false);
+    await assert.rejects(S.buildManifest([original],[{...asset,parsed:{parserVersion:'future-parser'}}]),/Unsupported ClientText parser/);
+});
+test('class variants keep independent field identities, reviews, raw text and carry-forward conflicts',()=>{
+    const original=unit();original.fields=S.CLASS_FORMS.map((form,index)=>({...original.fields[0],id:JSON.stringify(['Text',form]),kind:'form',form,group:'Text',
+        target:index===0?'Old class text':'',required:index===0,outdated:index===0,originalMissing:false}));
+    const first=original.fields[0],second=original.fields[1],values=S.valuesFor(original);
+    values[first.id]='Authored\nclass @ text \\n';values[second.id]='NONEXISTENT';
+    const reviewed={[first.id]:S.sourceHash(first.source)},saved={values,reviewed};
+    assert.equal(S.normalizeUnit(original).fields.length,12);
+    assert.equal(S.isClassForm(first),true);assert.equal(S.isClassForm('MS'),false);assert.equal(S.isClassForm({...first,kind:'gender'}),false);
+    assert.deepEqual(S.normalizeValues(original,values),values);
+    assert.equal(S.statusFor(original,saved).outdated,false);
+    const next=structuredClone(original);next.fields[0].source='New source';next.fields[0].target='Upstream class text';
+    const carried=S.carryForward(original,next,saved);
+    assert.deepEqual(carried.outdated,[first.id]);assert.equal(carried.conflicts[0].fieldId,first.id);
+    assert.equal(carried.values[second.id],'NONEXISTENT');assert.deepEqual(carried.dropped,[]);
+    assert.equal(S.suggestions(first).some(item=>item.value==='NONEXISTENT'),true);
+    assert.equal(S.diagnose(first,'NONEXISTENT').length,0);
+});
 test('optional forms, marker-only and field reviews preserve overlapping workload status',()=>{
     const original=unit('Source','Existing',true);
     const form={...original.fields[0],id:'form',kind:'form',required:false,target:'',outdated:false};
@@ -39,6 +67,17 @@ test('optional forms, marker-only and field reviews preserve overlapping workloa
     assert.throws(()=>S.normalizeReviewed(original,{[fieldId]:S.sourceHash('Old')}),/current/);
     assert.equal(S.suggestions(form)[0].value,'NONEXISTENT');assert.equal(S.suggestions(form,{openedByChar:'['}).some(item=>item.value==='NONEXISTENT'),false);
     assert.equal(S.suggestions(original.fields[0]).some(item=>item.value==='NONEXISTENT'),false);
+});
+test('source changes retain optional blank variants without creating review work for unused cells',()=>{
+    const before=unit();before.fields=['MS',...S.CLASS_FORMS].map(form=>({...before.fields[0],id:JSON.stringify(['Text',form]),kind:'form',form,group:'Text',target:'',required:false,outdated:false,originalMissing:false}));
+    const next=structuredClone(before);for(const field of next.fields)field.source='Changed English';
+    assert.deepEqual(S.carryForward(before,next,null).outdated,[]);
+    const active=next.fields[1],marked=next.fields[2],red=next.fields[3],intentional=next.fields[4];
+    marked.outdated=true;red.required=true;red.originalMissing=true;
+    const saved={values:{[active.id]:'Accepted class translation',[intentional.id]:'NONEXISTENT'}};
+    const carried=S.carryForward(before,next,saved);
+    assert.deepEqual(carried.outdated,[active.id,marked.id,red.id,intentional.id]);
+    assert.equal(carried.values[active.id],'Accepted class translation');assert.equal(carried.values[next.fields[0].id],'');
 });
 test('source advancement retains local text, isolates real upstream conflicts, and never drops',()=>{
     const before=unit(),after=unit('Changed English','Changed upstream');

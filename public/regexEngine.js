@@ -361,7 +361,7 @@ function getDictEntryDefinitionsWithMeta(dictEntry) {
   let seen = new Set();
   let out = [];
   for (const d of defs) {
-    let key = d.find.toLowerCase();
+    let key = JSON.stringify([d.find.toLowerCase(), d.replace]);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(d);

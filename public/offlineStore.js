@@ -5,9 +5,10 @@
   // v6 dictionary writers cannot preserve per-entry game scope; v7 writers
   // cannot preserve named-version/profile isolation; v8 writers would replace
   // normalized facts with stale aggregates. v11 writers cannot read bounded
-  // ClientText journal/proof fragments. Keep every
+  // ClientText journal/proof fragments. v12 editors cannot render class-variant
+  // fields accepted by the v2 workbook parser. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 12;
+  const DB_VERSION = 13;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();

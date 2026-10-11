@@ -26,14 +26,16 @@
     const mainFind = String(entry?.find ?? '').trim();
     const mainReplace = String(entry?.replace ?? '');
     const pairs = mainFind ? [{ find: mainFind, replace: mainReplace, isMain: true }] : [];
-    const seen = new Set(mainFind ? [mainFind.toLowerCase()] : []);
+    // The same source term may have several approved grammatical translations.
+    const seen = new Set(mainFind ? [JSON.stringify([mainFind.toLowerCase(), mainReplace])] : []);
     for (const alt of Array.isArray(entry?.alts) ? entry.alts : []) {
       if (!alt || typeof alt !== 'object') continue;
       const find = String(alt.find ?? '').trim();
-      const key = find.toLowerCase();
+      const replace = String(alt.replace ?? mainReplace);
+      const key = JSON.stringify([find.toLowerCase(), replace]);
       if (!find || seen.has(key)) continue;
       seen.add(key);
-      pairs.push({ _id: alt._id, find, replace: String(alt.replace ?? mainReplace), isMain: false });
+      pairs.push({ _id: alt._id, find, replace, isMain: false });
     }
     return pairs;
   }
@@ -47,13 +49,13 @@
     const mainFind = entry.find.trim();
     const pairs = mainFind ? [Object.freeze({ find: mainFind, replace: entry.replace, isMain: true })] : [];
     const keywordPairs = mainFind ? [Object.freeze({ find: mainFind, replace: entry.replace, isMain: true })] : [];
-    const seen = new Set(mainFind ? [mainFind.toLowerCase()] : []);
+    const seen = new Set(mainFind ? [JSON.stringify([mainFind.toLowerCase(), entry.replace])] : []);
     for (const rawAlt of Array.isArray(raw.alts) ? raw.alts : []) {
       yield;
       if (!rawAlt || typeof rawAlt !== 'object') continue;
       const alt = { _id: rawAlt._id, find: String(rawAlt.find ?? ''), replace: String(rawAlt.replace ?? entry.replace) };
       entry.alts.push(Object.freeze(alt));
-      const find = alt.find.trim(), key = find.toLowerCase();
+      const find = alt.find.trim(), key = JSON.stringify([find.toLowerCase(), alt.replace]);
       if (!find || seen.has(key)) continue;
       seen.add(key);
       pairs.push(Object.freeze({ _id: alt._id, find, replace: alt.replace, isMain: false }));

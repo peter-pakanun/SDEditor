@@ -139,11 +139,33 @@ test('ready snapshot metadata remains immutable and includes all matched alterna
   assert.equal(result.units[0].HLs[0].replace, 'ไฟ');
   assert.equal(result.entriesById.fire.tlnote, 'Old note');
   assert.equal(result.entriesById.fire.alts[1].replace, 'เผา');
-  assert.equal(result.entriesById.fire._pairs.length, 2);
+  assert.equal(result.entriesById.fire._pairs.length, 3);
   assert.ok(Object.isFrozen(result.entriesById.fire));
   assert.ok(Object.isFrozen(result.entriesById.fire.alts[1]));
   assert.ok(Object.isFrozen(result.entriesById.fire._pairs[0]));
   assert.ok(Object.isFrozen(result.entriesById.fire._pairs[1]));
+});
+
+test('same-Find grammatical translations survive snapshot normalization without duplicate suggestions', () => {
+  const entry = { _id: 'increased', find: 'increased', replace: 'erhöhte', alts: [
+    { _id: 'masculine', find: 'increased', replace: 'erhöhter' },
+    { _id: 'neuter', find: 'increased', replace: 'erhöhtes' },
+    { _id: 'duplicate', find: ' increased ', replace: 'erhöhter' },
+    { _id: 'main-duplicate', find: 'increased', replace: 'erhöhte' },
+    { _id: 'empty', find: '', replace: 'ignored' },
+  ] };
+  const expected = ['erhöhte', 'erhöhter', 'erhöhtes'];
+  assert.deepEqual(matching.getDefinitionPairs(entry).map(pair => pair.replace), expected);
+  const keywordDefinitions = vm.runInContext('getDictEntryDefinitionsWithMeta', engineContext);
+  assert.deepEqual(Array.from(keywordDefinitions(entry), pair => pair.replace), expected);
+  const snapshot = drain(matching.buildSnapshot([entry], 'poe1', 1));
+  assert.deepEqual(snapshot.entriesById.get(entry._id)._pairs.map(pair => pair.replace), expected);
+  assert.deepEqual(snapshot.active[0].keywordPairs.map(pair => pair.replace), expected);
+  const result = drain(matching.matchSnapshot(snapshot, [{ english: '{0}% increased Damage while Blind [increased]' }]));
+  assert.deepEqual(result.units[0].HLs.filter(hl => hl.dictId).map(hl => [hl.find, hl.replace]), [
+    ['increased', 'erhöhte'], ['[increased]', '[increased|erhöhte]'],
+  ], 'Overlapping alternatives keep one highlight and the main default replacement.');
+  assert.deepEqual(result.entriesById.increased._pairs.map(pair => pair.replace), expected);
 });
 
 test('plain main and alternate definitions with HTML characters use source text and safe escaped coordinates', () => {

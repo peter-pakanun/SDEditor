@@ -5,7 +5,11 @@
     else root.ClientTextState = api;
 })(typeof globalThis === 'object' ? globalThis : self, function () {
     'use strict';
-    const FORMAT = 'clienttext-v1', PARSER_VERSION = 'clienttext-v1';
+    const FORMAT = 'clienttext-v1', PARSER_VERSION = 'clienttext-v2';
+    const PARSER_VERSIONS = Object.freeze(['clienttext-v1', PARSER_VERSION]);
+    const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
+        'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
+    const isClassForm = field => CLASS_FORMS.includes(typeof field === 'string' ? field : field?.kind === 'form' ? field.form : null);
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const copy = value => value === undefined || value === null || typeof value === 'string' || typeof value === 'boolean' ? value : JSON.parse(JSON.stringify(value));
     function canonical(value) {
@@ -152,7 +156,9 @@
             const asset = Array.isArray(assets) ? assets.find(value => value.role === role) : assets[role];
             const assetHash = asset?.hash || asset?.assetHash || '';
             if (!hex(assetHash)) throw new TypeError('Missing ClientText original asset SHA-256 for ' + role + '.');
-            const descriptor = { format: FORMAT, role, assetHash, parserVersion: PARSER_VERSION,
+            const parserVersion = asset.parserVersion || asset.parsed?.parserVersion || PARSER_VERSION;
+            if (!PARSER_VERSIONS.includes(parserVersion)) throw new TypeError('Unsupported ClientText parser version: ' + parserVersion + '.');
+            const descriptor = { format: FORMAT, role, assetHash, parserVersion,
                 root: levels[levels.length - 1][0], unitCount: roleUnits.length };
             if (asset.schemaHash) descriptor.schemaHash = asset.schemaHash;
             descriptor.baselineId = hash(descriptor);
@@ -177,7 +183,7 @@
         try {
             const compact = normalizeCompact(compactInput);
             if (stableStringify(compactUnit(input)) !== stableStringify(compact)) return false;
-            if (!descriptor || descriptor.format !== FORMAT || descriptor.role !== compact.role || !hex(descriptor.root)
+            if (!descriptor || descriptor.format !== FORMAT || !PARSER_VERSIONS.includes(descriptor.parserVersion) || descriptor.role !== compact.role || !hex(descriptor.root)
                 || !Number.isSafeInteger(descriptor.unitCount) || descriptor.unitCount < 1 || !proof
                 || !Number.isSafeInteger(proof.index) || proof.index < 0 || proof.index >= descriptor.unitCount || !Array.isArray(proof.siblings)) return false;
             let current = leafHash(compact.id, compact.hash), index = proof.index, count = descriptor.unitCount, depth = 0;
@@ -211,6 +217,7 @@
         return Object.fromEntries(unit.fields.map(field => [field.id, own(saved?.values, field.id) ? saved.values[field.id] : field.target]));
     }
     const isAbsent = (field, value) => !!field.required && !audioOnly(field.source) && !String(value ?? '').trim();
+    const needsSourceReview = (field, value) => field.kind !== 'form' || !!field.required || !!field.outdated || !!String(value ?? '').trim();
     function statusFor(unit, saved = null) {
         const values = valuesFor(unit, saved), reviewed = saved?.reviewed || {}, fields = {}, savedPresent = !!saved && saved.saved !== false;
         for (const field of unit.fields) {
@@ -245,7 +252,7 @@
             if (!sourceChanged && previousSaved?.reviewed?.[field.id] === sourceHash(old.source)) reviewed[field.id] = sourceHash(field.source);
         }
         for (const field of previousUnit.fields) if (!nextUnit.fields.some(next => next.id === field.id)) removed.push({ field: copy(field), value: previous[field.id] });
-        const outdated = nextUnit.fields.filter(field => before.has(field.id) && !audioOnly(field.source)
+        const outdated = nextUnit.fields.filter(field => before.has(field.id) && !audioOnly(field.source) && needsSourceReview(field, values[field.id])
             && canonicalSource(before.get(field.id).source) !== canonicalSource(field.source)).map(field => field.id);
         return { values, reviewed, outdated, conflicts, removed, saved: !!previousSaved && previousSaved.saved !== false, dropped: [] };
     }
@@ -363,7 +370,7 @@
         if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
-    return { FORMAT, PARSER_VERSION, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
+    return { FORMAT, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        normalizeValues, normalizeReviewed, valuesFor, statusFor, counts, carryForward, tokenize, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

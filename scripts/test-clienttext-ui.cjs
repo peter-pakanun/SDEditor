@@ -698,6 +698,131 @@ function keyboardHarness(original=worksheetUnit(),changes={}){
         stopPropagation(){this.propagationStopped=true;}});
     return {...h,inputFor,inputs,event,focuses,row,region,controls,documentControls};
 }
+
+const CLASS_VARIANT_FORMS=['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
+    'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb'];
+function classVariantUnit(id='ClassVariants',row=2){
+    const original=namedUnit(id),base=original.fields[0],source='English [Keyword] {0}\nraw@literal\\n';
+    original.role='gender';original.id=JSON.stringify(['gender','NPCTextAudio_Gender',id]);original.sheet='NPCTextAudio_Gender';
+    original.fields=['MS','FS',...CLASS_VARIANT_FORMS].map((form,index)=>({...base,id:JSON.stringify(['Text',form]),name:'Text',kind:'form',form,group:'Text',
+        source,target:form==='MS'?'Default [Keyword] {0}':form==='FS'?'Default feminine [Keyword] {0}':form==='StrFourb'?'Populated [Keyword] {0}':form==='DexFourb'?'Other [Keyword] {0}':'',
+        required:form==='MS'||form==='FS'||form==='IntFourb',originalMissing:form==='IntFourb',outdated:form==='StrFourb',sourceCell:'C'+row,
+        targetCell:String.fromCharCode(68+index)+row}));return original;
+}
+
+test('class variants use one raw English group, populated tabs and collapsed defaults without changing standard forms',async()=>{
+    const original=classVariantUnit(),snapshot=clone(original),{app}=keyboardHarness(original,{ctSelection:'',ctValues:{}});
+    assert.equal(await app.ctSelect(original,false),true);const group=app.ctFieldGroups[0];
+    assert.equal(app.ctGroupSources(group).length,1);assert.equal(app.ctGroupSources(group)[0].text,original.fields[0].source);
+    assert.deepEqual(Array.from(app.ctClassFields(group),field=>field.form),CLASS_VARIANT_FORMS);
+    assert.deepEqual(Array.from(app.ctDefaultForms(group),field=>field.form),['MS','FS']);assert.equal(app.ctDefaultsOpen(group),false);
+    assert.deepEqual(Array.from(app.ctPopulatedVariants(group),field=>field.form),['StrFourb','DexFourb']);
+    assert.equal(app.ctSelectedVariant(group).form,'StrFourb');assert.equal(app.ctFocusedField,app.ctSelectedVariant(group).id);
+    assert.deepEqual(Array.from(app.ctTargetInputs(),input=>input.dataset.ctTarget),[app.ctSelectedVariant(group).id]);
+    assert.equal(app.ctDraftDirty,false);assert.deepEqual(original,snapshot);
+    const standard=keyboardHarness();assert.equal(standard.app.ctDefaultsOpen(standard.app.ctFieldGroups.find(group=>group.forms)),true);
+    assert.equal(standard.app.ctDisplayedFields().length,standard.app.ctFieldsFor().length);
+});
+
+test('per-ID variant selections retain exact blank choices and default expansion across full/inline and revisit, then fence by scope',async()=>{
+    const first=classVariantUnit('First'),second=classVariantUnit('Second',3),{app}=keyboardHarness(first,{ctUnits:[first,second],
+        _ctUnitIndex:new Map([[first.id,first],[second.id,second]])});app.ctInitializeVariants();
+    const group=app.ctFieldGroups[0],blank=group.fields.find(field=>field.form==='IntFour');
+    assert.equal(app.ctSelectVariant(group,blank.id,{focus:false}),true);assert.equal(app.ctSelectedVariant(group),blank);
+    assert.equal(app.ctToggleDefaults(group),true);assert.equal(app.ctDefaultsOpen(group),true);
+    assert.equal(await app.ctSelect(first,true,{focus:false}),true);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank);
+    assert.equal(await app.ctSelect(second,false,{focus:false}),true);assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),false);
+    assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]).form,'StrFourb');
+    assert.equal(await app.ctSelect(first,false,{focus:false}),true);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank);
+    assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),true);app.ctValues[blank.id]='\tcustom@literal\\n\n';app.ctValues[blank.id]='';
+    assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank,'clearing the selected cell never silently changes its variant');
+    const obsolete=app.ctFieldGroups[0];app.ctFence();assert.equal(Object.keys(app.ctVariantSelections).length,0);
+    assert.equal(Object.keys(app.ctDefaultsExpanded).length,0);assert.equal(app.ctSelectVariant(obsolete,blank.id),false);
+});
+
+test('hidden blank variants expose committed workload, missing/outdated facts and manual diagnostics through picker labels and summaries',()=>{
+    const {app}=keyboardHarness(classVariantUnit());app.ctInitializeVariants();const group=app.ctFieldGroups[0],
+        missing=group.fields.find(field=>field.form==='IntFourb'),optional=group.fields.find(field=>field.form==='IntFour'),
+        outdated=group.fields.find(field=>field.form==='StrFourb');
+    app.ctDiagnostics={[app.ctSelection]:[{fieldId:optional.id,severity:'warning',message:'Preserved manual finding'}]};
+    assert.equal(app.ctVariantLabel(missing),'IntFourb (blank) · Missing');
+    assert.equal(app.ctVariantLabel(optional),'IntFour (blank) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
+    assert.equal(app.ctVariantLabel(outdated),'StrFourb · Outdated');
+    assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Missing · 1 Outdated · 1 Warning');
+    const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});app.ctToggleDefaults(group);
+    assert.equal(app.ctDiagnostics,diagnostics,'display changes do not rerun or clear completed diagnostics');
+    app.ctFocusedField=group.fields[0].id;app.ctToggleDefaults(group);app.ctFocusSource(group,app.ctGroupSources(group)[0]);
+    assert.equal(app.ctPreviewField,optional,'English focus previews the active variant, not the hidden default');
+});
+
+test('class-field translation choices identify the exact form instead of repeating only the English heading',()=>{
+    const {app,window}=keyboardHarness(classVariantUnit()),group=app.ctFieldGroups[0],str=group.fields.find(field=>field.form==='StrFourb'),
+        dex=group.fields.find(field=>field.form==='DexFourb');
+    assert.equal(app.ctHistoryFieldLabel(str),'Text · StrFourb');assert.equal(app.ctHistoryFieldLabel(dex),'Text · DexFourb');
+    assert.match(window.ClientTextUI.fieldsComponent.template,/Translation choice · \{\{ host\.ctHistoryFieldLabel\(/);
+});
+
+for(const full of [false,true])test(`class variant ${full?'full':'inline'} Tab reveals every worksheet field in order and never focuses a hidden target`,async()=>{
+    const original=classVariantUnit(),{app,inputFor,event,focuses}=keyboardHarness(original,{ctEditor:full});app.ctInitializeVariants();
+    const group=app.ctFieldGroups[0],firstClass=app.ctClassFields(group)[0];let saves=0;app.ctSaveAndNavigate=()=>saves++;
+    app.ctSelectVariant(group,firstClass.id,{focus:false});inputFor(original,firstClass).focus();
+    const back=event(firstClass,'Tab',{shiftKey:true});await app.ctTargetKeydown(firstClass,back);
+    assert.equal(app.ctDefaultsOpen(group),true);assert.equal(focuses.at(-1).fieldId,original.fields[1].id);
+    for(let index=1;index<original.fields.length-1;index++){
+        const field=original.fields[index],next=original.fields[index+1];inputFor(original,field).focus();
+        const key=event(field,'Tab');await app.ctTargetKeydown(field,key);assert.equal(key.defaultPrevented,true);
+        assert.equal(focuses.at(-1).fieldId,next.id);assert.equal(app.ctDisplayedFields().includes(next),true);
+        assert.equal(app.ctTargetInputs().includes(inputFor(original,next)),true);
+        if(CLASS_VARIANT_FORMS.includes(next.form))assert.equal(app.ctSelectedVariant(group),next);
+    }
+    const hidden=firstClass,key=event(hidden,'Tab'),count=focuses.length;app.ctTargetKeydown(hidden,key);
+    assert.equal(key.defaultPrevented,undefined);assert.equal(focuses.length,count,'an obsolete hidden input cannot navigate the current editor');
+    assert.equal(saves,0);assert.equal(app.ctSelection,original.id);
+});
+
+test('delayed hidden-variant focus is fenced by scope, unit, selection run, overlay and newer focus',async()=>{
+    for(const changed of ['account','group','unit','run','overlay','focus']){
+        const original=classVariantUnit(),{app,window,inputFor,focuses}=keyboardHarness(original);app.ctInitializeVariants();
+        const callbacks=[];app.$nextTick=callback=>{callbacks.push(callback);return Promise.resolve();};
+        const group=app.ctFieldGroups[0],field=app.ctClassFields(group)[0],source=inputFor(original,app.ctSelectedVariant(group));source.focus();
+        assert.equal(app.ctSelectVariant(group,field.id),true);const before=focuses.length;
+        if(changed==='account')app.ctWorkspace={scope:{...scope,accountId:'other'}};
+        if(changed==='group')app.ctWorkspace={scope:{...scope,groupId:'other'}};
+        if(changed==='unit'){const next=classVariantUnit();app._ctUnitIndex=new Map([[next.id,next]]);}
+        if(changed==='run')app._ctSelectRun={};if(changed==='overlay')app.cloudHistoryVisible=true;
+        if(changed==='focus')window.document.activeElement={dataset:{},focus(){}};
+        for(const callback of callbacks)callback?.();assert.equal(focuses.length,before,changed);
+    }
+});
+
+test('class variant inline/full handoff keeps the selected raw field and exact caret while hidden values save atomically',async()=>{
+    const original=classVariantUnit(),f=fixture();await f.store.import(scope,{units:[original],assets:[{...asset,role:'gender'}]});
+    const {app,inputFor,event,focuses}=keyboardHarness(original);app._ctStore=f.store;app.ctInitializeVariants();app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    const group=app.ctFieldGroups[0],selected=group.fields.find(field=>field.form==='DexFourb'),hidden=group.fields.find(field=>field.form==='IntFour');
+    app.ctSelectVariant(group,selected.id,{focus:false});app.ctValues[selected.id]='raw@literal\\n\n[Keyword] {0}';
+    app.ctValues[hidden.id]='hidden@literal\\n\n[Keyword] {0}';app.ctDraftDirty=true;
+    const input=inputFor(original,selected);input.focus();input.setSelectionRange(2,6,'backward');
+    await app.ctTargetKeydown(selected,event(selected,'Enter',{ctrlKey:true}));assert.equal(app.ctEditor,true);
+    assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),selected);assert.equal(focuses.at(-1).fieldId,selected.id);
+    assert.equal(await app.ctCloseEditor(),true);assert.equal(app.ctEditor,false);assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,6);
+    assert.equal(await app.ctSave(),true);const saved=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id);
+    assert.equal(saved.values[selected.id],'raw@literal\\n\n[Keyword] {0}');assert.equal(saved.values[hidden.id],'hidden@literal\\n\n[Keyword] {0}');
+    assert.equal(Object.keys(saved.values).length,14);assert.deepEqual(history.at(-1).after.values,saved.values);
+    assert.equal((await f.store.getUnit(scope,original.id)).fields.find(field=>field.id===hidden.id).target,'');
+});
+
+test('selected class variants keep the existing keyword/variable completion, NONEXISTENT and preview context',async()=>{
+    const {app,inputFor,event}=keyboardHarness(classVariantUnit());app.ctInitializeVariants();
+    const group=app.ctFieldGroups[0],field=group.fields.find(field=>field.form==='IntFour');app.ctSelectVariant(group,field.id,{focus:false});
+    const input=inputFor(app.ctCurrentUnit,field);input.focus();app.ctQueueDraft=()=>{};
+    app.ctValues[field.id]='@literal\\n\n[';input.setSelectionRange(app.ctValues[field.id].length,app.ctValues[field.id].length);
+    assert.equal(app.ctSuggest(field,{target:input}),true);app.ctTargetKeydown(field,event(field,'Enter'));
+    assert.equal(app.ctValues[field.id],'@literal\\n\n[Keyword]');assert.equal(app.ctPreviewField,field);
+    assert.equal(app.ctReviewed[field.id],S.sourceHash(field.source));
+    app.ctValues[field.id]='NON';input.setSelectionRange(3,3);app.ctTargetKeydown(field,event(field,'Tab'));
+    assert.equal(app.ctValues[field.id],'NONEXISTENT');assert.equal(app.ctSelectedVariant(group),field);
+    assert.equal(app.ctPreviewField,field);assert.equal(app.ctDraftDirty,true);
+});
 test('Gender suggestions retain exact originals and opening inline/full editors never normalizes arbitrary metadata',async()=>{
     for(const value of ['-', ' ', '  custom\tvalue  ', 'NONEXISTENT', ' first\r\nsecond\n '])for(const full of [false,true]){
         const original=worksheetUnit('RawGender'),gender=original.fields.find(field=>field.kind==='gender');gender.target=value;
@@ -1161,6 +1286,29 @@ test('history restore creates an exact durable draft and retains only current fi
     assert.equal(await app.ctRestoreHistory(app.ctHistory.find(entry=>entry.id==='stale')),true);
     assert.deepEqual(clone(app.ctReviewed),{});
 });
+
+test('history restores hidden class variants as exact durable drafts without saving or changing display selections',async()=>{
+    const original=classVariantUnit(),hidden=original.fields.find(field=>field.form==='IntFour'),f=fixture(),
+        {app,mixin}=enableHistory(keyboardHarness(original));await f.store.import(scope,{units:[original],assets:[{...asset,role:'gender'}]});
+    const oldValues={...S.valuesFor(original),[hidden.id]:'Old@literal\\n\n[Keyword] {0}'},newValues={...oldValues,[hidden.id]:'New@literal\\n\n[Keyword] {0}'};
+    await f.store.save(scope,original.id,{jobId:'old',values:oldValues,reviewed:{[hidden.id]:S.sourceHash(hidden.source)}});
+    const saved=await f.store.save(scope,original.id,{jobId:'new',values:newValues,reviewed:{}});
+    app._ctStore=f.store;
+    // keyboardHarness substitutes a no-op checkpoint for navigation tests;
+    // restore exercises the actual durable command instead.
+    app.ctFlushDraft=mixin.methods.ctFlushDraft.bind(app);
+    app.ctSaved={[original.id]:saved.saved};app.ctValues=newValues;app.ctInitializeVariants();
+    const group=app.ctFieldGroups[0];app.ctSelectVariant(group,group.fields.find(field=>field.form==='StrFourb').id,{focus:false});
+    const selected=app.ctSelectedVariant(group);assert.notEqual(selected.id,hidden.id);
+    const outbox=clone(await f.store.getOutbox(scope)),history=clone(await f.store.listHistory(scope,original.id));
+    await app.ctLoadHistory();const entry=app.ctHistory.find(entry=>entry.after.values[hidden.id]===oldValues[hidden.id]);assert.ok(entry);
+    assert.equal(await app.ctRestoreHistory(entry),true);const draft=await f.store.getDraft(scope,original.id);
+    assert.equal(draft.values[hidden.id],oldValues[hidden.id]);assert.equal(draft.reviewed[hidden.id],S.sourceHash(hidden.source));
+    assert.equal(Object.keys(draft.values).length,original.fields.length);assert.equal(app.ctSelectedVariant(group).id,selected.id);
+    assert.equal(app.ctDefaultsOpen(group),false);assert.equal(app.ctDisplayedFields().includes(hidden),false);
+    assert.equal((await f.store.getSaved(scope))[original.id].values[hidden.id],newValues[hidden.id]);
+    assert.deepEqual(await f.store.getOutbox(scope),outbox);assert.deepEqual(await f.store.listHistory(scope,original.id),history);
+});
 test('history restore refuses stale rows and rechecks unit/account/group after draft preservation',async()=>{
     for(const changed of ['unit','account','group']){
         const {app,original}=enableHistory(harness()),held=deferred(),entered=deferred();
@@ -1439,6 +1587,23 @@ test('opening a workbook group refuses a different game or branch before cache/n
         app._cloud={async request(){reads++;return{group:{assets:[]}};}};app._ctWorker={async buildManifest(){return{descriptors:[]};}};
         await app.ctOpenGroup({id:scope.versionId,game:scope.game,branchId:scope.branchId,...changes},{id:scope.groupId,contentMode:'clienttext'},scope.language);
         assert.equal(reads,0);
+    }
+});
+
+test('published originals replay each accepted parser version instead of reinterpreting legacy manifests as class fields',async()=>{
+    for(const parserVersion of [undefined,'clienttext-v1','clienttext-v2']){
+        const {app,original}=harness(),version={id:scope.versionId,game:scope.game,branchId:scope.branchId},parsedWith=[],imports=[];
+        const descriptor={role:'normal',baselineId:'accepted-baseline',artifactHash:'verified',...(parserVersion?{parserVersion}:{})},
+            group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:scope.language,
+                assets:[{filename:'Thai_PoE2.xlsx',descriptor}]};
+        app.cloudCanAccessAllLanguages=true;app._ctStore={async listWorkspaces(){return[];},async import(captured,payload){imports.push({captured,payload});}};
+        app._cloud={async request(route){return route.endsWith('/original')?new Blob(['original bytes']):{group};}};
+        app._ctWorker={async parseWorkbook(bytes,options){parsedWith.push(options.parserVersion);return{units:[original],artifactHash:'verified',
+            filename:'Thai_PoE2.xlsx',parserVersion:options.parserVersion,sheets:[]};},async buildManifest(units,assets){return{descriptors:[descriptor]};}};
+        await app.ctOpenGroup(version,group,scope.language,false);
+        assert.deepEqual(parsedWith,[parserVersion || 'clienttext-v1']);assert.equal(imports.length,1);
+        assert.equal(imports[0].payload.assets[0].parsed.parserVersion,parserVersion || 'clienttext-v1');assert.equal(app.ctError,'');
+        assert.equal(app.ctWorkspace.scope.groupId,scope.groupId,'verification without activation keeps the current workspace');
     }
 });
 

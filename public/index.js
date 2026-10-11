@@ -2234,15 +2234,16 @@ const config = Vue.defineComponent({
       let normalizedAlts = Array.isArray(entry?.alts) ? entry.alts : [];
 
       let seen = new Set();
-      if (mainFind) seen.add(mainFind.toLowerCase());
+      if (mainFind) seen.add(JSON.stringify([mainFind.toLowerCase(), mainReplace]));
       for (const alt of normalizedAlts) {
         if (!alt || typeof alt !== "object") continue;
         let f = String(alt.find ?? "").trim();
         if (!f) continue;
-        let key = f.toLowerCase();
+        let replace = String(alt.replace ?? mainReplace);
+        let key = JSON.stringify([f.toLowerCase(), replace]);
         if (seen.has(key)) continue;
         seen.add(key);
-        pairs.push({ _id: alt._id, find: f, replace: String(alt.replace ?? mainReplace), isMain: false });
+        pairs.push({ _id: alt._id, find: f, replace, isMain: false });
       }
       return pairs;
     },

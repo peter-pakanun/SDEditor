@@ -531,6 +531,59 @@ test('changing Dictionary matching options during constructor yields retries bef
   }
 });
 
+test('German grammatical alternatives with the same Find remain selectable and editable in every editor layout', async () => {
+  const { editor, context, window } = loadEditor({ dictionary: [
+    { _id: 'increased', find: 'increased', replace: 'erhöhte', gameScope: 'poe1', tlnote: 'Choose the grammatical form.', alts: [
+      { _id: 'masculine', find: 'increased', replace: 'erhöhter' },
+      { _id: 'neuter', find: 'increased', replace: 'erhöhtes' },
+      { _id: 'duplicate', find: 'increased', replace: 'erhöhter' },
+    ] },
+    { _id: 'foreign', find: 'increased', replace: 'FOREIGN', gameScope: 'poe2', alts: [] },
+  ] });
+  context.Event = Event;
+  editor.descs = [description('german-alternatives', [
+    '{0}% increased Damage while Blind', 'increased@increased', 'increased\\nDamage', '[increased|increased]',
+  ], ['{0}%', 'left@right', 'draft\\nline', 'keyword draft'])];
+  try {
+    assert.equal(await editor.editFile(editor.descs[0].filepath), true, editor.editorLoadError);
+    for (const [index, columnIndex, values] of [
+      [0, 0, ['erhöhte', 'erhöhter', 'erhöhtes']],
+      [1, 0, ['erhöhte', 'erhöhter', 'erhöhtes']],
+      [1, 1, ['erhöhte', 'erhöhter', 'erhöhtes']],
+      [2, 0, ['erhöhte', 'erhöhter', 'erhöhtes']],
+      [3, 0, ['[increased|erhöhte]', '[increased|erhöhter]', '[increased|erhöhtes]']],
+    ]) {
+      const items = editor.buildHlPopupItems(index, columnIndex).filter(item => item.dictEntryId);
+      assert.deepEqual(Array.from(items, item => item.value), values);
+      assert.deepEqual(Array.from(items, item => item.dictAltId), ['', 'masculine', 'neuter']);
+      assert.ok(items.every(item => item.exactFromContext && !item.mustCreate && editor.canJumpToDictionaryFromHlPopupItem(item)));
+      const target = editor.getEditorColumn(editor.editorBlocks[index], columnIndex);
+      const input = {
+        value: '', selectionStart: 0, selectionEnd: 0, focus() {}, dispatchEvent() {},
+        setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+        setRangeText(text, start, end) { this.value = this.value.slice(0, start) + text + this.value.slice(end); },
+      };
+      editor.getEditorRef = kind => kind === 'translation' ? input : null;
+      for (let selectedIndex = 0; selectedIndex < items.length; selectedIndex++) {
+        input.value = ''; input.selectionStart = input.selectionEnd = 0;
+        editor.hlPopup.editorIndex = index; editor.hlPopup.columnIndex = columnIndex;
+        editor.hlPopup.filtered = items; editor.hlPopup.selectedIndex = selectedIndex; editor.hlPopup.visible = true;
+        assert.equal(editor.hlPopupTlnote, 'Choose the grammatical form.');
+        editor.hlPopupEnterAction();
+        await editor.$nextTick();
+        assert.equal(target.translation, values[selectedIndex], 'Enter inserts the selected form into the correct block or table column.');
+      }
+    }
+    let focused;
+    editor.focusDictionaryEntryReplaceInput = (id, options) => { focused = { id, altId: options?.altId }; };
+    const alternate = editor.buildHlPopupItems(0).find(item => item.dictAltId === 'neuter');
+    editor.hlPopup.filtered = [alternate]; editor.hlPopup.selectedIndex = 0;
+    editor.hlPopup.selectedTranslationText = '';
+    assert.equal(editor.hlPopupCtrlEnterAction(), true);
+    assert.deepEqual(focused, { id: 'increased', altId: 'neuter' });
+  } finally { window.DictionaryWorkerUI.mixin.beforeUnmount.call(editor); }
+});
+
 test('escaped Dictionary alternatives render in plain and table editors and option changes preserve editing context', async () => {
   const { editor, config, calls, document, window } = loadEditor({ dictionary: [
     { _id: 'special', find: 'SpecialTerms', replace: 'MAIN', alts: [

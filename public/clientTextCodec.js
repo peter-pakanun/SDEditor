@@ -9,13 +9,20 @@
 })(typeof globalThis === 'object' ? globalThis : self, function (root, XMLParser, State, JSZip) {
     'use strict';
     const VERSION = 1, RED = 'FA8072', ORANGE = 'FF9966';
+    const PARSER_VERSION = 'clienttext-v2', PARSER_VERSIONS = Object.freeze(['clienttext-v1', PARSER_VERSION]);
     const FILLS = { missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' };
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
+    const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
+        'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
     const NOTES = new Set(['Notes', 'Translation Note']);
     const METADATA = new Set(['Tags', 'ModType', 'StatMagnitude1 Stat', 'ModDomain', 'Generation Type', 'Character', 'Character Class']);
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const array = value => value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
     const error = (message, code = 'CLIENTTEXT_INVALID_WORKBOOK') => Object.assign(new Error(message), { code });
+    function parserVersion(value) {
+        if (!PARSER_VERSIONS.includes(value)) throw error('Unsupported ClientText parser version: ' + value + '.', 'CLIENTTEXT_UNSUPPORTED_PARSER');
+        return value;
+    }
     function local(node, name) {
         if (!node || typeof node !== 'object') return undefined;
         const keys = Object.keys(node).filter(key => key === name || !key.startsWith('@_') && key.split(':').pop() === name);
@@ -128,7 +135,7 @@
         if (type && !['n', 'str', 'b', 'e', 'd'].includes(type)) throw error('Unsupported worksheet cell type: ' + location + '.');
         return decodeExcel(raw);
     }
-    function layout(headers, sheet, warnings) {
+    function layout(headers, sheet, warnings, version) {
         const id = headers.filter(item => item.name === 'ID');
         if (id.length !== 1) throw error('Sheet ' + sheet + ' must contain exactly one ID column.');
         const used = new Set([id[0].column]), definitions = [], fieldIds = new Set(), gender = headers.filter(item => item.name === 'Gender');
@@ -136,7 +143,7 @@
         const at = new Map(headers.map(item => [item.column, item.name]));
         function add(sourceColumn, targetColumn, kind, form = null) {
             const heading = kind === 'gender' ? 'Gender' : at.get(sourceColumn);
-            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || NOTES.has(heading) || METADATA.has(heading)) {
+            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || (version === PARSER_VERSION && CLASS_FORMS.includes(heading)) || NOTES.has(heading) || METADATA.has(heading)) {
                 throw error('Cannot identify the English source for ' + sheet + '!' + letters(targetColumn) + '1.');
             }
             const fieldId = JSON.stringify([heading, form]);
@@ -154,6 +161,16 @@
                     throw error('Unsupported gender-form columns in sheet ' + sheet + ': ' + cluster.join(', ') + '. Expected MS/FS or MS/FS/NS/MP/FP/NP.', 'CLIENTTEXT_LAYOUT_CHANGED');
                 }
                 for (let offset = 0; offset < cluster.length; offset++) add(header.column - 1, header.column + offset, 'form', cluster[offset]);
+            } else if (version === PARSER_VERSION && CLASS_FORMS.includes(header.name)) {
+                // A class variant shares the nearest already identified English
+                // field. Unknown intervening headings could be another source;
+                // retain no guessed mapping when the source cluster is unclear.
+                const sources = definitions.filter(field => field.sourceColumn < header.column);
+                const sourceColumn = Math.max(0, ...sources.map(field => field.sourceColumn));
+                const unknown = headers.filter(item => item.column > sourceColumn && item.column < header.column && !used.has(item.column)
+                    && !CLASS_FORMS.includes(item.name) && !NOTES.has(item.name) && !METADATA.has(item.name) && item.name !== 'Gender');
+                if (!sourceColumn || unknown.length) throw error('Cannot unambiguously identify the English source for class variant ' + sheet + '!' + letters(header.column) + '1.', 'CLIENTTEXT_LAYOUT_CHANGED');
+                add(sourceColumn, header.column, 'form', header.name);
             }
         }
         if (!definitions.length) throw error('Sheet ' + sheet + ' has no recognized translation fields.', 'CLIENTTEXT_LAYOUT_CHANGED');
@@ -168,6 +185,7 @@
     }
     async function parseWorkbook(input, options = {}) {
         const bytes = await bytesOf(input), filename = String(options.filename || 'ClientText.xlsx'), role = options.role || (/gender/i.test(filename) ? 'gender' : 'normal'), language = String(options.language || '');
+        const version = parserVersion(options.parserVersion === undefined ? PARSER_VERSION : options.parserVersion);
         if (!/\.(xlsx|xlsm)$/i.test(filename) || !['normal', 'gender'].includes(role)) throw error('ClientText requires an .xlsx/.xlsm filename and normal/gender role.');
         const progress = options.onProgress || (() => {}), warnings = [], sheets = [], units = [];
         progress({ phase: 'opening', processed: 0, total: 1, percent: 0, sheet: '' });
@@ -223,7 +241,7 @@
                 if (value) headers.push({ column: number, name: value });
             }
             headers.sort((a, b) => a.column - b.column);
-            const schema = layout(headers, name, warnings), start = units.length;
+            const schema = layout(headers, name, warnings, version), start = units.length;
             if (local(sheet, 'conditionalFormatting') !== undefined) warnings.push({ code: 'CLIENTTEXT_CONDITIONAL_FORMATTING', sheet: name, message: 'Conditional formatting is preserved. Workload status uses direct cell fills; check any conditional Missing or Outdated colors before publishing.' });
             for (const merged of array(local(local(sheet, 'mergeCells'), 'mergeCell'))) {
                 const ref = attr(merged, 'ref'), match = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(ref || '');
@@ -262,7 +280,7 @@
         }
         const artifactHash = await rawHash(bytes);
         progress({ phase: 'complete', processed: sheets.length, total: sheets.length, percent: 100, sheet: sheets[sheets.length - 1]?.name || '' });
-        return { version: VERSION, filename, role, language, artifactHash, assetHash: artifactHash, format: macroEnabled ? 'xlsm' : 'xlsx', sheets, units, warnings };
+        return { version: VERSION, parserVersion: version, filename, role, language, artifactHash, assetHash: artifactHash, format: macroEnabled ? 'xlsm' : 'xlsx', sheets, units, warnings };
     }
     function savedRecords(saved) {
         if (saved instanceof Map) return saved;
@@ -334,7 +352,7 @@
             const opening = /^<[^>]+>/.exec(rowXml)[0], rowAttrs = startTagAttrs(opening), editsForRow = rowEdits.get(Number(rowAttrs.r));
             if (!editsForRow) return rowXml;
             const prefix = /^<([\w.-]+:)?row/.exec(opening)[1] || '', replacements = [];
-            const cellPattern = /<((?:[\w.-]+:)?c)\b[^>]*(?:\/>|>[\s\S]*?<\/\1\s*>)/g;
+            const cellPattern = /<((?:[\w.-]+:)?c)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/g;
             for (const match of rowXml.matchAll(cellPattern)) {
                 const raw = match[0], start = /^<[^>]+>/.exec(raw)[0], cellAttrs = startTagAttrs(start), edit = editsForRow.get(cellAttrs.r);
                 if (edit) {
@@ -371,6 +389,12 @@
         const progress = options.onProgress || (() => {});
         progress({ phase: 'verifying original', processed: 0, total: 1, percent: 0, sheet: '' });
         if (parsed?.version !== VERSION || await rawHash(bytes) !== parsed.artifactHash) throw error('The workbook original does not match its parsed baseline.');
+        // Older cached snapshots have no parserVersion and retain their exact
+        // v1 fields/metadata. An export must never promote their interpretation.
+        const version = parserVersion(parsed.parserVersion ?? parsed.descriptor?.parserVersion ?? 'clienttext-v1');
+        for (const declared of [parsed.parserVersion, parsed.descriptor?.parserVersion, options.parserVersion, options.descriptor?.parserVersion]) {
+            if (declared !== undefined && parserVersion(declared) !== version) throw error('The export parser version does not match its parsed baseline.', 'CLIENTTEXT_PARSER_MISMATCH');
+        }
         const zip = await open(bytes), saved = savedRecords(savedInput), units = new Map(parsed.units.map(unit => [unit.id, unit])), editsBySheet = new Map();
         let styles = null;
         for (const [unitId, record] of saved) {
@@ -408,5 +432,5 @@
         progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' });
         return result;
     }
-    return { VERSION, FORMS, FILLS, parseWorkbook, exportWorkbook };
+    return { VERSION, PARSER_VERSION, PARSER_VERSIONS, FORMS, CLASS_FORMS, FILLS, parseWorkbook, exportWorkbook };
 });

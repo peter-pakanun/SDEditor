@@ -20,6 +20,9 @@
     const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
+    const classForms = new Set(['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
+        'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb']);
+    const isClassField = field => field.kind === 'form' && classForms.has(field.form);
     function genderRawOffset(value,offset) {
         let raw=0,shown=0;while(raw<value.length && shown<offset){raw+=value[raw]==='\r' && value[raw+1]==='\n'?2:1;shown++;}return raw;
     }
@@ -66,6 +69,7 @@
             ctSheet: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false, ctIncludeConsistency: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
+            ctVariantSelections: {}, ctDefaultsExpanded: {},
             ctBusy: false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
@@ -558,7 +562,8 @@
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
-                this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this.ctInlineClosed=false;
+                this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this.ctInlineClosed=false;
+                this.ctVariantSelections={};this.ctDefaultsExpanded={};
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
@@ -608,10 +613,89 @@
             ctTone(unit) { const s = this.ctStatus(unit); return s.missing ? 'missing' : s.outdated ? 'outdated' : s.revised ? 'revised' : s.saved ? 'saved' : ''; },
             ctStatusLabel(unit) { const s = this.ctStatus(unit); return ['Missing', 'Outdated', 'Revised', 'Saved'].filter(label => s[label.toLowerCase()]).join(' · ') || 'Unchanged'; },
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
+            ctClassFields(group) { return group.fields.filter(isClassField); },
+            ctDefaultForms(group) { return group.fields.filter(field=>field.kind==='form' && !isClassField(field)); },
+            ctVariantKey(group,unit=this.ctCurrentUnit) { return JSON.stringify([unit?.id,group.key]); },
+            ctSelectedVariant(group,unit=this.ctCurrentUnit) {
+                const fields=this.ctClassFields(group),selected=this.ctVariantSelections[this.ctVariantKey(group,unit)],
+                    values=unit===this.ctCurrentUnit ? this.ctValues : this.ctValuesFor(unit);
+                return fields.find(field=>field.id===selected) || fields.find(field=>String(values[field.id] ?? '').trim()) || fields[0] || null;
+            },
+            ctPopulatedVariants(group) { return this.ctClassFields(group).filter(field=>String(this.ctValues[field.id] ?? '').trim()); },
+            ctDefaultsOpen(group,unit=this.ctCurrentUnit) { return !this.ctClassFields(group).length || !!this.ctDefaultsExpanded[this.ctVariantKey(group,unit)]; },
+            ctInitializeVariants(unit=this.ctCurrentUnit) {
+                for(const group of groupFields({fields:this.ctFieldsFor(unit)})){
+                    const fields=this.ctClassFields(group),key=this.ctVariantKey(group,unit);if(!fields.length)continue;
+                    if(!fields.some(field=>field.id===this.ctVariantSelections[key]))
+                        this.ctVariantSelections[key]=this.ctSelectedVariant(group,unit).id;
+                }
+            },
+            ctDisplayedFields(unit=this.ctCurrentUnit) {
+                return groupFields({fields:this.ctFieldsFor(unit)}).flatMap(group=>{
+                    if(!this.ctClassFields(group).length)return group.fields;
+                    const selected=this.ctSelectedVariant(group,unit);
+                    return group.fields.filter(field=>isClassField(field) ? field===selected : this.ctDefaultsOpen(group,unit));
+                });
+            },
+            ctVariantGroupCurrent(group) {
+                return !this.ctKeyboardBlocked() && group.fields.length && group.fields.every(field=>this.ctFieldsFor().includes(field));
+            },
+            ctSelectVariant(group,fieldId,{focus=true}={}) {
+                if(!this.ctVariantGroupCurrent(group) || !this.ctClassFields(group).some(field=>field.id===fieldId))return false;
+                this.ctVariantSelections[this.ctVariantKey(group)]=fieldId;this.ctCloseCompletion();
+                if(focus)return this.ctFocusTarget(false,fieldId);
+                this.ctFocusedField=fieldId;return true;
+            },
+            ctVariantTabKeydown(group,field,event) {
+                if(event.defaultPrevented || event.isComposing || event.keyCode===229 || event.ctrlKey || event.altKey || event.metaKey
+                    || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key) || !this.ctVariantGroupCurrent(group))return false;
+                const fields=this.ctPopulatedVariants(group),index=fields.indexOf(field);if(index<0)return false;
+                const next=event.key==='Home'?0:event.key==='End'?fields.length-1:(index+(event.key==='ArrowRight'?1:-1)+fields.length)%fields.length;
+                event.preventDefault();event.stopPropagation?.();return this.ctSelectVariant(group,fields[next].id);
+            },
+            ctToggleDefaults(group) {
+                if(!this.ctVariantGroupCurrent(group) || !this.ctClassFields(group).length)return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,key=this.ctVariantKey(group),open=!this.ctDefaultsOpen(group);this.ctDefaultsExpanded[key]=open;
+                if(!open && this.ctDefaultForms(group).some(field=>field.id===this.ctFocusedField))
+                    this.ctFocusedField=this.ctSelectedVariant(group)?.id || '';
+                this.ctCloseCompletion();this.$nextTick?.(()=>{if(this.ctCurrent(ctx) && this.ctCurrentUnit===unit)this.ctRefreshLayout();});return true;
+            },
+            ctVariantFacts(field) {
+                const status=this.ctFieldStatus(field),issues=(this.ctDiagnostics[this.ctSelection] || []).filter(issue=>issue.fieldId===field.id);
+                return {missing:!!status.missing,outdated:!!status.outdated,error:issues.some(issue=>issue.severity==='error'),
+                    warning:issues.some(issue=>issue.severity==='warning'),workload:!!field.originalMissing || !!field.outdated
+                        || (this.ctSaved[this.ctSelection]?.outdated || []).includes(field.id)};
+            },
+            ctVariantLabel(field) {
+                const facts=this.ctVariantFacts(field),labels=['Missing','Outdated','Error','Warning'].filter(name=>facts[name.toLowerCase()]);
+                return field.form+(String(this.ctValues[field.id] ?? '').trim()?'':' (blank)')+(labels.length?' · '+labels.join(' · '):'');
+            },
+            ctVariantSummary(fields) {
+                const facts=fields.map(field=>this.ctVariantFacts(field)),labels=[];
+                for(const name of ['Workload','Missing','Outdated','Error','Warning']){
+                    const count=facts.filter(fact=>fact[name.toLowerCase()]).length;if(count)labels.push(count+' '+name);
+                }
+                return labels.join(' · ');
+            },
+            ctRevealTarget(field) {
+                const group=groupFields({fields:this.ctFieldsFor()}).find(group=>group.fields.includes(field));
+                if(!group || !this.ctClassFields(group).length)return false;
+                const key=this.ctVariantKey(group);
+                if(isClassField(field)){
+                    const changed=this.ctSelectedVariant(group)!==field;this.ctVariantSelections[key]=field.id;return changed;
+                }
+                const changed=!this.ctDefaultsOpen(group);this.ctDefaultsExpanded[key]=true;return changed;
+            },
             ctGroupSources(group) {
                 const sources=new Map();for(const field of group.fields){const text=String(field.source ?? ''),item=sources.get(text);
                     if(item)item.names.push(field.form || field.name);else sources.set(text,{key:field.id,text,names:[field.form || field.name]});}
                 return [...sources.values()].map(item=>({...item,label:sources.size>1?item.names.join(' / '):group.name}));
+            },
+            ctFocusSource(group,source) {
+                const displayed=this.ctDisplayedFields(),matches=field=>field.source===source.text && displayed.includes(field),
+                    current=group.fields.find(field=>field.id===this.ctFocusedField && matches(field)),
+                    selected=this.ctSelectedVariant(group);
+                this.ctFocusedField=(current || (selected && matches(selected) ? selected : group.fields.find(matches)))?.id || source.key;
             },
             ctNotes(unit = this.ctCurrentUnit) { return (Array.isArray(unit?.developerNotes) ? unit.developerNotes : unit?.developerNotes ? [unit.developerNotes] : []).map(note => typeof note === 'string' ? note : note.text || note.value || '').filter(Boolean); },
             ctReport(progress) { this.ctProgress = { ...this.ctProgress, ...progress, completed: progress.completed ?? progress.processed ?? this.ctProgress?.completed ?? 0 }; },
@@ -700,11 +784,12 @@
                 this.ctSelection = unit.id; this.ctEditor = run.full;this.ctInlineClosed=false;this._ctInlineReturn=null; this.ctLookup = ''; this.ctCompletion=null;this.ctCommentText='';this.ctCommentGlobal=false;
                 if(run.full && this.ctTool==='preview')this.ctTool='dictionary';
                 this.ctPreviewGggVars={};
-                this.ctFocusedField=this.ctTabFields(unit)[0]?.id || '';
                 this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;
                 if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true; }
+                this.ctInitializeVariants(unit);const displayed=this.ctDisplayedFields(unit);
+                this.ctFocusedField=this.ctTabFields(unit).find(field=>displayed.includes(field))?.id || '';
                 this.ctResetHistory(); this.ctComments = [];
                 this.ctLoadHistory(ctx, unit.id); this.ctLoadComments(ctx, unit.id); this.ctPresence(ctx);
                 this.ctLoadCommentDraft(ctx,unit.id);
@@ -716,22 +801,36 @@
                 return region;
             },
             ctTargetInputs() {
-                const inputs=[...(this.ctEditorElement()?.querySelectorAll?.('[data-ct-target]') || [])];
+                const inputs=[...(this.ctEditorElement()?.querySelectorAll?.('[data-ct-target]') || [])],displayed=this.ctDisplayedFields();
                 return this.ctTabFields().map(field=>inputs.find(input=>input.dataset.ctTarget===field.id))
-                    .filter(input=>input && input.isConnected!==false && !input.disabled && !input.closest?.('[inert]'));
+                    .filter(input=>input && displayed.some(field=>field.id===input.dataset.ctTarget) && input.isConnected!==false
+                        && !input.disabled && !input.closest?.('[inert]') && (!input.getClientRects || input.getClientRects().length));
             },
             ctCaptureCaret(input) {
                 return Number.isInteger(input?.selectionStart) ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection} : null;
             },
             ctFocusTarget(last=false,fieldId=last?null:this.ctFocusedField,caret=null) {
-                const fields=this.ctTargetInputs(),field=fields.find(input=>input.dataset.ctTarget===fieldId) || fields[last?fields.length-1:0];
-                if(!field)return false;
-                this.ctFocusedField=field.dataset.ctTarget;field.focus?.();
-                if(caret && field.setSelectionRange){
-                    const length=String(field.value ?? '').length;
-                    field.setSelectionRange(Math.min(caret.start,length),Math.min(caret.end,length),caret.direction || 'none');
-                }
-                return true;
+                const fields=this.ctTabFields(),field=fields.find(field=>field.id===fieldId) || fields[last?fields.length-1:0];
+                if(!field || this.ctKeyboardBlocked())return false;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,selectionRun=this._ctSelectRun,full=this.ctEditor,
+                    run=this._ctFieldFocusRun={},changed=this.ctRevealTarget(field),active=root.document?.activeElement;
+                this.ctFocusedField=field.id;
+                const focus=()=>{
+                    if(this._ctFieldFocusRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selectionRun
+                        || this.ctEditor!==full || this.ctFocusedField!==field.id || this.ctKeyboardBlocked())return false;
+                    const input=this.ctTargetInputs().find(input=>input.dataset.ctTarget===field.id);if(!input)return false;
+                    input.focus?.();
+                    if(caret && input.setSelectionRange){const length=String(input.value ?? '').length;
+                        input.setSelectionRange(Math.min(caret.start,length),Math.min(caret.end,length),caret.direction || 'none');}
+                    return true;
+                };
+                if(!changed && focus())return true;
+                if(this.$nextTick){this.$nextTick(()=>{
+                    const nextActive=root.document?.activeElement;
+                    if(nextActive && nextActive!==active && nextActive!==root.document?.body && nextActive!==root.document?.documentElement)return;
+                    if(focus())this.ctRefreshLayout();
+                });return true;}
+                return false;
             },
             ctKeyboardOverlayOpen() {
                 return !!(root.AppDialogs?.isOpen
@@ -744,7 +843,7 @@
             },
             ctKeyboardTarget(field,input) {
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id),region=this.ctEditorElement();
-                if(!current || !this.ctTabFields().includes(current) || current.source!==field.source || current.kind!==field.kind
+                if(!current || !this.ctTabFields().includes(current) || !this.ctDisplayedFields().includes(current) || current.source!==field.source || current.kind!==field.kind
                     || current.targetCell!==field.targetCell || input?.dataset?.ctTarget!==field.id || input.isConnected===false
                     || input.disabled || input.closest?.('[inert]') || region?.contains && !region.contains(input))return false;
                 const row=input.closest?.('tr[data-unit-id]');
@@ -762,7 +861,8 @@
                         && input.isConnected!==false && !input.closest?.('[inert]') && (!input.getClientRects || input.getClientRects().length));
             },
             ctMoveFullTab(input,direction) {
-                const region=this.ctEditorElement(),targets=this.ctTargetInputs(),stops=[...targets,...this.ctFullTabControls()],index=stops.indexOf(input);
+                const region=this.ctEditorElement(),targets=this.ctTabFields(),stops=[...targets,...this.ctFullTabControls()],
+                    index=input.dataset?.ctTarget ? targets.findIndex(field=>field.id===input.dataset.ctTarget) : stops.indexOf(input);
                 if(index<0)return false;
                 let next=stops[index+direction];
                 if(!next){
@@ -773,6 +873,7 @@
                     if(inside.length)next=controls[(direction>0?Math.max(...inside):Math.min(...inside))+direction];
                 }
                 if(!next)return false;
+                if(targets.includes(next))return this.ctFocusTarget(false,next.id);
                 next.focus?.();return true;
             },
             ctFieldsKeydown(event) {
@@ -935,14 +1036,14 @@
                     event.preventDefault();event.stopPropagation?.();return this.ctOpenInlineFull(field,event.target);
                 }
                 if(event.key!=='Tab' || event.ctrlKey || event.altKey || event.metaKey)return;
-                const fields=this.ctTargetInputs(),index=fields.indexOf(event.target),direction=event.shiftKey?-1:1;
+                const fields=this.ctTabFields(),index=fields.findIndex(field=>field.id===event.target.dataset.ctTarget),direction=event.shiftKey?-1:1;
                 if(index<0)return;
                 if(this.ctEditor){
                     if(this.ctMoveFullTab(event.target,direction)){event.preventDefault();event.stopPropagation?.();}return;
                 }
                 event.preventDefault();event.stopPropagation?.();this.ctCloseCompletion();
                 const next=fields[index+direction];
-                if(next){next.focus?.();return true;}
+                if(next)return this.ctFocusTarget(false,next.id);
                 return this.ctSaveAndNavigate(direction<0,{inline:true,focusEnd:direction<0});
             },
             ctCloseCompletion() {this.ctCompletion=null;this._ctCompletionInput=null;},
@@ -1301,7 +1402,7 @@
             ctHistoryDisplay(value) { return this.ctHistoryWhitespace ? String(value).replace(/ /g, '·').replace(/\u00a0/g, '⍽').replace(/\t/g, '⇥\t').replace(/\n/g, '↵\n').replace(/\r/g, '␍') : value; },
             ctHistoryFieldLabel(field) {
                 const forms = { MS: 'Masculine singular', FS: 'Feminine singular', NS: 'Neuter singular', MP: 'Masculine plural', FP: 'Feminine plural', NP: 'Neuter plural' };
-                return field.name + (field.form ? ' · ' + (forms[field.form] || field.form) + ' (' + field.form + ')' : field.kind === 'gender' ? ' · Gender' : '');
+                return field.name + (field.form ? ' · ' + (forms[field.form] ? forms[field.form] + ' (' + field.form + ')' : field.form) : field.kind === 'gender' ? ' · Gender' : '');
             },
             ctOpenHistoryViewer() {
                 if (!this.ctCurrentUnit) return;
@@ -1394,7 +1495,7 @@
                         const role = descriptor.role;
                         const blob = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/' + encodeURIComponent(role) + '/original', { responseType: 'blob', timeout: 180000,signal:this._ctAbort.signal });
                         if (!current()) return;
-                        const parsed = await this._ctWorker.parseWorkbook(await blob.arrayBuffer(), { filename: descriptor.filename || descriptor.name, role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:descriptor.filename}) });
+                        const parsed = await this._ctWorker.parseWorkbook(await blob.arrayBuffer(), { filename: descriptor.filename || descriptor.name, role, language, parserVersion:descriptor.parserVersion || 'clienttext-v1', signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:descriptor.filename}) });
                         if ((descriptor.artifactHash || descriptor.hash) && parsed.artifactHash !== (descriptor.artifactHash || descriptor.hash)) throw new Error('The original workbook hash differs from the published manifest.');
                         for(const unit of parsed.units)units.push(unit); assets.push({ role, blob, hash: parsed.artifactHash, name: parsed.filename, parsed: { ...parsed, units: undefined } });
                     }
@@ -1626,7 +1727,7 @@
                     for(const asset of group.assets){
                         const blob=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(group.id)+'/assets/'+encodeURIComponent(asset.role)+'/original',{responseType:'blob',timeout:180000,signal});
                         current();
-                        const parsed=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:asset.filename,role:asset.role,language:prepared.language,signal:this._ctAbort.signal,onProgress:progress=>this.ctReport({...progress,workbook:'Previous '+asset.filename})});
+                        const parsed=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:asset.filename,role:asset.role,language:prepared.language,parserVersion:asset.descriptor?.parserVersion || 'clienttext-v1',signal:this._ctAbort.signal,onProgress:progress=>this.ctReport({...progress,workbook:'Previous '+asset.filename})});
                         if(parsed.artifactHash!==asset.artifactHash)throw new Error('The previous original hash differs from its accepted manifest.');
                         for(const unit of parsed.units)units.push(unit);assets.push({role:asset.role,blob,name:asset.filename,hash:parsed.artifactHash,parsed:{...parsed,units:undefined}});
                     }
@@ -1751,7 +1852,7 @@
             <template v-if="side !== 'translation'">
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
-            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId)?.name }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
+            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
             </div></div>
             <section v-for="group in host.ctFieldGroups" :key="group.key" class="ctBlock editBlock" :class="{inlineFileBlock:side !== 'both',ctFormBlock:group.forms}" :data-field-group="group.key" :data-inline-block="side !== 'both' ? 'field:'+group.key : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
                 <h3 v-if="side === 'both'">{{ group.name }}</h3>
@@ -1760,17 +1861,25 @@
                     <template v-if="group.fields.some(field=>field.kind !== 'gender' || field.source)">
                     <div v-for="source in host.ctGroupSources(group)" :key="source.key" class="ctSourceBlock inputField">
                         <label v-if="side === 'both' || host.ctGroupSources(group).length > 1" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
-                        <div class="textHL editorTextField multiline"><textarea :value="source.text" :data-ct-source="source.key" @focus="host.ctFocusedField=source.key" readonly tabindex="-1" :aria-label="source.label+' English'" placeholder="English" lang="en" spellcheck="false" rows="1"></textarea></div>
+                        <div class="textHL editorTextField multiline"><textarea :value="source.text" :data-ct-source="source.key" @focus="host.ctFocusSource(group,source)" readonly tabindex="-1" :aria-label="source.label+' English'" placeholder="English" lang="en" spellcheck="false" rows="1"></textarea></div>
                     </div>
                     </template>
                 </div>
                 <div v-if="side !== 'source'" class="ctFieldTranslation">
-                <table v-if="group.forms" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="group.fields.some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
-                    <tr v-for="row in ['M','F','N'].filter(row => group.fields.some(field => field.form.startsWith(row)))" :key="row"><th>{{ row }}</th>
-                    <td v-for="number in (group.fields.some(field => ['MP','FP','NP'].includes(field.form)) ? ['S','P'] : ['S'])" :key="number">
+                <button v-if="host.ctClassFields(group).length && host.ctDefaultForms(group).length" type="button" class="ctDefaultFormsToggle" :aria-expanded="host.ctDefaultsOpen(group)" @click="host.ctToggleDefaults(group)"><span>{{ host.ctDefaultsOpen(group) ? '▾' : '▸' }} Default forms · {{ host.ctDefaultForms(group).map(field=>field.form).join(' / ') }}</span><small v-if="host.ctVariantSummary(host.ctDefaultForms(group))">{{ host.ctVariantSummary(host.ctDefaultForms(group)) }}</small></button>
+                <table v-if="group.forms && host.ctDefaultForms(group).length && host.ctDefaultsOpen(group)" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
+                    <tr v-for="row in ['M','F','N'].filter(row => host.ctDefaultForms(group).some(field => field.form.startsWith(row)))" :key="row"><th>{{ row }}</th>
+                    <td v-for="number in (host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form)) ? ['S','P'] : ['S'])" :key="number">
                         <template v-if="host.ctForm(group,row+number)"><ct-target :host="host" :field="host.ctForm(group,row+number)" :compact="side !== 'both'"></ct-target></template><span v-else class="versionMuted">Unavailable</span>
                     </td></tr></tbody></table>
-                <template v-else><ct-target v-for="field in group.fields" :key="field.id" :host="host" :field="field" :compact="side !== 'both'"></ct-target></template>
+                <section v-if="host.ctClassFields(group).length" class="ctClassVariants" :data-variant-group="group.key">
+                    <div class="ctClassVariantsHeader"><strong>Class variants</strong><small>{{ host.ctPopulatedVariants(group).length }} populated / {{ host.ctClassFields(group).length }} available</small></div>
+                    <small v-if="host.ctVariantSummary(host.ctClassFields(group))" class="ctVariantSummary">{{ host.ctVariantSummary(host.ctClassFields(group)) }}</small>
+                    <div class="ctVariantTabs" role="tablist" aria-label="Populated class variants"><button v-for="field in host.ctPopulatedVariants(group)" :key="field.id" type="button" role="tab" :aria-label="field.form" :aria-selected="host.ctSelectedVariant(group)?.id === field.id" :tabindex="host.ctSelectedVariant(group)?.id === field.id ? 0 : -1" :class="{active:host.ctSelectedVariant(group)?.id === field.id,missing:host.ctVariantFacts(field).missing,outdated:host.ctVariantFacts(field).outdated}" :title="host.ctVariantLabel(field)" @click="host.ctSelectVariant(group,field.id)" @keydown="host.ctVariantTabKeydown(group,field,$event)">{{ field.form }}<span v-if="host.ctVariantFacts(field).missing || host.ctVariantFacts(field).outdated || host.ctVariantFacts(field).error || host.ctVariantFacts(field).warning" class="ctVariantDot" aria-hidden="true">●</span></button></div>
+                    <label class="ctVariantPicker">All variants<select :value="host.ctSelectedVariant(group)?.id" aria-label="All worksheet class variants" @change="host.ctSelectVariant(group,$event.target.value)"><option v-for="field in host.ctClassFields(group)" :key="field.id" :value="field.id">{{ host.ctVariantLabel(field) }}</option></select><small>{{ host.ctSelectedVariant(group)?.targetCell }}</small></label>
+                    <ct-target v-if="host.ctSelectedVariant(group)" :key="host.ctSelectedVariant(group).id" :host="host" :field="host.ctSelectedVariant(group)" :compact="side !== 'both'"></ct-target>
+                </section>
+                <template v-if="!group.forms"><ct-target v-for="field in group.fields" :key="field.id" :host="host" :field="field" :compact="side !== 'both'"></ct-target></template>
                 </div>
                 </div>
                 </div>

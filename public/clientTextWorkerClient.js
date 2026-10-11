@@ -67,7 +67,7 @@
             if (this.disposed || options.signal?.aborted) throw abortError();
             if (!this.worker) throw new Error('The ClientText workbook worker is unavailable.');
             const id = 'clienttext-' + (++this.counter), signal = options.signal;
-            const plainOptions = { filename: options.filename, role: options.role, language: options.language };
+            const plainOptions = { filename: options.filename, role: options.role, language: options.language, parserVersion: options.parserVersion };
             return new Promise((resolve, reject) => {
                 const abort = () => {
                     const request = this.pending.get(id);
@@ -104,7 +104,9 @@
         parseWorkbook(bytes, options) { return this.request('parseWorkbook', bytes, options); }
         buildManifest(units, assets = [], options) {
             const originals = Array.isArray(assets) ? assets : Object.entries(assets).map(([role, asset]) => ({ role, ...asset }));
-            const detached = { units: [], assets: originals.map(asset => ({ role: asset.role, hash: asset.hash || asset.assetHash, ...(asset.schemaHash ? { schemaHash: asset.schemaHash } : {}) })) };
+            const detached = { units: [], assets: originals.map(asset => ({ role: asset.role, hash: asset.hash || asset.assetHash,
+                parserVersion: asset.parserVersion || asset.parsed?.parserVersion,
+                ...(asset.schemaHash ? { schemaHash: asset.schemaHash } : {}) })) };
             if (!Transport.shouldStream(units)) { detached.units = plain(units); return this.request('buildManifest', undefined, options, detached); }
             return this.request('buildManifest', undefined, options, detached, [{ path: ['units'], values: units }]);
         }

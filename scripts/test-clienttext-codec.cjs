@@ -40,6 +40,117 @@ async function workbook({ replace = {}, macro = false, normal } = {}) {
 }
 const get = (parsed, record, sheetName = 'Normal') => parsed.units.find(unit => unit.recordId === record && unit.sheet === sheetName);
 const field = (unit, name, form = null) => unit.fields.find(item => item.id === JSON.stringify([name, form]));
+const classDialogue = () => sheet([
+    row(1, [cell('A1', 'ID'), cell('B1', 'Character Class'), cell('C1', 'Text'), cell('D1', 'MS'), cell('E1', 'FS'),
+        ...Codec.CLASS_FORMS.map((name, index) => cell(String.fromCharCode(70 + index) + '1', name)), cell('R1', 'Notes')]),
+    row(2, [cell('A2', 'dialogue'), cell('B2', 'Class metadata'), cell('C2', ' Raw [Tag|display] {0} @\\n\nsecond '),
+        cell('D2', 'Default masculine', 1), cell('E2', 'Default feminine', 1), empty('F2', 1), empty('G2', 2), empty('H2', 3),
+        cell('I2', ' @literal\\n raw\r\nactual\n\t ', 1), empty('J2', 1), cell('K2', 'NONEXISTENT', 1), cell('L2', 'Original class translation', 1),
+        ...['M', 'N', 'O', 'P', 'Q'].map(col => empty(col + '2', 1)), cell('R2', 'Actual developer note')]),
+]);
+
+test('v2 class dialogue variants are exact form identities with shared raw English and field-specific workload', async () => {
+    const parsed = await Codec.parseWorkbook(await workbook({ normal: classDialogue() }), { filename: 'German.xlsx', role: 'gender', language: 'German' });
+    const unit = get(parsed, 'dialogue');
+    assert.equal(parsed.parserVersion, 'clienttext-v2'); assert.equal(parsed.version, 1);
+    assert.deepEqual(Codec.CLASS_FORMS, State.CLASS_FORMS);
+    assert.equal(unit.fields.length, 14); assert.equal(unit.developerNotes, 'Actual developer note');
+    assert.deepEqual(unit.metadata, { 'Character Class': 'Class metadata' });
+    assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_METADATA_COLUMN'), false);
+    for (const [index, form] of Codec.CLASS_FORMS.entries()) {
+        const current = field(unit, 'Text', form);
+        assert.equal(current.kind, 'form'); assert.equal(current.form, form); assert.equal(current.group, 'Text'); assert.equal(current.name, 'Text');
+        assert.equal(current.source, ' Raw [Tag|display] {0} @\\n\nsecond '); assert.equal(current.sourceCell, 'C2');
+        assert.equal(current.targetCell, String.fromCharCode(70 + index) + '2');
+    }
+    assert.equal(field(unit, 'Text', 'StrFour').required, false);
+    assert.equal(field(unit, 'Text', 'IntFour').required, true); assert.equal(field(unit, 'Text', 'IntFour').originalMissing, true);
+    assert.equal(field(unit, 'Text', 'DexFour').required, false); assert.equal(field(unit, 'Text', 'DexFour').outdated, true);
+    assert.equal(field(unit, 'Text', 'DexFour').originalMissing, false);
+    assert.equal(field(unit, 'Text', 'StrDexFour').target, ' @literal\\n raw\r\nactual\n\t ');
+    assert.equal(field(unit, 'Text', 'StrIntFour').target, 'NONEXISTENT');
+    assert.equal(field(unit, 'Text', 'StrFourb').required, true);
+    assert.doesNotThrow(() => State.normalizeUnit(unit));
+});
+test('class identities survive safe moved columns, notes and multiple identified source groups', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('E1', 'Text'), cell('F1', 'MS'), cell('G1', 'FS'), cell('I1', 'Notes'), cell('L1', 'StrFourb')]),
+        row(2, [cell('A2', 'moved'), cell('B2', 'A separate name'), cell('C2', 'Nom', 1), cell('E2', 'Class dialogue source'), cell('F2', 'Default', 1), empty('G2', 1), cell('I2', 'Source note'), cell('L2', 'Class-specific target', 1)]),
+    ]);
+    const parsed = await Codec.parseWorkbook(await workbook({ normal }), { filename: 'German.xlsx' }), unit = get(parsed, 'moved'), current = field(unit, 'Text', 'StrFourb');
+    assert.equal(current.id, JSON.stringify(['Text', 'StrFourb'])); assert.equal(current.sourceCell, 'E2'); assert.equal(current.targetCell, 'L2');
+    assert.equal(current.source, 'Class dialogue source'); assert.equal(current.group, 'Text'); assert.equal(unit.developerNotes, 'Source note');
+    assert.equal(field(unit, 'Name').source, 'A separate name');
+    const moved = normal.replace('r="L1"', 'r="Q1"').replace('r="L2"', 'r="Q2"');
+    const shifted = field(get(await Codec.parseWorkbook(await workbook({ normal: moved }), { filename: 'German.xlsx' }), 'moved'), 'Text', 'StrFourb');
+    assert.equal(shifted.id, current.id); assert.equal(shifted.source, current.source); assert.equal(shifted.targetCell, 'Q2');
+});
+test('ambiguous class sources, duplicate identities, reserved sources and editable formulas are blocked', async () => {
+    const headers = [cell('A1', 'ID'), cell('C1', 'Text'), cell('D1', 'MS'), cell('E1', 'FS')];
+    const cases = [
+        [sheet([row(1, [...headers, cell('F1', 'New unpaired source'), cell('G1', 'StrFourb')]), row(2, [cell('A2', 'a'), cell('C2', 'English')])]), /unambiguously identify/],
+        [sheet([row(1, [...headers, cell('F1', 'StrFourb'), cell('G1', 'StrFourb')]), row(2, [cell('A2', 'a'), cell('C2', 'English')])]), /Duplicate source field/],
+        [sheet([row(1, [cell('A1', 'ID'), cell('B1', 'StrFourb'), cell('C1', 'Translation')]), row(2, [cell('A2', 'a'), cell('B2', 'Unsafe source')])]), /identify the English source/],
+        [sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Text'), cell('C1', 'StrFourb')]), row(2, [cell('A2', 'a'), cell('B2', 'Unidentified source')])]), /unambiguously identify/],
+    ];
+    for (const [normal, pattern] of cases) await assert.rejects(Codec.parseWorkbook(await workbook({ normal }), { filename: 'German.xlsx' }), pattern);
+    const original = classDialogue();
+    for (const normal of [original.replace(cell('C2', ' Raw [Tag|display] {0} @\\n\nsecond '), '<c r="C2"><f>1+1</f><v>2</v></c>'),
+        original.replace(cell('L2', 'Original class translation', 1), '<c r="L2" s="1"><f>1+1</f><v>2</v></c>')])
+        await assert.rejects(Codec.parseWorkbook(await workbook({ normal }), { filename: 'German.xlsx' }), /Formula/);
+    await assert.rejects(Codec.parseWorkbook(await workbook({ normal: original.replace('</worksheet>', '<mergeCells><mergeCell ref="L2:M2"/></mergeCells></worksheet>') }), { filename: 'German.xlsx' }), /Merged editable/);
+});
+test('class exports patch only the chosen target while retaining exact text, native parts and other cells', async () => {
+    const bytes = await workbook({ normal: classDialogue(), macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender' });
+    const unit = get(parsed, 'dialogue'), current = field(unit, 'Text', 'StrFourb'), authored = '=raw @\\n literal\r\nactual\n_x0020_ <continue> [Tag|display]';
+    const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: authored } } }, { parserVersion: 'clienttext-v2' });
+    const reopened = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'gender' }), result = get(reopened, 'dialogue');
+    assert.equal(field(result, 'Text', 'StrFourb').target, authored); assert.equal(field(result, 'Text', 'StrFourb').originalFill, 'D9D2E9');
+    for (const original of unit.fields) if (original.id !== current.id) assert.deepEqual(result.fields.find(item => item.id === original.id), original);
+    assert.equal(result.developerNotes, unit.developerNotes); assert.deepEqual(result.metadata, unit.metadata);
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
+        assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+    const omitTarget = text => text.replace(/<c\b[^>]*\br="L2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
+    assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')));
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
+});
+test('class workload fills distinguish optional blank, missing and reviewed outdated variants', async () => {
+    const bytes = await workbook({ normal: classDialogue() }), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsx' }), unit = get(parsed, 'dialogue');
+    const missing = field(unit, 'Text', 'IntFour'), outdated = field(unit, 'Text', 'DexFour'), optional = field(unit, 'Text', 'StrFour');
+    const records = { [unit.id]: { values: { [missing.id]: 'Filled class field', [outdated.id]: '', [optional.id]: 'NONEXISTENT' }, reviewed: { [outdated.id]: State.sourceHash(outdated.source) } } };
+    const exported = await Codec.exportWorkbook(bytes, parsed, records);
+    const result = get(await Codec.parseWorkbook(exported, { filename: 'German.xlsx' }), 'dialogue');
+    assert.equal(field(result, 'Text', 'IntFour').originalFill, 'D9D9D9'); assert.equal(field(result, 'Text', 'DexFour').originalFill, 'C6EFCE');
+    assert.equal(field(result, 'Text', 'StrFour').target, 'NONEXISTENT'); assert.equal(field(result, 'Text', 'StrFour').originalFill, 'D9D2E9');
+    assert.deepEqual(field(result, 'Text', 'StrDexFour'), field(unit, 'Text', 'StrDexFour'), 'Filling adjacent self-closing cells never consumes the next populated target');
+    const unresolved = get(await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [outdated.id]: 'Authored but unreviewed' } } }), { filename: 'German.xlsx' }), 'dialogue');
+    assert.equal(field(unresolved, 'Text', 'DexFour').originalFill, 'FF9966');
+});
+test('v1 snapshots replay their metadata authority and cannot silently export as v2', async () => {
+    const bytes = await workbook({ normal: classDialogue(), macro: true });
+    const options = { filename: 'German.xlsm', role: 'gender', parserVersion: 'clienttext-v1' }, legacy = await Codec.parseWorkbook(bytes, options), unit = get(legacy, 'dialogue');
+    assert.equal(legacy.parserVersion, 'clienttext-v1'); assert.equal(unit.fields.length, 2);
+    assert.equal(unit.metadata.StrFourb, 'Original class translation'); assert.equal(unit.metadata.IntFour, '');
+    assert.equal(legacy.warnings.filter(warning => warning.code === 'CLIENTTEXT_METADATA_COLUMN').length, 12);
+    const replay = await Codec.parseWorkbook(bytes, options); assert.deepEqual(replay.units, legacy.units);
+    const asset = { role: 'gender', hash: legacy.artifactHash, parserVersion: 'clienttext-v1' };
+    const first = await State.buildManifest(legacy.units, [asset]), repeated = await State.buildManifest(replay.units, [asset]);
+    assert.deepEqual(first.descriptors, repeated.descriptors); assert.equal(first.descriptors[0].parserVersion, 'clienttext-v1');
+    const oldSnapshot = { ...legacy }; delete oldSnapshot.parserVersion;
+    assert.deepEqual(await Codec.exportWorkbook(bytes, oldSnapshot, {}), bytes);
+    await assert.rejects(Codec.exportWorkbook(bytes, oldSnapshot, {}, { parserVersion: 'clienttext-v2' }), /parser version does not match/);
+    await assert.rejects(Codec.exportWorkbook(bytes, legacy, { [unit.id]: { values: { [JSON.stringify(['Text', 'StrFourb'])]: 'Not authorized by v1' } } }), /unknown field/);
+    const original = field(unit, 'Text', 'MS'), output = await Codec.exportWorkbook(bytes, legacy, { [unit.id]: { values: { [original.id]: 'Edited default translation' } } }, { parserVersion: 'clienttext-v1' });
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    assert.ok((await after.file('xl/worksheets/sheet1.xml').async('string')).includes(cell('L2', 'Original class translation', 1)));
+    assert.equal(get(await Codec.parseWorkbook(output, options), 'dialogue').metadata.StrFourb, unit.metadata.StrFourb);
+    assert.deepEqual(await after.file('xl/vbaProject.bin').async('uint8array'), await before.file('xl/vbaProject.bin').async('uint8array'));
+    const current = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender' });
+    await assert.rejects(Codec.exportWorkbook(bytes, current, {}, { parserVersion: 'clienttext-v1' }), /parser version does not match/);
+    await assert.rejects(Codec.parseWorkbook(bytes, { ...options, parserVersion: 'clienttext-v3' }), /Unsupported ClientText parser version/);
+    await assert.rejects(Codec.exportWorkbook(bytes, { ...legacy, parserVersion: 'clienttext-v3' }, {}), /Unsupported ClientText parser version/);
+});
 test('headers map notes, optional Gender and sparse forms without changing raw text', async () => {
     const bytes = await workbook(), progress = [];
     const parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx', role: 'gender', language: 'French', onProgress: value => progress.push(value) });
@@ -214,15 +325,16 @@ test('worker client forwards scoped progress and rejects/ignores cancelled respo
         terminate() { this.terminated = true; }
     }
     const client = WorkerClient.create({ Worker: FakeWorker }), progress = [], signal = new AbortController();
-    const pending = client.parseWorkbook(new Uint8Array([1]), { filename: 'French.xlsx', signal: signal.signal, onProgress: value => progress.push(value) });
+    const pending = client.parseWorkbook(new Uint8Array([1]), { filename: 'French.xlsx', parserVersion: 'clienttext-v1', signal: signal.signal, onProgress: value => progress.push(value) });
     await new Promise(resolve => setImmediate(resolve)); const worker = FakeWorker.instance, message = worker.messages[0];
+    assert.equal(message.options.parserVersion, 'clienttext-v1');
     worker.onmessage({ data: { type: 'progress', id: message.id, value: { sheet: 'A' } } }); assert.equal(progress.length, 1);
     signal.abort(); await assert.rejects(pending, { name: 'AbortError' });
     worker.onmessage({ data: { type: 'progress', id: message.id, value: { sheet: 'B' } } }); assert.equal(progress.length, 1);
     worker.onmessage({ data: { type: 'result', id: message.id, result: 'late' } });
-    const manifest = client.buildManifest([{ id: 'unit' }], [{ role: 'normal', hash: 'a'.repeat(64), blob: new Uint8Array([1]), parsed: { large: true } }]);
+    const manifest = client.buildManifest([{ id: 'unit' }], [{ role: 'normal', hash: 'a'.repeat(64), blob: new Uint8Array([1]), parsed: { large: true, parserVersion: 'clienttext-v1' } }]);
     await new Promise(resolve => setImmediate(resolve)); const request = worker.messages.at(-1);
-    assert.equal(request.type, 'buildManifest'); assert.deepEqual(request.assets, [{ role: 'normal', hash: 'a'.repeat(64) }]);
+    assert.equal(request.type, 'buildManifest'); assert.deepEqual(request.assets, [{ role: 'normal', hash: 'a'.repeat(64), parserVersion: 'clienttext-v1' }]);
     worker.onmessage({ data: { type: 'result', id: request.id, result: { format: 'clienttext-v1' } } }); assert.deepEqual(await manifest, { format: 'clienttext-v1' });
     client.dispose(); assert.equal(worker.terminated, true);
 });

@@ -7,8 +7,10 @@ const { pathToFileURL } = require('node:url');
 const { mkdtempSync, readFileSync, existsSync, rmSync, mkdirSync, writeFileSync, copyFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { createServer } = require('node:http');
+const { Readable } = require('node:stream');
 const { randomUUID, createHash } = require('node:crypto');
 const Codec = require('../public/clientTextCodec.js');
+const ClientState = require('../public/clientTextState.js');
 const StatCodec = require('../public/statDescCodec.js');
 const runtimeModules = 'C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
 const playwright = require(process.env.PLAYWRIGHT_MODULE_PATH || require.resolve('playwright', { paths: [runtimeModules] }));
@@ -69,7 +71,7 @@ const styles = `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Cali
 const genderAuditCases = [{ id: 'raw-dash', value: '-' }, { id: 'raw-space', value: ' ' }, { id: 'raw-custom', value: '  custom gender  ' },
     { id: 'raw-nonexistent', value: 'NONEXISTENT' }, { id: 'raw-multiline', value: ' first\r\nsecond\n ' },
     { id: 'draft-multiline', value: 'F' }, { id: 'paste-multiline', value: 'M' }, { id: 'shift-newline', value: 'N' }];
-async function workbook(JSZip, role, genderAudit = false) {
+async function workbook(JSZip, role, genderAudit = false, classSample = null) {
     const sheets = role === 'normal' ? [
         ['Normal', sheet([
             row(1, [cell('A1', 'ID'), cell('B1', 'Notes'), cell('C1', 'Name'), cell('D1', 'Translation'), cell('E1', 'Gender'), cell('G1', 'Description'), cell('H1', 'Translation')]),
@@ -92,7 +94,16 @@ async function workbook(JSZip, role, genderAudit = false) {
             row(3, [cell('A3', 'new-form'), cell('C3', 'New'), blank('D3', 2), blank('E3', 2), blank('F3', 1), blank('G3', 1), blank('H3', 1), blank('I3', 1)])
         ])],
         ['Nouns', sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Display Name'), cell('C1', 'Translation'), cell('D1', 'Gender')]), row(2, [cell('A2', 'noun'), cell('B2', 'Chest'), cell('C2', 'Coffre', 1), blank('D2', 2)])])],
-        ['Audio_Gender', sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Character Class'), cell('C1', 'Text'), cell('D1', 'MS'), cell('E1', 'FS')]), row(2, [cell('A2', 'two-form'), cell('B2', 'Fixture character'), cell('C2', 'Audio text'), cell('D2', 'Texte audio', 1), blank('E2', 1)])])]
+        ['Audio_Gender', sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Character Class'), cell('C1', 'Text'), cell('D1', 'MS'), cell('E1', 'FS')]), row(2, [cell('A2', 'two-form'), cell('B2', 'Fixture character'), cell('C2', 'Audio text'), cell('D2', 'Texte audio', 1), blank('E2', 1)])])],
+        ...(classSample ? [['NPCTextAudio_Gender', sheet([
+            row(1, [cell('A1', 'ID'), cell('B1', 'Character Class'), cell('C1', 'Text'), ...['MS','FS',...ClientState.CLASS_FORMS].map((form, index) => cell(String.fromCharCode(68 + index) + '1', form))]),
+            row(2, [cell('A2', classSample.recordId), cell('B2', classSample.character), cell('C2', classSample.source),
+                ...['MS','FS',...ClientState.CLASS_FORMS].map((form, index) => cell(String.fromCharCode(68 + index) + '2', classSample.values[form] || '', 1))]),
+            row(3, [cell('A3', 'variant-fixture'), cell('B3', 'Fixture metadata stays immutable'), cell('C3', '[keyword|Display] {0}\nSecond source line'),
+                cell('D3', 'Default masculine', 1), blank('E3', 1), cell('F3', '  German-style StrFour\nline  ', 1), blank('G3', 1), blank('H3', 2),
+                cell('I3', 'Mixed class', 1), blank('J3', 1), blank('K3', 1), cell('L3', 'Du hast die Laute gefunden.', 1), cell('M3', ' ', 1), blank('N3', 1), blank('O3', 1), blank('P3', 1), blank('Q3', 1)]),
+            row(4, [cell('A4', 'variant-next'), cell('B4', 'Second record'), cell('C4', '[keyword|Display] {0}'), cell('D4', 'Next default', 1), cell('F4', 'Next variant', 1), blank('L4', 1)])
+        ])]] : [])
     ];
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>');
@@ -127,9 +138,24 @@ async function run() {
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
-    const genderOnly = process.argv.includes('--gender-only'), normal = await workbook(JSZip, 'normal', genderOnly), gender = await workbook(JSZip, 'gender');
-    const files = [{ name: genderOnly ? 'German.xlsm' : 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
-        { name: genderOnly ? 'German_Gender.xlsm' : 'French_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }];
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = process.argv.includes('--class-variants-only');
+    let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
+    if (classOnly) {
+        const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
+        if (existsSync(source)) {
+            const bytes = readFileSync(source), parsed = await Codec.parseWorkbook(bytes, { filename: 'German_Gender.xlsm', role: 'gender' });
+            assert.equal(parsed.warnings.length, 0, 'Actual German class variant columns are recognized');
+            const sample = parsed.units.find(unit => unit.sheet === 'NPCTextAudio_Gender' && unit.recordId === 'UnaLuteQuestStart'); assert.ok(sample);
+            assert.equal(sample.fields.length, 14, 'German audio record retains two defaults and twelve class forms');
+            classSample = { recordId: sample.recordId, character: sample.metadata['Character Class'] || 'Una', source: sample.fields[0].source,
+                values: Object.fromEntries(sample.fields.map(field => [field.form, field.target])) };
+            classCorpus = { source, sha256: createHash('sha256').update(bytes).digest('hex'), units: parsed.units.length, warnings: parsed.warnings.length };
+            console.log('Class browser fixture: actual German sample verified, 68,484 IDs and zero warnings.');
+        }
+    }
+    const normal = await workbook(JSZip, 'normal', genderOnly), gender = await workbook(JSZip, 'gender', false, classSample);
+    const files = [{ name: genderOnly || classOnly ? 'German.xlsm' : 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
+        { name: genderOnly || classOnly ? 'German_Gender.xlsm' : 'French_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }];
     const statDescription = { filepath: 'specific_skill_stat_descriptions/explosive_grenade/fire.txt', filedir: 'specific_skill_stat_descriptions/explosive_grenade', filename: 'fire.txt', name: 'fire',
         stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], French: [''] } };
     const statArchive = new JSZip(); statArchive.file(statDescription.filepath, StatCodec.descEncode(statDescription), { createFolders: false });
@@ -154,6 +180,174 @@ async function run() {
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap();
+        if (classOnly) {
+            await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
+            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            const upload = page.getByRole('region', { name: 'Content upload' });
+            await upload.locator('input[type=text]').fill('Class variants browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click(); await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
+            const prepared = await page.evaluate(() => ({ warnings: window.__clientFixtureApp.ctPrepared[0].assets.flatMap(asset => asset.parsed.warnings),
+                versions: window.__clientFixtureApp.ctPrepared[0].manifest.descriptors.map(descriptor => descriptor.parserVersion) }));
+            assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v2','clienttext-v2'] });
+            await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
+            await page.getByRole('button', { name: 'Class variants browser fixture · ClientText · German', exact: true }).click();
+            const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
+            const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
+            await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
+            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'NPCTextAudio_Gender', exact: true }).click();
+            const id = record => JSON.stringify(['gender','NPCTextAudio_Gender',record]), fieldId = form => JSON.stringify(['Text',form]);
+            const target = form => workspace.getByRole('textbox', { name: 'Text ' + form, exact: true });
+            const picker = () => workspace.getByRole('combobox', { name: 'All worksheet class variants', exact: true });
+            const choose = async record => {
+                if (await page.evaluate(() => window.__clientFixtureApp.inlineEditor))
+                    await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: record, exact: true }) }).click({ position: { x: 5, y: 5 } });
+                else await workspace.getByRole('button', { name: record, exact: true }).click();
+                await page.waitForFunction(unitId => { const vm = window.__clientFixtureApp; return vm.ctSelection === unitId && !vm.ctBusy && !vm._ctSelectRun?.pending; }, id(record));
+            };
+            const active = async form => {
+                await page.waitForFunction(field => document.activeElement?.dataset.ctTarget === field, fieldId(form));
+                assert.equal(await target(form).evaluate(input => input === document.activeElement), true);
+            };
+            const saved = async (record, form, value) => {
+                await page.waitForFunction(({ unitId, field, value }) => window.__clientFixtureApp.ctSaved[unitId]?.values[field] === value && !window.__clientFixtureApp.ctBusy,
+                    { unitId: id(record), field: fieldId(form), value });
+                return page.evaluate(async ({ unitId, field }) => { const vm = window.__clientFixtureApp, work = (await vm._ctStore.getSaved(vm.ctWorkspace.scope))[unitId],
+                    original = await vm._ctStore.getUnit(vm.ctWorkspace.scope, unitId), history = await vm._ctStore.listHistory(vm.ctWorkspace.scope, unitId);
+                    return { saved: work.values[field], original: original.fields.find(item => item.id === field).target,
+                        history: history.find(entry => entry.after.jobId === work.jobId)?.after.values[field] }; }, { unitId: id(record), field: fieldId(form) });
+            };
+            await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), true);
+            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'false');
+            assert.equal(await workspace.locator('[data-ct-target]').count(), 1, 'Only the selected class form renders before default forms expand');
+            assert.equal(await workspace.locator('[data-ct-source]').count(), 1, 'One shared English source remains on the left');
+            assert.deepEqual(await picker().locator('option').evaluateAll(options => options.map(option => JSON.parse(option.value)[1])), ClientState.CLASS_FORMS);
+            assert.deepEqual(await workspace.getByRole('tablist', { name: 'Populated class variants', exact: true }).getByRole('tab').evaluateAll(tabs => tabs.map(tab => tab.getAttribute('aria-label'))), ['StrFour','StrDexFour','StrFourb']);
+            await picker().selectOption(fieldId('IntFour')); await active('IntFour'); assert.equal(await target('IntFour').inputValue(), '');
+            await target('IntFour').press('Tab'); await active('DexFour'); assert.equal(await target('DexFour').inputValue(), '');
+            await target('DexFour').press('Tab'); await active('StrDexFour'); await target('StrDexFour').press('Shift+Tab'); await active('DexFour');
+            await picker().selectOption(fieldId('StrFour')); await active('StrFour'); await target('StrFour').press('Shift+Tab'); await active('FS');
+            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Reverse Tab reveals a collapsed default form by worksheet position');
+            const forms = ['MS','FS',...ClientState.CLASS_FORMS]; await page.evaluate(field => window.__clientFixtureApp.ctFocusTarget(false, field), fieldId('MS')); await active('MS');
+            for (const form of forms.slice(1)) { await page.keyboard.press('Tab'); await active(form); }
+            for (const form of forms.slice(0,-1).reverse()) { await page.keyboard.press('Shift+Tab'); await active(form); }
+            assert.equal(await picker().inputValue(), fieldId('StrFour'), 'Worksheet traversal can reveal a blank class form without changing its text');
+            await workspace.locator('.ctDefaultFormsToggle').click();
+            const tabs = workspace.getByRole('tablist', { name: 'Populated class variants', exact: true });
+            await tabs.getByRole('tab', { name: 'StrFour', exact: true }).focus(); await page.keyboard.press('ArrowRight'); await active('StrDexFour');
+            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
+            await target('StrFourb').fill('  Draft line one\nline two {0} [keyword|Display]  ');
+            await target('StrFourb').press('F2');
+            await page.waitForFunction(unitId => window.__clientFixtureApp.ctSelection === unitId && window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy, id('variant-next'));
+            const firstText = '  Draft line one\nline two {0} [keyword|Display]  ';
+            assert.equal((await saved('variant-fixture','StrFourb',firstText)).saved, firstText, 'F2 saves raw multiline form work before navigation');
+            await page.keyboard.press('Escape'); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await page.evaluate(async () => { window.__clientFixtureApp.inlineEditor = true; await window.__clientFixtureApp.$nextTick(); });
+            await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), false);
+            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
+            await target('StrFourb').evaluate(input => input.setSelectionRange(2,7)); await target('StrFourb').press('Control+Enter');
+            await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy); await active('StrFourb');
+            assert.deepEqual(await target('StrFourb').evaluate(input => [input.selectionStart,input.selectionEnd]), [2,7], 'Ctrl+Enter preserves the selected hidden form and caret');
+            const secondText = '  New raw line\n{0} [keyword|Display]  '; await target('StrFourb').fill(secondText);
+            await target('StrFourb').evaluate(input => input.setSelectionRange(4,9)); await target('StrFourb').press('Escape');
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy); await active('StrFourb');
+            assert.equal(await target('StrFourb').inputValue(), secondText); assert.deepEqual(await target('StrFourb').evaluate(input => [input.selectionStart,input.selectionEnd]), [4,9], 'Escape returns the current full-editor caret to the exact inline variant');
+            await target('StrFourb').press('Control+s'); assert.equal((await saved('variant-fixture','StrFourb',secondText)).history, secondText);
+            await picker().selectOption(fieldId('DexIntFour')); await active('DexIntFour'); await target('DexIntFour').fill('[');
+            const completion = workspace.getByRole('listbox', { name: 'Source and Dictionary completions', exact: true }); await completion.waitFor();
+            await target('DexIntFour').press('Enter'); assert.equal(await target('DexIntFour').inputValue(), '[keyword|Display]', 'Class form [] completion preserves raw keyword syntax');
+            await target('DexIntFour').fill('{'); await completion.waitFor(); await target('DexIntFour').press('Enter');
+            assert.equal(await target('DexIntFour').inputValue(), '{0}', 'Class form {} completion preserves raw source placeholder');
+            await target('DexIntFour').press('Control+s'); await saved('variant-fixture','DexIntFour','{0}');
+            await target('DexIntFour').press('Control+Enter'); await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').fill('Final draft to restore');
+            await workspace.getByRole('button', { name: 'Save & close', exact: true }).click(); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await saved('variant-fixture','StrFourb','Final draft to restore');
+            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').press('Control+Enter');
+            await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await workspace.getByRole('button', { name: 'History', exact: true }).click();
+            await page.waitForFunction(field => !window.__clientFixtureApp.ctHistoryLoading && window.__clientFixtureApp.ctHistory.some(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
+            const eventIndex = await page.evaluate(field => window.__clientFixtureApp.ctHistory.findIndex(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
+            const event = workspace.locator('.ctHistoryEvent').nth(eventIndex); await event.getByRole('button', { name: 'Compare change', exact: true }).click();
+            const viewer = page.getByRole('dialog', { name: 'Compare · NPCTextAudio_Gender · variant-fixture', exact: true }); await viewer.waitFor();
+            const diff = viewer.locator('.ctHistoryDiffField[data-form="StrFourb"]');
+            assert.equal(await diff.locator('.ctHistory-before .ctHistoryTarget').textContent(), secondText);
+            assert.equal(await diff.locator('.ctHistory-after .ctHistoryTarget').textContent(), 'Final draft to restore');
+            assert.equal(await diff.locator('.ctHistory-before .ctHistorySource').textContent(), '[keyword|Display] {0}\nSecond source line');
+            await viewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
+            await event.getByRole('button', { name: 'Restore before as draft', exact: true }).click();
+            await page.waitForFunction(({ field, value }) => window.__clientFixtureApp.ctValues[field] === value && window.__clientFixtureApp.ctDraftDirty, { field: fieldId('StrFourb'), value: secondText });
+            await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').press('Control+s');
+            await saved('variant-fixture','StrFourb',secondText); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
+            await choose(classSample.recordId); await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
+            const themeChecks = [], checkThemes = async editor => {
+                for (const theme of ['light','grey','dark','modern-dark']) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme',theme),theme);
+                    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+                    const facts = await workspace.evaluate(root => {
+                        const variants = root.querySelector('.ctClassVariants'), block = variants.closest('.ctBlock'), source = block.querySelector('[data-ct-source]') || root.querySelector('[data-ct-source]'),
+                            target = variants.querySelector('[data-ct-target]'), elements = [variants,variants.querySelector('.ctVariantTabs'),variants.querySelector('select'),block.querySelector('.ctDefaultFormsToggle'),target];
+                        const box = element => { const rect=element.getBoundingClientRect(),style=getComputedStyle(element); return { x:rect.x,right:rect.right,y:rect.y,bottom:rect.bottom,width:rect.width,height:rect.height,visible:style.display!=='none' && style.visibility!=='hidden' }; };
+                        return { viewport:innerWidth,source:box(source),target:box(target),controls:elements.map(box) };
+                    });
+                    assert.equal(facts.controls.every(control => control.visible && control.width>0 && control.height>0 && control.x>=0 && control.right<=facts.viewport),true,editor+' '+theme+': class controls stay visible within desktop columns');
+                    assert.ok(facts.source.right<=facts.target.x,editor+' '+theme+': English stays left of the selected class translation');
+                    themeChecks.push({editor,theme,controlsVisible:true,englishLeft:true});
+                }
+                await page.evaluate(() => document.documentElement.setAttribute('data-theme','light'));
+            };
+            await checkThemes('inline');
+            const screenshotInline = join(directory,'clienttext-class-variants-inline.png'); await page.screenshot({ path: screenshotInline, fullPage: true });
+            await target('StrFourb').press('Control+Enter'); await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await checkThemes('full');
+            const screenshotFull = join(directory,'clienttext-class-variants-full.png'); await page.screenshot({ path: screenshotFull, fullPage: true });
+            await page.keyboard.press('Escape'); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
+            const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
+            const archive = await JSZip.loadAsync(readFileSync(await (await downloaded).path())), output = await archive.file('German_Gender.xlsm').async('uint8array');
+            const originalParsed = await Codec.parseWorkbook(gender, { filename: 'German_Gender.xlsm', role: 'gender' }), exported = await Codec.parseWorkbook(output, { filename: 'German_Gender.xlsm', role: 'gender' });
+            const changed = exported.units.find(unit => unit.id === id('variant-fixture'));
+            assert.equal(changed.fields.find(field => field.form === 'StrFourb').target, secondText); assert.equal(changed.fields.find(field => field.form === 'DexIntFour').target, '{0}');
+            for (const originalUnit of originalParsed.units) { const next = exported.units.find(unit => unit.id === originalUnit.id);
+                assert.deepEqual(next.fields.map(field => ({ id: field.id, source: field.source, sourceCell: field.sourceCell, targetCell: field.targetCell })), originalUnit.fields.map(field => ({ id: field.id, source: field.source, sourceCell: field.sourceCell, targetCell: field.targetCell })));
+                assert.deepEqual(next.metadata, originalUnit.metadata); assert.equal(next.developerNotes, originalUnit.developerNotes);
+                for (const field of originalUnit.fields) if (originalUnit.id !== id('variant-fixture') || !['StrFourb','DexIntFour'].includes(field.form))
+                    assert.equal(next.fields.find(item => item.id === field.id).target, field.target, 'Untouched default and class forms remain exact');
+            }
+            assert.deepEqual(await archive.file('German.xlsm').async('uint8array'), new Uint8Array(normal));
+            const originalZip = await JSZip.loadAsync(gender), exportedZip = await JSZip.loadAsync(output);
+            for (const part of Object.keys(originalZip.files).filter(part => !originalZip.files[part].dir && !['xl/worksheets/sheet4.xml','xl/styles.xml'].includes(part)))
+                assert.deepEqual(await exportedZip.file(part).async('uint8array'), await originalZip.file(part).async('uint8array'), 'Only edited worksheet/style parts can change: ' + part);
+            // Real accepted v1 group is replayed using its immutable parser version after the v2 editor has been used.
+            const legacyUnits = [], legacyAssets = [], created = api.locals.content.createUpload('fixture-admin', { game: 'poe2', name: 'Accepted legacy v1', contentMode: 'clienttext', language: 'German', idempotencyKey: randomUUID() });
+            for (const [role, bytes] of [['normal',normal],['gender',gender]]) {
+                const parsed = await Codec.parseWorkbook(bytes, { filename: role === 'normal' ? 'German.xlsm' : 'German_Gender.xlsm', role, parserVersion: 'clienttext-v1' });
+                legacyUnits.push(...parsed.units); legacyAssets.push({ role, hash: parsed.artifactHash, parserVersion: parsed.parserVersion });
+                await api.locals.content.receiveAsset(created.upload.id, role, 'fixture-admin', Readable.from([bytes]), parsed.filename);
+            }
+            const legacyManifest = await ClientState.buildManifest(legacyUnits, legacyAssets);
+            for (const role of ['normal','gender']) api.locals.content.putManifest(created.upload.id,role,'fixture-admin',{index:0,units:legacyManifest.units.filter(unit=>unit.role===role)});
+            const accepted = await api.locals.content.finalize(created.upload.id,'fixture-admin',{descriptors:legacyManifest.descriptors,idempotencyKey:randomUUID()}), legacyUnit = legacyUnits.find(unit => unit.role === 'normal' && unit.recordId === 'record');
+            const legacyValues = ClientState.valuesFor(legacyUnit); legacyValues[JSON.stringify(['Name',null])] = 'Accepted v1 saved text';
+            const review = { [JSON.stringify(['Description',null])]: ClientState.sourceHash(legacyUnit.fields.find(field => field.name === 'Description').source) };
+            api.locals.content.save(accepted.group.id,legacyUnit.id,'German','fixture-admin',{mutationId:randomUUID(),baseRevision:0,values:legacyValues,reviewed:review,baseline:legacyUnit,proof:ClientState.proofFor(legacyManifest,legacyUnit.id)});
+            await page.evaluate(async ({version,group}) => { const vm = window.__clientFixtureApp; await vm.ctOpenGroup(version,group,'German'); }, accepted);
+            await page.waitForFunction(id => window.__clientFixtureApp.ctWorkspace?.scope.groupId === id && !window.__clientFixtureApp.ctBusy, accepted.group.id);
+            await page.waitForFunction(id => window.__clientFixtureApp.ctSaved[id]?.serverRevision > 0, legacyUnit.id);
+            const replay = await page.evaluate(async () => { const vm = window.__clientFixtureApp, metadata = await vm._ctStore.getMetadata(vm.ctWorkspace.scope),
+                assets = await Promise.all(['normal','gender'].map(role => vm._ctStore.getAsset(vm.ctWorkspace.scope,role)));
+                return { versions: assets.map(asset => asset.parsed.parserVersion), descriptors: metadata.descriptors, saved: vm.ctSaved[JSON.stringify(['normal','Normal','record'])] }; });
+            assert.deepEqual(replay.versions, ['clienttext-v1','clienttext-v1']);
+            assert.deepEqual(replay.descriptors.slice().sort((a,b) => a.role.localeCompare(b.role)), legacyManifest.descriptors.slice().sort((a,b) => a.role.localeCompare(b.role)));
+            assert.equal(replay.saved.values[JSON.stringify(['Name',null])], 'Accepted v1 saved text'); assert.deepEqual(replay.saved.reviewed, review);
+            if (classCorpus) assert.equal(createHash('sha256').update(readFileSync(classCorpus.source)).digest('hex'), classCorpus.sha256, 'Read-only actual German source never changes');
+            assert.deepEqual(failures, []);
+            const report = { status:'PASS',classVariantsOnly:true,normalMode:true,corpus:classCorpus,themes:themeChecks,screenshots:[screenshotInline,screenshotFull],
+                results:['Real import v2 class forms; populated tabs/all variants/default collapse; worksheet order across hidden blank fields',
+                    'F2, inline/full exact field and caret, Ctrl+S, Save & close, raw multiline and []{} completion',
+                    'Durable history comparison/restoration; exported targets and unchanged English/metadata/package parts', 'Accepted v1 parser/descriptors/reviews replay unchanged after v2'] };
+            writeFileSync(join(directory,'class-variants-report.json'),JSON.stringify(report,null,2)); console.log(JSON.stringify(report,null,2)); return;
+        }
         if (genderOnly) {
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
             await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
@@ -284,7 +478,7 @@ async function run() {
             assert.equal(facts.groups, 1); assert.equal(facts.language, 'German'); assert.equal(facts.mode, 'clienttext');
             assert.equal(facts.units, 158386); assert.deepEqual(facts.records, { normal: 89902, gender: 68484 });
             assert.equal(facts.manifestUnits, facts.units, 'The browser worker builds a compact manifest for every parsed German record');
-            assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: index ? 24 : 0 })));
+            assert.deepEqual(facts.assets, originals.map((original, index) => ({ filename: original.name, role: index ? 'gender' : 'normal', hash: original.sha256, sheets: index ? 10 : 206, warnings: 0 })));
             assert.equal(facts.saved, 0, 'Preparation creates no Saved translation work'); assert.deepEqual(publications, [], 'Audit never publishes content to an API');
             for (const original of originals) assert.equal(createHash('sha256').update(readFileSync(original.path)).digest('hex'), original.sha256, 'German original remains unchanged');
             assert.deepEqual(failures, [], 'German production import has no browser script errors');
