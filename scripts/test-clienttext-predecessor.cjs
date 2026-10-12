@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const S=require('../public/clientTextState.js');
 const {unit,fieldId,asset}=require('./clienttext-storage-fixture.cjs');
+const AUDIO_MARKERS=['[NOAUDIO]','[NO AUDIO]','[OLD AUDIO]','[AUDIOTEST]'];
 function harness(){
     const window={ClientTextState:S,Vue:{markRaw:value=>value}},context=vm.createContext({window,console,AbortController,setTimeout,clearTimeout,setInterval,clearInterval});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
@@ -77,18 +78,31 @@ test('cancelled carry comparison cannot publish partial prepared work after an a
 });
 
 
-test('strict verified NOAUDIO add/remove automatically reviews meaningful dialogue even without prior Saved work',async()=>{
-    for(const [before,after] of [['Dialogue','[NOAUDIO] Dialogue'],['[NOAUDIO] Dialogue','Dialogue'],['Dialogue',' [NOAUDIO] Dialogue']]){
+test('strict verified audio metadata add, remove and swap reviews meaningful dialogue without prior Saved work',async()=>{
+    const sources=['Dialogue',...AUDIO_MARKERS.map(marker=>marker+' Dialogue')],pairs=[];
+    for(const before of sources)for(const after of sources)if(before!==after)pairs.push([before,after]);
+    for(const marker of AUDIO_MARKERS)pairs.push(['Dialogue',' '+marker+' Dialogue']);
+    for(const [before,after] of pairs){
         const app=harness(),original=unit(before),incoming=unit(after,'Thai',true);
         app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return[original];},async getAsset(){return{...asset,parserVersion:S.PARSER_VERSION,parsed:{sheets:[]}};}};
         app._cloud={async request(route){return route.startsWith('/v1/content-predecessor')?prior():{events:[],hasMore:false};}};
         const prepared={contentMode:'clienttext',language:'Thai',units:[incoming],assets:[{...asset,parsed:{sheets:[]}}],warnings:[]};await app.ctPrepareCarry(prepared);
         assert.equal(prepared.carry[0].reviewed[fieldId],S.sourceHash(after));assert.equal(prepared.carry[0].provenance.revision,0);
+        assert.equal(prepared.carry[0].previousFacts.fields[0].sourceHash,S.sourceHash(before));
+        assert.equal(prepared.carry[0].clientFacts.fields[0].sourceHash,S.sourceHash(after));
+        if(!after.includes('[NOAUDIO]'))assert.equal(prepared.carry[0].clientFacts.fields[0].sourceHash,S.hash(after),'new markers keep their accepted raw fingerprint');
         assert.equal(prepared.carry[0].clientFacts.fields[0].outdated,true);assert.equal(incoming.fields[0].source,after);
     }
 });
 test('missing predecessor evidence, malformed markers and actual dialogue changes never fabricate review',async()=>{
-    for(const [before,after] of [[null,'[NOAUDIO] Dialogue'],['Dialogue','[NOAUDIO]  Dialogue'],['Dialogue','[NOAUDIO] New dialogue'],['Dialogue','[NOAUDIO] [NOAUDIO] Dialogue']]){
+    const pairs=[];
+    for(const marker of AUDIO_MARKERS){
+        pairs.push([null,marker+' Dialogue'],['Dialogue',marker+'  Dialogue'],['Dialogue',marker+' New dialogue'],
+            ['Dialogue','  '+marker+' Dialogue'],['Dialogue',marker.toLowerCase()+' Dialogue'],['Dialogue',marker+'\tDialogue']);
+        for(const repeated of AUDIO_MARKERS)pairs.push(['Dialogue',marker+' '+repeated+' Dialogue']);
+    }
+    pairs.push(['Dialogue','[AUDIOFUTURE] Dialogue']);
+    for(const [before,after] of pairs){
         const app=harness(),incoming=unit(after,'Thai',true);app._ctStore={async getMetadata(){return{state:'ready'};},async getUnits(){return before===null?[]:[unit(before)];},async getAsset(){return{...asset,parsed:{sheets:[]}};}};
         app._cloud={async request(route){return route.startsWith('/v1/content-predecessor')?prior():{events:[],hasMore:false};}};
         const prepared={contentMode:'clienttext',language:'Thai',units:[incoming],assets:[{...asset,parsed:{sheets:[]}}],warnings:[]};await app.ctPrepareCarry(prepared);

@@ -2239,6 +2239,42 @@ test('ClientText scan categories reuse SD whitespace and dash checks and select 
     row.fields[0].target='[Broken';onlyScanChecks(app,'tagSyntax');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].some(issue=>issue.code==='missing-closing-tag'));
     onlyScanChecks(app);assert.equal(app.ctHasScanSelection,false);assert.equal(await app.ctStartScan(),undefined);
 });
+test('ClientText scans ignore optional audio metadata while checking real keywords, variables and Dictionary terms',async()=>{
+    const markers=['[NOAUDIO]','[NO AUDIO]','[OLD AUDIO]','[AUDIOTEST]'];
+    const rows=markers.flatMap((marker,index)=>[
+        namedUnit('Prefix'+index,marker+' Dialogue [Power] {0}','Dialogue [Power|Force] {0}'),
+        namedUnit('Embedded'+index,'Dialogue '+marker+' [Power] {0}','Dialogue [Power|Force] {0}'),
+        namedUnit('Retained'+index,marker+' Dialogue [Power] {0}',marker+' Dialogue [Power|Force] {0}')]);
+    const broken=namedUnit('ActualMismatch','[AUDIOTEST] Dialogue [Power] {0}','Dialogue [Wrong] {1}'),
+        ordinary=namedUnit('OrdinaryAudioWord','[OLD AUDIO] Audio [Power]','Audio [Power|Force]'),
+        lookalike=namedUnit('RealKeyword','[AUDIOTEST|Visible] Dialogue','Dialogue');
+    rows.push(broken,ordinary,lookalike);
+    const {app}=scanHarness(rows),before=clone(rows);
+    app.getActiveDictionaryEntries=()=>[...markers.map(marker=>({find:marker.slice(1,-1),replace:'Should never be required'})),
+        {find:'Power',replace:'Force'},{find:'Audio',replace:'Son'}];
+    onlyScanChecks(app,'tagSyntax','keywords','variables','terminology');
+    assert.equal(await app.ctStartScan(),true);
+    for(const row of rows.slice(0,markers.length*3))assert.equal(app.ctDiagnostics[row.id].length,0,row.recordId);
+    assert.deepEqual(Array.from(app.ctDiagnostics[broken.id].filter(issue=>issue.code==='clienttext-token-identity'),issue=>issue.kind).sort(),['keyword','variable']);
+    assert.ok(app.ctDiagnostics[ordinary.id].some(issue=>issue.code==='dictionary-terminology' && issue.sourceTerm==='Audio'));
+    assert.ok(app.ctDiagnostics[lookalike.id].some(issue=>issue.code==='clienttext-token-identity' && issue.kind==='keyword'));
+    assert.deepEqual(rows,before,'diagnostic exclusions never rewrite raw workbook source or translation');
+    const raw='🦁 [AUDIOTEST] Dialogue\r\n[Power|Force] {0}',masked=S.maskAudioMarkers(raw);
+    assert.equal(masked.length,raw.length);assert.equal(masked.indexOf('[Power|Force]'),raw.indexOf('[Power|Force]'));
+    assert.equal(masked,'🦁 '+ ' '.repeat('[AUDIOTEST]'.length)+' Dialogue\r\n[Power|Force] {0}');
+});
+
+test('ClientText consistency compares dialogue independently of one exact audio prefix',async()=>{
+    const rows=['','[NOAUDIO] ','[NO AUDIO] ','[OLD AUDIO] ','[AUDIOTEST] '].map((prefix,index)=>namedUnit('Equivalent'+index,prefix+'Dialogue','Same translation')),
+        different=namedUnit('Different','[AUDIOTEST] Changed dialogue','Other translation'),
+        strict=namedUnit('Repeated','[AUDIOTEST] [NOAUDIO] Dialogue','Other translation');
+    const {app}=scanHarness([...rows,different,strict]);onlyScanChecks(app,'consistency');
+    await app.ctStartScan();assert.equal(app.ctScanIssueCounts.warnings,0);
+    rows[0].fields[0].target='Conflicting translation';await app.ctStartScan();
+    for(const row of rows)assert.ok(app.ctDiagnostics[row.id].some(issue=>issue.code==='clienttext-consistency'));
+    assert.equal(app.ctDiagnostics[different.id].length,0);assert.equal(app.ctDiagnostics[strict.id].length,0);
+});
+
 test('scanner reads exact committed raw values across hidden worklist records and excludes hidden English, audio, Gender and NONEXISTENT forms',async()=>{
     const first=namedUnit('First','[Power]@literal\\n\r\n{0}','original [Power] {0}'),hidden=namedUnit('Hidden','[Power] {0}','saved without tags'),
         excluded=blankEnglishUnit('Excluded','[Power] {0}'),{app,window}=scanHarness([first,hidden,excluded],{ctSearch:'no matching records',ctSheet:'not a sheet',ctSelectedFilters:[],ctFilter:'missing'});

@@ -6,6 +6,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 const S=require('../public/clientTextState.js');
 const {unit,fieldId,asset}=require('./clienttext-storage-fixture.cjs');
+const AUDIO_MARKERS=['[NOAUDIO]','[NO AUDIO]','[OLD AUDIO]','[AUDIOTEST]'];
 function sdKeywordDiagnostics(source,target){
     const context=vm.createContext({}),code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8');
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);
@@ -42,11 +43,47 @@ test('sparse trusted facts preserve source reviews and original raw target finge
     const marked=unit('Source','',true),summary=S.addOriginalSummary(S.emptySummary(),marked);
     assert.equal(summary.workloadFields,1);assert.equal(summary.missingFields,1);assert.equal(summary.outdatedFields,1);assert.equal(summary.resolvedFields,0);
 });
-test('NOAUDIO exemption is exact, single, uppercase and only at the beginning',()=>{
-    assert.equal(S.canonicalSource('[NOAUDIO] Source'),'Source');assert.equal(S.canonicalSource(' [NOAUDIO] Source'),'Source');
-    for(const source of ['  [NOAUDIO] Source','[NOAUDIO]Source','Source [NOAUDIO]','[noaudio] Source','[NOAUDIO] [NOAUDIO] Source'])assert.equal(S.canonicalSource(source),source);
-    assert.equal(S.canonicalSource('[NOAUDIO]  Source'),' Source');assert.equal(S.audioOnly(' [NOAUDIO] '),true);
-    assert.equal(S.audioOnly('[NOAUDIO]\n'),false);assert.equal(S.sourceHash('[NOAUDIO] Source'),S.sourceHash('Source'));
+test('audio metadata source equivalence is exact, single, uppercase and only at the beginning',()=>{
+    for(const marker of AUDIO_MARKERS){
+        for(const source of [marker+' Source',' '+marker+' Source'])assert.equal(S.canonicalSource(source),'Source');
+        assert.equal(S.canonicalSource(marker),'');assert.equal(S.canonicalSource(' '+marker+' '),'');
+        assert.equal(S.canonicalSource(marker+'  Source'),' Source','remove only one following separator');
+        for(const source of ['  '+marker+' Source',marker+'Source','Source '+marker,marker.toLowerCase()+' Source',
+            '\t'+marker+' Source',marker+'\tSource',marker+'\nSource',marker.slice(0,-1)+'|Display] Source'])
+            assert.equal(S.canonicalSource(source),source);
+        for(const repeated of AUDIO_MARKERS)assert.equal(S.canonicalSource(marker+' '+repeated+' Source'),marker+' '+repeated+' Source');
+    }
+    for(const source of ['[AUDIO] Source','[AUDIOFUTURE] Source','[OLD AUDIO EXTRA] Source'])assert.equal(S.canonicalSource(source),source);
+    assert.equal(S.audioOnly(' [NOAUDIO] '),true);assert.equal(S.audioOnly('[NOAUDIO]\n'),false);
+    for(const marker of AUDIO_MARKERS.slice(1))assert.equal(S.audioOnly(marker),false,'legacy marker-only workload facts remain unchanged');
+});
+
+test('audio source equivalence preserves accepted legacy fingerprints, facts and proof witnesses',async()=>{
+    const cases=[['[NOAUDIO] Source','Source'],[' [NOAUDIO] Source','Source'],
+        ['[NO AUDIO] Source','[NO AUDIO] Source'],['[OLD AUDIO] Source','[OLD AUDIO] Source'],['[AUDIOTEST] Source','[AUDIOTEST] Source'],
+        ['[NOAUDIO] [AUDIOTEST] Source','[AUDIOTEST] Source'],['[NOAUDIO] [NO AUDIO] Source','[NO AUDIO] Source'],
+        ['[AUDIOTEST] [NOAUDIO] Source','[AUDIOTEST] [NOAUDIO] Source'],['[NOAUDIO] [NOAUDIO] Source','[NOAUDIO] [NOAUDIO] Source']];
+    for(const [source,legacyNormalized] of cases){
+        const original=unit(source,'Thai',true),before=structuredClone(original),field=original.fields[0];
+        const legacyFields=[{id:fieldId,kind:'text',sourceHash:S.hash(legacyNormalized),originalHash:S.hash('Thai'),
+            required:true,originalMissing:false,outdated:true,audioOnly:false}];
+        assert.equal(S.sourceHash(source),S.hash(legacyNormalized),source);
+        assert.deepEqual(S.clientFacts(original).fields,legacyFields,source);
+        const legacyCompact={id:original.id,role:original.role,sheet:original.sheet,recordId:original.recordId,
+            hash:S.hash(S.normalizeUnit(original)),fields:legacyFields};
+        for(const parserVersion of ['clienttext-v1','clienttext-v2']){
+            const descriptor={format:S.FORMAT,role:'normal',assetHash:asset.hash,parserVersion,
+                root:S.leafHash(original.id,legacyCompact.hash),unitCount:1};
+            assert.equal(S.verifyWitness(original,legacyCompact,{index:0,siblings:[]},descriptor),true,source+' / '+parserVersion);
+        }
+        assert.deepEqual(original,before);assert.equal(field.source,source);
+    }
+    for(const marker of AUDIO_MARKERS.slice(1)){
+        const original=unit(marker,''),facts=S.clientFacts(original).fields[0];
+        assert.equal(facts.sourceHash,S.hash(marker));assert.equal(facts.required,true);
+        assert.equal(facts.originalMissing,true);assert.equal(facts.audioOnly,false);
+    }
+    assert.equal(S.sourceHash('[NOAUDIO] Source'),S.sourceHash('Source'));
 });
 test('proofs protect all original source, target, metadata, field layout and asset roles',async()=>{
     const units=[unit(),{...unit(),id:JSON.stringify(['normal','ClientStrings','other']),recordId:'other'},
@@ -119,6 +156,20 @@ test('source advancement retains local text, isolates real upstream conflicts, a
     assert.deepEqual(audio.outdated,[]);assert.equal(audio.reviewed[fieldId],S.sourceHash('Source'));
     assert.equal(S.carryForward(before,after,null).values[fieldId],'Changed upstream');
 });
+
+test('audio metadata add, remove and swap carry exact current reviews without marking unchanged dialogue Outdated',()=>{
+    const sources=['Dialogue',...AUDIO_MARKERS.map(marker=>marker+' Dialogue')];
+    for(const beforeSource of sources)for(const afterSource of sources){
+        const before=unit(beforeSource,'Thai',true),after=unit(afterSource,'Thai',true),originals=structuredClone([before,after]);
+        const saved={values:{[fieldId]:'Local correction'},reviewed:{[fieldId]:S.sourceHash(beforeSource)}};
+        const carried=S.carryForward(before,after,saved);
+        assert.equal(carried.values[fieldId],'Local correction');assert.deepEqual(carried.outdated,[]);
+        assert.equal(carried.reviewed[fieldId],S.sourceHash(afterSource));assert.equal(S.statusFor(after,carried).outdated,false);
+        assert.deepEqual([before,after],originals);
+        const changed=S.carryForward(before,unit(afterSource.replace('Dialogue','Changed dialogue'),'Thai',true),saved);
+        assert.deepEqual(changed.outdated,[fieldId]);assert.equal(changed.reviewed[fieldId],undefined);
+    }
+});
 test('ClientText raw values retain @, literal backslash-n and actual line breaks',()=>{
     const text='mail@example.com \\n\nActual line';const original=unit(text,text);
     assert.equal(S.valuesFor(original)[fieldId],text);assert.equal(S.normalizeValues(original,{[fieldId]:text})[fieldId],text);
@@ -126,6 +177,28 @@ test('ClientText raw values retain @, literal backslash-n and actual line breaks
     assert.equal(S.diagnose(field,'[Keyword|คำ] {0} <size:16>').length,0);
     assert.ok(S.diagnose(field,'[Keyword').some(item=>item.level==='error'));
     assert.deepEqual(S.diagnose({...field,kind:'form'},'NONEXISTENT'),[]);
+});
+
+test('optional audio metadata never requires translated keyword tokens while real links and variables remain checked',()=>{
+    const markers=AUDIO_MARKERS.join(' '),source=markers+' Dialogue [Fire|Fire damage] {0}%',field={...unit().fields[0],source};
+    const target='Translation [Fire|Dégâts de feu] +{0}%';
+    assert.deepEqual(S.diagnose(field,target),[]);
+    assert.deepEqual(S.tokenize(source).filter(token=>token.kind==='audio').map(token=>token.full),AUDIO_MARKERS);
+    for(const marker of AUDIO_MARKERS){
+        assert.deepEqual(S.diagnose({...field,source:marker+' Dialogue'},'Translation'),[]);
+        assert.deepEqual(S.diagnose({...field,source:'Dialogue'},marker+' Translation'),[]);
+        assert.deepEqual(S.diagnose(field,marker+' '+target),[],'translations may retain optional audio metadata');
+    }
+    assert.ok(S.diagnose(field,target.replace('[Fire|Dégâts de feu]','Dégâts de feu')).some(issue=>issue.kind==='keyword'));
+    assert.ok(S.diagnose(field,target.replace('+{0}%','chance')).some(issue=>issue.kind==='variable'));
+    for(const tag of ['[AUDIOFUTURE]','[audiotest]','[AUDIOTEST|Display]','[OLD AUDIO EXTRA]']){
+        assert.equal(S.tokenize(tag)[0].kind,'keyword');
+        assert.ok(S.diagnose({...field,source:tag+' Dialogue'},'Translation').some(issue=>issue.kind==='keyword'),tag);
+    }
+    assert.deepEqual(S.suggestions(field,{openedByChar:'['}).map(item=>item.value),['[Fire|Fire damage]']);
+    assert.equal(S.suggestions(field).some(item=>AUDIO_MARKERS.includes(item.value)),false);
+    assert.equal(S.normalizeValues({...unit(),fields:[field]},{[field.id]:target})[field.id],target);
+    assert.equal(field.source,source);
 });
 
 test('ClientText missing and excess keyword diagnostics follow the actual SD range, error and count policy',()=>{

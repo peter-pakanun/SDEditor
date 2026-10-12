@@ -77,13 +77,26 @@
         }
         return digest;
     }
+    // Exact upstream dialogue metadata. These markers are optional in targets;
+    // ordinary keyword IDs and lookalike spellings retain their normal checks.
+    const AUDIO_MARKERS = new Set(['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]']);
+    const AUDIO_MARKER_PATTERN = /\[(?:NOAUDIO|NO AUDIO|OLD AUDIO|AUDIOTEST)\]/g;
     function canonicalSource(value) {
+        const text = String(value ?? '');
+        return text.match(AUDIO_MARKER_PATTERN)?.length === 1
+            ? text.replace(/^ ?\[(?:NOAUDIO|NO AUDIO|OLD AUDIO|AUDIOTEST)\](?: |$)/, '') : text;
+    }
+    function fingerprintSource(value) {
         const text = String(value ?? '');
         const marker = text.indexOf('[NOAUDIO]');
         return marker >= 0 && text.indexOf('[NOAUDIO]', marker + 9) < 0 ? text.replace(/^ ?\[NOAUDIO\](?: |$)/, '') : text;
     }
+    // Persisted original facts, proofs and reviews already use this fingerprint.
+    // Keep its v1/v2 normalization stable; compare verified raw dialogue through
+    // canonicalSource and transfer reviews to the next field's current hash.
+    // Marker-only workload also retains its existing parser/fact contract.
     const audioOnly = source => /^ ?\[NOAUDIO\] ?$/.test(String(source ?? ''));
-    const sourceHash = source => hash(canonicalSource(source));
+    const sourceHash = source => hash(fingerprintSource(source));
     function normalizeUnit(input) {
         if (!input || typeof input !== 'object') throw new TypeError('Invalid ClientText unit.');
         const role = String(input.role || 'normal'), sheet = String(input.sheet ?? ''), recordId = String(input.recordId ?? '');
@@ -345,7 +358,7 @@
                 const match=KEYWORD_AT_START.exec(text.slice(index));
                 if(!match)continue;
                 const full=match[0],identity=match[1];
-                add(full,index,full==='[NOAUDIO]'?'audio':'keyword',identity);
+                add(full,index,AUDIO_MARKERS.has(full)?'audio':'keyword',identity);
                 // Numeric references in keyword identities are part of the ID;
                 // numeric placeholders in visible link text remain variables.
                 const separator=full.indexOf('|');
@@ -361,6 +374,16 @@
             }
         }
         return tokens;
+    }
+    /** Omit audio metadata from terminology checks without moving text ranges. */
+    function maskAudioMarkers(value) {
+        const text = String(value ?? '');
+        let result = '', offset = 0;
+        for (const token of tokenize(text).filter(token => token.kind === 'audio')) {
+            result += text.slice(offset, token.start) + ' '.repeat(token.end - token.start);
+            offset = token.end;
+        }
+        return result + text.slice(offset);
     }
     /** Raw UTF-16 offsets, including prefixes and %, suitable for preview and insertion. */
     function extractVariables(value) {
@@ -461,5 +484,5 @@
     return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });
