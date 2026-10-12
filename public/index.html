@@ -351,7 +351,7 @@
           </template>
         </section>
         <section class="versionPanel offlineVersion" aria-label="Offline workspace">
-          <h2>Offline</h2><p class="versionMuted">Continue a stored StatDescription workspace and import updates. Open ClientText from Online.</p>
+          <h2>Offline</h2>
           <template v-if="managedOfflineVersion"><label for="offlineVersionName">Version name</label><div class="versionNameField"><input id="offlineVersionName" v-model="offlineVersionName" @keydown.enter.prevent="saveOfflineVersionName" placeholder="Name this local version"><button @click="saveOfflineVersionName">Save name</button></div><p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineVersion.sourceHash">{{ managedOfflineVersion.sourceHash?.slice(0, 16) }}</p><button class="primaryAction" @click="continueOfflineVersion" :disabled="managedVersionBusy">Continue offline workspace</button></template>
           <p v-else-if="managedLocalVersionsLoading && !managedLocalVersionsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading offline workspace…</p>
           <template v-else-if="managedOfflineAssociatedVersion">
@@ -359,7 +359,10 @@
             <p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineAssociatedVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineAssociatedVersion.sourceHash">{{ managedOfflineAssociatedVersion.sourceHash?.slice(0, 16) }}</p>
             <button class="primaryAction" @click="continueAssociatedOfflineVersion" :disabled="managedVersionBusy">Continue cached workspace</button>
           </template>
-          <p v-else-if="managedLocalVersionsLoaded" class="versionMuted">No offline workspace is stored for this game.</p>
+          <template v-else-if="managedLocalVersionsLoaded">
+            <p class="versionMuted">No offline workspace is stored for this game.</p>
+            <button class="primaryAction" @click="managedImportOffline(false)" :disabled="managedVersionBusy">Import StatDescriptions.zip</button>
+          </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
@@ -383,7 +386,6 @@
           </tr></tbody></table></div>
         <p v-else-if="managedDetailsLoading && !managedDetailsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading team details…</p>
         <p v-else-if="managedDetailsLoaded" class="versionMuted">No assignments are available for this version.</p>
-        <p v-if="ctAssignmentRows.some(row => row.contentMode === 'statdescription')" class="versionMuted">StatDescription progress shows Saved / (Missing + Saved). Revised is included in Saved; intentionally blank saves can also be Missing. Collections contain server-accepted Saved files; unsaved drafts and pending offline uploads remain outside the collected ZIP.</p>
       </section>
     </section>
     <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!ctUploading && (ctUploadVisible=false)">

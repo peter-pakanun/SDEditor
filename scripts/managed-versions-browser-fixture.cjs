@@ -158,8 +158,8 @@ async function run() {
     };
     const importOffline = async page => {
       const chooser = page.waitForEvent('filechooser');
-      // Seed a legacy offline workspace; initial imports are no longer offered in the chooser.
-      await page.evaluate(() => window.__managedFixtureApp.managedImportOffline(false));
+      await page.getByRole('region', { name: 'Offline workspace' })
+        .getByRole('button', { name: 'Import StatDescriptions.zip', exact: true }).click();
       await (await chooser).setFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
       await page.locator('#appDialogInput').fill('YES');
       await page.locator('.appDialogConfirm').click();
