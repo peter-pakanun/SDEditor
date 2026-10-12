@@ -146,7 +146,7 @@ async function runFixture({ storageOnly = false } = {}) {
     frontend.post('/fixture/session', (req, res) => req.get('X-Fixture-Key') === secret
         ? res.json(cloudStore.createSession('normalized-translator')) : res.sendStatus(403));
     frontend.get('/fixture/storage', (req, res) => res.type('html').send('<!doctype html><script>(' + browserProbe.toString()
-        + ')();</script><script src="/workspaceState.js"></script><script src="/statDescCodec.js"></script><script src="/collaborationProtocol.js"></script><script src="/normalizedStore.js"></script><script src="/normalizedRooms.js"></script><script src="/offlineStore.js"></script><script src="/fixture/jszip.min.js"></script>'));
+        + ')();</script><script src="/workspaceState.js"></script><script src="/statDescCodec.js"></script><script src="/collaborationProtocol.js"></script><script src="/collaborationSync.js"></script><script src="/normalizedStore.js"></script><script src="/normalizedRooms.js"></script><script src="/offlineStore.js"></script><script src="/fixture/jszip.min.js"></script>'));
     frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(publicDir, 'index.html'), 'utf8')
         .replace('<head>', '<head><script>(' + browserProbe.toString() + ')();</script>')
         .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
@@ -842,6 +842,30 @@ async function sourceCarryChecks(page, results) {
         assert.deepEqual(Object.keys(prepared.imported.sourceCarryRepairArchive).sort(), ['destination', 'predecessor']);
         assert.equal(prepared.missing.staged.Thai?.['carry/missing.txt'], undefined);
         assert.deepEqual(prepared.missing.dropped.Thai['carry/missing.txt'].snapshot.translations, ['Thai missing']);
+        const replay = await isolated.evaluate(async prepared => {
+            const scope = { ...prepared.scopes.currentScope, language: 'Thai' }, snapshot = await OfflineStore.getWorkspaceSnapshot(scope, 'Thai');
+            const key = CollaborationProtocol.scopeKey(scope), paths = ['carry/0.txt', 'carry/7.txt'];
+            const files = paths.map(filepath => ({ filepath, revision: 1, translations: filepath.endsWith('/0.txt') ? ['Included saved work'] : [''],
+                trackedForExport: true, needsReview: false }));
+            await OfflineStore.updateCollaborationRecords({ key, scope, filepaths: paths }, state => {
+                state.rooms[key] = { identity: scope, mode: 'sparse', roomId: 'carry-room', archive: snapshot.baseline.archive,
+                    initialized: true, sequence: 1, shared: Object.fromEntries(files.map(file => [file.filepath, file])),
+                    outbox: [], conflicts: [], recovery: [], carries: {} };
+            });
+            const client = new CollaborationSync.Client({ store: OfflineStore, WebSocket: null, presenceEnabled: () => false,
+                request: async () => { throw new Error('Fixture offline'); } });
+            try {
+                await client.connect({ ...scope, source: snapshot.source, baselineSource: snapshot.source, baselineTree: snapshot.baseline.tree,
+                    archive: snapshot.baseline.archive, workspace: snapshot.workspace, files: [], deferRemote: true });
+                await client.acceptSnapshot({ roomId: 'carry-room', sequence: 1, files }, client.epoch, true);
+                const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
+                return { ids: client.room().outbox.map(op => op.id), paths, saved: paths.filter(path => workspace.staged.Thai?.[path]),
+                    oldWitnesses: client.room().outbox.map(op => Object.keys(op.previousBaselines || {})) };
+            } finally { client.destroy(); }
+        }, prepared);
+        assert.equal(replay.ids.length, 2, 'Both nonblank and blank first merges get durable predecessor relays');
+        assert.deepEqual(replay.saved, [], 'Unmarked cached R1 snapshots cannot revive either removed inherited save');
+        assert.deepEqual(replay.oldWitnesses.flat().sort(), replay.paths.slice().sort(), 'Only affected old immutable files enter the proof relay');
         await isolated.reload();
         await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
         const restored = await isolated.evaluate(async prepared => {
@@ -859,6 +883,12 @@ async function sourceCarryChecks(page, results) {
         assert.equal(restored.correction.isMetadataCorrection, true); assert.equal(restored.correction.hasChanges, true); assert.equal(restored.correction.isRevised, false);
         assert.deepEqual(restored.imported.staged, prepared.imported.staged, 'Reload preserves both destination languages');
         assert.deepEqual(restored.previous.staged.Thai['carry/import.txt'].translations, ['Older saved Thai'], 'The predecessor workspace is retained');
+        const pendingReplay = await isolated.evaluate(async scope => {
+            const identity = { ...scope, language: 'Thai' }, key = CollaborationProtocol.scopeKey(identity);
+            const records = await OfflineStore.getCollaborationRecords({ key, scope: identity, includeOutbox: true });
+            return records.room.outbox.map(op => op.id);
+        }, prepared.scopes.currentScope);
+        assert.deepEqual(pendingReplay, replay.ids, 'Reload retains exact repair mutation IDs and their original scope');
         assert.equal(restored.missing.hasChanges, false); assert.equal(restored.missing.isDropped, true); assert.equal(restored.missing.isMissing, true); assert.equal(restored.missing.needsReview, true);
         assert.deepEqual(errors, []);
         results.push({ scenario: 'source-carry migration and reload', removed: Object.keys(restored.repaired.sourceCarryRepairArchive).length,

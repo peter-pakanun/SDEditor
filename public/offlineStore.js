@@ -10,8 +10,10 @@
   // trusted-original cache bindings. v14 writers cannot retain factual source
   // carry provenance or safely reconcile an existing destination workspace.
   // v16 also fences v15 writers that would restage blank baseline padding.
+  // v17 fences v16 snapshot writers that erase inherited timestamps/proofs or
+  // replay a redundant initial shared merge after scoped cleanup.
   // Keep every store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 16;
+  const DB_VERSION = 17;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -1714,6 +1716,10 @@
     listSaveSubmissions: normalized ? scope => normalized.listSubmissions(scope) : undefined,
     updateSaveSubmission: normalized ? (batch, patch) => normalized.updateSubmission(batch, patch) : undefined,
     getSource,
+    getSourceFiles: normalized ? (scope, filepaths) => {
+      const captured = normalizeWorkspaceScope(scope), paths = [...filepaths];
+      return normalized.transaction([normalized.stores.baseline], 'readonly', tx => normalized.originalFiles(tx, captured, paths));
+    } : undefined,
     setSource: async (source, version) => {
       const scope = scopedVersion(version);
       if (await usesRecords(scope)) {

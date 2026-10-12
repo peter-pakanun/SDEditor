@@ -568,7 +568,7 @@
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
       const desc = current.get(filepath), carry = entry.sourceCarry;
       if (!desc || entry.sourceHash !== workspace.sourceHash
-        || metadataCorrectionForSource(entry, desc, workspace.sourceHash) || carry?.metadataCorrection
+        || metadataCorrectionForSource(entry, desc, workspace.sourceHash) || carry?.metadataCorrection || carry?.destinationSave
         || droppedForFile(workspace, filepath, language) || wasDroppedInSource(workspace, filepath, language)) continue;
       // An explicit save in this version remains meaningful even when it is
       // unchanged. Only evidence of a predecessor copy permits cleanup.
@@ -594,6 +594,28 @@
       removed.push({ language, filepath, fromSourceHash });
     }
     return { changed: removed.length > 0 || corrected.length > 0, removed, corrected };
+  }
+  function carriedBaselineReplay(workspace, desc, language, file) {
+    if (!workspace || !desc || !file?.trackedForExport || file.needsReview || file.sourceCarry?.metadataCorrection || file.sourceCarry?.destinationSave
+      || !sameBaselineTranslation(desc, language, file.translations)
+      || droppedForFile(workspace, desc.filepath, language) || wasDroppedInSource(workspace, desc.filepath, language)) return null;
+    const current = workspace.staged?.[language]?.[desc.filepath];
+    // A later local command takes precedence over the archived inheritance,
+    // including an explicit unchanged/blank save.
+    if (current?.saveOrigin || current?.sourceCarry?.metadataCorrection || current?.sourceCarry?.destinationSave
+      || current && !sameBaselineTranslation(desc, language, current.translations)) return null;
+    for (const repair of Object.values(workspace.sourceCarryRepairArchive || {})) {
+      if (repair.filepath !== desc.filepath || repair.language !== language || repair.sourceHash !== workspace.sourceHash
+        || !repair.fromSourceHash || repair.fromSourceHash === workspace.sourceHash || repair.stage?.sourceCarry?.metadataCorrection
+        || repair.stage?.sourceHash !== workspace.sourceHash || !Array.isArray(repair.stage?.translations)
+        || !sameBaselineTranslation(desc, language, repair.stage?.translations)) continue;
+      const carry = file.sourceCarry;
+      // A later accepted revision is authoritative unless the API actually
+      // resets its staging. Unverified server work must remain visible Saved.
+      if (file.revision !== 1 || carry && (carry.fromSourceHash !== repair.fromSourceHash || carry.toSourceHash !== workspace.sourceHash)) continue;
+      return repair;
+    }
+    return null;
   }
   function mergeSourceImportWorkspace(existing, incoming, options = {}) {
     if (!existing) return copy(incoming);
@@ -846,7 +868,7 @@
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
     initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
-    sourceMetadata, metadataCorrectionForSource, mergeSourceImportWorkspace,
+    sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
     dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, coalesceDroppedConflict };
 });

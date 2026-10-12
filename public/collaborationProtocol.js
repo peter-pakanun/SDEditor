@@ -315,10 +315,18 @@
             originSourceHash: '', originSourceAvailable: false, targetSourceHash: result.sourceHash,
             reason: 'Preserved legacy dropped translation' });
         }
-      } else if (file.stagingReset && !file.trackedForExport) {
+      } else if (file.stagingReset && !file.trackedForExport
+        || WorkspaceState.carriedBaselineReplay(result, originals.get(file.filepath), language, file)) {
         if (result.staged[language]) delete result.staged[language][file.filepath];
       } else if (file.trackedForExport || file.revision > 0) {
-        WorkspaceState.stageTranslation(result, file, language, { source: originals.get(file.filepath), sourceCarry: file.sourceCarry });
+        const current = result.staged?.[language]?.[file.filepath];
+        const unchanged = current?.sourceHash === result.sourceHash && equal(current.translations, file.translations);
+        // A repeated accepted snapshot is not a new local save. Preserve the
+        // original timestamp/before text used to prove source inheritance.
+        const received = copy(file);
+        if (unchanged) delete received.beforeTranslations;
+        WorkspaceState.stageTranslation(result, received, language, { source: originals.get(file.filepath),
+          sourceCarry: file.sourceCarry, ...(unchanged ? { savedAt: current.savedAt } : {}) });
       }
       desc.translations[language] = file.needsReview
         ? WorkspaceState.workspaceFile(result, originals.get(file.filepath) || desc, language).translations

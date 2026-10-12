@@ -643,7 +643,7 @@
             const entry = field === 'droppedOutbox' ? key(value.id, value.kind) : outer;
             const path = value?.filepath || value?.candidate?.filepath || workspace.droppedArchive?.[outer]?.filepath || workspace.droppedArchive?.[value?.id]?.filepath || outer;
             records.push(row(id, [field, entry], { field, entry, data: value, ...(field === 'droppedOutbox' ? { order: Number(outer) } : {}) },
-              { ...(field === 'sourceCarryRepairArchive' ? {} : { pathKey: key(id, path) }), kindScope: key(id, field) }));
+              { pathKey: key(id, path), kindScope: key(id, field) }));
           }
         }
       }
@@ -838,7 +838,7 @@
     }
     async function ensure(scope) { if (scope?.sourceHash) await migrate(scope); }
     const carryRepairs = new Map();
-    const carryRepairKey = scope => key('source-carry-repair-v2', scopeKey(scope));
+    const carryRepairKey = scope => key('source-carry-repair-v3', scopeKey(scope));
     const roomIdentityKey = (scope, language) => key(...((scope.branchId || 'default') === 'default'
       ? [String(scope.accountId || 'guest'), scope.game, scope.sourceHash, language]
       : [String(scope.accountId || 'guest'), scope.game, scope.branchId, scope.sourceHash, language]), ...contentParts(scope));
@@ -890,8 +890,14 @@
           const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
           if (ready?.state !== 'ready' || !meta || marker?.state === 'ready') return null;
           const index = tx.objectStore(stores.records).index('by_kind'), kind = key(id, 'staged');
-          const keys = index.getAllKeys ? await request(index.getAllKeys(kind)) : (await request(index.getAll(kind))).map(item => item.key);
-          if (!keys.length && marker?.state !== 'converting') return null;
+          // Older cleanup archives were cold records. Per-file collaboration
+          // projection must see the evidence before it can replay a cached save.
+          const archives = await request(index.getAll(key(id, 'sourceCarryRepairArchive')));
+          const archiveKeys = archives.filter(archived => archived.value?.data?.filepath
+            && archived.pathKey !== key(id, archived.value.data.filepath)).map(archived => archived.key);
+          const stagedKeys = index.getAllKeys ? await request(index.getAllKeys(kind)) : (await request(index.getAll(kind))).map(item => item.key);
+          const keys = [...new Set([...archiveKeys, ...stagedKeys])];
+          if (!keys.length && !archives.length && marker?.state !== 'converting') return null;
           const siblings = (await request(tx.objectStore(stores.meta).getAll())).map(siblingScope).filter(other => other
             && String(other.accountId) === String(captured.accountId || 'guest') && other.game === captured.game
             && other.branchId === (captured.branchId || 'default') && other.sourceHash && other.sourceHash !== captured.sourceHash);
@@ -906,8 +912,12 @@
         });
         if (!initial) return { changed: false, removed: [] };
         return trackMigration('source-carry', id, captured, async () => {
+          // Accepted snapshot projection in older editors replaced savedAt and
+          // before even for unchanged text. The frozen pre-conversion workspace
+          // can still prove the original copy; never rewrite that evidence.
+          const frozen = initial.siblings.length && legacyGet && workspaceKey ? await legacyGet(workspaceKey(captured)) : null;
           const removed = []; let changed = false, deferred = initial.deferred;
-          const names = [stores.meta, stores.records, stores.baseline, stores.migration, stores.operations, stores.submissions, stores.receipts,
+          const names = [stores.meta, stores.records, stores.baseline, stores.migration, stores.operations, stores.submissions, stores.receipts, stores.shared,
             ...(revisionStoreName ? [revisionStoreName(captured.game)] : [])];
           for (let offset = 0; offset < initial.keys.length || !offset; offset += 64) {
             const keys = initial.keys.slice(offset, offset + 64);
@@ -918,6 +928,11 @@
               const receipts = await all(tx, stores.receipts, id);
               for (const recordKey of keys) {
                 const record = await request(tx.objectStore(stores.records).get(recordKey));
+                if (record?.scope === id && record.value.field === 'sourceCarryRepairArchive') {
+                  const path = record.value.data?.filepath;
+                  if (path) tx.objectStore(stores.records).put({ ...record, pathKey: key(id, path) });
+                  continue;
+                }
                 if (!record || record.scope !== id || record.value.field !== 'staged') continue;
                 const { language, entry: filepath, data: stage } = record.value;
                 const roomKey = roomIdentityKey(captured, language);
@@ -952,15 +967,31 @@
                   // Legacy equality alone cannot prove an unrelated content
                   // group was the predecessor of this workspace.
                   if (!sameContentScope(previous, captured)) continue;
-                  const savedAt = evidenceTime(stage.savedAt);
-                  if (savedAt < previous.importedAt || savedAt >= initial.importedAt) continue;
                   const before = await get(tx, stores.records, key(scopeKey(previous), ['staged', language, filepath]));
-                  if (!before || !stage.savedAt || before.data?.savedAt !== stage.savedAt || !same(before.data.translations, stage.translations)
-                    || !same(before.data.before, stage.before)) continue;
+                  if (!before) continue;
+                  const candidates = [stage], frozenStage = frozen?.sourceHash === captured.sourceHash ? frozen.staged?.[language]?.[filepath] : null;
+                  if (frozenStage?.sourceHash === captured.sourceHash && same(frozenStage.translations, stage.translations)) {
+                    const accepted = await get(tx, stores.shared, key(roomKey, filepath));
+                    if (accepted?.shared?.revision === 1 && accepted.shared.trackedForExport && !accepted.shared.needsReview
+                      && !accepted.shared.sourceCarry?.metadataCorrection && same(accepted.shared.translations, stage.translations)) candidates.push(frozenStage);
+                  }
                   const previousOriginal = await get(tx, stores.baseline, key(baselineKey(previous), filepath));
                   if (!previousOriginal) continue;
-                  repair = W.repairRedundantCarriedStages(current, { source: [original], previousSource: [previousOriginal],
-                    previousWorkspace: { ...previous, staged: { [language]: { [filepath]: copy(before.data) } } }, previousSourceHash: previous.sourceHash, history });
+                  for (const candidate of candidates) {
+                    const savedAt = evidenceTime(candidate.savedAt);
+                    if (savedAt < previous.importedAt || savedAt >= initial.importedAt || !candidate.savedAt
+                      || before.data?.savedAt !== candidate.savedAt || !same(before.data.translations, candidate.translations)
+                      || !same(before.data.before, candidate.before)) continue;
+                    current.staged[language][filepath] = copy(candidate);
+                    repair = W.repairRedundantCarriedStages(current, { source: [original], previousSource: [previousOriginal],
+                      previousWorkspace: { ...previous, staged: { [language]: { [filepath]: copy(before.data) } } }, previousSourceHash: previous.sourceHash, history });
+                    if (repair.changed) {
+                      const corrected = current.staged[language][filepath];
+                      if (corrected) { corrected.savedAt = stage.savedAt; corrected.before = copy(stage.before); }
+                      break;
+                    }
+                    current.staged[language][filepath] = copy(stage);
+                  }
                   if (repair.changed) break;
                 }
                 const next = current.staged?.[language]?.[filepath];
@@ -973,7 +1004,7 @@
                   if (!archived) tx.objectStore(stores.records).put(row(id, ['sourceCarryRepairArchive', entry], {
                     field: 'sourceCarryRepairArchive', entry, data: { filepath, language, sourceHash: captured.sourceHash, fromSourceHash,
                       stage: copy(stage), reason: 'Translation included in new original baseline', repairedAt: Date.now() },
-                  }, { kindScope: key(id, 'sourceCarryRepairArchive') }));
+                  }, { pathKey: key(id, filepath), kindScope: key(id, 'sourceCarryRepairArchive') }));
                   tx.objectStore(stores.records).delete(recordKey); pendingChanged = true;
                   pendingRemoved.push(...(repair.removed || []));
                 } else if (!same(next, stage)) {

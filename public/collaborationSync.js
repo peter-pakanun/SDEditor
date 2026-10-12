@@ -451,12 +451,28 @@
       })).filter(Boolean);
       let legacyCarries = {};
       let records;
+      const carryRepairPaths = Object.values(workspace?.sourceCarryRepairArchive || {}).filter(repair => repair.language === language
+        && repair.sourceHash === identity.sourceHash).map(repair => repair.filepath);
+      const previousBaselines = new Map();
+      if (this.store.getSourceFiles && !identity.groupId) {
+        const predecessors = new Map();
+        for (const repair of Object.values(workspace?.sourceCarryRepairArchive || {})) if (repair.language === language
+          && repair.sourceHash === identity.sourceHash && repair.fromSourceHash) {
+          if (!predecessors.has(repair.fromSourceHash)) predecessors.set(repair.fromSourceHash, []);
+          predecessors.get(repair.fromSourceHash).push(repair.filepath);
+        }
+        for (const [sourceHash, paths] of predecessors) {
+          const originals = await this.store.getSourceFiles({ ...identity, sourceHash }, [...new Set(paths)]);
+          if (!this.current(epoch)) throw staleError();
+          for (const file of originals.filter(Boolean)) previousBaselines.set(sourceHash + ':' + file.filepath, file);
+        }
+      }
       const compactManifest = { version: 2, files: await preparation.items(manifest.files,
         file => ({ filepath: file.filepath, entryCount: file.english.length })) };
       if (this.store.getCollaborationRecords && this.store.updateCollaborationRecords) {
         const incomingPaths = incoming.filter(file => modernWorkspace ? workspace.staged?.[language]?.[file.filepath]
           : file.trackedForExport || file.needsReview).map(file => file.filepath);
-        const repairPaths = Object.values(workspace?.placeholderRepairArchive || {}).map(repair => repair.filepath).filter(Boolean);
+        const repairPaths = [...Object.values(workspace?.placeholderRepairArchive || {}).map(repair => repair.filepath), ...carryRepairPaths].filter(Boolean);
         const loaded = await this.store.getCollaborationRecords({ key: this.key, scope: identity, command: 'open-local-room',
           filepaths: [...new Set([...incomingPaths, ...repairPaths])], includeAffected: true, includeOutbox: true,
           includeConflicts: true, includeDropped: true });
@@ -474,6 +490,22 @@
         legacyCarries = copy(room.carries || {});
         room.carries = {}; room.carryRevisions = {};
         const pendingPaths = new Set(room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
+        // Relay proven local inheritance for an older unmarked first merge.
+        // The API independently verifies its accepted predecessor and retains
+        // explicit saves and uncertain server evidence before resetting staging.
+        for (const path of carryRepairPaths) {
+          const shared = room.shared[path], original = this.baselineFiles.get(path);
+          const repair = W.carriedBaselineReplay(workspace, original, language, shared);
+          if (!repair || identity.groupId || pendingPaths.has(path) || shared.revision !== 1 || shared.sourceCarry
+            || !/^[a-f0-9]{64}$/.test(repair.fromSourceHash)) continue;
+          const sourceCarry = { fromSourceHash: repair.fromSourceHash, toSourceHash: identity.sourceHash,
+            ...(Number.isSafeInteger(repair.stage?.savedAt) ? { fromSavedAt: repair.stage.savedAt } : {}) };
+          const previousBaseline = previousBaselines.get(repair.fromSourceHash + ':' + path);
+          room.outbox.push({ id: this.uuid(), origin: 'merge', kind: 'join', status: 'pending', carryRepair: true,
+            ...(previousBaseline ? { previousBaselines: { [path]: P.witness(previousBaseline) } } : {}),
+            files: [{ base: copy(shared), yours: { ...copy(shared), sourceCarry } }] });
+          pendingPaths.add(path);
+        }
         for (const yours of incoming) {
           const staged = modernWorkspace ? workspace.staged?.[language]?.[yours.filepath] : null;
           if (modernWorkspace ? !staged : !yours.trackedForExport) {
@@ -502,13 +534,28 @@
           room.recovery.push({ id: this.uuid(), at: Date.now(), reason: 'Preserved dropped translation', files: [copy(carry)] });
         }
         this.rebuild(room);
-      }, { version: game, scope: identity, ...(records ? { records } : {}), projectWorkspace: stored => {
+      }, { version: game, scope: identity, ...(records ? { records } : {}), projectWorkspace: (stored, state) => {
         const current = stored || copy(workspace);
         if (!current || (current.sourceHash && current.sourceHash !== identity.sourceHash)) return current;
         current.sourceHash = identity.sourceHash; current.collaborationAccountId = identity.accountId;
         W.initializeWorkspace(current, { source: current._storageSelection
           ? (current.descs || []).map(desc => this.baselineFiles.get(desc.filepath)).filter(Boolean) : baselineSource,
           sourceHash: identity.sourceHash, game, language });
+        const room = state.rooms[this.key];
+        // Recheck the transaction's workspace after asynchronous proof reads.
+        // A newer explicit local save cancels this automatic relay.
+        const canceled = room.outbox.filter(operation => operation.carryRepair && !operation.files.every(entry =>
+          W.carriedBaselineReplay(current, this.baselineFiles.get(entry.yours.filepath), language, entry.base)));
+        room.outbox = room.outbox.filter(operation => !canceled.includes(operation));
+        for (const operation of canceled) for (const entry of operation.files) {
+          const staged = current.staged?.[language]?.[entry.yours.filepath];
+          if (!staged?.saveOrigin || room.outbox.some(op => op.files.some(file => file.yours.filepath === entry.yours.filepath))) continue;
+          room.outbox.push({ id: this.uuid(), origin: 'save', kind: 'edit', status: 'pending', files: [{
+            base: copy(room.shared[entry.yours.filepath] || this.baselineStates[entry.yours.filepath]),
+            yours: fileState({ filepath: entry.yours.filepath, translations: staged.translations, trackedForExport: true }),
+          }] });
+        }
+        if (canceled.length) this.rebuild(room);
         const descriptions = new Map((current.descs || []).map(desc => [desc.filepath, desc]));
         for (const carry of Object.values(legacyCarries)) {
           if (W.droppedForFile(current, carry.filepath, language)) continue;
@@ -1369,9 +1416,12 @@
           }
           if (merged.conflict) conflicts.push({ id: id + ':' + shared.filepath, mutationId: id, filepath: shared.filepath,
             kind: op.resetStaging ? 'delete_staged' : op.kind || 'edit', base: copy(entry.base), yours: copy(entry.yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
+          const wireCarry = copy(merged.file.sourceCarry);
+          if (wireCarry) { delete wireCarry.baselineEquality; delete wireCarry.destinationSave; }
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
-            ...(room.mode === 'sparse' && op.kind === 'join' && merged.file.sourceCarry ? { sourceCarry: copy(merged.file.sourceCarry) } : {}),
+            ...(room.mode === 'sparse' && op.kind === 'join' && wireCarry ? { sourceCarry: wireCarry,
+              ...(op.previousBaselines?.[shared.filepath] ? { previousBaseline: copy(op.previousBaselines[shared.filepath]) } : {}) } : {}),
             ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging || op.kind === 'join' && merged.file.sourceCarry) ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
               proof: P.baselineProof(this.baselineTree, shared.filepath) } : {}) });
         }

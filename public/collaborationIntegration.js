@@ -870,7 +870,8 @@
                 targetSourceHash: this.sourceIdentity, reason: 'Recovered dropped translation',
               });
             }
-          } else if (file.stagingReset && !file.trackedForExport) {
+          } else if (file.stagingReset && !file.trackedForExport
+            || window.WorkspaceState.carriedBaselineReplay(this.localDescs, original, lang, file)) {
             if (this.localDescs.staged?.[lang]) delete this.localDescs.staged[lang][file.filepath];
           } else if (file.trackedForExport || file.revision > 0) {
             const staged = this.localDescs.staged?.[lang]?.[file.filepath];
