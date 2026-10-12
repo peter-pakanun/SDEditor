@@ -51,6 +51,28 @@ test('clipboard defaults hidden and its visibility and text survive save, export
   assert.equal(e.editorClipboard, 'Keep this clipboard text');
 });
 
+test('ClientText class-name display defaults on and survives local save, export, and import', async () => {
+  const { e, writes, downloads, config } = harness();
+  assert.equal(e.mapClientTextClassNames, true);
+  for (const mapClientTextClassNames of [false, true]) {
+    e.mapClientTextClassNames = mapClientTextClassNames;
+    await config.watch.mapClientTextClassNames.call(e);
+    await e.flushScheduledSettingsSave();
+    assert.equal(writes.at(-1).mapClientTextClassNames, mapClientTextClassNames);
+    e.exportSettingsClicked();
+    const imported = JSON.parse(await downloads.at(-1).blob.text());
+    assert.equal(imported.mapClientTextClassNames, mapClientTextClassNames);
+    const restored = harness().e;
+    restored.importSettings(imported);
+    assert.equal(restored.mapClientTextClassNames, mapClientTextClassNames);
+  }
+  const legacy = e.settingsSavePayload();
+  delete legacy.mapClientTextClassNames;
+  e.mapClientTextClassNames = false;
+  e.importSettings(legacy);
+  assert.equal(e.mapClientTextClassNames, true);
+});
+
 test('new Dictionary game scope defaults to All and survives local save, export, and import', async () => {
   const { e, writes, downloads } = harness();
   assert.equal(e.dictionaryDefaultGameScope, 'all');

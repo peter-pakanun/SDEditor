@@ -864,7 +864,7 @@
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
-                this.ctVariantSelections={};
+                this.ctVariantSelections={};this._ctClassNameCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
@@ -916,6 +916,37 @@
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
             ctClassFields(group) { return group.fields.filter(isClassField); },
             ctDefaultForms(group) { return group.fields.filter(field=>field.kind==='form' && !isClassField(field)); },
+            ctClassVariantName(field) {
+                if(this.mapClientTextClassNames===false || !isClassField(field))return field.form || '';
+                const units=this.ctUnits,workspace=this.ctWorkspace;
+                let cache=this._ctClassNameCache;
+                if(!cache || cache.units!==units || cache.workspace!==workspace){
+                    const candidates=new Map();
+                    for(const unit of units){
+                        if(unit.sheet!=='Characters' || !['normal','gender'].includes(unit.role))continue;
+                        const path=/^Metadata\/Characters\/([^/]+)\/([^/]+)$/.exec(unit.recordId || '');
+                        if(!path || !classForms.has(path[2]) || path[1]!==path[2].replace(/Fourb?$/,''))continue;
+                        const fields=unit.fields.filter(value=>value.name==='Name' && (unit.role==='normal'
+                            ? value.kind==='text' : value.kind==='form' && value.form==='MS'));
+                        let item=candidates.get(path[2]);
+                        if(!item)candidates.set(path[2],item={normal:[],gender:[]});
+                        // Only immutable English names supply labels. Drafts and
+                        // saved translations never rewrite identities or this view.
+                        item[unit.role].push(fields.length===1 ? String(fields[0].source ?? '').trim() : '');
+                    }
+                    const names=new Map();
+                    for(const [form,item] of candidates){
+                        const values=item.normal.length ? item.normal : item.gender;
+                        if(values.length===1 && values[0] && values[0]!=='NONEXISTENT')names.set(form,values[0]);
+                    }
+                    cache=this._ctClassNameCache={units,workspace,names};
+                }
+                return cache.names.get(field.form) || field.form;
+            },
+            ctClassVariantLabel(field) {
+                const name=this.ctClassVariantName(field);
+                return name!==(field.form || '') ? name+' ('+field.form+')' : name;
+            },
             ctVariantKey(group,unit=this.ctCurrentUnit) { return JSON.stringify([unit?.id,group.key]); },
             ctSelectedVariant(group,unit=this.ctCurrentUnit) {
                 const fields=this.ctClassFields(group),selected=this.ctVariantSelections[this.ctVariantKey(group,unit)],
@@ -961,7 +992,7 @@
             },
             ctVariantLabel(field) {
                 const facts=this.ctVariantFacts(field),labels=['Missing','Outdated','Error','Warning'].filter(name=>facts[name.toLowerCase()]);
-                return field.form+(String(this.ctValues[field.id] ?? '').trim()?'':' (blank)')+(labels.length?' · '+labels.join(' · '):'');
+                return this.ctClassVariantLabel(field)+(String(this.ctValues[field.id] ?? '').trim()?'':' (blank)')+(labels.length?' · '+labels.join(' · '):'');
             },
             ctVariantSummary(fields) {
                 const facts=fields.map(field=>this.ctVariantFacts(field)),labels=[];
@@ -978,7 +1009,8 @@
             },
             ctGroupSources(group) {
                 const sources=new Map();for(const field of group.fields){const text=String(field.source ?? ''),item=sources.get(text);
-                    if(item)item.names.push(field.form || field.name);else sources.set(text,{key:field.id,text,names:[field.form || field.name]});}
+                    const label=field.form ? this.ctClassVariantLabel(field) : field.name;
+                    if(item)item.names.push(label);else sources.set(text,{key:field.id,text,names:[label]});}
                 return [...sources.values()].map(item=>({...item,label:sources.size>1?item.names.join(' / '):group.name}));
             },
             ctFocusSource(group,source) {
@@ -1814,7 +1846,7 @@
             ctHistoryDisplay(value) { return this.ctHistoryWhitespace ? String(value).replace(/ /g, '·').replace(/\u00a0/g, '⍽').replace(/\t/g, '⇥\t').replace(/\n/g, '↵\n').replace(/\r/g, '␍') : value; },
             ctHistoryFieldLabel(field) {
                 const forms = { MS: 'Masculine singular', FS: 'Feminine singular', NS: 'Neuter singular', MP: 'Masculine plural', FP: 'Feminine plural', NP: 'Neuter plural' };
-                return field.name + (field.form ? ' · ' + (forms[field.form] ? forms[field.form] + ' (' + field.form + ')' : field.form) : field.kind === 'gender' ? ' · Gender' : '');
+                return field.name + (field.form ? ' · ' + (forms[field.form] ? forms[field.form] + ' (' + field.form + ')' : this.ctClassVariantLabel(field)) : field.kind === 'gender' ? ' · Gender' : '');
             },
             ctOpenHistoryViewer() {
                 if (!this.ctCurrentUnit) return;
@@ -1930,7 +1962,7 @@
                 this.ctScanErrorFileCount=Object.values(results).filter(issues=>issues.some(issue=>issue.severity==='error')).length;
                 this.ctScanWarningFileCount=Object.values(results).filter(issues=>issues.some(issue=>issue.severity==='warning')).length;
             },
-            ctScanIssueLocation(issue) {return (issue.fieldName || 'Field')+(issue.form ? ' · '+issue.form : '')+(Number.isInteger(issue.line) ? ' · line '+(issue.line+1) : '');},
+            ctScanIssueLocation(issue) {return (issue.fieldName || 'Field')+(issue.form ? ' · '+this.ctClassVariantLabel({kind:'form',form:issue.form}) : '')+(Number.isInteger(issue.line) ? ' · line '+(issue.line+1) : '');},
             ctScanUnitLabel(count) {return count===1 ? 'record' : 'records';},
             async ctOpenDiagnosticResult(id) {
                 const cache=this._ctScanCache,unit=cache?.units.get(id);if(!unit || !this.ctScanDone || !this.ctScanEnvironmentCurrent(cache.environment,false))return false;
@@ -2477,7 +2509,7 @@
                 <section v-if="host.ctClassFields(group).length" class="ctClassVariants" :data-variant-group="group.key">
                     <div class="ctClassVariantsHeader"><strong>Class variants</strong><small>{{ host.ctPopulatedVariants(group).length }} populated / {{ host.ctClassFields(group).length }} available</small></div>
                     <small v-if="host.ctVariantSummary(host.ctClassFields(group))" class="ctVariantSummary">{{ host.ctVariantSummary(host.ctClassFields(group)) }}</small>
-                    <div class="ctVariantTabs" role="tablist" aria-label="Populated class variants"><button v-for="field in host.ctPopulatedVariants(group)" :key="field.id" type="button" role="tab" :aria-label="field.form" :aria-selected="host.ctSelectedVariant(group)?.id === field.id" :tabindex="host.ctSelectedVariant(group)?.id === field.id ? 0 : -1" :class="{active:host.ctSelectedVariant(group)?.id === field.id,missing:host.ctVariantFacts(field).missing,outdated:host.ctVariantFacts(field).outdated}" :title="host.ctVariantLabel(field)" @click="host.ctSelectVariant(group,field.id)" @keydown="host.ctVariantTabKeydown(group,field,$event)">{{ field.form }}<span v-if="host.ctVariantFacts(field).missing || host.ctVariantFacts(field).outdated || host.ctVariantFacts(field).error || host.ctVariantFacts(field).warning" class="ctVariantDot" aria-hidden="true">●</span></button></div>
+                    <div class="ctVariantTabs" role="tablist" aria-label="Populated class variants"><button v-for="field in host.ctPopulatedVariants(group)" :key="field.id" type="button" role="tab" :aria-label="host.ctClassVariantLabel(field)" :aria-selected="host.ctSelectedVariant(group)?.id === field.id" :tabindex="host.ctSelectedVariant(group)?.id === field.id ? 0 : -1" :class="{active:host.ctSelectedVariant(group)?.id === field.id,missing:host.ctVariantFacts(field).missing,outdated:host.ctVariantFacts(field).outdated}" :title="host.ctVariantLabel(field)" @click="host.ctSelectVariant(group,field.id)" @keydown="host.ctVariantTabKeydown(group,field,$event)">{{ host.ctClassVariantName(field) }}<span v-if="host.ctVariantFacts(field).missing || host.ctVariantFacts(field).outdated || host.ctVariantFacts(field).error || host.ctVariantFacts(field).warning" class="ctVariantDot" aria-hidden="true">●</span></button></div>
                     <label class="ctVariantPicker">All variants<select :value="host.ctSelectedVariant(group)?.id" aria-label="All worksheet class variants" @change="host.ctSelectVariant(group,$event.target.value)"><option v-for="field in host.ctClassFields(group)" :key="field.id" :value="field.id">{{ host.ctVariantLabel(field) }}</option></select><small>{{ host.ctSelectedVariant(group)?.targetCell }}</small></label>
                     <ct-target v-if="host.ctSelectedVariant(group)" :key="host.ctSelectedVariant(group).id" :host="host" :field="host.ctSelectedVariant(group)" :compact="side !== 'both'"></ct-target>
                 </section>
@@ -2499,7 +2531,7 @@
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated}">
-            <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+field.form : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
+            <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <template v-if="field.kind === 'gender'">
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>

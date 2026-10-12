@@ -50,12 +50,22 @@ const fields = ['MS','MP','FS','FP','NS','NP'].map((form,index)=>({
     targetCell:String.fromCharCode(66+index)+'2',required:true,originalMissing:false,outdated:false
 }));
 const unit = Vue.markRaw({id:'layout-record',role:'normal',sheet:sheets[0].name,recordId:'FixtureIdentifier',fields,notes:[]});
+const classForms=['MS','FS','DexFour','DexFourb','IntFourb'];
+const classUnit=Vue.markRaw({id:'class-layout-record',role:'normal',sheet:sheets[0].name,recordId:'ClassVariantFixture',notes:[],fields:classForms.map((form,index)=>({
+    id:'class-'+form,kind:'form',group:'Text',name:'Text',form,source:'Raw English [Keyword] {0} @ text.',
+    target:form==='DexFour'?'Ranger raw translation':form==='DexFourb'?'Huntress raw translation':index<2?'Default '+form+' translation':'',
+    targetCell:String.fromCharCode(68+index)+'2',required:index<2 || form==='IntFourb',originalMissing:form==='IntFourb',outdated:false
+}))});
+const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','Huntress'],['Int','IntFourb','Sorceress']].map(([attribute,form,source])=>({
+    id:'character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,notes:[],
+    fields:[{id:'Name',kind:'text',name:'Name',source,target:'Localized label '+form,targetCell:'D2',required:true,originalMissing:false,outdated:false}]
+})));
 const app = Vue.createApp({
     data() { return {...ct.data(),ctActive:true,ctUnits:Vue.markRaw([unit]),ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
         ctSheet:sheets[0].key,ctSearch:'Main search retained',ctAppliedSearch:'',ctSelectedFilters:['unchanged','missing','saved'],
         ctValues:Object.fromEntries(fields.map(field=>[field.id,field.target])),
-        inlineEditor:true,inlineSidebarVisible:false,lang:'Thai',translationEditorBcp47:'th',
+        inlineEditor:true,inlineSidebarVisible:false,mapClientTextClassNames:true,lang:'Thai',translationEditorBcp47:'th',
         gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,hideEditorClipboard:true,
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
@@ -64,6 +74,12 @@ const app = Vue.createApp({
     methods:{...ct.methods,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
         async ctFlushDraft(){return true;},async ctFlushCommentDraft(){},
+        ctStartClassVariantFixture(){
+            this.ctEditor=false;this.ctUnits=Vue.markRaw([classUnit,...characterUnits]);
+            this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));
+            this.ctSelection=classUnit.id;this.ctValues=Object.fromEntries(classUnit.fields.map(field=>[field.id,field.target]));
+            this.ctVariantSelections={};this.ctFocusedField='class-MS';this.ctInitializeVariants();
+        },
     },
     created(){this._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));this._ctSheets=Vue.markRaw(sheets);},
     mounted(){this._fixtureKey=event=>this.ctKey(event);document.addEventListener('keydown',this._fixtureKey);},
@@ -245,7 +261,7 @@ async function run() {
                 right:element.getBoundingClientRect().right,headerRight:element.closest('.editorActions').getBoundingClientRect().right,
                 buttons:[...element.children].map(button=>{const rect=button.getBoundingClientRect();return {text:button.textContent.trim(),left:rect.left,right:rect.right,top:rect.top};})
             }));
-            assert.deepEqual(actions.buttons.map(button=>button.text),['Save','Save & close','Discard draft','Close']);
+            assert.deepEqual(actions.buttons.map(button=>button.text),['Save','Save & close','Close']);
             assert.ok(actions.right<=actions.headerRight+1,theme+'/'+width+': grouped actions fit the editor header');
             for(let index=1;index<actions.buttons.length;index++){
                 const before=actions.buttons[index-1],after=actions.buttons[index];
@@ -261,6 +277,49 @@ async function run() {
             assert.equal(gutter.margin,'0px',theme+'/'+width+': full editor has no left margin');
             if(theme==='modern-dark' && width===1440) {
                 const path=join(tmpdir(),'sdeditor-clienttext-full-'+randomUUID()+'.png');
+                await page.screenshot({path});screenshots.push(path);
+            }
+        }
+        await page.evaluate(()=>window.__ctLayoutFixture.ctStartClassVariantFixture());await settle();
+        const assertClassLabels=async (mapped,name)=>{
+            const ranger=mapped?'Ranger (DexFour)':'DexFour',huntress=mapped?'Huntress (DexFourb)':'DexFourb',
+                sorceress=mapped?'Sorceress (IntFourb)':'IntFourb',tabs=page.getByRole('tablist',{name:'Populated class variants'}),
+                picker=page.getByRole('combobox',{name:'All worksheet class variants'});
+            assert.deepEqual(await tabs.getByRole('tab').allTextContents(),mapped?['Ranger','Huntress']:['DexFour','DexFourb'],name+': mapped tab text');
+            assert.deepEqual(await tabs.getByRole('tab').evaluateAll(elements=>elements.map(element=>element.getAttribute('aria-label'))),[ranger,huntress],name+': tab accessibility retains raw class codes');
+            assert.deepEqual(await picker.locator('option').evaluateAll(elements=>elements.map(element=>({value:element.value,label:element.textContent}))),[
+                {value:'class-DexFour',label:ranger},{value:'class-DexFourb',label:huntress},{value:'class-IntFourb',label:sorceress+' (blank) · Missing'}
+            ],name+': picker preserves raw IDs and blank/workload facts');
+            const input=page.locator('[data-ct-target="class-DexFour"]');
+            assert.ok((await input.getAttribute('aria-label')).includes(ranger),name+': translation accessibility follows display setting');
+        };
+        const captureClassState=()=>page.evaluate(()=>{
+            const host=window.__ctLayoutFixture,input=document.querySelector('[data-ct-target="class-DexFour"]');
+            return {units:JSON.stringify(host.ctUnits),saved:JSON.stringify(host.ctSaved),values:JSON.stringify(host.ctValues),
+                selections:JSON.stringify(host.ctVariantSelections),selection:host.ctSelection,focused:host.ctFocusedField,dirty:host.ctDraftDirty,
+                input:{value:input.value,active:input===document.activeElement,start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection}};
+        });
+        for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
+            await page.setViewportSize({width:1100,height:900});
+            await page.evaluate(({theme,full})=>{document.documentElement.setAttribute('data-theme',theme);const host=window.__ctLayoutFixture;
+                host.mapClientTextClassNames=true;host.ctEditor=full;host.ctSelectVariant(host.ctFieldGroups[0],'class-DexFour',{focus:false});}, {theme,full});
+            await settle();const name=theme+' class variants '+(full?'full':'inline'),input=page.locator('[data-ct-target="class-DexFour"]');
+            await input.fill('Draft @ raw\\n\ntranslation');await input.evaluate(element=>element.setSelectionRange(2,7,'backward'));
+            await assertClassLabels(true,name);
+            const before=await captureClassState();
+            await page.evaluate(()=>window.__ctLayoutFixture.mapClientTextClassNames=false);await settle();
+            await assertClassLabels(false,name+' disabled');assert.deepEqual(await captureClassState(),before,name+': disabling only changes labels');
+            await page.evaluate(()=>window.__ctLayoutFixture.mapClientTextClassNames=true);await settle();
+            await assertClassLabels(true,name+' re-enabled');assert.deepEqual(await captureClassState(),before,name+': re-enabling preserves draft, data, raw variant and caret');
+            const tabs=page.getByRole('tablist',{name:'Populated class variants'});
+            await tabs.getByRole('tab',{name:'Ranger (DexFour)',exact:true}).press('ArrowRight');await settle();
+            assert.equal(await page.getByRole('combobox',{name:'All worksheet class variants'}).inputValue(),'class-DexFourb',name+': keyboard selects the independent Fourb field');
+            assert.equal(await page.locator('[data-ct-target="class-DexFourb"]').inputValue(),'Huntress raw translation',name+': selection uses its exact unchanged raw target');
+            await page.getByRole('combobox',{name:'All worksheet class variants'}).selectOption('class-IntFourb');await settle();
+            assert.equal(await page.locator('[data-ct-target="class-IntFourb"]').inputValue(),'',name+': mapped blank Missing variant remains selectable');
+            results.push({name:name+' default/disabled display, immutable values, exact IDs, caret and keyboard selection'});
+            if(theme==='modern-dark' && full){
+                const path=join(tmpdir(),'sdeditor-clienttext-class-mapping-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
             }
         }

@@ -163,7 +163,7 @@
       get lang(){return source?'en':host.translationEditorBcp47;},
       get dataAttrs(){const issues=diagnostics();
         return source ? {'data-ct-source':fieldId,'aria-label':field.name+' English'}
-        : {'data-ct-target':fieldId,id:'ctfield-'+field.targetCell,'aria-label':field.name+(field.form?' '+field.form:''),
+        : {'data-ct-target':fieldId,id:'ctfield-'+field.targetCell,'aria-label':field.name+(field.form?' '+(host.ctClassVariantLabel?.(field) ?? field.form):''),
           title:issues.map(issue=>issue.message).join('\n') || undefined,'aria-invalid':issues.some(issue=>(issue.level || issue.severity)==='error') || undefined,
           'aria-autocomplete':'list','aria-controls':'sharedEditorAutocompleteList','aria-expanded':host.ctCompletion?.fieldId===fieldId,
           'aria-activedescendant':host.ctCompletion?.fieldId===fieldId && host.ctCompletion?.items?.length?'sharedEditorAutocompleteOption-'+(host.ctCompletion.selectedIndex || 0):undefined};}};

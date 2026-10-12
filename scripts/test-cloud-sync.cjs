@@ -29,6 +29,18 @@ test('clipboard defaults hidden and preserves an explicit visible preference', (
   }
 });
 
+test('ClientText class-name display defaults on and validates explicit preferences', () => {
+  assert.equal(Cloud.completeSettings({}).mapClientTextClassNames, true);
+  for (const mapClientTextClassNames of [true, false]) {
+    assert.equal(Cloud.completeSettings({ mapClientTextClassNames }).mapClientTextClassNames, mapClientTextClassNames);
+    assert.deepEqual(Cloud.preferences({ mapClientTextClassNames }), { mapClientTextClassNames });
+    assert.doesNotThrow(() => Cloud.validateImport({ mapClientTextClassNames }));
+  }
+  for (const mapClientTextClassNames of ['false', null, 0]) {
+    assert.throws(() => Cloud.validateImport({ mapClientTextClassNames }), /mapClientTextClassNames must be boolean/);
+  }
+});
+
 test('inline editing defaults on and preserves an explicit disabled preference', () => {
   assert.equal(Cloud.completeSettings({}).inlineEditor, true);
   assert.equal(Cloud.completeSettings({ inlineEditor: false }).inlineEditor, false);
@@ -339,6 +351,36 @@ test('account or abort changes during local JSON compression prevent network tra
     release.resolve();
     await assert.rejects(pending, error => cancel ? error.name === 'AbortError' : error.stale === true); assert.equal(calls, 0);
   }
+});
+
+test('ClientText class-name display persists through cloud backup and remains personal to each account', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api);
+  await h.client.saveLocal(payload([word()], { mapClientTextClassNames: false }));
+  assert.equal(h.store.state.profiles.alice.settings.mapClientTextClassNames, false);
+  await h.client.sync();
+  assert.equal(h.api.writes('/v1/settings').at(-1).body.settings.mapClientTextClassNames, false);
+  assert.equal(h.api.settings.get('alice').settings.mapClientTextClassNames, false);
+
+  const reloaded = await harness(t, { store: h.store, api: h.api });
+  assert.equal(reloaded.client.snapshot().settings.mapClientTextClassNames, false);
+  await reloaded.client.acceptLogin({ token: 'token-bob', user: user('bob'), expiresAt: 1 });
+  assert.equal(Cloud.completeSettings(reloaded.client.snapshot().settings).mapClientTextClassNames, true);
+  assert.equal(reloaded.store.state.profiles.alice.settings.mapClientTextClassNames, false);
+  await reloaded.client.acceptLogin({ token: 'token-alice', user: user(), expiresAt: 1 });
+  assert.equal(reloaded.client.snapshot().settings.mapClientTextClassNames, false);
+});
+
+test('ClientText class-name display imports preserve false and legacy imports restore the default', async t => {
+  const h = await harness(t);
+  const before = clone(h.store.state);
+  await assert.rejects(h.client.importLocal(payload([word()], { mapClientTextClassNames: 'false' })), /mapClientTextClassNames must be boolean/);
+  assert.deepEqual(h.store.state, before);
+  await h.client.importLocal(payload([word()], { mapClientTextClassNames: false }));
+  assert.equal(h.client.snapshot().settings.mapClientTextClassNames, false);
+  await h.client.importLocal(payload([word()]));
+  assert.equal(Cloud.completeSettings(h.client.snapshot().settings).mapClientTextClassNames, true);
+  assert.equal(h.client.recoveryExport().copies.at(-1).settings.mapClientTextClassNames, false);
 });
 
 test('new Dictionary game scope persists through cloud backup and remains personal to each account', async t => {

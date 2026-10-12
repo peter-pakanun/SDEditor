@@ -257,6 +257,7 @@ const config = Vue.defineComponent({
       hideDNT: true,
       hideEditorClipboard: true,
       hideSourceInPreviewPanel: false,
+      mapClientTextClassNames: true,
       highlightDict: true,
       shiftEnterSave: false,
       autoOpenNextFile: true,
@@ -639,6 +640,7 @@ const config = Vue.defineComponent({
     dictionaryFilter() { this.dictionaryPage = 1; },
     hideSourceInPreviewPanel() { this.saveSettings(); },
     hideEditorClipboard() { this.saveSettings(); },
+    mapClientTextClassNames() { this.saveSettings(); },
     uiDensity() { this.saveSettings(); },
     editorRegexes: { deep: true, handler() { this.saveSettings(); } },
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
@@ -7283,6 +7285,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         hideEditorClipboard: this.hideEditorClipboard,
         hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
+        mapClientTextClassNames: this.mapClientTextClassNames,
         highlightDict: this.highlightDict,
         inlineEditor: this.inlineEditor !== false,
         shiftEnterSave: this.shiftEnterSave,
@@ -7378,6 +7381,7 @@ const config = Vue.defineComponent({
         hideDNT: this.hideDNT,
         hideEditorClipboard: this.hideEditorClipboard,
         hideSourceInPreviewPanel: this.hideSourceInPreviewPanel,
+        mapClientTextClassNames: this.mapClientTextClassNames,
         highlightDict: this.highlightDict,
         inlineEditor: this.inlineEditor !== false,
         shiftEnterSave: this.shiftEnterSave,
@@ -7428,6 +7432,7 @@ const config = Vue.defineComponent({
       if (['light', 'grey', 'dark', 'modern-dark'].includes(settings.theme)) this.theme = settings.theme;
       if (typeof settings.hideDNT !== 'undefined') this.hideDNT = !!settings.hideDNT;
       this.hideEditorClipboard = settings.hideEditorClipboard !== false;
+      this.mapClientTextClassNames = settings.mapClientTextClassNames !== false;
       if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
       if (typeof settings.inlineEditor !== 'undefined') this.inlineEditor = !!settings.inlineEditor;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
