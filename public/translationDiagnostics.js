@@ -261,7 +261,35 @@
       && /^\{\d+\}>(?=[|\]])/.test(text.slice(index));
   }
 
-  function scanTags(text, addDiagnostic, depth = 0) {
+  function extractTextDecorationTags(value, offset = 0, depth = 0) {
+    const text = String(value ?? ""), tags = [];
+    for (let i = 0; i < text.length; i++) {
+      const decoration = findTextDecorationAt(text, i);
+      if (!decoration) continue;
+      if (decoration.malformed) {
+        i = Math.max(i, decoration.end - 1);
+        continue;
+      }
+      tags.push({
+        full: text.slice(decoration.start, decoration.end),
+        key: decoration.tagName.trim(),
+        start: offset + decoration.start,
+        end: offset + decoration.end,
+        openerEnd: offset + decoration.openerEnd
+      });
+      if (depth < 64) {
+        tags.push(...extractTextDecorationTags(
+          text.slice(decoration.contentStart, decoration.contentEnd),
+          offset + decoration.contentStart,
+          depth + 1
+        ));
+      }
+      i = decoration.end - 1;
+    }
+    return tags;
+  }
+
+  function scanTags(text, addDiagnostic, depth = 0, surroundingTag = null) {
     const stack = [];
 
     for (let i = 0; i < text.length; i++) {
@@ -279,6 +307,18 @@
           continue;
         }
 
+        const current = stack[stack.length - 1] || surroundingTag;
+        if (current && !(current.open === "[" && current.hasDynamicSeparator)) {
+          addDiagnostic(
+            LEVEL_ERROR,
+            "nested-tags",
+            `Nested text decoration. Close ${current.close} before starting a formatting wrapper.`,
+            textDecoration.start,
+            textDecoration.openerEnd,
+            { expected: current.close }
+          );
+        }
+
         if (depth >= 64) {
           addDiagnostic(
             LEVEL_ERROR,
@@ -292,16 +332,16 @@
         }
 
         const inner = text.slice(textDecoration.contentStart, textDecoration.contentEnd);
-        scanTags(inner, makeOffsetAddDiagnostic(addDiagnostic, textDecoration.contentStart), depth + 1);
+        scanTags(inner, makeOffsetAddDiagnostic(addDiagnostic, textDecoration.contentStart), depth + 1, current);
         i = textDecoration.end - 1;
         continue;
       }
 
       const ch = text[i];
-      const current = stack[stack.length - 1];
+      const current = stack[stack.length - 1] || surroundingTag;
 
-      if (ch === "|" && current?.open === "[") {
-        current.hasDynamicSeparator = true;
+      if (ch === "|" && stack[stack.length - 1]?.open === "[") {
+        stack[stack.length - 1].hasDynamicSeparator = true;
         continue;
       }
 
@@ -310,7 +350,7 @@
           && current?.open === "["
           && (current.hasDynamicSeparator || isKeywordReferenceVariableAt(text, i, current));
 
-        if (stack.length > 0 && !isAllowedVariableInKeyword) {
+        if (current && !isAllowedVariableInKeyword) {
           addDiagnostic(
             LEVEL_ERROR,
             "nested-tags",
@@ -546,6 +586,7 @@
     LEVEL_WARNING,
     LEVEL_ERROR,
     analyze,
+    extractTextDecorationTags,
     normalizeConsistencyText,
     createConsistencyIndex,
     updateConsistencyIndex,

@@ -2340,7 +2340,7 @@ const config = Vue.defineComponent({
         cols: String(s).length <= 0 ? 0 : columns.length,
         vars: countGGGVarTag(String(s)),
         kw: countKeywordPopupTag(String(s)),
-        decor: countTextDecorationTag(String(s))
+        decor: this.extractTextDecorationIdentityTags(s).length
       };
     },
     emptyTranslationDiagnostics() {
@@ -3153,22 +3153,7 @@ const config = Vue.defineComponent({
       return diagnostics;
     },
     extractTextDecorationIdentityTags(text, offset = 0) {
-      const source = String(text ?? "");
-      const regex = new RegExp(textDecorationTagRegex, "igm");
-      const tags = [];
-      let m;
-      while (m = regex.exec(source)) {
-        const full = m[1] || m[0];
-        const tagName = String(m[2] ?? "").trim();
-        tags.push({
-          full,
-          key: tagName,
-          start: offset + m.index,
-          end: offset + m.index + full.length,
-          openerEnd: offset + m.index + `<${tagName}>`.length
-        });
-      }
-      return tags;
+      return window.TranslationDiagnostics.extractTextDecorationTags(text, offset);
     },
     countTextDecorationIdentityTags(tags) {
       const counts = {};
@@ -6794,7 +6779,8 @@ const config = Vue.defineComponent({
       }
       if (lineMismatch.length) confirmations.push('Number of lines mismatched! (Translation/English)\n' + lineMismatch.slice(0, 12).join('\n'));
       if (columnMismatch.length) confirmations.push('Number of table columns mismatched! (Translation/English)\n' + columnMismatch.slice(0, 12).join('\n'));
-      for (const [counter, label] of [[countGGGVarTag, 'variable tags'], [countKeywordPopupTag, 'keyword popup tags'], [countTextDecorationTag, 'text decoration tags']]) {
+      const countDecorations = text => this.extractTextDecorationIdentityTags(text).length;
+      for (const [counter, label] of [[countGGGVarTag, 'variable tags'], [countKeywordPopupTag, 'keyword popup tags'], [countDecorations, 'text decoration tags']]) {
         if (newTranslations.reduce((n, text) => n + counter(text), 0) !== english.reduce((n, text) => n + counter(text), 0)) confirmations.push('Number of ' + label + ' mismatched!');
       }
       return confirmations;

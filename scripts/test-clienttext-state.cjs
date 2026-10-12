@@ -291,3 +291,53 @@ test('SD rarity and item formatting wrappers are recognized while nested variabl
         assert.ok(S.diagnose(field,source.replace('{0}','{1}')).some(issue=>issue.code==='clienttext-token-identity'&&issue.level==='error'));
     }
 });
+
+test('ClientText diagnostics accept nested modifiers, keyword display variables and localizable brace bodies',()=>{
+    const originals=[
+        '<i>{Outer <bold>{<underline>{<rgb(12,34,56)>{Color {0}%}}}}',
+        '<italic>{{<b>{{<color:rare>{{[Skill::{7}|<u>{{Display {0}%}}]}}}}}}',
+        '<font:\'fontin\'>{<italic>{[Skill<gemlevel={7}>|Name {0}]}}',
+        '<b>{1-2} {Fire Rune {0}} <i>{Literal {Word} {1}}',
+    ];
+    for(const source of originals){
+        const field={...unit().fields[0],source},before=structuredClone(field);
+        assert.deepEqual(S.diagnose(field,source),[],source);
+        assert.deepEqual(field,before,'diagnostics preserve the original tags');
+    }
+});
+
+test('ClientText diagnostics compare inner formatting identities and recognize underline',()=>{
+    const source='<i>{<underline>{Text {0}}}',field={...unit().fields[0],source};
+    assert.equal(S.tokenize(source).find(token=>token.full==='<underline>').kind,'format');
+    assert.deepEqual(S.diagnose(field,'<i>{<underline>{Texte {0}}}'),[]);
+    const target='<i>{<b>{Texte {0}}}',issues=S.diagnose(field,target);
+    assert.ok(!issues.some(issue=>issue.code==='clienttext-unknown-syntax'));
+    const mismatch=issues.find(issue=>issue.code==='clienttext-token-identity' && issue.kind==='format');
+    assert.ok(mismatch);assert.equal(target.slice(mismatch.start,mismatch.end),'<b>');
+});
+
+test('ClientText nested wrappers report missing, extra and crossed closing delimiters at raw offsets',()=>{
+    for(const text of ['<i>{<b>{Text {0}}','<i>{{<b>{{Text {0}}}}','<i>{[Skill|Text}]','[Skill|<i>{Text]}']){
+        const field={...unit().fields[0],source:text},issues=S.diagnose(field,text,{identity:false});
+        assert.ok(issues.some(issue=>issue.code==='missing-closing-tag'),text);
+        if(text.includes('Skill')){
+            const crossed=issues.find(issue=>issue.code==='extra-closing-tag');
+            assert.ok(crossed,text);assert.match(crossed.message,/Expected [\]}] first/);
+            assert.equal(crossed.end-crossed.start,1);
+            assert.ok(']}'.includes(text.slice(crossed.start,crossed.end)));
+        }
+        assert.deepEqual(S.diagnose(field,text,{identity:false,tagSyntax:false}),[],'syntax selection remains optional');
+    }
+    const extra='<i>{<b>{Text}}}';
+    const issue=S.diagnose({...unit().fields[0],source:extra},extra,{identity:false}).find(issue=>issue.code==='extra-closing-tag');
+    assert.ok(issue);assert.equal(issue.start,extra.length-1);assert.equal(issue.end,extra.length);
+});
+
+test('ClientText keyword links cannot nest in their identity or display, including inside formatting wrappers',()=>{
+    for(const text of ['[Fire [Cold]]','[Fire|Display [Cold]]','[Fire|<i>{Display [Cold|Word]}]',
+        '<i>{[Fire|<bold>{Display [Cold]}]}']){
+        const issues=S.diagnose({...unit().fields[0],source:text},text,{identity:false});
+        const issue=issues.find(item=>item.code==='nested-tags');
+        assert.ok(issue,text);assert.equal(text.slice(issue.start,issue.end),'[');
+    }
+});

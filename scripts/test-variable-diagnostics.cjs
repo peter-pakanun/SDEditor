@@ -718,13 +718,157 @@ test('SD diagnostics balance nested wrappers and color headers without allowing 
   assert.ok(analyze('<i>{{Valid}}}').diagnostics.some(item => item.code === 'extra-closing-tag'));
 });
 
+test('nested wrappers in keyword display text support variables and exact keyword identities', () => {
+  const { editor } = loadEditor();
+  const english = '[Skill::{7}|<i>{{<bold>{{Damage {0}%}}}}]';
+  const translation = '[Skill::{7}|<i>{{<bold>{{ความเสียหาย {0}%}}}}]';
+  assert.equal(editor.analyzeTranslationDiagnostics(translation, english).errorCount, 0);
+  assert.equal(editor.extractGggVarIdentityTags(translation).length, 1);
+  const changed = translation.replace('{0}%', '{1}%');
+  const variable = editor.analyzeTranslationDiagnostics(changed, english).diagnostics
+    .find(item => item.code === 'variable-tag-identity-mismatch');
+  assert.ok(variable);
+  assert.equal(changed.slice(variable.start, variable.end), '{1}%');
+});
+
+test('decoration nesting cannot hide invalid tags in variable bodies or keyword identities and labels', () => {
+  const { context } = loadEditor();
+  for (const raw of ['{<i>{{Text}}}', '[Skill<i>{{Text}}|Display]', '[Skill|<i>{{[Other]}}]',
+    '[Skill|<i>{{<bold>{{[Other]}}}}]']) {
+    assert.ok(context.window.TranslationDiagnostics.analyze(raw).diagnostics
+      .some(item => item.code === 'nested-tags'), raw);
+  }
+});
+
+test('decoration identity diagnostics compare every nested modifier and repeated occurrence', () => {
+  const { editor } = loadEditor();
+  const wrap = (tag, body) => `<${tag}>{{${body}}}`;
+  const english = wrap('i', wrap('bold', wrap('underline', 'Damage {0}%')));
+  const faithful = wrap('i', wrap('bold', wrap('underline', 'ความเสียหาย {0}%')));
+  assert.equal(editor.analyzeTranslationDiagnostics(faithful, english).errorCount, 0);
+  assert.equal(editor.computeTextStats(english).decor, 3);
+  assert.equal(editor.computeTextStats(faithful).decor, 3);
+  editor.editorCurrentEditingDesc = fixtureDescription('nested-counts', english, faithful);
+  editor.editorBlocks = [{ english, translation: faithful }];
+  assert.deepEqual(Array.from(editor.editorSaveConfirmations([faithful], [])), []);
+  for (const [label, source, target] of [
+    ['missing inner', english, wrap('i', wrap('underline', 'ความเสียหาย {0}%'))],
+    ['changed inner', english, wrap('i', wrap('b', wrap('underline', 'ความเสียหาย {0}%')))],
+    ['extra inner', english, wrap('i', wrap('bold', wrap('underline', wrap('white', 'ความเสียหาย {0}%'))))],
+    ['missing repeated inner', wrap('i', `${wrap('bold', 'One')} ${wrap('bold', 'Two')}`), wrap('i', wrap('bold', 'หนึ่ง'))],
+    ['extra repeated inner', wrap('i', wrap('bold', 'One')), wrap('i', `${wrap('bold', 'หนึ่ง')} ${wrap('bold', 'สอง')}`)],
+  ]) {
+    const errors = editor.analyzeTranslationDiagnostics(target, source).diagnostics
+      .filter(item => item.code === 'text-decoration-tag-name-mismatch');
+    assert.equal(errors.length, 1, label);
+    assert.equal(errors[0].level, 'error', label);
+    assert.match(errors[0].message, /<bold>/, label);
+    if (label.includes('repeated')) assert.match(errors[0].message, /<bold> x2/, label);
+    editor.editorCurrentEditingDesc = fixtureDescription('nested-counts', source, target);
+    editor.editorBlocks = [{ english: source, translation: target }];
+    const confirmations = editor.editorSaveConfirmations([target], []);
+    assert.equal(confirmations.includes('Number of text decoration tags mismatched!'), label !== 'changed inner', label);
+  }
+});
+
+test('nested RGB decoration identities retain complete headers and exact diagnostic offsets', () => {
+  const { editor } = loadEditor();
+  const wrap = (tag, body) => `<${tag}>{{${body}}}`;
+  const inner = wrap('fg:rgb(12,34,56)', wrap('bold', 'Value {0}%'));
+  const outer = wrap('i', `First\n${inner}`);
+  const sibling = wrap('underline', 'More {1}');
+  const raw = `Prefix ${outer} tail ${sibling}`, offset = 37;
+  const tags = Array.from(editor.extractTextDecorationIdentityTags(raw, offset), tag => ({ ...tag }));
+  assert.deepEqual(tags.map(tag => tag.key), ['i', 'fg:rgb(12,34,56)', 'bold', 'underline']);
+  assert.equal(editor.computeTextStats(raw).decor, 4, 'parameterized RGB headers and their inner modifiers count in metadata');
+  assert.deepEqual(tags.map(tag => tag.full), [outer, inner, wrap('bold', 'Value {0}%'), sibling]);
+  for (const tag of tags) {
+    assert.equal(raw.slice(tag.start - offset, tag.end - offset), tag.full);
+    assert.equal(raw.slice(tag.start - offset, tag.openerEnd - offset), `<${tag.key}>`);
+  }
+  for (const header of ['rgb(12,34,56)', 'fg:rgb(12,34,56)', 'color:rgb(12,34,56)', 'colour:rare']) {
+    const english = wrap('italic', wrap(header, 'Damage {0}%\nnext'));
+    const faithful = wrap('italic', wrap(header, 'ความเสียหาย {0}%\nถัดไป'));
+    assert.equal(editor.analyzeTranslationDiagnostics(faithful, english).errorCount, 0, header);
+    assert.equal(editor.computeTextStats(faithful).decor, 2, header);
+    editor.editorCurrentEditingDesc = fixtureDescription('rgb-counts', english, faithful);
+    editor.editorBlocks = [{ english, translation: faithful }];
+    assert.deepEqual(Array.from(editor.editorSaveConfirmations([faithful], [])), [], header);
+    const changed = faithful.replace(`<${header}>`, '<fg:rgb(1,2,3)>');
+    const mismatch = editor.analyzeTranslationDiagnostics(changed, english).diagnostics
+      .find(item => item.code === 'text-decoration-tag-name-mismatch');
+    assert.ok(mismatch, header);
+    assert.equal(changed.slice(mismatch.start, mismatch.end), '<fg:rgb(1,2,3)>', header);
+  }
+});
+
+test('table diagnostics compare nested modifiers within each column', () => {
+  const { editor } = loadEditor();
+  const wrap = (tag, body) => `<${tag}>{{${body}}}`;
+  const english = `${wrap('i', wrap('bold', 'Left {0}%'))}@${wrap('i', 'Right {1}')}`;
+  const faithful = `${wrap('i', wrap('bold', 'ซ้าย {0}%'))}@${wrap('i', 'ขวา {1}')}`;
+  assert.equal(editor.analyzeDescDiagnostics(fixtureDescription('nested-table-valid', english, faithful)).errorCount, 0);
+  const moved = `${wrap('i', 'ซ้าย {0}%')}@${wrap('i', wrap('bold', 'ขวา {1}'))}`;
+  const errors = editor.analyzeDescDiagnostics(fixtureDescription('nested-table-moved', english, moved)).diagnostics
+    .filter(item => item.code === 'text-decoration-tag-name-mismatch');
+  assert.equal(errors.length, 2, 'moving an inner modifier across columns cannot cancel out its missing/extra counts');
+  assert.deepEqual(Array.from(errors, item => item.columnIndex), [0, 1]);
+});
+
+test('editorSave blocks changing an inner modifier and saves faithful nested tags verbatim', async () => {
+  const { editor, alerts, confirmations } = loadEditor();
+  const wrap = (tag, body) => `<${tag}>{{${body}}}`;
+  const english = wrap('i', wrap('bold', 'Damage {0}%'));
+  const original = wrap('i', wrap('bold', 'เดิม {0}%'));
+  const changed = wrap('i', wrap('underline', 'ใหม่ {0}%'));
+  const faithful = wrap('i', wrap('bold', 'ใหม่ {0}%'));
+  const desc = fixtureDescription('nested-modifier-save', english, original);
+  editor.descs = [desc]; editor.editorCurrentEditingDesc = desc; editor.editorVisible = true;
+  editor.editorOriginalTranslations = [...desc.translations.Thai];
+  editor.editorBlocks = [{ english, translation: changed }];
+  let persisted = 0;
+  const persist = editor.persistTranslationBatch;
+  editor.persistTranslationBatch = async (...args) => { persisted++; return persist.call(editor, ...args); };
+  assert.equal(await editor.editorSave(), false);
+  assert.equal(persisted, 0);
+  assert.equal(desc.translations.Thai[0], original);
+  assert.equal(editor.editorVisible, true);
+  assert.match(alerts[0], /Text decoration tagName mismatch/);
+  assert.deepEqual(confirmations, []);
+  editor.editorBlocks[0].translation = faithful;
+  assert.equal(await editor.editorSave(), true);
+  assert.equal(persisted, 1);
+  assert.equal(desc.translations.Thai[0], faithful);
+  assert.equal(editor.localDescs.descs[0].translations.Thai[0], faithful);
+  assert.deepEqual(confirmations, []);
+});
+
 test('excessive SD decoration nesting returns a diagnostic without overflowing the call stack', () => {
-  const { context } = loadEditor(), raw = '<i>{{'.repeat(4000) + 'Text' + '}}'.repeat(4000);
+  const { editor, context } = loadEditor(), raw = '<i>{{'.repeat(4000) + 'Text' + '}}'.repeat(4000);
   let result;
   assert.doesNotThrow(() => { result = context.window.TranslationDiagnostics.analyze(raw); });
   const diagnostic = result.diagnostics.find(item => item.level === 'error' && item.code === 'nested-tags');
   assert.ok(diagnostic); assert.match(diagnostic.message, /nesting.*64/);
   assert.equal(raw.slice(diagnostic.start, diagnostic.end), '<i>', 'the excessive wrapper header has an exact diagnostic range');
+  let compared;
+  assert.doesNotThrow(() => { compared = editor.analyzeTranslationDiagnostics(raw, raw); });
+  assert.ok(compared.diagnostics.some(item => item.code === 'nested-tags'));
+  assert.equal(compared.diagnostics.some(item => item.code === 'text-decoration-tag-name-mismatch'), false,
+    'depth-limited identity extraction stays consistent for identical source and translation');
+});
+
+test('many unclosed wrappers skip their malformed line and retain a valid next-line decoration', () => {
+  const { editor } = loadEditor();
+  const full = '<b>{{Valid {0}}}', raw = '<i>{{'.repeat(10000) + `Text\n${full}`, offset = 17;
+  const tags = Array.from(editor.extractTextDecorationIdentityTags(raw, offset), tag => ({ ...tag }));
+  assert.deepEqual(tags.map(tag => tag.key), ['b']);
+  assert.equal(tags[0].full, full);
+  assert.equal(tags[0].start, offset + raw.indexOf(full));
+  assert.equal(tags[0].end, offset + raw.length);
+  let result;
+  assert.doesNotThrow(() => { result = editor.analyzeTranslationDiagnostics(raw, raw); });
+  assert.ok(result.diagnostics.some(item => item.code === 'malformed-text-decoration-tag' && item.level === 'warning'));
+  assert.equal(result.diagnostics.some(item => item.code === 'text-decoration-tag-name-mismatch'), false);
 });
 
 test('ClientText shares preview hosts and settings while isolating field values from SD state',()=>{

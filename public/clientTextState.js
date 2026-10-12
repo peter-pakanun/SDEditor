@@ -322,7 +322,7 @@
     }
     function tokenize(value) {
         const text = String(value ?? ''), tokens = [];
-        const formats = new Set(['size','font','rgb','glow','fg','colour','color','smaller','b','i','n','normal','italic','bold','u',
+        const formats = new Set(['size','font','rgb','glow','fg','colour','color','smaller','b','i','n','normal','italic','bold','u','underline',
             'shadow','center','left','right','red','green','blue','white','yellow','default','light',
             'unique','magic','rare','gem','currency','enchanted']);
         const add = (full,start,kind,identity=full) => tokens.push({full,start,end:start+full.length,kind,identity});
@@ -384,18 +384,26 @@
                 if(brace>=0 && !/^[A-Za-z][A-Za-z0-9_]*::\{\d+\}$/.test(identity)
                     && !/^[A-Za-z][A-Za-z0-9_]*<gemlevel=\{\d+\}>$/.test(identity))
                     add('error','nested-tags','Braces in a keyword ID must be a numeric ::{n} or <gemlevel={n}> reference.',token.start+1+brace,token.start+1+identity.length);
-                const nested=identity.indexOf('[');
-                if(nested>=0)add('error','nested-tags','Close the keyword tag before starting another keyword tag.',token.start+1+nested,token.end);
             }
-            for (const [open, close] of [['[',']'],['{','}']]) {
-                const stack = [];
-                for (let i = 0; i < text.length; i++) {
-                    if (text[i] === open) stack.push(i);
-                    else if (text[i] === close && !stack.length) add('error', 'extra-closing-tag', 'Extra closing ' + close, i, i + 1);
-                    else if (text[i] === close) stack.pop();
+            // Formatting and localizable brace bodies may nest, but their
+            // delimiters must close in order and keyword links cannot nest.
+            const stack = [], closers = {'[':']','{':'}'};
+            let keywordDepth = 0;
+            for (let i = 0; i < text.length; i++) {
+                const ch = text[i], current = stack[stack.length - 1];
+                if (ch === '[' || ch === '{') {
+                    if (ch === '[') {
+                        if (keywordDepth) add('error','nested-tags','Close the keyword tag before starting another keyword tag.',i,i+1);
+                        keywordDepth++;
+                    }
+                    stack.push({open:ch,close:closers[ch],start:i});
+                } else if (ch === ']' || ch === '}') {
+                    if (!current) add('error','extra-closing-tag','Extra closing '+ch,i,i+1);
+                    else if (ch !== current.close) add('error','extra-closing-tag','Extra closing '+ch+'. Expected '+current.close+' first.',i,i+1);
+                    else {stack.pop();if(current.open==='[')keywordDepth--;}
                 }
-                for (const start of stack) add('error', 'missing-closing-tag', 'Missing closing ' + close, start, start + 1);
             }
+            for (const token of stack) add('error','missing-closing-tag','Missing closing '+token.close,token.start,token.start+1);
             for(let index=0;index<text.length;index++){
                 if(text.startsWith('<<',index)){
                     const end=text.indexOf('>>',index+2);
