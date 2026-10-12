@@ -650,6 +650,29 @@ test('new ZIP translations that exactly include saved work remove inherited stag
   }
 });
 
+test('source advancement omits blank padding already represented by a missing translation block', () => {
+  for (const english of [['[DNT] Internal'], ['First', 'Second']]) for (const incoming of [undefined, [], ['']]) {
+    const previous = sourceDesc(), current = sourceDesc(), workspace = modern(previous);
+    for (const desc of [previous, current]) {
+      desc.translations.English = english;
+      delete desc.translations.Thai;
+    }
+    if (incoming !== undefined) current.translations.Thai = incoming;
+    const blank = english.map(() => '');
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: blank }, 'Thai', { source: previous, savedAt: 10 });
+    assert.equal(W.workspaceFile(workspace, previous, 'Thai').hasChanges, true, 'Explicit same-version blank saves remain Saved');
+    W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+    assert.equal(workspace.staged.Thai?.['a.txt'], undefined);
+    assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), null);
+    assert.deepEqual(W.workspaceFile(workspace, current, 'Thai').translations, blank);
+  }
+  const previous = sourceDesc(), current = sourceDesc(); delete current.translations.Thai;
+  assert.equal(W.classifySourceCarry(previous, current, 'Thai', [' ']).action, 'carry', 'Actual whitespace is not rewritten');
+  assert.equal(W.classifySourceCarry(previous, current, 'Thai', ['', '']).action, 'carry', 'Extra entries are not truncated');
+  current.remarks = ['corrected'];
+  assert.ok(W.classifySourceCarry(previous, current, 'Thai', ['']).metadataCorrection);
+});
+
 test('blank or incomplete new ZIP translations require Dropped review instead of carrying saved text', () => {
   for (const translated of [[''], [], ['new line', '']]) {
     const previous = sourceDesc(), current = sourceDesc('One', { Thai: translated }), workspace = modern(previous);

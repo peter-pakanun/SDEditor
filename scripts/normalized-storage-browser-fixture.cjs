@@ -747,18 +747,24 @@ async function sourceCarryChecks(page, results) {
             const stage = (work, source, index, translations, savedAt, language = 'Thai', sourceCarry) =>
                 WorkspaceState.stageTranslation(work, { filepath: source[index].filepath, translations }, language,
                     { source: source[index], savedAt, sourceCarry });
-            const previousSource = Array.from({ length: 7 }, (_, index) => describe(index));
+            const blankIndexes = Array.from({ length: 80 }, (_, index) => index + 7), explicitBlankIndex = 87;
+            const previousSource = Array.from({ length: 88 }, (_, index) => describe(index));
+            for (const index of [...blankIndexes, explicitBlankIndex]) {
+                previousSource[index].translations.English = ['[DNT] Internal ' + index];
+                delete previousSource[index].translations.Thai;
+            }
             const currentSource = copy(previousSource); currentSource[0].translations.Thai = ['Included saved work']; currentSource[2].remarks = ['corrected metadata'];
             const previousBaseline = await makeBaseline(previousSource), currentBaseline = await makeBaseline(currentSource);
             const previousScope = makeScope('fixture-carry-cleanup', previousBaseline.archive.baselineId);
             const currentScope = makeScope(previousScope.accountId, currentBaseline.archive.baselineId);
             const previous = workspace(previousScope, previousSource, previousBaseline), current = workspace(currentScope, currentSource, currentBaseline);
-            for (const index of [0, 1, 2, 3, 5, 6]) stage(previous, previousSource, index,
-                index === 0 ? ['Included saved work'] : previousSource[index].translations.Thai, 10 + index);
-            for (const index of [0, 1, 2, 3, 5, 6]) {
+            for (const index of [0, 1, 2, 3, 5, 6, ...blankIndexes]) stage(previous, previousSource, index,
+                index === 0 ? ['Included saved work'] : previousSource[index].translations.Thai || [''], 10 + index);
+            for (const index of [0, 1, 2, 3, 5, 6, ...blankIndexes]) {
                 (current.staged.Thai ||= {})[currentSource[index].filepath] = { ...copy(previous.staged.Thai[previousSource[index].filepath]), sourceHash: currentScope.sourceHash };
             }
             stage(current, currentSource, 4, currentSource[4].translations.Thai, 100);
+            stage(current, currentSource, explicitBlankIndex, [''], 101);
             for (const index of [5, 6]) current.staged.Thai[currentSource[index].filepath].sourceCarry = {
                 fromSourceHash: previousScope.sourceHash, toSourceHash: currentScope.sourceHash, fromSavedAt: 10 + index };
             const resolved = WorkspaceState.dropTranslation(current, previousSource[3], 'Thai', { id: 'carry-protected-promotion',
@@ -772,8 +778,17 @@ async function sourceCarryChecks(page, results) {
             await OfflineStore.saveSourceWorkspaceWithRevisions(copy(previousSource), previous, [], previousScope, previousBaseline);
             await OfflineStore.setVersionMetadata(previousScope, { createdAt: 1, sourceImportedAt: 1 });
             await OfflineStore.saveSourceWorkspaceWithRevisions(copy(currentSource), current, [{ filepath: currentSource[1].filepath, lang: 'Thai',
-                translations: copy(currentSource[1].translations.Thai), sourceHash: currentScope.sourceHash, savedAt: 20, note: 'Explicit unchanged save' }], currentScope, currentBaseline);
+                translations: copy(currentSource[1].translations.Thai), sourceHash: currentScope.sourceHash, savedAt: 20, note: 'Explicit unchanged save' },
+                { filepath: currentSource[explicitBlankIndex].filepath, lang: 'Thai', translations: [''], sourceHash: currentScope.sourceHash,
+                    savedAt: 101, note: 'Explicit blank save' }], currentScope, currentBaseline);
             await OfflineStore.setVersionMetadata(currentScope, { createdAt: 100, sourceImportedAt: 100 });
+            const open = indexedDB.open('sdeditor'), db = await new Promise((resolve, reject) => {
+                open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+            });
+            const checkpoint = db.transaction(['storage_migrations'], 'readwrite');
+            checkpoint.objectStore('storage_migrations').put({ key: JSON.stringify(['source-carry-repair-v1', NormalizedStore.scopeKey(currentScope)]),
+                value: { state: 'ready' } });
+            await new Promise((resolve, reject) => { checkpoint.oncomplete = resolve; checkpoint.onabort = () => reject(checkpoint.error); }); db.close();
             const repaired = await OfflineStore.getVersionWorkspace(currentScope, 'Thai');
 
             const importPreviousSource = [describe('import')], importCurrentSource = copy(importPreviousSource);
@@ -816,8 +831,11 @@ async function sourceCarryChecks(page, results) {
         assert.ok(prepared.repaired.staged.Thai['carry/4.txt'], 'Uncertain unchanged stage is retained');
         assert.ok(prepared.repaired.staged.Thai['carry/3.txt'], 'Resolved Dropped promotion is retained');
         assert.ok(prepared.repaired.staged.Thai['carry/6.txt'], 'Unresolved Dropped work is retained');
+        for (let index = 7; index < 87; index++) assert.equal(prepared.repaired.staged.Thai['carry/' + index + '.txt'], undefined,
+            'Inherited blank DNT padding is removed even after v1 completion');
+        assert.deepEqual(prepared.repaired.staged.Thai['carry/87.txt'].translations, [''], 'Explicit current-version blank stays Saved');
         assert.deepEqual(prepared.repaired.staged.Thai['carry/2.txt'].sourceCarry.metadataCorrection.after.remarks, ['corrected metadata']);
-        assert.equal(Object.values(prepared.repaired.sourceCarryRepairArchive).length, 2, 'Removed inherited entries have durable recovery archives');
+        assert.equal(Object.values(prepared.repaired.sourceCarryRepairArchive).length, 82, 'Removed inherited entries have durable recovery archives');
         assert.deepEqual(prepared.merged.staged.Thai['carry/import.txt'].translations, ['Newer destination Thai']);
         assert.deepEqual(prepared.imported.staged.German['carry/import.txt'].translations, ['Newer destination German']);
         assert.deepEqual(prepared.imported.dropped.Thai['carry/import.txt'].snapshot.translations, ['Older saved Thai']);
@@ -843,7 +861,9 @@ async function sourceCarryChecks(page, results) {
         assert.deepEqual(restored.previous.staged.Thai['carry/import.txt'].translations, ['Older saved Thai'], 'The predecessor workspace is retained');
         assert.equal(restored.missing.hasChanges, false); assert.equal(restored.missing.isDropped, true); assert.equal(restored.missing.isMissing, true); assert.equal(restored.missing.needsReview, true);
         assert.deepEqual(errors, []);
-        results.push({ scenario: 'source-carry migration and reload', removed: 2, protected: 5, recoveryArchives: 2 });
+        results.push({ scenario: 'source-carry migration and reload', removed: Object.keys(restored.repaired.sourceCarryRepairArchive).length,
+            inheritedBlankDntRemoved: 80, protected: Object.keys(restored.repaired.staged.Thai).length,
+            recoveryArchives: Object.keys(restored.repaired.sourceCarryRepairArchive).length });
         results.push({ scenario: 'existing destination import and language isolation', preservedLanguages: ['Thai', 'German'], competingTextPreserved: true });
         results.push({ scenario: 'missing incoming baseline preserves previous translation for review', saved: false, dropped: true });
     } finally { await isolated.close(); }

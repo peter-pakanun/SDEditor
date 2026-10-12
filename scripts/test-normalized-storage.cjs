@@ -514,10 +514,29 @@ test('carry repair adds factual metadata correction provenance and preserves Dro
     assert.ok(workspace.staged.Thai['dropped.txt'], 'A resolved Dropped assignment remains meaningful');
 });
 
+test('blank carry cleanup revisits a completed v1 checkpoint and retains explicit current-version blank saves', async () => {
+    const f = recordFixture(), files = ['inherited.txt', 'legacy.txt', 'explicit.txt'].map(path => f.source(path));
+    for (const file of files) delete file.translations.Thai;
+    const previous = { ...f.scope, sourceHash: 'previous' };
+    const stage = sourceHash => ({ sourceHash, translations: [''], before: [''], savedAt: 41 });
+    const current = Object.fromEntries(files.map(file => [file.filepath, stage(f.scope.sourceHash)]));
+    current['inherited.txt'].sourceCarry = { fromSourceHash: previous.sourceHash, toSourceHash: f.scope.sourceHash };
+    putCarryWorkspace(f, f.scope, files, { Thai: current });
+    putCarryWorkspace(f, previous, files, { Thai: { 'legacy.txt': stage(previous.sourceHash) } });
+    f.put(N.stores.migration, { key: f.n.key('source-carry-repair-v1', N.scopeKey(f.scope)), value: { state: 'ready' } });
+    f.data.get('revisions_poe2').set(1, { ...f.scope, filepath: 'explicit.txt', lang: 'Thai', translations: [''], savedAt: 42 });
+    const result = await f.n.repairCarriedStages(f.scope), workspace = await f.n.workspace(f.scope);
+    assert.equal(result.removed.length, 2);
+    assert.deepEqual(Object.keys(workspace.staged.Thai), ['explicit.txt']);
+    assert.equal(Object.keys(workspace.sourceCarryRepairArchive).length, 2);
+    const writes = f.writes.length; await f.n.activation(f.scope);
+    assert.equal(f.writes.length, writes, 'The new checkpoint settles without repeated writes');
+});
+
 test('carry cleanup resumes committed batches after failure without reviving removed records from frozen legacy state', async () => {
     let failure = true;
     const f = recordFixture({ onPut({ name, value }) {
-        if (failure && name === N.stores.migration && value.key.startsWith('["source-carry-repair-v1"') && value.value.state === 'ready') throw new Error('Interrupted cleanup');
+        if (failure && name === N.stores.migration && value.key.startsWith('["source-carry-repair-v2"') && value.value.state === 'ready') throw new Error('Interrupted cleanup');
     } }), files = Array.from({ length: 70 }, (_, index) => f.source('carry-' + String(index).padStart(3, '0') + '.txt'));
     putCarryWorkspace(f, f.scope, files, { Thai: Object.fromEntries(files.map(file => [file.filepath, { sourceHash: f.scope.sourceHash,
         translations: file.translations.Thai, sourceCarry: { fromSourceHash: 'old', toSourceHash: f.scope.sourceHash }, savedAt: 1 }])) });

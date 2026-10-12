@@ -138,6 +138,13 @@
     while (result.length < count) result.push('');
     return result;
   }
+  // Missing language blocks display as empty lines for the English entries.
+  // Compare that padding during inheritance without changing immutable data
+  // or the meaning of an explicit save made in the selected version.
+  const sameBaselineTranslation = (desc, language, translations) => {
+    const count = desc.translations?.English?.length || 0;
+    return equal(displayedLines(translations, count), displayedLines(desc.translations?.[language], count));
+  };
   const complete = (value, count) => Array.isArray(value) && value.length === count && value.every(text => String(text).trim());
   const snapshot = (desc, language, translations) => ({ english: lines(desc?.translations?.English),
     variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []), stats: copy(desc?.stats || []),
@@ -154,7 +161,7 @@
       return { action: 'drop', reason: 'Translation missing from new source' };
     const before = sourceMetadata(previous), after = sourceMetadata(current);
     if (!equal(before, after)) return { action: 'carry', reason: 'Source metadata corrected', metadataCorrection: { before, after } };
-    return equal(carried, baseline) ? { action: 'baseline', reason: 'Translation included in new source' }
+    return sameBaselineTranslation(current, language, carried) ? { action: 'baseline', reason: 'Translation included in new source' }
       : { action: 'carry', reason: 'Translation carried to new source' };
   }
   function metadataCorrectionForSource(entry, desc, sourceHash) {
@@ -582,7 +589,7 @@
           if (decision.action === 'baseline') fromSourceHash = previousHash;
         }
       }
-      if (!fromSourceHash || !equal(lines(entry.translations), lines(desc.translations?.[language]))) continue;
+      if (!fromSourceHash || !sameBaselineTranslation(desc, language, entry.translations)) continue;
       delete entries[filepath];
       removed.push({ language, filepath, fromSourceHash });
     }

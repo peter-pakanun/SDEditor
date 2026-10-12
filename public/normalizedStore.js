@@ -838,7 +838,7 @@
     }
     async function ensure(scope) { if (scope?.sourceHash) await migrate(scope); }
     const carryRepairs = new Map();
-    const carryRepairKey = scope => key('source-carry-repair-v1', scopeKey(scope));
+    const carryRepairKey = scope => key('source-carry-repair-v2', scopeKey(scope));
     const roomIdentityKey = (scope, language) => key(...((scope.branchId || 'default') === 'default'
       ? [String(scope.accountId || 'guest'), scope.game, scope.sourceHash, language]
       : [String(scope.accountId || 'guest'), scope.game, scope.branchId, scope.sourceHash, language]), ...contentParts(scope));

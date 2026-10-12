@@ -8,9 +8,10 @@
   // ClientText journal/proof fragments. v12 editors cannot render class-variant
   // fields accepted by the v2 workbook parser. v13 writers cannot read reusable
   // trusted-original cache bindings. v14 writers cannot retain factual source
-  // carry provenance or safely reconcile an existing destination workspace. Keep every
-  // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 15;
+  // carry provenance or safely reconcile an existing destination workspace.
+  // v16 also fences v15 writers that would restage blank baseline padding.
+  // Keep every store and durable retry receipt while excluding older editors/workers.
+  const DB_VERSION = 16;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
