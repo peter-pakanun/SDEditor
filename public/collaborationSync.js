@@ -490,18 +490,19 @@
         legacyCarries = copy(room.carries || {});
         room.carries = {}; room.carryRevisions = {};
         const pendingPaths = new Set(room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
-        // Relay proven local inheritance for an older unmarked first merge.
-        // The API independently verifies its accepted predecessor and retains
-        // explicit saves and uncertain server evidence before resetting staging.
+        // Repair a proven local carry already accepted as an automatic first
+        // merge. The API retains explicit saves and uncertain shared evidence,
+        // including when the predecessor was never uploaded.
         for (const path of carryRepairPaths) {
           const shared = room.shared[path], original = this.baselineFiles.get(path);
           const repair = W.carriedBaselineReplay(workspace, original, language, shared);
-          if (!repair || identity.groupId || pendingPaths.has(path) || shared.revision !== 1 || shared.sourceCarry
+          if (!repair || identity.groupId || pendingPaths.has(path) || shared.revision !== 1
             || !/^[a-f0-9]{64}$/.test(repair.fromSourceHash)) continue;
           const sourceCarry = { fromSourceHash: repair.fromSourceHash, toSourceHash: identity.sourceHash,
             ...(Number.isSafeInteger(repair.stage?.savedAt) ? { fromSavedAt: repair.stage.savedAt } : {}) };
           const previousBaseline = previousBaselines.get(repair.fromSourceHash + ':' + path);
-          room.outbox.push({ id: this.uuid(), origin: 'merge', kind: 'join', status: 'pending', carryRepair: true,
+          if (!previousBaseline) continue;
+          room.outbox.push({ id: this.uuid(), origin: 'merge', kind: 'join', status: 'pending', carryRepair: true, repairInitialMerge: true,
             ...(previousBaseline ? { previousBaselines: { [path]: P.witness(previousBaseline) } } : {}),
             files: [{ base: copy(shared), yours: { ...copy(shared), sourceCarry } }] });
           pendingPaths.add(path);
@@ -1299,6 +1300,29 @@
       }
       await flushCompleted();
     }
+    async retainSourceCarryRepair(op, files, epoch, reason = 'protected') {
+      const paths = op.files.map(entry => entry.yours.filepath);
+      await this.update((state, room) => {
+        for (const file of files) if (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision) room.shared[file.filepath] = fileState(file);
+        room.outbox = room.outbox.filter(operation => operation.id !== op.id);
+        room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== op.id);
+        this.rebuild(room);
+      }, { records: this.records('retain-source-carry-repair', paths, [op.id]), projectWorkspace: (workspace, state) => {
+        for (const repair of Object.values(workspace?.sourceCarryRepairArchive || {})) if (repair.language === state.rooms[this.key].identity.language
+          && paths.includes(repair.filepath)) repair.protectedRevision = files.find(file => file.filepath === repair.filepath)?.revision || 1;
+        return this.projection(files, epoch)(workspace, state);
+      } }, epoch);
+      await this.onRemote(this.remoteFiles(files).map(file => ({ ...file, sourceCarryRepairProtection: { revision: file.revision, reason } })));
+    }
+    async retainChangedSourceCarryRepair(op, epoch) {
+      if (!op?.repairInitialMerge) return false;
+      const room = this.room(), files = op.files.map(entry => room.shared[entry.yours.filepath]).filter(Boolean);
+      const paths = new Set(op.files.map(entry => entry.yours.filepath));
+      if (!files.some(file => file.revision !== 1 || file.needsReview || !file.trackedForExport || file.sourceCarry?.metadataCorrection
+        || W.classifySourceCarry(this.baselineFiles.get(file.filepath), this.baselineFiles.get(file.filepath), room.identity.language, file.translations).action !== 'baseline')
+        && !room.outbox.some(other => other.id !== op.id && !other.carryRepair && other.files.some(entry => paths.has(entry.yours.filepath)))) return false;
+      await this.retainSourceCarryRepair(op, files, epoch, 'newer_work'); return true;
+    }
     async flush(epoch) {
       const blocked = new Set();
       // The snapshot of IDs bounds this pass; newly queued saves trigger a later pass.
@@ -1306,6 +1330,7 @@
       for (const id of ids) {
         const op = this.room().outbox.find(item => item.id === id);
         if (!op) continue;
+        if (await this.retainChangedSourceCarryRepair(op, epoch)) continue;
         const paths = op.files.map(entry => entry.yours.filepath);
         if (['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) || paths.some(path => blocked.has(path))) {
           if (!['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) && !op.blockedByConflict) await this.update((state, room) => {
@@ -1345,6 +1370,13 @@
             if (!this.current(epoch)) throw staleError();
             break;
           } catch (error) {
+            if (current.repairInitialMerge && error.code === 'SOURCE_CARRY_REPAIR_CONFLICT') {
+              const accepted = error.current?.files;
+              if (!Array.isArray(accepted)) throw error;
+              await this.retainSourceCarryRepair(current, accepted, epoch, error.reason);
+              break;
+            }
+            if (current.repairInitialMerge && error.status === 404) error.message = 'Inherited saved-status repair requires an updated collaboration API. Your translations are preserved.';
             if (error.code === 'CANDIDATE_CONFLICT' && current.promoteDropped && this.store.updateWorkspace) {
               await this.retainDroppedConflict(error, current, 'promotion', epoch);
               if (this.room().outbox.find(item => item.id === id)?.status === 'pending') {
@@ -1373,6 +1405,7 @@
       if (this.store.getCollaborationRecords) await this.withLocalWrite(() => this.refreshStored(epoch,
         this.records('read-operation', this.room().outbox.find(op => op.id === id)?.files.map(entry => entry.yours.filepath) || [], [id])));
       const observed = this.room().outbox.find(op => op.id === id);
+      if (await this.retainChangedSourceCarryRepair(observed, epoch)) return;
       // Prepared requests are immutable retry payloads. Reusing one requires
       // neither a workspace read nor another IndexedDB write.
       if (!observed || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(observed.status)) return;
@@ -1455,6 +1488,10 @@
     }
     async sendMutation(op, epoch) {
       const path = '/rooms/' + encodeURIComponent(this.room().roomId);
+      if (op.repairInitialMerge) return this.api(path + '/source-carry-repairs', { method: 'POST', body: { mutationId: op.id,
+        files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: 1,
+          fromSourceHash: file.sourceCarry.fromSourceHash, baseline: copy(file.baseline), proof: copy(file.proof),
+          ...(file.previousBaseline ? { previousBaseline: copy(file.previousBaseline) } : {}) })) } }, epoch);
       if (op.resetStaging) return this.api(path + '/staged-deletions', { method: 'POST', body: { mutationId: op.id,
         files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: file.baseRevision, translations: copy(file.translations),
           ...(this.room().mode === 'sparse' ? { baseline: copy(file.baseline), proof: copy(file.proof) } : {}) })) } }, epoch);

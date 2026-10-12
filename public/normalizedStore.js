@@ -838,7 +838,7 @@
     }
     async function ensure(scope) { if (scope?.sourceHash) await migrate(scope); }
     const carryRepairs = new Map();
-    const carryRepairKey = scope => key('source-carry-repair-v3', scopeKey(scope));
+    const carryRepairKey = scope => key('source-carry-repair-v4', scopeKey(scope));
     const roomIdentityKey = (scope, language) => key(...((scope.branchId || 'default') === 'default'
       ? [String(scope.accountId || 'guest'), scope.game, scope.sourceHash, language]
       : [String(scope.accountId || 'guest'), scope.game, scope.branchId, scope.sourceHash, language]), ...contentParts(scope));
@@ -885,6 +885,21 @@
       const captured = { ...scope }, id = scopeKey(captured), markerKey = carryRepairKey(captured);
       if (carryRepairs.has(id)) return carryRepairs.get(id);
       const work = (async () => {
+        let predecessorDeferred = false;
+        const inspectPredecessors = dependencies.listVersionScopes && await transaction([stores.migration, stores.records], 'readonly', async tx => {
+          if ((await get(tx, stores.migration, markerKey))?.state === 'ready') return false;
+          const index = tx.objectStore(stores.records).index('by_kind');
+          return (await request(index.getAllKeys ? index.getAllKeys(key(id, 'staged')) : index.getAll(key(id, 'staged')))).length > 0;
+        });
+        // An older version can still exist only in the frozen v8 stores. Find
+        // scoped catalog identities and verify/convert that retained evidence
+        // before concluding that this workspace has no predecessor.
+        for (const previous of inspectPredecessors ? await dependencies.listVersionScopes(captured) : []) {
+          if (!previous.hasSource || !previous.sourceHash || previous.sourceHash === captured.sourceHash
+            || String(previous.accountId || 'guest') !== String(captured.accountId || 'guest') || previous.game !== captured.game
+            || (previous.branchId || 'default') !== (captured.branchId || 'default') || !sameContentScope(previous, captured)) continue;
+          try { await ensure(previous); } catch (_) { predecessorDeferred = true; }
+        }
         const initial = await transaction([stores.meta, stores.records, stores.migration, 'kv',
           ...(revisionStoreName ? [revisionStoreName(captured.game)] : [])], 'readonly', async tx => {
           const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
@@ -904,11 +919,12 @@
           const importedAt = await sourceImportTime(tx, captured);
           const chronological = [];
           if (importedAt) for (const sibling of siblings) {
+            if ((await get(tx, stores.migration, scopeKey(sibling)))?.state !== 'ready') continue;
             const previousImportedAt = await sourceImportTime(tx, sibling);
             if (previousImportedAt && previousImportedAt < importedAt) chronological.push({ ...sibling, importedAt: previousImportedAt });
           }
           return { keys: keys.sort().filter(value => !marker?.afterKey || value > marker.afterKey), siblings: chronological,
-            importedAt, deferred: !!marker?.deferred };
+            importedAt, deferred: !!marker?.deferred || predecessorDeferred };
         });
         if (!initial) return { changed: false, removed: [] };
         return trackMigration('source-carry', id, captured, async () => {
@@ -917,7 +933,7 @@
           // can still prove the original copy; never rewrite that evidence.
           const frozen = initial.siblings.length && legacyGet && workspaceKey ? await legacyGet(workspaceKey(captured)) : null;
           const removed = []; let changed = false, deferred = initial.deferred;
-          const names = [stores.meta, stores.records, stores.baseline, stores.migration, stores.operations, stores.submissions, stores.receipts, stores.shared,
+          const names = [stores.meta, stores.records, stores.baseline, stores.migration, stores.operations, stores.submissions, stores.receipts, stores.shared, stores.roomRecords,
             ...(revisionStoreName ? [revisionStoreName(captured.game)] : [])];
           for (let offset = 0; offset < initial.keys.length || !offset; offset += 64) {
             const keys = initial.keys.slice(offset, offset + 64);
@@ -970,10 +986,30 @@
                   const before = await get(tx, stores.records, key(scopeKey(previous), ['staged', language, filepath]));
                   if (!before) continue;
                   const candidates = [stage], frozenStage = frozen?.sourceHash === captured.sourceHash ? frozen.staged?.[language]?.[filepath] : null;
+                  const accepted = await get(tx, stores.shared, key(roomKey, filepath));
+                  const firstMerge = accepted?.shared?.revision === 1 && accepted.shared.trackedForExport && !accepted.shared.needsReview
+                    && !accepted.shared.sourceCarry?.metadataCorrection && !accepted.shared.sourceCarry?.destinationSave
+                    && same(accepted.shared.translations, stage.translations);
                   if (frozenStage?.sourceHash === captured.sourceHash && same(frozenStage.translations, stage.translations)) {
-                    const accepted = await get(tx, stores.shared, key(roomKey, filepath));
-                    if (accepted?.shared?.revision === 1 && accepted.shared.trackedForExport && !accepted.shared.needsReview
-                      && !accepted.shared.sourceCarry?.metadataCorrection && same(accepted.shared.translations, stage.translations)) candidates.push(frozenStage);
+                    if (firstMerge) candidates.push(frozenStage);
+                  }
+                  // The first shared projection also overwrote normalized
+                  // stages, which have no frozen current aggregate. Retained
+                  // authored timestamps and the pre-join recovery copy can
+                  // establish that this exact edit preceded the source import.
+                  const metadata = current.status?.[filepath], edited = metadata?.languageStatus?.[language]
+                    || (metadata?.statusLanguage === language ? metadata : {});
+                  const editedAt = Math.max(evidenceTime(edited.lastEditedAt), evidenceTime(edited.lastTranslatedAt));
+                  if (firstMerge && !stage.saveOrigin && editedAt && editedAt === evidenceTime(before.data?.savedAt)
+                    && editedAt >= previous.importedAt && editedAt < initial.importedAt && same(before.data?.translations, stage.translations)) {
+                    const recovery = await request(tx.objectStore(stores.roomRecords).index('by_path').getAll(key(roomKey, filepath)));
+                    for (const item of recovery) if (item.value.field === 'recoveryFiles' && item.value.data.trackedForExport
+                      && !item.value.data.needsReview && same(item.value.data.translations, stage.translations)) {
+                      const group = await get(tx, stores.roomRecords, key(roomKey, ['recovery', item.value.groupId]));
+                      if (group?.data?.reason === 'Local edited translation before joining' && evidenceTime(group.data.at) >= initial.importedAt) {
+                        candidates.push({ ...copy(before.data), sourceHash: captured.sourceHash }); break;
+                      }
+                    }
                   }
                   const previousOriginal = await get(tx, stores.baseline, key(baselineKey(previous), filepath));
                   if (!previousOriginal) continue;

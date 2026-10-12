@@ -692,6 +692,7 @@ async function runFixture({ storageOnly = false } = {}) {
             'Hot shared save, events and acknowledgments preserve every unselected recovery member');
         await malformedDeletionRecoveryChecks(page, results);
         await sourceCarryChecks(page, results);
+        await orphanCarryChecks(page, { apiOrigin, secret, api, database, results });
         console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
         if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
         assert.deepEqual(errors, []);
@@ -717,6 +718,71 @@ async function runFixture({ storageOnly = false } = {}) {
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
         rmSync(absolute, { recursive: true, force: true });
     }
+}
+
+async function orphanCarryChecks(page, { apiOrigin, secret, api, database, results }) {
+    const prepared = await page.evaluate(async () => {
+        const old = { filepath: 'orphan/a.txt', name: 'orphan', stats: ['orphan_stat'], variables: ['#'], remarks: [''],
+            translations: { English: ['Orphan English'], Thai: ['Old original'] } };
+        const current = structuredClone(old); current.translations.Thai = ['Recognized baseline'];
+        const baseline = async source => {
+            const zip = new JSZip(); zip.file(source[0].filepath, StatDescCodec.descEncode(source[0]));
+            const bytes = await zip.generateAsync({ type: 'uint8array' }), tree = await CollaborationProtocol.buildBaselineTree(source);
+            const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1, decisions: [], treeRoot: tree.root,
+                zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.length, fileCount: 1, descriptionCount: 1 });
+            return { archive, tree, source, rawSource: structuredClone(source) };
+        };
+        return { old: await baseline([old]), current: await baseline([current]) };
+    });
+    const collaboration = api.locals.collaboration, accountId = 'normalized-translator', scope = { accountId, game: 'poe1', branchId: 'orphan-fixture', language: 'Thai', sourceHash: prepared.current.archive.baselineId };
+    database.prepare('INSERT INTO version_branches(game,id,name) VALUES(?,?,?)').run(scope.game, scope.branchId, 'Orphan repair fixture');
+    collaboration.resolveArchive(accountId, scope.game, prepared.current.archive);
+    const joined = collaboration.join(accountId, { ...scope, archive: prepared.current.archive });
+    const file = prepared.current.source[0];
+    collaboration.mutate(accountId, joined.roomId, { mutationId: randomUUID(), origin: 'merge', files: [{ filepath: file.filepath,
+        baseRevision: 0, translations: file.translations.Thai, baseline: file, proof: { index: 0, siblings: [] } }] });
+    const shared = collaboration.file(joined.roomId, file.filepath);
+    const outcome = await page.evaluate(async ({ prepared, scope, joined, shared, apiOrigin, secret }) => {
+        const oldScope = { ...scope, sourceHash: prepared.old.archive.baselineId }, suffix = value => JSON.stringify([value.accountId, value.game, value.branchId, value.sourceHash]);
+        const make = (scope, source, archive) => WorkspaceState.initializeWorkspace({ ...scope, descs: structuredClone(source), importArchive: archive, status: {}, droppedOutbox: [] }, { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
+        const old = make(oldScope, prepared.old.source, prepared.old.archive), frozen = make(scope, prepared.current.source, prepared.current.archive);
+        WorkspaceState.stageTranslation(old, { filepath: shared.filepath, translations: shared.translations }, 'Thai', { source: prepared.old.source[0], savedAt: 41 });
+        frozen.staged = structuredClone(old.staged); frozen.staged.Thai[shared.filepath].sourceHash = scope.sourceHash;
+        WorkspaceState.setFileMetadata(frozen.status[shared.filepath] ||= {}, 'Thai', { lastTranslatedAt: 41, lastEditedAt: 41 });
+        const live = structuredClone(frozen); live.staged.Thai[shared.filepath].savedAt = 250; live.staged.Thai[shared.filepath].before = shared.translations;
+        await OfflineStore.saveSourceWorkspaceWithRevisions(prepared.current.source, live, [], scope, prepared.current);
+        const db = await new Promise((resolve, reject) => { const request = indexedDB.open('sdeditor'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+        const tx = db.transaction('kv', 'readwrite'), done = new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); }), kv = tx.objectStore('kv');
+        for (const [key, value] of [['workspace_version_v1:' + suffix(oldScope), old], ['source_version_v1:' + suffix(oldScope), prepared.old.source],
+            ['version_metadata_v1:' + suffix(oldScope), { ...oldScope, createdAt: 1 }], ['import_baseline_poe1_' + oldScope.sourceHash, prepared.old]]) kv.put({ key, value });
+        await done; db.close();
+        const key = CollaborationProtocol.scopeKey(scope);
+        await OfflineStore.updateCollaborationState(state => { state.rooms[key] = { mode: 'sparse', identity: scope, archive: prepared.current.archive,
+            roomId: joined.roomId, sequence: 1, initialized: true, shared: { [shared.filepath]: shared }, local: {}, outbox: [], conflicts: [],
+            recovery: [{ id: 'orphan-join-copy', at: Date.now(), reason: 'Local edited translation before joining', files: [shared] }], carries: {} }; return state; }, { key, scope, roomKey: key, version: scope.game });
+        const workspace = await OfflineStore.getWorkspace(scope);
+        if (workspace.staged.Thai?.[shared.filepath]) throw new Error('Unopened local predecessor did not remove redundant carry.');
+        const session = await (await fetch('/fixture/session', { method: 'POST', headers: { 'X-Fixture-Key': secret } })).json();
+        const client = new CollaborationSync.Client({ store: OfflineStore, WebSocket: null, presenceEnabled: () => false, request: async (path, options) => {
+            const response = await fetch(apiOrigin + path, { method: options.method || 'GET', headers: { Authorization: 'Bearer ' + session.token, 'Content-Type': 'application/json' }, body: options.body ? JSON.stringify(options.body) : undefined });
+            const result = await response.json(); if (!response.ok) throw Object.assign(new Error(result.error.message), result.error, { status: response.status }); return result;
+        } });
+        await client.connect({ ...scope, source: prepared.current.source, baselineSource: prepared.current.source, baselineTree: prepared.current.tree,
+            archive: prepared.current.archive, workspace, files: [], deferRemote: true });
+        if (client.room().outbox.length !== 1) throw new Error('Orphan repair was not queued exactly once.');
+        await client.flush(client.epoch); client.destroy();
+        const restored = await OfflineStore.getWorkspace(scope);
+        return { saved: !!restored.staged.Thai?.[shared.filepath], archives: Object.keys(restored.sourceCarryRepairArchive).length };
+    }, { prepared, scope, joined, shared, apiOrigin, secret });
+    assert.deepEqual(outcome, { saved: false, archives: 1 });
+    assert.equal(collaboration.file(joined.roomId, file.filepath).stagingReset, true);
+    assert.equal(database.prepare('SELECT COUNT(*) AS n FROM collaboration_rooms WHERE source_hash=?').get(prepared.old.archive.baselineId).n, 0);
+    await page.reload();
+    await page.waitForFunction(() => !!window.OfflineStore);
+    const reloaded = await page.evaluate(async ({ scope, filepath }) => { const workspace = await OfflineStore.getWorkspace(scope);
+        return { saved: !!workspace.staged.Thai?.[filepath], archives: Object.keys(workspace.sourceCarryRepairArchive).length }; }, { scope, filepath: file.filepath });
+    assert.deepEqual(reloaded, outcome, 'Offline reload retains the repaired stage absence and recovery archive.');
+    results.push({ scenario: 'real IndexedDB unopened offline predecessor and orphan API R1 merge repair without a server ancestor', saved: false, recoveryArchives: 1 });
 }
 
 async function sourceCarryChecks(page, results) {

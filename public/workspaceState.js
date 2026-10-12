@@ -558,6 +558,8 @@
     const previousHash = options.previousSourceHash || predecessor?.sourceHash || '';
     const authoredHere = new Set((options.history || []).filter(record => record.sourceHash === workspace.sourceHash)
       .map(record => serialized([record.lang || record.language, record.filepath, lines(record.translations)])));
+    const protectedHere = new Set(Object.values(workspace.sourceCarryRepairArchive || {}).filter(repair => repair.protectedRevision
+      && repair.sourceHash === workspace.sourceHash).map(repair => serialized([repair.language, repair.filepath])));
     const sameScope = predecessor && predecessor.sourceHash === previousHash && previousHash !== workspace.sourceHash
       && (!predecessor.game || !workspace.game || predecessor.game === workspace.game)
       && (predecessor.branchId || 'default') === (workspace.branchId || 'default')
@@ -568,6 +570,7 @@
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
       const desc = current.get(filepath), carry = entry.sourceCarry;
       if (!desc || entry.sourceHash !== workspace.sourceHash
+        || protectedHere.has(serialized([language, filepath]))
         || metadataCorrectionForSource(entry, desc, workspace.sourceHash) || carry?.metadataCorrection || carry?.destinationSave
         || droppedForFile(workspace, filepath, language) || wasDroppedInSource(workspace, filepath, language)) continue;
       // An explicit save in this version remains meaningful even when it is
@@ -605,7 +608,7 @@
     if (current?.saveOrigin || current?.sourceCarry?.metadataCorrection || current?.sourceCarry?.destinationSave
       || current && !sameBaselineTranslation(desc, language, current.translations)) return null;
     for (const repair of Object.values(workspace.sourceCarryRepairArchive || {})) {
-      if (repair.filepath !== desc.filepath || repair.language !== language || repair.sourceHash !== workspace.sourceHash
+      if (repair.protectedRevision || repair.filepath !== desc.filepath || repair.language !== language || repair.sourceHash !== workspace.sourceHash
         || !repair.fromSourceHash || repair.fromSourceHash === workspace.sourceHash || repair.stage?.sourceCarry?.metadataCorrection
         || repair.stage?.sourceHash !== workspace.sourceHash || !Array.isArray(repair.stage?.translations)
         || !sameBaselineTranslation(desc, language, repair.stage?.translations)) continue;

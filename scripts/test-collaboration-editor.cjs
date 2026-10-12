@@ -36,6 +36,22 @@ function harness() {
   for (const [name, getter] of Object.entries(computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   return { editor, window, writes, alerts, context, config };
 }
+test('protected carry repair restores Saved in the live editor and retains the rejected archive', async () => {
+  const { editor: e, window } = harness(), desc = description(1), W = window.WorkspaceState;
+  e.descs = [desc]; e.localDescs = { descs: [], staged: {}, status: {}, sourceHash: e.sourceIdentity };
+  e._workspaceSourceBaseline = [structuredClone(desc)];
+  W.initializeWorkspace(e.localDescs, { source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, language: 'Thai' });
+  e.localDescs.sourceCarryRepairArchive = { repair: { filepath: desc.filepath, language: 'Thai', sourceHash: e.sourceIdentity,
+    fromSourceHash: 'older', stage: { sourceHash: e.sourceIdentity, translations: desc.translations.Thai } } };
+  const file = { filepath: desc.filepath, translations: desc.translations.Thai, trackedForExport: true, revision: 1,
+    sourceCarryRepairProtection: { revision: 1, reason: 'authored_save' } };
+  await e.receiveCollaborationFiles([file], 'Thai');
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]);
+  assert.equal(e.localDescs.sourceCarryRepairArchive.repair.protectedRevision, 1);
+  await e.receiveCollaborationFiles([{ ...file, sourceCarryRepairProtection: undefined }], 'Thai');
+  assert.ok(e.localDescs.staged.Thai[desc.filepath]);
+});
+
 function description(index, translations = ['เดิม', 'สอง']) {
   const name = String(index).padStart(3, '0');
   return { filepath: `source/${name}.txt`, filedir: 'source', filename: `${name}.txt`, name: '',

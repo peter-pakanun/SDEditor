@@ -13,7 +13,8 @@
   // v17 fences v16 snapshot writers that erase inherited timestamps/proofs or
   // replay a redundant initial shared merge after scoped cleanup.
   // Keep every store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 17;
+  // v18 also fences writers that cannot retain standalone carry repair outcomes.
+  const DB_VERSION = 18;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -60,7 +61,7 @@
   }
   const normalized = runtime.NormalizedStore?.create({ openDb, W: WorkspaceState, legacyGet: kvGet,
     workspaceKey, sourceKey, receiptKey: receiptScopeKey, revisionStoreName, scopedRevision, normalizeScope: normalizeWorkspaceScope,
-    versionMetadataKey,
+    versionMetadataKey, listVersionScopes: listLocalVersionsMetadata,
     onMigration: notifyMigration, tmRuntime: () => runtime.TranslationMemory,
     prepareWorkspace: (scope, language) => getLegacyWorkspaceView(scope, language, true),
     preparedRoom: (scope, key) => preparedRoomRepairs.get(normalized.scopeKey(scope))?.rooms?.[key],

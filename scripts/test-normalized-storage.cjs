@@ -164,13 +164,15 @@ test('accepted staging reset cannot reconstruct a redundant carry from normalize
     assert.equal((await f.n.workspace(f.scope)).staged.Thai?.['a.txt'], undefined, 'An omitted sparse reset also remains authoritative.');
 });
 
-test('an unmarked first shared merge cannot revive archived inheritance and relays verified predecessor evidence once', async t => {
+test('automatic first shared merges cannot revive archived inheritance and queue one durable repair', async t => {
+    for (const marked of [false, true]) await t.test(marked ? 'with carry provenance' : 'without carry provenance', async sub => {
     const fromSourceHash = 'a'.repeat(64);
-    const { client, connect, f, source, P, rooms, key } = await cachedSparseFixture(t, { stageText: null,
+    const { client, connect, f, source, P, rooms, key } = await cachedSparseFixture(sub, { stageText: null,
         sourceCarry: { fromSourceHash, fromSavedAt: 4 } });
     const cleaned = await f.n.workspace(f.scope);
     assert.equal(cleaned.staged.Thai?.['a.txt'], undefined);
-    const shared = P.fileState({ filepath: 'a.txt', translations: source[0].translations.Thai, trackedForExport: true, revision: 1 });
+    const shared = P.fileState({ filepath: 'a.txt', translations: source[0].translations.Thai, trackedForExport: true, revision: 1,
+        ...(marked ? { sourceCarry: { fromSourceHash, toSourceHash: f.scope.sourceHash } } : {}) });
     await f.n.transaction(rooms.roomStores, 'readwrite', tx => rooms.writeRoom(tx, key, { identity: f.scope,
         archive: client.archive || f.data.get(N.stores.assets).values().next().value.value.archive, mode: 'sparse', roomId: 'room',
         sequence: 1, initialized: true, shared: { 'a.txt': shared }, outbox: [], conflicts: [], recovery: [], carries: {} }));
@@ -188,7 +190,7 @@ test('an unmarked first shared merge cannot revive archived inheritance and rela
     assert.deepEqual(client.room().outbox.map(item => item.id), [mutationId], 'Reconnect reuses the durable operation.');
     let accepted;
     client.request = async (url, options) => {
-        assert.ok(url.endsWith('/mutations')); assert.equal(options.body.mutationId, mutationId);
+        assert.ok(url.endsWith('/source-carry-repairs')); assert.equal(options.body.mutationId, mutationId);
         assert.deepEqual(options.body.files[0].previousBaseline, P.witness(previous));
         accepted = { ...shared, revision: 3, trackedForExport: false, stagingReset: true };
         return { files: [accepted] };
@@ -199,6 +201,35 @@ test('an unmarked first shared merge cannot revive archived inheritance and rela
     await connect();
     assert.equal(client.room().outbox.length, 0);
     assert.equal(Object.keys((await f.n.workspace(f.scope)).sourceCarryRepairArchive).length, 1);
+    });
+});
+
+test('a rejected orphan repair durably restores protected shared work and does not queue again', async t => {
+    for (const kind of ['protected-first', 'changed-during-request', 'changed-before-request']) await t.test(kind, async sub => {
+        const revision = kind === 'protected-first' ? 1 : 2;
+        const h = await cachedSparseFixture(sub, { stageText: null, sourceCarry: { fromSourceHash: 'a'.repeat(64) } });
+        const { client, connect, f, source, P, rooms, key } = h;
+        await f.n.workspace(f.scope);
+        const shared = P.fileState({ filepath: 'a.txt', translations: source[0].translations.Thai, trackedForExport: true, revision: 1 });
+        await f.n.transaction(rooms.roomStores, 'readwrite', tx => rooms.writeRoom(tx, key, { identity: f.scope,
+            archive: h.archive, mode: 'sparse', roomId: 'room', sequence: 1, initialized: true,
+            shared: { 'a.txt': shared }, outbox: [], conflicts: [], recovery: [], carries: {} }));
+        client.store.getSourceFiles = async () => { const file = structuredClone(source[0]); file.translations.Thai = ['Old original']; return [file]; };
+        await connect(); assert.equal(client.room().outbox.length, 1);
+        const protectedFile = { ...shared, revision, translations: revision === 1 ? shared.translations : ['Later explicit text'] };
+        let remote;
+        client.onRemote = async files => { remote = files; };
+        if (kind === 'changed-before-request') await client.acceptSnapshot({ roomId: 'room', sequence: 2, files: [protectedFile] }, client.epoch);
+        client.request = async () => { assert.notEqual(kind, 'changed-before-request', 'Known newer work cancels repair without a request'); throw Object.assign(new Error('Protected'), { status: 409, code: 'SOURCE_CARRY_REPAIR_CONFLICT', current: { files: [protectedFile] } }); };
+        await client.flush(client.epoch);
+        const workspace = await f.n.workspace(f.scope);
+        assert.deepEqual(workspace.staged.Thai['a.txt'].translations, protectedFile.translations);
+        assert.equal(Object.values(workspace.sourceCarryRepairArchive)[0].protectedRevision, revision);
+        assert.equal(remote[0].sourceCarryRepairProtection.revision, revision);
+        await connect(); assert.equal(client.room().outbox.length, 0);
+        await client.acceptSnapshot({ roomId: 'room', sequence: revision, files: [protectedFile] }, client.epoch, true);
+        assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, protectedFile.translations);
+    });
 });
 
 test('unchanged shared projection preserves original save time and before text while explicit later saves override archived cleanup', () => {
@@ -416,7 +447,7 @@ test('checkpoint compaction verifies immutable source content and preserves diff
     assert.deepEqual(record.source, original, 'Compaction cannot mutate the captured source');
 });
 
-function recordFixture({ rejectBaselineTransaction = false, legacyGet = async () => undefined, workspaceKey, activationNow, activationYield, IDBKeyRange, onPut } = {}) {
+function recordFixture({ rejectBaselineTransaction = false, legacyGet = async () => undefined, workspaceKey, sourceKey, listVersionScopes, activationNow, activationYield, IDBKeyRange, onPut } = {}) {
     const data = new Map([...N.names, 'kv', 'revisions_poe1', 'revisions_poe2'].map(name => [name, new Map()])), reads = [], writes = [], transactions = [];
     const request = value => {
         const req = {};
@@ -471,7 +502,7 @@ function recordFixture({ rejectBaselineTransaction = false, legacyGet = async ()
         return tx;
     } };
     const W = require('../public/workspaceState.js');
-    const n = N.create({ W, openDb: async () => db, legacyGet, workspaceKey, activationNow, activationYield, IDBKeyRange,
+    const n = N.create({ W, openDb: async () => db, legacyGet, workspaceKey, sourceKey, listVersionScopes, receiptKey: scope => 'receipt:' + N.scopeKey(scope), activationNow, activationYield, IDBKeyRange,
         revisionStoreName: game => 'revisions_' + game, scopedRevision: (revision, scope) => ({ ...revision, ...scope }),
         normalizeScope: scope => ({ ...scope, accountId: scope.accountId || scope.profile || 'guest', branchId: scope.branchId || 'default' }) });
     const put = (name, value) => data.get(name).set(value.key, structuredClone(value));
@@ -544,6 +575,68 @@ test('frozen copy evidence repairs provenance lost to first shared replay and pr
         assert.equal(!!workspace.staged.Thai?.['a.txt'], kind !== 'automatic');
         assert.deepEqual(frozen, copy, 'Retained evidence is never changed.');
     });
+});
+
+test('normalized first-merge recovery and authored timestamps prove inheritance without a frozen current workspace', async t => {
+    for (const kind of ['automatic', 'newer-edit', 'wrong-language', 'no-recovery', 'later-shared', 'receipt', 'protected']) await t.test(kind, async () => {
+        const f = recordFixture(), file = f.source('a.txt'), previous = { ...f.scope, sourceHash: 'previous' }, old = structuredClone(file);
+        old.translations.Thai = ['Old original'];
+        const stage = { sourceHash: previous.sourceHash, translations: file.translations.Thai, before: ['Old original'], savedAt: 41 };
+        f.put(N.stores.migration, { key: f.n.key('source-carry-repair-v3', N.scopeKey(f.scope)), value: { state: 'ready' } });
+        putCarryWorkspace(f, previous, [old], { Thai: { 'a.txt': stage } });
+        putCarryWorkspace(f, f.scope, [file], { Thai: { 'a.txt': { ...stage, sourceHash: f.scope.sourceHash, savedAt: 250, before: file.translations.Thai } } });
+        const status = { languageStatus: { [kind === 'wrong-language' ? 'German' : 'Thai']: { lastEditedAt: kind === 'newer-edit' ? 140 : 41, lastTranslatedAt: 41 } } };
+        f.put(N.stores.records, f.n.row(N.scopeKey(f.scope), ['status', 'a.txt'], { field: 'status', entry: 'a.txt', data: status }, { pathKey: f.n.key(N.scopeKey(f.scope), 'a.txt'), kindScope: f.n.key(N.scopeKey(f.scope), 'status') }));
+        const rooms = require('../public/normalizedRooms.js').create(f.n), key = rooms.identityKey(f.scope);
+        const shared = { filepath: 'a.txt', translations: file.translations.Thai, trackedForExport: true, revision: kind === 'later-shared' ? 2 : 1 };
+        await f.n.transaction(rooms.roomStores, 'readwrite', tx => rooms.writeRoom(tx, key, { identity: f.scope, mode: 'sparse', shared: { 'a.txt': shared },
+            outbox: [], conflicts: [], recovery: kind === 'no-recovery' ? [] : [{ id: 'join-copy', at: 200, reason: 'Local edited translation before joining', files: [shared] }], carries: {} }));
+        if (kind === 'receipt') f.put(N.stores.receipts, f.n.row(N.scopeKey(f.scope), 'save', { signature: JSON.stringify({ scope: [f.scope.game, 'Thai', f.scope.sourceHash, f.scope.accountId], files: [{ filepath: 'a.txt', translations: file.translations.Thai }] }) }));
+        if (kind === 'protected') f.put(N.stores.records, f.n.row(N.scopeKey(f.scope), ['sourceCarryRepairArchive', 'protected'], {
+            field: 'sourceCarryRepairArchive', entry: 'protected', data: { filepath: 'a.txt', language: 'Thai', sourceHash: f.scope.sourceHash, fromSourceHash: previous.sourceHash, protectedRevision: 1, stage } },
+            { pathKey: f.n.key(N.scopeKey(f.scope), 'a.txt'), kindScope: f.n.key(N.scopeKey(f.scope), 'sourceCarryRepairArchive') }));
+        const workspace = await f.n.workspace(f.scope);
+        assert.equal(!!workspace.staged.Thai?.['a.txt'], kind !== 'automatic');
+    });
+});
+
+test('carry cleanup discovers and verifies an unopened legacy predecessor without a server version', async () => {
+    const legacy = new Map(), reads = [], workspaceKey = scope => 'frozen:' + N.scopeKey(scope), sourceKey = scope => 'raw:' + N.scopeKey(scope);
+    let previous;
+    const f = recordFixture({ workspaceKey, sourceKey, legacyGet: async key => { reads.push(key); return structuredClone(legacy.get(key)); },
+        listVersionScopes: async () => [{ ...previous, hasSource: true }, { ...previous, accountId: 'foreign', hasSource: true }] });
+    previous = { ...f.scope, sourceHash: 'unopened-predecessor' };
+    const file = f.source('a.txt'), old = structuredClone(file); old.translations.Thai = ['Old original'];
+    const stage = { sourceHash: f.scope.sourceHash, translations: file.translations.Thai, before: ['Old original'], savedAt: 41 };
+    legacy.set(workspaceKey(previous), { ...previous, stagedVersion: 1, descs: [old], droppedOutbox: [], staged: { Thai: { 'a.txt': { ...stage, sourceHash: previous.sourceHash } } } });
+    legacy.set(sourceKey(previous), [old]);
+    legacy.set(workspaceKey(f.scope), { ...f.scope, staged: { Thai: { 'a.txt': stage } } });
+    f.put('kv', { key: 'version_metadata_v1:' + N.scopeKey(previous), value: { ...previous, createdAt: 1 } });
+    putCarryWorkspace(f, f.scope, [file], { Thai: { 'a.txt': { ...stage, savedAt: 250, before: file.translations.Thai } } });
+    const roomKey = require('../public/normalizedRooms.js').create(f.n).identityKey(f.scope);
+    f.put(N.stores.shared, f.n.row(roomKey, 'a.txt', { filepath: 'a.txt', shared: { filepath: 'a.txt', translations: file.translations.Thai, trackedForExport: true, revision: 1 } }));
+    assert.equal(await f.n.hasScope(previous), false);
+    const frozen = structuredClone([...legacy]), workspace = await f.n.workspace(f.scope);
+    assert.equal(workspace.staged.Thai?.['a.txt'], undefined);
+    assert.equal(await f.n.hasScope(previous), true);
+    assert.deepEqual([...legacy], frozen);
+    assert.equal(reads.some(key => key?.includes('foreign')), false);
+    const readCount = reads.length; await f.n.workspace(f.scope);
+    assert.equal(reads.length, readCount, 'A settled cleanup does not hydrate older workspaces again.');
+});
+
+test('an unavailable unopened predecessor defers cleanup while the current workspace remains usable', async () => {
+    let previous;
+    const f = recordFixture({ workspaceKey: scope => 'frozen:' + N.scopeKey(scope), sourceKey: scope => 'raw:' + N.scopeKey(scope),
+        listVersionScopes: async () => [{ ...previous, hasSource: true }], legacyGet: async key => key?.startsWith('frozen:')
+            ? { ...previous, stagedVersion: 1, descs: [], staged: {}, status: {}, droppedOutbox: [] } : undefined });
+    previous = { ...f.scope, sourceHash: 'unavailable' };
+    const file = f.source('a.txt'), stage = { sourceHash: f.scope.sourceHash, translations: file.translations.Thai, before: ['Old original'], savedAt: 41 };
+    putCarryWorkspace(f, f.scope, [file], { Thai: { 'a.txt': stage } });
+    const workspace = await f.n.workspace(f.scope);
+    assert.deepEqual(workspace.staged.Thai['a.txt'], stage);
+    assert.equal(f.data.get(N.stores.migration).get(f.n.key('source-carry-repair-v4', N.scopeKey(f.scope))).value.state, 'deferred');
+    assert.equal(await f.n.hasScope(previous), false);
 });
 
 test('scoped carry repair removes proven inherited baseline text in every language while preserving explicit and ambiguous saves', async () => {
@@ -638,7 +731,7 @@ test('blank carry cleanup revisits a completed v1 checkpoint and retains explici
 test('carry cleanup resumes committed batches after failure without reviving removed records from frozen legacy state', async () => {
     let failure = true;
     const f = recordFixture({ onPut({ name, value }) {
-        if (failure && name === N.stores.migration && value.key.startsWith('["source-carry-repair-v3"') && value.value.state === 'ready') throw new Error('Interrupted cleanup');
+        if (failure && name === N.stores.migration && value.key.startsWith('["source-carry-repair-v4"') && value.value.state === 'ready') throw new Error('Interrupted cleanup');
     } }), files = Array.from({ length: 70 }, (_, index) => f.source('carry-' + String(index).padStart(3, '0') + '.txt'));
     putCarryWorkspace(f, f.scope, files, { Thai: Object.fromEntries(files.map(file => [file.filepath, { sourceHash: f.scope.sourceHash,
         translations: file.translations.Thai, sourceCarry: { fromSourceHash: 'old', toSourceHash: f.scope.sourceHash }, savedAt: 1 }])) });

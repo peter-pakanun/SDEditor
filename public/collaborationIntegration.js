@@ -849,6 +849,10 @@
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
           const original = this.workspaceSourceFile(file.filepath) || desc;
+          if (file.sourceCarryRepairProtection?.revision === file.revision) {
+            for (const repair of Object.values(this.localDescs.sourceCarryRepairArchive || {})) if (repair.filepath === file.filepath
+              && repair.language === lang && repair.sourceHash === this.sourceIdentity) repair.protectedRevision = file.revision;
+          }
           const promotion = options.acknowledgedPromotions?.[file.filepath];
           const candidate = promotion && window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang);
           if (candidate && options.acknowledgedSourceHash === this.sourceIdentity
