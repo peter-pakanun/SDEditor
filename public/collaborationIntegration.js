@@ -479,7 +479,7 @@
           ? 'Review the current saved translation and confirm deletion again, or cancel the deletion request to keep it.'
           : record.error?.code === 'DROPPED_PROMOTION_CHANGED'
           ? 'Open the full editor to review the current Dropped translation before saving again.'
-          : 'Open Local drafts to review this submitted translation.';
+          : 'Use Review retained edits to review this submitted translation.';
         for (const file of record.batch.files) this.inlineDraftFindings = { ...this.inlineDraftFindings,
           [file.filepath]: [{ level: 'error', deferredSave: true, ...(record.batch.resetStaging ? { submissionReset: true, submissionJobId: record.batch.jobId } : {}),
             message: file.filepath + ': ' + [record.error?.message, advice].filter(Boolean).join(' ') }] };

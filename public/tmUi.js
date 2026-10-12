@@ -241,7 +241,7 @@
           await this.queryTranslationMemory(); return;
         }
         const current = this.serializeEditorTranslations?.()[index] ?? this.editorBlocks[index]?.translation;
-        if (String(current || '').trim() && current !== match.target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?', { title: 'Use TM translation?', confirmLabel: 'Replace draft', danger: false })) return;
+        if (String(current || '').trim() && current !== match.target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?', { title: 'Use TM translation?', confirmLabel: 'Replace translation', danger: false })) return;
         if (key !== this.tmEditorKey || !this.tmEditorCurrent(capture) || !this.tmMatchCurrent(match)
           || current !== (this.serializeEditorTranslations?.()[index] ?? this.editorBlocks[index]?.translation)) return;
         await this.tmApplyTarget(index, match.target);

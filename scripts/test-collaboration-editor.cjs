@@ -2872,7 +2872,7 @@ test('a changed save scope requires a fresh decision and preserves the direct su
   assert.equal(e.pendingLocalSaves, 0); assert.equal(submissions.get(batch.jobId).state, 'review');
   assert.equal(submissions.get(batch.jobId).batch.files[0].translations[0], 'ใหม่');
   assert.equal(desc.translations.Thai[0], 'เดิม');
-  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /Local drafts/);
+  assert.match(e.inlineDraftFindings[desc.filepath][0].message, /Review retained edits/);
   await e.retryPendingSaves(); assert.equal(calls.length, 1);
   e._pendingSaves.dispose();
 });

@@ -746,7 +746,7 @@
         this.editorSaving = true;
         try {
           if (sharedBase && (!sharedBase.trackedForExport || !equal(base.translations, sharedBase.translations))) {
-            throw Object.assign(new Error('The local and shared saved translations do not match. Review and save the translation you want to keep before deleting it. Use Local drafts to resolve unsaved copies.'),
+            throw Object.assign(new Error('The local and shared saved translations do not match. Review and save the translation you want to keep before deleting it. Use Review retained edits to resolve unsaved copies.'),
               { code: 'DELETE_STAGED_BASE_CHANGED' });
           }
           if (!await this.flushEditorDraft() || !current()) return false;
@@ -898,7 +898,7 @@
             expectedRevision: this._draftSession?.expectedRevision, originalBlocks: copy(this.editorBlocks),
             base: copy(this.collaborationFile?.(desc) || { translations: desc.translations[this.lang] || [] }) };
           this.editorCompareActive = true; this.editorCompareMode = 'translation';
-          this.editorCompareTitle = 'Local draft recovery — review the preserved translation against this source';
+          this.editorCompareTitle = 'Retained translation — review against this source';
           const english = desc.translations.English;
           const candidate = this.draftRecoveryCandidate;
           const stillCurrent = () => this.draftRecoveryCandidate === candidate && this.draftScopeCurrent(scope)
@@ -921,7 +921,7 @@
           || recovery.sessionRun !== this._editorOpenRun || recovery.expectedRevision !== this._draftSession?.expectedRevision) return;
         const currentBase = this.collaborationFile?.(this.editorCurrentEditingDesc) || { translations: this.editorCurrentEditingDesc.translations[this.lang] || [] };
         if (!equal(recovery.base, currentBase)) {
-          this.collaborationNotice = 'The committed translation changed during recovery. Reopen Local drafts and review the current comparison.';
+          this.collaborationNotice = 'The committed translation changed during recovery. Reopen retained edits and review the current comparison.';
           return;
         }
         const english = this.editorCurrentEditingDesc.translations.English;
@@ -933,7 +933,7 @@
         const preparedBase = this.collaborationFile?.(this.editorCurrentEditingDesc)
           || { translations: this.editorCurrentEditingDesc.translations[this.lang] || [] };
         if (!equal(recovery.base, preparedBase)) {
-          this.collaborationNotice = 'The committed translation changed during recovery. Reopen Local drafts and review the current comparison.';
+          this.collaborationNotice = 'The committed translation changed during recovery. Reopen retained edits and review the current comparison.';
           return;
         }
         this.editorCompareActive = false; this.draftRecoveryCandidate = null;

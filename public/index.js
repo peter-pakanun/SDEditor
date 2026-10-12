@@ -206,7 +206,7 @@ const config = Vue.defineComponent({
       pageSize: 20,
       currentPage: 1,
       searchText: "",
-      selectedFileFilters: ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning', 'localDraft'],
+      selectedFileFilters: ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'],
       fileFiltersVisible: false,
       selectedFilepath: '',
       diagnosticScanResults: {},
@@ -832,7 +832,6 @@ const config = Vue.defineComponent({
         { key: 'dropped', label: 'Dropped translations', tone: 'dropped' },
         { key: 'diagnosticError', label: 'Diagnostic errors', tone: 'error' },
         { key: 'diagnosticWarning', label: 'Diagnostic warnings', tone: 'warning' },
-        { key: 'localDraft', label: 'Local drafts', tone: '' },
         { key: 'unchanged', label: 'Unchanged', tone: '' },
       ];
     },
@@ -6079,7 +6078,7 @@ const config = Vue.defineComponent({
       this._fileSearchTimer = null;
       this._fileSearchComposing = false;
       this.searchText = '';
-      this.selectedFileFilters = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning', 'localDraft'];
+      this.selectedFileFilters = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
       this.currentPage = 1;
       this.filterDesc();
     },
@@ -6812,7 +6811,7 @@ const config = Vue.defineComponent({
           || !this.collaborationContextCurrent(context) || (session && session !== this._draftSession)
           || !arrayEquals(draftAtSave, this.editorBlocks.map(block => block?.translation ?? ''))) return false;
         if (session?.conflict || session?.record?.conflicts?.length) {
-          this.collaborationNotice = 'Another tab changed this local draft. Open Local drafts to review both copies.';
+          this.collaborationNotice = 'Another tab changed this local draft. Use Review retained edits to review both copies.';
           if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'error', message: this.collaborationNotice }] };
           return false;
         }
@@ -6870,7 +6869,7 @@ const config = Vue.defineComponent({
           const message = desc.filepath + ': ' + (error.code === 'DROPPED_PROMOTION_CHANGED'
             ? error.message + ' Open the full editor to review the current Dropped translation before saving again.'
             : error.draftReview ? error.message
-            : 'The committed translation or local draft changed. Open Local drafts to compare and review before saving.');
+            : 'The committed translation or local draft changed. Use Review retained edits to compare and review before saving.');
           if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings,
             [desc.filepath]: [{ level: 'error', message, deferredSave: true }] };
         };
@@ -6923,7 +6922,7 @@ const config = Vue.defineComponent({
         await this.flushEditorDraft?.({ force: true });
         if (!this.collaborationContextCurrent(saveContext) || this._editorSaveToken !== saveToken) return false;
         const review = ['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(error.code);
-        const message = error.draftReview ? error.message : review ? 'The committed translation or local draft changed. Open Local drafts to compare and review before saving.'
+        const message = error.draftReview ? error.message : review ? 'The committed translation or local draft changed. Use Review retained edits to compare and review before saving.'
           : 'Could not save this translation. Your local draft has been retained. ' + error.message;
         if (!review) this.cloudStorageError = message;
         this.collaborationNotice = message;

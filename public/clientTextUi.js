@@ -15,7 +15,7 @@
         {key:'missing',label:'Missing translation',tone:'missing'}, {key:'saved',label:'Saved changes',tone:'saved'},
         {key:'revised',label:'Revised translations',tone:'revised'}, {key:'outdated',label:'Outdated translation',tone:'outdated'},
         {key:'error',label:'Diagnostic errors',tone:'error'}, {key:'warning',label:'Diagnostic warnings',tone:'warning'},
-        {key:'draft',label:'Local drafts',tone:'draft'}, {key:'unchanged',label:'Unchanged',tone:'unchanged'}
+        {key:'unchanged',label:'Unchanged',tone:'unchanged'}
     ];
     // Start with workload and saved changes; complete originals remain
     // available through the Unchanged filter.
@@ -156,7 +156,7 @@
             ctPreviewKeys() { return [...new Set([...this.ctGamePreview.source.keysOrder,...this.ctGamePreview.target.keysOrder])]; },
             ctFieldGroups() { return groupFields({fields:this.ctFieldsFor()}); },
             ctHistoryChoices() {
-                return [{ key: 'original', label: 'Original workbook' }, { key: 'current', label: 'Current draft / saved translation' },
+                return [{ key: 'original', label: 'Original workbook' }, { key: 'current', label: 'Current translation' },
                     ...this.ctHistory.flatMap(entry => ['before', 'after'].map(side => ({ key: entry.key + ':' + side,
                         label: this.ctHistoryLabel(entry) + ' · ' + side, unavailable: !entry[side].available })))];
             },
@@ -1037,7 +1037,7 @@
                     }
                 },initialization);
                 if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,[
-                    'Preserving local drafts','Checking selected workspace','Checking reusable workbook cache',
+                    'Preserving unsaved edits','Checking selected workspace','Checking reusable workbook cache',
                     ...descriptors.flatMap((descriptor,index)=>cached[index]?[]:[{label:'Downloading original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:2},{label:'Parsing original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:4}]),
                     {label:'Caching selected workspace',weight:3},'Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
                 for(let index=0;index<descriptors.length;index++){
@@ -1076,10 +1076,10 @@
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
                 const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
-                    ['Preserving local drafts','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                    ['Preserving unsaved edits','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
                 let ctx;
                 try{
-                if(!await this.ctInitializationStep('Preserving local drafts',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
+                if(!await this.ctInitializationStep('Preserving unsaved edits',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
                     || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return false;
                 this.ctFence(); this._ctAbort=new AbortController();const signal=this._ctAbort.signal;
                 this.ctWorkspace = { scope: copy(scope), metadata: metadata || {} };
@@ -1852,7 +1852,7 @@
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=this.ctValues[field.id],selection=this._ctSelectRun,target=match.target,
                     current=()=>!match.id || this.ctMemoryResults?.some(candidate=>candidate.id===match.id && candidate.target===target);
                 if(!current())return false;
-                if(String(value || '').trim() && value!==target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?',{title:'Use TM translation?',confirmLabel:'Replace draft',danger:false}))return false;
+                if(String(value || '').trim() && value!==target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?',{title:'Use TM translation?',confirmLabel:'Replace translation',danger:false}))return false;
                 if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctPreviewField!==field || this.ctValues[field.id]!==value
                     || this.ctBusy || this.ctHistoryViewer || match.target!==target || !current())return false;
                 const input=this.ctDictionaryTarget(field.id);
@@ -2012,17 +2012,17 @@
                 const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
                 const opening=this._ctOpenRun={};
                 const initialization=activate ? this.ctBeginInitialization('Opening '+(version.name || 'selected version')+' · '+language+' ClientText',null,
-                    ['Preserving local drafts','Checking selected workspace','Checking reusable workbook cache','Caching selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']) : null;
+                    ['Preserving unsaved edits','Checking selected workspace','Checking reusable workbook cache','Caching selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']) : null;
                 this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
                 const signal=this._ctAbort.signal,current=()=>this._ctOpenRun===opening && key===this.managedCatalogScope && openingEpoch===(this._ctEpoch || 0) && !signal.aborted,
                     check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
                 try {
-                    if(activate && !await this.ctInitializationStep('Preserving local drafts',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();check();return true;},initialization))return false;
+                    if(activate && !await this.ctInitializationStep('Preserving unsaved edits',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();check();return true;},initialization))return false;
                     const cached=await this.ctInitializationStep('Checking selected workspace',async report=>{
                         const result=await this._ctStore.getMetadata(scope,{guard:current});check();report({detail:result?.state==='ready'?'Selected workspace is cached':'Preparing selected originals'});return result;
                     },initialization);
                     if(cached?.state==='ready'){
-                        if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,['Preserving local drafts','Checking selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                        if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,['Preserving unsaved edits','Checking selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
                         return activate ? await this.ctActivate(scope,{...cached,version},initialization) : cached;
                     }
                     await this.ctRequireTrustedProtocol(signal);check();
@@ -2514,7 +2514,7 @@
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
             </template>
             <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :compact="compact"></editor-native-field>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed in this draft</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const toolsComponent = root.EditorComponents?.Tools;

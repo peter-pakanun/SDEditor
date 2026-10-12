@@ -10,7 +10,7 @@ The immutable parsed **original ZIP baseline** supplies English, entry metadata,
 
 The **current committed translation** is the staged translation for this file, language, and source version when one exists; otherwise it is the original ZIP translation. Staged presence is meaningful even for an empty array, blank lines, or text identical to the ZIP. Unsaved editor typing is a draft and must not change workspace counts or export data.
 
-Both inline and full editors retain translation drafts locally under their profile/account, game, accepted source, language and filepath. A **Local draft** label and draft findings describe this separate editing state; they are not Saved, Error or Warning workspace statuses. Displaying draft text in a row must not replace its committed descriptor or make Lookup, exports, manual scans or collaboration treat it as committed text.
+Both inline and full editors retain translation drafts locally under their profile/account, game, accepted source, language and filepath. Drafts have no badges, counters or dedicated status filter. Actionable editor findings describe unsaved editing state; they are not Saved, Error or Warning workspace statuses. Displaying draft text in a row must not replace its committed descriptor or make Lookup, exports, manual scans or collaboration treat it as committed text.
 
 A **dropped copy** is a separate unresolved snapshot of translation text with its original English and entry metadata where available. It is not the current translation. A valid current ZIP translation may coexist with a dropped copy. Missing old English must be reported as unavailable rather than reconstructed from the new source.
 

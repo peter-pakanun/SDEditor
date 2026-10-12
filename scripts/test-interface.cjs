@@ -114,7 +114,8 @@ test('one-file save and draft refreshes preserve unrelated rows and match a full
   editor.filterDesc({ changedFilepaths: [baseline[0].filepath, baseline[500].filepath, baseline[20].filepath] });
   assert.equal(reads, 3, 'Status derivation is limited to the changed files.');
   assert.equal(editor.filteredDescs.find(row => row.filepath === baseline[999].filepath), untouchedRow);
-  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [0, 20, 500, 999].map(index => baseline[index].filepath));
+  assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [0, 500, 999].map(index => baseline[index].filepath),
+    'Unsaved typing retains the committed status instead of adding a private status-filter match.');
   assert.equal(editor.statistic.hasChanges, 3); assert.equal(editor.statistic.isMissing, 1); assert.equal(editor.statistic.isRevised, 2);
   const incremental = JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic });
   editor.filterDesc();
@@ -174,7 +175,7 @@ test('incremental row refresh rebuilds when account or branch changes', () => {
 });
 
 const names = rows => Array.from(rows, row => row.filename.replace(/\.txt$/, ''));
-const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning', 'localDraft'];
+const defaultStatuses = ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'];
 
 test('Revised filters changed existing translations separately from initial fills and saved baseline files', () => {
   const { editor } = loadEditor();

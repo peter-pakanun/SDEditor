@@ -192,7 +192,7 @@ test('ClientText status chips default Unchanged off and use OR matching with sco
     const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
         {app,mixin}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
     app.ctSelectedFilters=mixin.data().ctSelectedFilters;
-    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning','draft']);
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning']);
     assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id,outdated.id]);
     app.ctSelectedFilters.push('unchanged');assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
     app.ctSelectedFilters=['unchanged'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id]);
@@ -204,13 +204,13 @@ test('ClientText status chips default Unchanged off and use OR matching with sco
     app.ctFilter='missing';assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id],'legacy scalar filters remain compatible');
 });
 
-test('ClientText Local drafts filter and counter include scoped durable and current drafts without changing committed status',async()=>{
+test('ClientText internal draft tracking includes scoped durable and current drafts without exposing a status filter',async()=>{
     const first=namedUnit('DraftOne'),second=namedUnit('DraftTwo'),third=namedUnit('Clean'),
         {app}=listHarness({ctUnits:[first,second,third],_ctUnitIndex:new Map([first,second,third].map(unit=>[unit.id,unit])),ctSelection:second.id});
     app._ctStore={async getDraftSummaries(captured){assert.equal(captured.groupId,scope.groupId);return[{unitId:first.id,revision:3,updatedAt:1}];}};
     await app.ctRefreshDraftSummaries();app.ctDraftDirty=true;app.ctSelectedFilters=['draft'];
     assert.deepEqual(Array.from(app.ctRows,row=>row.id),[first.id,second.id]);assert.equal(app.ctDraftCount,2);
-    assert.equal(app.ctStatusFilterOptions.find(option=>option.key==='draft').count,2);
+    assert.equal(app.ctStatusFilterOptions.some(option=>option.key==='draft'),false);
     assert.equal(app.ctStatus(first).saved,false);assert.equal(app.ctStatus(first).unchanged,true);
     app.ctSelection=first.id;assert.equal(app.ctDraftCount,1,'the selected private draft is not double-counted');
     const pending=deferred();app._ctStore.getDraftSummaries=()=>pending.promise;const loading=app.ctRefreshDraftSummaries();
@@ -2498,7 +2498,7 @@ test('cached ClientText opening uses the shared initialization owner and skips w
     app._ctWorker={parseWorkbook(){throw Error('Cache hit must not parse');}};
     assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope)),true);
     assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);assert.equal(app.ctSheetFilter,'');
-    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving local drafts','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
     assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
 });
 test('a nested cached ClientText owner cannot release the shared foreground preparation gate',async()=>{
