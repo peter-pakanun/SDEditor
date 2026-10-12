@@ -473,6 +473,7 @@
         if (room.mode !== 'sparse' || room.archive.baselineId !== archive.baselineId) throw new Error('The stored collaboration baseline differs.');
         legacyCarries = copy(room.carries || {});
         room.carries = {}; room.carryRevisions = {};
+        const pendingPaths = new Set(room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
         for (const yours of incoming) {
           const staged = modernWorkspace ? workspace.staged?.[language]?.[yours.filepath] : null;
           if (modernWorkspace ? !staged : !yours.trackedForExport) {
@@ -485,7 +486,12 @@
             if (!modernWorkspace) legacyCarries[yours.filepath] = copy(yours);
             continue;
           }
-          const previous = room.local[yours.filepath] || this.baselineStates[yours.filepath];
+          // Normalized room.local includes the current workspace's staged
+          // overlay. Only accepted shared text proves that an unqueued save
+          // has already synchronized; comparing the overlay with itself would
+          // lose local-only work after an expired session or access change.
+          const previous = (pendingPaths.has(yours.filepath) ? room.local[yours.filepath] : room.shared[yours.filepath])
+            || this.baselineStates[yours.filepath];
           if (contentEqual(yours, previous)) continue;
           room.recovery.push({ id: this.uuid(), at: Date.now(), reason: 'Local edited translation before joining', files: [copy(yours)] });
           room.outbox.push({ id: this.uuid(), origin: 'merge', kind: 'join', status: 'pending', files: [{ base: copy(previous), yours: copy(yours) }] });
@@ -688,10 +694,10 @@
             const yours = local[shared.filepath];
             if (yours && !contentEqual(yours, shared) && !pendingPaths.has(shared.filepath)) {
               const id = this.uuid();
-              const operation = { id, origin: 'merge', kind: 'join', files: [{ base: null, yours }], status: 'conflict' };
-              room.outbox.push(operation);
               const merged = mergeFile(null, yours, shared);
-              room.conflicts.push({ id: id + ':' + shared.filepath, mutationId: id, filepath: shared.filepath,
+              const operation = { id, origin: 'merge', kind: 'join', files: [{ base: null, yours }], status: merged.conflict ? 'conflict' : 'pending' };
+              room.outbox.push(operation);
+              if (merged.conflict) room.conflicts.push({ id: id + ':' + shared.filepath, mutationId: id, filepath: shared.filepath,
                 kind: 'join', base: null, yours: copy(yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
             }
           }
@@ -1365,7 +1371,8 @@
             kind: op.resetStaging ? 'delete_staged' : op.kind || 'edit', base: copy(entry.base), yours: copy(entry.yours), shared: copy(shared), indexes: merged.indexes, metadata: merged.metadata });
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
-            ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging) ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
+            ...(room.mode === 'sparse' && op.kind === 'join' && merged.file.sourceCarry ? { sourceCarry: copy(merged.file.sourceCarry) } : {}),
+            ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging || op.kind === 'join' && merged.file.sourceCarry) ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
               proof: P.baselineProof(this.baselineTree, shared.filepath) } : {}) });
         }
         room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id).concat(conflicts);

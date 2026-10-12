@@ -1417,7 +1417,7 @@ test('missing cached baseline preserves old browser data and refuses sparse coll
   assert.deepEqual(plain({ source, workspace }), before); assert.match(e.cloudStorageError, /baseline is unavailable/);
 });
 
-test('changing English block metadata drops saved text separately even when source text stays identical', async () => {
+test('changing English block metadata retains Saved text with factual correction provenance', async () => {
   const { editor: e, window } = harness({ realImport: true });
   const raw = description('metadata', ['Same source']); raw.variables = ['#']; raw.remarks = [''];
   raw.translations.Thai = ['Current ZIP translation'];
@@ -1435,9 +1435,30 @@ test('changing English block metadata drops saved text separately even when sour
   e.descs[0].translations.Thai = ['saved local edit']; e.descs[0].hasChanges = true;
   e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
   assert.equal(await e.reconcileImportArchive(second.archive), true);
-  assert.deepEqual(plain(e.descs[0].translations.Thai), ['Current ZIP translation']);
-  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, raw.filepath, 'Thai').snapshot.translations), ['saved local edit']);
-  assert.deepEqual(plain(e.descs[0].variables), ['1']); assert.equal(e.descs[0].hasChanges, false); assert.equal(e.descs[0].needsReview, false);
+  assert.deepEqual(plain(e.descs[0].translations.Thai), ['saved local edit']);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, raw.filepath, 'Thai'), null);
+  assert.deepEqual(plain(e.descs[0].variables), ['1']); assert.equal(e.descs[0].hasChanges, true); assert.equal(e.descs[0].needsReview, false);
+  const state = window.WorkspaceState.workspaceFile(e.localDescs, second.source[0], 'Thai');
+  assert.equal(state.isMetadataCorrection, true);
+  assert.equal(state.staged.sourceCarry.fromSourceHash, first.archive.baselineId);
+  assert.equal(state.staged.sourceCarry.toSourceHash, second.archive.baselineId);
+  assert.deepEqual(plain(state.staged.sourceCarry.metadataCorrection.before.remarks), ['']);
+  assert.deepEqual(plain(state.staged.sourceCarry.metadataCorrection.after.remarks), ['new_rule']);
+});
+
+test('reimporting the selected accepted baseline preserves explicit unchanged and blank saves in every language', async () => {
+  const { editor: e, window } = harness({ realImport: true });
+  const source = description('same', ['Same source']); source.translations.Thai = ['']; source.translations.German = ['unchanged'];
+  e.sourceIdentity = 'current-source'; e.descs = plain([source]); e._workspaceSourceBaseline = plain([source]);
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  window.WorkspaceState.initializeWorkspace(e.localDescs, { source: [source], sourceHash: e.sourceIdentity, game: 'poe1', language: 'Thai' });
+  for (const language of ['Thai', 'German']) window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: source.filepath, translations: source.translations[language] }, language, { source, savedAt: 10 });
+  const before = plain(e.localDescs.staged);
+  e.buildImportedBaseline = async () => ({ archive: { baselineId: 'current-source' }, source: plain([source]) });
+  await e.importUpdateZipFile({ size: 10, lastModified: 1 }, plain([source]));
+  assert.deepEqual(plain(e.localDescs.staged), before);
+  assert.equal(window.WorkspaceState.workspaceFile(e.localDescs, source, 'Thai').isDropped, false);
 });
 
 test('recovering a history candidate waits for local durability and does not stage its translation', async () => {

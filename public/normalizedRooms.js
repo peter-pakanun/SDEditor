@@ -248,8 +248,11 @@
         const shared = room.shared[path], desc = descriptions.get(path), staged = workspace?.staged?.[room.identity.language]?.[path];
         if (shared) room.local[path] = copy(shared);
         if (staged && !pending.has(path)) room.local[path] = { ...(shared || { filepath: path, revision: 0 }),
-          translations: copy(staged.translations), needsReview: false, trackedForExport: true };
-        else if (!shared && staged) room.local[path] = { filepath: path, translations: copy(staged.translations), revision: 0, needsReview: false, trackedForExport: true };
+          translations: copy(staged.translations), needsReview: false, trackedForExport: true,
+          ...(staged.sourceCarry ? { sourceCarry: copy(staged.sourceCarry) } : {}) };
+        else if (!shared && staged) room.local[path] = { filepath: path, translations: copy(staged.translations), revision: 0, needsReview: false, trackedForExport: true,
+          ...(staged.sourceCarry ? { sourceCarry: copy(staged.sourceCarry) } : {}) };
+        if (staged && !pending.has(path) && !staged.sourceCarry) delete room.local[path].sourceCarry;
         if (!room.local[path] && desc && room.mode !== 'sparse') room.local[path] = P.fileState({ filepath: path,
           translations: desc.translations?.[room.identity.language] || [], revision: 0 }, desc.translations?.English?.length);
       }

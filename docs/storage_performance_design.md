@@ -6,6 +6,8 @@ Use this design when adding another content mode with comparable original conten
 
 The trusted ClientText follow-up uses API schema v19 and browser v14. Browser parsing is the content authority; the API retains immutable originals, descriptors/summaries and sparse affected work/history. New imports do not build complete compact manifests or Merkle trees. Reusable browser originals are keyed by artifact hash, parser version and role, with authored state isolated by workspace scope. Cold and cached activation report through the existing workspace initialization coordinator. The older manifest/proof measurements below describe the previous storage path, not trusted-client preparation timings.
 
+StatDescription source advancement now uses browser v15/API v20. It omits inherited saves identical to the incoming English/translation/metadata, carries metadata-only corrections as Saved with factual old/new provenance, and prioritizes Dropped review for lost translations. Browser cleanup is resumable per scoped workspace; it protects authored destination work and pending operations. Shared cleanup verifies retained originals or identical accepted file hashes and emits revisioned staging resets while retaining history and immutable collections. Cached room rejoin compares local-only saved work against the accepted shared state before queueing it, so reconstructed room caches cannot erase or silently ignore that work.
+
 The [Workspace Status Contract](workspace_statuses.md) governs status and recovery meaning. [Local-first Server Storage](local_first_server_storage.md) governs accepted baseline retention, publication, exports, server payloads, and rollout. Read those documents before changing their boundaries.
 
 ## Why storage became part of responsiveness
@@ -43,7 +45,7 @@ Capture identity before the first await, queue insertion, IndexedDB request or w
 
 ## Normalized IndexedDB records
 
-IndexedDB v14 retains the v9/v10 scoped stores in [normalizedStore.js](../public/normalizedStore.js), the authored ClientText stores introduced in v11, and reusable workbook caches:
+IndexedDB v15 retains the v9/v10 scoped stores in [normalizedStore.js](../public/normalizedStore.js), the authored ClientText stores introduced in v11, and reusable workbook caches:
 
 | Store group | Purpose |
 | --- | --- |

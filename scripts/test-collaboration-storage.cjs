@@ -115,12 +115,40 @@ test('modern description helpers detach translation arrays and omit derived flag
 
 test('source import persists source, workspace and recovery revisions in one transaction', async () => {
   const { store, kv, revisions, transactions } = fixture();
-  const operation = store.saveSourceWorkspaceWithRevisions(['new source'], { descs: ['new workspace'] }, [{ translations: ['history'] }], 'poe1');
+  kv.set('workspace_poe1', { sourceHash: 'old-source', descs: ['before'], unrelated: true });
+  const operation = store.saveSourceWorkspaceWithRevisions(['new source'], { sourceHash: 'new-source', descs: ['new workspace'] }, [{ translations: ['history'] }], 'poe1');
   await queued(); assert.deepEqual(kv.get('source_poe1'), ['old source']);
   assert.deepEqual(kv.get('workspace_poe1').descs, ['before']);
   transactions[0].complete(); await operation;
   assert.deepEqual(kv.get('source_poe1'), ['new source']);
   assert.deepEqual(kv.get('workspace_poe1').descs, ['new workspace']);
+  assert.equal(kv.get('workspace_poe1').sourceHash, 'new-source');
+  assert.equal(revisions.length, 1);
+});
+
+test('same-source imports retain destination saves and recovery evidence in the atomic commit', async () => {
+  const { store, kv, revisions, transactions } = fixture();
+  const source = [{ filepath: 'a.txt', name: 'A', stats: ['stat'], variables: [], remarks: [],
+    translations: { English: ['One'], Thai: ['zip thai'], German: ['zip german'] } }];
+  const existing = { sourceHash: 'current-source', game: 'poe1', stagedVersion: 1, descs: structuredClone(source), status: {},
+    staged: { Thai: { 'a.txt': { sourceHash: 'current-source', savedAt: 9, translations: ['destination thai'] } },
+      German: { 'a.txt': { sourceHash: 'current-source', savedAt: 8, translations: ['destination german'] } } },
+    sourceCarryRepairArchive: { retained: { stage: { translations: ['previous evidence'] } } } };
+  kv.set('workspace_poe1', structuredClone(existing));
+  const incoming = { sourceHash: 'current-source', game: 'poe1', stagedVersion: 1, descs: structuredClone(source), status: {},
+    staged: { Thai: { 'a.txt': { sourceHash: 'current-source', savedAt: 1, translations: ['imported thai'],
+      sourceCarry: { fromSourceHash: 'old-source', toSourceHash: 'current-source', fromSavedAt: 1 } } } } };
+  const operation = store.saveSourceWorkspaceWithRevisions(source, incoming, [{ translations: ['recovery history'] }], 'poe1');
+  await queued();
+  assert.deepEqual(kv.get('workspace_poe1'), existing, 'The destination is untouched until commit.');
+  assert.equal(revisions.length, 0);
+  transactions[0].complete();
+  const committed = structuredClone(await operation);
+  assert.deepEqual(committed.staged, existing.staged);
+  assert.deepEqual(committed.sourceCarryRepairArchive, existing.sourceCarryRepairArchive);
+  assert.deepEqual(committed.dropped.Thai['a.txt'].snapshot.translations, ['imported thai']);
+  assert.equal(committed.dropped.Thai['a.txt'].originSourceHash, 'old-source');
+  assert.deepEqual(kv.get('workspace_poe1'), committed);
   assert.equal(revisions.length, 1);
 });
 

@@ -7,9 +7,10 @@
   // normalized facts with stale aggregates. v11 writers cannot read bounded
   // ClientText journal/proof fragments. v12 editors cannot render class-variant
   // fields accepted by the v2 workbook parser. v13 writers cannot read reusable
-  // trusted-original cache bindings. Keep every
+  // trusted-original cache bindings. v14 writers cannot retain factual source
+  // carry provenance or safely reconcile an existing destination workspace. Keep every
   // store and durable retry receipt while excluding older editors/workers.
-  const DB_VERSION = 14;
+  const DB_VERSION = 15;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -56,6 +57,7 @@
   }
   const normalized = runtime.NormalizedStore?.create({ openDb, W: WorkspaceState, legacyGet: kvGet,
     workspaceKey, sourceKey, receiptKey: receiptScopeKey, revisionStoreName, scopedRevision, normalizeScope: normalizeWorkspaceScope,
+    versionMetadataKey,
     onMigration: notifyMigration, tmRuntime: () => runtime.TranslationMemory,
     prepareWorkspace: (scope, language) => getLegacyWorkspaceView(scope, language, true),
     preparedRoom: (scope, key) => preparedRoomRepairs.get(normalized.scopeKey(scope))?.rooms?.[key],
@@ -1011,21 +1013,31 @@
       if (baseline && baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
       const metadata = { createdAt: Date.now(), ...await kvGet(versionMetadataKey(captured)), ...captured,
         ...(workspace.versionName ? { name: workspace.versionName } : {}), updatedAt: Date.now() };
-      await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) }, revisions, baseline, [
+      const committed = await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) }, revisions, baseline, [
         { key: activeKey(captured), value: captured }, { key: versionMetadataKey(captured), value: metadata },
         { key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) }]);
       activeScopes.set(activeKey(captured), captured);
       if (workspaceContext === contextAtStart && workspaceContext?.accountId === captured.accountId && workspaceContext.game === captured.game && workspaceContext.branchId === captured.branchId) workspaceContext = { ...captured };
-      return;
+      return committed;
     }
     const db = await openDb();
     const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
     const done = txDone(tx);
+    let committed = workspace, importFailure;
     try {
       const kv = tx.objectStore(STORE_KV);
       kv.put({ key: sourceKey(captured || gameVersion), value: source });
-      kv.put({ key: workspaceKey(captured || gameVersion), value: pruneWorkspace(captured ? { ...workspace,
-        accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) } : workspace) });
+      const destinationKey = workspaceKey(captured || gameVersion), incoming = captured ? { ...workspace,
+        accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) } : workspace;
+      const destinationRead = kv.get(destinationKey);
+      destinationRead.onsuccess = () => {
+        try {
+          const existing = destinationRead.result?.value;
+          committed = incoming.sourceHash && existing?.sourceHash === incoming.sourceHash && WorkspaceState.mergeSourceImportWorkspace
+            ? WorkspaceState.mergeSourceImportWorkspace(existing, incoming, { source, game: gameVersion }) : incoming;
+          kv.put({ key: destinationKey, value: pruneWorkspace(committed) });
+        } catch (error) { importFailure = error; try { tx.abort(); } catch (_) {} }
+      };
       if (captured?.sourceHash) {
         kv.put({ key: activeKey(captured), value: captured });
         const metadataRead = kv.get(versionMetadataKey(captured));
@@ -1046,12 +1058,13 @@
       await done.catch(() => {});
       throw error;
     }
-    await done;
+    try { await done; } catch (error) { throw importFailure || error; }
     if (captured?.sourceHash) {
       activeScopes.set(activeKey(captured), captured);
       if (workspaceContext === contextAtStart && workspaceContext?.accountId === captured.accountId
         && workspaceContext?.game === captured.game && workspaceContext.branchId === captured.branchId) workspaceContext = { ...captured };
     }
+    return committed;
   }
 
   // Ordinary editor saves send only their touched files to the worker. Read the

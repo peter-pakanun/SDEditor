@@ -34,6 +34,12 @@ In the API checkout, `node scripts/cleanup-clienttext.js --dry-run` inventories 
 
 ClientText source changes retain translations with exact-source review requirements, including sparse source-only records that are not Saved work. Managed collections freeze accepted Saved units and source-only review facts; the browser reconstructs complete workbooks from verified originals, with both files in a paired download. Drafts and unaccepted outbox work are excluded. ClientText TM is a separate local projection learned atomically from valid saves and accepted shared events; its field context and retained text survive removed records. It is not sent through the legacy cloud TM endpoint.
 
+## StatDescription inherited-save cleanup
+
+Browser v15 and API v20 omit automatic inherited saves already supplied exactly by the incoming baseline. Metadata-only changes with unchanged English retain Saved translations using current metadata and factual old/new provenance. Empty/incomplete incoming translations with nonblank predecessor text remain Dropped for comparison. Existing destination-version work takes precedence during reimport.
+
+Browser cleanup is scoped, resumable and atomic; removed inherited stages retain recovery evidence. Pending commands, explicit destination saves, metadata corrections, Dropped assignments and uncertain records are protected. Shared cleanup verifies retained predecessor/current ZIPs or identical accepted per-file baseline hashes, checkpoints completed rooms, and publishes revisioned staging resets. Missing/corrupt originals defer cleanup when the accepted file hashes cannot establish the baseline; history, events, receipts, original artifacts and frozen collections remain immutable. Deploy API v20 first, then browser v15.
+
 ## Why the downloaded database was large
 
 The downloaded backup `2026-10-08T14-11-45-782Z-7a571b29` was a schema-v13 snapshot. Sizes below include each table's indexes and use MiB (1,048,576 bytes).
@@ -120,7 +126,7 @@ Backup manifest format 4 contains a compacted SQLite snapshot compressed as `sde
 
 Routine redeploy uses `backup.js --fast`: a consistent online raw format-3 snapshot with SQLite integrity/checksum checks, configuration and external artifact references. It skips snapshot `VACUUM`, gzip and exhaustive payload decoding; the manifest records that compaction and payload-reference verification were deferred. Restore always performs full reference verification, and default manual/restore/compaction safety backups retain the compacted, compressed and fully verified behavior. Raw deployment snapshots can use more disk space. `npm run test:deploy` keeps correctness/migration/recovery tests while excluding the 149,550-unit capacity fixture; full `npm test` remains the release check. Redeploy logs each stage and elapsed time so a later processing delay is attributed to its actual step.
 
-To reclaim pages in the live database after migration, stop the API and run `node scripts/compact.js --stopped` in the API checkout. This command checks the process lock, creates a compressed safety backup, obtains an exclusive database lock, checkpoints the WAL and vacuums deliberately. It does not run automatically at startup. Retain `DATA_DIR/artifacts` separately, including ZIPs, ClientText workbooks and existing collected archives. Deploy schema v19 and reference-aware restore before the frontend; rolling back requires old code plus a compatible database/artifact backup and loses post-backup writes.
+To reclaim pages in the live database after migration, stop the API and run `node scripts/compact.js --stopped` in the API checkout. This command checks the process lock, creates a compressed safety backup, obtains an exclusive database lock, checkpoints the WAL and vacuums deliberately. It does not run automatically at startup. Retain `DATA_DIR/artifacts` separately, including ZIPs, ClientText workbooks and existing collected archives. Deploy schema v20 and reference-aware restore before the frontend; rolling back requires old code plus a compatible database/artifact backup and loses post-backup writes.
 
 ## Validation and remaining operational work
 

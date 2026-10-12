@@ -637,6 +637,197 @@ test('a source-compatible staged translation advances scope without creating a d
   assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), null);
 });
 
+test('new ZIP translations that exactly include saved work remove inherited stages in every language', () => {
+  const previous = sourceDesc(), workspace = modern(previous);
+  for (const language of ['Thai', 'German']) W.stageTranslation(workspace,
+    { filepath: 'a.txt', translations: [language + ' saved'] }, language, { source: previous, savedAt: 10 });
+  const current = sourceDesc('One', { Thai: ['Thai saved'], German: ['German saved'] });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  for (const language of ['Thai', 'German']) {
+    const state = W.workspaceFile(workspace, current, language);
+    assert.deepEqual(state.translations, [language + ' saved']);
+    assert.equal(state.hasChanges, false); assert.equal(state.isDropped, false); assert.equal(state.isRevised, false);
+  }
+});
+
+test('blank or incomplete new ZIP translations require Dropped review instead of carrying saved text', () => {
+  for (const translated of [[''], [], ['new line', '']]) {
+    const previous = sourceDesc(), current = sourceDesc('One', { Thai: translated }), workspace = modern(previous);
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['saved text'] }, 'Thai', { source: previous });
+    W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+    const state = W.workspaceFile(workspace, current, 'Thai');
+    assert.equal(state.hasChanges, false); assert.equal(state.isMissing, true); assert.equal(state.isDropped, true);
+    assert.equal(state.candidate.reason, 'Translation missing from new source');
+    assert.deepEqual(state.candidate.snapshot.translations, ['saved text']);
+  }
+});
+
+test('metadata-only source updates use current metadata and retain factual saved correction provenance', () => {
+  const previous = sourceDesc(), current = sourceDesc(), workspace = modern(previous);
+  current.variables = ['#new']; current.remarks = ['new remark']; current.stats = ['new stat']; current.name = 'new name';
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source: previous, savedAt: 10 });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  const state = W.workspaceFile(workspace, current, 'Thai');
+  assert.equal(state.hasChanges, true); assert.equal(state.isMetadataCorrection, true); assert.equal(state.isDropped, false);
+  assert.deepEqual(state.staged.sourceCarry, { fromSourceHash: 'old', toSourceHash: 'new', fromSavedAt: 10,
+    metadataCorrection: { before: W.sourceMetadata(previous), after: W.sourceMetadata(current) } });
+  assert.deepEqual(current.translations.Thai, ['one']); assert.deepEqual(previous.variables, ['#']);
+  const stale = structuredClone(state.staged); stale.sourceCarry.metadataCorrection.after.name = 'wrong';
+  assert.equal(W.metadataCorrectionForSource(stale, current, 'new'), false, 'Correction facts must match the accepted current source.');
+  const fromApi = structuredClone(state.staged);
+  for (const side of ['before', 'after']) {
+    const facts = fromApi.sourceCarry.metadataCorrection[side];
+    fromApi.sourceCarry.metadataCorrection[side] = { name: facts.name, stats: facts.stats, variables: facts.variables, remarks: facts.remarks };
+  }
+  assert.equal(W.metadataCorrectionForSource(fromApi, current, 'new'), true, 'API metadata property order does not change correction facts.');
+});
+
+test('incomplete incoming translation still requires review when source metadata changes', () => {
+  const previous = sourceDesc(), current = sourceDesc('One', { Thai: [''] }), workspace = modern(previous);
+  current.remarks = ['new remark'];
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['saved text'] }, 'Thai', { source: previous });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  const state = W.workspaceFile(workspace, current, 'Thai');
+  assert.equal(state.hasChanges, false); assert.equal(state.isMetadataCorrection, false); assert.equal(state.isDropped, true);
+  assert.deepEqual(state.candidate.snapshot.remarks, ['remark']);
+});
+
+test('baseline-identical carry removal preserves prior Dropped assignments and authored blank intent', () => {
+  const previous = sourceDesc(), current = sourceDesc(), workspace = modern(previous);
+  const candidate = W.dropTranslation(workspace, sourceDesc('Older'), 'Thai', { id: 'preserved', originSourceHash: 'older' });
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source: previous });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  assert.equal(W.workspaceFile(workspace, current, 'Thai').hasChanges, false);
+  assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai').id, candidate.id);
+  const blankWorkspace = modern(previous), blankSource = sourceDesc('One', { Thai: [''] });
+  W.stageTranslation(blankWorkspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source: previous });
+  W.upgradeSource(blankWorkspace, { previousSource: [previous], source: [blankSource], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  assert.equal(W.workspaceFile(blankWorkspace, blankSource, 'Thai').hasChanges, false);
+  assert.equal(W.droppedForFile(blankWorkspace, 'a.txt', 'Thai'), null, 'An explicit blank supersedes the old ZIP translation.');
+});
+
+test('missing historical source preserves staged text with honestly unavailable source context', () => {
+  const workspace = modern(sourceDesc());
+  W.stageTranslation(workspace, { filepath: 'orphan.txt', translations: ['recover me'] }, 'Thai');
+  W.upgradeSource(workspace, { previousSource: [], source: [sourceDesc()], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  const candidate = W.droppedForFile(workspace, 'orphan.txt', 'Thai');
+  assert.deepEqual(candidate.snapshot.translations, ['recover me']); assert.deepEqual(candidate.snapshot.english, []);
+  assert.equal(candidate.originSourceAvailable, false);
+});
+
+test('redundant carry migration requires lineage evidence and preserves explicit same-version saves', () => {
+  const source = sourceDesc(), previous = modern(source), current = modern(source, 'new');
+  W.stageTranslation(previous, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source, savedAt: 10 });
+  current.staged.Thai = { 'a.txt': { ...structuredClone(previous.staged.Thai['a.txt']), sourceHash: 'new' } };
+  const options = { source: [source], previousSource: [source], previousWorkspace: previous, previousSourceHash: 'old' };
+  const authored = structuredClone(current);
+  assert.equal(W.repairRedundantCarriedStages(authored, { ...options,
+    history: [{ filepath: 'a.txt', lang: 'Thai', sourceHash: 'new', translations: ['one'], savedAt: 20 }] }).changed, false);
+  assert.equal(W.repairRedundantCarriedStages(structuredClone(current), { source: [source] }).changed, false);
+  const result = W.repairRedundantCarriedStages(current, options);
+  assert.equal(result.changed, true); assert.equal(result.removed.length, 1); assert.equal(current.staged.Thai['a.txt'], undefined);
+  assert.equal(W.repairRedundantCarriedStages(current, options).changed, false, 'The repair is idempotent.');
+});
+
+test('carry migration restores proven metadata correction facts and rejects unrelated predecessor scopes', () => {
+  const previousSource = sourceDesc(), source = sourceDesc(), previous = modern(previousSource), current = modern(source, 'new');
+  source.remarks = ['corrected'];
+  W.stageTranslation(previous, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source: previousSource, savedAt: 10 });
+  current.staged.Thai = { 'a.txt': { ...structuredClone(previous.staged.Thai['a.txt']), sourceHash: 'new' } };
+  const options = { source: [source], previousSource: [previousSource], previousWorkspace: previous };
+  const other = structuredClone(previous); other.accountId = 'other';
+  assert.equal(W.repairRedundantCarriedStages(structuredClone(current), { ...options, previousWorkspace: other }).changed, false);
+  const grouped = structuredClone(previous); grouped.groupId = 'other-group'; grouped.versionId = 'version';
+  assert.equal(W.repairRedundantCarriedStages(structuredClone(current), { ...options, previousWorkspace: grouped }).changed, false);
+  const result = W.repairRedundantCarriedStages(current, options);
+  assert.equal(result.changed, true); assert.equal(result.removed.length, 0); assert.equal(result.corrected.length, 1);
+  assert.equal(W.workspaceFile(current, source, 'Thai').isMetadataCorrection, true);
+  assert.equal(W.repairRedundantCarriedStages(current, options).changed, false);
+});
+
+test('explicit same-version saves clear inherited correction provenance while shared projection preserves it', () => {
+  const previous = sourceDesc(), source = sourceDesc(), workspace = modern(previous); source.remarks = ['corrected'];
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source: previous, savedAt: 10 });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [source], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
+  const sourceCarry = structuredClone(workspace.staged.Thai['a.txt'].sourceCarry);
+  const file = P.fileState({ filepath: 'a.txt', translations: ['one'], trackedForExport: true, revision: 1, sourceCarry });
+  const projected = P.projectWorkspace(workspace, [file], 'Thai', [source]);
+  assert.deepEqual(projected.staged.Thai['a.txt'].sourceCarry, sourceCarry);
+  assert.equal(W.workspaceFile(projected, source, 'Thai').isMetadataCorrection, true);
+  W.stageTranslation(projected, file, 'Thai', { source, savedAt: 20 });
+  assert.equal(projected.staged.Thai['a.txt'].sourceCarry, undefined);
+  assert.equal(W.workspaceFile(projected, source, 'Thai').hasChanges, true, 'An explicit unchanged save remains Saved.');
+});
+
+test('collaboration merge preserves local carry facts and explicit provenance clearing without text conflicts', () => {
+  const sourceCarry = { fromSourceHash: 'old', toSourceHash: 'new', fromSavedAt: 10,
+    metadataCorrection: { before: { remarks: ['old'] }, after: { remarks: ['new'] } } };
+  const baseline = P.fileState({ filepath: 'a.txt', translations: ['one'], trackedForExport: false });
+  const yours = P.fileState({ ...baseline, trackedForExport: true, sourceCarry });
+  const carried = P.mergeFile(baseline, yours, baseline);
+  assert.equal(carried.conflict, false); assert.deepEqual(carried.file.sourceCarry, sourceCarry);
+  assert.equal(P.contentEqual(yours, { ...yours, sourceCarry: undefined }), false);
+  const differentlyOrdered = { ...yours, sourceCarry: { metadataCorrection: sourceCarry.metadataCorrection,
+    fromSavedAt: 10, toSourceHash: 'new', fromSourceHash: 'old' } };
+  assert.equal(P.contentEqual(yours, differentlyOrdered), true);
+  const explicit = P.mergeFile(yours, { ...yours, sourceCarry: undefined }, yours);
+  assert.equal(explicit.conflict, false); assert.equal(explicit.file.sourceCarry, undefined);
+});
+
+test('source import merging preserves destination languages and separates competing carried text for review', () => {
+  const source = sourceDesc(), incoming = modern(source, 'new'), existing = modern(source, 'new');
+  W.stageTranslation(incoming, { filepath: 'a.txt', translations: ['older Thai'] }, 'Thai', { source, savedAt: 10,
+    sourceCarry: { fromSourceHash: 'old', toSourceHash: 'new', fromSavedAt: 10 } });
+  W.stageTranslation(existing, { filepath: 'a.txt', translations: ['newer Thai'] }, 'Thai', { source, savedAt: 20 });
+  W.stageTranslation(existing, { filepath: 'a.txt', translations: ['newer German'] }, 'German', { source, savedAt: 20 });
+  const before = structuredClone(existing), merged = W.mergeSourceImportWorkspace(existing, incoming, { source: [source], game: 'poe1' });
+  assert.deepEqual(existing, before, 'The input destination remains detached.');
+  assert.deepEqual(W.workspaceFile(merged, source, 'Thai').translations, ['newer Thai']);
+  assert.deepEqual(W.workspaceFile(merged, source, 'German').translations, ['newer German']);
+  assert.deepEqual(W.droppedForFile(merged, 'a.txt', 'Thai').snapshot.translations, ['older Thai']);
+  assert.equal(W.droppedForFile(merged, 'a.txt', 'Thai').originSourceHash, 'old');
+});
+
+test('source import merging retains existing Dropped recovery and rejects different content-group scopes', () => {
+  const source = sourceDesc(), incoming = modern(source, 'new'), existing = modern(source, 'new');
+  W.stageTranslation(incoming, { filepath: 'a.txt', translations: ['older Thai'] }, 'Thai', { source });
+  W.stageTranslation(existing, { filepath: 'a.txt', translations: ['newer Thai'] }, 'Thai', { source });
+  const retained = W.dropTranslation(existing, sourceDesc('Older English'), 'Thai', { id: 'retained', originSourceHash: 'earliest' });
+  const merged = W.mergeSourceImportWorkspace(existing, incoming, { source: [source], game: 'poe1' });
+  assert.equal(W.droppedForFile(merged, 'a.txt', 'Thai').id, retained.id);
+  assert.deepEqual(merged.droppedConflicts.Thai['a.txt'].yours.snapshot.translations, ['older Thai']);
+  assert.equal(merged.droppedConflicts.Thai['a.txt'].shared.id, retained.id);
+  assert.ok(Object.values(merged.droppedArchive).some(candidate => candidate.snapshot?.translations?.[0] === 'older Thai'));
+  const grouped = structuredClone(existing); grouped.groupId = 'other'; grouped.versionId = 'version';
+  assert.throws(() => W.mergeSourceImportWorkspace(grouped, incoming, { source: [source] }), /different scope/);
+});
+
+test('destination resolutions suppress imported retries of the same Dropped generation and its shared alias', () => {
+  for (const status of ['promoted', 'discarded']) for (const aliased of [false, true]) {
+    const source = sourceDesc(), incoming = modern(source, 'new'), existing = modern(source, 'new');
+    const candidate = W.dropTranslation(incoming, source, 'Thai', { id: 'local-generation', originSourceHash: 'old', translations: ['preserved'] });
+    const resolved = { ...structuredClone(candidate), id: aliased ? 'shared-generation' : candidate.id, status, revision: 1 };
+    existing.droppedArchive[resolved.id] = resolved;
+    if (aliased) {
+      existing.droppedAliases = { [candidate.id]: { id: resolved.id, fromRevision: 0, revision: 1, targetSourceHash: 'new' } };
+      W.recordDroppedConflict(incoming, { kind: 'upload', game: 'poe1', language: 'Thai', filepath: 'a.txt', targetSourceHash: 'new',
+        yours: candidate, shared: { ...structuredClone(resolved), status: 'dropped', revision: 0 } });
+    }
+    W.stageTranslation(existing, { filepath: 'a.txt', translations: ['current saved text'] }, 'Thai', { source });
+    const merged = W.mergeSourceImportWorkspace(existing, incoming, { source: [source], game: 'poe1' });
+    assert.equal(W.droppedForFile(merged, 'a.txt', 'Thai'), null);
+    assert.equal(merged.droppedArchive[resolved.id].status, status);
+    assert.equal(merged.droppedOutbox.some(operation => operation.kind === 'put' && [candidate.id, resolved.id].includes(operation.id)), false);
+    assert.equal(merged.droppedConflicts.Thai?.['a.txt'], undefined, 'Resolved aliases cannot retain a stale review gate.');
+    assert.deepEqual(W.workspaceFile(merged, source, 'Thai').translations, ['current saved text']);
+    assert.equal(incoming.dropped.Thai['a.txt'].status, 'dropped', 'Inputs retain their original version evidence.');
+    const fresh = modern(source, 'new');
+    W.dropTranslation(fresh, source, 'Thai', { id: 'fresh-recovery', recoveryId: 'fresh-recovery', originSourceHash: 'old', translations: ['preserved'] });
+    const recovered = W.mergeSourceImportWorkspace(existing, fresh, { source: [source], game: 'poe1' });
+    assert.equal(W.droppedForFile(recovered, 'a.txt', 'Thai').id, 'fresh-recovery', 'A deliberate new recovery generation is retained.');
+  }
+});
+
 test('legacy private review text migrates to dropped without becoming staged or replacing current ZIP text', () => {
   const current = sourceDesc('New English', { Thai: [''] }), local = sourceDesc('Old English', { Thai: ['old translation'] });
   local.hasChanges = false;

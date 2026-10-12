@@ -590,7 +590,8 @@
         return { filepath: desc.filepath, translations: [...(baseline ? state.translations : desc.translations?.[lang] || [])],
           // Older servers use these wire fields; current workspace status comes
           // exclusively from staged records, never from persisted booleans.
-          needsReview: modern ? false : !!desc.needsReview, trackedForExport: !!state.hasChanges };
+          needsReview: modern ? false : !!desc.needsReview, trackedForExport: !!state.hasChanges,
+          ...(state.staged?.sourceCarry ? { sourceCarry: this.toPlainForStorage(state.staged.sourceCarry) } : {}) };
       },
       captureCollaborationContext() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, source: this.sourceIdentity, account: this.cloudUser?.id || '',
@@ -857,6 +858,7 @@
             // receipt. Use the same guarded resolution as its durable commit.
             window.WorkspaceState.stageTranslation(this.localDescs, file, lang, {
               source: original, sourceHash: this.sourceIdentity, game: this.gameVersion, promoteDropped: promotion,
+              sourceCarry: file.sourceCarry,
               savedAt: this.localDescs.staged?.[lang]?.[file.filepath]?.savedAt,
             });
           }
@@ -874,6 +876,7 @@
             const staged = this.localDescs.staged?.[lang]?.[file.filepath];
             window.WorkspaceState.stageTranslation(this.localDescs, file, lang,
               { source: original, sourceHash: this.sourceIdentity, game: this.gameVersion,
+                sourceCarry: file.sourceCarry,
                 savedAt: staged && arrayEquals(staged.translations, file.translations) ? staged.savedAt : undefined });
           }
           const state = window.WorkspaceState.workspaceFile(this.localDescs, original, lang);

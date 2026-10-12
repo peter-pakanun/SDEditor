@@ -5451,6 +5451,48 @@ const config = Vue.defineComponent({
       }
     },
 
+    metadataCorrectionDetails(filepath, language = this.lang) {
+      const entry = this.localDescs?.staged?.[language]?.[filepath];
+      const carry = entry?.sourceCarry, correction = carry?.metadataCorrection;
+      if (!entry || entry.sourceHash !== this.sourceIdentity || carry?.toSourceHash !== this.sourceIdentity
+        || !carry.fromSourceHash || carry.fromSourceHash === carry.toSourceHash || !correction?.before || !correction?.after) return '';
+      const original = this.workspaceSourceFile(filepath);
+      if (!original) return '';
+      const labels = { name: 'Description name', stats: 'Stats', variables: 'Entry variables', remarks: 'Entry remarks' };
+      const details = [];
+      for (const [field, label] of Object.entries(labels)) {
+        const before = correction.before[field] ?? (field === 'name' ? '' : []);
+        const after = correction.after[field] ?? (field === 'name' ? '' : []);
+        const current = original[field] ?? (field === 'name' ? '' : []);
+        if (JSON.stringify(after) !== JSON.stringify(current)) return '';
+        if (JSON.stringify(before) !== JSON.stringify(after)) details.push(`${label}: ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+      }
+      return details.length ? 'Updated from the current English metadata.\n' + details.join('\n') : '';
+    },
+    getSourceImportCarrySummary(previousWorkspace, previousSource, source, previousSourceHash) {
+      const old = new Map(previousSource.map(desc => [desc.filepath, desc]));
+      const next = new Map(source.map(desc => [desc.filepath, desc]));
+      let redundant = 0;
+      const corrections = [];
+      for (const [language, entries] of Object.entries(previousWorkspace?.staged || {})) {
+        for (const [filepath, entry] of Object.entries(entries)) {
+          const decision = window.WorkspaceState.classifySourceCarry?.(old.get(filepath), next.get(filepath), language, entry.translations);
+          if (decision?.action === 'baseline' && !this.localDescs.staged?.[language]?.[filepath]) redundant++;
+        }
+      }
+      for (const [language, entries] of Object.entries(this.localDescs?.staged || {})) {
+        for (const [filepath, entry] of Object.entries(entries)) {
+          if (entry.sourceCarry?.fromSourceHash !== previousSourceHash) continue;
+          const details = this.metadataCorrectionDetails(filepath, language);
+          if (details) corrections.push(`${filepath} (${language})\n${details}`);
+        }
+      }
+      const summaries = [];
+      if (redundant) summaries.push(`${redundant} inherited save${redundant === 1 ? ' already matches' : 's already match'} the new baseline and ${redundant === 1 ? 'was' : 'were'} not carried forward.`);
+      if (corrections.length) summaries.push(`${corrections.length} translation${corrections.length === 1 ? '' : 's'} saved with updated English metadata.\n\n`
+        + corrections.slice(0, 12).join('\n\n') + (corrections.length > 12 ? `\n\n${corrections.length - 12} more; each file's Metadata updated label shows its changes.` : ''));
+      return summaries.join('\n\n');
+    },
     getImportRepairSummary(parsed) {
       const repairs = (parsed || []).flatMap(desc => desc?.importRepairs || []);
       if (!repairs.length) return '';
@@ -5659,13 +5701,13 @@ const config = Vue.defineComponent({
       }
       const carryForward = this.beginWorkspaceInitializationTask?.('Carrying translations and preserved copies into the new source', options.initialization);
       const advancesSource = sourceHash !== this.sourceIdentity;
-      const nextWorkspace = this.toPlainForStorage(this.localDescs);
+      let nextWorkspace = this.toPlainForStorage(this.localDescs);
       nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
       const baselineSource = importedBaseline?.source || this.toPlainForStorage(nextSource);
       const prevSource = this.workspaceSource();
       const leavingGroup = advancesSource && importContext?.groupId;
       const previousDroppedArchive = leavingGroup ? this.toPlainForStorage(nextWorkspace.droppedArchive || {}) : null;
-      window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
+      if (advancesSource) window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
         previousSourceHash: this.sourceIdentity, sourceHash, game });
       if (leavingGroup) {
         // Shared candidate IDs and revisions belong to the previous group.
@@ -5772,7 +5814,8 @@ const config = Vue.defineComponent({
 
       this.finishWorkspaceInitializationTask?.(carryForward);
       try {
-        await prepare('Saving source, translations and recovery history', () => window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(baselineSource), nextWorkspace, sourceRevisions, game, importedBaseline));
+        const committedWorkspace = await prepare('Saving source, translations and recovery history', () => window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(baselineSource), nextWorkspace, sourceRevisions, game, importedBaseline));
+        if (committedWorkspace?.sourceHash === sourceHash && committedWorkspace?.stagedVersion >= 1) nextWorkspace = committedWorkspace;
       } catch (error) {
         if (!workspaceCurrent()) return;
         this.loadingProgress = this.sourceLoaded ? 100 : 0;
@@ -5787,12 +5830,14 @@ const config = Vue.defineComponent({
       this._workspaceBaselineIndex = null;
       this.sourceIdentity = sourceHash;
       this.descs = nextSource;
+      this.applyWorkspaceOverlay();
       this.sourceLoaded = true;
       this.clearDiagnosticScanResults();
       this.loadingProgress = 100;
       this.filterDesc();
-      const repairSummary = this.getImportRepairSummary(parsed);
-      if (repairSummary) this.appAlert('Source import completed.\n\n' + repairSummary);
+      const summaries = [advancesSource && this.getSourceImportCarrySummary(importWorkspace, prevSource, baselineSource, importContext?.source || importWorkspace.sourceHash),
+        this.getImportRepairSummary(parsed)].filter(Boolean);
+      if (summaries.length) this.appAlert('Source import completed.\n\n' + summaries.join('\n\n'));
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {

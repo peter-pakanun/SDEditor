@@ -691,6 +691,7 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.deepEqual(preservedGroup, originalRoom.recovery.find(record => record.id === 'retained-many-file-recovery'),
             'Hot shared save, events and acknowledgments preserve every unselected recovery member');
         await malformedDeletionRecoveryChecks(page, results);
+        await sourceCarryChecks(page, results);
         console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
         if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
         assert.deepEqual(errors, []);
@@ -716,6 +717,136 @@ async function runFixture({ storageOnly = false } = {}) {
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
         rmSync(absolute, { recursive: true, force: true });
     }
+}
+
+async function sourceCarryChecks(page, results) {
+    const isolated = await page.context().newPage();
+    const errors = [];
+    isolated.on('pageerror', error => errors.push(error.message));
+    try {
+        await isolated.goto(new URL('/fixture/storage', page.url()).href);
+        await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const prepared = await isolated.evaluate(async () => {
+            const copy = value => JSON.parse(JSON.stringify(value));
+            const describe = index => ({ filepath: 'carry/' + index + '.txt', filename: index + '.txt', filedir: 'carry', name: 'stat_' + index,
+                stats: ['stat_' + index], variables: ['#'], remarks: [''],
+                translations: { English: ['English ' + index], Thai: ['Thai ' + index], German: ['German ' + index] } });
+            const makeScope = (accountId, sourceHash) => ({ accountId, game: 'poe1', branchId: 'default', sourceHash });
+            const makeBaseline = async source => {
+                const zip = new JSZip();
+                for (const desc of source) zip.file(desc.filepath, StatDescCodec.descEncode(desc));
+                const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+                const tree = await CollaborationProtocol.buildBaselineTree(source);
+                const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+                    zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.byteLength, fileCount: source.length,
+                    descriptionCount: source.length, decisions: [], treeRoot: tree.root });
+                return { source: copy(source), rawSource: copy(source), archive, tree };
+            };
+            const workspace = (scope, source, baseline) => WorkspaceState.initializeWorkspace({ ...scope, descs: copy(source), status: {}, importArchive: copy(baseline.archive) },
+                { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
+            const stage = (work, source, index, translations, savedAt, language = 'Thai', sourceCarry) =>
+                WorkspaceState.stageTranslation(work, { filepath: source[index].filepath, translations }, language,
+                    { source: source[index], savedAt, sourceCarry });
+            const previousSource = Array.from({ length: 7 }, (_, index) => describe(index));
+            const currentSource = copy(previousSource); currentSource[0].translations.Thai = ['Included saved work']; currentSource[2].remarks = ['corrected metadata'];
+            const previousBaseline = await makeBaseline(previousSource), currentBaseline = await makeBaseline(currentSource);
+            const previousScope = makeScope('fixture-carry-cleanup', previousBaseline.archive.baselineId);
+            const currentScope = makeScope(previousScope.accountId, currentBaseline.archive.baselineId);
+            const previous = workspace(previousScope, previousSource, previousBaseline), current = workspace(currentScope, currentSource, currentBaseline);
+            for (const index of [0, 1, 2, 3, 5, 6]) stage(previous, previousSource, index,
+                index === 0 ? ['Included saved work'] : previousSource[index].translations.Thai, 10 + index);
+            for (const index of [0, 1, 2, 3, 5, 6]) {
+                (current.staged.Thai ||= {})[currentSource[index].filepath] = { ...copy(previous.staged.Thai[previousSource[index].filepath]), sourceHash: currentScope.sourceHash };
+            }
+            stage(current, currentSource, 4, currentSource[4].translations.Thai, 100);
+            for (const index of [5, 6]) current.staged.Thai[currentSource[index].filepath].sourceCarry = {
+                fromSourceHash: previousScope.sourceHash, toSourceHash: currentScope.sourceHash, fromSavedAt: 10 + index };
+            const resolved = WorkspaceState.dropTranslation(current, previousSource[3], 'Thai', { id: 'carry-protected-promotion',
+                originSourceHash: previousScope.sourceHash, targetSourceHash: currentScope.sourceHash, translations: ['Preserved reviewed alternative'] });
+            stage(current, currentSource, 3, currentSource[3].translations.Thai, 13);
+            WorkspaceState.stageTranslation(current, { filepath: currentSource[3].filepath, translations: currentSource[3].translations.Thai }, 'Thai',
+                { source: currentSource[3], savedAt: 13, promoteDropped: { id: resolved.id, revision: 0, targetSourceHash: currentScope.sourceHash } });
+            WorkspaceState.dropTranslation(current, previousSource[6], 'Thai', { id: 'carry-protected-unresolved',
+                originSourceHash: previousScope.sourceHash, targetSourceHash: currentScope.sourceHash, translations: ['Unresolved reviewed alternative'] });
+            OfflineStore.setWorkspaceContext(previousScope);
+            await OfflineStore.saveSourceWorkspaceWithRevisions(copy(previousSource), previous, [], previousScope, previousBaseline);
+            await OfflineStore.setVersionMetadata(previousScope, { createdAt: 1, sourceImportedAt: 1 });
+            await OfflineStore.saveSourceWorkspaceWithRevisions(copy(currentSource), current, [{ filepath: currentSource[1].filepath, lang: 'Thai',
+                translations: copy(currentSource[1].translations.Thai), sourceHash: currentScope.sourceHash, savedAt: 20, note: 'Explicit unchanged save' }], currentScope, currentBaseline);
+            await OfflineStore.setVersionMetadata(currentScope, { createdAt: 100, sourceImportedAt: 100 });
+            const repaired = await OfflineStore.getVersionWorkspace(currentScope, 'Thai');
+
+            const importPreviousSource = [describe('import')], importCurrentSource = copy(importPreviousSource);
+            importCurrentSource[0].translations.Thai = ['New upstream Thai'];
+            const importPreviousBaseline = await makeBaseline(importPreviousSource), importCurrentBaseline = await makeBaseline(importCurrentSource);
+            const importPreviousScope = makeScope('fixture-carry-destination', importPreviousBaseline.archive.baselineId);
+            const importCurrentScope = makeScope(importPreviousScope.accountId, importCurrentBaseline.archive.baselineId);
+            const importPrevious = workspace(importPreviousScope, importPreviousSource, importPreviousBaseline), destination = workspace(importCurrentScope, importCurrentSource, importCurrentBaseline);
+            stage(importPrevious, importPreviousSource, 0, ['Older saved Thai'], 30);
+            stage(destination, importCurrentSource, 0, ['Newer destination Thai'], 40);
+            stage(destination, importCurrentSource, 0, ['Newer destination German'], 40, 'German');
+            destination.sourceCarryRepairArchive = { destination: { reason: 'Retained destination evidence' } };
+            await OfflineStore.saveSourceWorkspaceWithRevisions(copy(importPreviousSource), importPrevious, [], importPreviousScope, importPreviousBaseline);
+            await OfflineStore.saveSourceWorkspaceWithRevisions(copy(importCurrentSource), destination, [], importCurrentScope, importCurrentBaseline);
+            const advanced = copy(await OfflineStore.getVersionWorkspace(importPreviousScope, 'Thai'));
+            WorkspaceState.upgradeSource(advanced, { previousSource: importPreviousSource, source: importCurrentSource,
+                previousSourceHash: importPreviousScope.sourceHash, sourceHash: importCurrentScope.sourceHash, game: 'poe1' });
+            advanced.sourceCarryRepairArchive = { predecessor: { reason: 'Retained predecessor evidence' } };
+            advanced.importArchive = copy(importCurrentBaseline.archive);
+            const merged = await OfflineStore.saveSourceWorkspaceWithRevisions(copy(importCurrentSource), advanced, [], importCurrentScope, importCurrentBaseline);
+            const imported = await OfflineStore.getVersionWorkspace(importCurrentScope, 'German');
+
+            const missingPreviousSource = [describe('missing')], missingCurrentSource = copy(missingPreviousSource);
+            missingCurrentSource[0].translations.Thai = [''];
+            const missingPreviousBaseline = await makeBaseline(missingPreviousSource), missingCurrentBaseline = await makeBaseline(missingCurrentSource);
+            const missingPreviousScope = makeScope('fixture-carry-missing', missingPreviousBaseline.archive.baselineId);
+            const missingCurrentScope = makeScope(missingPreviousScope.accountId, missingCurrentBaseline.archive.baselineId);
+            const missing = workspace(missingPreviousScope, missingPreviousSource, missingPreviousBaseline);
+            WorkspaceState.upgradeSource(missing, { previousSource: missingPreviousSource, source: missingCurrentSource,
+                previousSourceHash: missingPreviousScope.sourceHash, sourceHash: missingCurrentScope.sourceHash, game: 'poe1' });
+            missing.importArchive = copy(missingCurrentBaseline.archive);
+            await OfflineStore.saveSourceWorkspaceWithRevisions(copy(missingCurrentSource), missing, [], missingCurrentScope, missingCurrentBaseline);
+            return { scopes: { previousScope, currentScope, importPreviousScope, importCurrentScope, missingCurrentScope },
+                currentSource, importCurrentSource, missingCurrentSource, repaired, merged, imported,
+                missing: await OfflineStore.getVersionWorkspace(missingCurrentScope, 'Thai') };
+        });
+        assert.equal(prepared.repaired.staged.Thai['carry/0.txt'], undefined, 'Proven legacy redundant carry is removed');
+        assert.equal(prepared.repaired.staged.Thai['carry/5.txt'], undefined, 'Explicit inherited provenance permits redundant cleanup');
+        assert.ok(prepared.repaired.staged.Thai['carry/1.txt'], 'Explicit current-source unchanged save is protected by history');
+        assert.ok(prepared.repaired.staged.Thai['carry/4.txt'], 'Uncertain unchanged stage is retained');
+        assert.ok(prepared.repaired.staged.Thai['carry/3.txt'], 'Resolved Dropped promotion is retained');
+        assert.ok(prepared.repaired.staged.Thai['carry/6.txt'], 'Unresolved Dropped work is retained');
+        assert.deepEqual(prepared.repaired.staged.Thai['carry/2.txt'].sourceCarry.metadataCorrection.after.remarks, ['corrected metadata']);
+        assert.equal(Object.values(prepared.repaired.sourceCarryRepairArchive).length, 2, 'Removed inherited entries have durable recovery archives');
+        assert.deepEqual(prepared.merged.staged.Thai['carry/import.txt'].translations, ['Newer destination Thai']);
+        assert.deepEqual(prepared.imported.staged.German['carry/import.txt'].translations, ['Newer destination German']);
+        assert.deepEqual(prepared.imported.dropped.Thai['carry/import.txt'].snapshot.translations, ['Older saved Thai']);
+        assert.deepEqual(Object.keys(prepared.imported.sourceCarryRepairArchive).sort(), ['destination', 'predecessor']);
+        assert.equal(prepared.missing.staged.Thai?.['carry/missing.txt'], undefined);
+        assert.deepEqual(prepared.missing.dropped.Thai['carry/missing.txt'].snapshot.translations, ['Thai missing']);
+        await isolated.reload();
+        await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const restored = await isolated.evaluate(async prepared => {
+            const { currentScope, importCurrentScope, importPreviousScope, missingCurrentScope } = prepared.scopes;
+            const repaired = await OfflineStore.getVersionWorkspace(currentScope, 'Thai');
+            const imported = await OfflineStore.getVersionWorkspace(importCurrentScope, 'German');
+            const previous = await OfflineStore.getVersionWorkspace(importPreviousScope, 'Thai');
+            const missing = await OfflineStore.getVersionWorkspace(missingCurrentScope, 'Thai');
+            return { repaired, imported, previous,
+                correction: WorkspaceState.workspaceFile(repaired, prepared.currentSource[2], 'Thai'),
+                missing: WorkspaceState.workspaceFile(missing, prepared.missingCurrentSource[0], 'Thai') };
+        }, prepared);
+        assert.deepEqual(restored.repaired.staged, prepared.repaired.staged, 'Reload retains repaired and protected staged entries');
+        assert.deepEqual(restored.repaired.sourceCarryRepairArchive, prepared.repaired.sourceCarryRepairArchive, 'Reload retains repair recovery evidence');
+        assert.equal(restored.correction.isMetadataCorrection, true); assert.equal(restored.correction.hasChanges, true); assert.equal(restored.correction.isRevised, false);
+        assert.deepEqual(restored.imported.staged, prepared.imported.staged, 'Reload preserves both destination languages');
+        assert.deepEqual(restored.previous.staged.Thai['carry/import.txt'].translations, ['Older saved Thai'], 'The predecessor workspace is retained');
+        assert.equal(restored.missing.hasChanges, false); assert.equal(restored.missing.isDropped, true); assert.equal(restored.missing.isMissing, true); assert.equal(restored.missing.needsReview, true);
+        assert.deepEqual(errors, []);
+        results.push({ scenario: 'source-carry migration and reload', removed: 2, protected: 5, recoveryArchives: 2 });
+        results.push({ scenario: 'existing destination import and language isolation', preservedLanguages: ['Thai', 'German'], competingTextPreserved: true });
+        results.push({ scenario: 'missing incoming baseline preserves previous translation for review', saved: false, dropped: true });
+    } finally { await isolated.close(); }
 }
 
 async function malformedDeletionRecoveryChecks(page, results) {

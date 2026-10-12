@@ -2,6 +2,168 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const N = require('../public/normalizedStore.js');
 
+test('cached sparse rooms queue local-only staged saves against accepted text and preserve them through rejoin', async t => {
+    const P = require('../public/collaborationProtocol.js'), W = require('../public/workspaceState.js');
+    const { Client } = require('../public/collaborationSync.js');
+    for (const cached of ['none', 'empty', 'shared']) await t.test(cached, async t => {
+        const f = recordFixture(), source = [f.source('a.txt')], tree = await P.buildBaselineTree(source);
+        const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+            fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+        f.scope.sourceHash = archive.baselineId;
+        f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
+        f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive, tree } });
+        let workspace = await f.n.workspace(f.scope);
+        W.initializeWorkspace(workspace, { source, sourceHash: f.scope.sourceHash, game: f.scope.game });
+        W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Local save while session expired'] }, 'Thai',
+            { source: source[0], sourceHash: f.scope.sourceHash, game: f.scope.game });
+        await f.n.saveWorkspace(f.scope, workspace);
+        const rooms = require('../public/normalizedRooms.js').create(f.n), key = rooms.identityKey(f.scope);
+        f.put(N.stores.migration, { key: f.n.key('room', key), value: { state: 'ready' } });
+        const shared = { filepath: 'a.txt', translations: ['Earlier cloud save'], trackedForExport: true, revision: 3 };
+        if (cached !== 'none') await f.n.transaction([N.stores.rooms, N.stores.shared, N.stores.operations, N.stores.roomRecords], 'readwrite', tx => rooms.writeRoom(tx, key,
+            { identity: f.scope, archive, mode: 'sparse', roomId: 'room', initialized: true, sequence: 3,
+                manifest: { version: 2, files: [{ filepath: 'a.txt', entryCount: 1 }] },
+                shared: cached === 'shared' ? { 'a.txt': shared } : {}, outbox: [], conflicts: [], recovery: [], carries: {} }));
+        const client = new Client({ store: { getCollaborationRecords: command => rooms.getRecords(command),
+            updateCollaborationRecords: (command, update, options) => rooms.updateRecords(command, update, options), captureWorkspaceScope: scope => scope },
+            WebSocket: null, presenceEnabled: () => false, request: async () => { throw new Error('Remote work remains deferred'); } });
+        t.after(() => client.destroy());
+        workspace = await f.n.workspace(f.scope);
+        await client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive, workspace, deferRemote: true,
+            files: [{ filepath: 'a.txt', translations: workspace.staged.Thai['a.txt'].translations, trackedForExport: true }] });
+        assert.equal(client.room().outbox.length, 1, 'A local-only save needs its own durable join operation even in a cached room');
+        const operation = client.room().outbox[0], originalId = operation.id;
+        assert.deepEqual(operation.files[0].base.translations, cached === 'shared' ? shared.translations : source[0].translations.Thai);
+        await client.acceptSnapshot({ roomId: 'room', sequence: 3, files: cached === 'empty' ? [] : [shared] }, client.epoch, true);
+        assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, ['Local save while session expired']);
+        assert.equal(client.room().outbox[0].id, originalId);
+        assert.equal(client.room().recovery.length, 1, 'The local copy is retained before joining');
+        await client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive,
+            workspace: await f.n.workspace(f.scope), deferRemote: true,
+            files: [{ filepath: 'a.txt', translations: ['Local save while session expired'], trackedForExport: true }] });
+        assert.equal(client.room().outbox.length, 1, 'Another reconnect reuses the pending operation instead of adding a duplicate');
+        assert.equal(client.room().outbox[0].id, originalId);
+    });
+});
+
+async function cachedSparseFixture(t, { cached = 'empty', pending = false, stageText = 'Later local-only save', sourceCarry } = {}) {
+    const P = require('../public/collaborationProtocol.js'), W = require('../public/workspaceState.js');
+    const { Client } = require('../public/collaborationSync.js');
+    const f = recordFixture(), source = [f.source('a.txt')], tree = await P.buildBaselineTree(source);
+    const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([4, 5, 6])), zipSize: 3,
+        fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    f.scope.sourceHash = archive.baselineId;
+    f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
+    f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive, tree } });
+    const carry = sourceCarry && { ...structuredClone(sourceCarry), toSourceHash: f.scope.sourceHash };
+    const workspace = await f.n.workspace(f.scope);
+    W.initializeWorkspace(workspace, { source, sourceHash: f.scope.sourceHash, game: f.scope.game });
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: [stageText ?? source[0].translations.Thai[0]] }, 'Thai',
+        { source: source[0], sourceHash: f.scope.sourceHash, game: f.scope.game, ...(carry ? { sourceCarry: carry } : {}) });
+    await f.n.saveWorkspace(f.scope, workspace);
+    const rooms = require('../public/normalizedRooms.js').create(f.n), key = rooms.identityKey(f.scope);
+    f.put(N.stores.migration, { key: f.n.key('room', key), value: { state: 'ready' } });
+    const shared = cached === 'shared' ? P.fileState({ filepath: 'a.txt', translations: ['Earlier cloud save'], trackedForExport: true, revision: 3 }) : null;
+    const first = P.fileState({ filepath: 'a.txt', translations: ['Earlier queued save'], trackedForExport: true });
+    const base = shared || P.fileState({ filepath: 'a.txt', translations: source[0].translations.Thai });
+    await f.n.transaction([N.stores.rooms, N.stores.shared, N.stores.operations, N.stores.roomRecords], 'readwrite', tx => rooms.writeRoom(tx, key,
+        { identity: f.scope, archive, mode: 'sparse', roomId: 'room', initialized: true, sequence: shared?.revision || 0,
+            manifest: { version: 2, files: [{ filepath: 'a.txt', entryCount: 1 }] }, shared: shared ? { 'a.txt': shared } : {},
+            outbox: pending ? [{ id: 'pending-a', origin: 'save', kind: 'edit', status: 'pending', files: [{ base, yours: first }] }] : [],
+            conflicts: [], recovery: [], carries: {} }));
+    const client = new Client({ store: { getCollaborationRecords: command => rooms.getRecords(command),
+        updateCollaborationRecords: (command, update, options) => rooms.updateRecords(command, update, options), captureWorkspaceScope: scope => scope },
+        WebSocket: null, presenceEnabled: () => false, request: async () => { throw new Error('Remote work remains deferred'); } });
+    t.after(() => client.destroy());
+    const connect = async () => {
+        const workspace = await f.n.workspace(f.scope);
+        const files = Object.entries(workspace.staged.Thai || {}).map(([filepath, stage]) => ({ filepath,
+            translations: stage.translations, trackedForExport: true, ...(stage.sourceCarry ? { sourceCarry: stage.sourceCarry } : {}) }));
+        return client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive, workspace, deferRemote: true, files });
+    };
+    return { f, P, W, source, archive, rooms, key, client, connect, shared, first, carry };
+}
+
+test('cached pending saves do not hide a later local-only save and its acknowledgement preserves the newer text', async t => {
+    for (const cached of ['empty', 'shared']) await t.test(cached, async t => {
+        const h = await cachedSparseFixture(t, { cached, pending: true }), { client, f, connect, first } = h;
+        await connect();
+        assert.equal(client.room().outbox.length, 2);
+        assert.equal(client.room().outbox[0].id, 'pending-a');
+        const newerId = client.room().outbox[1].id;
+        assert.deepEqual(client.room().outbox[1].files[0].base.translations, first.translations);
+        await connect();
+        assert.deepEqual(client.room().outbox.map(operation => operation.id), ['pending-a', newerId], 'Rejoin reuses both durable operations.');
+        const accepted = { ...first, revision: (h.shared?.revision || 0) + 1 };
+        client.request = async (url, options) => {
+            assert.ok(url.endsWith('/mutations'));
+            if (options.body.mutationId === 'pending-a') return { files: [accepted] };
+            throw new Error('Later save remains pending');
+        };
+        await assert.rejects(client.flush(client.epoch), /Later save remains pending/);
+        assert.deepEqual(client.room().outbox.map(operation => operation.id), [newerId]);
+        assert.deepEqual(client.room().local['a.txt'].translations, ['Later local-only save']);
+        assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, ['Later local-only save']);
+        await client.acceptSnapshot({ roomId: 'room', sequence: accepted.revision, files: [accepted] }, client.epoch, true);
+        await connect();
+        assert.deepEqual(client.room().outbox.map(operation => operation.id), [newerId]);
+        assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, ['Later local-only save']);
+    });
+});
+
+test('metadata carry facts survive cached rejoin, operation acknowledgement and accepted snapshots', async t => {
+    const metadata = { name: 'Description 0', stats: ['stat_0'], variables: ['#'], remarks: [''] };
+    const sourceCarry = { fromSourceHash: 'previous-source', fromSavedAt: 4,
+        metadataCorrection: { before: { ...structuredClone(metadata), stats: ['old_stat'] }, after: metadata } };
+    const { client, connect, f, carry, source, W } = await cachedSparseFixture(t, { stageText: null, sourceCarry });
+    await connect();
+    assert.equal(client.room().outbox.length, 1, 'Provenance differs from an unstaged baseline even when translation text matches.');
+    assert.deepEqual(client.room().outbox[0].files[0].yours.sourceCarry, carry);
+    assert.deepEqual(client.room().local['a.txt'].sourceCarry, carry);
+    let accepted;
+    client.request = async (url, options) => {
+        assert.ok(url.endsWith('/mutations'));
+        assert.deepEqual(options.body.files[0].sourceCarry, carry);
+        accepted = { ...options.body.files[0], revision: 1 };
+        return { files: [accepted] };
+    };
+    await client.flush(client.epoch);
+    assert.equal(client.room().outbox.length, 0);
+    assert.deepEqual(client.room().shared['a.txt'].sourceCarry, carry);
+    await client.acceptSnapshot({ roomId: 'room', sequence: 1, files: [accepted] }, client.epoch, true);
+    await connect();
+    const workspace = await f.n.workspace(f.scope);
+    assert.equal(client.room().outbox.length, 0, 'Accepted provenance does not create another upload.');
+    assert.deepEqual(workspace.staged.Thai['a.txt'].sourceCarry, carry);
+    assert.equal(W.workspaceFile(workspace, source[0], 'Thai').isMetadataCorrection, true);
+    assert.equal(W.workspaceFile(workspace, source[0], 'Thai').isRevised, false);
+});
+
+test('accepted staging reset cannot reconstruct a redundant carry from normalized room caches', async t => {
+    const { client, connect, f, source, P, rooms, key } = await cachedSparseFixture(t, { cached: 'shared', stageText: null,
+        sourceCarry: { fromSourceHash: 'previous-source', fromSavedAt: 4 } });
+    const cleaned = await f.n.workspace(f.scope);
+    assert.equal(cleaned.staged.Thai?.['a.txt'], undefined);
+    assert.equal(Object.keys(cleaned.sourceCarryRepairArchive).length, 1);
+    await connect();
+    assert.equal(client.room().outbox.length, 0);
+    const reset = P.fileState({ filepath: 'a.txt', translations: source[0].translations.Thai,
+        trackedForExport: false, stagingReset: true, revision: 4 });
+    await client.acceptSnapshot({ roomId: 'room', sequence: 4, files: [reset] }, client.epoch, true);
+    await connect();
+    const stored = await rooms.getRecords({ key, scope: f.scope, filepaths: ['a.txt'], includeOutbox: true });
+    assert.equal(stored.room.outbox.length, 0);
+    assert.equal(stored.room.local['a.txt'].trackedForExport, false);
+    assert.equal(stored.room.local['a.txt'].stagingReset, true);
+    const reloaded = await f.n.workspace(f.scope);
+    assert.equal(reloaded.staged.Thai?.['a.txt'], undefined);
+    assert.equal(Object.keys(reloaded.sourceCarryRepairArchive).length, 1);
+    await client.acceptSnapshot({ roomId: 'room', sequence: 4, files: [] }, client.epoch, true);
+    await connect();
+    assert.equal(client.room().outbox.length, 0);
+    assert.equal((await f.n.workspace(f.scope)).staged.Thai?.['a.txt'], undefined, 'An omitted sparse reset also remains authoritative.');
+});
+
 test('accepted baseline equality follows immutable multilingual witnesses rather than parser or editor state', () => {
     const P = require('../public/collaborationProtocol.js');
     const original = { filepath: 'specific_skill_stat_descriptions/explosive_grenade.txt', name: null,
@@ -174,7 +336,7 @@ test('checkpoint compaction verifies immutable source content and preserves diff
 });
 
 function recordFixture({ rejectBaselineTransaction = false, legacyGet = async () => undefined, activationNow, activationYield, IDBKeyRange, onPut } = {}) {
-    const data = new Map([...N.names, 'kv'].map(name => [name, new Map()])), reads = [], writes = [], transactions = [];
+    const data = new Map([...N.names, 'kv', 'revisions_poe1', 'revisions_poe2'].map(name => [name, new Map()])), reads = [], writes = [], transactions = [];
     const request = value => {
         const req = {};
         queueMicrotask(() => { req.result = structuredClone(value); req.onsuccess(); });
@@ -191,6 +353,8 @@ function recordFixture({ rejectBaselineTransaction = false, legacyGet = async ()
             const selected = (index, id) => {
                 const range = id && typeof id === 'object' && Object.hasOwn(id, 'lower');
                 const matches = value => range ? value != null && value >= id.lower && value <= id.upper : id === undefined || value === id;
+                if (index === 'by_file_lang_time') return [...rows.values()].filter(item => item.filepath === id.lower[0] && item.lang === id.lower[1]
+                    && item.savedAt >= id.lower[2] && item.savedAt <= id.upper[2]);
                 const result = [...rows.values()].filter(row => index === 'by_scope' ? matches(row.scope)
                     : index === 'by_kind' ? matches(row.kindScope) : index ? matches(row.pathKey) || row.paths?.some(matches) : matches(row.key));
                 if (range) result.sort((a, b) => {
@@ -205,8 +369,10 @@ function recordFixture({ rejectBaselineTransaction = false, legacyGet = async ()
                 count(id) { reads.push({ name, id, method: 'count' }); return request(selected(null, id).length); },
                 put(value) { writes.push({ name, value: structuredClone(value) }); rows.set(value.key, structuredClone(value)); onPut?.({ name, value, tx }); },
                 delete(id) { rows.delete(id); },
+                add(value) { const id = Math.max(0, ...rows.keys()) + 1; rows.set(id, structuredClone(value)); },
                 index(index) { return {
                     getAll(id) { reads.push({ name, index, id }); return request(selected(index, id)); },
+                    getAllKeys(id) { reads.push({ name, index, id, method: 'getAllKeys' }); return request(selected(index, id).map(item => item.key)); },
                     count(id) { reads.push({ name, index, id, method: 'count' }); return request(selected(index, id).length); },
                 }; },
             };
@@ -225,6 +391,7 @@ function recordFixture({ rejectBaselineTransaction = false, legacyGet = async ()
     } };
     const W = require('../public/workspaceState.js');
     const n = N.create({ W, openDb: async () => db, legacyGet, activationNow, activationYield, IDBKeyRange,
+        revisionStoreName: game => 'revisions_' + game, scopedRevision: (revision, scope) => ({ ...revision, ...scope }),
         normalizeScope: scope => ({ ...scope, accountId: scope.accountId || scope.profile || 'guest', branchId: scope.branchId || 'default' }) });
     const put = (name, value) => data.get(name).set(value.key, structuredClone(value));
     const scope = { accountId: 'owner', game: 'poe2', branchId: 'default', sourceHash: 'accepted', language: 'Thai' };
@@ -261,6 +428,173 @@ test('one room projection reuses each immutable baseline read through room, work
     });
     assert.equal(f.reads.filter(read => read.name === N.stores.baseline).length, 1,
         'Room hydration, workspace hydration and projection must issue a single baseline request');
+});
+
+function putCarryWorkspace(f, scope, files, stages) {
+    const id = N.scopeKey(scope), baseId = N.baselineKey(scope);
+    f.put(N.stores.meta, { key: id, scope: id, value: { ...scope, stagedVersion: 1, statusMetadataVersion: 1 } });
+    f.put(N.stores.migration, { key: id, value: { state: 'ready' } });
+    f.put('kv', { key: 'version_metadata_v1:' + id, value: { ...scope, createdAt: scope.sourceHash === f.scope.sourceHash ? 100 : 1 } });
+    for (const [order, file] of files.entries()) {
+        f.put(N.stores.baseline, f.n.row(baseId, file.filepath, file, { order }));
+        f.put(N.stores.files, f.n.row(id, file.filepath, { filepath: file.filepath, overrides: {} }, { pathKey: f.n.key(id, file.filepath) }));
+    }
+    for (const [language, entries] of Object.entries(stages)) for (const [filepath, data] of Object.entries(entries))
+        f.put(N.stores.records, f.n.row(id, ['staged', language, filepath], { field: 'staged', language, entry: filepath, data },
+            { pathKey: f.n.key(id, filepath), kindScope: f.n.key(id, 'staged') }));
+}
+
+test('scoped carry repair removes proven inherited baseline text in every language while preserving explicit and ambiguous saves', async () => {
+    const f = recordFixture(), files = ['known.txt', 'legacy.txt', 'explicit.txt', 'uncertain.txt', 'receipt.txt'].map(path => f.source(path));
+    const previous = { ...f.scope, sourceHash: 'predecessor' }, foreign = { ...previous, accountId: 'another-account' };
+    const entry = (file, language, sourceHash = f.scope.sourceHash) => ({ sourceHash, translations: structuredClone(file.translations[language]), before: ['authored before'], savedAt: 41 });
+    const current = { Thai: {}, German: {} }, old = { Thai: {}, German: {} };
+    for (const language of Object.keys(current)) for (const file of files) current[language][file.filepath] = entry(file, language);
+    for (const language of Object.keys(current)) {
+        current[language]['known.txt'].sourceCarry = { fromSourceHash: previous.sourceHash, toSourceHash: f.scope.sourceHash, fromSavedAt: 41 };
+        old[language]['legacy.txt'] = entry(files[1], language, previous.sourceHash);
+    }
+    current.Thai['receipt.txt'].sourceCarry = { fromSourceHash: previous.sourceHash, toSourceHash: f.scope.sourceHash, fromSavedAt: 41 };
+    putCarryWorkspace(f, f.scope, files, current); putCarryWorkspace(f, previous, files, old);
+    putCarryWorkspace(f, foreign, files, { Thai: { 'uncertain.txt': entry(files[3], 'Thai', previous.sourceHash) } });
+    f.data.get('revisions_poe2').set(1, { ...f.scope, filepath: 'explicit.txt', lang: 'Thai', translations: files[2].translations.Thai, savedAt: 42 });
+    f.put(N.stores.receipts, f.n.row(N.scopeKey(f.scope), 'intentional-receipt', { jobId: 'intentional-receipt', signature: JSON.stringify({
+        scope: [f.scope.game, 'Thai', f.scope.sourceHash, f.scope.accountId], files: [{ filepath: 'receipt.txt', translations: files[4].translations.Thai }],
+    }), result: { retained: true } }));
+    const oldRecords = structuredClone([...f.data.get(N.stores.records)].filter(([, item]) => item.scope !== N.scopeKey(f.scope)));
+    const result = await f.n.repairCarriedStages(f.scope), workspace = await f.n.workspace(f.scope);
+    assert.equal(result.removed.length, 4);
+    for (const language of Object.keys(current)) {
+        assert.equal(workspace.staged[language]['known.txt'], undefined); assert.equal(workspace.staged[language]['legacy.txt'], undefined);
+        assert.deepEqual(workspace.staged[language]['uncertain.txt'], current[language]['uncertain.txt']);
+    }
+    assert.deepEqual(workspace.staged.Thai['explicit.txt'], current.Thai['explicit.txt']);
+    assert.deepEqual(workspace.staged.Thai['receipt.txt'], current.Thai['receipt.txt']);
+    assert.deepEqual([...f.data.get(N.stores.records)].filter(([, item]) => item.scope !== N.scopeKey(f.scope)), oldRecords);
+    assert.equal(f.data.get(N.stores.receipts).size, 1, 'Durable receipts remain replayable');
+    assert.equal(f.data.get('revisions_poe2').size, 1, 'History remains recovery evidence');
+    assert.equal(Object.keys(workspace.sourceCarryRepairArchive).length, 4, 'Each removed stage remains recoverable');
+    for (const archived of Object.values(workspace.sourceCarryRepairArchive)) {
+        assert.deepEqual(archived.stage, current[archived.language][archived.filepath]);
+        assert.equal(archived.sourceHash, f.scope.sourceHash);
+    }
+    const writes = f.writes.length; await f.n.activation(f.scope);
+    assert.equal(f.writes.length, writes, 'Settled activation never repeats cleanup writes');
+    assert.equal(f.writes.some(write => write.name === 'kv'), false, 'Cleanup never rewrites frozen aggregates or metadata');
+});
+
+test('carry repair adds factual metadata correction provenance and preserves Dropped workload and pending operations', async () => {
+    const f = recordFixture(), files = ['metadata.txt', 'dropped.txt', 'pending.txt', 'submitted.txt'].map(path => f.source(path));
+    const previous = { ...f.scope, sourceHash: 'previous' }, originals = structuredClone(files);
+    originals[0].stats = ['previous_stat'];
+    const stage = file => ({ sourceHash: f.scope.sourceHash, translations: file.translations.Thai, before: ['previous'], savedAt: 11 });
+    const current = Object.fromEntries(files.map(file => [file.filepath, stage(file)]));
+    for (const path of ['dropped.txt', 'pending.txt', 'submitted.txt']) current[path].sourceCarry = { fromSourceHash: 'previous', toSourceHash: f.scope.sourceHash };
+    putCarryWorkspace(f, f.scope, files, { Thai: current });
+    putCarryWorkspace(f, previous, originals, { Thai: { 'metadata.txt': { ...stage(originals[0]), sourceHash: 'previous' } } });
+    const id = N.scopeKey(f.scope), path = 'dropped.txt';
+    f.put(N.stores.records, f.n.row(id, ['droppedArchive', 'resolved-dropped'], { field: 'droppedArchive', entry: 'resolved-dropped',
+        data: { id: 'resolved-dropped', filepath: path, language: 'Thai', game: f.scope.game, status: 'promoted', targetSourceHashes: [f.scope.sourceHash] } },
+        { pathKey: f.n.key(id, path), kindScope: f.n.key(id, 'droppedArchive') }));
+    const R = require('../public/normalizedRooms.js'), roomKey = R.create(f.n).identityKey(f.scope);
+    f.put(N.stores.operations, f.n.row(roomKey, 'pending', { id: 'pending', files: [{ yours: { filepath: 'pending.txt' } }] },
+        { paths: [f.n.key(roomKey, 'pending.txt')] }));
+    f.put(N.stores.submissions, f.n.row(id, 'submitted', { batch: { files: [{ filepath: 'submitted.txt' }] } },
+        { paths: [f.n.key(id, 'Thai', 'submitted.txt')] }));
+    await f.n.repairCarriedStages(f.scope);
+    let workspace = await f.n.workspace(f.scope);
+    assert.deepEqual(workspace.staged.Thai['metadata.txt'].sourceCarry.metadataCorrection.before.stats, ['previous_stat']);
+    assert.deepEqual(workspace.staged.Thai['metadata.txt'].sourceCarry.metadataCorrection.after.stats, files[0].stats);
+    const state = require('../public/workspaceState.js').workspaceFile(workspace, files[0], 'Thai');
+    assert.equal(state.isMetadataCorrection, true); assert.equal(state.isRevised, false);
+    assert.ok(workspace.staged.Thai['dropped.txt']); assert.ok(workspace.staged.Thai['pending.txt']); assert.ok(workspace.staged.Thai['submitted.txt']);
+    f.data.get(N.stores.operations).clear(); f.data.get(N.stores.submissions).clear();
+    await f.n.repairCarriedStages(f.scope); workspace = await f.n.workspace(f.scope);
+    assert.equal(workspace.staged.Thai['pending.txt'], undefined); assert.equal(workspace.staged.Thai['submitted.txt'], undefined);
+    assert.ok(workspace.staged.Thai['dropped.txt'], 'A resolved Dropped assignment remains meaningful');
+});
+
+test('carry cleanup resumes committed batches after failure without reviving removed records from frozen legacy state', async () => {
+    let failure = true;
+    const f = recordFixture({ onPut({ name, value }) {
+        if (failure && name === N.stores.migration && value.key.startsWith('["source-carry-repair-v1"') && value.value.state === 'ready') throw new Error('Interrupted cleanup');
+    } }), files = Array.from({ length: 70 }, (_, index) => f.source('carry-' + String(index).padStart(3, '0') + '.txt'));
+    putCarryWorkspace(f, f.scope, files, { Thai: Object.fromEntries(files.map(file => [file.filepath, { sourceHash: f.scope.sourceHash,
+        translations: file.translations.Thai, sourceCarry: { fromSourceHash: 'old', toSourceHash: f.scope.sourceHash }, savedAt: 1 }])) });
+    await assert.rejects(f.n.repairCarriedStages(f.scope), /Interrupted cleanup/);
+    assert.equal([...f.data.get(N.stores.records).values()].filter(item => item.value.field === 'staged').length, 6);
+    assert.equal([...f.data.get(N.stores.records).values()].filter(item => item.value.field === 'sourceCarryRepairArchive').length, 64);
+    failure = false; await f.n.repairCarriedStages(f.scope);
+    const workspace = await f.n.workspace(f.scope);
+    assert.equal(Object.keys(workspace.staged).length, 0); assert.equal(Object.keys(workspace.sourceCarryRepairArchive).length, 70);
+    const reloaded = N.create({ W: require('../public/workspaceState.js'), openDb: async () => f.db, legacyGet: async () => { throw new Error('Frozen legacy state cannot be read'); },
+        revisionStoreName: game => 'revisions_' + game });
+    assert.deepEqual((await reloaded.activation(f.scope)).workspace.sourceCarryRepairArchive, workspace.sourceCarryRepairArchive);
+    assert.equal(f.writes.filter(write => write.name === N.stores.migration && write.value.value.state === 'converting').length, 1);
+});
+
+test('carry repair preserves unreadable current-scope receipts and unrelated content-group predecessor evidence', async () => {
+    const f = recordFixture(), file = f.source('uncertain.txt'), scope = { ...f.scope, versionId: 'release', groupId: 'first' },
+        other = { ...scope, sourceHash: 'previous', groupId: 'second' };
+    const stage = { sourceHash: scope.sourceHash, translations: file.translations.Thai, before: ['old'], savedAt: 2 };
+    putCarryWorkspace(f, scope, [file], { Thai: { [file.filepath]: stage } });
+    putCarryWorkspace(f, other, [file], { Thai: { [file.filepath]: { ...stage, sourceHash: other.sourceHash } } });
+    assert.equal((await f.n.repairCarriedStages(scope)).changed, false);
+    const proven = { ...stage, sourceCarry: { fromSourceHash: other.sourceHash, toSourceHash: scope.sourceHash } };
+    putCarryWorkspace(f, f.scope, [file], { Thai: { [file.filepath]: proven } });
+    f.put(N.stores.receipts, f.n.row(N.scopeKey(f.scope), 'unknown-receipt', { jobId: 'unknown-receipt', signature: '{incomplete' }));
+    await f.n.repairCarriedStages(f.scope);
+    assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai[file.filepath], proven);
+    assert.equal(f.data.get(N.stores.receipts).size, 1);
+});
+
+test('unmarked legacy carry cleanup requires a chronological predecessor and prefers verified metadata before source history', async t => {
+    for (const variant of ['reverse', 'unknown', 'source-history', 'metadata-first']) await t.test(variant, async () => {
+        const f = recordFixture(), file = f.source('legacy.txt'), previous = { ...f.scope, sourceHash: 'sibling' },
+            stage = { sourceHash: f.scope.sourceHash, translations: file.translations.Thai, before: ['authored before'], savedAt: 41 };
+        putCarryWorkspace(f, f.scope, [file], { Thai: { [file.filepath]: stage } });
+        putCarryWorkspace(f, previous, [file], { Thai: { [file.filepath]: { ...stage, sourceHash: previous.sourceHash } } });
+        const currentKey = 'version_metadata_v1:' + N.scopeKey(f.scope), previousKey = 'version_metadata_v1:' + N.scopeKey(previous);
+        if (variant === 'reverse') {
+            f.put('kv', { key: currentKey, value: { ...f.scope, createdAt: 1 } });
+            f.put('kv', { key: previousKey, value: { ...previous, createdAt: 100 } });
+        } else if (variant === 'unknown' || variant === 'source-history') {
+            f.put('kv', { key: currentKey, value: { ...f.scope, createdAt: 999, migrated: true } });
+            f.put('kv', { key: previousKey, value: { ...previous, createdAt: 1, migrated: true } });
+        }
+        if (variant === 'source-history' || variant === 'metadata-first') {
+            // Verified normal metadata wins over archive modification-date
+            // metadata and over unrelated/incomplete source history timestamps.
+            f.data.get('revisions_poe2').set(1, { ...previous, filepath: file.filepath, lang: 'English', note: 'Source import', savedAt: variant === 'metadata-first' ? 200 : 1 });
+            f.data.get('revisions_poe2').set(2, { ...f.scope, filepath: file.filepath, lang: 'English', note: 'Source import', savedAt: variant === 'metadata-first' ? 10 : 100 });
+        }
+        const result = await f.n.repairCarriedStages(f.scope), workspace = await f.n.workspace(f.scope);
+        const shouldRemove = variant === 'source-history' || variant === 'metadata-first';
+        assert.equal(result.removed.length, Number(shouldRemove));
+        if (shouldRemove) assert.equal(workspace.staged.Thai, undefined);
+        else assert.deepEqual(workspace.staged.Thai[file.filepath], stage, 'A later sibling or unknown order cannot prove inheritance');
+    });
+});
+
+test('source import atomically retains existing destination saves and preserves differing incoming carries for review', async () => {
+    const f = recordFixture(), file = f.source('destination.txt'), target = { Thai: { [file.filepath]: { sourceHash: f.scope.sourceHash,
+        translations: ['newer destination Thai'], before: ['older destination Thai'], savedAt: 90 } }, German: { [file.filepath]: {
+        sourceHash: f.scope.sourceHash, translations: ['newer destination German'], before: ['older destination German'], savedAt: 91 } } };
+    putCarryWorkspace(f, f.scope, [file], target);
+    const incoming = { ...f.scope, stagedVersion: 1, statusMetadataVersion: 1, descs: [file], staged: { Thai: { [file.filepath]: {
+        sourceHash: f.scope.sourceHash, translations: ['carried predecessor Thai'], before: ['predecessor baseline'], savedAt: 10,
+        sourceCarry: { fromSourceHash: 'predecessor', toSourceHash: f.scope.sourceHash } } } }, status: {} };
+    const committed = await f.n.importScope(f.scope, [file], incoming, [], undefined);
+    assert.deepEqual(committed.staged, target);
+    assert.deepEqual(committed.dropped.Thai[file.filepath].snapshot.translations, ['carried predecessor Thai']);
+    assert.equal(committed.dropped.Thai[file.filepath].originSourceHash, 'predecessor');
+    assert.deepEqual((await f.n.workspace(f.scope)).staged, target);
+    assert.equal([...f.data.get('kv').keys()].some(key => key.startsWith('workspace') || key.startsWith('source_')), false,
+        'Imports do not rewrite frozen aggregate workspace data');
+    f.data.get(N.stores.migration).set(N.scopeKey(f.scope), { key: N.scopeKey(f.scope), value: { state: 'converting' } });
+    const before = structuredClone([...f.data.get(N.stores.records)]);
+    await assert.rejects(f.n.importScope(f.scope, [file], incoming, [], undefined), /destination workspace is still being recovered/);
+    assert.deepEqual([...f.data.get(N.stores.records)], before, 'An unfinished destination stays recoverable');
 });
 
 test('large workspace selection batches only selected paths and keeps cold recovery out of atomic projections', async () => {

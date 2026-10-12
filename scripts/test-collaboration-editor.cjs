@@ -1329,6 +1329,65 @@ test('same-baseline source reimport retains the existing modern group associatio
   assert.equal(e.collaborationWorkspaceReady(), true);
 });
 
+function sourceCarryImportFixture() {
+  const h = harness(), e = h.editor, copy = value => JSON.parse(JSON.stringify(value));
+  vm.runInContext('offlineStoreReady = true', h.context);
+  e.scheduleCollaboration = () => {};
+  const old = description(1); old.hasChanges = false;
+  old.translations.German = ['Deutsch', 'Zwei'];
+  e._workspaceSourceBaseline = [copy(old)]; e.descs = [copy(old)];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+  h.window.WorkspaceState.initializeWorkspace(e.localDescs, { source: [old], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  for (const language of ['Thai', 'German']) h.window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: old.filepath, translations: old.translations[language] }, language,
+    { source: old, sourceHash: e.sourceIdentity, savedAt: 10, saveOrigin: 'save' });
+  e.applyWorkspaceOverlay();
+  const next = copy(old), imports = [];
+  e.buildImportedBaseline = async () => ({ source: [copy(next)], archive: { baselineId: 'b'.repeat(64), treeRoot: 'tree' }, tree: { root: 'tree' } });
+  h.window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, workspace) => { imports.push(copy({ source, workspace })); return copy(workspace); };
+  return { ...h, old, next, imports, copy };
+}
+
+test('source advancement omits identical inherited baseline saves for every language and reports the result after commit', async () => {
+  const { editor: e, next, imports, alerts } = sourceCarryImportFixture();
+  await e.importUpdateZipFile({ size: 123, lastModified: 1 }, [next]);
+  assert.equal(imports.length, 1);
+  assert.equal(e.localDescs.staged.Thai?.[next.filepath], undefined);
+  assert.equal(e.localDescs.staged.German?.[next.filepath], undefined);
+  assert.equal(e.descs[0].hasChanges, false);
+  assert.match(alerts.at(-1), /2 inherited saves already match the new baseline/);
+});
+
+test('metadata-only advancement uses current English metadata and reports factual corrections in the selected language', async () => {
+  const { editor: e, next, alerts, window } = sourceCarryImportFixture();
+  next.variables = ['# #', '#']; next.remarks = ['canonical_remark', ''];
+  await e.importUpdateZipFile({ size: 123, lastModified: 1 }, [next]);
+  assert.equal(e.descs[0].hasChanges, true); assert.equal(e.descs[0].isDropped, false);
+  assert.deepEqual(Array.from(e.localDescs.descs[0].variables), next.variables);
+  assert.match(e.metadataCorrectionDetails(next.filepath), /Entry variables:.*# #/);
+  assert.match(alerts.at(-1), /2 translations saved with updated English metadata/);
+  assert.match(window.StatDescCodec.generateTranslationBlock(e.descs[0], 'Thai'), /# # "เดิม" canonical_remark/);
+  e.lang = 'German'; e.applyWorkspaceOverlay();
+  assert.match(e.metadataCorrectionDetails(next.filepath), /Entry remarks/);
+  e.sourceIdentity = 'another-source';
+  assert.equal(e.metadataCorrectionDetails(next.filepath), '');
+});
+
+test('source import activates the committed destination workspace rather than the predecessor copy', async () => {
+  const { editor: e, next, window, copy } = sourceCarryImportFixture();
+  next.translations.Thai = ['Incoming baseline', 'Second'];
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, workspace) => {
+    const committed = copy(workspace);
+    window.WorkspaceState.stageTranslation(committed, { filepath: next.filepath, translations: ['Newer target Thai', 'Second'] }, 'Thai', { source: next, sourceHash: workspace.sourceHash });
+    window.WorkspaceState.stageTranslation(committed, { filepath: next.filepath, translations: ['Newer target German', 'Zwei'] }, 'German', { source: next, sourceHash: workspace.sourceHash });
+    return committed;
+  };
+  await e.importUpdateZipFile({ size: 123, lastModified: 1 }, [next]);
+  assert.equal(e.descs[0].translations.Thai[0], 'Newer target Thai');
+  e.lang = 'German'; e.applyWorkspaceOverlay();
+  assert.equal(e.descs[0].translations.German[0], 'Newer target German');
+});
+
 function modernGroupDroppedImportFixture(options) {
   const h = modernGroupSourceImportFixture(options), { editor: e, window, original, group, scope, copy } = h;
   delete e.localDescs.staged.Thai[original.filepath];

@@ -606,7 +606,7 @@
         }
       });
     }
-    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive'];
+    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive', 'sourceCarryRepairArchive'];
     const languageMaps = new Set(['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']);
     function verificationMap(field, value) {
       const map = value || {};
@@ -642,7 +642,8 @@
           else {
             const entry = field === 'droppedOutbox' ? key(value.id, value.kind) : outer;
             const path = value?.filepath || value?.candidate?.filepath || workspace.droppedArchive?.[outer]?.filepath || workspace.droppedArchive?.[value?.id]?.filepath || outer;
-            records.push(row(id, [field, entry], { field, entry, data: value, ...(field === 'droppedOutbox' ? { order: Number(outer) } : {}) }, { pathKey: key(id, path), kindScope: key(id, field) }));
+            records.push(row(id, [field, entry], { field, entry, data: value, ...(field === 'droppedOutbox' ? { order: Number(outer) } : {}) },
+              { ...(field === 'sourceCarryRepairArchive' ? {} : { pathKey: key(id, path) }), kindScope: key(id, field) }));
           }
         }
       }
@@ -836,8 +837,168 @@
       try { return await work; } finally { migrations.delete(id); }
     }
     async function ensure(scope) { if (scope?.sourceHash) await migrate(scope); }
+    const carryRepairs = new Map();
+    const carryRepairKey = scope => key('source-carry-repair-v1', scopeKey(scope));
+    const roomIdentityKey = (scope, language) => key(...((scope.branchId || 'default') === 'default'
+      ? [String(scope.accountId || 'guest'), scope.game, scope.sourceHash, language]
+      : [String(scope.accountId || 'guest'), scope.game, scope.branchId, scope.sourceHash, language]), ...contentParts(scope));
+    function siblingScope(meta) {
+      try {
+        const [accountId, game, branchId, sourceHash, content] = JSON.parse(meta.key);
+        return { accountId, game, branchId, sourceHash, ...contentScope(content) };
+      } catch (_) { return null; }
+    }
+    function historyInScope(item, scope) {
+      return item.sourceHash === scope.sourceHash && String(item.accountId || item.collaborationAccountId || 'guest') === String(scope.accountId || 'guest')
+        && (item.branchId || 'default') === (scope.branchId || 'default') && sameContentScope(item, scope);
+    }
+    const evidenceTime = value => typeof value === 'string' ? Date.parse(value) || Number(value) || 0 : Number(value) || 0;
+    async function sourceImportTime(tx, scope) {
+      const metadataKey = dependencies.versionMetadataKey?.(scope) || 'version_metadata_v1:' + scopeKey(scope);
+      const metadata = await get(tx, 'kv', metadataKey), createdAt = evidenceTime(metadata?.sourceImportedAt || metadata?.createdAt);
+      // Migrated metadata can use a ZIP modification date, and adoption can
+      // copy another profile's timestamp. Neither proves import chronology.
+      if (createdAt && !metadata.migrated && !metadata.adoptedFrom) return createdAt;
+      if (!revisionStoreName) return 0;
+      const store = tx.objectStore(revisionStoreName(scope.game));
+      const prefix = [String(scope.accountId || 'guest'), scope.branchId || 'default', scope.sourceHash];
+      const history = keyRanges?.bound && store.indexNames?.contains('by_scope_file_time')
+        ? await request(store.index('by_scope_file_time').getAll(keyRanges.bound([...prefix, '', 0], [...prefix, '\uffff', Number.MAX_SAFE_INTEGER])))
+        : await request(store.getAll());
+      const timestamps = history.filter(item => item.lang === 'English' && ['Source import', 'Source update'].includes(item.note)
+        && historyInScope(item, scope)).map(item => evidenceTime(item.savedAt)).filter(Boolean);
+      return timestamps.reduce((earliest, value) => !earliest || value < earliest ? value : earliest, 0);
+    }
+    async function carryHistory(tx, scope, filepath, language) {
+      if (!revisionStoreName) return [];
+      const store = tx.objectStore(revisionStoreName(scope.game));
+      const rows = keyRanges?.bound && store.index
+        ? await request(store.index('by_file_lang_time').getAll(keyRanges.bound([filepath, language, 0], [filepath, language, Number.MAX_SAFE_INTEGER])))
+        : await request(store.getAll());
+      return rows.filter(item => item.filepath === filepath && item.lang === language && historyInScope(item, scope));
+    }
+    // The old carry-forward writer retargeted a staged hash without recording
+    // its predecessor. Repair only entries whose durable facts prove that
+    // inheritance; an explicit save, recovery decision or uncertain queue wins.
+    async function repairCarriedStages(scope) {
+      if (!W?.repairRedundantCarriedStages || !scope?.sourceHash) return { changed: false, removed: [] };
+      const captured = { ...scope }, id = scopeKey(captured), markerKey = carryRepairKey(captured);
+      if (carryRepairs.has(id)) return carryRepairs.get(id);
+      const work = (async () => {
+        const initial = await transaction([stores.meta, stores.records, stores.migration, 'kv',
+          ...(revisionStoreName ? [revisionStoreName(captured.game)] : [])], 'readonly', async tx => {
+          const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
+          if (ready?.state !== 'ready' || !meta || marker?.state === 'ready') return null;
+          const index = tx.objectStore(stores.records).index('by_kind'), kind = key(id, 'staged');
+          const keys = index.getAllKeys ? await request(index.getAllKeys(kind)) : (await request(index.getAll(kind))).map(item => item.key);
+          if (!keys.length && marker?.state !== 'converting') return null;
+          const siblings = (await request(tx.objectStore(stores.meta).getAll())).map(siblingScope).filter(other => other
+            && String(other.accountId) === String(captured.accountId || 'guest') && other.game === captured.game
+            && other.branchId === (captured.branchId || 'default') && other.sourceHash && other.sourceHash !== captured.sourceHash);
+          const importedAt = await sourceImportTime(tx, captured);
+          const chronological = [];
+          if (importedAt) for (const sibling of siblings) {
+            const previousImportedAt = await sourceImportTime(tx, sibling);
+            if (previousImportedAt && previousImportedAt < importedAt) chronological.push({ ...sibling, importedAt: previousImportedAt });
+          }
+          return { keys: keys.sort().filter(value => !marker?.afterKey || value > marker.afterKey), siblings: chronological,
+            importedAt, deferred: !!marker?.deferred };
+        });
+        if (!initial) return { changed: false, removed: [] };
+        return trackMigration('source-carry', id, captured, async () => {
+          const removed = []; let changed = false, deferred = initial.deferred;
+          const names = [stores.meta, stores.records, stores.baseline, stores.migration, stores.operations, stores.submissions, stores.receipts,
+            ...(revisionStoreName ? [revisionStoreName(captured.game)] : [])];
+          for (let offset = 0; offset < initial.keys.length || !offset; offset += 64) {
+            const keys = initial.keys.slice(offset, offset + 64);
+            const result = await transaction(names, 'readwrite', async tx => {
+              const meta = await get(tx, stores.meta, id), conversion = await get(tx, stores.migration, id);
+              if (!meta || conversion?.state !== 'ready') return { stopped: true };
+              const pendingRemoved = []; let pendingChanged = false, pendingDeferred = false;
+              const receipts = await all(tx, stores.receipts, id);
+              for (const recordKey of keys) {
+                const record = await request(tx.objectStore(stores.records).get(recordKey));
+                if (!record || record.scope !== id || record.value.field !== 'staged') continue;
+                const { language, entry: filepath, data: stage } = record.value;
+                const roomKey = roomIdentityKey(captured, language);
+                const [operations, submissions] = await Promise.all([
+                  request(tx.objectStore(stores.operations).index('by_path').getAll(key(roomKey, filepath))),
+                  request(tx.objectStore(stores.submissions).index('by_path').getAll(key(id, language, filepath))),
+                ]);
+                if (operations.length || submissions.length) { pendingDeferred = true; continue; }
+                const original = await get(tx, stores.baseline, key(baselineKey(captured), filepath));
+                if (!original) continue;
+                const records = await selectedRows(tx, stores.records, id, [filepath]);
+                const current = assembleWorkspace(meta, [], records, new Map([[filepath, original]]), false);
+                current.staged = { [language]: { [filepath]: copy(stage) } };
+                const history = await carryHistory(tx, captured, filepath, language);
+                // A durable receipt remains replayable even after history
+                // retention. Its signed language/source and exact text prove
+                // an intentional command in this version.
+                for (const item of receipts) try {
+                  const signed = JSON.parse(item.value.signature);
+                  if (!Array.isArray(signed.scope) || !Array.isArray(signed.files)
+                    || (signed.scope?.[0] === captured.game && signed.scope[1] === language && signed.scope[2] === captured.sourceHash
+                    && String(signed.scope[3] || 'guest') === String(captured.accountId || 'guest')
+                    && signed.files.some(file => file.filepath === filepath && same(file.translations, stage.translations))))
+                    history.push({ filepath, lang: language, sourceHash: captured.sourceHash, translations: copy(stage.translations) });
+                } catch (_) {
+                  // An unreadable receipt may be the explicit save that made
+                  // this stage intentional. Retain uncertain work and receipt.
+                  history.push({ filepath, lang: language, sourceHash: captured.sourceHash, translations: copy(stage.translations) });
+                }
+                let repair = W.repairRedundantCarriedStages(current, { source: [original], history });
+                if (!repair.changed && !stage.sourceCarry) for (const previous of initial.siblings) {
+                  // Legacy equality alone cannot prove an unrelated content
+                  // group was the predecessor of this workspace.
+                  if (!sameContentScope(previous, captured)) continue;
+                  const savedAt = evidenceTime(stage.savedAt);
+                  if (savedAt < previous.importedAt || savedAt >= initial.importedAt) continue;
+                  const before = await get(tx, stores.records, key(scopeKey(previous), ['staged', language, filepath]));
+                  if (!before || !stage.savedAt || before.data?.savedAt !== stage.savedAt || !same(before.data.translations, stage.translations)
+                    || !same(before.data.before, stage.before)) continue;
+                  const previousOriginal = await get(tx, stores.baseline, key(baselineKey(previous), filepath));
+                  if (!previousOriginal) continue;
+                  repair = W.repairRedundantCarriedStages(current, { source: [original], previousSource: [previousOriginal],
+                    previousWorkspace: { ...previous, staged: { [language]: { [filepath]: copy(before.data) } } }, previousSourceHash: previous.sourceHash, history });
+                  if (repair.changed) break;
+                }
+                const next = current.staged?.[language]?.[filepath];
+                if (!next) {
+                  const fromSourceHash = repair.removed?.find(item => item.language === language && item.filepath === filepath)?.fromSourceHash || '';
+                  const entry = key(language, filepath, stage.sourceHash, fromSourceHash, stage.savedAt || 0);
+                  const archiveKey = key(id, ['sourceCarryRepairArchive', entry]);
+                  const archived = await get(tx, stores.records, archiveKey);
+                  if (archived && !same(archived.data.stage, stage)) { pendingDeferred = true; continue; }
+                  if (!archived) tx.objectStore(stores.records).put(row(id, ['sourceCarryRepairArchive', entry], {
+                    field: 'sourceCarryRepairArchive', entry, data: { filepath, language, sourceHash: captured.sourceHash, fromSourceHash,
+                      stage: copy(stage), reason: 'Translation included in new original baseline', repairedAt: Date.now() },
+                  }, { kindScope: key(id, 'sourceCarryRepairArchive') }));
+                  tx.objectStore(stores.records).delete(recordKey); pendingChanged = true;
+                  pendingRemoved.push(...(repair.removed || []));
+                } else if (!same(next, stage)) {
+                  tx.objectStore(stores.records).put({ ...record, value: { ...record.value, data: copy(next) } }); pendingChanged = true;
+                }
+              }
+              const final = offset + keys.length >= initial.keys.length;
+              tx.objectStore(stores.migration).put({ key: markerKey, scope: id, value: final
+                ? { state: deferred || pendingDeferred ? 'deferred' : 'ready' }
+                : { state: 'converting', afterKey: keys.at(-1), deferred: deferred || pendingDeferred } });
+              return { changed: pendingChanged, removed: pendingRemoved, deferred: pendingDeferred };
+            });
+            if (result.stopped) break;
+            changed ||= result.changed; deferred ||= result.deferred; removed.push(...result.removed);
+            if (offset + keys.length >= initial.keys.length) break;
+          }
+          return { changed, removed };
+        });
+      })();
+      carryRepairs.set(id, work);
+      try { return await work; } finally { carryRepairs.delete(id); }
+    }
     async function workspace(scope, options = {}) {
       await ensure(scope);
+      if (options.filepaths == null) await repairCarriedStages(scope);
       return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', tx => readWorkspace(tx, scope, options.filepaths, options.includeDropped, options.allDropped));
     }
     async function source(scope) {
@@ -959,6 +1120,7 @@
     async function activation(scope) {
       const captured = { ...scope };
       await ensure(captured);
+      await repairCarriedStages(captured);
       const id = scopeKey(captured), baseId = baselineKey(captured);
       // Do no corpus cloning, sorting or assembly while this consistent read
       // holds IndexedDB stores. Every response is already detached by IDB.
@@ -987,7 +1149,7 @@
       W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game, branchId: scope.branchId, accountId: scope.accountId });
       W.pruneWorkspaceStatus(workspace);
       const id = scopeKey(scope), baseId = baselineKey(scope), originals = new Map(source.map(file => [file.filepath, file]));
-      const parts = splitWorkspace(scope, workspace, originals);
+      let committed;
       await transaction([stores.meta, stores.baseline, stores.assets, stores.files, stores.records, stores.migration, 'kv', revisionStoreName(scope.game)], 'readwrite', async tx => {
         // Existing identities are immutable. An import may update staged facts,
         // but cannot change an accepted source under the same identity.
@@ -1000,6 +1162,11 @@
           if (previous && !sameBaselineFile(previous, file)) throw new Error('The imported source differs from its accepted baseline identity.');
           if (!previous) tx.objectStore(stores.baseline).put(row(baseId, file.filepath, file, { order }));
         }
+        const conversion = await get(tx, stores.migration, id);
+        if (conversion && conversion.state !== 'ready') throw new Error('The destination workspace is still being recovered. Open it to finish recovery before importing this source again.');
+        const existing = await readWorkspace(tx, scope);
+        committed = W.mergeSourceImportWorkspace ? W.mergeSourceImportWorkspace(existing, workspace, { source, game: scope.game }) : workspace;
+        const parts = splitWorkspace(scope, committed, originals);
         await writeDifference(tx, stores.files, await all(tx, stores.files, id), parts.files);
         await writeDifference(tx, stores.records, await all(tx, stores.records, id), parts.records);
         tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
@@ -1010,7 +1177,9 @@
         for (const revision of revisions || []) tx.objectStore(revisionStoreName(scope.game)).add(scopedRevision(revision, scope));
         for (const item of metadataRows) tx.objectStore('kv').put(item);
         tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
+        tx.objectStore(stores.migration).delete(carryRepairKey(scope));
       });
+      return committed;
     }
     async function assets(scope) {
       await ensure(scope);
@@ -1313,7 +1482,7 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration,
+      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same,
       tmStores, tmCapture, getTranslationMemory, getTranslationMemoryState, putTranslationMemoryUnits, deleteTranslationMemoryUnit, getTranslationMemoryPending,
       applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,

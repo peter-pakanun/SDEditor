@@ -7,6 +7,9 @@
   'use strict';
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const canonicalCarry = value => Array.isArray(value) ? value.map(canonicalCarry) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalCarry(value[key])])) : value;
+  const sameCarry = (a, b) => equal(canonicalCarry(a || null), canonicalCarry(b || null));
   const HEX = /^[a-f0-9]{64}$/;
   const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string');
   const validPath = value => typeof value === 'string' && !!value && !value.includes('\\')
@@ -232,11 +235,13 @@
     return { filepath: file.filepath, translations, needsReview: !!file.needsReview,
       trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
       ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}),
+      ...(file.sourceCarry ? { sourceCarry: copy(file.sourceCarry) } : {}),
       ...(Array.isArray(file.beforeTranslations) ? { beforeTranslations: copy(file.beforeTranslations) } : {}) };
   }
   function contentEqual(a, b) {
     return !!a && !!b && equal(a.translations, b.translations)
-      && !!a.needsReview === !!b.needsReview && !!a.trackedForExport === !!b.trackedForExport;
+      && !!a.needsReview === !!b.needsReview && !!a.trackedForExport === !!b.trackedForExport
+      && sameCarry(a.sourceCarry, b.sourceCarry);
   }
   function mergeFile(base, yours, shared) {
     if (!shared) throw new Error('Shared file is missing: ' + yours.filepath);
@@ -267,6 +272,14 @@
       else if (base && !!shared[key] === !!base[key]) result[key] = !!yours[key];
       else { result[key] = !!yours[key]; metadata.push(key); }
     }
+    // Carry facts follow the side that changed them. They do not manufacture
+    // a text conflict when the saved translation itself can merge cleanly.
+    let sourceCarry = shared.sourceCarry;
+    if (sameCarry(yours.sourceCarry, shared.sourceCarry)) sourceCarry = yours.sourceCarry;
+    else if (base && sameCarry(shared.sourceCarry, base.sourceCarry)) sourceCarry = yours.sourceCarry;
+    else if ((!base || !sameCarry(yours.sourceCarry, base.sourceCarry)) && yours.sourceCarry
+      && equal(result.translations, yours.translations)) sourceCarry = yours.sourceCarry;
+    if (sourceCarry) result.sourceCarry = copy(sourceCarry); else delete result.sourceCarry;
     if (result.trackedForExport) delete result.stagingReset;
     return { file: result, indexes, metadata, conflict: indexes.length > 0 || metadata.length > 0 };
   }
@@ -305,7 +318,7 @@
       } else if (file.stagingReset && !file.trackedForExport) {
         if (result.staged[language]) delete result.staged[language][file.filepath];
       } else if (file.trackedForExport || file.revision > 0) {
-        WorkspaceState.stageTranslation(result, file, language, { source: originals.get(file.filepath) });
+        WorkspaceState.stageTranslation(result, file, language, { source: originals.get(file.filepath), sourceCarry: file.sourceCarry });
       }
       desc.translations[language] = file.needsReview
         ? WorkspaceState.workspaceFile(result, originals.get(file.filepath) || desc, language).translations

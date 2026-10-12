@@ -230,6 +230,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspace :is(#table, .fileTable) .fileOpenButton:hover { text-decoration: underline; }
 .fileDroppedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-dropped); }
 .fileRevisedLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-revised); }
+.fileMetadataLabel { display: block; margin-top: 4px; font-size: 11px; color: var(--ui-saved); }
+.metadataCorrectionPanel { margin: 8px 0; padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 6px; }
+.metadataCorrectionPanel summary { cursor: pointer; }
+.metadataCorrectionPanel pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .fileDiagnosticLabel { display: block; margin-top: 4px; font-size: 11px; }
 .fileDiagnosticLabel.error { color: var(--ui-missing); }
 .fileDiagnosticLabel.warning { color: var(--ui-warning); }

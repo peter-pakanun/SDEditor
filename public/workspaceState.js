@@ -76,7 +76,7 @@
     }
     return status;
   }
-  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'needsReview', 'trackedForExport']);
+  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'needsReview', 'trackedForExport']);
   const cleanMetadata = value => Object.fromEntries(Object.entries(value || {})
     .filter(([field]) => !statusFlags.has(field) && !excluded.has(field)));
   function setFileMetadata(status, language, patch = {}, local) {
@@ -143,6 +143,26 @@
     variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []), stats: copy(desc?.stats || []),
     name: String(desc?.name || ''), translations: lines(translations ?? desc?.translations?.[language]) });
   const sameSource = (left, right) => !!left && !!right && equal(snapshot(left, 'English', []), snapshot(right, 'English', []));
+  const sourceMetadata = desc => ({ variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []),
+    stats: copy(desc?.stats || []), name: String(desc?.name || '') });
+  function classifySourceCarry(previous, current, language, translations) {
+    if (!current) return { action: 'drop', reason: 'File removed from source' };
+    if (!previous || !equal(lines(previous.translations?.English), lines(current.translations?.English)))
+      return { action: 'drop', reason: 'English source changed' };
+    const carried = lines(translations), baseline = lines(current.translations?.[language]);
+    if (carried.some(text => text.trim()) && !complete(baseline, current.translations?.English?.length || 0))
+      return { action: 'drop', reason: 'Translation missing from new source' };
+    const before = sourceMetadata(previous), after = sourceMetadata(current);
+    if (!equal(before, after)) return { action: 'carry', reason: 'Source metadata corrected', metadataCorrection: { before, after } };
+    return equal(carried, baseline) ? { action: 'baseline', reason: 'Translation included in new source' }
+      : { action: 'carry', reason: 'Translation carried to new source' };
+  }
+  function metadataCorrectionForSource(entry, desc, sourceHash) {
+    const carry = entry?.sourceCarry, correction = carry?.metadataCorrection;
+    return !!(carry?.fromSourceHash && carry.fromSourceHash !== sourceHash && carry.toSourceHash === sourceHash
+      && object(correction?.before) && object(correction?.after) && !equal(correction.before, correction.after)
+      && equal(correction.after, sourceMetadata(desc)));
+  }
   const droppedScopeCache = new WeakMap();
   function invalidateDroppedScopes(workspace) { droppedScopeCache.delete(workspace); }
   function sourceHashes(...values) {
@@ -266,6 +286,7 @@
     const baseline = desc?.translations?.[language];
     return { translations, hasChanges: !!staged, isRevised: !!staged && complete(baseline, count)
       && !equal(lines(baseline), translations) && !candidate && !wasDroppedInSource(workspace, desc?.filepath, language),
+      isMetadataCorrection: !!staged && metadataCorrectionForSource(staged, desc, workspace?.sourceHash),
       isMissing: !complete(translations, count), isDropped: !!candidate,
       needsReview: !!candidate && !staged && !complete(translations, count), candidate, staged };
   }
@@ -292,6 +313,7 @@
     const saveOrigin = options.saveOrigin || (current?.sourceHash === entry.sourceHash
       && equal(current.translations, entry.translations) ? current.saveOrigin : null);
     if (saveOrigin) entry.saveOrigin = saveOrigin;
+    if (options.sourceCarry) entry.sourceCarry = copy(options.sourceCarry);
     (workspace.staged[language] ||= {})[file.filepath] = entry;
     return entry;
   }
@@ -463,13 +485,20 @@
     initializeWorkspace(workspace, { ...options, source: options.previousSource, sourceHash: options.previousSourceHash || workspace.sourceHash });
     const old = new Map((options.previousSource || []).map(desc => [desc.filepath, desc]));
     const next = new Map((options.source || []).map(desc => [desc.filepath, desc]));
+    const previouslyStaged = new Set(Object.entries(workspace.staged || {}).flatMap(([language, entries]) =>
+      Object.keys(entries).map(filepath => serialized([language, filepath]))));
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
-      if (sameSource(old.get(filepath), next.get(filepath))) entry.sourceHash = options.sourceHash;
-      else {
-        const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
-        if (desc) dropTranslation(workspace, desc, language, { game: options.game, translations: entry.translations,
+      const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
+      const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations);
+      if (decision.action === 'carry') {
+        entry.sourceCarry = { fromSourceHash: entry.sourceHash || options.previousSourceHash || workspace.sourceHash,
+          toSourceHash: options.sourceHash, fromSavedAt: entry.savedAt,
+          ...(decision.metadataCorrection ? { metadataCorrection: copy(decision.metadataCorrection) } : {}) };
+        entry.sourceHash = options.sourceHash;
+      } else {
+        if (decision.action === 'drop') dropTranslation(workspace, desc || { filepath, translations: { English: [] } }, language, { game: options.game, translations: entry.translations,
           originSourceHash: entry.sourceHash || options.previousSourceHash, targetSourceHash: options.sourceHash,
-          reason: next.has(filepath) ? 'English source changed' : 'File removed from source', provenance: { savedAt: entry.savedAt } });
+          originSourceAvailable: !!desc, reason: decision.reason, provenance: { savedAt: entry.savedAt } });
         delete entries[filepath];
       }
     }
@@ -480,7 +509,8 @@
       for (const language of Object.keys(previous.translations || {}).filter(languageName)) {
         const translations = lines(previous.translations[language]);
         const preserved = workspace.dropped?.[language]?.[previous.filepath];
-        if (!translations.some(text => text.trim()) || workspace.staged[language]?.[previous.filepath]
+        if (!translations.some(text => text.trim()) || previouslyStaged.has(serialized([language, previous.filepath]))
+          || workspace.staged[language]?.[previous.filepath]
           || droppedForFile(workspace, previous.filepath, language)
           || (preserved && inWorkspaceScope(workspace, preserved) && candidateScopes(preserved).includes(options.sourceHash))) continue;
         const currentCount = current?.translations?.English?.length || 0;
@@ -511,6 +541,131 @@
     workspace.sourceBaseline = { sourceHash: options.sourceHash };
     invalidateDroppedScopes(workspace);
     return workspace;
+  }
+  function repairRedundantCarriedStages(workspace, options = {}) {
+    const removed = [], corrected = [];
+    if (!object(workspace) || !workspace.sourceHash || !Array.isArray(options.source)) return { changed: false, removed, corrected };
+    const current = new Map(options.source.map(desc => [desc.filepath, desc]));
+    const previous = new Map((options.previousSource || []).map(desc => [desc.filepath, desc]));
+    const predecessor = options.previousWorkspace;
+    const previousHash = options.previousSourceHash || predecessor?.sourceHash || '';
+    const authoredHere = new Set((options.history || []).filter(record => record.sourceHash === workspace.sourceHash)
+      .map(record => serialized([record.lang || record.language, record.filepath, lines(record.translations)])));
+    const sameScope = predecessor && predecessor.sourceHash === previousHash && previousHash !== workspace.sourceHash
+      && (!predecessor.game || !workspace.game || predecessor.game === workspace.game)
+      && (predecessor.branchId || 'default') === (workspace.branchId || 'default')
+      && (predecessor.workspaceGroupId || predecessor.groupId || '') === (workspace.workspaceGroupId || workspace.groupId || '')
+      && (predecessor.workspaceVersionId || predecessor.versionId || '') === (workspace.workspaceVersionId || workspace.versionId || '')
+      && String(predecessor.accountId || predecessor.collaborationAccountId || 'guest')
+        === String(workspace.accountId || workspace.collaborationAccountId || 'guest');
+    for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
+      const desc = current.get(filepath), carry = entry.sourceCarry;
+      if (!desc || entry.sourceHash !== workspace.sourceHash
+        || metadataCorrectionForSource(entry, desc, workspace.sourceHash) || carry?.metadataCorrection
+        || droppedForFile(workspace, filepath, language) || wasDroppedInSource(workspace, filepath, language)) continue;
+      // An explicit save in this version remains meaningful even when it is
+      // unchanged. Only evidence of a predecessor copy permits cleanup.
+      if (authoredHere.has(serialized([language, filepath, lines(entry.translations)]))) continue;
+      let fromSourceHash = carry?.fromSourceHash && carry.fromSourceHash !== workspace.sourceHash
+        && carry.toSourceHash === workspace.sourceHash ? carry.fromSourceHash : '';
+      if (!fromSourceHash && sameScope) {
+        const prior = predecessor.staged?.[language]?.[filepath];
+        if (prior && prior.sourceHash === previousHash && timestamp(prior.savedAt) && timestamp(prior.savedAt) === timestamp(entry.savedAt)
+          && equal(lines(prior.translations), lines(entry.translations)) && equal(lines(prior.before), lines(entry.before))) {
+          const decision = classifySourceCarry(previous.get(filepath), desc, language, prior.translations);
+          if (decision.metadataCorrection) {
+            entry.sourceCarry = { fromSourceHash: previousHash, toSourceHash: workspace.sourceHash,
+              fromSavedAt: prior.savedAt, metadataCorrection: copy(decision.metadataCorrection) };
+            corrected.push({ language, filepath, fromSourceHash: previousHash });
+            continue;
+          }
+          if (decision.action === 'baseline') fromSourceHash = previousHash;
+        }
+      }
+      if (!fromSourceHash || !equal(lines(entry.translations), lines(desc.translations?.[language]))) continue;
+      delete entries[filepath];
+      removed.push({ language, filepath, fromSourceHash });
+    }
+    return { changed: removed.length > 0 || corrected.length > 0, removed, corrected };
+  }
+  function mergeSourceImportWorkspace(existing, incoming, options = {}) {
+    if (!existing) return copy(incoming);
+    if (!object(incoming) || existing.sourceHash !== incoming.sourceHash)
+      throw new Error('Source imports can merge only the same destination workspace.');
+    if ((existing.branchId || 'default') !== (incoming.branchId || 'default')
+      || (existing.game && incoming.game && existing.game !== incoming.game)
+      || String(existing.accountId || existing.collaborationAccountId || 'guest')
+        !== String(incoming.accountId || incoming.collaborationAccountId || 'guest')
+      || (existing.workspaceGroupId || existing.groupId || '') !== (incoming.workspaceGroupId || incoming.groupId || '')
+      || (existing.workspaceVersionId || existing.versionId || '') !== (incoming.workspaceVersionId || incoming.versionId || ''))
+      throw new Error('The destination workspace belongs to a different scope.');
+    const merged = { ...copy(incoming), ...copy(existing) };
+    maps(merged);
+    const descriptions = new Map((incoming.descs || []).map(desc => [desc.filepath, copy(desc)]));
+    for (const desc of existing.descs || []) descriptions.set(desc.filepath, copy(desc));
+    merged.descs = [...descriptions.values()];
+    merged.status = { ...copy(incoming.status || {}), ...copy(existing.status || {}) };
+    for (const field of ['staged', 'dropped', 'droppedConflicts']) {
+      merged[field] = {};
+      for (const language of new Set([...Object.keys(incoming[field] || {}), ...Object.keys(existing[field] || {})]))
+        merged[field][language] = { ...copy(incoming[field]?.[language] || {}), ...copy(existing[field]?.[language] || {}) };
+    }
+    for (const field of ['droppedArchive', 'droppedAliases', 'sourceCarryRepairArchive'])
+      if (existing[field] || incoming[field]) merged[field] = { ...copy(incoming[field] || {}), ...copy(existing[field] || {}) };
+    const resolvedImports = new Set();
+    for (const [language, candidates] of Object.entries(incoming.dropped || {})) for (const [filepath, candidate] of Object.entries(candidates)) {
+      const alias = existing.droppedAliases?.[candidate.id];
+      const resolved = existing.droppedArchive?.[alias?.id] || existing.droppedArchive?.[candidate.id];
+      if (!resolved || !['promoted', 'discarded'].includes(resolved.status) || !inWorkspaceScope(existing, resolved)
+        || resolved.language !== language || resolved.filepath !== filepath
+        || (resolved.snapshot && !sameDroppedContent(candidate, resolved))) continue;
+      if (merged.dropped[language]?.[filepath]?.id === candidate.id) delete merged.dropped[language][filepath];
+      merged.droppedArchive[resolved.id] = { ...copy(resolved), targetSourceHashes: candidateScopes(resolved, candidate) };
+      if (candidate.id !== resolved.id && !existing.droppedArchive?.[candidate.id])
+        merged.droppedArchive[candidate.id] = { ...copy(candidate), status: 'replaced' };
+      resolvedImports.add(candidate.id); resolvedImports.add(resolved.id);
+    }
+    for (const [language, conflicts] of Object.entries(incoming.droppedConflicts || {})) for (const [filepath, conflict] of Object.entries(conflicts)) {
+      if (!existing.droppedConflicts?.[language]?.[filepath] && resolvedImports.has(conflict.yours?.id)
+        && (!conflict.shared?.id || resolvedImports.has(conflict.shared.id))) delete merged.droppedConflicts[language][filepath];
+    }
+    // A destination resolution is authoritative for this recovery generation,
+    // including retries still using the local ID acknowledged by its alias.
+    const operations = new Map((incoming.droppedOutbox || []).filter(operation => operation.kind !== 'put' || !resolvedImports.has(operation.id))
+      .map(operation => [serialized([operation.id, operation.kind]), copy(operation)]));
+    for (const operation of existing.droppedOutbox || []) operations.set(serialized([operation.id, operation.kind]), copy(operation));
+    merged.droppedOutbox = [...operations.values()];
+    const sources = new Map((options.source || []).map(desc => [desc.filepath, desc]));
+    for (const [language, entries] of Object.entries(incoming.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
+      const retained = existing.staged?.[language]?.[filepath];
+      if (!retained || equal(lines(retained.translations), lines(entry.translations))) continue;
+      const source = sources.get(filepath);
+      if (!source) throw new Error('The original source is unavailable for conflicting imported work: ' + filepath);
+      const retainedCandidate = droppedForFile(merged, filepath, language);
+      const originMetadata = entry.sourceCarry?.metadataCorrection?.before || sourceMetadata(source);
+      const candidate = dropTranslation(merged, source, language, { game: options.game || merged.game,
+        originSourceHash: entry.sourceCarry?.fromSourceHash || entry.sourceHash,
+        targetSourceHash: merged.sourceHash,
+        snapshot: { english: lines(source.translations?.English), ...copy(originMetadata), translations: lines(entry.translations) },
+        reason: 'Imported translation differs from saved destination work', provenance: { savedAt: entry.savedAt } });
+      if (retainedCandidate && candidate?.status === 'dropped' && retainedCandidate.id !== candidate.id) {
+        merged.dropped[language][filepath] = copy(retainedCandidate);
+        if (!merged.droppedConflicts[language]?.[filepath]) recordDroppedConflict(merged, {
+          kind: 'upload', game: merged.game, language, filepath, targetSourceHash: merged.sourceHash,
+          yours: candidate, shared: retainedCandidate,
+        });
+        else for (const operation of merged.droppedOutbox) if (operation.id === candidate.id) operation.conflict = true;
+      }
+    }
+    // Keep all historical recovery groups. Existing destination entries retain
+    // their positions, which stored per-group recovery records refer to.
+    if (Array.isArray(incoming.importRecovery) || Array.isArray(existing.importRecovery)) {
+      merged.importRecovery = copy(existing.importRecovery || []);
+      for (const recovery of incoming.importRecovery || []) if (!merged.importRecovery.some(retained => equal(retained, recovery)))
+        merged.importRecovery.push(copy(recovery));
+    }
+    invalidateDroppedScopes(merged);
+    return merged;
   }
   function discardDropped(workspace, filepath, language, expected) {
     const candidate = droppedForFile(workspace, filepath, language);
@@ -683,6 +838,8 @@
     return choice === 'shared' ? shared : workspace.dropped[language][filepath];
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
-    initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
+    initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
+    sourceMetadata, metadataCorrectionForSource, mergeSourceImportWorkspace,
+    dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, coalesceDroppedConflict };
 });
