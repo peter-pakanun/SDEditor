@@ -870,7 +870,7 @@
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
-                this.ctVariantSelections={};this._ctClassNameCache=null;
+                this.ctVariantSelections={};this._ctClassNameCache=null;this._ctReferenceIndexCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
@@ -1026,6 +1026,14 @@
                 this.ctFocusedField=(current || (selected && matches(selected) ? selected : group.fields.find(matches)))?.id || source.key;
             },
             ctNotes(unit = this.ctCurrentUnit) { return (Array.isArray(unit?.developerNotes) ? unit.developerNotes : unit?.developerNotes ? [unit.developerNotes] : []).map(note => typeof note === 'string' ? note : note.text || note.value || '').filter(Boolean); },
+            ctReferenceMetadata(unit = this.ctCurrentUnit) {
+                const units=this.ctUnits,workspace=this.ctWorkspace,adapter=root.ContentAdapters.clienttext;
+                let cache=this._ctReferenceIndexCache;
+                if(!cache || cache.units!==units || cache.workspace!==workspace){
+                    cache=this._ctReferenceIndexCache={units,workspace,index:adapter.characterReferenceIndex(units)};
+                }
+                return adapter.referenceMetadata(unit,cache.index);
+            },
             ctReport(progress) { this.ctProgress = { ...this.ctProgress, ...progress, completed: progress.completed ?? progress.processed ?? this.ctProgress?.completed ?? 0 }; },
             ctBeginInitialization(label,session,plan=[]) {
                 const owner=this.beginWorkspaceInitialization?.({label,session,plan});
@@ -2476,6 +2484,10 @@
         }
     };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
+        methods: {
+            showTooltip(event,text) { this.host.showTooltip?.(event,text); },
+            hideTooltip() { this.host.hideTooltip?.(); },
+        },
         mounted() {
             this.$nextTick(()=>this.host.ctResizeFields(this.$el));
             if(root.ResizeObserver){
@@ -2491,6 +2503,7 @@
         <div class="ctFields" :data-side="side === 'both' ? undefined : side" :inert="host.ctBusy" @keydown="host.ctFieldsKeydown($event)">
             <div :class="{inlineFileBlock:side !== 'both',inlineBlockPrelude:side !== 'both'}" :data-inline-block="side !== 'both' ? 'prelude' : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
             <template v-if="side !== 'translation'">
+                <section v-for="reference in host.ctReferenceMetadata()" :key="reference.name" class="ctReferenceContext editBlock"><strong>{{ reference.name }}</strong><pre :tabindex="reference.tooltip ? 0 : undefined" :aria-label="reference.tooltip || undefined" v-tooltip="reference.tooltip">{{ reference.display ?? reference.value }}</pre></section>
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
             <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>

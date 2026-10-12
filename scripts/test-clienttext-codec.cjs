@@ -175,6 +175,70 @@ test('the vendored browser UMD dependency loads through its default export', asy
     const parsed = await context.ClientTextCodec.parseWorkbook(await workbook(), { filename: 'French.xlsx' });
     assert.equal(parsed.units.length, 5);
 });
+test('NPCText and NPCTalk Context references retain raw cells through v1/v2 parsing and targeted XLSM exports', async () => {
+    const contexts = [' Metadata/Characters/Str/StrFourb\r\nMetadata/Characters/Dex/DexFour @literal\\n <ref> ', 'Metadata/Characters/Int/IntFour\n\tMetadata/Characters/StrDex/StrDexFour'];
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Context'), cell('C1', 'Text'), cell('D1', 'Translation'), cell('E1', 'Notes')]),
+        row(2, [cell('A2', 'dialogue'), cell('B2', contexts[0]), cell('C2', 'English dialogue'), cell('D2', 'Original dialogue', 1), cell('E2', 'Separate developer note')]),
+    ]);
+    const talk = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Context'), cell('C1', 'DisplayName'), cell('D1', 'Translation'), cell('E1', 'DisplayNameConsole'), cell('F1', 'Translation'), cell('G1', 'Translation Note')]),
+        row(2, [cell('A2', 'talk'), cell('B2', contexts[1]), cell('C2', 'Speaker'), cell('D2', 'Original speaker', 1), cell('E2', 'Console speaker'), cell('F2', 'Original console speaker', 1), cell('G2', 'Separate translation note')]),
+    ]);
+    const bytes = await workbook({ macro: true, normal, replace: {
+        'xl/workbook.xml': `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="NPCText" sheetId="1" r:id="rId1"/><sheet name="NPCTalk" sheetId="2" r:id="rId2"/></sheets></workbook>`,
+        'xl/worksheets/sheet2.xml': talk,
+    } });
+    let legacyUnits;
+    for (const parserVersion of ['clienttext-v1', 'clienttext-v2']) {
+        const options = { filename: 'Thai.xlsm', language: 'Thai', parserVersion }, parsed = await Codec.parseWorkbook(bytes, options);
+        const npc = get(parsed, 'dialogue', 'NPCText'), npcTalk = get(parsed, 'talk', 'NPCTalk');
+        assert.equal(parsed.parserVersion, parserVersion);
+        assert.deepEqual(npc.metadata, { Context: contexts[0] }); assert.deepEqual(npcTalk.metadata, { Context: contexts[1] });
+        assert.equal(npc.developerNotes, 'Separate developer note'); assert.equal(npcTalk.developerNotes, 'Separate translation note');
+        assert.equal(npc.fields.some(field => field.name === 'Context'), false);
+        assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_METADATA_COLUMN' && warning.message.includes('Context')), false);
+        assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes, 'Reference metadata never rewrites an untouched original');
+        if (legacyUnits) {
+            assert.deepEqual(parsed.units, legacyUnits, 'Explicit v1 metadata and editable field identities remain unchanged in v2');
+            assert.deepEqual(parsed.units.map(State.compactUnit), legacyUnits.map(State.compactUnit), 'Context retains its original baseline hash authority');
+        } else legacyUnits = parsed.units;
+        const authored = 'Translated dialogue\nSecond line', consoleName = 'Translated console name';
+        const output = await Codec.exportWorkbook(bytes, parsed, {
+            [npc.id]: { values: { [field(npc, 'Text').id]: authored } },
+            [npcTalk.id]: { values: { [field(npcTalk, 'DisplayNameConsole').id]: consoleName } },
+        }, { parserVersion });
+        const reopened = await Codec.parseWorkbook(output, options), exportedNpc = get(reopened, 'dialogue', 'NPCText'), exportedTalk = get(reopened, 'talk', 'NPCTalk');
+        assert.equal(field(exportedNpc, 'Text').target, authored); assert.equal(field(exportedTalk, 'DisplayNameConsole').target, consoleName);
+        assert.deepEqual(exportedNpc.metadata, npc.metadata); assert.deepEqual(exportedTalk.metadata, npcTalk.metadata);
+        assert.equal(exportedNpc.developerNotes, npc.developerNotes); assert.equal(exportedTalk.developerNotes, npcTalk.developerNotes);
+        assert.deepEqual(field(exportedTalk, 'DisplayName'), field(npcTalk, 'DisplayName'));
+        const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output), changed = new Map([['xl/worksheets/sheet1.xml', 'D2'], ['xl/worksheets/sheet2.xml', 'F2']]);
+        for (const name of Object.keys(before.files)) {
+            if (before.files[name].dir || name === 'xl/styles.xml') continue;
+            if (!changed.has(name)) assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+            else {
+                const omitTarget = text => text.replace(new RegExp('<c\\b[^>]*\\br="' + changed.get(name) + '"[^>]*(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
+                assert.equal(omitTarget(await after.file(name).async('string')), omitTarget(await before.file(name).async('string')), 'Context and all unrelated cells stay byte-identical in ' + name);
+            }
+        }
+    }
+});
+test('recognizing Context references does not reinterpret existing source headings or ambiguous class layouts', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Context'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'context-source'), cell('B2', 'Existing source heading'), cell('C2', 'Existing translation', 1)]),
+    ]);
+    for (const parserVersion of ['clienttext-v1', 'clienttext-v2']) {
+        const unit = get(await Codec.parseWorkbook(await workbook({ normal }), { filename: 'Thai.xlsx', parserVersion }), 'context-source');
+        assert.equal(field(unit, 'Context').source, 'Existing source heading'); assert.deepEqual(unit.metadata, {});
+    }
+    const ambiguous = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Text'), cell('C1', 'MS'), cell('D1', 'FS'), cell('E1', 'Context'), cell('F1', 'StrFourb')]),
+        row(2, [cell('A2', 'ambiguous'), cell('B2', 'English'), cell('C2', 'Default'), cell('E2', 'Metadata/Characters/Str/StrFourb'), cell('F2', 'Class translation')]),
+    ]);
+    await assert.rejects(Codec.parseWorkbook(await workbook({ normal: ambiguous }), { filename: 'Thai.xlsx', parserVersion: 'clienttext-v2' }), /unambiguously identify/);
+});
 test('complete XLSM exports patch only targets and cloned status styles', async () => {
     const bytes = await workbook({ macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm', role: 'normal' });
     const record = get(parsed, 'record'), complete = get(parsed, 'complete'), forms = get(parsed, 'record', 'Words_Gender');

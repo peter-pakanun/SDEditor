@@ -9,6 +9,29 @@ const window = {};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
+test('Lookup reference metadata displays mapped English with the shared focusable tooltip before notes', () => {
+  assert.match(Lookup.template, /v-for="item in lookupSelectedReference\.referenceMetadata \|\| \[\]"[^>]*><h4>\{\{ item\.name \}\}<\/h4><pre class="lookupText"[^>]*>\{\{ item\.display \?\? item\.value \}\}<\/pre>/);
+  assert.match(Lookup.template, /:tabindex="item\.tooltip \? 0 : undefined" :aria-label="item\.tooltip \|\| undefined" v-tooltip="item\.tooltip"/);
+  assert.doesNotMatch(Lookup.template, /:title="item\./);
+  assert.ok(Lookup.template.indexOf('lookupSelectedReference.referenceMetadata') < Lookup.template.indexOf('lookupSelectedReference.developerNotes'));
+  const css = fs.readFileSync(path.join(__dirname, '../public/editor-lookup.css'), 'utf8');
+  assert.match(css, /\.lookupText\s*\{[^}]*user-select:\s*text/);
+});
+
+test('Lookup tooltip bindings call the current editor host through the shared surface', () => {
+  const Session = require('../public/editorSession.js');
+  const calls = [], event = { clientX: 40, clientY: 80 };
+  const host = { ctActive: true, showTooltip(value, text) { assert.equal(this, host); calls.push(['show', value, text]); },
+    hideTooltip() { assert.equal(this, host); calls.push(['hide']); } };
+  const props = { controller: Session.create(host) }, bindings = Lookup.setup(props);
+  bindings.showTooltip(event, 'Character: Metadata/Characters/Dex/DexFourb\nEnglish: Huntress');
+  bindings.hideTooltip();
+  const nextHost = { ctActive: false, showTooltip(value, text) { assert.equal(this, nextHost); calls.push(['next', value, text]); } };
+  props.controller = Session.create(nextHost);
+  bindings.showTooltip(event, 'Next reference');
+  assert.deepEqual(calls, [['show', event, 'Character: Metadata/Characters/Dex/DexFourb\nEnglish: Huntress'], ['hide'], ['next', event, 'Next reference']]);
+});
+
 test('shared native fields keep raw ClientText characters and publish committed IME text only', () => {
   const calls = [];
   const controller = { field: { translation: '', readonly: false },

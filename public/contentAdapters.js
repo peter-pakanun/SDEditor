@@ -12,6 +12,50 @@
         return {filepath:String(unit.sheet),stats:[],condition:'',remarks:'',entryIndex:null,contentMode:'clienttext',
             fieldKind:field.kind,fieldName:field.name,role:unit.role,sheet:unit.sheet,recordId:unit.recordId,fieldId:field.id,...(field.form?{form:field.form}:{})};
     }
+    function characterReferenceIndex(units){
+        const index=new Map();
+        // The caller supplies only the selected workspace's immutable originals.
+        // Translated/staged values never participate in these reference labels.
+        for(const unit of units||[]){
+            if(unit?.sheet!=='Characters'||typeof unit.recordId!=='string'||!unit.recordId.startsWith('Metadata/Characters/'))continue;
+            for(const field of unit.fields||[]){
+                if(field?.name!=='Name'||field.kind==='gender'||typeof field.source!=='string'||!field.source.trim())continue;
+                if(!index.has(unit.recordId))index.set(unit.recordId,[]);
+                index.get(unit.recordId).push({unit,field});
+            }
+        }
+        return index;
+    }
+    function characterReference(path,unit,index){
+        const all=index?.get?.(path);
+        if(!Array.isArray(all)||!all.length)return null;
+        const sameRole=all.filter(candidate=>candidate.unit.role===unit?.role),candidates=sameRole.length?sameRole:all;
+        // Several gender forms can point to one English Name cell. A role
+        // fallback is safe only when every candidate has the same English name.
+        const names=new Set(candidates.map(candidate=>candidate.field.source));
+        return names.size===1?{path,name:candidates[0].field.source,candidates}:null;
+    }
+    function referenceMetadata(unit,index){
+        return ['Context','Character','Character Class'].flatMap(name=>{
+            const value=unit?.metadata?.[name];
+            if(typeof value!=='string'||!value.trim())return [];
+            const entry={name,value};
+            if(!index||name==='Context')return [entry];
+            const matched=new Map();
+            const display=value.replace(/\S+/g,path=>{
+                const match=characterReference(path,unit,index);
+                if(!match)return path;
+                matched.set(path,match);return match.name;
+            });
+            if(!matched.size)return [entry];
+            const details=[...matched.values()].map(match=>{
+                const cells=[...new Set(match.candidates.map(candidate=>
+                    candidate.unit.sheet+'!'+(candidate.field.sourceCell||'?')+' ('+candidate.unit.role+' workbook)'))];
+                return 'English Name: '+match.name+'\nFull path: '+match.path+'\nSource: '+cells.join(', ');
+            });
+            return [{...entry,display,tooltip:name+':\n'+value+'\n\n'+details.join('\n\n')}];
+        });
+    }
     function compatibleContext(left,right){
         return normalizeMode(left?.contentMode)===normalizeMode(right?.contentMode)
             && ['fieldKind','form'].every(field=>String(left?.[field]||'')===String(right?.[field]||''));
@@ -80,7 +124,7 @@
         status:(unit,saved)=>runtime().statusFor(unit,saved),
         history:(unit,saved)=>({unitId:unit.id,values:copy(runtime().valuesFor(unit,saved)),reviewed:copy(saved?.reviewed||{})}),
         diagnose:(unit,values)=>unit.fields.flatMap(field=>runtime().diagnose(field,values[field.id]).map(issue=>({...issue,fieldId:field.id}))),
-        contextFor,memoryUnits,findMemory,compatibleContext,
+        contextFor,characterReferenceIndex,referenceMetadata,memoryUnits,findMemory,compatibleContext,
     });
     const statdescription=Object.freeze({id:'statdescription',unitIdentity:unit=>unit.filepath,
         fields:(unit,language)=> (unit.translations?.English||[]).map((source,index)=>({id:String(index),name:String(index+1),kind:'text',source,target:unit.translations?.[language]?.[index]||'',entryIndex:index})),

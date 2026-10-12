@@ -180,7 +180,9 @@
         }
         const metadata = headers.filter(item => !used.has(item.column));
         if (new Set(metadata.map(item => item.name)).size !== metadata.length) throw error('Duplicate metadata column headings in sheet ' + sheet + '.', 'CLIENTTEXT_LAYOUT_CHANGED');
-        for (const item of metadata) if (!NOTES.has(item.name) && !METADATA.has(item.name)) warnings.push({ code: 'CLIENTTEXT_METADATA_COLUMN', sheet, cell: letters(item.column) + '1', message: 'Unrecognized metadata column retained: ' + item.name + '.' });
+        // Context is known reference metadata. Keep its existing layout
+        // interpretation so accepted v1/v2 sources and identities stay intact.
+        for (const item of metadata) if (!NOTES.has(item.name) && !METADATA.has(item.name) && item.name !== 'Context') warnings.push({ code: 'CLIENTTEXT_METADATA_COLUMN', sheet, cell: letters(item.column) + '1', message: 'Unrecognized metadata column retained: ' + item.name + '.' });
         return { idColumn: id[0].column, definitions, metadata };
     }
     async function parseWorkbook(input, options = {}) {

@@ -49,7 +49,12 @@ const fields = ['MS','MP','FS','FP','NS','NP'].map((form,index)=>({
     target:index===0 ? 'A long singular translation deliberately wraps into several lines when its column is narrower.' : form+' translation',
     targetCell:String.fromCharCode(66+index)+'2',required:true,originalMissing:false,outdated:false
 }));
-const unit = Vue.markRaw({id:'layout-record',role:'normal',sheet:sheets[0].name,recordId:'FixtureIdentifier',fields,notes:[]});
+const unit = Vue.markRaw({id:'layout-record',role:'normal',sheet:sheets[0].name,recordId:'FixtureIdentifier',fields,notes:[],
+    metadata:{Character:'Metadata/Characters/Dex/DexFourb\\nMetadata/Characters/Str/StrFourb',Context:'Raw <img src=x onerror=alert(1)> reference'},developerNotes:'Separate developer note'});
+const referenceCharacterUnits=Vue.markRaw([['Dex','DexFourb','Huntress','B10'],['Str','StrFourb','Warrior','B8']].map(([attribute,form,source,sourceCell])=>({
+    id:'reference-character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,
+    fields:[{id:'Name',name:'Name',kind:'text',source,target:'Localized '+source,sourceCell,targetCell:'C'+sourceCell.slice(1),required:true}]
+})));
 const classForms=['MS','FS','DexFour','DexFourb','IntFourb'];
 const classUnit=Vue.markRaw({id:'class-layout-record',role:'normal',sheet:sheets[0].name,recordId:'ClassVariantFixture',notes:[],fields:classForms.map((form,index)=>({
     id:'class-'+form,kind:'form',group:'Text',name:'Text',form,source:'Raw English [Keyword] {0} @ text.',
@@ -61,7 +66,7 @@ const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','
     fields:[{id:'Name',kind:'text',name:'Name',source,target:'Localized label '+form,targetCell:'D2',required:true,originalMissing:false,outdated:false}]
 })));
 const app = Vue.createApp({
-    data() { return {...ct.data(),ctActive:true,ctUnits:Vue.markRaw([unit]),ctSelection:unit.id,
+    data() { return {...ct.data(),ctActive:true,ctUnits:Vue.markRaw([unit,...referenceCharacterUnits]),ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
         ctSheet:sheets[0].key,ctSearch:'Main search retained',ctAppliedSearch:'',ctSelectedFilters:['unchanged','missing','saved'],
         ctValues:Object.fromEntries(fields.map(field=>[field.id,field.target])),
@@ -71,7 +76,7 @@ const app = Vue.createApp({
     };},
     computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount']
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
-    methods:{...ct.methods,${tooltipMethods}
+    methods:{...ct.methods,scheduleInlineAlignment:window.InlineEditor.mixin.methods.scheduleInlineAlignment,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
         async ctFlushDraft(){return true;},async ctFlushCommentDraft(){},
         ctStartClassVariantFixture(){
@@ -81,7 +86,7 @@ const app = Vue.createApp({
             this.ctVariantSelections={};this.ctFocusedField='class-MS';this.ctInitializeVariants();
         },
     },
-    created(){this._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));this._ctSheets=Vue.markRaw(sheets);},
+    created(){this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));this._ctSheets=Vue.markRaw(sheets);},
     mounted(){this._fixtureKey=event=>this.ctKey(event);document.addEventListener('keydown',this._fixtureKey);},
     beforeUnmount(){document.removeEventListener('keydown',this._fixtureKey);}
 });
@@ -106,7 +111,7 @@ async function run() {
         <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
-        <script src="/clientTextState.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -202,9 +207,34 @@ async function run() {
                 assert.ok(geometry.source.right<=geometry.target.left,name+': English stays left of translation in the full editor');
                 assert.ok(Math.abs(geometry.source.width-geometry.target.width)<1,name+': English and translation get equal column widths');
                 assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': English and translation are top-aligned');
-            }else assert.ok(geometry.source.right<=geometry.target.left,name+': inline English and translation retain separate table columns');
+            }else {
+                assert.ok(geometry.source.right<=geometry.target.left,name+': inline English and translation retain separate table columns');
+                assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': reference prelude keeps English aligned with translation');
+            }
             assert.equal(geometry.highlights,7,name+': source and all six form targets use shared highlight overlays');
             results.push({name:name+' native field layout',sourceWidth:Math.round(geometry.source.width),targetWidth:Math.round(geometry.target.width)});
+        };
+        const checkReferences=async (full,name)=>{
+            const prefix=full?'.ctFullEditor':'.ctFields[data-side="source"]',references=page.locator(prefix+' .ctReferenceContext');
+            assert.deepEqual(await references.locator('strong').allTextContents(),['Context','Character'],name+': reference headings remain separate from notes');
+            assert.deepEqual(await references.locator('pre').allTextContents(),[
+                'Raw <img src=x onerror=alert(1)> reference','Huntress\nWarrior'
+            ],name+': exact English names replace mapped character paths');
+            assert.equal(await references.locator('img,input,textarea,button').count(),0,name+': escaped read-only reference text');
+            assert.equal(await page.locator(prefix+' .ctDeveloperNotes pre').textContent(),'Separate developer note',name+': developer notes remain separate');
+            assert.equal(await references.locator('pre').evaluateAll(elements=>elements.every(element=>getComputedStyle(element).userSelect==='text'
+                && getComputedStyle(element).whiteSpace==='pre-wrap' && element.scrollWidth<=element.clientWidth+1)),true,name+': selectable wrapped reference paths');
+            if(!full)assert.equal(await page.locator('.ctFields[data-side="translation"] .ctReferenceContext').count(),0,name+': reference is shown beside English');
+            const mapped=references.locator('pre').nth(1),expected=await page.evaluate(()=>window.__ctLayoutFixture.ctReferenceMetadata().find(item=>item.name==='Character').tooltip);
+            for(const detail of ['Metadata/Characters/Dex/DexFourb','Metadata/Characters/Str/StrFourb','Huntress','Warrior','Characters!B10','Characters!B8'])assert.ok(expected.includes(detail),name+': tooltip includes '+detail);
+            assert.equal(await mapped.getAttribute('title'),null,name+': use shared tooltip component');
+            await mapped.hover();await tooltip.waitFor();await settle();
+            const tooltipText=()=>tooltip.evaluate(element=>[...element.children].map(line=>line.textContent===' '?'':line.textContent).join('\n'));
+            assert.equal(await tooltipText(),expected,name+': hover reveals full mapped reference information');
+            const bounds=await tooltip.boundingBox();assert.ok(bounds.x>=7 && bounds.y>=7 && bounds.x+bounds.width<=page.viewportSize().width-7 && bounds.y+bounds.height<=page.viewportSize().height-7,name+': reference tooltip stays in viewport');
+            await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});
+            await mapped.focus();await tooltip.waitFor();assert.equal(await tooltipText(),expected,name+': keyboard focus reveals the same information');
+            await page.locator(full?'.ctFullEditor [data-ct-target="form-FS"]':'.ctFields[data-side="translation"] [data-ct-target="form-FS"]').focus();await tooltip.waitFor({state:'detached'});
         };
         for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100,1000]) {
             await page.setViewportSize({width,height:900});
@@ -225,6 +255,7 @@ async function run() {
             await checkTooltip(longButton,longSheet+'\nNormal workbook',theme+'/'+width);
             await checkGrid(theme+'/'+width+' inline');
             await checkFieldLayout(false,theme+'/'+width+' inline');
+            await checkReferences(false,theme+'/'+width+' inline');
             if(theme==='modern-dark' && width===1100) {
                 await longButton.hover();await tooltip.waitFor();await settle();
                 const path=join(tmpdir(),'sdeditor-clienttext-inline-'+randomUUID()+'.png');
@@ -269,6 +300,7 @@ async function run() {
             await page.locator('.ctID').click();await page.locator('.ctFullEditor').waitFor();await settle();
             await checkGrid(theme+'/'+width+' full');
             await checkFieldLayout(true,theme+'/'+width+' full');
+            await checkReferences(true,theme+'/'+width+' full');
             const lastFormLabel=page.locator('.ctFullEditor .ctFormGrid tbody tr:last-child > th');
             await lastFormLabel.scrollIntoViewIfNeeded();
             assert.equal(await lastFormLabel.evaluate(element=>{const r=element.getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===element;}),true,theme+'/'+width+': last full form label remains reachable by scrolling');

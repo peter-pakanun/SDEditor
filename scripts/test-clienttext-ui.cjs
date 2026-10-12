@@ -8,6 +8,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+        ContentAdapters:require('../public/contentAdapters.js'),
         TerminologyDiagnostics:require('../public/terminologyDiagnostics.js'),Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),context);
@@ -46,6 +47,32 @@ function namedUnit(id,source='English',target='Translation',outdated=false){
     return {...unit(source,target,outdated),id:JSON.stringify(['normal','ClientStrings',id]),recordId:id};
 }
 const rowEvent=(key,control=false)=>({key,target:{closest:()=>control?{}:null},preventDefault(){this.defaultPrevented=true;},stopPropagation(){}});
+
+test('ClientText exposes selected record reference metadata separately from developer notes',()=>{
+    const {app,original}=harness(),raw='Metadata/Characters/Dex/DexFourb\r\n raw\\n ';
+    original.metadata={Character:raw,'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'Retained privately'};
+    original.developerNotes='Actual note';const before=clone(original);
+    assert.deepEqual(clone(app.ctReferenceMetadata()),[
+        {name:'Character',value:raw},{name:'Character Class',value:original.metadata['Character Class']}
+    ]);
+    assert.deepEqual(Array.from(app.ctNotes()),['Actual note']);assert.deepEqual(original,before);
+    app.ctSelection='another record';assert.deepEqual(clone(app.ctReferenceMetadata()),[]);
+});
+
+test('character reference labels reuse a scoped index and refresh when originals or workspace change',()=>{
+    const {app,original,window}=harness(),path='Metadata/Characters/Dex/DexFourb',
+        character={...namedUnit(path),sheet:'Characters',recordId:path,fields:[{id:'Name',name:'Name',kind:'text',source:'Huntress',target:'Local translation',sourceCell:'B10'}]};
+    original.metadata={Character:path};app.ctUnits=[original,character];const before=clone(original);
+    const first=app.ctReferenceMetadata();assert.equal(first[0].display,'Huntress');assert.ok(first[0].tooltip.includes(path));assert.ok(first[0].tooltip.includes('Characters!B10'));
+    const cached=app._ctReferenceIndexCache;app.ctReferenceMetadata();assert.equal(app._ctReferenceIndexCache,cached);
+    app.ctUnits=[original,{...character,fields:[{...character.fields[0],source:'Different original'}]}];
+    assert.equal(app.ctReferenceMetadata()[0].display,'Different original');assert.notEqual(app._ctReferenceIndexCache,cached);
+    const newCache=app._ctReferenceIndexCache;app.ctWorkspace={...app.ctWorkspace};app.ctReferenceMetadata();assert.notEqual(app._ctReferenceIndexCache,newCache);
+    app.ctUnits=[original];assert.deepEqual(clone(app.ctReferenceMetadata()),[{name:'Character',value:path}]);assert.deepEqual(original,before);
+    const calls=[],component={host:{showTooltip(event,text){calls.push([event,text]);},hideTooltip(){calls.push('hide');}}},event={clientX:4};
+    window.ClientTextUI.fieldsComponent.methods.showTooltip.call(component,event,'Character details');window.ClientTextUI.fieldsComponent.methods.hideTooltip.call(component);
+    assert.deepEqual(calls,[[event,'Character details'],'hide']);
+});
 
 function blankEnglishUnit(id='BlankThenEnglish',source='Visible English'){
     const original=namedUnit(id),base=original.fields[0];

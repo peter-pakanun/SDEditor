@@ -168,6 +168,7 @@
         continue;
       }
       if (source.language !== lang) continue;
+      const characterReferences = window.ContentAdapters?.clienttext?.characterReferenceIndex?.(source.units || []);
       for (const unit of source.units || []) {
         const values = window.ContentAdapters?.clienttext?.values(unit, source.saved?.[unit.id])
           || window.ClientTextState?.valuesFor(unit, source.saved?.[unit.id]) || { ...Object.fromEntries((unit.fields || []).map(field => [field.id, field.target])), ...source.saved?.[unit.id]?.values };
@@ -178,6 +179,7 @@
             ...Object.entries(unit.metadata || {}).flatMap(([name, value]) => [name, String(value ?? '')]),
             unit.developerNotes].filter(Boolean).join(' ');
           const reference = { ...common, filepath, filename: String(unit.recordId), lang, stats: [], isDNT: false,
+            referenceMetadata: window.ContentAdapters?.clienttext?.referenceMetadata(unit, characterReferences) || [],
             developerNotes: String(unit.developerNotes ?? ''), blocks: [{ index: 0, fieldId: field.id,
               label: [field.name || field.id, field.form].filter(Boolean).join(' · '), kind: field.kind, form: field.form,
               english, translation, isTable: false, englishColumns: [english], translationColumns: [translation] }] };
