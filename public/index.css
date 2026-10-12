@@ -1235,6 +1235,7 @@ button, label, th, td, input[type="checkbox"] {
 
 .editor>.edit {
   margin-right: var(--side-width);
+  padding-bottom: calc(1.5em * var(--density));
 }
 
 /* A font by Jos Buivenga (exljbris) -> www.exljbris.com */
