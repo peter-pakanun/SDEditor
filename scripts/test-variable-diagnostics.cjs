@@ -519,13 +519,14 @@ test('preview value identity still shares the same variable across percentage fo
   assert.deepEqual(Object.keys(editor.previewGggVars), ['1']);
 });
 
-test('ClientText uses shared variables and keyword display without SD text decoding', () => {
+test('ClientText uses shared variables and keyword display while rendering escaped newlines', () => {
   const {editor}=loadEditor(),raw='@CharacterName literal\\n actual\n{} {d} +{0:+d}% {2:0.1f} [Skill::{7}|Deal {0}% damage]';
   const preview=editor.buildGamePreviewSegments(raw,{contentMode:'clienttext'});
   assert.deepEqual(Array.from(preview.keysOrder),['','d','0:+d','2:0.1f','0']);
   assert.equal(preview.segments.filter(segment=>segment.type==='rightAlign').length,0);
-  assert.equal(preview.segments.filter(segment=>segment.type==='break').length,1);
-  assert.equal(preview.segments[0].text,'@CharacterName literal\\n actual');
+  assert.equal(preview.segments.filter(segment=>segment.type==='break').length,2);
+  assert.equal(preview.segments[0].text,'@CharacterName literal');
+  assert.equal(preview.segments[2].text,' actual');
   assert.equal(preview.segments.find(segment=>segment.key==='0:+d').prefix,'+');
   assert.equal(preview.segments.find(segment=>segment.key==='0:+d').trailingPercent,true);
   editor.ctActive=true;editor.ctPreviewGggVars={'0':'37'};
@@ -678,9 +679,27 @@ test('preview retains consecutive actual LF, CRLF and CR breaks inside styles an
     assert.equal(preview.segments.at(-1).full, '[Skill|KeyStart' + keywordNewline.repeat(2) + 'KeyEnd]', 'ClientText retains raw newline characters; SD normalizes display newlines');
     assert.ok(preview.segments.filter(segment => segment.type === 'text').every(segment => segment.decorStyle.fontStyle === 'italic' && segment.decorStyle.fontWeight === 'bold'));
   }
-  const literal = editor.buildGamePreviewSegments('Literal\\ntext\n\nNext', { contentMode: 'clienttext' });
-  assert.deepEqual(Array.from(literal.segments, segment => segment.type === 'text' ? segment.text : segment.type),
-    ['Literal\\ntext', 'break', 'break', 'Next'], 'ClientText retains literal backslash-n');
+});
+
+test('ClientText preview renders escaped line breaks across color, nested styles and keyword labels', () => {
+  const { editor } = loadEditor();
+  const raw = '<red>{Atlas reset.}\\n\\n<white>{Complete maps {0}.}'
+    + '\\n<i>{<bold>{Start {1}\\n\\nDouble\\n\\n\\nTriple {2}}}'
+    + '\r\n[Skill|KeyStart\\n\\nKeyEnd {3}]\\n\\nTail @{4}';
+  const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+  assert.deepEqual(Array.from(preview.keysOrder), ['0', '1', '2', '3', '4']);
+  assert.deepEqual(Array.from(preview.segments, segment => segment.type === 'text' ? segment.text : segment.type === 'var' ? `{${segment.key}}` : segment.type),
+    ['Atlas reset.', 'break', 'break', 'Complete maps ', '{0}', '.', 'break', 'Start ', '{1}', 'break', 'break', 'Double',
+      'break', 'break', 'break', 'Triple ', '{2}', 'break', 'kw', 'break', 'break', 'Tail ', '{4}']);
+  const start = preview.segments.find(segment => segment.text === 'Start ');
+  assert.equal(start.decorStyle.fontStyle, 'italic');
+  assert.equal(start.decorStyle.fontWeight, 'bold');
+  const keyword = preview.segments.find(segment => segment.type === 'kw');
+  assert.equal(keyword.full, '[Skill|KeyStart\\n\\nKeyEnd {3}]', 'tooltip retains the original escaped text');
+  assert.deepEqual(Array.from(keyword.parts, part => part.type === 'text' ? part.text : part.type),
+    ['KeyStart', 'break', 'break', 'KeyEnd ', 'var']);
+  assert.equal(preview.segments.at(-1).full, '@{4}');
+  assert.equal(preview.segments.at(-1).prefix, '@');
 });
 
 test('SD preview keeps empty leading and intermediate rows when arranging table columns', () => {

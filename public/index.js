@@ -1657,10 +1657,13 @@ const config = Vue.defineComponent({
             i += variable.full.length;
             continue;
           }
-          if (part[i] === '\n' || part[i] === '\r') {
+          // Interpret ClientText's escaped newlines only while rendering, so
+          // variables and tooltip ranges still refer to the original cell text.
+          const escapedNewline = clientText && part[i] === '\\' && part[i + 1] === 'n';
+          if (escapedNewline || part[i] === '\n' || part[i] === '\r') {
             flushText();
             output.push({ type: 'break' });
-            i += part[i] === '\r' && part[i + 1] === '\n' ? 2 : 1;
+            i += escapedNewline || (part[i] === '\r' && part[i + 1] === '\n') ? 2 : 1;
             continue;
           }
           textBuf += part[i];

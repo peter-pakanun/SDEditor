@@ -108,7 +108,12 @@ async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table
       + '@' + ['', '', `RightStart${label}`, '', `RightDouble${label}`, '', '', `RightTriple${label}`, `RightSingle${label}`].join(newline)
       : [`PlainStart${label}`, '', `PlainDouble${label}`, '', '', `PlainTriple${label}`, `PlainSingle${label}`,
       wrap('i', wrap('bold', `NestedStart${label}${newline}${newline}NestedDouble${label}`)),
-      `[Skill|KeyStart${label}${newline}${newline}KeyDouble${label}]`, ...(ct ? [`Literal${label}\\nLiteralEnd${label}`] : [])].join(newline);
+      `[Skill|KeyStart${label}${newline}${newline}KeyDouble${label}]`, ...(ct ? [
+        wrap('red', `EscapedStart${label}`) + '\\n\\n' + wrap('white', `EscapedDouble${label}`)
+          + `\\n\\n\\nEscapedTriple${label}\\nEscapedSingle${label}`,
+        wrap('i', wrap('bold', `EscapedNestedStart${label}\\n\\nEscapedNestedDouble${label}`)),
+        `[Skill|EscapedKeyStart${label}\\n\\nEscapedKeyDouble${label}]`,
+      ] : [])].join(newline);
     const source = text('Source', '\r\n'), target = text('Translation', '\n');
     const saved = { contentMode, hideSource: host.hideSourceInPreviewPanel };
     window.__previewLineSnapshot = saved; host.hideSourceInPreviewPanel = false;
@@ -147,13 +152,18 @@ async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table
         return { lineHeight,
           single: gap('PlainTriple', 'PlainSingle'), double: gap('PlainStart', 'PlainDouble'), triple: gap('PlainDouble', 'PlainTriple'),
           nested: gap('NestedStart', 'NestedDouble'), keyword: gap('KeyStart', 'KeyDouble'),
-          literal: frame.textContent.includes('Literal' + label + '\\nLiteralEnd' + label) };
+          ...(frame.textContent.includes('EscapedStart' + label) ? {
+            escapedSingle: gap('EscapedTriple', 'EscapedSingle'), escapedDouble: gap('EscapedStart', 'EscapedDouble'),
+            escapedTriple: gap('EscapedDouble', 'EscapedTriple'), escapedNested: gap('EscapedNestedStart', 'EscapedNestedDouble'),
+            escapedKeyword: gap('EscapedKeyStart', 'EscapedKeyDouble'),
+          } : {}), escapedVisible: frame.textContent.includes('\\n') };
       }), table);
       assert.equal(frames.length, 2, contentMode + '/' + surface + '/' + theme);
       for (const [index, frame] of frames.entries()) {
         const message = contentMode + '/' + surface + '/' + theme + '/' + (index ? 'Translation LF' : 'Source CRLF');
         const gaps = table ? [['single', 1], ['double', 2], ['triple', 3], ['rightDouble', 2], ['rightTriple', 3]]
           : [['single', 1], ['double', 2], ['triple', 3], ['nested', 2], ['keyword', 2]];
+        if (contentMode === 'clienttext') gaps.push(['escapedSingle', 1], ['escapedDouble', 2], ['escapedTriple', 3], ['escapedNested', 2], ['escapedKeyword', 2]);
         for (const [name, lines] of gaps) {
           assert.ok(Math.abs(frame[name] - lines * frame.lineHeight) < 1, message + ': ' + name + ' line gap ' + frame[name] + ' equals ' + lines + ' lines of ' + frame.lineHeight);
         }
@@ -161,7 +171,7 @@ async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table
           assert.ok(Math.abs(frame.leading - 2 * frame.lineHeight) < 1, message + ': two leading empty table rows retain height (' + frame.leading + 'px)');
           assert.ok(Math.abs(frame.alignment) < 1, message + ': columns remain aligned');
         }
-        if (contentMode === 'clienttext') assert.equal(frame.literal, true, message + ': literal backslash-n remains text');
+        if (contentMode === 'clienttext') assert.equal(frame.escapedVisible, false, message + ': escaped backslash-n renders as line breaks');
       }
     }
     assert.deepEqual(await page.evaluate(contentMode => {
@@ -181,7 +191,8 @@ async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table
       delete window.__previewLineSnapshot; await host.$nextTick();
     });
   }
-  console.log(contentMode + '/' + surface + ' source/translation consecutive preview line breaks' + (table ? ' and empty table rows' : ', nested styles and keyword labels') + ' passed in all four desktop themes.');
+  console.log(contentMode + '/' + surface + ' source/translation consecutive preview line breaks' + (table ? ' and empty table rows' : ', nested styles and keyword labels')
+    + (contentMode === 'clienttext' ? ', including escaped backslash-n' : '') + ' passed in all four desktop themes.');
 }
 
 async function run() {
