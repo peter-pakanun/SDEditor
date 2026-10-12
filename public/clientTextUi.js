@@ -84,7 +84,7 @@
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
-            ctVariantSelections: {}, ctDefaultsExpanded: {},
+            ctVariantSelections: {},
             ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
             ctScanProcessed:0,ctScanTotal:0,ctScanRunId:0,ctScanError:'',ctScanPhase:'',ctScanErrorFileCount:0,ctScanWarningFileCount:0,
@@ -864,7 +864,7 @@
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
-                this.ctVariantSelections={};this.ctDefaultsExpanded={};
+                this.ctVariantSelections={};
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
@@ -923,7 +923,6 @@
                 return fields.find(field=>field.id===selected) || fields.find(field=>String(values[field.id] ?? '').trim()) || fields[0] || null;
             },
             ctPopulatedVariants(group) { return this.ctClassFields(group).filter(field=>String(this.ctValues[field.id] ?? '').trim()); },
-            ctDefaultsOpen(group,unit=this.ctCurrentUnit) { return !this.ctClassFields(group).length || !!this.ctDefaultsExpanded[this.ctVariantKey(group,unit)]; },
             ctInitializeVariants(unit=this.ctCurrentUnit) {
                 for(const group of groupFields({fields:this.ctFieldsFor(unit)})){
                     const fields=this.ctClassFields(group),key=this.ctVariantKey(group,unit);if(!fields.length)continue;
@@ -935,7 +934,7 @@
                 return groupFields({fields:this.ctFieldsFor(unit)}).flatMap(group=>{
                     if(!this.ctClassFields(group).length)return group.fields;
                     const selected=this.ctSelectedVariant(group,unit);
-                    return group.fields.filter(field=>isClassField(field) ? field===selected : this.ctDefaultsOpen(group,unit));
+                    return group.fields.filter(field=>!isClassField(field) || field===selected);
                 });
             },
             ctVariantGroupCurrent(group) {
@@ -953,13 +952,6 @@
                 const fields=this.ctPopulatedVariants(group),index=fields.indexOf(field);if(index<0)return false;
                 const next=event.key==='Home'?0:event.key==='End'?fields.length-1:(index+(event.key==='ArrowRight'?1:-1)+fields.length)%fields.length;
                 event.preventDefault();event.stopPropagation?.();return this.ctSelectVariant(group,fields[next].id);
-            },
-            ctToggleDefaults(group) {
-                if(!this.ctVariantGroupCurrent(group) || !this.ctClassFields(group).length)return false;
-                const ctx=this.ctContext(),unit=this.ctCurrentUnit,key=this.ctVariantKey(group),open=!this.ctDefaultsOpen(group);this.ctDefaultsExpanded[key]=open;
-                if(!open && this.ctDefaultForms(group).some(field=>field.id===this.ctFocusedField))
-                    this.ctFocusedField=this.ctSelectedVariant(group)?.id || '';
-                this.ctCloseCompletion();this.$nextTick?.(()=>{if(this.ctCurrent(ctx) && this.ctCurrentUnit===unit)this.ctRefreshLayout();});return true;
             },
             ctVariantFacts(field) {
                 const status=this.ctFieldStatus(field),issues=(this.ctDiagnostics[this.ctSelection] || []).filter(issue=>issue.fieldId===field.id);
@@ -979,13 +971,10 @@
                 return labels.join(' · ');
             },
             ctRevealTarget(field) {
+                if(!isClassField(field))return false;
                 const group=groupFields({fields:this.ctFieldsFor()}).find(group=>group.fields.includes(field));
-                if(!group || !this.ctClassFields(group).length)return false;
-                const key=this.ctVariantKey(group);
-                if(isClassField(field)){
-                    const changed=this.ctSelectedVariant(group)!==field;this.ctVariantSelections[key]=field.id;return changed;
-                }
-                const changed=!this.ctDefaultsOpen(group);this.ctDefaultsExpanded[key]=true;return changed;
+                if(!group)return false;
+                const changed=this.ctSelectedVariant(group)!==field;this.ctVariantSelections[this.ctVariantKey(group)]=field.id;return changed;
             },
             ctGroupSources(group) {
                 const sources=new Map();for(const field of group.fields){const text=String(field.source ?? ''),item=sources.get(text);
@@ -1178,8 +1167,8 @@
                 this.scheduleClientTextDictionaryMatches();this.ctRefreshDraftSummaries(ctx);
                 this.ctLoadCommentDraft(ctx,unit.id);
                 await this.$nextTick?.();if(!current() || this.ctSelection!==unit.id)return false;
-                // Opening starts at the first worksheet cell, revealing collapsed
-                // defaults through the same focus path used by Tab navigation.
+                // Opening starts at the first worksheet cell through the same
+                // focus path used by Tab navigation.
                 run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget(false,null);return true;
             },
             ctEditorElement() {
@@ -2479,8 +2468,7 @@
                     </template>
                 </div>
                 <div v-if="side !== 'source'" class="ctFieldTranslation">
-                <button v-if="host.ctClassFields(group).length && host.ctDefaultForms(group).length" type="button" class="ctDefaultFormsToggle" :aria-expanded="host.ctDefaultsOpen(group)" @click="host.ctToggleDefaults(group)"><span>{{ host.ctDefaultsOpen(group) ? '▾' : '▸' }} Default forms · {{ host.ctDefaultForms(group).map(field=>field.form).join(' / ') }}</span><small v-if="host.ctVariantSummary(host.ctDefaultForms(group))">{{ host.ctVariantSummary(host.ctDefaultForms(group)) }}</small></button>
-                <table v-if="group.forms && host.ctDefaultForms(group).length && host.ctDefaultsOpen(group)" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
+                <table v-if="group.forms && host.ctDefaultForms(group).length" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
                     <tr v-for="row in ['M','F','N'].filter(row => host.ctDefaultForms(group).some(field => field.form.startsWith(row)))" :key="row"><th>{{ row }}</th>
                     <td v-for="number in (host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form)) ? ['S','P'] : ['S'])" :key="number">
                         <template v-if="host.ctForm(group,row+number)"><ct-target :host="host" :field="host.ctForm(group,row+number)" :compact="side !== 'both'"></ct-target></template><span v-else class="versionMuted">Unavailable</span>

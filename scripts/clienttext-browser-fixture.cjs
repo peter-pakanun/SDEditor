@@ -296,6 +296,10 @@ async function run() {
                 await page.waitForFunction(field => document.activeElement?.dataset.ctTarget === field, fieldId(form));
                 assert.equal(await target(form).evaluate(input => input === document.activeElement), true);
             };
+            const defaultsVisible = async () => {
+                assert.equal(await workspace.locator('.ctDefaultFormsToggle').count(),0,'Default forms have no expand/collapse button');
+                for(const form of ['MS','FS'])assert.equal(await target(form).isVisible(),true,form+' remains visible');
+            };
             const saved = async (record, form, value) => {
                 await page.waitForFunction(({ unitId, field, value }) => window.__clientFixtureApp.ctSaved[unitId]?.values[field] === value && !window.__clientFixtureApp.ctBusy,
                     { unitId: id(record), field: fieldId(form), value });
@@ -306,23 +310,21 @@ async function run() {
             };
             await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), true);
             await active('MS');
-            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Full-editor opening reveals the first default form');
+            await defaultsVisible();
             assert.equal(await workspace.locator('[data-ct-target]').count(), 3, 'Both default forms render alongside the selected class variant');
             assert.equal(await workspace.locator('[data-ct-source]').count(), 1, 'One shared English source remains on the left');
             assert.deepEqual(await picker().locator('option').evaluateAll(options => options.map(option => JSON.parse(option.value)[1])), ClientState.CLASS_FORMS);
             assert.deepEqual(await workspace.getByRole('tablist', { name: 'Populated class variants', exact: true }).getByRole('tab').evaluateAll(tabs => tabs.map(tab => tab.getAttribute('aria-label'))), ['StrFour','StrDexFour','StrFourb']);
-            await workspace.locator('.ctDefaultFormsToggle').click();
-            assert.equal(await workspace.locator('[data-ct-target]').count(), 1, 'Defaults can still collapse before worksheet traversal reveals them');
             await picker().selectOption(fieldId('IntFour')); await active('IntFour'); assert.equal(await target('IntFour').inputValue(), '');
+            await defaultsVisible();
             await target('IntFour').press('Tab'); await active('DexFour'); assert.equal(await target('DexFour').inputValue(), '');
             await target('DexFour').press('Tab'); await active('StrDexFour'); await target('StrDexFour').press('Shift+Tab'); await active('DexFour');
             await picker().selectOption(fieldId('StrFour')); await active('StrFour'); await target('StrFour').press('Shift+Tab'); await active('FS');
-            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Reverse Tab reveals a collapsed default form by worksheet position');
+            await defaultsVisible();
             const forms = ['MS','FS',...ClientState.CLASS_FORMS]; await page.evaluate(field => window.__clientFixtureApp.ctFocusTarget(false, field), fieldId('MS')); await active('MS');
             for (const form of forms.slice(1)) { await page.keyboard.press('Tab'); await active(form); }
             for (const form of forms.slice(0,-1).reverse()) { await page.keyboard.press('Shift+Tab'); await active(form); }
             assert.equal(await picker().inputValue(), fieldId('StrFour'), 'Worksheet traversal can reveal a blank class form without changing its text');
-            await workspace.locator('.ctDefaultFormsToggle').click();
             const tabs = workspace.getByRole('tablist', { name: 'Populated class variants', exact: true });
             await tabs.getByRole('tab', { name: 'StrFour', exact: true }).focus(); await page.keyboard.press('ArrowRight'); await active('StrDexFour');
             await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
@@ -335,11 +337,10 @@ async function run() {
             await page.evaluate(async () => { window.__clientFixtureApp.inlineEditor = true; await window.__clientFixtureApp.$nextTick(); });
             await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), false);
             await active('MS');
-            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Inline click reveals the first default form');
-            await workspace.locator('.ctDefaultFormsToggle').click();
+            await defaultsVisible();
             await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'variant-fixture', exact: true }) }).focus();
             await page.keyboard.press('Enter');await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
-            await active('MS');assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Enter reopens collapsed defaults in the full editor');
+            await active('MS');await defaultsVisible();
             await page.keyboard.press('Escape');await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
             await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'variant-fixture', exact: true }) }).click({ position: { x: 5, y: 5 } });
             await active('MS');
@@ -353,24 +354,29 @@ async function run() {
             assert.equal(await target('StrFourb').inputValue(), secondText); assert.deepEqual(await target('StrFourb').evaluate(input => [input.selectionStart,input.selectionEnd]), [4,9], 'Escape returns the current full-editor caret to the exact inline variant');
             await target('StrFourb').press('Control+s'); assert.equal((await saved('variant-fixture','StrFourb',secondText)).history, secondText);
             if(classOpeningOnly){
-                const checks=[],row=workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:'variant-fixture',exact:true})});
-                for(const theme of ['light','grey','dark','modern-dark']){
+                const checks=[],screenshots=[],row=workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:'variant-fixture',exact:true})});
+                for(const width of [1440,1024])for(const theme of ['light','grey','dark','modern-dark']){
+                    await page.setViewportSize({width,height:1000});
                     await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
                     for(const full of [false,true]){
-                        if(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded')==='true')await workspace.locator('.ctDefaultFormsToggle').click();
                         if(full){await row.focus();await page.keyboard.press('Enter');}
                         else await row.click({position:{x:5,y:5}});
                         await active('MS');assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctEditor),full);
-                        assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'),'true');
+                        await defaultsVisible();
                         assert.equal(await target('MS').inputValue(),'Default masculine','Opening retains the original default text');
-                        checks.push({theme,editor:full?'full':'inline',defaultsExpanded:true,focused:'MS'});
+                        const bounds=await workspace.locator('.ctFormGrid').evaluate(grid=>{const box=grid.getBoundingClientRect();return{left:box.left,right:box.right,viewport:innerWidth};});
+                        assert.ok(bounds.left>=0 && bounds.right<=bounds.viewport,'Default form grid fits the desktop viewport');
+                        checks.push({width,theme,editor:full?'full':'inline',defaultsVisible:true,focused:'MS'});
+                        if(width===1440 && theme==='modern-dark'){
+                            const path=join(directory,'clienttext-default-forms-'+(full?'full':'inline')+'.png');await page.screenshot({path,fullPage:true});screenshots.push(path);
+                        }
                         if(full){await page.keyboard.press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);}
                     }
                 }
                 assert.deepEqual(failures,[]);
-                console.log(JSON.stringify({status:'PASS',classEditorOpeningOnly:true,normalMode:true,checks,
-                    results:['Full-editor click and inline row click expand defaults and focus the first worksheet form',
-                        'Enter reopens collapsed defaults; Ctrl+Enter/Escape preserve the exact class field and caret']},null,2));return;
+                console.log(JSON.stringify({status:'PASS',classEditorOpeningOnly:true,normalMode:true,checks,screenshots,
+                    results:['Default forms stay visible through class selection, worksheet navigation and editor opening, without a toggle',
+                        'Click/Enter focus the first form; Ctrl+Enter/Escape preserve the exact class field and caret']},null,2));return;
             }
             await picker().selectOption(fieldId('DexIntFour')); await active('DexIntFour'); await target('DexIntFour').fill('[');
             const completion = page.getByRole('listbox', { name: 'Highlights', exact: true }); await completion.waitFor();
@@ -407,7 +413,7 @@ async function run() {
                     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
                     const facts = await workspace.evaluate(root => {
                         const variants = root.querySelector('.ctClassVariants'), block = variants.closest('.ctBlock'), source = block.querySelector('[data-ct-source]') || root.querySelector('[data-ct-source]'),
-                            target = variants.querySelector('[data-ct-target]'), elements = [variants,variants.querySelector('.ctVariantTabs'),variants.querySelector('select'),block.querySelector('.ctDefaultFormsToggle'),target];
+                            target = variants.querySelector('[data-ct-target]'), elements = [variants,variants.querySelector('.ctVariantTabs'),variants.querySelector('select'),block.querySelector('.ctFormGrid'),target];
                         const box = element => { const rect=element.getBoundingClientRect(),style=getComputedStyle(element); return { x:rect.x,right:rect.right,y:rect.y,bottom:rect.bottom,width:rect.width,height:rect.height,visible:style.display!=='none' && style.visibility!=='hidden' }; };
                         return { viewport:innerWidth,source:box(source),target:box(target),controls:elements.map(box) };
                     });
@@ -462,7 +468,7 @@ async function run() {
             if (classCorpus) assert.equal(createHash('sha256').update(readFileSync(classCorpus.source)).digest('hex'), classCorpus.sha256, 'Read-only actual German source never changes');
             assert.deepEqual(failures, []);
             const report = { status:'PASS',classVariantsOnly:true,normalMode:true,corpus:classCorpus,themes:themeChecks,screenshots:[screenshotInline,screenshotFull],
-                results:['Real import v2 class forms; populated tabs/all variants/default collapse; worksheet order across hidden blank fields',
+                results:['Real import v2 class forms; populated tabs/all variants/visible defaults; worksheet order across hidden blank fields',
                     'F2, inline/full exact field and caret, Ctrl+S, Save & close, raw multiline and []{} completion',
                     'Durable history comparison/restoration; exported targets and unchanged English/metadata/package parts', 'Accepted v1 parser/descriptors/reviews replay unchanged after v2'] };
             writeFileSync(join(directory,'class-variants-report.json'),JSON.stringify(report,null,2)); console.log(JSON.stringify(report,null,2)); return;

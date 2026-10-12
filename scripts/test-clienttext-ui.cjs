@@ -1221,54 +1221,55 @@ function classVariantUnit(id='ClassVariants',row=2){
         targetCell:String.fromCharCode(68+index)+row}));return original;
 }
 
-test('class variants use one raw English group, populated tabs and collapsed defaults without changing standard forms',async()=>{
+test('class variants use one raw English group, populated tabs and always-visible defaults without changing standard forms',async()=>{
     const original=classVariantUnit(),snapshot=clone(original),{app}=keyboardHarness(original,{ctSelection:'',ctValues:{}});
     assert.equal(await app.ctSelect(original,false,{focus:false}),true);const group=app.ctFieldGroups[0];
     assert.equal(app.ctGroupSources(group).length,1);assert.equal(app.ctGroupSources(group)[0].text,original.fields[0].source);
     assert.deepEqual(Array.from(app.ctClassFields(group),field=>field.form),CLASS_VARIANT_FORMS);
-    assert.deepEqual(Array.from(app.ctDefaultForms(group),field=>field.form),['MS','FS']);assert.equal(app.ctDefaultsOpen(group),false);
+    assert.deepEqual(Array.from(app.ctDefaultForms(group),field=>field.form),['MS','FS']);
     assert.deepEqual(Array.from(app.ctPopulatedVariants(group),field=>field.form),['StrFourb','DexFourb']);
-    assert.equal(app.ctSelectedVariant(group).form,'StrFourb');assert.equal(app.ctFocusedField,app.ctSelectedVariant(group).id);
-    assert.deepEqual(Array.from(app.ctTargetInputs(),input=>input.dataset.ctTarget),[app.ctSelectedVariant(group).id]);
+    assert.equal(app.ctSelectedVariant(group).form,'StrFourb');assert.equal(app.ctFocusedField,original.fields[0].id);
+    assert.deepEqual(Array.from(app.ctTargetInputs(),input=>input.dataset.ctTarget),[original.fields[0].id,original.fields[1].id,app.ctSelectedVariant(group).id]);
     assert.equal(app.ctDraftDirty,false);assert.deepEqual(original,snapshot);
-    const standard=keyboardHarness();assert.equal(standard.app.ctDefaultsOpen(standard.app.ctFieldGroups.find(group=>group.forms)),true);
+    const standard=keyboardHarness();
     assert.equal(standard.app.ctDisplayedFields().length,standard.app.ctFieldsFor().length);
 });
 
 for(const opening of ['inline click','full click','row Enter','double-click'])for(const reopening of [false,true])
-test(`${opening} ${reopening?'reopens':'opens'} collapsed defaults at the first worksheet form`,async()=>{
+test(`${opening} ${reopening?'reopens':'opens'} visible defaults at the first worksheet form`,async()=>{
     const original=classVariantUnit(),snapshot=clone(original),full=opening!=='inline click',
         {app,focuses,inputFor}=keyboardHarness(original,{inlineEditor:opening!=='full click'});
     app.ctInitializeVariants(original);
     const group=app.ctFieldGroups[0],selected=app.ctSelectedVariant(group),first=original.fields[0];
     if(reopening){inputFor(original,selected).focus();app.ctInlineClosed=true;}
     else app.ctSelection='';
-    assert.equal(app.ctDefaultsOpen(group),false);
+    if(reopening)assert.equal(app.ctDisplayedFields().includes(first),true);
     const values=app.ctValues,reviewed=app.ctReviewed,choices=app.ctChoices,saved=app.ctSaved;
     const opened=opening==='row Enter'?await app.ctRowKeydown(original,rowEvent('Enter'))
         :await app[opening==='double-click'?'ctRowDoubleClick':'ctRowClick'](original,rowEvent(''));
     assert.equal(opened,true);assert.equal(app.ctEditor,full);assert.equal(app.ctInlineClosed,false);
-    assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),true);assert.equal(app.ctFocusedField,first.id);
+    assert.equal(app.ctDisplayedFields().includes(first),true);assert.equal(app.ctFocusedField,first.id);
     assert.equal(focuses.at(-1).fieldId,first.id);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),selected);
     assert.equal(app.ctTargetInputs()[0].dataset.ctTarget,first.id);assert.equal(app.ctDraftDirty,false);
     if(reopening){assert.equal(app.ctValues,values);assert.equal(app.ctReviewed,reviewed);assert.equal(app.ctChoices,choices);}
     assert.equal(app.ctSaved,saved);assert.deepEqual(original,snapshot);
 });
 
-test('per-ID variant selections retain exact blank choices and default expansion across full/inline and revisit, then fence by scope',async()=>{
+test('per-ID variant selections retain exact blank choices and visible defaults across full/inline and revisit, then fence by scope',async()=>{
     const first=classVariantUnit('First'),second=classVariantUnit('Second',3),{app}=keyboardHarness(first,{ctUnits:[first,second],
         _ctUnitIndex:new Map([[first.id,first],[second.id,second]])});app.ctInitializeVariants();
     const group=app.ctFieldGroups[0],blank=group.fields.find(field=>field.form==='IntFour');
     assert.equal(app.ctSelectVariant(group,blank.id,{focus:false}),true);assert.equal(app.ctSelectedVariant(group),blank);
-    assert.equal(app.ctToggleDefaults(group),true);assert.equal(app.ctDefaultsOpen(group),true);
+    assert.equal(app.ctDefaultForms(group).every(field=>app.ctDisplayedFields().includes(field)),true);
     assert.equal(await app.ctSelect(first,true,{focus:false}),true);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank);
-    assert.equal(await app.ctSelect(second,false,{focus:false}),true);assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),false);
+    assert.equal(await app.ctSelect(second,false,{focus:false}),true);
+    assert.equal(app.ctDefaultForms(app.ctFieldGroups[0]).every(field=>app.ctDisplayedFields().includes(field)),true);
     assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]).form,'StrFourb');
     assert.equal(await app.ctSelect(first,false,{focus:false}),true);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank);
-    assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),true);app.ctValues[blank.id]='\tcustom@literal\\n\n';app.ctValues[blank.id]='';
+    assert.equal(app.ctDefaultForms(app.ctFieldGroups[0]).every(field=>app.ctDisplayedFields().includes(field)),true);app.ctValues[blank.id]='\tcustom@literal\\n\n';app.ctValues[blank.id]='';
     assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),blank,'clearing the selected cell never silently changes its variant');
     const obsolete=app.ctFieldGroups[0];app.ctFence();assert.equal(Object.keys(app.ctVariantSelections).length,0);
-    assert.equal(Object.keys(app.ctDefaultsExpanded).length,0);assert.equal(app.ctSelectVariant(obsolete,blank.id),false);
+    assert.equal(app.ctSelectVariant(obsolete,blank.id),false);
 });
 
 test('hidden blank variants expose committed workload, missing/outdated facts and manual diagnostics through picker labels and summaries',()=>{
@@ -1280,10 +1281,12 @@ test('hidden blank variants expose committed workload, missing/outdated facts an
     assert.equal(app.ctVariantLabel(optional),'IntFour (blank) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
     assert.equal(app.ctVariantLabel(outdated),'StrFourb · Outdated');
     assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Missing · 1 Outdated · 1 Warning');
-    const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});app.ctToggleDefaults(group);
+    const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});
     assert.equal(app.ctDiagnostics,diagnostics,'display changes do not rerun or clear completed diagnostics');
-    app.ctFocusedField=group.fields[0].id;app.ctToggleDefaults(group);app.ctFocusSource(group,app.ctGroupSources(group)[0]);
-    assert.equal(app.ctPreviewField,optional,'English focus previews the active variant, not the hidden default');
+    app.ctFocusSource(group,app.ctGroupSources(group)[0]);
+    assert.equal(app.ctPreviewField,optional,'English focus preserves the current class variant');
+    app.ctFocusedField=group.fields[0].id;app.ctFocusSource(group,app.ctGroupSources(group)[0]);
+    assert.equal(app.ctPreviewField,group.fields[0],'English focus preserves the current visible default form');
 });
 
 test('class-field translation choices identify the exact form instead of repeating only the English heading',()=>{
@@ -1298,7 +1301,7 @@ for(const full of [false,true])test(`class variant ${full?'full':'inline'} Tab r
     const group=app.ctFieldGroups[0],firstClass=app.ctClassFields(group)[0];let saves=0;app.ctSaveAndNavigate=()=>saves++;
     app.ctSelectVariant(group,firstClass.id,{focus:false});inputFor(original,firstClass).focus();
     const back=event(firstClass,'Tab',{shiftKey:true});await app.ctTargetKeydown(firstClass,back);
-    assert.equal(app.ctDefaultsOpen(group),true);assert.equal(focuses.at(-1).fieldId,original.fields[1].id);
+    assert.equal(app.ctDisplayedFields().includes(original.fields[1]),true);assert.equal(focuses.at(-1).fieldId,original.fields[1].id);
     for(let index=1;index<original.fields.length-1;index++){
         const field=original.fields[index],next=original.fields[index+1];inputFor(original,field).focus();
         const key=event(field,'Tab');await app.ctTargetKeydown(field,key);assert.equal(key.defaultPrevented,true);
@@ -1856,7 +1859,7 @@ test('confirmed history restores hidden class variants in one saved revision wit
     assert.equal(await app.ctRestoreHistory(entry),true);const restored=(await f.store.getSaved(scope))[original.id];
     assert.equal(restored.values[hidden.id],oldValues[hidden.id]);assert.equal(restored.reviewed[hidden.id],S.sourceHash(hidden.source));
     assert.equal(Object.keys(restored.values).length,original.fields.length);assert.equal(app.ctSelectedVariant(group).id,selected.id);
-    assert.equal(app.ctDefaultsOpen(group),false);assert.equal(app.ctDisplayedFields().includes(hidden),false);
+    assert.equal(app.ctDefaultForms(group).every(field=>app.ctDisplayedFields().includes(field)),true);assert.equal(app.ctDisplayedFields().includes(hidden),false);
     assert.equal(await f.store.getDraft(scope,original.id),undefined);assert.equal(restored.origin,'restore');
     const queued=await f.store.getOutbox(scope);assert.equal(queued.length,outbox.length,'unclaimed sparse work coalesces per ID');assert.equal(queued[0].origin,'restore');
     assert.equal(queued[0].values[hidden.id],oldValues[hidden.id]);assert.equal((await f.store.listHistory(scope,original.id)).length,history.length+1);
