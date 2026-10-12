@@ -173,6 +173,7 @@ async function run() {
       await target.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
       assert.equal(await target.evaluate(element => element === document.activeElement), true, 'Tooltip target is keyboard reachable');
       await page.getByRole('tooltip').waitFor(); assert.match(await page.getByRole('tooltip').textContent(), expected);
+      if (expected.source.includes('local')) assert.doesNotMatch(await page.getByRole('tooltip').textContent(), /New Zealand|NZT/);
     };
     const checkOfflineImportDialog = async (page, { keyboard = false } = {}) => {
       const button = page.getByRole('button', { name: 'Import ZIP', exact: true });
@@ -199,7 +200,7 @@ async function run() {
       assert.equal(await reminder.count(), deadline ? 1 : 0);
       if (deadline) {
         assert.equal(await reminder.evaluate(element => element.previousElementSibling?.classList.contains('saved')), true, 'Deadline immediately follows Saved counts');
-        await checkTooltip(page, reminder, /New Zealand.*local/);
+        await checkTooltip(page, reminder, /local/);
       }
     };
     const openStatusChooser = async page => {
@@ -605,7 +606,7 @@ async function run() {
       assert.equal(layout.nativeTitles, 0, 'Dashboard uses shared tooltips only in ' + theme);
       assert.equal(await thaiRow.getByRole('button', { name: 'Open editor', exact: true }).evaluate(element => element.classList.contains('primaryAction')), false,
         'Manager team actions keep equal prominence across all languages');
-      await checkTooltip(manager, manager.locator('.onlineVersions time').first(), /New Zealand.*local/);
+      await checkTooltip(manager, manager.locator('.onlineVersions time').first(), /local/);
       await checkTooltip(manager, thaiRow.locator('.versionProgress'), /Revised: 1 \(included in Saved\)/);
       assert.equal(await manager.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'No page overflow in ' + theme);
       await manager.locator('.teamVersionTable tbody tr').nth(2).hover();
@@ -658,6 +659,11 @@ async function run() {
     await manager.locator('#versionMetadataName').waitFor();
     assert.equal(await actionMenu.getAttribute('open'), null, 'Invoking metadata closes the floating actions');
     assert.equal(await manager.locator('#versionMetadataName').inputValue(), version.name);
+    assert.equal(await manager.locator('#versionMetadataDeadline').inputValue(), await manager.evaluate(instant => {
+      const date = new Date(instant), pad = value => String(value).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }, version.deadlineAt), 'Edit version details initializes the deadline in the browser timezone');
+    assert.doesNotMatch(await manager.getByRole('dialog', { name: 'Edit version details' }).textContent(), /New Zealand|NZT/);
     await manager.getByRole('dialog', { name: 'Edit version details' }).getByRole('button', { name: 'Cancel', exact: true }).click();
     await menuSummary.focus();
     if (await actionMenu.getAttribute('open') === null) await manager.keyboard.press('Space');
@@ -741,7 +747,7 @@ async function run() {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await translator.keyboard.press('Tab');
       assert.equal(await translator.locator('html').getAttribute('data-theme'), theme);
-      await checkTooltip(translator, translator.locator('.editorVersionContext .versionStatusName'), /Import deadline:.*New Zealand/);
+      await checkTooltip(translator, translator.locator('.editorVersionContext .versionStatusName'), /Import deadline:.*local/);
       assert.equal(await translator.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Editor fits ' + theme);
       await translator.screenshot({ path: join(directory, 'translator-' + theme + '.png'), fullPage: true });
     }

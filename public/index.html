@@ -389,7 +389,18 @@
     <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!ctUploading && (ctUploadVisible=false)">
       <section class="box ctUploadDialog" aria-label="Content upload">
         <h2>{{ ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
-        <template v-if="!ctUploadVersion"><label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label><label class="ctUploadField">Advisory deadline<input type="datetime-local" v-model="ctUploadDeadline"></label></template>
+        <template v-if="!ctUploadVersion">
+          <label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label>
+          <div v-if="!ctUploadLocal" class="ctUploadField">
+            <label for="ctUploadDeadline">Advisory deadline · New Zealand time</label>
+            <div class="versionDeadlineFields">
+              <select aria-label="Advisory deadline weekday" :value="managedDeadlineWeekday(ctUploadDeadline)" @change="ctUploadDeadline = managedNextWeekDeadline(ctUploadDeadline, $event.target.value)" :disabled="ctUploading" v-tooltip="'Choose this day in next week, in New Zealand time.'">
+                <option v-for="(day, index) in managedDeadlineWeekdays" :key="day" :value="index">{{ day }}</option>
+              </select>
+              <input id="ctUploadDeadline" type="datetime-local" v-model="ctUploadDeadline" :disabled="ctUploading">
+            </div>
+          </div>
+        </template>
         <div class="ctUploadSelectors">
           <label class="ctUploadField">Select files<input type="file" multiple accept=".zip,.xlsx,.xlsm,.txt" @change="ctChooseFiles" :disabled="ctUploading"></label>
           <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
@@ -553,9 +564,9 @@
     <div v-if="managedManagerAccess && managedMetadataVisible" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionMetadataTitle">
       <h2 id="versionMetadataTitle">Edit version details</h2>
       <label for="versionMetadataName">Version name</label><input id="versionMetadataName" v-model="managedMetadataName">
-      <label for="versionMetadataDeadline">Import deadline · New Zealand time</label>
+      <label for="versionMetadataDeadline">Import deadline · local time</label>
       <div class="versionDeadlineFields">
-        <select aria-label="Import deadline weekday" :value="managedDeadlineWeekday(managedMetadataDeadline)" @change="managedMetadataDeadline = managedNextWeekDeadline(managedMetadataDeadline, $event.target.value)" :disabled="managedVersionBusy" v-tooltip="'Choose this day in next week, in New Zealand time.'">
+        <select aria-label="Import deadline weekday" :value="managedDeadlineWeekday(managedMetadataDeadline)" @change="managedMetadataDeadline = managedNextLocalWeekDeadline(managedMetadataDeadline, $event.target.value)" :disabled="managedVersionBusy" v-tooltip="'Choose this day in next week, in local time.'">
           <option v-for="(day, index) in managedDeadlineWeekdays" :key="day" :value="index">{{ day }}</option>
         </select>
         <input id="versionMetadataDeadline" type="datetime-local" v-model="managedMetadataDeadline">

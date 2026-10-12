@@ -2065,7 +2065,7 @@ test('rendered tooltip placement clears the footer using the full wrapped conten
   context.window.innerWidth = 800; context.window.innerHeight = 600;
   const text = ['2026-10-05_POE2', 'PoE2 · Thai · default branch',
     'ZIP SHA-256: ' + 'a'.repeat(64), 'Source baseline: ' + 'b'.repeat(64),
-    'Import deadline: Oct 12, 2026, 9:00 AM New Zealand · Oct 12, 2026, 3:00 AM local',
+    'Import deadline: Oct 12, 2026, 3:00 AM local',
     'Open source versions.'].join('\n');
   editor.showTooltip({ clientX: 100, clientY: 550 }, text);
   const state = editor.tooltip;

@@ -104,7 +104,9 @@ async function run() {
       for (const rect of bounds.textRects) assert.ok(rect.top >= 0 && rect.bottom <= bounds.viewportHeight
         && rect.left >= 0 && rect.right <= bounds.viewportWidth, name + ': a wrapped text line is cut off.');
       assert.equal(bounds.text, await page.evaluate(() => window.__tooltipFixture.managedStatusTooltip), name + ': complete content');
-      assert.match(bounds.text, /ZIP SHA-256: [a-f0-9]{64}\nSource baseline: [a-f0-9]{64}\nImport deadline: .*New Zealand.*local\nOpen source versions\./);
+      assert.match(bounds.text, /ZIP SHA-256: [a-f0-9]{64}\nSource baseline: [a-f0-9]{64}\nImport deadline: .*local\nOpen source versions\./);
+      assert.doesNotMatch(bounds.text, /New Zealand|NZT/);
+      assert.ok(bounds.text.includes('Import deadline: Oct 12, 2026, 3:00 AM local'), 'Deadline reflects the browser timezone.');
       results.push({ name, width: Math.round(bounds.width), height: Math.round(bounds.height), bottom: Math.round(bounds.bottom) });
     };
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const density of ['compact', 'spacious']) {

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { spawnSync } = require('node:child_process');
 const Managed = require('../public/managedVersions.js');
 const WorkspaceInitialization = require('../public/workspaceInitialization.js');
 const codec = require('../public/statDescCodec.js');
@@ -498,6 +499,73 @@ test('invalid deadline dates are rejected instead of silently moving the deadlin
   }
 });
 
+test('deadline displays and metadata inputs use the browser timezone while Publish keeps New Zealand time', () => {
+  for (const [timeZone, localInput, localInstant, nextMonday] of [
+    ['Asia/Bangkok', '2026-10-12T03:00', '2026-10-12T02:00:00.000Z', '2026-10-05T18:45'],
+    ['America/New_York', '2026-10-11T16:00', '2026-10-12T13:00:00.000Z', '2026-10-05T18:45'],
+    ['Pacific/Auckland', '2026-10-12T09:00', '2026-10-11T20:00:00.000Z', '2026-10-12T18:45'],
+  ]) {
+    const script = `
+      const assert = require('node:assert/strict');
+      const Managed = require(${JSON.stringify(require.resolve('../public/managedVersions.js'))});
+      const instant = '2026-10-11T20:00:00.000Z';
+      assert.equal(Intl.DateTimeFormat().resolvedOptions().timeZone, ${JSON.stringify(timeZone)});
+      assert.equal(Managed.localDeadlineInput(instant), ${JSON.stringify(localInput)});
+      assert.equal(Managed.parseLocalDeadline(${JSON.stringify(localInput)}), instant);
+      assert.equal(Managed.parseLocalDeadline('2026-10-12T09:00'), ${JSON.stringify(localInstant)});
+      assert.equal(Managed.mixin.methods.managedFormatDeadline(instant),
+        new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(instant)) + ' local');
+      assert.doesNotMatch(Managed.mixin.methods.managedFormatDeadline(instant), /New Zealand|NZT/);
+      assert.equal(Managed.nextLocalWeekDeadline('2026-11-02T18:45', 0, new Date('2026-10-04T12:00:00Z')), ${JSON.stringify(nextMonday)});
+      assert.equal(Managed.deadlineInput(instant), '2026-10-12T09:00');
+      assert.equal(Managed.parseDeadline('2026-10-12T09:00'), instant);
+      const app = { managedManagerAccess: true, managedVersionBusy: false };
+      Managed.mixin.methods.openManagedMetadata.call(app, { id: 'weekly', name: 'Weekly', deadlineAt: instant });
+      assert.equal(app.managedMetadataDeadline, ${JSON.stringify(localInput)});
+      assert.equal(app.managedMetadataVisible, true);
+    `;
+    const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, TZ: timeZone } });
+    assert.equal(result.status, 0, timeZone + ': ' + (result.error?.message || result.stderr || result.stdout));
+  }
+});
+
+test('local deadline handling rejects invalid dates and local DST gaps and keeps next-week wall clocks', () => {
+  const script = `
+    const assert = require('node:assert/strict');
+    const Managed = require(${JSON.stringify(require.resolve('../public/managedVersions.js'))});
+    for (const input of ['', '2026-02-30T09:00', '2026-13-01T09:00', '2026-10-05T25:00', '2026-10-05T09:61', '2026-03-08T02:30'])
+      assert.throws(() => Managed.parseLocalDeadline(input), /deadline|valid|exist/i, input);
+    for (const [input, instant] of [
+      ['2026-03-08T01:30', '2026-03-08T06:30:00.000Z'],
+      ['2026-03-08T03:30', '2026-03-08T07:30:00.000Z'],
+      ['2026-11-01T01:30', '2026-11-01T05:30:00.000Z'],
+    ]) {
+      assert.equal(Managed.parseLocalDeadline(input), instant);
+      assert.equal(Managed.localDeadlineInput(instant), input);
+    }
+    assert.equal(Managed.nextLocalWeekDeadline('2026-03-02T09:00', 6, new Date('2026-03-02T17:00:00Z')), '2026-03-15T09:00');
+    assert.equal(Managed.parseLocalDeadline('2026-03-15T09:00'), '2026-03-15T13:00:00.000Z');
+    assert.equal(Managed.nextLocalWeekDeadline('2026-10-26T09:00', 6, new Date('2026-10-26T17:00:00Z')), '2026-11-08T09:00');
+    assert.equal(Managed.parseLocalDeadline('2026-11-08T09:00'), '2026-11-08T14:00:00.000Z');
+    assert.equal(Managed.nextLocalWeekDeadline('', 0, new Date('2026-12-27T17:00:00Z')), '2026-12-28T09:00');
+    assert.equal(Managed.nextLocalWeekDeadline('2026-10-05T18:45', '', new Date()), '2026-10-05T18:45');
+    const preserved = '2026-11-01T06:30:27.521Z'; // Later 01:30 occurrence after the clocks turn back.
+    let submitted;
+    const app = { managedManagerAccess: true, managedVersionBusy: false, managedCatalogScope: 'scope',
+      _cloud: { async request(route, options) { submitted = options.body.deadlineAt; } },
+      managedBeginOperation() { this._managedOperation = 1; return 1; }, managedFinishOperation() {},
+      managedSetOperationError() {}, async refreshManagedVersions() {} };
+    Managed.mixin.methods.openManagedMetadata.call(app, { id: 'weekly', name: 'Weekly', deadlineAt: preserved });
+    assert.equal(app.managedMetadataDeadline, '2026-11-01T01:30');
+    app.managedMetadataName = 'Renamed';
+    Managed.mixin.methods.saveManagedMetadata.call(app).then(() => {
+      assert.equal(submitted, preserved, 'A name-only edit preserves seconds and the later repeated local clock occurrence');
+    });
+  `;
+  const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, TZ: 'America/New_York' } });
+  assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+});
+
 test('filename sanitation preserves version identity and removes filesystem separators', () => {
   assert.equal(Managed.filename('2026-10-05_POE2'), '2026-10-05_POE2');
   assert.equal(Managed.filename('Weekly: "PoE/2"\\zip?*. '), 'Weekly_ _PoE_2__zip__');
@@ -542,7 +610,8 @@ test('version ended badge represents all teams for managers and the assigned tea
 test('status tooltips retain ended and withdrawn guidance with the exact active deadline', () => {
   const { app } = harness(); app.managedVersionDetails.teams[0].ended = true;
   assert.match(app.managedStatusTooltip, /Ended · further saves are outside the last collection/);
-  assert.match(app.managedStatusDeadlineTooltip, /New Zealand/); assert.match(app.managedStatusDeadlineTooltip, /Ended/);
+  assert.match(app.managedStatusDeadlineTooltip, /local/); assert.doesNotMatch(app.managedStatusDeadlineTooltip, /New Zealand|NZT/);
+  assert.match(app.managedStatusDeadlineTooltip, /Ended/);
   app.managedVersions[0].status = 'withdrawn';
   assert.match(app.managedStatusTooltip, /Withdrawn · shared saves paused; local work retained/);
 });
@@ -865,6 +934,23 @@ test('row metadata saves retain their explicit version target when another versi
   await app.saveManagedMetadata();
   assert.equal(requests[0].route, '/v1/versions/row-action');
   assert.equal(requests[0].options.body.name, 'Renamed target'); assert.equal(requests[0].options.body.expectedRevision, 4);
+  assert.equal(requests[0].options.body.deadlineAt, edited.deadlineAt, 'Unchanged metadata preserves the deadline instant across local input conversion');
+});
+
+test('metadata edits submit the selected local clock time as an instant and reject invalid dates before requesting', async () => {
+  const { app, requests } = harness({ request: async () => ({}) });
+  app.refreshManagedVersions = async () => {};
+  app.openManagedMetadata(version());
+  app.managedMetadataDeadline = '2026-10-13T17:45';
+  await app.saveManagedMetadata();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.body.deadlineAt, new Date(2026, 9, 13, 17, 45).toISOString());
+  app.openManagedMetadata(version());
+  app.managedMetadataDeadline = '2026-02-30T17:45';
+  await app.saveManagedMetadata();
+  assert.equal(requests.length, 1, 'An invalid local input cannot mutate the version');
+  assert.equal(app.managedMetadataVisible, true, 'The failed edit stays available for correction');
+  assert.match(app.managedOperationErrors.metadata, /valid|deadline/i);
 });
 
 test('deadline reminders stay passive and progress uses Missing plus Saved with Revised inside Saved', () => {

@@ -60,6 +60,7 @@
 .ctUploadDialog input[type=text],.ctUploadDialog input[type=datetime-local] { width:100%; box-sizing:border-box; }
 .ctUploadDialog label { display:block; margin:10px 0; }
 .ctUploadDialog .ctUploadField { display:grid; gap:6px; min-width:0; margin:16px 0; }
+.ctUploadDialog .ctUploadField > label { margin:0; }
 .ctUploadDialog .ctUploadField input { min-width:0; width:100%; margin:0; }
 .ctUploadSelectors { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:20px 0; }
 .ctUploadDialog .ctUploadSelectors .ctUploadField { margin:0; }

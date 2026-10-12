@@ -27,6 +27,10 @@
     return { name: `${p.year}-${p.month}-${p.day}_${game === 'poe2' ? 'POE2' : 'POE1'}`, deadlineAt: nzInstant(date) };
   }
   function deadlineInput(instant) { const p = parts(new Date(instant)); return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`; }
+  function localDeadlineInput(instant) {
+    const date = new Date(instant), pad = value => String(value).padStart(2, '0');
+    return `${String(date.getFullYear()).padStart(4, '0')}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
   function deadlineWeekday(value) {
     const date = new Date(`${String(value || '').split('T')[0]}T00:00:00Z`);
     return Number.isFinite(date.getTime()) ? (date.getUTCDay() + 6) % 7 : '';
@@ -39,6 +43,13 @@
     date.setUTCDate(date.getUTCDate() + 7 - (date.getUTCDay() + 6) % 7 + day);
     return date.toISOString().slice(0, 10) + 'T' + (String(value || '').split('T')[1] || '09:00');
   }
+  function nextLocalWeekDeadline(value, weekday, now = new Date()) {
+    const day = Number(weekday);
+    if (weekday === '' || !Number.isInteger(day) || day < 0 || day > 6) return value;
+    const date = new Date(now);
+    date.setDate(date.getDate() + 7 - (date.getDay() + 6) % 7 + day);
+    return localDeadlineInput(date).slice(0, 10) + 'T' + (String(value || '').split('T')[1] || '09:00');
+  }
   function parseDeadline(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value || '');
     if (!match) throw new Error('Choose the import deadline in New Zealand time.');
@@ -48,6 +59,12 @@
     const instant = nzInstant(date, +match[4], +match[5]);
     if (deadlineInput(instant) !== value) throw new Error('That local time does not exist in New Zealand. Choose another deadline.');
     return instant;
+  }
+  function parseLocalDeadline(value) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value || '')) throw new Error('Choose the import deadline in local time.');
+    const date = new Date(value + ':00');
+    if (!Number.isFinite(date.getTime()) || localDeadlineInput(date) !== value) throw new Error('Choose a valid import deadline in local time.');
+    return date.toISOString();
   }
   function reminder(instant, now = Date.now()) {
     const remaining = new Date(instant).getTime() - now;
@@ -229,6 +246,7 @@
       },
       managedDeadlineWeekday: deadlineWeekday,
       managedNextWeekDeadline: nextWeekDeadline,
+      managedNextLocalWeekDeadline: nextLocalWeekDeadline,
       managedCloseVersionMenus(except, returnFocus) {
         for (const menu of document.querySelectorAll('.versionActionMenu[open]')) {
           if (menu === except) continue;
@@ -823,7 +841,7 @@
       managedFormatDeadline(instant) {
         if (!instant) return '';
         const date = new Date(instant);
-        return new Intl.DateTimeFormat(undefined, { timeZone: NZ, dateStyle: 'medium', timeStyle: 'short' }).format(date) + ' New Zealand · ' + new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date) + ' local';
+        return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date) + ' local';
       },
       managedFormatDate(instant) { return new Date(instant).toLocaleString(); },
       managedDeadlineTooltip(instant) { return this.managedFormatDeadline(instant); },
@@ -1023,12 +1041,17 @@
       openManagedMetadata(version = this.managedSelectedVersion) {
         if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         this.managedMetadataVersion = copy(version); this.managedMetadataName = version.name;
-        this.managedMetadataDeadline = deadlineInput(version.deadlineAt); this.managedMetadataVisible = true;
+        this.managedMetadataDeadline = localDeadlineInput(version.deadlineAt); this.managedMetadataVisible = true;
       },
       async saveManagedMetadata() {
         const version = this.managedMetadataVersion || this.managedSelectedVersion, key = this.managedCatalogScope; if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
-        try { await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id), { method: 'PATCH', body: { name: this.managedMetadataName.trim(), deadlineAt: parseDeadline(this.managedMetadataDeadline), expectedRevision: version.revision, idempotencyKey: id() } }); if (current()) { this.managedSetOperationError('metadata', ''); this.managedMetadataVisible = false; await this.refreshManagedVersions(); } }
+        try {
+          const deadlineAt = this.managedMetadataDeadline === localDeadlineInput(version.deadlineAt)
+            ? version.deadlineAt : parseLocalDeadline(this.managedMetadataDeadline);
+          await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id), { method: 'PATCH', body: { name: this.managedMetadataName.trim(), deadlineAt, expectedRevision: version.revision, idempotencyKey: id() } });
+          if (current()) { this.managedSetOperationError('metadata', ''); this.managedMetadataVisible = false; await this.refreshManagedVersions(); }
+        }
         catch (error) { if (!error.stale && current()) this.managedSetOperationError('metadata', error); }
         finally { this.managedFinishOperation(operation); }
       },
@@ -1205,5 +1228,5 @@
       },
     },
   };
-  return { mixin, defaults, deadlineInput, deadlineWeekday, nextWeekDeadline, parseDeadline, reminder, filename, DEFAULT_BRANCH };
+  return { mixin, defaults, deadlineInput, localDeadlineInput, deadlineWeekday, nextWeekDeadline, nextLocalWeekDeadline, parseDeadline, parseLocalDeadline, reminder, filename, DEFAULT_BRANCH };
 });
