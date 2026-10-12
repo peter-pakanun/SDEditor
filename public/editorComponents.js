@@ -476,6 +476,15 @@
         <editor-history-panel :controller="$props.controller"></editor-history-panel>
       </div>`, true);
   Tools.components = { 'editor-translation-memory-panel': TranslationMemory, 'editor-lookup-panel': Lookup, 'editor-comments-panel': Comments, 'editor-history-panel': History };
+  const PreviewAudio = {
+    name: 'EditorPreviewAudio',
+    props: { segment: { type: Object, required: true }, controller: { type: Object, required: true } },
+    methods: {
+      showTooltip(event, text) { this.controller.showTooltip?.(event, text); },
+      hideTooltip() { this.controller.hideTooltip?.(); },
+    },
+    template: String.raw`<span class="gamePreviewAudioMarker" :data-audio-marker="segment.full" tabindex="0" role="img" :aria-label="segment.tooltip" v-tooltip="segment.tooltip"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3z"></path><path d="M19 6v7"></path><circle class="gamePreviewAudioDot" cx="19" cy="17" r="1"></circle></svg></span>`,
+  };
   const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip">
           <div v-if="gamePreviewFullEditor" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
@@ -505,6 +514,7 @@
                       <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
+                      <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewSourceIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
@@ -529,6 +539,7 @@
                       <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
+                      <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewTargetIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
@@ -555,6 +566,7 @@
             </div>
           </div>
         </div>`, true);
+  SharedPreview.components = { 'editor-preview-audio': PreviewAudio };
   const Autocomplete = sharedSurface('EditorAutocomplete', String.raw`<div v-if="hlPopup.visible" class="hlPopupBackdrop" data-inline-focus-surface @focusout="inlineRowFocusOut" @mousedown="closeHlPopup">
         <div class="hlPopup" ref="hlPopupPanel" :style="{ left: hlPopup.x + 'px', top: hlPopup.y + 'px', width: hlPopup.width + 'px', maxHeight: hlPopup.maxHeight ? hlPopup.maxHeight + 'px' : '' }" @mousedown.stop>
           <input class="hlPopupFilter" type="text" ref="hlPopupFilter" v-model="hlPopup.filter" placeholder="Filter highlights" aria-label="Filter highlights" aria-autocomplete="list" aria-controls="sharedEditorAutocompleteList" :aria-expanded="hlPopup.visible" :aria-activedescendant="hlPopup.filtered.length ? 'sharedEditorAutocompleteOption-' + hlPopup.selectedIndex : undefined" @keydown="hlPopupFilterKeydown" @input="applyHlPopupFilter">

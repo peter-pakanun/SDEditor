@@ -79,8 +79,17 @@
     }
     // Exact upstream dialogue metadata. These markers are optional in targets;
     // ordinary keyword IDs and lookalike spellings retain their normal checks.
-    const AUDIO_MARKERS = new Set(['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]']);
+    const AUDIO_MARKERS = new Map([
+        ['[NOAUDIO]', 'No audio marker. This dialogue is marked as having no audio.'],
+        ['[NO AUDIO]', 'No audio marker. This dialogue is marked as having no audio.'],
+        ['[OLD AUDIO]', 'Old audio marker. This dialogue is marked with old audio.'],
+        ['[AUDIOTEST]', 'Audio test marker. This dialogue is marked for audio testing.'],
+    ]);
     const AUDIO_MARKER_PATTERN = /\[(?:NOAUDIO|NO AUDIO|OLD AUDIO|AUDIOTEST)\]/g;
+    function audioMarkerTooltip(marker) {
+        const description = AUDIO_MARKERS.get(marker);
+        return description ? marker + '\n' + description + '\nThis metadata is optional in translations.' : '';
+    }
     function canonicalSource(value) {
         const text = String(value ?? '');
         return text.match(AUDIO_MARKER_PATTERN)?.length === 1
@@ -481,7 +490,7 @@
         if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
-    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
+    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };

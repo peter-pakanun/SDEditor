@@ -100,6 +100,103 @@ async function checkPreviewDecorations(page, contentMode) {
   console.log(contentMode + ' source/translation nested preview styles, variables, keyword text and raw tags passed in all four desktop themes.');
 }
 
+async function checkAudioPreviewMarkers(page, surface = 'full') {
+  const markers = ['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]'];
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const raw = await page.evaluate(async markers => {
+    const host = window.__sharedFixtureApp, unit = host.ctCurrentUnit, field = host.ctPreviewField;
+    window.__audioPreviewSnapshot = { units: host.ctUnits, index: host._ctUnitIndex, values: host.ctValues,
+      vars: host.ctPreviewGggVars, hideSource: host.hideSourceInPreviewPanel };
+    const text = label => '🦁 ' + markers.map((marker, index) => marker + '{0}% <italic>{' + marker + ' ' + label + ' ' + index + '} [Power|Link {1}]').join('\\n')
+      + '\r\n[audiotest] [AUDIOFUTURE] [AUDIOTEST|Visible] [OLD AUDIO EXTRA]';
+    const source = text('Source'), target = text('Translation');
+    const replacement = Vue.markRaw({ ...unit, fields: unit.fields.map(item => item.id === field.id ? { ...item, source, target } : item) });
+    host._ctUnitIndex = Vue.markRaw(new Map([[replacement.id, replacement]])); host.ctUnits = Vue.markRaw([replacement]);
+    host.ctValues = { ...host.ctValues, [field.id]: target }; host.hideSourceInPreviewPanel = false;
+    await host.$nextTick(); host.ctPreviewGggVars = { '0': '37', '1': '23' }; await host.$nextTick();
+    return { source, target, fieldId: field.id, tokens: [source, target].map(text => ClientTextState.tokenize(text)) };
+  }, markers);
+  const pane = surface === 'full' ? '.ctFullEditor' : '.ctListWorkspace';
+  try {
+    const frames = page.locator('.gamePreviewWindow');
+    assert.equal(await frames.count(), 2, surface + ': English and translation previews are present.');
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+      for (const [index, label] of ['English', 'translation'].entries()) {
+        const frame = frames.nth(index), message = 'ClientText audio/' + surface + '/' + theme + '/' + label;
+        assert.equal(await frame.locator('.gamePreviewAudioMarker').count(), markers.length * 2,
+          message + ': top-level and styled markers use icons.');
+        assert.equal(await frame.locator('.gamePreviewAudioMarker svg').count(), markers.length * 2,
+          message + ': each marker has a speaker/exclamation SVG.');
+        const content = await frame.innerText();
+        for (const marker of markers) assert.ok(!content.includes(marker), message + ': raw marker is replaced in the rendered preview.');
+        assert.ok(content.includes('37%') && content.includes('Link 23'), message + ': adjacent variables and real keyword labels render.');
+        assert.ok(content.includes('Visible') && content.includes('AUDIOFUTURE') && content.includes('audiotest'),
+          message + ': lookalikes and real keyword identities remain ordinary text.');
+        for (const marker of markers) {
+          const icon = frame.locator('.gamePreviewAudioMarker[data-audio-marker="' + marker + '"]').first();
+          assert.equal(await icon.getAttribute('role'), 'img', message);
+          assert.equal(await icon.getAttribute('tabindex'), '0', message);
+          const description = await icon.getAttribute('aria-label');
+          assert.ok(description.includes(marker), message + ': accessible description identifies the exact tag.');
+          assert.match(description, /audio/i, message);
+          assert.match(description, /translation/i, message);
+          await icon.hover();
+          assert.equal(await page.locator('[role="tooltip"]').innerText(), description, message + ': pointer hover explains the marker.');
+        }
+        const first = frame.locator('.gamePreviewAudioMarker').first();
+        await first.focus();
+        assert.equal(await first.evaluate(element => element === document.activeElement), true, message + ': keyboard users can focus the icon.');
+        assert.equal(await page.locator('[role="tooltip"]').innerText(), await first.getAttribute('aria-label'),
+          message + ': keyboard focus displays the same explanation.');
+        const geometry = await first.evaluate(element => {
+          const rect = element.getBoundingClientRect(), svg = element.querySelector('svg'), icon = svg.getBoundingClientRect();
+          return { width: rect.width, height: rect.height, svgWidth: icon.width, svgHeight: icon.height, color: getComputedStyle(element).color };
+        });
+        assert.ok(geometry.width > 0 && geometry.height > 0 && geometry.svgWidth > 0 && geometry.svgHeight > 0,
+          message + ': the icon is visibly sized.');
+        assert.notEqual(geometry.color, 'rgba(0, 0, 0, 0)', message + ': the icon has a visible theme color.');
+      }
+    }
+    assert.equal(await page.locator(pane + ' [data-ct-source="' + raw.fieldId + '"]').inputValue(), raw.source.replace(/\r\n?/g, '\n'),
+      surface + ': native English retains literal audio tags.');
+    assert.equal(await page.locator(pane + ' [data-ct-target="' + raw.fieldId + '"]').inputValue(), raw.target.replace(/\r\n?/g, '\n'),
+      surface + ': native translation retains literal audio tags.');
+    const preserved = await page.evaluate(({ fieldId, pane }) => {
+      const host = window.__sharedFixtureApp, source = host.ctPreviewField.source, target = host.ctValues[fieldId];
+      const overlays = [...document.querySelectorAll(pane + ' .editorHighlightContent')].map(element => element.textContent);
+      return { source, target, tokens: [source, target].map(text => ClientTextState.tokenize(text)), overlays,
+        overlayIcons: document.querySelectorAll(pane + ' .editorHighlightContent .gamePreviewAudioMarker').length };
+    }, { fieldId: raw.fieldId, pane });
+    assert.equal(preserved.source, raw.source, surface + ': preview rendering preserves raw English.');
+    assert.equal(preserved.target, raw.target, surface + ': preview rendering preserves raw translation.');
+    assert.deepEqual(preserved.tokens, raw.tokens, surface + ': preview rendering preserves every raw token offset.');
+    assert.equal(preserved.overlayIcons, 0, surface + ': native highlight overlays retain raw text.');
+    for (const text of [raw.source, raw.target]) assert.ok(preserved.overlays.includes(text.replace(/\r\n?/g, '\n')),
+      surface + ': the highlight overlay retains exact raw tags and dialogue.');
+    if (surface === 'full' && process.env.SDEDITOR_AUDIO_PREVIEW_SCREENSHOT) {
+      await page.locator('.gamePreviewStrip').evaluate(element => {
+        for (const pane of element.querySelectorAll('.gamePreviewFrameWrap, .gamePreviewFramesColumn, .gamePreviewMainRow')) pane.scrollTop = 0;
+      });
+      const first = frames.first().locator('.gamePreviewAudioMarker').first(), box = await first.boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.screenshot({ path: process.env.SDEDITOR_AUDIO_PREVIEW_SCREENSHOT });
+      console.log('Audio preview screenshot: ' + process.env.SDEDITOR_AUDIO_PREVIEW_SCREENSHOT);
+    }
+  } finally {
+    await page.evaluate(async () => {
+      const host = window.__sharedFixtureApp, saved = window.__audioPreviewSnapshot;
+      host.hideTooltip(); host._ctUnitIndex = saved.index; host.ctUnits = saved.units; host.ctValues = saved.values;
+      host.ctPreviewGggVars = saved.vars; host.hideSourceInPreviewPanel = saved.hideSource;
+      delete window.__audioPreviewSnapshot; await host.$nextTick();
+      document.querySelector('[data-ct-target="' + host.ctFocusedField + '"]')?.focus({ preventScroll: true });
+    });
+    if (viewport) await page.setViewportSize(viewport);
+  }
+  console.log('ClientText audio markers in ' + surface + ' English/translation previews, styled markers, hover/focus tooltips and unchanged native text/offsets passed in all four desktop themes.');
+}
+
 async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table = false) {
   const raw = await page.evaluate(async ({ contentMode, table }) => {
     const host = window.__sharedFixtureApp, ct = contentMode === 'clienttext';
@@ -325,6 +422,7 @@ async function run() {
     console.log('ClientText full editor and native fields mounted.');
     await checkPreviewDecorations(page, 'clienttext');
     await checkPreviewLineBreaks(page, 'clienttext');
+    await checkAudioPreviewMarkers(page);
     const ct = page.locator('.ctFullEditor [data-ct-target="text-field"]');
     assert.equal(await ct.inputValue(), 'raw @ literal\\n\nactual');
     assert.ok(await page.locator('.ctFullEditor .HLter [data-ct-hl]').count() >= 3);
@@ -471,7 +569,11 @@ async function run() {
     assert.equal(await page.evaluate(() => document.querySelector('.sharedEditorSidebar') === window.__fixtureToolsNode), true);
     assert.equal(await page.evaluate(() => document.querySelector('.gamePreviewStrip') === window.__fixturePreviewNode), true);
     await checkPreviewLineBreaks(page, 'clienttext', 'inline');
+    await checkAudioPreviewMarkers(page, 'inline');
     assert.equal(await page.locator('.ctListWorkspace [data-ct-target="text-field"]').inputValue(), 'kept raw @ literal\\n\ntranslation');
+    if (process.env.SDEDITOR_AUDIO_PREVIEW_ONLY === '1') {
+      assert.deepEqual(failures, []); return;
+    }
     await page.locator('.ctListWorkspace').getByRole('button', { name: 'Show all comments', exact: true }).click();
     assert.equal(await page.locator('#allCommentsSidebar').count(), 1);
     await page.locator('#allCommentsSidebar').getByRole('button', { name: 'Close all comments', exact: true }).click();

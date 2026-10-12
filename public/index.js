@@ -1615,7 +1615,9 @@ const config = Vue.defineComponent({
           if (textBuf) output.push(decorate({ type: 'text', text: textBuf }));
           textBuf = '';
         };
-        const variables = clientText ? new Map(clientVariables(part).map(variable => [variable.start, variable])) : null;
+        const clientTokens = clientText ? window.ClientTextState.tokenize(part) : [];
+        const variables = clientText ? new Map(clientTokens.filter(token => token.kind === 'variable').map(token => [token.start, token])) : null;
+        const audioMarkers = clientText ? new Map(clientTokens.filter(token => token.kind === 'audio').map(token => [token.start, token])) : null;
         let i = 0;
         while (i < part.length) {
           const slice = part.slice(i);
@@ -1624,6 +1626,13 @@ const config = Vue.defineComponent({
             flushText();
             output.push(...scanInline(wrapper.text, wrapper.tag, { ...decorStyle, ...wrapper.style }, keywordDisplay, depth + 1));
             i += wrapper.length;
+            continue;
+          }
+          const audio = audioMarkers?.get(i);
+          if (audio) {
+            flushText();
+            output.push({ type: 'audio', full: audio.full, tooltip: window.ClientTextState.audioMarkerTooltip(audio.full) });
+            i += audio.full.length;
             continue;
           }
           const km = !keywordDisplay && part[i] === '[' ? kwRe.exec(slice) : null;

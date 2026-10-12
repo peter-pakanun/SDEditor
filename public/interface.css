@@ -340,6 +340,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .paginationArrow svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .sideHeader { flex-wrap: wrap; }
 .editor .gamePreviewStrip { display: flex; flex-direction: column; }
+.gamePreviewAudioMarker { display: inline-flex; align-items: center; justify-content: center; width: 1.1em; height: 1.1em; margin-inline: .1em; vertical-align: -.12em; color: #e8bd76; cursor: help; border-radius: 2px; }
+.gamePreviewAudioMarker svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.gamePreviewAudioMarker .gamePreviewAudioDot { fill: currentColor; stroke: none; }
+.gamePreviewAudioMarker:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .editor .gamePreviewToolbar { position: static; flex: none; gap: 8px; margin-bottom: 6px; }
 .editor .gamePreviewMainRow { flex: 1; height: auto; }
 .editor .editButtons button { line-height: 1.6; }

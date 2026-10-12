@@ -537,6 +537,69 @@ test('ClientText uses shared variables and keyword display while rendering escap
   assert.equal(raw,'@CharacterName literal\\n actual\n{} {d} +{0:+d}% {2:0.1f} [Skill::{7}|Deal {0}% damage]');
 });
 
+test('ClientText previews render the four exact audio markers with their explanations', () => {
+  const { editor, context } = loadEditor(), state = context.window.ClientTextState;
+  const markers = ['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]'];
+  for (const marker of markers) {
+    for (const raw of [marker, `<italic>{<bold>{${marker}}}`]) {
+      const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+      assert.deepEqual(Array.from(preview.keysOrder), [], raw);
+      assert.equal(preview.segments.length, 1, raw);
+      const segment = preview.segments[0];
+      assert.equal(segment.type, 'audio', raw);
+      assert.equal(segment.full, marker, raw);
+      assert.equal(segment.tooltip, state.audioMarkerTooltip(marker), raw);
+      assert.ok(segment.tooltip.includes(marker), 'The explanation identifies the exact original marker.');
+      assert.match(segment.tooltip, /audio/i, marker);
+      assert.match(segment.tooltip, /translation/i, 'The explanation tells translators what the marker means for their text.');
+    }
+  }
+  assert.equal(new Set(markers.map(marker => state.audioMarkerTooltip(marker))).size, markers.length,
+    'The tooltip identifies each distinct marker.');
+});
+
+test('ClientText audio preview icons preserve neighboring text, variables, line breaks and raw offsets', () => {
+  const { editor, context } = loadEditor(), state = context.window.ClientTextState;
+  const raw = '🦁 [NOAUDIO]{0}%\\n<italic>{[NO AUDIO] Dialogue {1}}\r\n'
+    + '<bold>{[OLD AUDIO]} [Power|Power {2}] [AUDIOTEST] @{3}';
+  const before = state.tokenize(raw).map(token => ({ ...token }));
+  const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+  assert.deepEqual(Array.from(preview.keysOrder), ['0', '1', '2', '3']);
+  assert.equal(preview.segments.filter(segment => segment.type === 'break').length, 2,
+    'Escaped LF and raw CRLF remain distinct displayed line breaks.');
+  assert.deepEqual(Array.from(preview.segments.filter(segment => segment.type === 'audio'), segment => segment.full),
+    ['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]']);
+  assert.equal(preview.segments.find(segment => segment.type === 'kw').full, '[Power|Power {2}]');
+  assert.equal(preview.segments.find(segment => segment.key === '0').trailingPercent, true);
+  assert.equal(preview.segments.find(segment => segment.key === '3').prefix, '@');
+  assert.equal(preview.segments.find(segment => segment.text === ' Dialogue ').decorStyle.fontStyle, 'italic');
+  assert.deepEqual(state.tokenize(raw).map(token => ({ ...token })), before, 'Rendering does not change raw token ranges.');
+  for (const token of before) assert.equal(raw.slice(token.start, token.end), token.full);
+  assert.equal(before.find(token => token.full === '[NOAUDIO]').start, 3, 'Offsets retain UTF-16 surrogate pairs.');
+  assert.equal(before.find(token => token.full === '@{3}').start, raw.indexOf('@{3}'));
+});
+
+test('audio preview recognition is exact and does not change StatDescription rendering', () => {
+  const { editor, context } = loadEditor(), state = context.window.ClientTextState;
+  for (const raw of ['[noaudio]', '[audiotest]', '[AUDIOFUTURE]', '[OLD AUDIO EXTRA]',
+    '[NOAUDIO|Visible]', '[AUDIOTEST|Display]', '<<[NOAUDIO]>>', '[Skill|[AUDIOTEST]]']) {
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+    assert.equal(preview.segments.some(segment => segment.type === 'audio'), false, raw);
+    assert.equal(state.audioMarkerTooltip(raw), '', raw);
+  }
+  for (const marker of ['[NOAUDIO]', '[NO AUDIO]', '[OLD AUDIO]', '[AUDIOTEST]']) {
+    const preview = editor.buildGamePreviewSegments(marker);
+    assert.equal(preview.segments.length, 1, marker);
+    assert.equal(preview.segments[0].type, 'kw', 'StatDescription keeps its original keyword renderer.');
+    assert.equal(preview.segments[0].full, marker);
+  }
+  for (const raw of ['[NOAUDIO|Visible]', '[AUDIOTEST|Display]']) {
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+    assert.equal(preview.segments[0].type, 'kw', 'Pipe syntax remains an ordinary keyword reference.');
+    assert.equal(preview.segments[0].full, raw);
+  }
+});
+
 test('ClientText preview balances formatting wrappers and preserves unsupported syntax safely',()=>{
   const {editor}=loadEditor();
   const preview=editor.buildGamePreviewSegments('<unique>{{{0}}} <smaller>{Small {1}} <fg:rgb(255,0,0)>{<glow:rgb(227,125,1)>{Nested {2}}} <<xbox_button_a>> <unknown>{literal}',{contentMode:'clienttext'});
