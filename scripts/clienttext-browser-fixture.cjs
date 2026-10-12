@@ -268,7 +268,8 @@ async function run() {
         if(process.argv.includes('--trusted-cache-only')){await captureTrustedCache();assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',results},null,2));return;}
         if (classOnly) {
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
-            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
             await upload.locator('input[type=text]').fill('Class variants browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click(); await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
@@ -278,7 +279,7 @@ async function run() {
             assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v2','clienttext-v2'] });
             await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
-            await page.getByRole('button', { name: 'Class variants browser fixture · ClientText · German', exact: true }).click();
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'German')));
             const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
             const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
             await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
@@ -475,7 +476,8 @@ async function run() {
         }
         if (genderOnly) {
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.lang = 'German'; vm.autoOpenNextFile = false; await vm.saveSettings(); });
-            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
             await upload.locator('input[type=text]').fill('Gender browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
@@ -484,7 +486,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctPrepared[0].assets.reduce((count, asset) => count + asset.parsed.warnings.length, 0)), 0, 'Arbitrary original Gender values create no import warning');
             await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
-            await page.getByRole('button', { name: 'Gender browser fixture · ClientText · German', exact: true }).click();
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'German')));
             const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
             const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
             await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
@@ -581,7 +583,8 @@ async function run() {
             });
             const publications = [];
             page.on('request', request => { if (request.method() === 'POST' && /\/v1\/(?:versions|version-releases|content-versions|content-groups|content-uploads)(?:[/?]|$)/.test(request.url())) publications.push(request.url()); });
-            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
             await upload.locator('input[type=text]').fill('German ClientText production audit');
             await upload.locator('input[type=file]').first().setInputFiles(originals.map(original => ({ name: original.name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: original.bytes })));
@@ -629,7 +632,8 @@ async function run() {
                 const vm = window.__clientFixtureApp; vm.theme = 'modern-dark'; vm.hideClipboard = true; vm.hideSourceInPreviewPanel = false;
                 await vm.saveSettings(); document.documentElement.setAttribute('data-theme', 'modern-dark');
             });
-            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const captureUpload = page.getByRole('region', { name: 'Content upload' });
             await captureUpload.locator('input[type=text]').fill('2026-10-05 · PoE 2');
             await captureUpload.locator('input[type=file]').first().setInputFiles(originals.map(original => ({ name: original.name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: original.bytes })));
@@ -649,7 +653,7 @@ async function run() {
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading && !window.__clientFixtureApp.ctUploadVisible, null, { timeout: 300000 });
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'Original French workbooks store locally');
             const storeMs = Date.now() - started - prepareMs;
-            await page.getByRole('button', { name: '2026-10-05 · PoE 2 · ClientText · French', exact: true }).click();
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'French')));
             const captureWorkspace = page.getByRole('region', { name: 'ClientText workspace' }), sheetNavigation = captureWorkspace.getByRole('navigation', { name: 'Workbook sheets' });
             await captureWorkspace.waitFor(); await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy, null, { timeout: 180000 });
             assert.equal(await captureWorkspace.getByRole('combobox', { name: 'Content group', exact: true }).count(), 0, 'Production capture uses the Versions assignment workflow without a header selector');
@@ -742,7 +746,8 @@ async function run() {
             console.log(JSON.stringify({ status: 'PASS', frenchPatchnote: true, outputDirectory, units: preparedFacts.units, prepareMs, storeMs, compactComparison }));
             return;
         }
-        await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+        // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+        await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
         const upload = page.getByRole('region', { name: 'Content upload' });
         const desktopSizes = [{ width: 1440, height: 1000 }, { width: 1100, height: 850 }];
         const themes = ['light', 'grey', 'dark', 'modern-dark'];
@@ -835,7 +840,7 @@ async function run() {
             await filter.click();
         };
         const openCached = async ({ allStatuses = true } = {}) => {
-            await page.getByRole('button', { name: 'ClientText browser fixture · ClientText · French', exact: true }).click();
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces[0]));
             await page.getByRole('region', { name: 'ClientText workspace' }).waitFor();
             if (allStatuses) await showAllClientStatuses();
         };
@@ -1703,7 +1708,7 @@ async function run() {
             await page.setViewportSize(desktopSizes[0]);await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),'modern-dark');
             results.push('Published ClientText shared Comments retain100 long cards in an inner scroll area with the composer and tool tabs fixed at both desktop widths in all four themes');
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
-            const acceptedEvent = page.waitForEvent('download'); await details.getByRole('button', { name: 'Download accepted work', exact: true }).click();
+            const acceptedEvent = page.waitForEvent('download'); await details.getByRole('button', { name: 'Download', exact: true }).click();
             const acceptedDownload = await acceptedEvent, acceptedArchive = await JSZip.loadAsync(readFileSync(await acceptedDownload.path()));
             const acceptedNormal = await Codec.parseWorkbook(await acceptedArchive.file(files[0].name).async('uint8array'), { filename: files[0].name, role: 'normal' });
             const acceptedField = get(acceptedNormal, 'record', 'Name'); assert.equal(acceptedField.target, 'En ligne'); assert.equal(acceptedField.originalFill, 'D9D9D9');
@@ -1774,7 +1779,7 @@ async function run() {
                         assert.equal(group.href, '#table'); assert.equal(group.cells, 4); assert.equal(group.meter, 'meter');
                         assert.deepEqual(group.segments.map(segment => segment.kind), group.contentMode === 'clienttext' ? ['saved', 'revised', 'missing', 'outdated'] : ['saved', 'revised', 'missing'], 'Both modes share the progress bar layout, with ClientText Outdated work in orange');
                         assert.ok(group.progress.width >= 200, 'Both content modes reuse the existing readable progress meter');
-                        assert.ok(['Open editor', 'Download accepted work', 'Collect and end'].every(text => group.actions.some(action => action.text === text && !action.disabled)), 'Shared table keeps the team actions available');
+                        assert.ok(['Open editor', 'Download', 'Download and end'].every(text => group.actions.some(action => action.text === text && !action.disabled)), 'Shared table keeps the team actions available');
                         if (group.contentMode === 'clienttext') {
                             assert.equal(group.loadedText, `${group.counts.loaded ?? 0} IDs`, 'ClientText table shows the exact ID count');
                             assert.equal(group.progressText, group.counts.workloadFields ? `${group.counts.resolvedFields ?? 0} / ${group.counts.workloadFields}` : '—', 'ClientText progress uses field workload, rather than unit counts');
@@ -2033,7 +2038,7 @@ async function run() {
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return !vm.editorSessionActive && !vm.editorSaving; });
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.showVersionChooser()), true, 'Versions opens after the final SD save');
             await page.getByRole('button', { name: 'Shared ClientText fixture', exact: true }).click();
-            const statCollection = page.waitForEvent('download'); await statTeam.getByRole('button', { name: 'Download accepted work', exact: true }).click();
+            const statCollection = page.waitForEvent('download'); await statTeam.getByRole('button', { name: 'Download', exact: true }).click();
             const statDownload = await statCollection, exportedStats = await JSZip.loadAsync(readFileSync(await statDownload.path()));
             const exportedDescription = StatCodec.parseText(statDescription.filepath, StatCodec.decodeUTF16(await exportedStats.file(statDescription.filepath).async('uint8array')), 'French', { strict: true });
             assert.deepEqual(exportedDescription.translations.French, ['Dégâts de feu du groupe']);
@@ -2262,7 +2267,8 @@ async function run() {
             const productionFiles = ['Thai_PoE2.xlsm', 'French_PoE2.xlsm', 'French_Gender_PoE2.xlsm'].map(name => ({ name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: readFileSync(join(productionDirectory, name)) }));
             if (await workspace.isVisible()) await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             else if (!await page.getByRole('region', { name: 'Source versions' }).isVisible()) assert.equal(await page.evaluate(() => window.__clientFixtureApp.showVersionChooser()), true);
-            await page.getByRole('button', { name: 'Import ClientText workbooks', exact: true }).click();
+            // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
+            await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             await upload.locator('input[type=text]').fill('Production ClientText fixture');
             await upload.locator('input[type=file]').first().setInputFiles(productionFiles);
             await page.evaluate(() => {
@@ -2289,7 +2295,7 @@ async function run() {
             console.log('Production fixture: stored in ' + storeMs + 'ms; opening workspaces.');
             for (const language of ['Thai', 'French']) {
                 const opening = Date.now();
-                await page.getByRole('button', { name: 'Production ClientText fixture · ClientText · ' + language, exact: true }).click();
+                await page.evaluate(language => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.version?.name === 'Production ClientText fixture' && row.language === language)), language);
                 await workspace.waitFor(); await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy, null, { timeout: 180000 });
                 await showAllClientStatuses();
                 await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));

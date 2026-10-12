@@ -158,7 +158,8 @@ async function run() {
     };
     const importOffline = async page => {
       const chooser = page.waitForEvent('filechooser');
-      await page.getByRole('button', { name: 'Import previous version', exact: true }).click();
+      // Seed a legacy offline workspace; initial imports are no longer offered in the chooser.
+      await page.evaluate(() => window.__managedFixtureApp.managedImportOffline(false));
       await (await chooser).setFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: bytes });
       await page.locator('#appDialogInput').fill('YES');
       await page.locator('.appDialogConfirm').click();
@@ -768,7 +769,7 @@ async function run() {
     results.push('Client-side Download only uses an immutable Saved-only manifest, preserves original language blocks, matches the server codec bytes and keeps window/latest ending collection unchanged');
     const endingTrafficStart = collectionTraffic.length;
     const download = manager.waitForEvent('download');
-    await thaiRow.getByRole('button', { name: 'Download and mark ended', exact: true }).click();
+    await thaiRow.getByRole('button', { name: 'Download and end', exact: true }).click();
     await manager.locator('.appDialogConfirm').click();
     const endingBytes = await checkTranslatedDownload(await download);
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersionDetails.teams.find(team => team.language === 'Thai').ended);

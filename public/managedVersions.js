@@ -935,12 +935,12 @@
         const version = copy(this.managedSelectedVersion);
         if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
         team = copy(team);
-        const action = endWindow ? (team.counts.saved ? 'Download and mark ended' : 'Mark ended — no saved files') : 'Download only';
+        const action = endWindow ? (team.counts.saved ? 'Download and end' : 'Mark ended — no saved files') : 'Download';
         const errorKey = endWindow ? 'collect' : 'downloadOnly';
         const operation = this.managedBeginOperation();
         const current = this.managedCollectionCurrent(version, operation);
         try {
-          if (endWindow && !await this.appConfirm(`Collect ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
+          if (endWindow && !await this.appConfirm(`Download ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
           if (!current()) return;
           this.setBrowserWork?.('versions', { key: 'collection', label: 'Preparing translated ZIP', active: true, immediate: true });
           this._managedCollectionIds ||= new Map();
@@ -1176,7 +1176,7 @@
             if (!current()) return;
             if (!['UNFINISHED_TEAMS', 'VERSION_UNFINISHED_TEAMS', 'VERSION_TEAMS_UNFINISHED'].includes(error.code)) throw error;
             const teams = error.details?.unfinishedTeams || error.details?.error?.unfinishedTeams || [];
-            if (!await this.appConfirm(`The previous HEAD still has open teams${teams.length ? ': ' + teams.join(', ') : ''}. Collect and end them first, or explicitly publish using their captured shared work.`, { title: 'Previous version is still open', confirmLabel: 'Publish anyway', danger: false })) return;
+            if (!await this.appConfirm(`The previous HEAD still has open teams${teams.length ? ': ' + teams.join(', ') : ''}. Download and end them first, or explicitly publish using their captured shared work.`, { title: 'Previous version is still open', confirmLabel: 'Publish anyway', danger: false })) return;
             if (!current()) return;
             result = await this._cloud.request(path, { method: 'POST', body: { ...body, overrideUnfinished: true } });
           }
