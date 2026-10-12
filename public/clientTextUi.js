@@ -33,7 +33,7 @@
         {key:'controls',label:'ClientText controls',description:'Control identities and counts compared with English.'}
     ];
     const defaultScanChecks = () => Object.fromEntries(scanTypes.map(type=>[type.key,type.key!=='terminology']));
-    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter');
+    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter,.ctReferenceContext');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
     const classForms = new Set(['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
         'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb']);
@@ -1029,8 +1029,8 @@
             ctReferenceMetadata(unit = this.ctCurrentUnit) {
                 const units=this.ctUnits,workspace=this.ctWorkspace,adapter=root.ContentAdapters.clienttext;
                 let cache=this._ctReferenceIndexCache;
-                if(!cache || cache.units!==units || cache.workspace!==workspace){
-                    cache=this._ctReferenceIndexCache={units,workspace,index:adapter.characterReferenceIndex(units)};
+                if(!cache || cache.units!==units || cache.workspace!==workspace || !cache.index){
+                    cache=this._ctReferenceIndexCache={units,workspace,index:adapter.cachedContextReferenceIndex(units)};
                 }
                 return adapter.referenceMetadata(unit,cache.index);
             },
@@ -1074,7 +1074,7 @@
                 if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,[
                     'Preserving unsaved edits','Checking selected workspace','Checking reusable workbook cache',
                     ...descriptors.flatMap((descriptor,index)=>cached[index]?[]:[{label:'Downloading original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:2},{label:'Parsing original: '+(descriptor.filename || descriptor.name || descriptor.role),weight:4}]),
-                    {label:'Caching selected workspace',weight:3},'Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                    {label:'Caching selected workspace',weight:3},'Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
                 for(let index=0;index<descriptors.length;index++){
                     const descriptor=descriptors[index],name=descriptor.filename || descriptor.name || descriptor.role,hash=descriptor.assetHash || descriptor.artifactHash || descriptor.hash;
                     let asset,originals;
@@ -1111,7 +1111,7 @@
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
                 const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
-                    ['Preserving unsaved edits','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                    ['Preserving unsaved edits','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
                 let ctx;
                 try{
                 if(!await this.ctInitializationStep('Preserving unsaved edits',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
@@ -1133,6 +1133,10 @@
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
                     this.ctSheet = visibleUnits.length ? JSON.stringify([visibleUnits[0].role, visibleUnits[0].sheet]) : ''; this.ctPage = 1;
                     this.ctDiagnostics = raw({}); this.ctScanDone = false; this.ctSearch = ''; this.ctAppliedSearch = '';
+                    await this.ctInitializationStep('Preparing context references',async()=>{
+                        const index=await root.ContentAdapters.clienttext.contextReferenceIndex(units,{guard:current});check();
+                        this._ctReferenceIndexCache={units:this.ctUnits,workspace:this.ctWorkspace,index};
+                    },initialization);
                     await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();},initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
                     check();this.ctActive = true; this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
@@ -2050,7 +2054,7 @@
                 const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
                 const opening=this._ctOpenRun={};
                 const initialization=activate ? this.ctBeginInitialization('Opening '+(version.name || 'selected version')+' · '+language+' ClientText',null,
-                    ['Preserving unsaved edits','Checking selected workspace','Checking reusable workbook cache','Caching selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']) : null;
+                    ['Preserving unsaved edits','Checking selected workspace','Checking reusable workbook cache','Caching selected workspace','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']) : null;
                 this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
                 const signal=this._ctAbort.signal,current=()=>this._ctOpenRun===opening && key===this.managedCatalogScope && openingEpoch===(this._ctEpoch || 0) && !signal.aborted,
                     check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
@@ -2060,7 +2064,7 @@
                         const result=await this._ctStore.getMetadata(scope,{guard:current});check();report({detail:result?.state==='ready'?'Selected workspace is cached':'Preparing selected originals'});return result;
                     },initialization);
                     if(cached?.state==='ready'){
-                        if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,['Preserving unsaved edits','Checking selected workspace','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+                        if(initialization?.ownsPlan)this.setWorkspaceInitializationPlan?.(initialization,['Preserving unsaved edits','Checking selected workspace','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
                         return activate ? await this.ctActivate(scope,{...cached,version},initialization) : cached;
                     }
                     await this.ctRequireTrustedProtocol(signal);check();
@@ -2483,6 +2487,13 @@
             }
         }
     };
+    const contextComponent = { name:'ClientTextContext',props:{host:Object,items:{type:Array,default:()=>[]},compact:Boolean},
+        methods:{
+            showTooltip(event,text) { this.host.showTooltip?.(event,text); },
+            hideTooltip() { this.host.hideTooltip?.(); },
+        },template:`<section v-if="items.length" class="ctReferenceContext" :class="{ctContextCompact:compact}" tabindex="-1" aria-label="Context" @click.stop @dblclick.stop>
+            <dl><div v-for="item in items" :key="item.name" class="ctContextEntry"><dt>{{ item.name }}</dt><dd class="ctContextValue"><span v-for="(part,index) in item.parts" :key="index" class="ctContextPart" :tabindex="part.tooltip ? 0 : undefined" :aria-label="part.tooltip || undefined" v-tooltip="part.tooltip">{{ part.text }}</span></dd></div></dl>
+        </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
@@ -2503,7 +2514,6 @@
         <div class="ctFields" :data-side="side === 'both' ? undefined : side" :inert="host.ctBusy" @keydown="host.ctFieldsKeydown($event)">
             <div :class="{inlineFileBlock:side !== 'both',inlineBlockPrelude:side !== 'both'}" :data-inline-block="side !== 'both' ? 'prelude' : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
             <template v-if="side !== 'translation'">
-                <section v-for="reference in host.ctReferenceMetadata()" :key="reference.name" class="ctReferenceContext editBlock"><strong>{{ reference.name }}</strong><pre :tabindex="reference.tooltip ? 0 : undefined" :aria-label="reference.tooltip || undefined" v-tooltip="reference.tooltip">{{ reference.display ?? reference.value }}</pre></section>
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
             <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
@@ -2560,6 +2570,6 @@
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const toolsComponent = root.EditorComponents?.Tools;
-    return { mixin, teams, detect, groupFields, mode, fieldsComponent, targetComponent, toolsComponent };
+    return { mixin, teams, detect, groupFields, mode, contextComponent, fieldsComponent, targetComponent, toolsComponent };
 });
 

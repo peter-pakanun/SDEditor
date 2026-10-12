@@ -7822,6 +7822,7 @@ function renderUnifiedLineDiff(edits) {
 
 const app = Vue.createApp(config);
 if (window.ClientTextUI) {
+  app.component('ct-context', window.ClientTextUI.contextComponent);
   app.component('ct-fields', window.ClientTextUI.fieldsComponent);
   app.component('ct-target', window.ClientTextUI.targetComponent);
   app.component('ct-tools', window.ClientTextUI.toolsComponent);

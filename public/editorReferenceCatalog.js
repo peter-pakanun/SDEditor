@@ -67,7 +67,8 @@
     if (session.mode === 'clienttext') {
       if (language !== session.language) return null;
       return { mode: 'clienttext', scope, groupId: group.id || scope.groupId || '', groupLabel: label({ ...group, contentMode: 'clienttext' }),
-        language, units: host.ctUnits || [], saved: host.ctSaved || {} };
+        language, units: host.ctUnits || [], saved: host.ctSaved || {},
+        contextReferences: root.ContentAdapters?.clienttext?.cachedContextReferenceIndex?.(host.ctUnits) };
     }
     return { mode: 'statdescription', scope, groupId: group.id || scope.groupId || '', groupLabel: label(group),
       language, descs: host.descs || [], workspace: host.localDescs };
@@ -94,8 +95,13 @@
           if (mode(group) === 'clienttext') {
             const metadata = await host._ctStore?.getMetadata(scope, { guard: current }); check();
             if (metadata?.state === 'ready') {
-              const [units, saved] = await Promise.all([host._ctStore.getUnits(scope, { guard: current }), host._ctStore.getSaved(scope, { guard: current })]); check();
-              cached = { mode: 'clienttext', scope, groupId: group.id, groupLabel: label(group), language, units, saved };
+              const retained = prepared.get(preparedKey(scope));
+              const original = metadata.signature && retained?.mode === 'clienttext'
+                && retained.originalSignature === metadata.signature ? retained.units : null;
+              const [units, saved] = await Promise.all([original || host._ctStore.getUnits(scope, { guard: current }), host._ctStore.getSaved(scope, { guard: current })]); check();
+              cached = { mode: 'clienttext', scope, groupId: group.id, groupLabel: label(group), language, units, saved,
+                ...(metadata.signature ? { originalSignature: metadata.signature } : {}),
+                ...(original ? { contextReferences: retained.contextReferences } : {}) };
             }
           } else if (scope.sourceHash) {
             const descs = await root.OfflineStore?.getVersionSource(scope); check();
@@ -106,7 +112,7 @@
           }
           if (!cached) {
             const retained = prepared.get(preparedKey(scope));
-            if (retained) {
+            if (retained?.mode === 'statdescription') {
               // Another tab may commit a sibling translation while its original
               // exists only in this session. Refresh Saved overlays on each read.
               const workspace = await root.OfflineStore?.getVersionWorkspace(retained.scope, language); check();
@@ -133,8 +139,10 @@
                 ctReport: progress => { check(); options.onProgress?.(progress); },
                 ctInitializationStep: async (_name, callback) => callback(progress => { check(); options.onProgress?.(progress); }) };
               await cacheGroup.call(facade, copy(session.version), group, scope, { signal: options.signal, current }); check();
-              const [units, saved] = await Promise.all([host._ctStore.getUnits(scope, { guard: current }), host._ctStore.getSaved(scope, { guard: current })]); check();
-              cached = { mode: 'clienttext', scope, groupId: group.id, groupLabel: label(group), language, units, saved };
+              const [metadata, units, saved] = await Promise.all([host._ctStore.getMetadata(scope, { guard: current }),
+                host._ctStore.getUnits(scope, { guard: current }), host._ctStore.getSaved(scope, { guard: current })]); check();
+              cached = { mode: 'clienttext', scope, groupId: group.id, groupLabel: label(group), language, units, saved,
+                ...(metadata?.signature ? { originalSignature: metadata.signature } : {}) };
             } else {
               const archive = group.assets?.find(asset => asset.role === 'source')?.descriptor;
               if (!archive || !root.ManagedCollectionExports?.parseOriginal || !root.JSZip) throw new Error('StatDescription reference preparation is unavailable.');
@@ -152,6 +160,19 @@
           missing.push({ id: group.id, label: label(group), mode: mode(group) });
           errors.push(label(group) + ': ' + error.message);
         }
+      }
+      check();
+      // Build references before publishing catalog sources. Rendering and saved
+      // overlay refreshes only consume this prepared, immutable-unit index.
+      const adapter = root.ContentAdapters?.clienttext;
+      for (const source of sources) {
+        if (source.mode !== 'clienttext' || !adapter?.contextReferenceIndex) continue;
+        source.contextReferences ??= adapter.cachedContextReferenceIndex?.(source.units);
+        if (!source.contextReferences) {
+          source.contextReferences = await adapter.contextReferenceIndex(source.units, { guard: current });
+          check();
+        }
+        if (source.originalSignature) prepared.set(preparedKey(source.scope), source);
       }
       check();
       return { sources, groups: groups.map(group => ({ id: group.id, label: label(group), mode: mode(group) })), missing, errors };

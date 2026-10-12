@@ -284,33 +284,34 @@ test('reference preserves every source and translation entry, multiline text, ta
   assert.equal(reference.referenceMetadata, undefined);
 });
 
-test('ClientText lookup exposes original context and character metadata with literal values', () => {
+test('ClientText lookup exposes every populated metadata heading with literal values', async () => {
   const unit = deepFreeze({ id: 'npc', role: 'NPCText', sheet: 'NPCText', recordId: 'ClearfellGreeting',
-    metadata: { ID: 'ClearfellGreeting', Context: '  Metadata/Characters/NPC/Clearfell/Lachlann\\n<tag>\r\nLine two  ',
+    metadata: { 'Raw label': 'Unmapped entry', Context: '  Metadata/Characters/NPC/Clearfell/Lachlann\\n<tag>\r\nLine two  ',
       Character: 'Metadata/Characters/NPC/Clearfell/Lachlann', 'Character Class': '  Ranger  ', Other: 'Keep elsewhere' },
     developerNotes: 'Developer guidance', fields: [{ id: 'text', name: 'Text', kind: 'text', source: 'Greetings', target: 'สวัสดี' }] });
-  const { model } = loadLookup({ lookupCatalogSources: [{ mode: 'clienttext', language: 'Thai', units: [unit], saved: {} }] });
+  const units = [unit];
+  await require('../public/contentAdapters.js').clienttext.contextReferenceIndex(units);
+  const { model } = loadLookup({ lookupCatalogSources: [{ mode: 'clienttext', language: 'Thai', units, saved: {} }] });
   model.lookupCatalogKey = model.lookupSessionKey;
   search(model, 'Metadata/Characters', 'metadata');
   assert.equal(model.lookupResultCount, 1);
   model.lookupSelect(model.lookupVisibleResults[0].key);
   const reference = model.lookupSelectedReference;
-  assert.deepEqual(plain(reference.referenceMetadata), [
-    { name: 'Context', value: unit.metadata.Context }, { name: 'Character', value: unit.metadata.Character },
-    { name: 'Character Class', value: unit.metadata['Character Class'] },
-  ]);
+  assert.deepEqual(plain(reference.referenceMetadata), Object.entries(unit.metadata)
+    .map(([name, value]) => ({ name, value, parts: [{ text: value }] })));
   assert.equal(reference.developerNotes, 'Developer guidance');
   assert.equal(reference.blocks[0].english, 'Greetings');
-  reference.referenceMetadata[0].value = 'View changed';
+  reference.referenceMetadata.find(entry => entry.name === 'Context').value = 'View changed';
   assert.equal(unit.metadata.Context, '  Metadata/Characters/NPC/Clearfell/Lachlann\\n<tag>\r\nLine two  ');
 });
 
-test('ClientText lookup safely omits blank metadata and sparse units without metadata', () => {
+test('ClientText lookup safely omits blank metadata and sparse units without metadata', async () => {
   const units = [
     { id: 'blank', role: 'NPCText', sheet: 'NPCText', recordId: 'BlankContext',
       metadata: { Context: ' \r\n ', Character: '', 'Character Class': null }, fields: [{ id: 'text', source: 'Blank context', target: '' }] },
     { id: 'sparse', role: 'NPCTalk', sheet: 'NPCTalk', recordId: 'SparseContext', fields: [{ id: 'text' }] },
   ];
+  await require('../public/contentAdapters.js').clienttext.contextReferenceIndex(units);
   const { model } = loadLookup({ lookupCatalogSources: [{ mode: 'clienttext', language: 'Thai', units, saved: {} }] });
   model.lookupCatalogKey = model.lookupSessionKey;
   search(model, 'Context', 'path');
@@ -321,18 +322,21 @@ test('ClientText lookup safely omits blank metadata and sparse units without met
   }
 });
 
-test('ClientText Lookup resolves each reference from its own Characters sheet and keeps raw metadata intact', () => {
+test('ClientText Lookup consumes prepared generic references from each group and keeps raw metadata intact', async () => {
   const path = 'Metadata/Characters/Dex/DexFourb';
   const dialogue = deepFreeze({ id: 'dialogue', role: 'normal', sheet: 'NPCTalkDialogueTextAudio', recordId: 'HuntressDelwynIntroConvoA',
     metadata: { Context: 'Opening conversation', Character: path, 'Character Class': path },
     developerNotes: 'Original note', fields: [{ id: 'text', name: 'Text', kind: 'text', source: 'Greetings', target: 'สวัสดี' }] });
-  const character = english => deepFreeze({ id: 'character', role: 'normal', sheet: 'Characters', recordId: path, metadata: { ID: path },
-    fields: [{ id: 'name', name: 'Name', kind: 'text', source: english, target: 'ชื่อแปล' },
-      { id: 'description', name: 'Description', kind: 'text', source: 'Other source', target: '' }] });
+  const character = english => deepFreeze({ id: 'character', role: 'normal', sheet: 'ActorRecords', recordId: path,
+    fields: [{ id: 'name', name: 'Display', kind: 'text', source: english, target: 'ชื่อแปล', sourceCell: 'B10' },
+      { id: 'form', name: 'Display', form: '1', kind: 'text', source: english, target: '', sourceCell: 'B10' }] });
   const unitsA = deepFreeze([dialogue, character('Huntress')]), unitsB = deepFreeze([dialogue, character('Another English name')]);
   const before = JSON.stringify([unitsA, unitsB]);
   const A = require('../public/contentAdapters.js'), indexed = [];
-  const adapters = { ...A, clienttext: { ...A.clienttext, characterReferenceIndex(units) { indexed.push(units); return A.clienttext.characterReferenceIndex(units); } } };
+  await A.clienttext.contextReferenceIndex(unitsA); await A.clienttext.contextReferenceIndex(unitsB);
+  const adapters = { ...A, clienttext: { ...A.clienttext,
+    contextReferenceIndex() { assert.fail('Rendering and selecting Lookup must not scan immutable units for references'); },
+    cachedContextReferenceIndex(units) { indexed.push(units); return A.clienttext.cachedContextReferenceIndex(units); } } };
   const sources = [
     { mode: 'clienttext', language: 'Thai', groupId: 'first', scope: { sourceHash: 'first' }, units: unitsA,
       saved: { character: { values: { name: 'Saved translation' } } } },
@@ -342,42 +346,74 @@ test('ClientText Lookup resolves each reference from its own Characters sheet an
   model.lookupCatalogKey = model.lookupSessionKey;
   search(model, 'HuntressDelwynIntroConvoA', 'path');
   assert.equal(model.lookupResultCount, 2);
-  assert.deepEqual(indexed, [unitsA, unitsB], 'One Characters index is built per source, not per field.');
+  assert.deepEqual(indexed, [unitsA, unitsB], 'One ready reference index is consumed per source, not per field.');
   for (const result of model.lookupVisibleResults) {
     model.lookupSelect(result.key);
     const references = model.lookupSelectedReference.referenceMetadata;
-    assert.deepEqual(plain(references[0]), { name: 'Context', value: 'Opening conversation' });
+    assert.deepEqual(plain(references[0]), { name: 'Context', value: 'Opening conversation', parts: [{ text: 'Opening conversation' }] });
     const english = result.groupId === 'first' ? 'Huntress' : 'Another English name';
     for (const reference of references.slice(1)) {
       assert.equal(reference.value, path);
       assert.equal(reference.display, english);
-      assert.ok(reference.tooltip.includes(path));
-      assert.ok(reference.tooltip.includes(english));
-      assert.ok(reference.tooltip.includes('Characters'));
-      assert.ok(!reference.tooltip.includes('Saved translation'));
-      assert.ok(!reference.tooltip.includes('Wrong active editor name'));
+      const tooltip = reference.parts.find(part => part.tooltip)?.tooltip;
+      assert.ok(tooltip.includes(path));
+      assert.ok(tooltip.includes(english));
+      assert.ok(tooltip.includes('ActorRecords!B10'));
+      assert.ok(!tooltip.includes('Saved translation'));
+      assert.ok(!tooltip.includes('Wrong active editor name'));
     }
   }
   assert.equal(indexed.length, 2, 'Reading and selecting results reuses the catalog index.');
   assert.equal(JSON.stringify([unitsA, unitsB]), before);
 });
 
-test('ClientText Lookup leaves ambiguous Characters names and unavailable mappings as raw references', () => {
+test('ClientText Lookup leaves ambiguous record IDs and unavailable mappings raw', async () => {
   const path = 'Metadata/Characters/Dex/DexFourb';
   const dialogue = { id: 'dialogue', role: 'normal', sheet: 'NPCTextAudio', recordId: 'Dialogue', metadata: { Character: path },
     fields: [{ id: 'text', name: 'Text', kind: 'text', source: 'Greetings', target: '' }] };
   const character = (id, name) => ({ id, role: 'normal', sheet: 'Characters', recordId: path,
     fields: [{ id: 'name', name: 'Name', kind: 'text', source: name, target: '' }] });
   const source = { mode: 'clienttext', language: 'Thai', units: [dialogue, character('one', 'Huntress'), character('two', 'Ambiguous name')], saved: {} };
+  const A = require('../public/contentAdapters.js');
+  await A.clienttext.contextReferenceIndex(source.units);
   const { model } = loadLookup({ lookupCatalogSources: [source] });
   model.lookupCatalogKey = model.lookupSessionKey;
   search(model, 'Dialogue', 'path'); model.lookupSelect(model.lookupVisibleResults[0].key);
-  assert.deepEqual(plain(model.lookupSelectedReference.referenceMetadata), [{ name: 'Character', value: path }]);
-  const A = require('../public/contentAdapters.js'), noIndex = { ...A, clienttext: { ...A.clienttext, characterReferenceIndex: undefined } };
+  const ambiguous = model.lookupSelectedReference.referenceMetadata[0];
+  assert.equal(ambiguous.value, path); assert.equal(ambiguous.display, path);
+  assert.equal(ambiguous.parts.map(part => part.text).join(''), path);
+  assert.ok(ambiguous.parts[0].tooltip.includes('Huntress')); assert.ok(ambiguous.parts[0].tooltip.includes('Ambiguous name'));
+  const noIndex = { ...A, clienttext: { ...A.clienttext, cachedContextReferenceIndex: undefined } };
   const fallback = loadLookup({ lookupCatalogSources: [source] }, noIndex).model;
   fallback.lookupCatalogKey = fallback.lookupSessionKey;
   search(fallback, 'Dialogue', 'path'); fallback.lookupSelect(fallback.lookupVisibleResults[0].key);
-  assert.deepEqual(plain(fallback.lookupSelectedReference.referenceMetadata), [{ name: 'Character', value: path }]);
+  assert.deepEqual(plain(fallback.lookupSelectedReference.referenceMetadata), [{ name: 'Character', value: path, parts: [{ text: path }] }]);
+});
+
+test('ClientText Lookup preserves comma delimiters and bare tags while exposing individual matches', async () => {
+  const make = (id, recordId, sheet, text, role = 'normal') => ({ id, recordId, sheet, role,
+    fields: [{ id: 'Label', name: 'Label', source: text, target: '', sourceCell: 'B2' }] });
+  const row = make('row', 'Greeting', 'Conversations', 'Greetings', 'gender');
+  row.metadata = { Contributors: '  Assets/People/A,\r\nAssets/People/B  ', Tags: 'ring, crossbow, missing' };
+  const units = [row, make('a', 'Assets/People/A', 'People', 'Alice'), make('b', 'Assets/People/B', 'People', 'Bob'),
+    make('ring', 'ring', 'Items', 'Rings'), make('crossbow-one', 'crossbow', 'Items', 'Crossbow'),
+    make('crossbow-two', 'crossbow', 'GemTags', '[Crossbow]')];
+  const before = JSON.stringify(units), A = require('../public/contentAdapters.js');
+  const contextReferences = await A.clienttext.contextReferenceIndex(units);
+  const { model } = loadLookup({ lookupCatalogSources: [{ mode: 'clienttext', language: 'Thai', units, saved: {}, contextReferences }] });
+  model.lookupCatalogKey = model.lookupSessionKey;
+  search(model, 'Greeting', 'path'); model.lookupSelect(model.lookupVisibleResults[0].key);
+  const [contributors, tags] = model.lookupSelectedReference.referenceMetadata;
+  assert.equal(contributors.value, row.metadata.Contributors);
+  assert.equal(contributors.parts.map(part => part.text).join(''), '  Alice,\r\nBob  ');
+  assert.equal(contributors.parts.filter(part => part.tooltip).length, 2);
+  assert.ok(contributors.parts.find(part => part.text === 'Alice').tooltip.includes('Assets/People/A'));
+  assert.equal(tags.parts.map(part => part.text).join(''), row.metadata.Tags);
+  assert.ok(tags.parts.find(part => part.text === 'ring').tooltip.includes('Rings'));
+  const crossbow = tags.parts.find(part => part.text === 'crossbow');
+  assert.ok(crossbow.tooltip.includes('Items!B2')); assert.ok(crossbow.tooltip.includes('GemTags!B2'));
+  assert.equal(tags.parts.filter(part => part.tooltip).length, 2);
+  assert.equal(JSON.stringify(units), before);
 });
 
 test('lookup methods preserve drafts, current editor, persistence, workspace search and selection', () => {

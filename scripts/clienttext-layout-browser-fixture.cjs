@@ -42,19 +42,32 @@ const sheetData = [
     .map(([role, name]) => ({ role, name, key: JSON.stringify([role, name]) }));
 
 const fixtureJs = `${tooltipComponent}
+(async()=>{
 const ct = window.ClientTextUI.mixin;
 const sheets = ${JSON.stringify(sheetData)};
 const fields = ['MS','MP','FS','FP','NS','NP'].map((form,index)=>({
     id:'form-'+form,kind:'form',group:'Text',name:'Text',form,source:'English source for the current record.',
     target:index===0 ? 'A long singular translation deliberately wraps into several lines when its column is narrower.' : form+' translation',
-    targetCell:String.fromCharCode(66+index)+'2',required:true,originalMissing:false,outdated:false
+    sourceCell:'J2',targetCell:String.fromCharCode(66+index)+'2',required:true,originalMissing:false,outdated:false
 }));
 const unit = Vue.markRaw({id:'layout-record',role:'normal',sheet:sheets[0].name,recordId:'FixtureIdentifier',fields,notes:[],
-    metadata:{Character:'Metadata/Characters/Dex/DexFourb\\nMetadata/Characters/Str/StrFourb',Context:'Raw <img src=x onerror=alert(1)> reference'},developerNotes:'Separate developer note'});
+    metadata:{Character:'Metadata/Characters/Dex/DexFourb, Metadata/Characters/Str/StrFourb',Context:'Raw <img src=x onerror=alert(1)> reference',
+        Tags:'ring, crossbow, default',Arbitrary:'  keep\\tthese\\nspaces  ',Zero:'0',Flag:'false',Empty:'  '},developerNotes:'Separate developer note'});
+const inactiveUnit=Vue.markRaw({id:'inactive-layout-record',role:'normal',sheet:sheets[0].name,recordId:'InactiveFixtureIdentifier',notes:[],metadata:{Tags:'inactive context'},
+    fields:[{id:'inactive-Text',kind:'text',name:'Text',source:'Inactive English.',target:'Inactive translation.',sourceCell:'J3',targetCell:'K3',required:true,originalMissing:false,outdated:false}]});
 const referenceCharacterUnits=Vue.markRaw([['Dex','DexFourb','Huntress','B10'],['Str','StrFourb','Warrior','B8']].map(([attribute,form,source,sourceCell])=>({
     id:'reference-character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,
-    fields:[{id:'Name',name:'Name',kind:'text',source,target:'Localized '+source,sourceCell,targetCell:'C'+sourceCell.slice(1),required:true}]
+    fields:[{id:'Name',name:'Name',kind:'text',source,target:'Localized '+source,sourceCell,targetCell:'C'+sourceCell.slice(1),required:true},
+        ...(source==='Huntress'?[
+            {id:'Description',name:'Description',kind:'text',source:'An agile adventurer skilled with spear and bow. This longer biography supplies useful English context in the tooltip while the short worksheet name remains the inline label.\\nThe remaining biography continues beyond the compact tooltip preview.',target:'Localized biography',sourceCell:'E10',targetCell:'F10',required:true},
+            {id:'Traits Description',name:'Traits Description',kind:'text',source:'Agility, precision and versatility.',target:'Localized traits',sourceCell:'H10',targetCell:'I10',required:true}
+        ]:[])]
 })));
+const tagUnits=Vue.markRaw([['ring','DelveCraftingTags','Rings','B12'],['crossbow','FilterSearchOptions','Crossbow','B30'],['crossbow','GemTags','[Crossbow]','B4']].map(([recordId,sheet,source,sourceCell],index)=>({
+    id:'tag-reference-'+index,role:'normal',sheet,recordId,fields:[{id:'Text',name:'Text',kind:'text',source,target:'Localized '+source,sourceCell,targetCell:'C'+sourceCell.slice(1),required:true}]
+})));
+const initialUnits=Vue.markRaw([unit,inactiveUnit,...referenceCharacterUnits,...tagUnits]);
+await window.ContentAdapters.clienttext.contextReferenceIndex(initialUnits,{yield:()=>new Promise(resolve=>setTimeout(resolve,0))});
 const classForms=['MS','FS','DexFour','DexFourb','IntFourb'];
 const classUnit=Vue.markRaw({id:'class-layout-record',role:'normal',sheet:sheets[0].name,recordId:'ClassVariantFixture',notes:[],fields:classForms.map((form,index)=>({
     id:'class-'+form,kind:'form',group:'Text',name:'Text',form,source:'Raw English [Keyword] {0} @ text.',
@@ -66,7 +79,7 @@ const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','
     fields:[{id:'Name',kind:'text',name:'Name',source,target:'Localized label '+form,targetCell:'D2',required:true,originalMissing:false,outdated:false}]
 })));
 const app = Vue.createApp({
-    data() { return {...ct.data(),ctActive:true,ctUnits:Vue.markRaw([unit,...referenceCharacterUnits]),ctSelection:unit.id,
+    data() { return {...ct.data(),ctActive:true,ctUnits:initialUnits,ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
         ctSheet:sheets[0].key,ctSearch:'Main search retained',ctAppliedSearch:'',ctSelectedFilters:['unchanged','missing','saved'],
         ctValues:Object.fromEntries(fields.map(field=>[field.id,field.target])),
@@ -92,6 +105,7 @@ const app = Vue.createApp({
 });
 app.component('editor-workspace-shell',window.EditorComponents.WorkspaceShell);
 app.component('ct-fields',window.ClientTextUI.fieldsComponent);
+app.component('ct-context',window.ClientTextUI.contextComponent);
 app.component('ct-target',window.ClientTextUI.targetComponent);
 app.component('editor-native-field',window.EditorComponents.NativeField);
 app.component('editor-diagnostic-meta',window.EditorComponents.DiagnosticMeta);
@@ -100,7 +114,8 @@ app.component('editor-full-shell',{...window.EditorComponents.FullEditorShell,te
 app.component('ct-tools',{props:['host'],template:'<aside class="side sharedEditorSidebar ctTools"><h3>File tools</h3><p>Disposable layout fixture</p></aside>'});
 app.component('app-tooltip',AppTooltip);
 ${tooltipDirective}
-window.__ctLayoutFixture=app.mount('#app');`;
+window.__ctLayoutFixture=app.mount('#app');
+})().catch(error=>{console.error(error);window.__ctLayoutFixtureError=String(error);});`;
 
 async function run() {
     const frontend = express(), server = createServer(frontend);
@@ -116,22 +131,23 @@ async function run() {
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const results = [], screenshots = [], errors = [];
-    let browser;
+    let browser,page;
     try {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
-        const context = await browser.newContext({viewport:{width:1440,height:900},locale:'en-US',timezoneId:'Asia/Bangkok',ignoreHTTPSErrors:true});
-        const page = await context.newPage();
+        const context = await browser.newContext({viewport:{width:1440,height:900},locale:'en-US',timezoneId:'Asia/Bangkok',ignoreHTTPSErrors:true,permissions:['clipboard-read','clipboard-write']});
+        page = await context.newPage();
         page.on('pageerror', error => errors.push(error.message));
         page.on('console', message => {if(message.type()==='error')errors.push(message.text());});
         await page.goto('http://127.0.0.1:' + server.address().port);
-        await page.waitForFunction(() => !!window.__ctLayoutFixture);
+        await page.waitForFunction(() => !!window.__ctLayoutFixture || !!window.__ctLayoutFixtureError);
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixtureError),undefined,'Fixture preparation succeeds');
         const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         const nav = page.getByRole('navigation', {name:'Workbook sheets'});
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
         const rowHeader = page.getByRole('columnheader', {name:'Row number'});
         assert.equal(await rowHeader.getAttribute('aria-sort'), 'ascending', 'Worksheet row order is the default');
-        assert.equal(await page.locator('.ctTable > tbody > tr > .ctRowNumber').textContent(), '2', 'Show the original worksheet row');
+        assert.equal(await page.locator('.ctTable > tbody > tr > .ctRowNumber').first().textContent(), '2', 'Show the original worksheet row');
         await rowHeader.getByRole('button', {name:'Row number'}).click();
         assert.equal(await rowHeader.getAttribute('aria-sort'), 'descending', 'Pointer activation reverses row order');
         await rowHeader.getByRole('button', {name:'Row number'}).press('Enter');
@@ -161,7 +177,7 @@ async function run() {
             const geometry = await page.locator('.ctFormGrid').evaluate(element => {
                 const rect = node => {const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
                 const unobscured = cell => {const r=cell.getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest('.ctFormGrid')===element;};
-                const inViewport = cell => {const r=cell.getBoundingClientRect();return r.top+r.height/2>=0 && r.top+r.height/2<innerHeight;};
+                const inViewport = cell => {const r=cell.getBoundingClientRect();return r.top+r.height/2>=16 && r.top+r.height/2<innerHeight-16;};
                 return {table:rect(element),full:!!element.closest('.ctFullEditor'),headers:[...element.tHead.rows[0].cells].map(cell=>({
                     ...rect(cell),text:cell.textContent.trim(),align:getComputedStyle(cell).textAlign,unobscured:unobscured(cell),inViewport:inViewport(cell)})),
                     rows:[...element.tBodies[0].rows].map(row=>[...row.cells].map(cell=>({
@@ -209,33 +225,78 @@ async function run() {
                 assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': English and translation are top-aligned');
             }else {
                 assert.ok(geometry.source.right<=geometry.target.left,name+': inline English and translation retain separate table columns');
-                assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': reference prelude keeps English aligned with translation');
+                assert.ok(Math.abs(geometry.source.top-geometry.target.top)<1,name+': context in the identity column keeps English aligned with translation');
             }
             assert.equal(geometry.highlights,7,name+': source and all six form targets use shared highlight overlays');
             results.push({name:name+' native field layout',sourceWidth:Math.round(geometry.source.width),targetWidth:Math.round(geometry.target.width)});
         };
         const checkReferences=async (full,name)=>{
-            const prefix=full?'.ctFullEditor':'.ctFields[data-side="source"]',references=page.locator(prefix+' .ctReferenceContext');
-            assert.deepEqual(await references.locator('strong').allTextContents(),['Context','Character'],name+': reference headings remain separate from notes');
-            assert.deepEqual(await references.locator('pre').allTextContents(),[
-                'Raw <img src=x onerror=alert(1)> reference','Huntress\nWarrior'
-            ],name+': exact English names replace mapped character paths');
+            const prefix=full?'.ctFullEditor':'tr[data-unit-id="layout-record"] .fileIdentityCell',references=page.locator(prefix+' .ctReferenceContext');
+            assert.equal(await page.locator('.ctReferenceContext').count(),1,name+': context appears once for the active record');
+            assert.equal(await page.locator('tr[data-unit-id="inactive-layout-record"] .ctReferenceContext').count(),0,name+': inactive row has no context');
+            assert.equal(await page.locator('.ctFields .ctReferenceContext').count(),0,name+': context is absent from English and translation fields');
+            assert.deepEqual(await references.locator('dt').allTextContents(),['Character','Context','Tags','Arbitrary','Zero','Flag'],name+': all nonblank headings preserve workbook column order');
+            assert.deepEqual(await references.locator('dd').allTextContents(),[
+                'Huntress, Warrior','Raw <img src=x onerror=alert(1)> reference','ring, crossbow, default','  keep\tthese\nspaces  ','0','false'
+            ],name+': names replace structured paths while raw tags and exact arbitrary text remain visible');
             assert.equal(await references.locator('img,input,textarea,button').count(),0,name+': escaped read-only reference text');
-            assert.equal(await page.locator(prefix+' .ctDeveloperNotes pre').textContent(),'Separate developer note',name+': developer notes remain separate');
-            assert.equal(await references.locator('pre').evaluateAll(elements=>elements.every(element=>getComputedStyle(element).userSelect==='text'
+            assert.equal(await page.locator((full?'.ctFullEditor':'.ctFields[data-side="source"]')+' .ctDeveloperNotes pre').textContent(),'Separate developer note',name+': developer notes remain separate');
+            assert.equal(await references.locator('dd').evaluateAll(elements=>elements.every(element=>getComputedStyle(element).userSelect==='text'
                 && getComputedStyle(element).whiteSpace==='pre-wrap' && element.scrollWidth<=element.clientWidth+1)),true,name+': selectable wrapped reference paths');
-            if(!full)assert.equal(await page.locator('.ctFields[data-side="translation"] .ctReferenceContext').count(),0,name+': reference is shown beside English');
-            const mapped=references.locator('pre').nth(1),expected=await page.evaluate(()=>window.__ctLayoutFixture.ctReferenceMetadata().find(item=>item.name==='Character').tooltip);
-            for(const detail of ['Metadata/Characters/Dex/DexFourb','Metadata/Characters/Str/StrFourb','Huntress','Warrior','Characters!B10','Characters!B8'])assert.ok(expected.includes(detail),name+': tooltip includes '+detail);
-            assert.equal(await mapped.getAttribute('title'),null,name+': use shared tooltip component');
-            await mapped.hover();await tooltip.waitFor();await settle();
             const tooltipText=()=>tooltip.evaluate(element=>[...element.children].map(line=>line.textContent===' '?'':line.textContent).join('\n'));
-            assert.equal(await tooltipText(),expected,name+': hover reveals full mapped reference information');
-            const bounds=await tooltip.boundingBox();assert.ok(bounds.x>=7 && bounds.y>=7 && bounds.x+bounds.width<=page.viewportSize().width-7 && bounds.y+bounds.height<=page.viewportSize().height-7,name+': reference tooltip stays in viewport');
-            await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});
-            await mapped.focus();await tooltip.waitFor();assert.equal(await tooltipText(),expected,name+': keyboard focus reveals the same information');
+            const expectedParts=await page.evaluate(()=>window.__ctLayoutFixture.ctReferenceMetadata().flatMap(item=>item.parts.filter(part=>part.tooltip)));
+            assert.deepEqual(expectedParts.map(part=>part.text),['Huntress','Warrior','ring','crossbow'],name+': matched list items have individual tooltips');
+            for(const [index,part] of expectedParts.entries()) {
+                const token=references.locator('.ctContextPart[tabindex="0"]').nth(index);
+                assert.equal(await token.getAttribute('title'),null,name+': use shared tooltip component');
+                await token.hover();await tooltip.waitFor();await settle();
+                assert.equal(await tooltipText(),part.tooltip,name+': hover reveals exact token reference details');
+                const bounds=await tooltip.boundingBox();assert.ok(bounds.x>=7 && bounds.y>=7 && bounds.x+bounds.width<=page.viewportSize().width-7 && bounds.y+bounds.height<=page.viewportSize().height-7,name+': reference tooltip stays in viewport');
+                await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});
+                await token.focus();await tooltip.waitFor();assert.equal(await tooltipText(),part.tooltip,name+': keyboard focus reveals the same token information');
+                await page.locator(full?'.ctFullEditor [data-ct-target="form-FS"]':'.ctFields[data-side="translation"] [data-ct-target="form-FS"]').focus();await tooltip.waitFor({state:'detached'});
+            }
+            for(const detail of ['Metadata/Characters/Dex/DexFourb','Huntress','Characters!B10','English Description:','Characters!E10','+1 more English fields'])assert.ok(expectedParts[0].tooltip.includes(detail),name+': Character tooltip includes '+detail);
+            for(const detail of ['ring','Rings','DelveCraftingTags!B12'])assert.ok(expectedParts[2].tooltip.includes(detail),name+': bare tag tooltip includes related '+detail);
+            for(const detail of ['crossbow','Crossbow','[Crossbow]','FilterSearchOptions!B30','GemTags!B4'])assert.ok(expectedParts[3].tooltip.includes(detail),name+': ambiguous tag includes each related '+detail);
+            assert.equal(await references.evaluate(element=>{
+                const identity=element.closest('.ctFullEditor')?element.previousElementSibling:element.parentElement.querySelector('.ctFilePath');
+                return identity.nextElementSibling===element && (!element.closest('.ctFullEditor') || element.nextElementSibling.classList.contains('ctEditorNavigation'));
+            }),true,name+': context follows the filepath and precedes full-editor navigation');
             await page.locator(full?'.ctFullEditor [data-ct-target="form-FS"]':'.ctFields[data-side="translation"] [data-ct-target="form-FS"]').focus();await tooltip.waitFor({state:'detached'});
         };
+        const checkContextInteraction=async name=>{
+            const input=page.locator('.ctFields[data-side="translation"] [data-ct-target="form-FS"]'),original=await input.inputValue();
+            await input.fill('Draft retained while selecting context text.');
+            const before=await page.evaluate(()=>{
+                const host=window.__ctLayoutFixture;
+                return {values:JSON.stringify(host.ctValues),selection:host.ctSelection,editor:host.ctEditor,closed:host.ctInlineClosed};
+            });
+            const context=page.locator('tr[data-unit-id="layout-record"] .ctReferenceContext'),token=context.locator('.ctContextPart[tabindex="0"]').first();
+            await context.locator('dd').nth(3).click();await context.locator('dd').nth(3).dblclick();
+            await token.focus();await token.press('ArrowDown');await token.press('Enter');await settle();
+            assert.deepEqual(await page.evaluate(()=>{
+                const host=window.__ctLayoutFixture;
+                return {values:JSON.stringify(host.ctValues),selection:host.ctSelection,editor:host.ctEditor,closed:host.ctInlineClosed};
+            }),before,name+': pointer and keyboard context actions preserve the draft and active row');
+            await token.press('Tab');
+            assert.equal(await context.locator('.ctContextPart[tabindex="0"]').nth(1).evaluate(element=>element===document.activeElement),true,name+': Tab traverses individual reference tokens');
+            const raw=context.locator('dd').nth(3),expected=await raw.textContent();
+            await raw.evaluate(element=>{
+                const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(element);selection.removeAllRanges();selection.addRange(range);
+            });
+            assert.equal(await page.evaluate(()=>window.getSelection().toString()),expected,name+': raw context is selectable without modifying text');
+            await page.keyboard.press('Control+c');
+            assert.equal((await page.evaluate(()=>navigator.clipboard.readText())).replace(/\r\n/g,'\n'),expected,name+': copying preserves raw context whitespace with native Windows line endings');
+            await input.fill(original);await input.focus();await tooltip.waitFor({state:'detached'});
+            results.push({name:name+' context selection, copying, token Tab navigation and draft retention'});
+        };
+        for(const mode of [{inlineEditor:false,ctInlineClosed:false},{inlineEditor:true,ctInlineClosed:true}]) {
+            await page.evaluate(mode=>Object.assign(window.__ctLayoutFixture,mode),mode);await settle();
+            assert.equal(await page.locator('.ctReferenceContext').count(),0,'Inactive inline mode does not show context');
+        }
+        await page.evaluate(()=>Object.assign(window.__ctLayoutFixture,{inlineEditor:true,ctInlineClosed:false}));await settle();
+        results.push({name:'Context hidden outside active inline editing'});
         for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100,1000]) {
             await page.setViewportSize({width,height:900});
             await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);window.__ctLayoutFixture.ctEditor=false;},theme);
@@ -256,6 +317,7 @@ async function run() {
             await checkGrid(theme+'/'+width+' inline');
             await checkFieldLayout(false,theme+'/'+width+' inline');
             await checkReferences(false,theme+'/'+width+' inline');
+            if(width===1100)await checkContextInteraction(theme+'/'+width+' inline');
             if(theme==='modern-dark' && width===1100) {
                 await longButton.hover();await tooltip.waitFor();await settle();
                 const path=join(tmpdir(),'sdeditor-clienttext-inline-'+randomUUID()+'.png');
@@ -292,12 +354,12 @@ async function run() {
                     button:list.querySelector('button')===saved.button,top:list.scrollTop};
             });
             assert.deepEqual(retained,{nav:true,list:true,filter:true,button:true,top:scrollBefore.top},theme+'/'+width+': returning preserves original Sheets DOM and scroll');
-            await page.locator('.ctID').click();await page.locator('.ctFullEditor').waitFor();
+            await page.locator('.ctID').first().click();await page.locator('.ctFullEditor').waitFor();
             await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Close',exact:true}).click();await settle();
             assert.equal(await page.locator('.ctSheetList').evaluate(element=>element.scrollTop),scrollBefore.top,theme+'/'+width+': pointer open and Close retain Sheets scroll');
             await assertPreserved();
             results.push({name:theme+'/'+width+' Sheets DOM, fixed filter, scroll and keyboard focus retention',scrollTop:retained.top});
-            await page.locator('.ctID').click();await page.locator('.ctFullEditor').waitFor();await settle();
+            await page.locator('.ctID').first().click();await page.locator('.ctFullEditor').waitFor();await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});await settle();
             await checkGrid(theme+'/'+width+' full');
             await checkFieldLayout(true,theme+'/'+width+' full');
             await checkReferences(true,theme+'/'+width+' full');
@@ -373,6 +435,12 @@ async function run() {
         }
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));
+    } catch(error) {
+        if(page && !page.isClosed()) {
+            const path=join(tmpdir(),'sdeditor-clienttext-failure-'+randomUUID()+'.png');
+            await page.screenshot({path});console.error('Failure screenshot: '+path);
+        }
+        throw error;
     } finally {
         await browser?.close();
         await new Promise(resolve=>server.close(resolve));

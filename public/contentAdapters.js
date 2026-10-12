@@ -12,48 +12,92 @@
         return {filepath:String(unit.sheet),stats:[],condition:'',remarks:'',entryIndex:null,contentMode:'clienttext',
             fieldKind:field.kind,fieldName:field.name,role:unit.role,sheet:unit.sheet,recordId:unit.recordId,fieldId:field.id,...(field.form?{form:field.form}:{})};
     }
-    function characterReferenceIndex(units){
-        const index=new Map();
-        // The caller supplies only the selected workspace's immutable originals.
-        // Translated/staged values never participate in these reference labels.
-        for(const unit of units||[]){
-            if(unit?.sheet!=='Characters'||typeof unit.recordId!=='string'||!unit.recordId.startsWith('Metadata/Characters/'))continue;
-            for(const field of unit.fields||[]){
-                if(field?.name!=='Name'||field.kind==='gender'||typeof field.source!=='string'||!field.source.trim())continue;
-                if(!index.has(unit.recordId))index.set(unit.recordId,[]);
-                index.get(unit.recordId).push({unit,field});
-            }
+    const contextIndexes=new WeakMap();
+    // Candidates have exact raw-string offsets. Delimiters and surrounding
+    // whitespace remain ordinary text, including literal backslash-n.
+    function contextCandidates(value){
+        const spans=new Map(),add=(text,start)=>{
+            const trimmed=text.trim();if(!trimmed)return;
+            const offset=text.indexOf(trimmed),from=start+offset,to=from+trimmed.length;
+            spans.set(from+':'+to,{value:trimmed,start:from,end:to});
+        };
+        add(value,0);
+        for(const match of value.matchAll(/[^,\r\n]+/g))add(match[0],match.index);
+        for(const match of value.matchAll(/[^\s,;()[\]{}<>"']+\/[^\s,;()[\]{}<>"']+/g))add(match[0],match.index);
+        return [...spans.values()].sort((a,b)=>a.start-b.start||b.end-a.end);
+    }
+    const structuredPath=value=>/^[^\s,;()[\]{}<>"']+(?:\/[^\s,;()[\]{}<>"']+)+$/.test(value);
+    function englishSources(unit){
+        const seen=new Set();
+        const fields=(unit.fields||[]).filter(field=>{
+            if(field?.kind==='gender'||typeof field?.source!=='string'||!field.source.trim())return false;
+            const key=JSON.stringify([field.sourceCell||field.name||field.id,field.source]);
+            if(seen.has(key))return false;seen.add(key);return true;
+        });
+        const column=field=>{
+            const letters=/^([A-Z]+)[0-9]+$/i.exec(field.sourceCell||'')?.[1];
+            return letters?[...letters.toUpperCase()].reduce((value,letter)=>value*26+letter.charCodeAt(0)-64,0):Infinity;
+        };
+        return fields.sort((left,right)=>column(left)-column(right));
+    }
+    function cachedContextReferenceIndex(units){return Array.isArray(units)?contextIndexes.get(units):undefined;}
+    async function contextReferenceIndex(units,options={}){
+        const check=()=>{
+            if(options.signal?.aborted||options.guard&&!options.guard())
+                throw Object.assign(new Error('Context reference preparation was cancelled.'),{name:'AbortError',stale:true});
+        };
+        check();const cached=cachedContextReferenceIndex(units);if(cached)return cached;
+        const originals=Array.isArray(units)?units:[],candidates=new Set(),index=new Map();
+        const pause=options.yield||(()=>new Promise(resolve=>setTimeout(resolve,0))),now=()=>root.performance?.now?.()??Date.now();
+        let started=now(),processed=0;
+        const checkpoint=async force=>{
+            check();if(force||now()-started>=8){await pause();check();started=now();}
+        };
+        for(const unit of originals){
+            for(const value of Object.values(unit?.metadata||{}))if(typeof value==='string'&&value.trim())
+                for(const candidate of contextCandidates(value))candidates.add(candidate.value);
+            if(++processed%256===0)await checkpoint(false);
         }
+        await checkpoint(true);processed=0;
+        for(const unit of originals){
+            if(candidates.has(unit?.recordId)){
+                const fields=englishSources(unit);
+                if(!index.has(unit.recordId))index.set(unit.recordId,[]);index.get(unit.recordId).push({unit,fields});
+            }
+            if(++processed%256===0)await checkpoint(false);
+        }
+        check();if(Array.isArray(units))contextIndexes.set(units,index);
         return index;
     }
-    function characterReference(path,unit,index){
-        const all=index?.get?.(path);
-        if(!Array.isArray(all)||!all.length)return null;
-        const sameRole=all.filter(candidate=>candidate.unit.role===unit?.role),candidates=sameRole.length?sameRole:all;
-        // Several gender forms can point to one English Name cell. A role
-        // fallback is safe only when every candidate has the same English name.
-        const names=new Set(candidates.map(candidate=>candidate.field.source));
-        return names.size===1?{path,name:candidates[0].field.source,candidates}:null;
+    function referenceTooltip(id,candidates,resolved){
+        const preview=text=>{const flat=text.replace(/\r\n|\r|\n/g,' ↵ ');return flat.slice(0,160)+(flat.length>160?'…':'');};
+        const details=candidates.slice(0,4).map(({unit,fields})=>{
+            const lines=fields.slice(0,2).map(field=>'English '+(field.name||field.id)+': '+preview(field.source)+'\nSource: '+unit.sheet+'!'+(field.sourceCell||'?')+' ('+unit.role+' workbook)');
+            if(fields.length>2)lines.push('+'+(fields.length-2)+' more English fields');
+            if(!fields.length)lines.push('No nonblank English source\nSource: '+unit.sheet+' ('+unit.role+' workbook)');
+            return lines.join('\n');
+        });
+        if(candidates.length>4)details.push('+'+(candidates.length-4)+' more matching records');
+        return (resolved?'Full path: ':'Related matches for: ')+id+'\n\n'+details.join('\n\n');
     }
     function referenceMetadata(unit,index){
-        return ['Context','Character','Character Class'].flatMap(name=>{
-            const value=unit?.metadata?.[name];
+        return Object.entries(unit?.metadata||{}).flatMap(([name,value])=>{
             if(typeof value!=='string'||!value.trim())return [];
-            const entry={name,value};
-            if(!index||name==='Context')return [entry];
-            const matched=new Map();
-            const display=value.replace(/\S+/g,path=>{
-                const match=characterReference(path,unit,index);
-                if(!match)return path;
-                matched.set(path,match);return match.name;
-            });
-            if(!matched.size)return [entry];
-            const details=[...matched.values()].map(match=>{
-                const cells=[...new Set(match.candidates.map(candidate=>
-                    candidate.unit.sheet+'!'+(candidate.field.sourceCell||'?')+' ('+candidate.unit.role+' workbook)'))];
-                return 'English Name: '+match.name+'\nFull path: '+match.path+'\nSource: '+cells.join(', ');
-            });
-            return [{...entry,display,tooltip:name+':\n'+value+'\n\n'+details.join('\n\n')}];
+            const parts=[];let offset=0,matched=false;
+            if(index)for(const span of contextCandidates(value)){
+                if(span.start<offset)continue;
+                const candidates=index.get(span.value);if(!candidates?.length)continue;
+                // Worksheet order supplies a generic label without knowing
+                // target sheet/column names. Biography and other fields stay
+                // in the tooltip; paragraphs are not promoted to inline labels.
+                const label=candidates.length===1?candidates[0].fields[0]?.source:undefined;
+                const resolved=structuredPath(span.value)&&typeof label==='string'&&label.length<=160&&!/[\r\n]/.test(label);
+                if(span.start>offset)parts.push({text:value.slice(offset,span.start)});
+                parts.push({text:resolved?label:span.value,tooltip:referenceTooltip(span.value,candidates,resolved)});
+                offset=span.end;matched=true;
+            }
+            if(offset<value.length)parts.push({text:value.slice(offset)});
+            return [{name,value,parts,...(matched?{display:parts.map(part=>part.text).join('')}:{})}];
         });
     }
     function compatibleContext(left,right){
@@ -124,7 +168,7 @@
         status:(unit,saved)=>runtime().statusFor(unit,saved),
         history:(unit,saved)=>({unitId:unit.id,values:copy(runtime().valuesFor(unit,saved)),reviewed:copy(saved?.reviewed||{})}),
         diagnose:(unit,values)=>unit.fields.flatMap(field=>runtime().diagnose(field,values[field.id]).map(issue=>({...issue,fieldId:field.id}))),
-        contextFor,characterReferenceIndex,referenceMetadata,memoryUnits,findMemory,compatibleContext,
+        contextFor,contextReferenceIndex,cachedContextReferenceIndex,referenceMetadata,memoryUnits,findMemory,compatibleContext,
     });
     const statdescription=Object.freeze({id:'statdescription',unitIdentity:unit=>unit.filepath,
         fields:(unit,language)=> (unit.translations?.English||[]).map((source,index)=>({id:String(index),name:String(index+1),kind:'text',source,target:unit.translations?.[language]?.[index]||'',entryIndex:index})),

@@ -53,25 +53,57 @@ test('ClientText exposes selected record reference metadata separately from deve
     original.metadata={Character:raw,'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'Retained privately'};
     original.developerNotes='Actual note';const before=clone(original);
     assert.deepEqual(clone(app.ctReferenceMetadata()),[
-        {name:'Character',value:raw},{name:'Character Class',value:original.metadata['Character Class']}
+        {name:'Character',value:raw,parts:[{text:raw}]},
+        {name:'Character Class',value:original.metadata['Character Class'],parts:[{text:original.metadata['Character Class']}]},
+        {name:'Tags',value:'Retained privately',parts:[{text:'Retained privately'}]}
     ]);
     assert.deepEqual(Array.from(app.ctNotes()),['Actual note']);assert.deepEqual(original,before);
     app.ctSelection='another record';assert.deepEqual(clone(app.ctReferenceMetadata()),[]);
 });
 
-test('character reference labels reuse a scoped index and refresh when originals or workspace change',()=>{
+test('context reference labels read a prepared scoped index without scanning originals during rendering',async()=>{
     const {app,original,window}=harness(),path='Metadata/Characters/Dex/DexFourb',
         character={...namedUnit(path),sheet:'Characters',recordId:path,fields:[{id:'Name',name:'Name',kind:'text',source:'Huntress',target:'Local translation',sourceCell:'B10'}]};
     original.metadata={Character:path};app.ctUnits=[original,character];const before=clone(original);
-    const first=app.ctReferenceMetadata();assert.equal(first[0].display,'Huntress');assert.ok(first[0].tooltip.includes(path));assert.ok(first[0].tooltip.includes('Characters!B10'));
+    const adapter=window.ContentAdapters.clienttext;
+    assert.equal(app.ctReferenceMetadata()[0].display,undefined,'unprepared rendering retains the raw reference');
+    await adapter.contextReferenceIndex(app.ctUnits);
+    const first=app.ctReferenceMetadata();assert.equal(first[0].display,'Huntress');assert.ok(first[0].parts[0].tooltip.includes(path));assert.ok(first[0].parts[0].tooltip.includes('Characters!B10'));
     const cached=app._ctReferenceIndexCache;app.ctReferenceMetadata();assert.equal(app._ctReferenceIndexCache,cached);
     app.ctUnits=[original,{...character,fields:[{...character.fields[0],source:'Different original'}]}];
+    await adapter.contextReferenceIndex(app.ctUnits);
     assert.equal(app.ctReferenceMetadata()[0].display,'Different original');assert.notEqual(app._ctReferenceIndexCache,cached);
     const newCache=app._ctReferenceIndexCache;app.ctWorkspace={...app.ctWorkspace};app.ctReferenceMetadata();assert.notEqual(app._ctReferenceIndexCache,newCache);
-    app.ctUnits=[original];assert.deepEqual(clone(app.ctReferenceMetadata()),[{name:'Character',value:path}]);assert.deepEqual(original,before);
+    app.ctUnits=[original];assert.deepEqual(clone(app.ctReferenceMetadata()),[{name:'Character',value:path,parts:[{text:path}]}]);assert.deepEqual(original,before);
     const calls=[],component={host:{showTooltip(event,text){calls.push([event,text]);},hideTooltip(){calls.push('hide');}}},event={clientX:4};
-    window.ClientTextUI.fieldsComponent.methods.showTooltip.call(component,event,'Character details');window.ClientTextUI.fieldsComponent.methods.hideTooltip.call(component);
+    window.ClientTextUI.contextComponent.methods.showTooltip.call(component,event,'Character details');window.ClientTextUI.contextComponent.methods.hideTooltip.call(component);
     assert.deepEqual(calls,[[event,'Character details'],'hide']);
+    await adapter.contextReferenceIndex(app.ctUnits);
+    let preparedReads=0;window.ContentAdapters={...window.ContentAdapters,clienttext:{...adapter,
+        cachedContextReferenceIndex(units){preparedReads++;return adapter.cachedContextReferenceIndex(units);},
+        contextReferenceIndex(){assert.fail('Render must not scan originals');}}};
+    app._ctReferenceIndexCache=null;app.ctReferenceMetadata();app.ctReferenceMetadata();assert.equal(preparedReads,1);
+});
+
+test('context shares one component under identity and leaves fields and inline keyboard blocks separate',async()=>{
+    const {app,window,original}=listHarness({inlineEditor:true}),context=window.ClientTextUI.contextComponent,
+        html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
+    assert.match(context.template,/class="ctReferenceContext"[^>]*tabindex="-1"/);
+    assert.match(context.template,/@click\.stop @dblclick\.stop/);
+    assert.match(context.template,/v-tooltip="part\.tooltip"/);assert.match(context.template,/\{\{ part\.text \}\}/);
+    assert.doesNotMatch(context.template,/v-html|data-inline-block|data-ct-target/);
+    assert.doesNotMatch(window.ClientTextUI.fieldsComponent.template,/ctReferenceMetadata|ctReferenceContext/);
+    assert.match(window.ClientTextUI.fieldsComponent.template,/ctDeveloperNotes/);
+    const identity=html.slice(html.indexOf('<td class="fileIdentityCell"><button class="fileOpenButton ctID"'),html.indexOf('<td data-label="English"',html.indexOf('<td class="fileIdentityCell"><button class="fileOpenButton ctID"')));
+    assert.match(identity,/<small class="ctFilePath">.*<ct-context v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit\.id"[^>]* compact><\/ct-context>/);
+    const full=html.slice(html.indexOf('<editor-full-shell v-if="ctEditor"'),html.indexOf('</editor-full-shell>',html.indexOf('<editor-full-shell v-if="ctEditor"')));
+    assert.ok(full.indexOf('editorFileIdentity')<full.indexOf('<ct-context'));
+    assert.ok(full.indexOf('<ct-context')<full.indexOf('ctEditorNavigation'));
+    let selections=0;app.ctSelect=()=>{selections++;return true;};
+    const target={closest(selector){return selector.includes('.ctReferenceContext')?{}:null;}};
+    assert.equal(app.ctRowClick(original,{target}),false);assert.equal(app.ctRowDoubleClick(original,{target}),false);
+    for(const key of ['Enter','ArrowDown','Home'])assert.equal(await app.ctRowKeydown(original,{key,target,preventDefault(){assert.fail('Context text keeps native selection keys');}}),false);
+    app.$refs.ctFileTableRegion={contains:()=>true};assert.equal(app.ctInlineNavigationTarget(target),false);assert.equal(selections,0);
 });
 
 function blankEnglishUnit(id='BlankThenEnglish',source='Visible English'){
@@ -2645,8 +2677,22 @@ test('cached ClientText opening uses the shared initialization owner and skips w
     app._ctWorker={parseWorkbook(){throw Error('Cache hit must not parse');}};
     assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope)),true);
     assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);assert.equal(app.ctSheetFilter,'');
-    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Loading cached translations','Preparing Dictionary matches','Opening ClientText workspace']);
+    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
     assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
+});
+test('late context reference preparation cannot publish an index into a replacement workspace',async()=>{
+    const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app,window}=initializationHarness({_ctStore:f.store}),adapter=window.ContentAdapters.clienttext,
+        started=deferred(),pending=deferred();
+    window.ContentAdapters={...window.ContentAdapters,clienttext:{...adapter,async contextReferenceIndex(units,options){
+        started.resolve();await pending.promise;return adapter.contextReferenceIndex(units,options);
+    }}};
+    const opening=app.ctActivate(scope,await f.store.getMetadata(scope));await started.promise;
+    app.ctFence();const replacement=namedUnit('Replacement');app.ctUnits=[replacement];
+    app.ctWorkspace={scope:{...scope,groupId:'another-group'}};
+    const cache=app._ctReferenceIndexCache={units:app.ctUnits,workspace:app.ctWorkspace,index:new Map()};
+    pending.resolve();assert.equal(await opening,false);assert.equal(app.ctActive,false);
+    assert.equal(app.ctUnits[0],replacement);assert.equal(app._ctReferenceIndexCache,cache);assert.equal(app.ctError,'');
 });
 test('a nested cached ClientText owner cannot release the shared foreground preparation gate',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app}=initializationHarness({_ctStore:f.store});

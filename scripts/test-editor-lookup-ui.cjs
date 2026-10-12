@@ -257,6 +257,10 @@ test('Lookup panel uses literal text, independent controls, and persistent acces
   assert.match(lookupPanel, /v-model="lookupQuery"/);
   assert.match(lookupPanel, /aria-label="Reference search results"/);
   assert.match(lookupPanel, /aria-label="Selected reference"/);
+  assert.match(lookupPanel, /<ct-context :host="\$props\.controller" :items="lookupSelectedReference\.referenceMetadata \|\| \[\]"><\/ct-context>/);
+  assert.ok(lookupPanel.indexOf('<ct-context')>lookupPanel.indexOf('{{ lookupSelectedReference.filepath }}'));
+  assert.ok(lookupPanel.indexOf('<ct-context')<lookupPanel.indexOf('lookupSelectedReference.developerNotes'));
+  assert.doesNotMatch(lookupPanel,/v-for="item in lookupSelectedReference\.referenceMetadata/);
   assert.doesNotMatch(lookupPanel, /Search all loaded files without leaving your draft\.|Loaded source and saved translations/);
   assert.doesNotMatch(lookupPanel, /v-model="(?:lang|editorBlocks[^" ]*)"/);
   assert.doesNotMatch(lookupPanel, /(?:editFile|editorSave|saveAndSkipFile|commentsOpenFile)\(/);

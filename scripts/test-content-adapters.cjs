@@ -2,75 +2,123 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const A=require('../public/contentAdapters.js'),S=require('../public/clientTextState.js'),TM=require('../public/translationMemory.js');
 const {unit,fieldId}=require('./clienttext-storage-fixture.cjs');
 
-test('ClientText reference metadata retains raw context and character paths separately from notes',()=>{
-    const original=unit(),raw=' Metadata/Characters/Dex/DexFourb\r\nMetadata/Characters/Int/IntFourb\\n ',
-        metadata={Context:'Raw <img src=x onerror=alert(1)>',Character:raw,'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'Other retained metadata'};
-    original.metadata=metadata;original.developerNotes='Separate developer note';
-    const before=structuredClone(original);
-    assert.deepEqual(A.clienttext.referenceMetadata(original),[
-        {name:'Context',value:metadata.Context},{name:'Character',value:raw},{name:'Character Class',value:metadata['Character Class']}
-    ]);
-    assert.deepEqual(original,before);
-    assert.deepEqual(A.clienttext.referenceMetadata({metadata:{Context:' \r\n ',Character:'','Character Class':null}}),[]);
-    assert.deepEqual(A.clienttext.referenceMetadata(null),[]);
-});
+const plainEntry=(name,value)=>({name,value,parts:[{text:value}]});
 const character=(recordId,source,role='normal',sourceCell='B10')=>({
     id:JSON.stringify([role,'Characters',recordId]),role,sheet:'Characters',recordId,metadata:{},
     fields:[{id:JSON.stringify(['Name',null]),name:'Name',kind:'text',source,target:'Translated label',sourceCell,targetCell:'C10'}]
 });
-test('ClientText character references display exact immutable English Names with source cells in tooltips',()=>{
-    const path='Metadata/Characters/Dex/DexFourb',source=character(path,'Huntress'),original=unit();
+test('ClientText context displays every populated heading in workbook order, without changing raw metadata',()=>{
+    const original=unit();original.metadata={Context:'Raw <img src=x onerror=alert(1)>',Character:' path\r\nliteral\\n ',
+        'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'0',FutureHeading:'false',Empty:' \r\n ',Blank:'',Null:null};
+    original.developerNotes='Separate note';const before=structuredClone(original);
+    assert.deepEqual(A.clienttext.referenceMetadata(original),Object.entries(original.metadata).filter(([,v])=>typeof v==='string'&&v.trim()).map(([n,v])=>plainEntry(n,v)));
+    assert.deepEqual(original,before);assert.deepEqual(A.clienttext.referenceMetadata(null),[]);
+});
+test('ClientText paths use exact immutable English with per-part source tooltips',async()=>{
+    const path='Metadata/Characters/Dex/DexFourb',original=unit(),source=character(path,'Huntress');
     original.metadata={Context:'Same raw context',Character:path,'Character Class':'Metadata/Characters/Str/StrFourb'};
     const warrior=character(original.metadata['Character Class'],'Warrior','normal','B8'),units=[source,warrior,original],before=structuredClone(units);
-    const index=A.clienttext.characterReferenceIndex(units),references=A.clienttext.referenceMetadata(original,index);
-    assert.equal(index.get(path)[0].unit,source);assert.equal(index.get(path)[0].field,source.fields[0]);
-    assert.deepEqual(references[0],{name:'Context',value:'Same raw context'});
-    assert.equal(references[1].value,path);assert.equal(references[1].display,'Huntress');
-    assert.match(references[1].tooltip,/English Name: Huntress/);assert.ok(references[1].tooltip.includes(path));
-    assert.match(references[1].tooltip,/Characters!B10 \(normal workbook\)/);
-    assert.equal(references[2].display,'Warrior');assert.match(references[2].tooltip,/Characters!B8 \(normal workbook\)/);
+    const index=await A.clienttext.contextReferenceIndex(units),references=A.clienttext.referenceMetadata(original,index);
+    assert.equal(index.get(path)[0].unit,source);assert.equal(index.get(path)[0].fields[0],source.fields[0]);
+    assert.deepEqual(references[0],plainEntry('Context','Same raw context'));assert.equal(references[1].value,path);
+    assert.equal(references[1].display,'Huntress');assert.match(references[1].parts[0].tooltip,/English Name: Huntress/);
+    assert.ok(references[1].parts[0].tooltip.includes(path));assert.match(references[1].parts[0].tooltip,/Characters!B10 \(normal workbook\)/);
+    assert.equal(references[2].display,'Warrior');assert.match(references[2].parts[0].tooltip,/Characters!B8 \(normal workbook\)/);
     assert.deepEqual(units,before);
 });
-test('ClientText character references preserve multiline whitespace and unknown paths with complete raw tooltip',()=>{
-    const path='Metadata/Characters/Dex/DexFourb',unknown='Metadata/Characters/NPC/Unknown',raw=' \t'+path+'\r\n  '+unknown+'\n'+path+' \r\n';
-    const original=unit();original.metadata={Character:raw};
-    const index=A.clienttext.characterReferenceIndex([character(path,'Huntress')]);
-    const [reference]=A.clienttext.referenceMetadata(original,index);
-    assert.equal(reference.value,raw);assert.equal(reference.display,' \tHuntress\r\n  '+unknown+'\nHuntress \r\n');
-    assert.ok(reference.tooltip.includes(raw));assert.equal(reference.tooltip.split('English Name: Huntress').length,2);
+test('ClientText mapping preserves commas, raw newlines, unknown paths and literal escapes',async()=>{
+    const path='Metadata/Characters/Dex/DexFourb',unknown='Metadata/Characters/NPC/Unknown',original=unit(),
+        raw=' \t'+path+',\r\n  '+unknown+'\n'+path+' \r\n';
+    original.metadata={Character:raw};const index=await A.clienttext.contextReferenceIndex([character(path,'Huntress'),original]);
+    const [entry]=A.clienttext.referenceMetadata(original,index);assert.equal(entry.value,raw);
+    assert.equal(entry.display,' \tHuntress,\r\n  '+unknown+'\nHuntress \r\n');
+    assert.equal(entry.parts.filter(part=>part.tooltip).length,2);
+    assert.ok(entry.parts.filter(part=>part.tooltip).every(part=>part.tooltip.includes(path)));
     const unmatched='metadata/Characters/Dex/DexFourb\n'+path+'Suffix\n'+path+'\\n';
-    assert.deepEqual(A.clienttext.referenceMetadata({...original,metadata:{Character:unmatched}},index),[{name:'Character',value:unmatched}]);
+    assert.deepEqual(A.clienttext.referenceMetadata({...original,metadata:{Character:unmatched}},index),[plainEntry('Character',unmatched)]);
 });
-test('ClientText character indexes use only exact Characters-sheet Name source fields',()=>{
-    const path='Metadata/Characters/Dex/DexFourb',valid=character(path,'Huntress');
-    const wrongSheet={...valid,sheet:'NPCText'},wrongField={...valid,fields:[{...valid.fields[0],name:'Description'}]},
-        empty=character(path,' \r\n'),enumField={...valid,fields:[{...valid.fields[0],kind:'gender',source:'M'}]};
-    const index=A.clienttext.characterReferenceIndex([wrongSheet,wrongField,empty,enumField]);
-    assert.equal(index.size,0);
-    const original=unit();original.metadata={Character:path};
-    assert.deepEqual(A.clienttext.referenceMetadata(original,index),[{name:'Character',value:path}]);
-    assert.equal(A.clienttext.characterReferenceIndex(null).size,0);
+test('ClientText sparse references work with arbitrary sheets, columns and path prefixes',async()=>{
+    const path='Data/Actors/Scout',original=unit();original.metadata={NewContext:'Speaker ('+path+'); missing Data/Actors/Missing.'};
+    const target={...character(path,'Scout'),sheet:'FutureActors',fields:[{...character(path,'Scout').fields[0],name:'DisplayLabel'}]},
+        index=await A.clienttext.contextReferenceIndex([target,character('unrelated','Other'),original]);
+    assert.equal(index.size,1);const [entry]=A.clienttext.referenceMetadata(original,index);
+    assert.equal(entry.display,'Speaker (Scout); missing Data/Actors/Missing.');assert.equal(entry.value,original.metadata.NewContext);
+    assert.match(entry.parts.find(part=>part.tooltip).tooltip,/English DisplayLabel: Scout/);
+    assert.equal((await A.clienttext.contextReferenceIndex(null)).size,0);
 });
-test('ClientText character mapping prefers the current workbook role and rejects ambiguous fallback names',()=>{
+test('ClientText duplicate sheet and workbook-role IDs remain raw even when English names agree',async()=>{
     const path='Metadata/Characters/Dex/DexFourb',original=unit();original.metadata={Character:path};
-    const normal=character(path,'Normal English','normal','B10'),gender=character(path,'Gender English','gender','C10');
-    let index=A.clienttext.characterReferenceIndex([gender,normal]);
-    assert.equal(A.clienttext.referenceMetadata(original,index)[0].display,'Normal English');
-    assert.equal(A.clienttext.referenceMetadata({...original,role:'gender'},index)[0].display,'Gender English');
-    assert.deepEqual(A.clienttext.referenceMetadata({...original,role:'other'},index),[{name:'Character',value:path}]);
-    index=A.clienttext.characterReferenceIndex([gender]);
+    const normal=character(path,'Normal English'),gender=character(path,'Gender English','gender','C10');
+    let index=await A.clienttext.contextReferenceIndex([normal,gender,original]);
+    for(const role of ['normal','gender','other']){
+        const [entry]=A.clienttext.referenceMetadata({...original,role},index);assert.equal(entry.display,path);
+        assert.match(entry.parts[0].tooltip,/Related matches/);assert.ok(entry.parts[0].tooltip.includes('Normal English'));
+        assert.ok(entry.parts[0].tooltip.includes('Gender English'));
+    }
+    index=await A.clienttext.contextReferenceIndex([gender,original]);
     assert.equal(A.clienttext.referenceMetadata(original,index)[0].display,'Gender English');
-    const conflicting=character(path,'Different English','normal','B11');
-    index=A.clienttext.characterReferenceIndex([gender,normal,conflicting]);
-    assert.deepEqual(A.clienttext.referenceMetadata(original,index),[{name:'Character',value:path}]);
+    index=await A.clienttext.contextReferenceIndex([normal,{...normal,sheet:'OtherActors'},original]);
+    assert.equal(A.clienttext.referenceMetadata(original,index)[0].display,path);
 });
-test('ClientText character mapping accepts gender forms with the same English source without arbitrary form choice',()=>{
+test('ClientText paired gender forms sharing one English source do not duplicate tooltip provenance',async()=>{
     const path='Metadata/Characters/Dex/DexFourb',gender=character(path,'Huntress','gender','C10'),original=unit();
-    gender.fields= ['MS','FS','NS'].map(form=>({...gender.fields[0],id:JSON.stringify(['Name',form]),kind:'form',form}));
-    original.metadata={Character:path};
-    const [reference]=A.clienttext.referenceMetadata(original,A.clienttext.characterReferenceIndex([gender]));
-    assert.equal(reference.display,'Huntress');assert.match(reference.tooltip,/Characters!C10 \(gender workbook\)/);
-    assert.equal(reference.tooltip.split('Characters!C10').length,2);
+    gender.fields=['MS','FS','NS'].map(form=>({...gender.fields[0],id:JSON.stringify(['Name',form]),kind:'form',form}));
+    original.metadata={Character:path};const [entry]=A.clienttext.referenceMetadata(original,await A.clienttext.contextReferenceIndex([gender,original]));
+    assert.equal(entry.display,'Huntress');assert.match(entry.parts[0].tooltip,/Characters!C10 \(gender workbook\)/);
+    assert.equal(entry.parts[0].tooltip.split('Characters!C10').length,2);
+});
+test('ClientText tags keep their raw IDs and match exact list items without inferring prose words',async()=>{
+    const original=unit();original.metadata={Tags:' ring, crossbow, default ',Generation:'Corruption',Prose:'a ring in prose'};
+    const ring={...character('ring','Rings'),sheet:'DelveCraftingTags'},crossbow={...character('crossbow','Crossbow'),sheet:'FilterSearchOptions'},
+        crossbow2={...character('crossbow','[Crossbow]'),sheet:'GemTags'},corruption={...character('Corruption','Corruption Chamber'),sheet:'Incursion2Rooms'};
+    const entries=A.clienttext.referenceMetadata(original,await A.clienttext.contextReferenceIndex([original,ring,crossbow,crossbow2,corruption]));
+    assert.equal(entries[0].display,original.metadata.Tags);assert.equal(entries[1].display,'Corruption');
+    assert.deepEqual(entries[2],plainEntry('Prose',original.metadata.Prose));
+    const matches=entries[0].parts.filter(part=>part.tooltip);assert.equal(matches.length,2);assert.equal(matches[0].text,'ring');
+    assert.match(matches[0].tooltip,/Related matches for: ring/);assert.ok(matches[0].tooltip.includes('Rings'));
+    assert.ok(matches[1].tooltip.includes('[Crossbow]'));assert.ok(matches[1].tooltip.includes('Crossbow'));
+});
+test('ClientText blank, enum and paragraph labels remain raw without hiding record ambiguity',async()=>{
+    const path='Data/Actors/Scout',original=unit();original.metadata={Actor:path};
+    const empty=character(path,' \r\n'),gender={...character(path,'M'),fields:[{...character(path,'M').fields[0],kind:'gender'}]},
+        paragraph=character(path,'Long English\nparagraph'),long=character(path,'a'.repeat(161));
+    for(const targets of [[empty],[gender],[paragraph],[long],[character(path,'Scout'),{...empty,sheet:'OtherActors'}]]){
+        const [entry]=A.clienttext.referenceMetadata(original,await A.clienttext.contextReferenceIndex([original,...targets]));
+        assert.equal(entry.display,path);assert.match(entry.parts[0].tooltip,/Related matches/);
+    }
+});
+test('ClientText multi-field records use the first concise worksheet source with other fields in the tooltip',async()=>{
+    const path='Metadata/Characters/Dex/DexFourb',original=unit();original.metadata={Character:path};
+    const record=character(path,'Huntress');record.fields.unshift(
+        {...record.fields[0],id:'traits',name:'Traits Description',source:'Trait: Trained to block incoming attacks',sourceCell:'H10'},
+        {...record.fields[0],id:'description',name:'Description',source:'A full English biography follows the label.',sourceCell:'E10'});
+    const before=structuredClone(record),[entry]=A.clienttext.referenceMetadata(original,await A.clienttext.contextReferenceIndex([original,record]));
+    assert.equal(entry.display,'Huntress');assert.match(entry.parts[0].tooltip,/English Name: Huntress/);
+    assert.match(entry.parts[0].tooltip,/English Description: A full English biography/);assert.match(entry.parts[0].tooltip,/Characters!B10/);
+    assert.match(entry.parts[0].tooltip,/\+1 more English fields/);assert.deepEqual(record,before);
+});
+test('ClientText caches only complete cooperatively prepared indexes and checks scope before cache reuse',async()=>{
+    const path='Data/Actors/Scout',original=unit();original.metadata={Actor:path};const units=[original,character(path,'Scout')];
+    assert.equal(A.clienttext.cachedContextReferenceIndex(units),undefined);let current=true,pauses=0;
+    await assert.rejects(A.clienttext.contextReferenceIndex(units,{guard:()=>current,yield:async()=>{pauses++;current=false;}}),{name:'AbortError',stale:true});
+    assert.equal(pauses,1);assert.equal(A.clienttext.cachedContextReferenceIndex(units),undefined);current=true;
+    const index=await A.clienttext.contextReferenceIndex(units,{guard:()=>current});assert.equal(A.clienttext.cachedContextReferenceIndex(units),index);
+    assert.equal(await A.clienttext.contextReferenceIndex(units,{yield:async()=>{throw new Error('Cached index must not yield');}}),index);
+    current=false;await assert.rejects(A.clienttext.contextReferenceIndex(units,{guard:()=>current}),{name:'AbortError'});
+    assert.equal(A.clienttext.cachedContextReferenceIndex([...units]),undefined);
+    const other=[{...original,metadata:{Actor:path}},character(path,'Other group')];
+    assert.equal(A.clienttext.referenceMetadata(other[0],await A.clienttext.contextReferenceIndex(other))[0].display,'Other group');
+    assert.equal(A.clienttext.referenceMetadata(original,index)[0].display,'Scout');
+});
+test('ClientText related-match tooltip previews stay bounded for large matching records',async()=>{
+    const original=unit();original.metadata={Tag:'match'};
+    const targets=Array.from({length:6},(_,number)=>{
+        const row={...character('match','English '+number+'\n'+'a'.repeat(500)),sheet:'Sheet'+number};
+        row.fields.push({...row.fields[0],name:'Second',source:'Second'}, {...row.fields[0],name:'Third',source:'Third'});return row;
+    });
+    const [entry]=A.clienttext.referenceMetadata(original,await A.clienttext.contextReferenceIndex([original,...targets]));
+    assert.equal(entry.display,'match');assert.match(entry.parts[0].tooltip,/\+2 more matching records/);
+    assert.match(entry.parts[0].tooltip,/\+1 more English fields/);assert.ok(entry.parts[0].tooltip.length<2000);
 });
 test('content adapters preserve ClientText literals and preserve legacy StatDescription TM context keys',()=>{
     const raw='Email@example.com \\n literal\nactual',original=unit(raw,raw),fields=A.clienttext.fields(original);

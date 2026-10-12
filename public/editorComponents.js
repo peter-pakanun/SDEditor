@@ -343,7 +343,7 @@
           <section class="lookupReference" ref="lookupReference" tabindex="0" aria-label="Selected reference">
             <template v-if="lookupSelectedReference">
               <header><h3>{{ lookupSelectedReference.filepath }}</h3><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
-              <section v-for="item in lookupSelectedReference.referenceMetadata || []" :key="item.name" class="lookupReferenceBlock"><h4>{{ item.name }}</h4><pre class="lookupText" :tabindex="item.tooltip ? 0 : undefined" :aria-label="item.tooltip || undefined" v-tooltip="item.tooltip">{{ item.display ?? item.value }}</pre></section>
+              <ct-context :host="$props.controller" :items="lookupSelectedReference.referenceMetadata || []"></ct-context>
               <section v-if="lookupSelectedReference.developerNotes" class="lookupReferenceBlock"><h4>Developer notes</h4><pre class="lookupText">{{ lookupSelectedReference.developerNotes }}</pre></section>
               <article v-for="block in lookupSelectedReference.blocks" :key="block.index" class="lookupReferenceBlock">
                 <h4>{{ block.label || ('Block ' + (block.index + 1)) }}<span v-if="block.form"> · {{ block.form }}</span><span v-if="block.isTable"> · Table (@ separates columns)</span></h4>

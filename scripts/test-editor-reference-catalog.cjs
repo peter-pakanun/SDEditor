@@ -10,7 +10,7 @@ const sd = (text = 'Blade damage', target = 'Saved blade') => ({ filepath: 'same
 const unit = (target = 'Original') => ({ id: '["normal","Sheet","same"]', role: 'normal', sheet: 'Sheet', recordId: 'same',
   developerNotes: 'Developer note', fields: [{ id: 'Text', name: 'Text', kind: 'text', source: 'Blade damage', target }] });
 function harness(options = {}) {
-  const window = { ...options.window };
+  const window = { ContentAdapters: require('../public/contentAdapters.js'), ...options.window };
   const context = vm.createContext({ window, AbortController, setTimeout, clearTimeout });
   for (const name of ['editorReferenceCatalog.js', 'editorLookup.js']) vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   const api = window.EditorLookup;
@@ -98,6 +98,80 @@ test('cached catalog loads only authorized groups of the current release and cap
   assert.equal(calls.length, 1); assert.equal(calls[0].accountId, 'alice'); assert.equal(calls[0].groupId, 'ct');
   assert.equal(result.missing.length, 0);
   const foreign = await catalog.load(session, 'German'); assert.equal(foreign.sources.length, 0); assert.equal(calls.length, 1);
+});
+
+test('catalog prepares generic context indexes for complete active and sibling workbook groups', async () => {
+  const A = require('../public/contentAdapters.js'), builds = [], ref = 'Assets/Actors/Huntress';
+  const dialogue = group => ({ id: group + '-dialogue', role: 'gender', sheet: 'Conversations', recordId: group + '-line',
+    metadata: { Speaker: ref, Tags: 'ring, unknown' }, fields: [{ id: 'Text', name: 'Text', source: 'Greeting', target: '' }] });
+  const records = (group, name) => [dialogue(group),
+    { id: group + '-actor', role: 'normal', sheet: 'Actors', recordId: ref,
+      fields: [{ id: 'Title', name: 'Title', source: name, target: 'Translated title', sourceCell: 'B10' }] },
+    { id: group + '-ring', role: 'normal', sheet: 'RelatedItems', recordId: 'ring',
+      fields: [{ id: 'Label', name: 'Label', source: 'Rings', target: '', sourceCell: 'C3' }] }];
+  const activeUnits = records('active', 'Huntress'), siblingUnits = records('sibling', 'Different English label');
+  const before = JSON.stringify([activeUnits, siblingUnits]);
+  const { host, session, catalog, api, window } = harness({
+    window: { ContentAdapters: { ...A, clienttext: { ...A.clienttext,
+      async contextReferenceIndex(units, options) { builds.push(units); assert.ok(options.guard()); return A.clienttext.contextReferenceIndex(units, options); } } } },
+    session: { mode: 'clienttext', group: { id: 'active', versionId: 'release', contentMode: 'clienttext', language: 'Thai' },
+      scope: { accountId: 'alice', game: 'poe2', branchId: 'default', versionId: 'release', groupId: 'active' } },
+    host: { ctUnits: activeUnits, ctSaved: {}, _ctStore: { async getMetadata() { return { state: 'ready' }; },
+      async getUnits() { return siblingUnits; }, async getSaved() { return {}; } } },
+  });
+  session.version.contentGroups = [session.group, { id: 'sibling', versionId: 'release', contentMode: 'clienttext', language: 'Thai' }];
+  const result = await catalog.load(session, 'Thai');
+  assert.deepEqual(builds, [activeUnits, siblingUnits]);
+  assert.notEqual(result.sources[0].contextReferences, result.sources[1].contextReferences);
+  assert.equal(result.sources[0].contextReferences.size, 2);
+  assert.equal(result.sources[0].contextReferences, window.EditorReferenceCatalog.activeSource(host, session, 'Thai').contextReferences);
+  for (const source of result.sources) {
+    const entry = api.buildCatalogIndex([source], 'Thai').find(entry => entry.unit.id === source.groupId + '-dialogue');
+    const speaker = entry.reference.referenceMetadata[0];
+    assert.equal(speaker.display, source.groupId === 'active' ? 'Huntress' : 'Different English label');
+    assert.ok(speaker.parts[0].tooltip.includes('Actors!B10'));
+    assert.ok(speaker.parts[0].tooltip.includes('normal workbook'));
+    const tags = entry.reference.referenceMetadata[1];
+    assert.equal(tags.value, 'ring, unknown'); assert.equal(tags.parts.map(part => part.text).join(''), 'ring, unknown');
+    assert.ok(tags.parts[0].tooltip.includes('Rings'));
+  }
+  await catalog.load(session, 'Thai'); assert.equal(builds.length, 2, 'Repeated loads reuse indexes for unchanged immutable units');
+  assert.equal(JSON.stringify([activeUnits, siblingUnits]), before);
+});
+
+test('late context index preparation cannot publish into a replacement Lookup session', async () => {
+  const entered = deferred(), pending = deferred(), original = unit(); let guard;
+  const { host, session } = harness({ session: { mode: 'clienttext', group: { id: 'ct', contentMode: 'clienttext' } },
+    host: { ctUnits: [original], ctSaved: {} }, window: { ContentAdapters: { clienttext: {
+      cachedContextReferenceIndex() {}, async contextReferenceIndex(_units, options) {
+        guard = options.guard; assert.ok(guard()); entered.resolve(); await pending.promise; return new Map();
+      } } } } });
+  const loading = host.lookupLoadCatalog(); await entered.promise;
+  session.language = 'German'; assert.equal(guard(), false); pending.resolve();
+  assert.equal(await loading, false); assert.equal(host.lookupCatalogSources.length, 0);
+});
+
+test('catalog reuses verified sibling originals across fresh storage arrays and refreshes Saved overlays', async () => {
+  const A = require('../public/contentAdapters.js'); let reads = 0, signature = 'first-original', saved = 'First saved';
+  const row = { ...unit(), metadata: { Context: 'Assets/Person' } };
+  const target = { id: 'person', recordId: 'Assets/Person', role: 'normal', sheet: 'People',
+    fields: [{ id: 'Name', name: 'Name', source: 'Huntress', target: '', sourceCell: 'B2' }] };
+  const units = [row, target];
+  const { session, catalog } = harness({ host: { _ctStore: {
+    async getMetadata() { return { state: 'ready', signature }; },
+    async getUnits() { reads++; return [...units]; },
+    async getSaved() { return { [row.id]: { values: { Text: saved } } }; },
+  } } });
+  session.version.contentGroups = [{ id: 'ct', versionId: 'release', contentMode: 'clienttext', language: 'Thai' }];
+  const initial = (await catalog.load(session, 'Thai')).sources[1];
+  assert.equal(reads, 1); assert.equal(initial.contextReferences, A.clienttext.cachedContextReferenceIndex(initial.units));
+  saved = '';
+  const refreshed = (await catalog.load(session, 'Thai')).sources[1];
+  assert.equal(refreshed.units, initial.units); assert.equal(refreshed.contextReferences, initial.contextReferences);
+  assert.equal(reads, 1); assert.equal(refreshed.saved[row.id].values.Text, '', 'Committed blank overlay must refresh');
+  signature = 'replacement-original';
+  const replacement = (await catalog.load(session, 'Thai')).sources[1];
+  assert.equal(reads, 2); assert.notEqual(replacement.units, initial.units); assert.notEqual(replacement.contextReferences, initial.contextReferences);
 });
 test('standalone imported content searches only the active mode without reading sibling storage', async () => {
   const { host, session, catalog } = harness({ session: { version: null, scope: { accountId: 'guest', game: 'poe2' } },
