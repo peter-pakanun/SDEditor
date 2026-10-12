@@ -5649,12 +5649,47 @@ const config = Vue.defineComponent({
         return;
       }
       const carryForward = this.beginWorkspaceInitializationTask?.('Carrying translations and preserved copies into the new source', options.initialization);
+      const advancesSource = sourceHash !== this.sourceIdentity;
       const nextWorkspace = this.toPlainForStorage(this.localDescs);
       nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
       const baselineSource = importedBaseline?.source || this.toPlainForStorage(nextSource);
       const prevSource = this.workspaceSource();
+      const leavingGroup = advancesSource && importContext?.groupId;
+      const previousDroppedArchive = leavingGroup ? this.toPlainForStorage(nextWorkspace.droppedArchive || {}) : null;
       window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
         previousSourceHash: this.sourceIdentity, sourceHash, game });
+      if (leavingGroup) {
+        // Shared candidate IDs and revisions belong to the previous group.
+        // Carry snapshots locally; retain the old group's recovery evidence.
+        Object.assign(nextWorkspace.droppedArchive, previousDroppedArchive);
+        for (const conflicts of Object.values(nextWorkspace.droppedConflicts || {})) for (const conflict of Object.values(conflicts)) {
+          for (const candidate of [conflict.yours, conflict.shared]) if (candidate?.id && !nextWorkspace.droppedArchive[candidate.id]) {
+            nextWorkspace.droppedArchive[candidate.id] = this.toPlainForStorage(candidate);
+          }
+        }
+        for (const record of Object.values(nextWorkspace.droppedArchive)) record.groupId ||= importContext.groupId;
+        nextWorkspace.droppedAliases = {};
+        nextWorkspace.droppedConflicts = {};
+        nextWorkspace.droppedOutbox = [];
+        for (const [lang, candidates] of Object.entries(nextWorkspace.dropped || {})) for (const filepath of Object.keys(candidates)) {
+          const candidate = window.WorkspaceState.droppedForFile(nextWorkspace, filepath, lang);
+          if (!candidate) continue;
+          const carried = { ...this.toPlainForStorage(candidate), id: `carry-${sourceHash}-${candidate.id}`,
+            revision: 0, targetSourceHash: sourceHash, targetSourceHashes: [sourceHash] };
+          delete carried.groupId;
+          delete carried.versionId;
+          candidates[filepath] = carried;
+          nextWorkspace.droppedArchive[carried.id] = this.toPlainForStorage(carried);
+          nextWorkspace.droppedOutbox.push({ id: carried.id, kind: 'put', revision: 0, candidate: this.toPlainForStorage(carried) });
+        }
+      }
+      if (advancesSource) {
+        delete nextWorkspace.catalogVersionId;
+        delete nextWorkspace.workspaceGroupId;
+        delete nextWorkspace.workspaceVersionId;
+        delete nextWorkspace.groupId;
+        delete nextWorkspace.versionId;
+      }
       if (importedBaseline) nextWorkspace.importArchive = importedBaseline.archive;
       else delete nextWorkspace.importArchive;
       const sourceRevisions = [];
@@ -5736,6 +5771,7 @@ const config = Vue.defineComponent({
         return;
       }
       if (!workspaceCurrent()) return;
+      if (advancesSource) this.activeContentGroup = null;
       this.localDescs = nextWorkspace;
       this.importBaseline = importedBaseline;
       this._workspaceSourceBaseline = baselineSource;

@@ -53,7 +53,7 @@ Click a tab or use **Left/Right Arrow**, **Home**, and **End** while a tab has f
 
 ### Importing StatDescriptions.zip
 
-Use **Import ZIP** in the main action header to begin the import process in an Offline workspace. The button is disabled for Online versions, including cached Online work while disconnected; these use the manager-published ZIP. Open the version chooser and select the Offline workspace to use local ZIP imports.
+Use **Import ZIP** in the main action header to begin the import process in a workspace opened from the Offline panel. It stays enabled even when the same source hash belongs to a published Online version. The button is disabled when you open the workspace through Online, including cached Online work while disconnected; these use the manager-published ZIP. Open the version chooser and select the Offline workspace to use local ZIP imports.
 Use **Versions** and its Assignment table to switch between the groups in a published version.
 For more details, see the [**Import Workflow**](import_workflow.md).
 

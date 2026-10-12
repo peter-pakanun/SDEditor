@@ -1252,6 +1252,156 @@ test('failed source import preserves the current source, translations and versio
   assert.equal(e.descs[0], old); assert.equal(e.localDescs, workspace); assert.equal(e.sourceIdentity, 'source-one');
   assert.match(alerts.at(-1), /Existing work is unchanged/);
 });
+
+function modernGroupSourceImportFixture({ sameBaseline = false } = {}) {
+  const h = harness(), e = h.editor, copy = value => JSON.parse(JSON.stringify(value));
+  vm.runInContext('offlineStoreReady = true', h.context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/offlineStore.js'), 'utf8'), h.context, { filename: 'offlineStore.js' });
+  e.testMode = false; e.sourceIdentity = 'a'.repeat(64); e.branchId = 'default'; e.cloudProfileId = 'group-translator';
+  e.cloudUser = { id: e.cloudProfileId, role: 'translator', language: 'Thai', assignmentVersion: 1 };
+  e.managedWorkspaceMode = 'offline';
+  const group = e.activeContentGroup = { id: 'published-stat-group', versionId: 'published-week', contentMode: 'statdescription' };
+  const old = description(1); old.hasChanges = false;
+  const original = copy(old), scope = { accountId: e.cloudProfileId, game: e.gameVersion, branchId: e.branchId,
+    sourceHash: e.sourceIdentity, groupId: group.id, versionId: group.versionId };
+  const workspace = e.localDescs = { sourceHash: e.sourceIdentity, catalogVersionId: group.versionId,
+    groupId: group.id, versionId: group.versionId, workspaceGroupId: group.id, workspaceVersionId: group.versionId, descs: [], status: {} };
+  h.window.WorkspaceState.initializeWorkspace(workspace, { source: [original], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  h.window.WorkspaceState.stageTranslation(workspace, { filepath: old.filepath, translations: ['Saved group correction', 'Saved second line'] }, e.lang,
+    { source: original, sourceHash: e.sourceIdentity });
+  e._workspaceSourceBaseline = [copy(original)]; e.descs = [old]; e.applyWorkspaceOverlay();
+  const next = copy(original);
+  if (!sameBaseline) { next.translations.English[0] = 'Changed imported source'; next.translations.Thai = ['', '']; }
+  const newHash = sameBaseline ? e.sourceIdentity : 'b'.repeat(64);
+  const baseline = { archive: { baselineId: newHash, zipHash: 'c'.repeat(64) }, source: [next] };
+  e.buildImportedBaseline = async () => copy(baseline);
+  e.scheduleCollaboration = () => {};
+  h.window.OfflineStore.setWorkspaceContext(scope);
+  const before = copy(workspace), imports = [];
+  h.window.OfflineStore.saveSourceWorkspaceWithRevisions = async (source, nextWorkspace, revisions, game, retained) => {
+    const captured = h.window.OfflineStore.captureWorkspaceScope({ game, sourceHash: nextWorkspace.sourceHash, branchId: nextWorkspace.branchId });
+    imports.push(copy({ source, workspace: nextWorkspace, revisions, scope: captured, retained }));
+    assert.equal(e.localDescs, workspace, 'Source activation waits until the scoped import commits.');
+    assert.equal(e.activeContentGroup, group, 'The previous group remains active until successful commit.');
+    assert.equal(e.sourceIdentity, scope.sourceHash);
+  };
+  return { ...h, group, original, workspace, scope, before, next, newHash, imports, copy };
+}
+
+test('a changed ZIP imported from an Offline modern group commits an independent workspace and retains the original group work', async () => {
+  const h = modernGroupSourceImportFixture(), { editor: e, window, workspace, group, scope, before, next, newHash, imports, copy } = h;
+  await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
+  assert.equal(imports.length, 1);
+  const imported = imports[0];
+  assert.deepEqual(imported.scope, { accountId: scope.accountId, game: scope.game, branchId: scope.branchId, sourceHash: newHash },
+    'A different baseline is stored outside the previously selected published group.');
+  for (const field of ['catalogVersionId', 'groupId', 'versionId', 'workspaceGroupId', 'workspaceVersionId']) {
+    assert.equal(Object.hasOwn(imported.workspace, field), false, 'The committed workspace drops inherited ' + field);
+    assert.equal(Object.hasOwn(e.localDescs, field), false, 'The activated workspace drops inherited ' + field);
+  }
+  assert.equal(e.activeContentGroup, null); assert.equal(e.collaborationWorkspaceReady(), true);
+  assert.equal(e.sourceIdentity, newHash); assert.equal(e.localDescs.sourceHash, newHash);
+  const dropped = window.WorkspaceState.droppedForFile(e.localDescs, next.filepath, 'Thai');
+  assert.deepEqual(Array.from(dropped.snapshot.translations), ['Saved group correction', 'Saved second line']);
+  assert.equal(dropped.originSourceHash, scope.sourceHash); assert.equal(dropped.targetSourceHash, newHash);
+  assert.deepEqual(copy(workspace), before, 'The old group source, Saved work, preserved copies and metadata remain untouched.');
+  assert.equal(workspace.catalogVersionId, group.versionId); assert.equal(workspace.workspaceGroupId, group.id);
+});
+
+test('failed changed-baseline import preserves the Offline modern group and its source metadata', async () => {
+  const h = modernGroupSourceImportFixture(), { editor: e, window, alerts, workspace, group, scope, before, next, copy } = h;
+  const capture = window.OfflineStore.saveSourceWorkspaceWithRevisions;
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async (...args) => { await capture(...args); throw new Error('Quota exceeded'); };
+  await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
+  assert.equal(e.localDescs, workspace); assert.equal(e.activeContentGroup, group); assert.equal(e.sourceIdentity, scope.sourceHash);
+  assert.equal(e.collaborationWorkspaceReady(), true); assert.equal(e.managedWorkspaceMode, 'offline');
+  assert.deepEqual(copy(workspace), before); assert.match(alerts.at(-1), /Existing work is unchanged/);
+});
+
+test('same-baseline source reimport retains the existing modern group association', async () => {
+  const h = modernGroupSourceImportFixture({ sameBaseline: true }), { editor: e, group, scope, next, imports } = h;
+  await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
+  assert.equal(imports.length, 1); assert.deepEqual(imports[0].scope, scope);
+  assert.equal(e.activeContentGroup, group); assert.equal(e.sourceIdentity, scope.sourceHash);
+  assert.equal(e.localDescs.catalogVersionId, group.versionId);
+  assert.equal(e.localDescs.groupId, group.id); assert.equal(e.localDescs.versionId, group.versionId);
+  assert.equal(e.localDescs.workspaceGroupId, group.id); assert.equal(e.localDescs.workspaceVersionId, group.versionId);
+  assert.equal(e.collaborationWorkspaceReady(), true);
+});
+
+function modernGroupDroppedImportFixture(options) {
+  const h = modernGroupSourceImportFixture(options), { editor: e, window, original, group, scope, copy } = h;
+  delete e.localDescs.staged.Thai[original.filepath];
+  const preserved = copy(original);
+  preserved.translations.English[0] = 'Earlier preserved English';
+  const candidate = window.WorkspaceState.dropTranslation(e.localDescs, preserved, 'Thai', {
+    id: 'server-id', revision: 7, recoveryId: 'explicit-original-recovery', game: scope.game,
+    originSourceHash: 'd'.repeat(64), targetSourceHash: scope.sourceHash, createdAt: 123,
+    translations: ['Acknowledged preserved group text', 'Second preserved line'],
+    baseline: { filepath: original.filepath, sourceHash: 'd'.repeat(64) }, proof: { index: 1, siblings: ['proof-sibling'] },
+    originArchive: { baselineId: 'd'.repeat(64), zipHash: 'e'.repeat(64) },
+  });
+  Object.assign(candidate, { groupId: group.id, versionId: group.versionId });
+  e.localDescs.droppedArchive[candidate.id] = copy(candidate);
+  e.localDescs.droppedAliases = { 'old-local-id': { id: candidate.id, fromRevision: 0, revision: candidate.revision, targetSourceHash: scope.sourceHash } };
+  const conflict = { game: scope.game, language: 'Thai', filepath: original.filepath, targetSourceHash: scope.sourceHash,
+    kind: 'promotion', operationId: 'old-group-promotion',
+    yours: { ...copy(candidate), id: 'conflicting-local-copy', snapshot: { ...copy(candidate.snapshot), translations: ['Unresolved local conflict text', 'Local second'] } },
+    shared: { ...copy(candidate), id: 'conflicting-shared-copy', revision: 8, snapshot: { ...copy(candidate.snapshot), translations: ['Unresolved shared conflict text', 'Shared second'] } },
+  };
+  // Exercise older conflict evidence which exists only in the comparison,
+  // alongside stale group-scoped alias, upload and discard commands.
+  e.localDescs.droppedConflicts = { Thai: { [original.filepath]: copy(conflict) } };
+  e.localDescs.droppedOutbox = [
+    { id: candidate.id, kind: 'put', revision: candidate.revision, candidate: copy(candidate), replace: true, conflict: true },
+    { id: candidate.id, kind: 'discard', revision: candidate.revision, candidate: copy(candidate) },
+  ];
+  e.applyWorkspaceOverlay();
+  return { ...h, candidate: copy(candidate), conflict: copy(conflict), before: copy(e.localDescs) };
+}
+
+test('leaving a modern group rebinds acknowledged Dropped text without replaying its group mutations', async () => {
+  const h = modernGroupDroppedImportFixture(), { editor: e, window, workspace, scope, candidate, conflict, before, next, newHash, imports, copy } = h;
+  await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
+  assert.equal(imports.length, 1); assert.equal(imports[0].scope.groupId, undefined);
+  const committed = imports[0].workspace, carried = window.WorkspaceState.droppedForFile(e.localDescs, next.filepath, 'Thai');
+  assert.ok(carried); assert.notEqual(carried.id, candidate.id); assert.notEqual(carried.id, candidate.recoveryId);
+  assert.equal(carried.revision, 0); assert.equal(carried.groupId, undefined); assert.equal(carried.versionId, undefined);
+  assert.equal(carried.originSourceHash, candidate.originSourceHash); assert.equal(carried.targetSourceHash, newHash);
+  assert.deepEqual(Array.from(carried.targetSourceHashes), [newHash]);
+  for (const field of ['snapshot', 'recoveryId', 'baseline', 'proof', 'originArchive', 'createdAt']) {
+    assert.deepEqual(copy(carried[field]), candidate[field], 'Carry retains the original ' + field);
+  }
+  assert.deepEqual(committed.droppedArchive[candidate.id], candidate,
+    'The old server ID, revision, group, provenance and target assignments remain recovery evidence.');
+  for (const copyName of ['yours', 'shared']) {
+    const archived = committed.droppedArchive[conflict[copyName].id];
+    assert.ok(archived, 'Both sides of the old comparison remain recoverable.');
+    assert.deepEqual(archived.snapshot, conflict[copyName].snapshot);
+    assert.equal(archived.revision, conflict[copyName].revision);
+  }
+  assert.deepEqual(committed.droppedAliases, {}); assert.deepEqual(committed.droppedConflicts, {});
+  assert.equal(committed.droppedOutbox.length, 1);
+  assert.deepEqual(committed.droppedOutbox[0], { id: carried.id, kind: 'put', revision: 0, candidate: copy(carried) },
+    'Only a plain local destination upload is queued; no old discard, replace, conflict or revision is replayed.');
+  assert.deepEqual(copy(workspace), before, 'Leaving the group never mutates its own saved recovery evidence or commands.');
+  assert.equal(workspace.sourceHash, scope.sourceHash); assert.equal(e.activeContentGroup, null);
+  assert.equal(e.collaborationWorkspaceReady(), true);
+});
+
+test('same-baseline group import preserves acknowledged Dropped IDs, revisions, aliases and pending decisions', async () => {
+  const h = modernGroupDroppedImportFixture({ sameBaseline: true }), { editor: e, window, group, candidate, conflict, before, next, imports, copy } = h;
+  await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
+  assert.equal(imports.length, 1); assert.equal(imports[0].scope.groupId, group.id);
+  const dropped = window.WorkspaceState.droppedForFile(e.localDescs, next.filepath, 'Thai');
+  assert.equal(dropped.id, candidate.id); assert.equal(dropped.revision, candidate.revision); assert.equal(dropped.groupId, group.id);
+  assert.deepEqual(copy(e.localDescs.droppedArchive[candidate.id]), candidate);
+  assert.deepEqual(copy(e.localDescs.droppedAliases), before.droppedAliases);
+  assert.deepEqual(copy(e.localDescs.droppedConflicts.Thai[next.filepath]), conflict);
+  assert.ok(e.localDescs.droppedOutbox.some(operation => operation.kind === 'discard' && operation.id === candidate.id && operation.revision === candidate.revision));
+  assert.ok(e.localDescs.droppedOutbox.some(operation => operation.kind === 'put' && operation.id === candidate.id && operation.replace && operation.conflict));
+  assert.equal(e.activeContentGroup, group); assert.equal(e.collaborationWorkspaceReady(), true);
+});
 test('translated import stages every file in one durable save and failure changes none', async () => {
   const { editor: e, window, context, writes } = harness();
   vm.runInContext('offlineStoreReady = true', context); e.testMode = false;

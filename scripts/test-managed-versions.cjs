@@ -968,6 +968,10 @@ test('matching published baseline adopts only metadata while retaining active dr
   assert.equal(app.editorVisible, true); assert.equal(app.editorSessionActive, true);
   assert.deepEqual(events.map(event => event.type), ['metadata']);
   assert.deepEqual(events[0].values, { catalogVersionId: 'weekly-1', officialName: '2026-10-05_POE2' });
+  assert.equal(app.managedWorkspaceMode, 'offline');
+  assert.equal(app.managedImportZipDisabled, false, 'Automatic same-baseline association keeps the Offline import action available.');
+  await app.managedReadDetails('weekly-1', false);
+  assert.equal(app.managedImportZipDisabled, false, 'Background published-detail refresh preserves the entry mode.');
 });
 
 test('an associated cached baseline remains available for local Continue without becoming a standalone workspace', async () => {
@@ -984,7 +988,97 @@ test('an associated cached baseline remains available for local Continue without
   assert.equal(events.some(event => event.type === 'import'), false);
   assert.equal(app.localVersions[0].catalogVersionId, 'weekly-1');
   assert.equal(app.localVersions[0].name, 'My previous offline ZIP');
-  assert.equal(app.managedImportZipDisabled, true, 'Local Continue preserves the published source import policy.');
+  assert.equal(app.managedWorkspaceMode, 'offline');
+  assert.equal(app.managedImportZipDisabled, false, 'Offline Continue enables Import ZIP even when the same baseline is published.');
+});
+
+test('the same published baseline switches Import ZIP policy only through Offline and Online entry', async () => {
+  const { app } = harness();
+  const local = { ...storageScope(), hasSource: true, current: true, catalogVersionId: 'weekly-1' };
+  app.localVersions = [local]; app.versionChooserVisible = true;
+  assert.equal(await app.continueAssociatedOfflineVersion(), true);
+  assert.equal(app.managedWorkspaceMode, 'offline'); assert.equal(app.managedImportZipDisabled, false);
+  assert.equal(app.sourceIdentity, local.sourceHash);
+  app.versionChooserVisible = true;
+  assert.equal(await app.continueManagedVersion(version(), 'Thai'), true);
+  assert.equal(app.managedWorkspaceMode, 'online'); assert.equal(app.managedImportZipDisabled, true);
+  assert.equal(app.sourceIdentity, local.sourceHash, 'Mode switching retains the identical immutable baseline.');
+  app._cloud = null;
+  assert.equal(app.managedOnlineAvailable, false);
+  assert.equal(app.managedImportZipDisabled, true, 'Losing connectivity keeps the chosen Online import policy.');
+  app.versionChooserVisible = true;
+  assert.equal(await app.continueAssociatedOfflineVersion(), true);
+  assert.equal(app.managedWorkspaceMode, 'offline'); assert.equal(app.managedImportZipDisabled, false);
+  assert.equal(app.sourceIdentity, local.sourceHash);
+});
+
+test('successful Offline source and translated import entries enable Import ZIP', async () => {
+  for (const translated of [false, true]) {
+    const { app } = harness(); const dialogs = [];
+    app.managedVersions = []; app.managedWorkspaceMode = 'online'; app.versionChooserVisible = true;
+    app.localVersions = [{ ...storageScope(), hasSource: true }];
+    app.showImportUpdateZipDialog = () => dialogs.push('source');
+    app.importTranslatedZipClicked = () => dialogs.push('translated');
+    assert.equal(await app.managedImportOffline(translated), true);
+    assert.equal(app.managedWorkspaceMode, 'offline'); assert.equal(app.managedImportZipDisabled, false);
+    assert.deepEqual(dialogs, [translated ? 'translated' : 'source']);
+  }
+});
+
+test('failed entry activation preserves the current Import ZIP policy', async () => {
+  for (const entry of ['online', 'offline', 'import-source', 'import-translated']) {
+    for (const rejects of [false, true]) {
+      const { app } = harness();
+      app.managedWorkspaceMode = entry === 'online' ? 'offline' : 'online';
+      const previousMode = app.managedWorkspaceMode;
+      app.localVersions = [{ ...storageScope(), hasSource: true, catalogVersionId: 'weekly-1' }];
+      app.managedActivateWorkspace = async () => { if (rejects) throw new Error('Activation failed'); return false; };
+      const action = entry === 'online' ? () => app.continueManagedVersion(version(), 'Thai')
+        : entry === 'offline' ? () => app.continueAssociatedOfflineVersion()
+        : () => app.managedImportOffline(entry === 'import-translated');
+      if (entry.startsWith('import')) {
+        app.managedVersions = []; delete app.localVersions[0].catalogVersionId;
+        app.showImportUpdateZipDialog = app.importTranslatedZipClicked = () => assert.fail('A failed activation must not open import.');
+      }
+      assert.equal(await action(), false, entry + (rejects ? ' rejection' : ' failure'));
+      assert.equal(app.managedWorkspaceMode, previousMode, entry);
+      assert.equal(app.managedImportZipDisabled, previousMode === 'online', entry);
+    }
+  }
+});
+
+test('stale entry completion cannot replace the current Import ZIP policy', async () => {
+  for (const entry of ['online', 'offline', 'import-source', 'import-translated']) {
+    const activation = deferred(), reached = deferred(), { app } = harness();
+    app.managedWorkspaceMode = entry === 'online' ? 'offline' : 'online';
+    const previousMode = app.managedWorkspaceMode;
+    app.localVersions = [{ ...storageScope(), hasSource: true, catalogVersionId: 'weekly-1' }];
+    app.managedActivateWorkspace = () => { reached.resolve(); return activation.promise; };
+    const action = entry === 'online' ? () => app.continueManagedVersion(version(), 'Thai')
+      : entry === 'offline' ? () => app.continueAssociatedOfflineVersion()
+      : () => app.managedImportOffline(entry === 'import-translated');
+    if (entry.startsWith('import')) {
+      app.managedVersions = []; delete app.localVersions[0].catalogVersionId;
+      app.showImportUpdateZipDialog = app.importTranslatedZipClicked = () => assert.fail('A stale entry must not open import.');
+    }
+    const opening = action(); await reached.promise;
+    app.cloudProfileId = 'bob'; activation.resolve(true); await opening;
+    assert.equal(app.managedWorkspaceMode, previousMode, entry);
+    assert.equal(app.managedImportZipDisabled, previousMode === 'online', entry);
+  }
+});
+
+test('workspace owner and catalog access changes reset the Online import policy', async () => {
+  for (const change of [app => { app.cloudProfileId = 'bob'; }, app => { app.gameVersion = 'poe1'; },
+    app => { app.branchId = 'release'; }]) {
+    const { app } = harness(); app.managedWorkspaceMode = 'online';
+    app._managedWorkspaceOwner = JSON.stringify(['alice', 'poe2', 'default']);
+    change(app); await app.managedScopeChanged({ deferWorkspace: true });
+    assert.equal(app.managedWorkspaceMode, 'offline'); assert.equal(app.managedImportZipDisabled, false);
+  }
+  const { app } = harness(); app.managedWorkspaceMode = 'online';
+  app.managedClearCatalogAccess();
+  assert.equal(app.managedWorkspaceMode, 'offline'); assert.equal(app.managedImportZipDisabled, false);
 });
 
 test('the Offline chooser explains published cache association and offers local Continue', () => {

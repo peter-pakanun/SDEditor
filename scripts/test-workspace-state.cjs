@@ -834,3 +834,43 @@ test('automatic recovery keeps resolved-content deduplication and rejects reused
   assert.throws(() => W.dropTranslation(workspace, source, 'Thai', { id: 'action', recoveryId: 'action', translations: ['different'] }), /different translation/);
   assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai').id, 'action');
 });
+
+test('standalone work ignores grouped Dropped assignments and cannot reactivate their server IDs', () => {
+  const source = sourceDesc(), grouped = modern(source, 'current'); grouped.groupId = 'old-group';
+  const old = W.dropTranslation(grouped, source, 'Thai', { id: 'old-group-server', revision: 7, originSourceHash: 'origin' });
+  old.groupId = grouped.groupId; grouped.droppedArchive[old.id] = structuredClone(old);
+  const workspace = modern(source, 'current');
+  workspace.dropped.Thai = { 'a.txt': structuredClone(old) };
+  workspace.droppedArchive[old.id] = structuredClone(old);
+  const preserved = structuredClone(workspace.droppedArchive[old.id]);
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Standalone correction'] }, 'Thai', { source });
+  assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), null);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true,
+    'A grouped historical assignment cannot turn independent standalone corrections into ordinary Saved workload.');
+  const carried = W.dropTranslation(workspace, source, 'Thai', { id: 'local-standalone', originSourceHash: old.originSourceHash });
+  assert.equal(carried.id, 'local-standalone'); assert.equal(carried.revision, 0); assert.equal(carried.groupId, undefined);
+  assert.deepEqual(workspace.droppedArchive[old.id], preserved, 'Historical grouped evidence retains its server revision and scope.');
+  assert.equal(workspace.droppedOutbox.some(operation => operation.id === old.id), false);
+});
+
+test('Dropped projection and assignment cache follow both persisted and UI group identities', () => {
+  for (const field of ['groupId', 'workspaceGroupId']) {
+    const source = sourceDesc(), workspace = modern(source, 'current'); workspace[field] = 'accepted-group';
+    const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'accepted-server', revision: 2 });
+    candidate.groupId = 'accepted-group'; workspace.droppedArchive[candidate.id] = structuredClone(candidate);
+    assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), candidate, field + ' admits matching group records.');
+    W.discardDropped(workspace, 'a.txt', 'Thai', candidate);
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Saved correction'] }, 'Thai', { source });
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false,
+      'The matching group assignment is retained after discard.');
+    workspace[field] = 'other-group';
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true,
+      'Changing group invalidates the cached assignment without replacing the archive.');
+    workspace[field] = 'accepted-group';
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false,
+      'Returning to the original group restores its assignment.');
+    delete workspace[field];
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true,
+      'Leaving the group also invalidates the cached assignment.');
+  }
+});

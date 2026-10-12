@@ -7,6 +7,7 @@ const { pathToFileURL } = require('node:url');
 const { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { createServer } = require('node:http');
+const { Readable } = require('node:stream');
 const { randomUUID } = require('node:crypto');
 const codec = require('../public/statDescCodec.js');
 
@@ -172,6 +173,18 @@ async function run() {
       assert.equal(await target.evaluate(element => element === document.activeElement), true, 'Tooltip target is keyboard reachable');
       await page.getByRole('tooltip').waitFor(); assert.match(await page.getByRole('tooltip').textContent(), expected);
     };
+    const checkOfflineImportDialog = async (page, { keyboard = false } = {}) => {
+      const button = page.getByRole('button', { name: 'Import ZIP', exact: true });
+      assert.equal(await button.isEnabled(), true, 'Offline entry enables the actual Import ZIP control');
+      if (keyboard) { await button.focus(); await page.keyboard.press('Enter'); }
+      else await button.click();
+      await page.locator('.importDialogBox').waitFor();
+      assert.equal(await page.evaluate(() => window.__managedFixtureApp.importDialogVisible), true);
+      assert.equal(await page.getByRole('button', { name: /Import Next Version/ }).isVisible(), true);
+      assert.equal(await page.getByRole('button', { name: /Import Translated/ }).isVisible(), true);
+      await page.locator('.importDialogOverlay').filter({ has: page.locator('.importDialogBox') }).click({ position: { x: 5, y: 5 } });
+      await page.locator('.importDialogBox').waitFor({ state: 'hidden' });
+    };
     const checkStatusVersion = async (page, name, { ended = false, deadline = false, online = false } = {}) => {
       const label = page.locator('.workspaceStatus .versionStatusName');
       await label.waitFor(); assert.equal(await label.textContent(), name);
@@ -179,7 +192,7 @@ async function run() {
       assert.equal(await page.locator('.workspaceActions').getByRole('button', { name: /^(Versions|Manage version)$/ }).count(), 0, 'No duplicate header chooser');
       await checkTooltip(page, label, /ZIP SHA-256: [a-f0-9]{64}/);
       assert.equal(await page.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), online,
-        online ? 'Online versions disable Import ZIP' : 'Standalone Offline workspaces keep Import ZIP enabled');
+        online ? 'Online entry disables Import ZIP' : 'Offline entry keeps Import ZIP enabled, including a published matching baseline');
       assert.equal(await page.locator('.workspaceStatus .versionBadge.ended').count(), ended ? 1 : 0);
       const reminder = page.locator('.workspaceStatus .versionDeadline');
       assert.equal(await reminder.count(), deadline ? 1 : 0);
@@ -317,6 +330,133 @@ async function run() {
     await translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first().fill('ความเสียหายไฟที่แก้ไข');
     await translator.getByRole('button', { name: 'Save & close', exact: true }).click();
     await translator.evaluate(async () => { const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry(); });
+    if (process.argv.includes('--import-mode-only')) {
+      await translator.waitForFunction(() => !window.__managedFixtureApp.editorVisible && !window.__managedFixtureApp.editorSaving);
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry();
+      });
+      const versions = api.locals.versions, collaboration = api.locals.collaboration;
+      const publishArchive = async (archiveBytes, name, expectedRoomId) => {
+        const created = versions.createUpload('fixture-manager', { game: 'poe2', name, idempotencyKey: randomUUID() });
+        await versions.receiveArchive(created.upload.id, 'fixture-manager', Readable.from([archiveBytes]));
+        versions.prepare(created.upload.id, 'fixture-manager', {}); await versions.idle();
+        const prepared = versions.uploadStatus(created.upload.id, 'fixture-manager');
+        assert.equal(prepared.upload.status, 'prepared', JSON.stringify(prepared));
+        assert.equal(prepared.upload.existingTeams.find(team => team.language === 'Thai').roomId, expectedRoomId,
+          'Manager preparation finds the exact standalone room for this baseline');
+        return versions.publish(created.upload.id, 'fixture-manager', {
+          expectedHeadId: versions.branch('poe2', 'default').head_version_id,
+          overrideUnfinished: true, idempotencyKey: randomUUID(),
+        }).version;
+      };
+      const roomState = roomId => ({ snapshot: collaboration.snapshot(roomId, 'fixture-thai'),
+        history: collaboration.history(roomId, 'fixture-thai', {}) });
+      const firstHistory = collaboration.history(standaloneRoomId, 'fixture-thai', {});
+      assert.ok(firstHistory.items.length > 0, 'The initial Offline save reached real shared history');
+      const first = await publishArchive(bytes, 'Import mode initial', standaloneRoomId);
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.refreshManagedVersions(); await vm.managedRefreshActive();
+      });
+      await translator.waitForFunction(id => window.__managedFixtureApp.activeManagedVersionId === id, first.id);
+      assert.equal(await translator.evaluate(() => window.__managedFixtureApp.managedWorkspaceMode), 'offline',
+        'Automatic association keeps the entry mode Offline');
+      assert.equal(versions.detail(first.id, 'fixture-manager').teams.find(team => team.language === 'Thai').roomId, standaloneRoomId);
+      assert.deepEqual(collaboration.history(standaloneRoomId, 'fixture-thai', {}), firstHistory,
+        'Publication keeps standalone shared history');
+      await checkStatusVersion(translator, first.name, { deadline: true });
+      for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+        await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
+        await checkOfflineImportDialog(translator, { keyboard: theme === 'light' });
+      }
+      await openStatusChooser(translator);
+      await versionRow(translator, first.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+      await waitWorkspace(translator, first, 'Thai');
+      await checkStatusVersion(translator, first.name, { online: true, deadline: true });
+      await openStatusChooser(translator);
+      await translator.getByRole('region', { name: 'Offline workspace' }).getByRole('button', { name: 'Continue cached workspace', exact: true }).click();
+      await waitWorkspace(translator, first, 'Thai');
+      await checkStatusVersion(translator, first.name, { deadline: true });
+      await checkOfflineImportDialog(translator, { keyboard: true });
+      await openStatusChooser(translator);
+      await versionRow(translator, first.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+      await waitWorkspace(translator, first, 'Thai');
+      await checkStatusVersion(translator, first.name, { online: true, deadline: true });
+      await openStatusChooser(translator);
+      await translator.getByRole('region', { name: 'Offline workspace' }).getByRole('button', { name: 'Continue cached workspace', exact: true }).click();
+      await waitWorkspace(translator, first, 'Thai');
+      results.push('Matching published baseline remains importable from Offline; pointer and keyboard dialog use works in all four desktop themes; explicit Online/Offline/Online entries apply the selected mode');
+      const oldRoom = roomState(standaloneRoomId);
+      const nextZip = await JSZip.loadAsync(bytes);
+      const extraSource = { ...source, filepath: 'fixture/lightning.txt', filename: 'lightning.txt', name: 'lightning', stats: ['lightning_damage'],
+        translations: { English: ['Lightning damage'], Thai: ['ความเสียหายสายฟ้า'], German: ['Blitzschaden'] } };
+      nextZip.file(extraSource.filepath, codec.descEncode(extraSource), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+      const nextBytes = await nextZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      await translator.getByRole('button', { name: 'Import ZIP', exact: true }).click();
+      const nextChooser = translator.waitForEvent('filechooser');
+      await translator.getByRole('button', { name: /Import Next Version/ }).click();
+      await (await nextChooser).setFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: nextBytes });
+      await translator.locator('#appDialogInput').fill('YES');
+      await translator.locator('.appDialogConfirm').click();
+      await translator.locator('.appDialogConfirm').filter({ hasText: 'Proceed' }).click();
+      await translator.waitForFunction(oldHash => {
+        const vm = window.__managedFixtureApp;
+        return vm.sourceLoaded && vm.sourceIdentity !== oldHash && !vm._importingSource && !vm.workspaceInitializationActive
+          && vm._collaboration?.snapshot().roomId;
+      }, first.sourceHash);
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry();
+      });
+      const next = await translator.evaluate(() => {
+        const vm = window.__managedFixtureApp;
+        return { sourceHash: vm.sourceIdentity, roomId: vm._collaboration.snapshot().roomId,
+          mode: vm.managedWorkspaceMode, managedId: vm.activeManagedVersionId };
+      });
+      assert.notEqual(next.sourceHash, first.sourceHash); assert.notEqual(next.roomId, standaloneRoomId);
+      assert.equal(next.mode, 'offline'); assert.equal(next.managedId, '');
+      assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isEnabled(), true);
+      assert.deepEqual(roomState(standaloneRoomId), oldRoom, 'Next import leaves the old published room and shared history untouched');
+      assert.deepEqual(collaboration.file(next.roomId, source.filepath).translations, ['ความเสียหายไฟที่แก้ไข'],
+        'Matching-English Saved work carries into the new standalone room');
+      await translator.evaluate(filepath => window.__managedFixtureApp.editFile(filepath), extraSource.filepath);
+      await translator.locator('input[placeholder="Translation"]').filter({ visible: true }).first().fill('ความเสียหายสายฟ้าที่แก้ไข');
+      await translator.getByRole('button', { name: 'Save & close', exact: true }).click();
+      await translator.waitForFunction(() => !window.__managedFixtureApp.editorVisible && !window.__managedFixtureApp.editorSaving);
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration.retry();
+      });
+      const nextRoom = roomState(next.roomId);
+      const successor = await publishArchive(nextBytes, 'Import mode next', next.roomId);
+      assert.equal(successor.sourceHash, next.sourceHash);
+      assert.equal(versions.detail(successor.id, 'fixture-manager').teams.find(team => team.language === 'Thai').roomId, next.roomId);
+      assert.deepEqual(collaboration.history(next.roomId, 'fixture-thai', {}), nextRoom.history,
+        'Manager publication adopts the new room with its existing history');
+      assert.deepEqual(collaboration.file(next.roomId, extraSource.filepath).translations, ['ความเสียหายสายฟ้าที่แก้ไข']);
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.refreshManagedVersions(); await vm.managedRefreshActive();
+      });
+      await translator.waitForFunction(id => window.__managedFixtureApp.activeManagedVersionId === id, successor.id);
+      await checkStatusVersion(translator, successor.name, { deadline: true });
+      results.push('Actual Next Version import creates a distinct standalone baseline and room, carries Saved work, preserves the previous version, and manager publication adopts the room without replacing saves or history');
+      await openStatusChooser(translator);
+      await versionRow(translator, successor.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+      await waitWorkspace(translator, successor, 'Thai');
+      await translator.route(apiOrigin + '/**', route => route.abort());
+      await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.refreshManagedVersions(); await vm.managedRefreshActive();
+      });
+      assert.equal(await translator.evaluate(() => window.__managedFixtureApp.managedVersionsUnavailable), true,
+        'Real failed API requests use the retained catalog');
+      await checkStatusVersion(translator, successor.name, { online: true, deadline: true });
+      const guarded = await translator.evaluate(async () => {
+        const vm = window.__managedFixtureApp; await vm.importZipClicked(); await vm.$nextTick();
+        return { mode: vm.managedWorkspaceMode, dialog: vm.importDialogVisible, sourceHash: vm.sourceIdentity };
+      });
+      assert.deepEqual(guarded, { mode: 'online', dialog: false, sourceHash: successor.sourceHash });
+      results.push('Disconnected cached Online entry keeps the real Import ZIP control disabled and the direct action guarded');
+      assert.deepEqual(failures, [], 'Browser script errors');
+      console.log(JSON.stringify({ status: 'PASS', normalMode: true, importModeOnly: true, browser: executablePath, results }, null, 2));
+      return;
+    }
     await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
     await manager.locator('#managerUploadName').fill('2026-10-05_POE2');
     const wrongGameZip = new JSZip(), uploadCount = database.prepare('SELECT COUNT(*) AS n FROM version_uploads').get().n;
@@ -349,9 +489,10 @@ async function run() {
     assert.equal(await manager.locator('.teamVersionTable tbody tr').count(), 12);
     const version = await manager.evaluate(() => JSON.parse(JSON.stringify(window.__managedFixtureApp.managedSelectedVersion)));
     assert.equal(version.name, '2026-10-05_POE2'); assert.equal(version.isHead, true);
-    await translator.waitForFunction(() => window.__managedFixtureApp.managedImportZipDisabled);
-    assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isDisabled(), true,
-      'Manager publication adopts the active matching Offline workspace and disables Import ZIP');
+    await translator.waitForFunction(id => window.__managedFixtureApp.activeManagedVersionId === id, version.id);
+    assert.equal(await translator.getByRole('button', { name: 'Import ZIP', exact: true }).isEnabled(), true,
+      'Manager publication associates the matching Offline workspace without changing its import policy');
+    await checkOfflineImportDialog(translator);
     const probeContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
     const catalogProbe = await probeContext.newPage();
     catalogProbe.on('pageerror', error => failures.push(error.message));
@@ -559,6 +700,18 @@ async function run() {
     await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
     await waitWorkspace(translator, version, 'Thai');
     await checkStatusVersion(translator, version.name, { deadline: true, online: true });
+    await openStatusChooser(translator);
+    await translator.getByRole('region', { name: 'Offline workspace' }).getByRole('button', { name: 'Continue cached workspace', exact: true }).click();
+    await waitWorkspace(translator, version, 'Thai');
+    await checkStatusVersion(translator, version.name, { deadline: true });
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
+      await checkOfflineImportDialog(translator, { keyboard: theme === 'light' });
+    }
+    await openStatusChooser(translator);
+    await versionRow(translator, version.name).getByRole('button', { name: 'Open editor', exact: true }).click();
+    await waitWorkspace(translator, version, 'Thai');
+    await checkStatusVersion(translator, version.name, { deadline: true, online: true });
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await checkStatusVersion(translator, version.name, { deadline: true, online: true });
@@ -738,7 +891,7 @@ async function run() {
     assert.equal(await offline.locator('#offlineVersionName').inputValue(), 'Local reference export');
     await assertMetadataOnly(offline, 'Named standalone Offline game selection');
     results.push('Unsigned Offline card keeps original import warnings, editable local name, keyboard naming and Continue workflow');
-    results.push('Import ZIP remains enabled for named/unnamed Offline workspaces and disabled for adopted, published, ended and cached Online versions');
+    results.push('Import ZIP opens by pointer and keyboard in Offline mode across four themes, including a published matching baseline; Online mode disables it even for disconnected cached/ended versions');
     const successorZip = await JSZip.loadAsync(bytes); successorZip.comment = 'Distinct successor archive for catalog navigation fixture';
     const successorBytes = await successorZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();

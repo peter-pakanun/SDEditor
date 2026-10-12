@@ -1524,6 +1524,14 @@ async function associatedCachedWorkspaceCheck(page, results, { filepath }) {
         return !vm.versionChooserVisible && !vm.versionStorageLoading && vm.sourceLoaded && vm.sourceIdentity === scope.sourceHash;
     });
     const readyMs = Date.now() - start;
+    const importButton = page.getByRole('button', { name: 'Import ZIP', exact: true });
+    assert.equal(await importButton.isEnabled(), true, 'Offline cached Continue enables Import ZIP despite the retained published association');
+    await importButton.click();
+    await page.locator('.importDialogBox').waitFor();
+    assert.equal(await page.evaluate(() => window.__normalizedApp.importDialogVisible), true,
+        'The Offline Import ZIP action opens the actual import options dialog');
+    await page.locator('.importDialogOverlay').filter({ has: page.locator('.importDialogBox') }).click({ position: { x: 5, y: 5 } });
+    await page.locator('.importDialogBox').waitFor({ state: 'hidden' });
     const continuation = await page.evaluate(async filepath => {
         const vm = window.__normalizedApp, probe = window.__cachedContinueProbe, copy = value => JSON.parse(JSON.stringify(value));
         const result = { beforeWorkspace: probe.beforeWorkspace, afterWorkspace: copy(await OfflineStore.getWorkspace(probe.scope)),
@@ -1549,7 +1557,7 @@ async function associatedCachedWorkspaceCheck(page, results, { filepath }) {
     assert.equal(continuation.requests.some(path => /\/original(?:$|\?)/.test(path)), false, 'Continue cached workspace never downloads the original ZIP');
     assert.equal(continuation.operations.some(operation => operation.store === 'baseline_files' && ['put', 'add', 'delete'].includes(operation.method)), false,
         'Continue cached workspace never rewrites immutable baseline rows');
-    results.push({ scenario: 'authenticated associated cached workspace button resumes exact Saved work and history without reimport or ZIP download', readyMs });
+    results.push({ scenario: 'authenticated associated cached Offline workspace enables Import ZIP and resumes exact Saved work and history without reimport or ZIP download', readyMs });
     await page.context().setOffline(false);
 }
 

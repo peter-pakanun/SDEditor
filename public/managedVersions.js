@@ -67,7 +67,7 @@
       managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '',
       managedCatalogLoading: false, managedCatalogLoaded: false, managedLocalVersionsLoading: false, managedLocalVersionsLoaded: false,
       managedDetailsLoading: false, managedDetailsLoaded: false,
-      activeManagedVersionId: '', managedActiveDetails: null, managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
+      activeManagedVersionId: '', managedActiveDetails: null, managedWorkspaceMode: 'offline', managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
       managedUploadName: '', managedUploadDeadline: '', managedUploadFile: null, managedUploadBytes: 0,
       managedUploadError: '', managedDuplicateChoices: {}, managedDuplicateVersion: null, managedMetadataVisible: false, managedMetadataVersion: null, managedMetadataName: '', managedMetadataDeadline: '',
       managedRecoveryVisible: false, managedRecoveryTeam: null }; },
@@ -128,7 +128,7 @@
           && (!version.accountId || version.accountId === accountId)) || null;
       },
       managedImportZipDisabled() {
-        return this.managedCatalogAccess && !!(this.managedActiveVersion || this.managedStatusLocalVersion?.catalogVersionId);
+        return this.managedCatalogAccess && this.managedWorkspaceMode === 'online';
       },
       managedStatusName() {
         const currentLocalName = this.localDescs?.sourceHash === this.sourceIdentity ? this.localDescs.versionName : '';
@@ -215,6 +215,7 @@
         this.managedTeamSort = sort;
       },
       managedClearCatalogAccess() {
+        this.managedWorkspaceMode = 'offline';
         this.closeManagedPresence(); this._managedDetailRun = (this._managedDetailRun || 0) + 1;
         this._managedOperation = null; this._managedActivation = null; this.managedVersionBusy = false; this.clearBrowserWork?.('versions');
         this.managedVersions = []; this.managedBranch = null; this.selectedManagedVersionId = ''; this.activeManagedVersionId = '';
@@ -304,6 +305,7 @@
         const key = this.managedCatalogScope, run = this._managedScopeRun = (this._managedScopeRun || 0) + 1;
         const owner = JSON.stringify([this.cloudProfileId || 'guest', this.gameVersion, this.branchId]);
         const previousOwner = this._managedWorkspaceOwner;
+        if (previousOwner !== owner) this.managedWorkspaceMode = 'offline';
         const previousCatalogOwner = this._managedCatalogOwner || previousOwner;
         if (previousCatalogOwner && JSON.parse(previousCatalogOwner)[0] === 'guest' && this.cloudSignedIn
           && JSON.parse(previousCatalogOwner)[1] === this.gameVersion && JSON.parse(previousCatalogOwner)[2] === this.branchId) this._managedGuestAdoptionScope = owner;
@@ -581,6 +583,7 @@
           this.activeContentGroup=version?.groupId ? version.details?.contentGroups?.find(group=>group.id===version.groupId) || {id:version.groupId,versionId:version.versionId,contentMode:'statdescription'} : null;
           if (version && !await this.managedActivateWorkspace(version.sourceHash)) return false;
           if (!current()) return false;
+          this.managedWorkspaceMode = 'offline';
           if (!version) { this.activeManagedVersionId = ''; this.versionChooserVisible = false; if (!this.sourceLoaded) this.showImportUpdateZipDialog(); }
           this.managedSetOperationError('offline-entry', ''); return true;
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError('offline-entry', error); return false; }
@@ -592,6 +595,7 @@
         try {
           if (version && !await this.managedActivateWorkspace(version.sourceHash)) return false;
           if (!current()) return false;
+          this.managedWorkspaceMode = 'offline';
           this.versionChooserVisible = false;
           if (translated) this.importTranslatedZipClicked(); else this.showImportUpdateZipDialog();
           this.managedSetOperationError('offline-entry', ''); return true;
@@ -767,6 +771,7 @@
           if (!current()) return;
           const opened = await task('Opening the prepared workspace', () => this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization));
           if (opened && current()) {
+            this.managedWorkspaceMode = 'online';
             this.managedSetOperationError('open', '');
             if (acknowledgedWindow && this.managedActiveVersion?.id === version.id
               && acknowledgedWindow === this.managedEditWarningKey(this.managedActiveVersion, this.lang, this.managedActiveTeam)) {

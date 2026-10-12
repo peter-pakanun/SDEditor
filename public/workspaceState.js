@@ -160,13 +160,14 @@
     const game = workspace?.game || workspace?.sourceBaseline?.game;
     if (game && record.game && game !== record.game) return false;
     if ((record.branchId || 'default') !== (workspace?.branchId || 'default')) return false;
+    if (record.groupId && record.groupId !== (workspace?.workspaceGroupId || workspace?.groupId || '')) return false;
     if (record.collaborationAccountId && String(record.collaborationAccountId) !== String(workspace?.collaborationAccountId || '')) return false;
     return true;
   }
   function wasDroppedInSource(workspace, filepath, language) {
     if (!object(workspace) || !workspace.sourceHash) return false;
     const context = [workspace.droppedArchive, workspace.sourceHash, workspace.game || workspace.sourceBaseline?.game,
-      workspace.collaborationAccountId, workspace.branchId || 'default'];
+      workspace.collaborationAccountId, workspace.branchId || 'default', workspace.workspaceGroupId || workspace.groupId || ''];
     let cached = droppedScopeCache.get(workspace);
     if (!cached || context.some((value, index) => value !== cached.context[index])) {
       const byLanguage = new Map();
@@ -206,6 +207,7 @@
     const signature = serialized([game, language, desc.filepath, originSourceHash, content, ...(branchId === 'default' ? [] : [branchId])]);
     const active = droppedForFile(workspace, desc.filepath, language);
     const sameContent = record => record && record.game === game && (record.branchId || 'default') === branchId
+      && inWorkspaceScope(workspace, record)
       && record.language === language && record.filepath === desc.filepath
       && record.originSourceHash === originSourceHash && equal(record.snapshot, content);
     const recoveryId = options.recoveryId || '';
