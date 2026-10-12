@@ -1448,7 +1448,7 @@
                 }else{seen.set(identity,item);items.push(item);}};
                 const entries=this.getActiveDictionaryEntries?.() || this.dictionary || [];
                 for(const token of tokens){
-                    const sourceRanges=sourceTokens.filter(source=>source.full===token.value || source.kind==='variable' && openedByChar==='{' && source.full.slice(source.prefix.length)===token.value)
+                    const sourceRanges=sourceTokens.filter(source=>root.ClientTextState.tokenInsertion(source,field.source).value===token.value || source.kind==='variable' && openedByChar==='{' && source.full.slice(source.prefix.length)===token.value)
                         .map(source=>({start:source.start,end:source.end}));
                     const base={...token,sourceRanges};
                     const keyword=/^\[([^\]|]+)(?:\|([^\]]*))?\]$/.exec(token.value);
@@ -1507,13 +1507,14 @@
                     || item.dictionaryKey && !(completion.allItems || completion.items).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
                     this.ctCloseCompletion();return false;
                 }
-                if(root.EditorSession)return root.EditorSession.insert(this,field,item.value,{input:target,start:completion.start,end:completion.end,raw:true});
+                if(root.EditorSession)return root.EditorSession.insert(this,field,item.value,{input:target,start:completion.start,end:completion.end,raw:true,caretOffset:item.caretOffset});
                 const text=completion.text.slice(0,completion.start)+item.value+completion.text.slice(completion.end);
                 this.ctValues[field.id]=text;this.ctCloseCompletion();this.ctEdited(field);
                 this.$nextTick?.(()=>{
                     if(!this.ctCurrent(completion.context) || this.ctSelection!==completion.unitId || this.ctValues[field.id]!==text
                         || this.ctFocusedField && this.ctFocusedField!==field.id || target?.isConnected===false)return;
-                    target?.focus();target?.setSelectionRange(completion.start+item.value.length,completion.start+item.value.length);this.ctResizeField(target);
+                    const caret=text.slice(0,completion.start+(item.caretOffset ?? item.value.length)).replace(/\r\n?/g,'\n').length;
+                    target?.focus();target?.setSelectionRange(caret,caret);this.ctResizeField(target);
                 });return true;
             },
             ctRememberDraftStageFailure(ctx,unitId,signature,operation) {

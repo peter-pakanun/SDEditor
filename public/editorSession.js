@@ -105,8 +105,11 @@
         .map(issue=>({...issue,kind:issue.code==='dictionary-terminology'?'terminology':'consistency'}))};
   }
   function ranges(host, field, text, source) {
-    const tokens=root.ClientTextState?.tokenize(text) || [],output=tokens.map(token=>({start:token.start,end:token.end,value:token.full,
-      identity:token.identity,kind:token.kind,className:token.kind==='keyword'?'hl keywordHL':'hl',replace:token.full}));
+    const tokens=root.ClientTextState?.tokenize(text) || [],output=tokens.map(token=>{
+      const insertion=root.ClientTextState.tokenInsertion(token,text);
+      return {start:token.start,end:token.end,value:token.full,identity:token.identity,kind:token.kind,
+        className:token.kind==='keyword'?'hl keywordHL':'hl',replace:insertion.value,caretOffset:insertion.caretOffset};
+    });
     if(source){
       const pack=host.ctDictionaryPack,unit=pack?.units?.find(unit=>unit.key===field.id && unit.english===text);
       for(const hl of unit?.HLs || []){
@@ -131,7 +134,8 @@
     const previous=String(host.ctValues[field.id] ?? ''),start=options.whole ? 0 : options.raw ? options.start : rawOffset(previous,options.start ?? input.selectionStart ?? 0),
       end=options.whole ? previous.length : options.raw ? options.end : rawOffset(previous,options.end ?? input.selectionEnd ?? input.selectionStart ?? 0);
     if(typeof input.value==='string' && input.value!==previous.replace(/\r\n?/g,'\n') || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>previous.length)return false;
-    const next=previous.slice(0,start)+replacement+previous.slice(end),caret=next.slice(0,start+replacement.length).replace(/\r\n?/g,'\n').length;
+    const next=previous.slice(0,start)+replacement+previous.slice(end),offset=Number.isInteger(options.caretOffset) ? Math.max(0,Math.min(replacement.length,options.caretOffset)) : replacement.length,
+      caret=next.slice(0,start+offset).replace(/\r\n?/g,'\n').length;
     const history=rawHistory(host,field,previous);
     input.focus?.();
     const shownStart=previous.slice(0,start).replace(/\r\n?/g,'\n').length,shownEnd=previous.slice(0,end).replace(/\r\n?/g,'\n').length;
@@ -186,11 +190,11 @@
         if(content)content.style.transform='translate('+(-event.target.scrollLeft)+'px, '+(-event.target.scrollTop)+'px)';},
       paste(event){const text=event.clipboardData?.getData?.('text/plain');if(!valid() || source || typeof text!=='string')return;event.preventDefault();insert(host,field,text,{input:event.target});},
       altKeyup(event){if(!valid() || !event.altKey || event.ctrlKey || event.metaKey || !/^[0-9]$/.test(event.key))return;
-        const tokens=ranges(host,field,String(field.source ?? ''),true),range=tokens[(Number(event.key)||10)-1];if(range)insert(host,field,range.replace || range.value,{input:event.target});},
+        const tokens=ranges(host,field,String(field.source ?? ''),true),range=tokens[(Number(event.key)||10)-1];if(range)insert(host,field,range.replace || range.value,{input:event.target,caretOffset:range.caretOffset});},
       sourceClick(event){if(!valid())return;const span=event.target?.closest?.('[data-ct-hl]'),range=list()[Number(span?.dataset.ctHl)];if(!span || !range)return;
         if(event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey){host.ctOpenHighlightDictionary?.(field,range);return;}
         if(event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey){host.editorClipboard=range.value;root.navigator?.clipboard?.writeText?.(range.value).catch?.(()=>{});return;}
-        if(!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey)insert(host,field,range.replace || range.value);},
+        if(!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey)insert(host,field,range.replace || range.value,{caretOffset:range.caretOffset});},
       tooltip(event){if(!valid())return;
         if(!source){const overlay=event.target?.parentElement?.querySelector?.('.HLter'),span=host.getTooltipElementAtPoint?.(overlay,event.clientX,event.clientY,'.diagnosticRange[data-tooltip]');
           if(span)host.showTooltip?.(event,span.getAttribute('data-tooltip'));else host.hideTooltip?.();return;}

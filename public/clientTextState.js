@@ -426,20 +426,32 @@
         }
         return result;
     }
+    function tokenInsertion(token, source) {
+        const value = token.full;
+        if (token.kind !== 'format' || value.startsWith('</') || source[token.end] !== '{') return { value };
+        const name = /^<([A-Za-z]+)/.exec(value)?.[1]?.toLowerCase();
+        const single = ['size','font','rgb','glow','fg','smaller'].includes(name);
+        const opening = !single && source.startsWith('{{', token.end) ? '{{' : '{', closing = opening === '{{' ? '}}' : '}';
+        return { value: value + opening + closing, label: value + opening + '_' + closing, caretOffset: value.length + opening.length };
+    }
     function suggestions(field, options = {}) {
-        const openedBy = options.openedByChar || '', tokens = tokenize(canonicalSource(field.source));
+        const openedBy = options.openedByChar || '', source = canonicalSource(field.source), tokens = tokenize(source);
         // A prefix already typed before an opening brace must remain outside
         // the replacement range. Keyword suggestions retain their complete ID
         // and optional pipe display, including reference metadata.
-        const values = [...new Set(tokens.filter(token => token.kind !== 'audio').map(token =>
-            token.kind==='variable' && openedBy==='{' ? token.full.slice(token.prefix.length) : token.full)
-            .filter(value => !openedBy || value[0]===openedBy))];
-        const items = values.map(value => ({ value, label: value, matchText: value, matchTextLower: value.toLocaleLowerCase() }));
+        const seen = new Set(), items = [];
+        for (const token of tokens.filter(token => token.kind !== 'audio')) {
+            const insertion = token.kind === 'variable' && openedBy === '{' ? { value: token.full.slice(token.prefix.length) } : tokenInsertion(token, source);
+            const value = insertion.value;
+            if (seen.has(value) || openedBy && value[0] !== openedBy) continue;
+            seen.add(value);
+            items.push({ ...insertion, label: insertion.label || value, matchText: value, matchTextLower: value.toLocaleLowerCase() });
+        }
         if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
     return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });
