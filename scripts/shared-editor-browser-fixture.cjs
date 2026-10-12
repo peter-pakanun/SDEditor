@@ -100,6 +100,90 @@ async function checkPreviewDecorations(page, contentMode) {
   console.log(contentMode + ' source/translation nested preview styles, variables, keyword text and raw tags passed in all four desktop themes.');
 }
 
+async function checkPreviewLineBreaks(page, contentMode, surface = 'full', table = false) {
+  const raw = await page.evaluate(async ({ contentMode, table }) => {
+    const host = window.__sharedFixtureApp, ct = contentMode === 'clienttext';
+    const wrap = (tag, text) => ct ? `<${tag}>{${text}}` : `<${tag}>{{${text}}}`;
+    const text = (label, newline) => table ? ['', '', `LeftStart${label}`, '', `LeftDouble${label}`, '', '', `LeftTriple${label}`, `LeftSingle${label}`].join(newline)
+      + '@' + ['', '', `RightStart${label}`, '', `RightDouble${label}`, '', '', `RightTriple${label}`, `RightSingle${label}`].join(newline)
+      : [`PlainStart${label}`, '', `PlainDouble${label}`, '', '', `PlainTriple${label}`, `PlainSingle${label}`,
+      wrap('i', wrap('bold', `NestedStart${label}${newline}${newline}NestedDouble${label}`)),
+      `[Skill|KeyStart${label}${newline}${newline}KeyDouble${label}]`, ...(ct ? [`Literal${label}\\nLiteralEnd${label}`] : [])].join(newline);
+    const source = text('Source', '\r\n'), target = text('Translation', '\n');
+    const saved = { contentMode, hideSource: host.hideSourceInPreviewPanel };
+    window.__previewLineSnapshot = saved; host.hideSourceInPreviewPanel = false;
+    if (ct) {
+      const unit = host.ctCurrentUnit, field = host.ctPreviewField;
+      Object.assign(saved, { units: host.ctUnits, index: host._ctUnitIndex, values: host.ctValues });
+      const replacement = Vue.markRaw({ ...unit, fields: unit.fields.map(item => item.id === field.id ? { ...item, source, target } : item) });
+      host._ctUnitIndex = Vue.markRaw(new Map([[replacement.id, replacement]])); host.ctUnits = Vue.markRaw([replacement]);
+      host.ctValues = { ...host.ctValues, [field.id]: target };
+    } else {
+      const index = host.editorBlocks.findIndex(block => !block.isTable), block = host.editorBlocks[index];
+      Object.assign(saved, { index, focused: host.editorFocusedIndex, english: block.english, translation: block.translation });
+      block.english = source; block.translation = target; host.editorFocusedIndex = index; host.refreshGamePreview();
+    }
+    await host.$nextTick(); return { source, target };
+  }, { contentMode, table });
+  try {
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+      const frames = await page.locator('.gamePreviewWindow').evaluateAll((elements, table) => elements.map((frame, index) => {
+        const label = index ? 'Translation' : 'Source', walker = document.createTreeWalker(frame, NodeFilter.SHOW_TEXT), nodes = [];
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        const top = word => {
+          const node = nodes.find(node => node.textContent.includes(word));
+          if (!node) throw Error('Missing preview word ' + word);
+          const offset = node.textContent.indexOf(word), range = document.createRange();
+          range.setStart(node, offset); range.setEnd(node, offset + word.length); return range.getBoundingClientRect().top;
+        };
+        const gap = (before, after) => top(after + label) - top(before + label);
+        const value = getComputedStyle(frame), lineHeight = Number.parseFloat(value.lineHeight);
+        if (table) return { lineHeight, single: gap('LeftTriple', 'LeftSingle'), double: gap('LeftStart', 'LeftDouble'), triple: gap('LeftDouble', 'LeftTriple'),
+          rightDouble: gap('RightStart', 'RightDouble'), rightTriple: gap('RightDouble', 'RightTriple'),
+          leading: nodes.find(node => node.textContent.includes('LeftStart' + label)).parentElement.getBoundingClientRect().top
+            - frame.getBoundingClientRect().top - Number.parseFloat(value.paddingTop) - Number.parseFloat(value.borderTopWidth),
+          alignment: top('LeftStart' + label) - top('RightStart' + label) };
+        return { lineHeight,
+          single: gap('PlainTriple', 'PlainSingle'), double: gap('PlainStart', 'PlainDouble'), triple: gap('PlainDouble', 'PlainTriple'),
+          nested: gap('NestedStart', 'NestedDouble'), keyword: gap('KeyStart', 'KeyDouble'),
+          literal: frame.textContent.includes('Literal' + label + '\\nLiteralEnd' + label) };
+      }), table);
+      assert.equal(frames.length, 2, contentMode + '/' + surface + '/' + theme);
+      for (const [index, frame] of frames.entries()) {
+        const message = contentMode + '/' + surface + '/' + theme + '/' + (index ? 'Translation LF' : 'Source CRLF');
+        const gaps = table ? [['single', 1], ['double', 2], ['triple', 3], ['rightDouble', 2], ['rightTriple', 3]]
+          : [['single', 1], ['double', 2], ['triple', 3], ['nested', 2], ['keyword', 2]];
+        for (const [name, lines] of gaps) {
+          assert.ok(Math.abs(frame[name] - lines * frame.lineHeight) < 1, message + ': ' + name + ' line gap ' + frame[name] + ' equals ' + lines + ' lines of ' + frame.lineHeight);
+        }
+        if (table) {
+          assert.ok(Math.abs(frame.leading - 2 * frame.lineHeight) < 1, message + ': two leading empty table rows retain height (' + frame.leading + 'px)');
+          assert.ok(Math.abs(frame.alignment) < 1, message + ': columns remain aligned');
+        }
+        if (contentMode === 'clienttext') assert.equal(frame.literal, true, message + ': literal backslash-n remains text');
+      }
+    }
+    assert.deepEqual(await page.evaluate(contentMode => {
+      const host = window.__sharedFixtureApp;
+      return contentMode === 'clienttext' ? { source: host.ctPreviewField.source, target: host.ctValues[host.ctPreviewField.id] }
+        : { source: host.editorBlocks[host.editorFocusedIndex].english, target: host.editorBlocks[host.editorFocusedIndex].translation };
+    }, contentMode), raw, contentMode + '/' + surface + ': line-break rendering preserves raw text');
+  } finally {
+    await page.evaluate(async () => {
+      const host = window.__sharedFixtureApp, saved = window.__previewLineSnapshot;
+      host.hideSourceInPreviewPanel = saved.hideSource;
+      if (saved.contentMode === 'clienttext') { host._ctUnitIndex = saved.index; host.ctUnits = saved.units; host.ctValues = saved.values; }
+      else {
+        Object.assign(host.editorBlocks[saved.index], { english: saved.english, translation: saved.translation });
+        host.editorFocusedIndex = saved.focused; host.refreshGamePreview();
+      }
+      delete window.__previewLineSnapshot; await host.$nextTick();
+    });
+  }
+  console.log(contentMode + '/' + surface + ' source/translation consecutive preview line breaks' + (table ? ' and empty table rows' : ', nested styles and keyword labels') + ' passed in all four desktop themes.');
+}
+
 async function run() {
   assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to installed Edge/Chrome.');
   const serverApp = express();
@@ -133,6 +217,8 @@ async function run() {
       await checkDiagnosticScanner(page); assert.deepEqual(failures, []); return;
     }
     await checkPreviewDecorations(page, 'statdescription');
+    await checkPreviewLineBreaks(page, 'statdescription');
+    await checkPreviewLineBreaks(page, 'statdescription', 'table', true);
     const sd = page.locator('.editor [data-editor-ref="translation_1"]');
     await sd.fill('SD retained draft');
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Lookup', exact: true }).click();
@@ -227,6 +313,7 @@ async function run() {
     await page.waitForSelector('.ctFullEditor [data-ct-target="text-field"]');
     console.log('ClientText full editor and native fields mounted.');
     await checkPreviewDecorations(page, 'clienttext');
+    await checkPreviewLineBreaks(page, 'clienttext');
     const ct = page.locator('.ctFullEditor [data-ct-target="text-field"]');
     assert.equal(await ct.inputValue(), 'raw @ literal\\n\nactual');
     assert.ok(await page.locator('.ctFullEditor .HLter [data-ct-hl]').count() >= 3);
@@ -372,6 +459,7 @@ async function run() {
     assert.equal(await page.locator('#inlineEditorPreviewHost .gamePreviewWindow').count(), 2);
     assert.equal(await page.evaluate(() => document.querySelector('.sharedEditorSidebar') === window.__fixtureToolsNode), true);
     assert.equal(await page.evaluate(() => document.querySelector('.gamePreviewStrip') === window.__fixturePreviewNode), true);
+    await checkPreviewLineBreaks(page, 'clienttext', 'inline');
     assert.equal(await page.locator('.ctListWorkspace [data-ct-target="text-field"]').inputValue(), 'kept raw @ literal\\n\ntranslation');
     await page.locator('.ctListWorkspace').getByRole('button', { name: 'Show all comments', exact: true }).click();
     assert.equal(await page.locator('#allCommentsSidebar').count(), 1);

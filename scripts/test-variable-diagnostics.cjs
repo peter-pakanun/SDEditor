@@ -663,6 +663,33 @@ test('SD multiline table wrappers retain styling, row order and displayed variab
   assert.ok(preview.segments.filter(segment => ['text', 'var'].includes(segment.type)).every(segment => segment.decorStyle.fontStyle === 'italic'));
 });
 
+test('preview retains consecutive actual LF, CRLF and CR breaks inside styles and keyword labels', () => {
+  const { editor } = loadEditor();
+  for (const contentMode of ['statdescription', 'clienttext']) for (const newline of ['\n', '\r\n', '\r']) {
+    const wrap = (tag, text) => contentMode === 'clienttext' ? `<${tag}>{${text}}` : `<${tag}>{{${text}}}`;
+    const raw = wrap('i', wrap('bold', 'Start' + newline.repeat(2) + 'Double' + newline.repeat(3) + 'Triple'))
+      + newline + '[Skill|KeyStart' + newline.repeat(2) + 'KeyEnd]';
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode });
+    assert.deepEqual(Array.from(preview.segments, segment => segment.type === 'text' ? segment.text : segment.type),
+      ['Start', 'break', 'break', 'Double', 'break', 'break', 'break', 'Triple', 'break', 'kw'], contentMode + ': ' + JSON.stringify(newline));
+    assert.deepEqual(Array.from(preview.segments.at(-1).parts, part => part.type === 'text' ? part.text : part.type),
+      ['KeyStart', 'break', 'break', 'KeyEnd']);
+    const keywordNewline = contentMode === 'clienttext' ? newline : '\n';
+    assert.equal(preview.segments.at(-1).full, '[Skill|KeyStart' + keywordNewline.repeat(2) + 'KeyEnd]', 'ClientText retains raw newline characters; SD normalizes display newlines');
+    assert.ok(preview.segments.filter(segment => segment.type === 'text').every(segment => segment.decorStyle.fontStyle === 'italic' && segment.decorStyle.fontWeight === 'bold'));
+  }
+  const literal = editor.buildGamePreviewSegments('Literal\\ntext\n\nNext', { contentMode: 'clienttext' });
+  assert.deepEqual(Array.from(literal.segments, segment => segment.type === 'text' ? segment.text : segment.type),
+    ['Literal\\ntext', 'break', 'break', 'Next'], 'ClientText retains literal backslash-n');
+});
+
+test('SD preview keeps empty leading and intermediate rows when arranging table columns', () => {
+  const { editor } = loadEditor();
+  const preview = editor.buildGamePreviewSegments('\n\nLeft\n\nAfter@\n\nRight\n\nAfter');
+  assert.deepEqual(Array.from(preview.segments, segment => segment.type === 'text' ? segment.text : segment.type),
+    ['rightAlign', 'break', 'rightAlign', 'break', 'Left', 'rightAlign', 'Right', 'break', 'rightAlign', 'break', 'After', 'rightAlign', 'After']);
+});
+
 test('preview leaves unknown, malformed, control and unsafe color syntax visible', () => {
   const { editor } = loadEditor();
   for (const contentMode of ['statdescription', 'clienttext']) {

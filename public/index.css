@@ -1574,18 +1574,22 @@ button, label, th, td, input[type="checkbox"] {
   width: 2ch;
 }
 
-.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewRightAlign {
+.gamePreviewWindow:has(.gamePreviewRightAlign) > .gamePreviewRightAlign {
   flex-grow: 1;
   width: auto;
+  /* Empty table rows still need a distinct flex line and its text height. */
+  min-width: 1px;
+  min-height: 1lh;
 }
 
 .gamePreviewBreak {
-  display: block;
-  height: 0;
+  line-height: inherit;
 }
 
-.gamePreviewWindow:has(.gamePreviewRightAlign) .gamePreviewBreak {
+.gamePreviewWindow:has(.gamePreviewRightAlign) > .gamePreviewBreak {
+  display: block;
   flex-basis: 100%;
+  height: 0;
 }
 
 .editBlock {

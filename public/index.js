@@ -1012,6 +1012,8 @@ const config = Vue.defineComponent({
     },
     gamePreviewDisplaySource() { return this.ctActive ? this.ctGamePreview.source.segments : this.gamePreviewSourceSegments; },
     gamePreviewDisplayTarget() { return this.ctActive ? this.ctGamePreview.target.segments : this.gamePreviewSegments; },
+    gamePreviewSourceIsTable() { return this.gamePreviewDisplaySource.some(segment => segment.type === 'rightAlign'); },
+    gamePreviewTargetIsTable() { return this.gamePreviewDisplayTarget.some(segment => segment.type === 'rightAlign'); },
     gamePreviewVarValues() { return this.ctActive ? this.ctPreviewGggVars : this.previewGggVars; },
     gamePreviewVarKeyList() {
       let seen = new Set();
@@ -1655,10 +1657,10 @@ const config = Vue.defineComponent({
             i += variable.full.length;
             continue;
           }
-          if (part[i] === '\n') {
+          if (part[i] === '\n' || part[i] === '\r') {
             flushText();
             output.push({ type: 'break' });
-            i++;
+            i += part[i] === '\r' && part[i + 1] === '\n' ? 2 : 1;
             continue;
           }
           textBuf += part[i];
