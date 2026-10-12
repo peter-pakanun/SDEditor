@@ -145,7 +145,8 @@ async function run() {
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
-    const genderOnly = process.argv.includes('--gender-only'), classOnly = process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only');
+    const classOpeningOnly = process.argv.includes('--class-editor-opening-only');
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only');
     let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
     if (classOnly) {
         const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
@@ -304,11 +305,14 @@ async function run() {
                         history: history.find(entry => entry.after.jobId === work.jobId)?.after.values[field] }; }, { unitId: id(record), field: fieldId(form) });
             };
             await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), true);
-            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'false');
-            assert.equal(await workspace.locator('[data-ct-target]').count(), 1, 'Only the selected class form renders before default forms expand');
+            await active('MS');
+            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Full-editor opening reveals the first default form');
+            assert.equal(await workspace.locator('[data-ct-target]').count(), 3, 'Both default forms render alongside the selected class variant');
             assert.equal(await workspace.locator('[data-ct-source]').count(), 1, 'One shared English source remains on the left');
             assert.deepEqual(await picker().locator('option').evaluateAll(options => options.map(option => JSON.parse(option.value)[1])), ClientState.CLASS_FORMS);
             assert.deepEqual(await workspace.getByRole('tablist', { name: 'Populated class variants', exact: true }).getByRole('tab').evaluateAll(tabs => tabs.map(tab => tab.getAttribute('aria-label'))), ['StrFour','StrDexFour','StrFourb']);
+            await workspace.locator('.ctDefaultFormsToggle').click();
+            assert.equal(await workspace.locator('[data-ct-target]').count(), 1, 'Defaults can still collapse before worksheet traversal reveals them');
             await picker().selectOption(fieldId('IntFour')); await active('IntFour'); assert.equal(await target('IntFour').inputValue(), '');
             await target('IntFour').press('Tab'); await active('DexFour'); assert.equal(await target('DexFour').inputValue(), '');
             await target('DexFour').press('Tab'); await active('StrDexFour'); await target('StrDexFour').press('Shift+Tab'); await active('DexFour');
@@ -330,6 +334,15 @@ async function run() {
             await page.keyboard.press('Escape'); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
             await page.evaluate(async () => { window.__clientFixtureApp.inlineEditor = true; await window.__clientFixtureApp.$nextTick(); });
             await choose('variant-fixture'); assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), false);
+            await active('MS');
+            assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Inline click reveals the first default form');
+            await workspace.locator('.ctDefaultFormsToggle').click();
+            await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'variant-fixture', exact: true }) }).focus();
+            await page.keyboard.press('Enter');await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await active('MS');assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'), 'true', 'Enter reopens collapsed defaults in the full editor');
+            await page.keyboard.press('Escape');await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
+            await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'variant-fixture', exact: true }) }).click({ position: { x: 5, y: 5 } });
+            await active('MS');
             await picker().selectOption(fieldId('StrFourb')); await active('StrFourb');
             await target('StrFourb').evaluate(input => input.setSelectionRange(2,7)); await target('StrFourb').press('Control+Enter');
             await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy); await active('StrFourb');
@@ -339,6 +352,26 @@ async function run() {
             await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy); await active('StrFourb');
             assert.equal(await target('StrFourb').inputValue(), secondText); assert.deepEqual(await target('StrFourb').evaluate(input => [input.selectionStart,input.selectionEnd]), [4,9], 'Escape returns the current full-editor caret to the exact inline variant');
             await target('StrFourb').press('Control+s'); assert.equal((await saved('variant-fixture','StrFourb',secondText)).history, secondText);
+            if(classOpeningOnly){
+                const checks=[],row=workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:'variant-fixture',exact:true})});
+                for(const theme of ['light','grey','dark','modern-dark']){
+                    await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
+                    for(const full of [false,true]){
+                        if(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded')==='true')await workspace.locator('.ctDefaultFormsToggle').click();
+                        if(full){await row.focus();await page.keyboard.press('Enter');}
+                        else await row.click({position:{x:5,y:5}});
+                        await active('MS');assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctEditor),full);
+                        assert.equal(await workspace.locator('.ctDefaultFormsToggle').getAttribute('aria-expanded'),'true');
+                        assert.equal(await target('MS').inputValue(),'Default masculine','Opening retains the original default text');
+                        checks.push({theme,editor:full?'full':'inline',defaultsExpanded:true,focused:'MS'});
+                        if(full){await page.keyboard.press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);}
+                    }
+                }
+                assert.deepEqual(failures,[]);
+                console.log(JSON.stringify({status:'PASS',classEditorOpeningOnly:true,normalMode:true,checks,
+                    results:['Full-editor click and inline row click expand defaults and focus the first worksheet form',
+                        'Enter reopens collapsed defaults; Ctrl+Enter/Escape preserve the exact class field and caret']},null,2));return;
+            }
             await picker().selectOption(fieldId('DexIntFour')); await active('DexIntFour'); await target('DexIntFour').fill('[');
             const completion = page.getByRole('listbox', { name: 'Highlights', exact: true }); await completion.waitFor();
             await target('DexIntFour').press('Enter'); assert.equal(await target('DexIntFour').inputValue(), '[keyword|Display]', 'Class form [] completion preserves raw keyword syntax');

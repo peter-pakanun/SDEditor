@@ -1223,7 +1223,7 @@ function classVariantUnit(id='ClassVariants',row=2){
 
 test('class variants use one raw English group, populated tabs and collapsed defaults without changing standard forms',async()=>{
     const original=classVariantUnit(),snapshot=clone(original),{app}=keyboardHarness(original,{ctSelection:'',ctValues:{}});
-    assert.equal(await app.ctSelect(original,false),true);const group=app.ctFieldGroups[0];
+    assert.equal(await app.ctSelect(original,false,{focus:false}),true);const group=app.ctFieldGroups[0];
     assert.equal(app.ctGroupSources(group).length,1);assert.equal(app.ctGroupSources(group)[0].text,original.fields[0].source);
     assert.deepEqual(Array.from(app.ctClassFields(group),field=>field.form),CLASS_VARIANT_FORMS);
     assert.deepEqual(Array.from(app.ctDefaultForms(group),field=>field.form),['MS','FS']);assert.equal(app.ctDefaultsOpen(group),false);
@@ -1233,6 +1233,26 @@ test('class variants use one raw English group, populated tabs and collapsed def
     assert.equal(app.ctDraftDirty,false);assert.deepEqual(original,snapshot);
     const standard=keyboardHarness();assert.equal(standard.app.ctDefaultsOpen(standard.app.ctFieldGroups.find(group=>group.forms)),true);
     assert.equal(standard.app.ctDisplayedFields().length,standard.app.ctFieldsFor().length);
+});
+
+for(const opening of ['inline click','full click','row Enter','double-click'])for(const reopening of [false,true])
+test(`${opening} ${reopening?'reopens':'opens'} collapsed defaults at the first worksheet form`,async()=>{
+    const original=classVariantUnit(),snapshot=clone(original),full=opening!=='inline click',
+        {app,focuses,inputFor}=keyboardHarness(original,{inlineEditor:opening!=='full click'});
+    app.ctInitializeVariants(original);
+    const group=app.ctFieldGroups[0],selected=app.ctSelectedVariant(group),first=original.fields[0];
+    if(reopening){inputFor(original,selected).focus();app.ctInlineClosed=true;}
+    else app.ctSelection='';
+    assert.equal(app.ctDefaultsOpen(group),false);
+    const values=app.ctValues,reviewed=app.ctReviewed,choices=app.ctChoices,saved=app.ctSaved;
+    const opened=opening==='row Enter'?await app.ctRowKeydown(original,rowEvent('Enter'))
+        :await app[opening==='double-click'?'ctRowDoubleClick':'ctRowClick'](original,rowEvent(''));
+    assert.equal(opened,true);assert.equal(app.ctEditor,full);assert.equal(app.ctInlineClosed,false);
+    assert.equal(app.ctDefaultsOpen(app.ctFieldGroups[0]),true);assert.equal(app.ctFocusedField,first.id);
+    assert.equal(focuses.at(-1).fieldId,first.id);assert.equal(app.ctSelectedVariant(app.ctFieldGroups[0]),selected);
+    assert.equal(app.ctTargetInputs()[0].dataset.ctTarget,first.id);assert.equal(app.ctDraftDirty,false);
+    if(reopening){assert.equal(app.ctValues,values);assert.equal(app.ctReviewed,reviewed);assert.equal(app.ctChoices,choices);}
+    assert.equal(app.ctSaved,saved);assert.deepEqual(original,snapshot);
 });
 
 test('per-ID variant selections retain exact blank choices and default expansion across full/inline and revisit, then fence by scope',async()=>{

@@ -1155,7 +1155,7 @@
                 };
                 if(this.ctSelection===unit.id){
                     this.ctEditor=run.full;this.ctInlineClosed=false;if(run.full && this.ctTool==='preview')this.ctTool='dictionary';await this.$nextTick?.();if(!current())return false;
-                    run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget();return true;
+                    run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget(false,null);return true;
                 }
                 if (!await this.ctFlushDraft()) {run.pending=false;return false;}
                 if(!current())return false;
@@ -1178,7 +1178,9 @@
                 this.scheduleClientTextDictionaryMatches();this.ctRefreshDraftSummaries(ctx);
                 this.ctLoadCommentDraft(ctx,unit.id);
                 await this.$nextTick?.();if(!current() || this.ctSelection!==unit.id)return false;
-                run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget();return true;
+                // Opening starts at the first worksheet cell, revealing collapsed
+                // defaults through the same focus path used by Tab navigation.
+                run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget(false,null);return true;
             },
             ctEditorElement() {
                 const refs=this.$refs?.ctEditorRegion,ref=Array.isArray(refs)?refs[0]:refs,region=ref?.$el || ref;
