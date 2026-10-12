@@ -60,6 +60,29 @@ const GAME_PREVIEW_FONT_STACKS = {
   Turkish: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
 };
 
+// Preview palette only. Never apply these substitutions to stored translation text.
+const GAME_PREVIEW_COLORS = Object.freeze({
+  red: '#ff0000', orange: '#ffa500', yellow: '#ffff00', green: '#46a239',
+  blue: '#0000ff', indigo: '#4b0082', violet: '#ee82ee', black: '#000000',
+  white: '#ffffff', grey: '#808080', gray: '#808080', lightgrey: '#d3d3d3',
+  aqua: '#00ffff', dodgerblue: '#1e90ff', pink: '#ffc0cb',
+  bronze: '#cd7f32', silver: '#c0c0c0', gold: '#ffd700',
+  default: '#7f7f7f', valuedefault: '#ffffff', normal: '#c8c8c8', whiteitem: '#c8c8c8',
+  magic: '#8888ff', magicitem: '#8888ff', rare: '#ffff77', rareitem: '#ffff77',
+  unique: '#af6025', uniqueitem: '#af6025', gem: '#1ba29b', gemitem: '#1ba29b',
+  currency: '#aa9e82', currencyitem: '#aa9e82', quest: '#4ae63a', questitem: '#4ae63a',
+  corrupted: '#d20000', unmet: '#d20000', augmented: '#8888ff', crafted: '#b8daf2',
+  enchanted: '#c8f7ff', nemesismod: '#ffc800', title: '#e7b478', legacy: '#d4913f',
+  fire: '#960000', cold: '#366492', lightning: '#ffd700', chaos: '#d02090',
+  craftingcaster: '#b3f8fe', craftingphysical: '#c79d93', craftingfire: '#ff9a77',
+  craftingcold: '#93d8ff', craftinglightning: '#f8cb76', craftingchaos: '#d8a7d3',
+  craftingspeed: '#cfeea5', craftingcrit: '#b2a7d6', craftinglife: '#c96e6e',
+  craftingdefences: '#a88f67', craftingattack: '#da814d',
+  craftaffectremove: '#fe9900', craftaffectwarning: '#ebc850', craftaffectreroll: '#fe9900',
+  ultimatumnumber: '#fe5c51', mavenfightpopuptitle: '#008fce', sanctumcurse: '#a06dca',
+  ancestralblue: '#86b2c3',
+});
+
 const AppTooltip = {
   props: {
     state: {
@@ -1511,167 +1534,172 @@ const config = Vue.defineComponent({
       this.previewGggVars = next;
     },
     buildGamePreviewSegments(decodedString, options = {}) {
-      let s = String(decodedString ?? "");
+      const s = String(decodedString ?? "");
       const clientText = options.contentMode === 'clienttext';
-      let decorRe = new RegExp("^" + textDecorationTagRegex, "i");
-      let kwRe = new RegExp("^" + keywordPopupTagRegex, "i");
-      let gggRe = new RegExp("^" + gggVarTagRegex, "i");
-      let segments = [];
-      let keysOrder = [];
-      let keySeen = new Set();
-      let textBuf = "";
-      let textDecorTag = "";
-      let flushText = () => {
-        if (textBuf) {
-          let seg = { type: "text", text: textBuf };
-          if (textDecorTag) seg.decorTag = textDecorTag;
-          segments.push(seg);
-          textBuf = "";
-          textDecorTag = "";
-        }
-      };
-      let appendText = (text, decorTag = "") => {
-        let normalizedDecorTag = String(decorTag ?? "").trim().toLowerCase();
-        if (textBuf && textDecorTag !== normalizedDecorTag) flushText();
-        textDecorTag = normalizedDecorTag;
-        textBuf += text;
-      };
-      const rememberVariable = variable => {
-        const key = String(variable.key ?? '');
-        if (!keySeen.has(key)) { keySeen.add(key); keysOrder.push(key); }
-        return {type:'var',key,full:variable.full,prefix:variable.prefix || '',trailingPercent:!!variable.trailingPercent};
-      };
+      const kwRe = new RegExp("^" + keywordPopupTagRegex, "i");
+      const gggRe = new RegExp("^" + gggVarTagRegex, "i");
       const clientVariables = text => window.ClientTextState.extractVariables(text);
-      const keywordParts = text => {
-        const parts=[];let offset=0;
-        for(const variable of clientVariables(text)) {
-          if(variable.start>offset)parts.push({type:'text',text:text.slice(offset,variable.start)});
-          parts.push(rememberVariable(variable));offset=variable.end;
-        }
-        if(offset<text.length)parts.push({type:'text',text:text.slice(offset)});
-        return parts;
+      // These previously supported ClientText containers still expose their text,
+      // but this preview does not implement their font/size/effect semantics.
+      const containers = new Set(['size','font','glow','smaller','bigger','larger','n',
+        'shadow','center','left','right','light']);
+      const rgbColor = value => {
+        const match = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(value);
+        if (!match) return null;
+        const channels = match.slice(1).map(Number);
+        return channels.every(channel => channel <= 255) ? `rgb(${channels.join(', ')})` : null;
       };
-      // Workbook wrappers use both <tag>{text} and SD's <tag>{{text}}.
-      // Balance the braces so a nested {0} remains a variable rather than
-      // becoming part of the wrapper's closing delimiter.
-      const clientWrapper = part => {
-        const header=/^<([^<>\r\n]+)>/.exec(part),name=header && /^([A-Za-z]+)(?=[:(]|$)/.exec(header[1]);
-        if(!name || part[header[0].length]!=='{')return null;
-        const tag=name[1].toLowerCase();
-        const supported=new Set(['size','font','rgb','glow','fg','colour','color','smaller','b','i','n','normal','italic','bold','u','shadow','center','left','right','red','green','blue','white','yellow','default','light','unique','magic','rare','gem','currency','enchanted']);
-        if(!supported.has(tag))return null;
-        const start=header[0].length;
-        const single=new Set(['size','font','rgb','glow','fg','smaller']);
-        const delimiters=!single.has(tag) && part.slice(start,start+2)==='{{' ? 2 : 1;
-        let depth=0;
-        for(let end=start;end<part.length;end++) {
-          if(part[end]==='{')depth++;
-          else if(part[end]==='}' && --depth===0) {
-            if(delimiters===2 && part.slice(end-1,end+1)!=='}}')return null;
-            return {text:part.slice(start+delimiters,end+1-delimiters),tag,length:end+1};
+      const colorValue = value => Object.prototype.hasOwnProperty.call(GAME_PREVIEW_COLORS, value)
+        ? GAME_PREVIEW_COLORS[value] : rgbColor(value);
+      const decoration = header => {
+        const value = header.toLowerCase();
+        if (value === 'i' || value === 'italic') return { tag: value, style: { fontStyle: 'italic' } };
+        if (value === 'b' || value === 'bold') return { tag: value, style: { fontWeight: 'bold' } };
+        if (value === 'u' || value === 'underline') return { tag: value, style: { textDecorationLine: 'underline' } };
+        const colorHeader = /^(colour|color|fg):(.+)$/.exec(value);
+        const color = colorValue(colorHeader ? colorHeader[2].trim() : value);
+        if (color) return { tag: colorHeader ? colorHeader[1] : value.startsWith('rgb(') ? 'rgb' : value, style: { color } };
+        // Unknown colour parameters remain literal, never become arbitrary CSS.
+        if (colorHeader || /^rgb\(/.test(value)) return null;
+        const name = /^([a-z]+)(?=[:(]|$)/.exec(value)?.[1];
+        return clientText && containers.has(name) ? { tag: name, style: {} } : null;
+      };
+      const wrapperAtStart = part => {
+        const header = /^<([^<>\r\n]+)>/.exec(part);
+        if (!header) return null;
+        const decor = decoration(header[1]);
+        const start = header[0].length;
+        if (!decor || part[start] !== '{' || (!clientText && part[start + 1] !== '{')) return null;
+        let depth = 0;
+        for (let end = start; end < part.length; end++) {
+          if (part[end] === '{') depth++;
+          else if (part[end] === '}' && --depth === 0) {
+            let delimiters = 1;
+            if (part[start + 1] === '{' && part[end - 1] === '}') {
+              const body = part.slice(start + 1, end);
+              // A single-brace wrapper can begin with a variable ({0}, {}),
+              // while {{Text {0}}} and {{{0}}} use the double-brace convention.
+              const variables = clientText ? clientVariables(body) : [];
+              const startsWithVariable = variables.length > 0 && variables[0].start === 0;
+              let contentDepth = 0, balancedContent = true;
+              if (clientText) {
+                // Literal brace text may also start a single-brace wrapper.
+                // Removing two delimiters must leave balanced content.
+                for (const character of part.slice(start + 2, end - 1)) {
+                  if (character === '{') contentDepth++;
+                  else if (character === '}' && --contentDepth < 0) { balancedContent = false; break; }
+                }
+                balancedContent = balancedContent && contentDepth === 0;
+              }
+              delimiters = clientText && (startsWithVariable || !balancedContent) ? 1 : 2;
+            }
+            if (!clientText && delimiters !== 2) return null;
+            return { ...decor, text: part.slice(start + delimiters, end + 1 - delimiters), length: end + 1 };
           }
         }
         return null;
       };
-
-      let scanInline = (part, allowBreaks = true, decorTag = "") => {
+      const scanInline = (part, decorTag = '', decorStyle = {}, keywordDisplay = false, depth = 0) => {
+        const output = [];
+        let textBuf = '';
+        const decorate = segment => {
+          if (decorTag) segment.decorTag = decorTag;
+          if (Object.keys(decorStyle).length) segment.decorStyle = decorStyle;
+          return segment;
+        };
+        const flushText = () => {
+          if (textBuf) output.push(decorate({ type: 'text', text: textBuf }));
+          textBuf = '';
+        };
+        const variables = clientText ? new Map(clientVariables(part).map(variable => [variable.start, variable])) : null;
         let i = 0;
-        let activeDecorTag = String(decorTag ?? "").trim().toLowerCase();
-        const variables=clientText ? new Map(clientVariables(part).map(variable=>[variable.start,variable])) : null;
         while (i < part.length) {
-          let slice = part.slice(i);
-          const wrapper=clientText ? clientWrapper(slice) : null;
-          if(wrapper) {
-            flushText();scanInline(wrapper.text,allowBreaks,wrapper.tag);flushText();i+=wrapper.length;continue;
-          }
-          let dm = clientText ? null : decorRe.exec(slice);
-          if (dm && dm.index === 0) {
+          const slice = part.slice(i);
+          const wrapper = part[i] === '<' && depth < 64 ? wrapperAtStart(slice) : null;
+          if (wrapper) {
             flushText();
-            scanInline(String(dm[3] ?? ""), allowBreaks, dm[2]);
-            flushText();
-            i += dm[0].length;
+            output.push(...scanInline(wrapper.text, wrapper.tag, { ...decorStyle, ...wrapper.style }, keywordDisplay, depth + 1));
+            i += wrapper.length;
             continue;
           }
-          let km = kwRe.exec(slice);
-          if (km && km.index === 0) {
+          const km = !keywordDisplay && part[i] === '[' ? kwRe.exec(slice) : null;
+          if (km) {
             flushText();
-            let tagName = String(km[2] ?? "").trim();
-            let dynamicContent = String(km[3] ?? "").trim();
-            let display = dynamicContent || tagName;
-            let seg = { type: "kw", text: display, full: km[0] };
-            if(clientText && dynamicContent)seg.parts=keywordParts(dynamicContent);
-            if (activeDecorTag) seg.decorTag = activeDecorTag;
-            segments.push(seg);
+            const tagName = String(km[2] ?? '').trim();
+            const dynamicContent = String(km[3] ?? '').trim();
+            const segment = decorate({ type: 'kw', text: dynamicContent || tagName, full: km[0] });
+            if (dynamicContent) segment.parts = scanInline(dynamicContent, decorTag, decorStyle, true, depth + 1);
+            output.push(segment);
             i += km[0].length;
             continue;
           }
-          const clientVariable=variables?.get(i);
-          let gm = clientText ? null : gggRe.exec(slice);
-          if (gm && gm.index === 0) {
+          // In StatDescriptions, @ separates table columns even before a variable.
+          // ClientText and keyword labels retain @ as a variable prefix.
+          if (!clientText && !keywordDisplay && part[i] === '@' && this.isTableDelimiterAt(part, i)) {
             flushText();
-            let full = gm[0];
-            let key = typeof getGggVarIdentityKey === "function" ? getGggVarIdentityKey(full) : full;
-            let ks = String(key);
-            if (!keySeen.has(ks)) {
-              keySeen.add(ks);
-              keysOrder.push(ks);
-            }
-            let prefix = ["@", "+", "-"].includes(full[0]) ? full[0] : "";
-            let trailingPercent = full.endsWith("%");
-            let seg = { type: "var", key: ks, trailingPercent, full, prefix };
-            if (activeDecorTag) seg.decorTag = activeDecorTag;
-            segments.push(seg);
-            i += full.length;
-            continue;
-          }
-          if(clientVariable) {
-            flushText();const seg=rememberVariable(clientVariable);
-            if(activeDecorTag)seg.decorTag=activeDecorTag;
-            segments.push(seg);i+=clientVariable.full.length;continue;
-          }
-          if (!clientText && part[i] === '@' && this.isTableDelimiterAt(part, i)) {
-            flushText();
-            segments.push({ type: "rightAlign" });
+            output.push({ type: 'rightAlign' });
             i++;
             continue;
           }
-          if (allowBreaks && part[i] === '\n') {
+          const gm = clientText ? null : gggRe.exec(slice);
+          const variable = clientText ? variables.get(i) : gm && {
+            full: gm[0], key: typeof getGggVarIdentityKey === 'function' ? getGggVarIdentityKey(gm[0]) : gm[0],
+            prefix: ['@', '+', '-'].includes(gm[0][0]) ? gm[0][0] : '', trailingPercent: gm[0].endsWith('%'),
+          };
+          if (variable) {
             flushText();
-            segments.push({ type: "break" });
+            output.push(decorate({ type: 'var', key: String(variable.key), full: variable.full,
+              prefix: variable.prefix || '', trailingPercent: !!variable.trailingPercent }));
+            i += variable.full.length;
+            continue;
+          }
+          if (part[i] === '\n') {
+            flushText();
+            output.push({ type: 'break' });
             i++;
             continue;
           }
-          appendText(part[i], activeDecorTag);
+          textBuf += part[i];
           i++;
         }
+        flushText();
+        return output;
       };
-
-      if (!clientText && this.isTableText(s)) {
-        let columns = this.splitTableColumns(s).map(col => this.normalizeNewlines(col));
-        let columnLines = columns.map(col => String(col).split("\n"));
-        let rowCount = columnLines.reduce((max, lines) => Math.max(max, lines.length), 0);
-        for (let row = 0; row < rowCount; row++) {
-          for (let col = 0; col < columnLines.length; col++) {
-            if (col > 0) {
-              flushText();
-              segments.push({ type: "rightAlign" });
-            }
-            scanInline(columnLines[col]?.[row] ?? "", false);
-          }
-          if (row < rowCount - 1) {
-            flushText();
-            segments.push({ type: "break" });
-          }
+      // Parse whole wrappers before arranging SD table columns into display rows.
+      // Splitting the raw text into lines first loses styles spanning a line break.
+      let segments = scanInline(clientText ? s : this.normalizeNewlines(s));
+      if (!clientText && segments.some(segment => segment.type === 'rightAlign')) {
+        const columns = [[[]]];
+        for (const segment of segments) {
+          if (segment.type === 'rightAlign') columns.push([[]]);
+          else if (segment.type === 'break') columns[columns.length - 1].push([]);
+          else columns[columns.length - 1].at(-1).push(segment);
         }
-      } else {
-        scanInline(s, true);
+        segments = [];
+        const rowCount = Math.max(...columns.map(column => column.length));
+        for (let row = 0; row < rowCount; row++) {
+          for (let col = 0; col < columns.length; col++) {
+            if (col > 0) segments.push({ type: 'rightAlign' });
+            segments.push(...(columns[col][row] || []));
+          }
+          if (row < rowCount - 1) segments.push({ type: 'break' });
+        }
       }
-      flushText();
+      const keysOrder = [], keySeen = new Set();
+      const rememberVariables = parts => {
+        for (const segment of parts) {
+          if (segment.type === 'var' && !keySeen.has(segment.key)) {
+            keySeen.add(segment.key); keysOrder.push(segment.key);
+          }
+          if (segment.parts) rememberVariables(segment.parts);
+        }
+      };
+      rememberVariables(segments);
       return { segments, keysOrder };
     },
     gamePreviewKeywordText(segment) {
       if(!segment.parts)return segment.text;
-      return segment.parts.map(part=>part.type==='var' ? part.prefix+(this.gamePreviewVarValues[part.key] ?? this.defaultPreviewVarValue(part.key))+(part.trailingPercent?'%':'') : part.text).join('');
+      return segment.parts.map(part=>part.type==='var' ? part.prefix+(this.gamePreviewVarValues[part.key] ?? this.defaultPreviewVarValue(part.key))+(part.trailingPercent?'%':'') : part.type==='break' ? '\n' : part.text).join('');
     },
     refreshGamePreview() {
       if (this.ctActive || !this.editorSessionActive) return;

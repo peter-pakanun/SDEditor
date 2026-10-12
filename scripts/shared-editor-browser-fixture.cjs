@@ -18,6 +18,88 @@ const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-che
 const { checkDiagnosticScanner } = require('./diagnostic-scanner-browser-check.cjs');
 const { thaiEnglish, germanEnglish, germanTarget, dictionary: shredDictionary } = require('./clienttext-highlight-fixture.cjs');
 
+async function checkPreviewDecorations(page, contentMode) {
+  const raw = await page.evaluate(async contentMode => {
+    const host = window.__sharedFixtureApp, clientText = contentMode === 'clienttext';
+    const wrap = (tag, text) => clientText ? `<${tag}>{${text}}` : `<${tag}>{{${text}}}`;
+    const text = label => wrap('italic', wrap('b', wrap('underline', wrap('rgb(12,34,56)',
+      `Styled ${label} {0}% [Skill::{7}|` + wrap('unique', `Keyword ${label} {1}%`) + ']')))) + ' tail <unknown>{literal}';
+    const source = text('Source'), target = text('Translation');
+    window.__previewStyleSnapshot = { contentMode, hideSource: host.hideSourceInPreviewPanel };
+    host.hideSourceInPreviewPanel = false;
+    if (clientText) {
+      const unit = host.ctCurrentUnit, field = host.ctPreviewField;
+      Object.assign(window.__previewStyleSnapshot, { units: host.ctUnits, index: host._ctUnitIndex, values: host.ctValues, vars: host.ctPreviewGggVars });
+      const replacement = Vue.markRaw({ ...unit, fields: unit.fields.map(item => item.id === field.id ? { ...item, source, target } : item) });
+      host._ctUnitIndex = Vue.markRaw(new Map([[replacement.id, replacement]])); host.ctUnits = Vue.markRaw([replacement]);
+      host.ctValues = { ...host.ctValues, [field.id]: target };
+      await host.$nextTick(); host.ctPreviewGggVars = { '0': '37', '1': '23' };
+    } else {
+      const index = host.editorBlocks.findIndex(block => !block.isTable);
+      if (index < 0) throw Error('The preview fixture needs an ordinary SD block.');
+      const block = host.editorBlocks[index];
+      Object.assign(window.__previewStyleSnapshot, { index, focused: host.editorFocusedIndex, english: block.english, translation: block.translation, vars: host.previewGggVars });
+      block.english = source; block.translation = target; host.editorFocusedIndex = index;
+      host.refreshGamePreview(); host.previewGggVars = { '0': '37', '1': '23' };
+    }
+    await host.$nextTick();
+    return { source, target };
+  }, contentMode);
+  try {
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+      await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+      const frames = await page.locator('.gamePreviewWindow').evaluateAll(elements => elements.map(frame => {
+        const style = element => {
+          const value = getComputedStyle(element);
+          return { text: element.textContent, italic: value.fontStyle, weight: value.fontWeight, underline: value.textDecorationLine, color: value.color };
+        };
+        return { text: frame.textContent, styled: style(frame.querySelector(':scope > .gamePreviewText')),
+          variable: style(frame.querySelector(':scope > .gamePreviewVarDisplay')),
+          keyword: style(frame.querySelector('.gamePreviewKw .gamePreviewText')),
+          keywordVariable: style(frame.querySelector('.gamePreviewKw .gamePreviewVarDisplay')),
+          tail: style([...frame.querySelectorAll(':scope > .gamePreviewText')].at(-1)) };
+      }));
+      assert.equal(frames.length, 2, contentMode + '/' + theme);
+      for (const [index, frame] of frames.entries()) {
+        const label = index ? 'Translation' : 'Source', message = contentMode + '/' + theme + '/' + label;
+        assert.equal(frame.styled.text, 'Styled ' + label + ' ', message);
+        for (const value of [frame.styled, frame.variable, frame.keyword, frame.keywordVariable]) {
+          assert.equal(value.italic, 'italic', message);
+          assert.ok(Number(value.weight) >= 700, message + ': bold style composes');
+          assert.ok(value.underline.includes('underline'), message + ': underline style composes');
+        }
+        assert.equal(frame.styled.color, 'rgb(12, 34, 56)', message);
+        assert.equal(frame.variable.color, 'rgb(12, 34, 56)', message);
+        assert.equal(frame.keyword.color, 'rgb(175, 96, 37)', message + ': inner named color overrides outer RGB');
+        assert.equal(frame.keywordVariable.color, 'rgb(175, 96, 37)', message);
+        assert.equal(frame.variable.text, '37%', message);
+        assert.equal(frame.keywordVariable.text, '23%', message);
+        assert.ok(frame.text.includes('tail <unknown>{literal}'), message + ': unsupported tags remain visible');
+        assert.equal(frame.tail.italic, 'normal', message + ': typography ends at its wrapper');
+      }
+    }
+    const preserved = await page.evaluate(contentMode => {
+      const host = window.__sharedFixtureApp;
+      return contentMode === 'clienttext' ? { source: host.ctPreviewField.source, target: host.ctValues[host.ctPreviewField.id] }
+        : { source: host.editorBlocks[host.editorFocusedIndex].english, target: host.editorBlocks[host.editorFocusedIndex].translation };
+    }, contentMode);
+    assert.deepEqual(preserved, raw, contentMode + ': rendered preview retains exact original tags');
+  } finally {
+    await page.evaluate(async () => {
+      const host = window.__sharedFixtureApp, saved = window.__previewStyleSnapshot;
+      host.hideSourceInPreviewPanel = saved.hideSource;
+      if (saved.contentMode === 'clienttext') {
+        host._ctUnitIndex = saved.index; host.ctUnits = saved.units; host.ctValues = saved.values; host.ctPreviewGggVars = saved.vars;
+      } else {
+        host.editorBlocks[saved.index].english = saved.english; host.editorBlocks[saved.index].translation = saved.translation;
+        host.editorFocusedIndex = saved.focused; host.refreshGamePreview(); host.previewGggVars = saved.vars;
+      }
+      delete window.__previewStyleSnapshot; await host.$nextTick();
+    });
+  }
+  console.log(contentMode + ' source/translation nested preview styles, variables, keyword text and raw tags passed in all four desktop themes.');
+}
+
 async function run() {
   assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to installed Edge/Chrome.');
   const serverApp = express();
@@ -50,6 +132,7 @@ async function run() {
     if (process.env.SDEDITOR_SCANNER_ONLY === '1') {
       await checkDiagnosticScanner(page); assert.deepEqual(failures, []); return;
     }
+    await checkPreviewDecorations(page, 'statdescription');
     const sd = page.locator('.editor [data-editor-ref="translation_1"]');
     await sd.fill('SD retained draft');
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Lookup', exact: true }).click();
@@ -143,6 +226,7 @@ async function run() {
     });
     await page.waitForSelector('.ctFullEditor [data-ct-target="text-field"]');
     console.log('ClientText full editor and native fields mounted.');
+    await checkPreviewDecorations(page, 'clienttext');
     const ct = page.locator('.ctFullEditor [data-ct-target="text-field"]');
     assert.equal(await ct.inputValue(), 'raw @ literal\\n\nactual');
     assert.ok(await page.locator('.ctFullEditor .HLter [data-ct-hl]').count() >= 3);

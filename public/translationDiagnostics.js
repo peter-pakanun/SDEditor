@@ -199,7 +199,9 @@
 
   function findTextDecorationAt(text, index) {
     if (text[index] !== "<") return null;
-    const nameMatch = /^<([A-Za-z][A-Za-z0-9_:\-]*)>/.exec(text.slice(index));
+    // Headers are opaque syntax here; style names and color parameters are
+    // interpreted only by the preview renderer.
+    const nameMatch = /^<([A-Za-z][^<>{}\[\]\r\n]*)>/.exec(text.slice(index));
     if (!nameMatch) return null;
     const opener = nameMatch[0];
     const bodyStart = index + opener.length;
@@ -216,7 +218,16 @@
     }
 
     const contentStart = bodyStart + 2;
-    const closeIndex = text.indexOf("}}", contentStart);
+    // Nested wrappers and numeric substitutions have their own braces, so
+    // the first }} is not necessarily the enclosing wrapper's end.
+    let depth = 0, closeIndex = -1;
+    for (let i = bodyStart; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}" && --depth === 0) {
+        if (text.slice(i - 1, i + 1) === "}}") closeIndex = i - 1;
+        break;
+      }
+    }
     if (closeIndex < 0) {
       return {
         malformed: true,
@@ -250,7 +261,7 @@
       && /^\{\d+\}>(?=[|\]])/.test(text.slice(index));
   }
 
-  function scanTags(text, addDiagnostic) {
+  function scanTags(text, addDiagnostic, depth = 0) {
     const stack = [];
 
     for (let i = 0; i < text.length; i++) {
@@ -268,8 +279,20 @@
           continue;
         }
 
+        if (depth >= 64) {
+          addDiagnostic(
+            LEVEL_ERROR,
+            "nested-tags",
+            "Text decoration nesting exceeds the supported depth of 64.",
+            textDecoration.start,
+            textDecoration.openerEnd
+          );
+          i = textDecoration.end - 1;
+          continue;
+        }
+
         const inner = text.slice(textDecoration.contentStart, textDecoration.contentEnd);
-        scanTags(inner, makeOffsetAddDiagnostic(addDiagnostic, textDecoration.contentStart));
+        scanTags(inner, makeOffsetAddDiagnostic(addDiagnostic, textDecoration.contentStart), depth + 1);
         i = textDecoration.end - 1;
         continue;
       }

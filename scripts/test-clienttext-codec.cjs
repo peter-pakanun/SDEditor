@@ -204,6 +204,27 @@ test('unreviewed outdated fields keep orange and stale review hashes are rejecte
     const result = await Codec.parseWorkbook(output, { filename: 'French.xlsx' });
     assert.equal(field(get(result, 'record'), 'Description').originalFill, 'FF9966');
 });
+
+test('ClientText raw formatting survives draft, durable save, history and real XLSM export', async () => {
+    const bytes = await workbook({ macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsm', role: 'normal', language: 'Thai' });
+    const unit = get(parsed, 'complete'), current = field(unit, 'Name');
+    const raw = '<i>{<bold>{<underline>{ไทย {0}%}}} <rgb(12,34,56)>{สี} <<icon>> <continue>\r\n<unknown>{raw} @ literal\\n';
+    const { fixture, scope } = require('./clienttext-storage-fixture.cjs'), f = fixture();
+    await f.store.import(scope, { units: parsed.units, assets: [{ role: 'normal', name: 'Thai.xlsm', hash: parsed.artifactHash, blob: new Blob([bytes]) }] });
+    const values = State.valuesFor(unit); values[current.id] = raw;
+    const draft = await f.store.putDraft(scope, unit.id, { values, reviewed: {} });
+    assert.equal((await f.store.getDraft(scope, unit.id)).values[current.id], raw);
+    const accepted = await f.store.save(scope, unit.id, { jobId: 'preserve-decoration-tags', values: draft.values, reviewed: {}, expectedRevision: 0, expectedDraftRevision: draft.revision });
+    assert.equal(accepted.saved.values[current.id], raw);
+    assert.equal((await f.store.listHistory(scope, unit.id)).at(-1).after.values[current.id], raw);
+    assert.equal(field(await f.store.getUnit(scope, unit.id), 'Name').target, current.target, 'the immutable original retains its raw target');
+    const output = await Codec.exportWorkbook(bytes, parsed, await f.store.getSaved(scope));
+    const exported = await Codec.parseWorkbook(output, { filename: 'Thai.xlsm', language: 'Thai' });
+    assert.equal(field(get(exported, 'complete'), 'Name').target, raw);
+    assert.equal(field(get(exported, 'complete'), 'Name').source, current.source);
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    assert.deepEqual(await after.file('xl/vbaProject.bin').async('uint8array'), await before.file('xl/vbaProject.bin').async('uint8array'));
+});
 test('source advancement paints unresolved review orange, then green, without Revised', async () => {
     const bytes = await workbook(), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx' }), unit = get(parsed, 'complete'), f = field(unit, 'Name');
     const saved = { values: { [f.id]: f.target }, outdated: [f.id], saved: false };

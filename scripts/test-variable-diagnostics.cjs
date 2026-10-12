@@ -548,6 +548,185 @@ test('ClientText preview balances formatting wrappers and preserves unsupported 
   assert.equal(incomplete.segments[0].text,'<smaller>{incomplete');
 });
 
+test('both previews compose nested typography and colors on text and variables', () => {
+  const { editor } = loadEditor();
+  const style = { fontStyle: 'italic', fontWeight: 'bold', textDecorationLine: 'underline', color: 'rgb(12, 34, 56)' };
+  for (const contentMode of ['statdescription', 'clienttext']) {
+    const wrap = (tag, text) => contentMode === 'clienttext' ? `<${tag}>{${text}}` : `<${tag}>{{${text}}}`;
+    const raw = wrap('i', wrap('bold', wrap('underline', wrap('rgb(12,34,56)', 'Styled {0}%')))) + ' plain';
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode });
+    assert.deepEqual(Array.from(preview.keysOrder), ['0'], contentMode);
+    for (const segment of preview.segments.filter(segment => segment.text === 'Styled ' || segment.type === 'var')) {
+      assert.deepEqual({ ...segment.decorStyle }, style, contentMode);
+      assert.equal(segment.decorTag, 'rgb');
+    }
+    const plain = preview.segments.find(segment => segment.text === ' plain');
+    assert.ok(plain && !plain.decorStyle?.fontStyle && !plain.decorStyle?.color, 'styles end at their closing braces');
+    assert.equal(preview.segments.find(segment => segment.type === 'var').trailingPercent, true);
+  }
+  for (const tag of ['i', 'italic']) {
+    const preview = editor.buildGamePreviewSegments(`<${tag}>{{Word}}`);
+    assert.equal(preview.segments[0].text, 'Word');
+    assert.equal(preview.segments[0].decorStyle.fontStyle, 'italic');
+  }
+});
+
+test('double wrappers preserve first-position variables and nested SD keyword identity', () => {
+  const { editor } = loadEditor();
+  for (const contentMode of ['statdescription', 'clienttext']) {
+    const raw = '<enchanted>{{{0}% [Skill::{7}|<i>{{Strike {1}}}]}}';
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode });
+    assert.deepEqual(Array.from(preview.keysOrder), ['0', '1']);
+    const variable = preview.segments.find(segment => segment.type === 'var');
+    assert.equal(variable.key, '0');
+    assert.equal(variable.decorStyle.color, '#c8f7ff');
+    const keyword = preview.segments.find(segment => segment.type === 'kw');
+    assert.equal(keyword.full, '[Skill::{7}|<i>{{Strike {1}}}]');
+    assert.ok(!preview.keysOrder.includes('7'), 'identity metadata is never a display variable');
+    for (const part of keyword.parts) {
+      assert.equal(part.decorStyle.fontStyle, 'italic');
+      assert.equal(part.decorStyle.color, '#c8f7ff');
+    }
+    editor.ctActive = contentMode === 'clienttext';
+    editor.previewGggVars = { '1': '23' }; editor.ctPreviewGggVars = { '1': '23' };
+    assert.equal(editor.gamePreviewKeywordText(keyword), 'Strike 23');
+  }
+});
+
+test('known palette styles compose with typography and inner color takes precedence', () => {
+  const { editor } = loadEditor();
+  const preview = editor.buildGamePreviewSegments('<fg:rgb(12,34,56)>{<italic>{<unique>{{Unique {0}}}}}', { contentMode: 'clienttext' });
+  const variable = preview.segments.find(segment => segment.type === 'var');
+  assert.equal(variable.decorStyle.color, '#af6025');
+  assert.equal(variable.decorStyle.fontStyle, 'italic');
+  assert.equal(variable.decorTag, 'unique');
+});
+
+test('ClientText distinguishes a single wrapper around a variable from double delimiters', () => {
+  const { editor } = loadEditor();
+  for (const raw of ['<i>{{0}}', '<italic>{{Text {0}}}', '<rgb(12,34,56)>{{{0}}}']) {
+    const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+    assert.deepEqual(Array.from(preview.keysOrder), ['0'], raw);
+    assert.equal(preview.segments.filter(segment => segment.type === 'var').length, 1, raw);
+    assert.ok(preview.segments.filter(segment => segment.type === 'text').every(segment => !/[{}]/.test(segment.text)), raw);
+  }
+  const nested = editor.buildGamePreviewSegments('<i>{Outer <b>{Inner} outer}', { contentMode: 'clienttext' });
+  assert.equal(nested.segments.find(segment => segment.text === 'Inner').decorStyle.fontWeight, 'bold');
+  const restored = nested.segments.find(segment => segment.text === ' outer');
+  assert.equal(restored.decorStyle.fontStyle, 'italic');
+  assert.ok(!restored.decorStyle.fontWeight, 'closing the inner wrapper restores the outer typography');
+});
+
+test('SD table delimiters before variables stay separate while ClientText keeps the @ prefix', () => {
+  const { editor } = loadEditor();
+  for (const raw of ['A@{0}', '<i>{{Limit@{0}}}']) {
+    const preview = editor.buildGamePreviewSegments(raw);
+    assert.deepEqual(Array.from(preview.segments, segment => segment.type), ['text', 'rightAlign', 'var'], raw);
+    const variable = preview.segments.at(-1);
+    assert.equal(variable.full, '{0}', raw); assert.equal(variable.prefix, '', raw);
+    if (raw.startsWith('<i>')) {
+      assert.equal(preview.segments[0].decorStyle.fontStyle, 'italic');
+      assert.equal(variable.decorStyle.fontStyle, 'italic');
+    }
+  }
+  const client = editor.buildGamePreviewSegments('A@{0}', { contentMode: 'clienttext' });
+  assert.deepEqual(Array.from(client.segments, segment => segment.type), ['text', 'var']);
+  assert.equal(client.segments[1].full, '@{0}'); assert.equal(client.segments[1].prefix, '@');
+});
+
+test('ClientText single and double wrappers preserve variable ranges and their typography', () => {
+  const { editor } = loadEditor();
+  for (const [tag, separator, property, value] of [['i', ' to ', 'fontStyle', 'italic'], ['bold', '–', 'fontWeight', 'bold']]) {
+    for (const raw of [`<${tag}>{{0}${separator}{1}}`, `<${tag}>{{{0}${separator}{1}}}`]) {
+      const preview = editor.buildGamePreviewSegments(raw, { contentMode: 'clienttext' });
+      assert.deepEqual(Array.from(preview.keysOrder), ['0', '1'], raw);
+      assert.equal(preview.segments.map(segment => segment.type === 'var' ? `{${segment.key}}` : segment.text).join(''), `{0}${separator}{1}`, raw);
+      assert.ok(preview.segments.every(segment => segment.decorStyle[property] === value), raw);
+    }
+  }
+});
+
+test('ClientText single wrappers retain literal braced words and subsequent variables', () => {
+  const { editor } = loadEditor();
+  const preview = editor.buildGamePreviewSegments('<i>{{Fire Rune} {0}}', { contentMode: 'clienttext' });
+  assert.deepEqual(Array.from(preview.keysOrder), ['0']);
+  assert.equal(preview.segments[0].text, '{Fire Rune} ');
+  assert.ok(preview.segments.every(segment => segment.decorStyle.fontStyle === 'italic'));
+});
+
+test('SD multiline table wrappers retain styling, row order and displayed variable order', () => {
+  const { editor } = loadEditor();
+  const preview = editor.buildGamePreviewSegments('<i>{{left {0}\nnext {1}@right {2}\nlast}}');
+  assert.deepEqual(Array.from(preview.keysOrder), ['0', '2', '1']);
+  assert.deepEqual(Array.from(preview.segments, segment => segment.type === 'text' ? segment.text : segment.type === 'var' ? `{${segment.key}}` : segment.type),
+    ['left ', '{0}', 'rightAlign', 'right ', '{2}', 'break', 'next ', '{1}', 'rightAlign', 'last']);
+  assert.ok(preview.segments.filter(segment => ['text', 'var'].includes(segment.type)).every(segment => segment.decorStyle.fontStyle === 'italic'));
+});
+
+test('preview leaves unknown, malformed, control and unsafe color syntax visible', () => {
+  const { editor } = loadEditor();
+  for (const contentMode of ['statdescription', 'clienttext']) {
+    for (const raw of ['<unknown>{literal}', '<i>{{incomplete}', '<continue>{dialogue}', '<<itemvisual:CurrencyArmourQuality>>',
+      '<rgb(256,0,0)>{invalid}', '<fg:rgb(1,2,3);position:absolute>{unsafe}']) {
+      const preview = editor.buildGamePreviewSegments(raw, { contentMode });
+      assert.equal(preview.segments.map(segment => segment.text || '').join(''), raw, `${contentMode}: ${raw}`);
+      assert.ok(preview.segments.every(segment => !segment.decorStyle?.color), 'untrusted headers cannot create CSS');
+    }
+  }
+});
+
+test('SD preview formatting never changes the raw translation saved or UTF-16 exported', async () => {
+  const { editor, alerts, confirmations } = loadEditor();
+  const codec = require('../public/statDescCodec.js');
+  const wrap = text => `<i>{{<bold>{{<underline>{{<rgb(12,34,56)>{{${text} {0}%}}}}}}}}`;
+  const english = wrap('English'), translation = wrap('ไทย');
+  assert.equal(editor.analyzeTranslationDiagnostics(translation, english).errorCount, 0);
+  const desc = codec.parseText('test/decorations.txt', `description test\n1 damage\n1\n# "${english}"\nlang "Thai"\n1\n# "Original {0}%"`, 'Thai', { strict: true });
+  editor.descs = [desc]; editor.editorCurrentEditingDesc = desc; editor.editorVisible = true;
+  editor.editorOriginalTranslations = [...desc.translations.Thai]; editor.editorBlocks = [{ english, translation }];
+  editor.editorFocusedIndex = 0;
+  editor.refreshGamePreview();
+  assert.deepEqual({ ...editor.gamePreviewSegments[0].decorStyle }, {
+    fontStyle: 'italic', fontWeight: 'bold', textDecorationLine: 'underline', color: 'rgb(12, 34, 56)',
+  });
+  assert.equal(editor.editorBlocks[0].translation, translation);
+  assert.equal(await editor.editorSave(), true);
+  const saved = editor.localDescs.descs[0];
+  assert.equal(saved.translations.Thai[0], translation);
+  const exported = codec.parseText(saved.filepath, codec.decodeUTF16(codec.descEncode(saved)), 'Thai', { strict: true });
+  assert.equal(exported.translations.Thai[0], translation);
+  assert.equal(exported.translations.English[0], english);
+  assert.deepEqual(alerts, []); assert.deepEqual(confirmations, []);
+});
+
+test('SD diagnostics balance nested wrappers and color headers without allowing ordinary nested tags', () => {
+  const { context } = loadEditor(), analyze = text => context.window.TranslationDiagnostics.analyze(text);
+  for (const raw of ['<rgb(12,34,56)>{{Color {0}%}}', '<fg:rgb(12,34,56)>{{<i>{{Color {0}%}}}}',
+    '<colour:rare>{{<bold>{{[Skill::{7}|Display {0}%]}}}}']) {
+    assert.equal(analyze(raw).errorCount, 0, raw);
+    assert.equal(analyze(raw).warningCount, 0, raw);
+  }
+  for (const raw of ['<i>{single}', '<i>{{missing', '<i>{{<bold>{{Missing outer}}', '<rgb(12,34,56)>{{Color {0}%}']) {
+    assert.ok(analyze(raw).diagnostics.some(item => item.code === 'malformed-text-decoration-tag'), raw);
+  }
+  for (const raw of ['<i>{{{0 {1}}}}', '<i>{{[Fire [Cold]]}}', '<rgb(12,34,56)>{{[Skill{0}|Display]}}']) {
+    assert.ok(analyze(raw).diagnostics.some(item => item.code === 'nested-tags'), raw);
+  }
+  for (const raw of ['<bad{>{{Text}}', '<bad[>{{Text}}', '<bad{0}>{{Text}}', '[Skill<bad{0}>{{Text}}]']) {
+    assert.ok(analyze(raw).errorCount > 0, 'malformed header delimiters remain visible to the ordinary scanner: ' + raw);
+  }
+  assert.ok(analyze('<i>{{Valid}}}').diagnostics.some(item => item.code === 'extra-closing-tag'));
+});
+
+test('excessive SD decoration nesting returns a diagnostic without overflowing the call stack', () => {
+  const { context } = loadEditor(), raw = '<i>{{'.repeat(4000) + 'Text' + '}}'.repeat(4000);
+  let result;
+  assert.doesNotThrow(() => { result = context.window.TranslationDiagnostics.analyze(raw); });
+  const diagnostic = result.diagnostics.find(item => item.level === 'error' && item.code === 'nested-tags');
+  assert.ok(diagnostic); assert.match(diagnostic.message, /nesting.*64/);
+  assert.equal(raw.slice(diagnostic.start, diagnostic.end), '<i>', 'the excessive wrapper header has an exact diagnostic range');
+});
+
 test('ClientText shares preview hosts and settings while isolating field values from SD state',()=>{
   const {editor,context}=loadEditor();
   const text={id:'text',kind:'text',source:'English {}@literal\\n\nnext'},form={id:'MS',kind:'form',source:'Form {0}'},gender={id:'gender',kind:'gender',source:''};

@@ -1552,7 +1552,12 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 .gamePreviewVarPct {
-  font-weight: 600;
+  font-weight: inherit;
+}
+
+.gamePreviewDecor--i,
+.gamePreviewDecor--italic {
+  font-style: italic;
 }
 
 .gamePreviewDecor--enchanted {

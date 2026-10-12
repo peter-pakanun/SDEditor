@@ -491,9 +491,17 @@
                   <div class="gamePreviewLineLabel">EN</div>
                   <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily }">
                     <template v-for="(seg, si) in gamePreviewDisplaySource" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
-                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" v-tooltip="seg.full">{{ gamePreviewKeywordText(seg) }}</span>
-                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">
+                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
+                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
+                        <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gps-part-' + si + '-' + pi">
+                          <span v-if="part.type === 'text'" class="gamePreviewText" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">{{ part.text }}</span>
+                          <span v-else-if="part.type === 'var'" class="gamePreviewVarDisplay" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">
+                            <span class="gamePreviewVarValue" v-tooltip="part.full">{{ part.prefix + (gamePreviewVarValues[part.key] ?? defaultPreviewVarValue(part.key)) }}</span><span v-if="part.trailingPercent" class="gamePreviewVarPct">%</span>
+                          </span>
+                          <span v-else-if="part.type === 'break'" class="gamePreviewBreak"></span>
+                        </template></template><template v-else>{{ gamePreviewKeywordText(seg) }}</template>
+                      </span>
+                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
@@ -506,9 +514,17 @@
                   <div class="gamePreviewLineLabel">{{ translationEditorBcp47 || lang || 'TL' }}</div>
                   <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
                     <template v-for="(seg, si) in gamePreviewDisplayTarget" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
-                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" v-tooltip="seg.full">{{ gamePreviewKeywordText(seg) }}</span>
-                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''">
+                      <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
+                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
+                        <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gp-part-' + si + '-' + pi">
+                          <span v-if="part.type === 'text'" class="gamePreviewText" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">{{ part.text }}</span>
+                          <span v-else-if="part.type === 'var'" class="gamePreviewVarDisplay" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">
+                            <span class="gamePreviewVarValue" v-tooltip="part.full">{{ part.prefix + (gamePreviewVarValues[part.key] ?? defaultPreviewVarValue(part.key)) }}</span><span v-if="part.trailingPercent" class="gamePreviewVarPct">%</span>
+                          </span>
+                          <span v-else-if="part.type === 'break'" class="gamePreviewBreak"></span>
+                        </template></template><template v-else>{{ gamePreviewKeywordText(seg) }}</template>
+                      </span>
+                      <span v-else-if="seg.type === 'var'" class="gamePreviewVarDisplay" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
