@@ -6752,6 +6752,9 @@ const config = Vue.defineComponent({
       this.refreshEditorDiagnostics();
       const errors = this.collectEditorDiagnostics("error");
       const warnings = this.collectEditorDiagnostics("warning");
+      return { errors, warnings, confirmations: this.editorSaveConfirmations(newTranslations, warnings) };
+    },
+    editorSaveConfirmations(newTranslations, warnings = this.collectEditorDiagnostics("warning")) {
       const confirmations = [];
       if (warnings.length) confirmations.push('Translation warnings found:\n' + this.formatDiagnosticsForDisplay(warnings, 12));
       const english = this.editorCurrentEditingDesc?.translations?.English || [];
@@ -6767,7 +6770,7 @@ const config = Vue.defineComponent({
       for (const [counter, label] of [[countGGGVarTag, 'variable tags'], [countKeywordPopupTag, 'keyword popup tags'], [countTextDecorationTag, 'text decoration tags']]) {
         if (newTranslations.reduce((n, text) => n + counter(text), 0) !== english.reduce((n, text) => n + counter(text), 0)) confirmations.push('Number of ' + label + ' mismatched!');
       }
-      return { errors, warnings, confirmations };
+      return confirmations;
     },
     async editorSave({ close = true, automatic = false, defer = close || automatic } = {}) {
       if (this.editorLoading || this.editorLoadError || this.editorSaving || this._importingSource || this._resetConfirming || this.versionStorageLoading) return false;
@@ -6785,11 +6788,14 @@ const config = Vue.defineComponent({
       this.editorSaving = true;
       const saveToken = this._editorSaveToken = {};
       const saveContext = this.captureCollaborationContext();
+      const draftScope = this.editorDraftScope?.(desc.filepath);
+      let submittedDraft;
       try {
         const newTranslations = this.serializeEditorTranslations ? this.serializeEditorTranslations() : this.editorBlocks.map(block => {
           if (block?.isTable) this.syncEditorBlockFromTableColumns(block);
           return this.encodeNewlines(block.isMultiline ? this.decodeEscapedNewlines(block.translation || '') : block.translation || '');
         });
+        submittedDraft = newTranslations;
         const context = this.captureCollaborationContext();
         const draftAtSave = this.editorBlocks.map(block => block?.translation ?? '');
         const blocksAtSave = this.editorBlocks, baseAtSave = this._editorCollabBase;
@@ -6922,6 +6928,7 @@ const config = Vue.defineComponent({
         if (!review) this.cloudStorageError = message;
         this.collaborationNotice = message;
         if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'error', message }] };
+        this.rememberDraftStagingFailure?.(draftScope, submittedDraft);
         return false;
       } finally { if (this._editorSaveToken === saveToken) this.editorSaving = false; }
     },

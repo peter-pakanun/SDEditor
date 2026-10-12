@@ -7,7 +7,7 @@
   const mixin = {
     data() {
       return { inlineEditor: true, inlineActive: false, inlineSidebarVisible: true,
-        inlineDraftRows: {}, inlineDraftFindings: {}, inlineDraftError: '', draftRecords: [],
+        inlineDraftRows: {}, inlineDraftFindings: {}, inlineDraftError: '', draftRecords: [], draftStagingFailures: {},
         draftRecoveryVisible: false, draftRecoverySelected: null, draftRecoveryBusy: false, draftRecoveryCandidate: null,
         draftWritePending: 0, inlineTransitionBusy: false };
     },
@@ -35,6 +35,22 @@
           || (workspace?.sourceHash && workspace.sourceHash !== this.sourceIdentity)
           || (this._draftSession && !this.draftScopeCurrent(this._draftSession.scope))) return false;
         return !equal(this.serializeEditorTranslations(), this.inlineCommittedTranslations);
+      },
+      editorDraftBlocked() {
+        const desc = this.editorCurrentEditingDesc, session = this._draftSession;
+        if (!this.editorSessionActive || !desc?.filepath || !session || !this.draftScopeCurrent(session.scope)
+          || this.editorLoading || this.editorLoadError || this.editorCompareActive) return false;
+        const translations = this.serializeEditorTranslations();
+        const record = this.inlineDraftFor(desc.filepath);
+        const conflict = !!(session.conflict || session.record?.conflicts?.length || record?.conflicts?.length);
+        if (!conflict && equal(translations, this.inlineCommittedTranslations)) return false;
+        if (conflict || this.editorDiagnosticErrorCount || this.editorDroppedConflict
+          || (this.inlineActive && root.WorkspaceState?.droppedForFile(this.localDescs, desc.filepath, this.lang))) return true;
+        if (this.inlineDraftError && session.writeError && equal(translations, session.pendingRecord?.translations)) return true;
+        if (this.inlineFindingsFor(desc.filepath).some(finding => finding.deferredSave && !finding.submissionReset)) return true;
+        const failure = this.draftStagingFailures[desc.filepath];
+        if (failure && equal(failure.scope, session.scope) && equal(failure.translations, translations)) return true;
+        return !!session.declined && session.declined === JSON.stringify([translations, this.editorSaveConfirmations(translations).join('\n\n')]);
       },
       draftRecoveryItems() {
         return this.draftRecords.flatMap(record => [record, ...(record.conflicts || [])].filter(item => item.state === 'active')
@@ -132,6 +148,7 @@
       },
       async draftScopeChanged() {
         this.inlineDraftFindings = {};
+        this.draftStagingFailures = {};
         if (this._draftSession && !this.draftScopeCurrent(this._draftSession.scope)) await this.detachEditorSessionForScopeChange();
         await this.loadEditorDrafts();
       },
@@ -373,6 +390,10 @@
       },
       inlineDraftFor(filepath) { return this.inlineDraftRows[filepath] || null; },
       inlineFindingsFor(filepath) { return this.inlineDraftFindings[filepath] || []; },
+      rememberDraftStagingFailure(scope, translations) {
+        if (scope && Array.isArray(translations) && this.draftScopeCurrent(scope)) this.draftStagingFailures = { ...this.draftStagingFailures,
+          [scope.filepath]: { scope: copy(scope), translations: copy(translations) } };
+      },
       inlineRowBlocks(row) {
         const desc = this.getDescByFilepath(row.filepath), english = desc?.translations?.English || [];
         const lines = this.inlineDraftFor(row.filepath)?.translations || desc?.translations?.[this.lang] || [];
@@ -801,6 +822,7 @@
         const wasInline = this.inlineActive, filepath = session.scope.filepath;
         this._draftSession = null;
         this.inlineDraftFindings = { ...this.inlineDraftFindings, [filepath]: [] };
+        const failures = { ...this.draftStagingFailures }; delete failures[filepath]; this.draftStagingFailures = failures;
         this._nextEditorSurface = wasInline ? 'inline' : 'full';
         try { await this.openEditorFile(filepath, true); } finally { this._nextEditorSurface = null; }
         return true;
@@ -843,6 +865,7 @@
         }
         if (this.draftScopeCurrent(session.scope) && !session.conflict && !session.writeError && !stored?.conflicts?.length) {
           this.inlineDraftFindings = { ...this.inlineDraftFindings, [session.scope.filepath]: [] };
+          const failures = { ...this.draftStagingFailures }; delete failures[session.scope.filepath]; this.draftStagingFailures = failures;
         }
         this.publishEditorDraftRecord(session, stored);
       },

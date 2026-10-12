@@ -20,7 +20,7 @@ function harness(changes={}){
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
-    for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController'])
+    for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
@@ -217,6 +217,52 @@ test('ClientText Local drafts filter and counter include scoped durable and curr
     app.ctWorkspace={scope:{...scope,groupId:'replacement'}};const current=[{unitId:third.id,revision:1,updatedAt:2}];app.ctDraftSummaries=current;
     pending.resolve([{unitId:first.id,revision:9,updatedAt:3}]);await loading;assert.equal(app.ctDraftSummaries,current,'late old-group draft summaries cannot publish into the replacement group');
 });
+test('ClientText draft controls stay hidden for untouched rows, ordinary typing and unrelated errors',()=>{
+    const {app,original}=listHarness();assert.equal(app.ctDraftBlocked,false);
+    app.ctValues[fieldId]='Ordinary typing';app.ctDraftDirty=true;
+    app.ctDraftSummaries=[{unitId:original.id,revision:2}];app.ctError='Could not load Dictionary';
+    assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftCount,1);
+    assert.equal(app.ctStatus(original).saved,false,'control visibility cannot stage a draft or change status');
+    app.ctChoices=[{fieldId,local:'Ordinary typing',remote:'Incoming'}];assert.equal(app.ctDraftBlocked,true);
+    app.ctQueueDraft=()=>{};app.ctChooseAlternative(app.ctChoices[0],'local');assert.equal(app.ctDraftBlocked,false);
+    app.ctChoices=[{fieldId,local:'Older',remote:'Incoming'}];app.ctDraftDirty=false;
+    assert.equal(app.ctDraftBlocked,false,'saved alternatives alone do not constitute a private draft');
+});
+
+test('ClientText checkpoint failures expose Discard only for the captured draft and clear after a successful retry',async()=>{
+    const {app}=listHarness({ctDraftDirty:true}),pending=deferred();let failing=true;
+    app._ctStore={async putDraft(){if(failing)throw Error('Draft storage unavailable');return{revision:3};}};
+    assert.equal(await app.ctFlushDraft(),false);assert.equal(app.ctDraftBlocked,true);
+    failing=false;assert.equal(await app.ctFlushDraft(),true);assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftStageFailure,null);
+    app.ctValues[fieldId]='Pending old text';app._ctStore.putDraft=()=>pending.promise;
+    const flushing=app.ctFlushDraft();await settle();app.ctValues[fieldId]='Newer typing';pending.reject(Error('Late checkpoint failure'));
+    assert.equal(await flushing,false);assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftStageFailure,null);
+});
+
+test('ClientText save failures expose only the current failed draft and survive successful checkpoint writes until saved',async()=>{
+    const {app}=listHarness({ctDraftDirty:true}),signature=JSON.stringify([app.ctValues,app.ctReviewed]);let failSave=true;
+    app._ctStore={async putDraft(){return{revision:3};},async save(_scope,_unitId,command){if(failSave)throw Error('Save storage unavailable');return{saved:{values:command.values,reviewed:command.reviewed,revision:1}};}};
+    app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    assert.equal(await app.ctSave(),false);assert.equal(app.ctDraftBlocked,true);assert.equal(app.ctDraftStageFailure.signature,signature);
+    assert.equal(await app.ctFlushDraft(),true);assert.equal(app.ctDraftBlocked,true,'a private checkpoint does not resolve a failed staging attempt');
+    failSave=false;assert.equal(await app.ctSave(),true);assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftStageFailure,null);
+    app.ctDraftDirty=true;app.ctValues[fieldId]='Another draft';app.ctRememberDraftStageFailure(app.ctContext(),app.ctSelection,JSON.stringify([app.ctValues,app.ctReviewed]),'save');
+    app.ctQueueDraft=()=>{};app.ctEdited(app.ctCurrentUnit.fields[0]);assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftStageFailure,null);
+});
+
+test('late ClientText save failures cannot expose draft controls after typing, unit or scope changes',async()=>{
+    for(const changed of ['typing','review','unit','account','group','language','epoch']){
+        const {app}=listHarness({ctDraftDirty:true}),pending=deferred();app.ctFlushDraft=async()=>true;app._ctStore={save:()=>pending.promise};
+        const saving=app.ctSave();await settle();
+        if(changed==='typing')app.ctValues[fieldId]='Newer typing';
+        else if(changed==='review')app.ctReviewed[fieldId]='Newer review';
+        else if(changed==='unit')app.ctSelection='other-unit';
+        else if(changed==='epoch')app._ctEpoch=1;
+        else app.ctWorkspace={scope:{...scope,[changed==='account'?'accountId':changed==='group'?'groupId':'language']:'other'}};
+        pending.reject(Error('Late failed save'));assert.equal(await saving,false);assert.equal(app.ctDraftBlocked,false,changed);assert.equal(app.ctDraftStageFailure,null,changed);
+    }
+});
+
 test('ClientText table sorting and search preserve raw @, literal escapes, newlines and committed values',()=>{
     const first=namedUnit('ID10','A@literal\\nactual\nline','Z'),second=namedUnit('ID2','B','A'),
         {app}=listHarness({ctUnits:[first,second],ctSelectedFilters:['unchanged','saved','revised']});
@@ -315,7 +361,9 @@ test('Discard draft is revision-checked, preserves saved work and retains typing
     const {app,original}=listHarness({ctDraftDirty:true,ctValues:{[fieldId]:'discard me'}});app._ctStore=f.store;
     const saved=await f.store.save(scope,original.id,{jobId:'accepted',values:{[fieldId]:'Saved exact@\\n'},reviewed:{}});
     app.ctSaved={[original.id]:saved.saved};app._ctEditRevision=saved.saved.revision;
+    app.ctRememberDraftStageFailure(app.ctContext(),original.id,JSON.stringify([app.ctValues,app.ctReviewed]),'save');assert.equal(app.ctDraftBlocked,true);
     assert.equal(await app.ctDiscardDraft(),true);assert.ok(!await f.store.getDraft(scope,original.id));
+    assert.equal(app.ctDraftBlocked,false);assert.equal(app.ctDraftStageFailure,null);
     assert.equal(app.ctValues[fieldId],'Saved exact@\\n');assert.equal(app.ctDraftDirty,false);assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'Saved exact@\\n');
     const pending=deferred(),calls=[];app.ctValues={[fieldId]:'old draft'};app.ctDraftDirty=true;
     app.ctFlushDraft=async()=>{app._ctDraftRevision=8;return true;};app._ctStore={async discardDraft(captured,id,options){calls.push({captured,id,options});await pending.promise;}};

@@ -83,7 +83,7 @@
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
-            ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctCompletion: null,
+            ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {}, ctDefaultsExpanded: {},
             ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
@@ -269,6 +269,13 @@
             ctPageCount() { return Math.max(1, Math.ceil(this.ctRows.length / this.ctEffectivePageSize)); },
             ctDraftUnitIds() {const ids=new Set(this.ctDraftSummaries.map(draft=>draft.unitId));if(this.ctDraftDirty && this.ctSelection)ids.add(this.ctSelection);return ids;},
             ctDraftCount() {return this.ctDraftUnitIds.size;},
+            ctDraftBlocked() {
+                if(!this.ctActive || !this.ctWorkspace || !this.ctCurrentUnit || !this.ctDraftDirty)return false;
+                if(this.ctChoices.length)return true;
+                const failure=this.ctDraftStageFailure;
+                return !!failure && this.ctCurrent(failure.context) && failure.unitId===this.ctSelection
+                    && failure.signature===JSON.stringify([this.ctValues,this.ctReviewed]);
+            },
             ctCounts() {
                 this.ctRevision;
                 const counts={total:this.ctUnits.length,missing:0,outdated:0,revised:0,saved:0,unchanged:0};
@@ -805,7 +812,7 @@
                     if(this._ctDraftRevision===revision){this._ctDraftRevision=null;const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     if(signature!==JSON.stringify([this.ctValues,this.ctReviewed])){this.ctQueueDraft();return false;}
                     this.ctValues=this.ctValuesFor(this.ctCurrentUnit);this.ctReviewed={...(this.ctSaved[unitId]?.reviewed || {})};
-                    this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctCloseCompletion();await this.ctRefreshDraftSummaries(ctx);return true;
+                    this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctDraftStageFailure=null;this.ctCloseCompletion();await this.ctRefreshDraftSummaries(ctx);return true;
                 } catch(error){if(this.ctCurrent(ctx))this.ctError='Draft was not discarded: '+error.message;return false;}
                 finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
             },
@@ -858,7 +865,7 @@
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
                 this.ctVariantSelections={};this.ctDefaultsExpanded={};
-                this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctBusy = false;
+                this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
                 this.ctPreviewGggVars={};this.ctFocusedField='';
@@ -1160,7 +1167,7 @@
                 this.ctSelection = unit.id; this.ctEditor = run.full;this.ctInlineClosed=false;this._ctInlineReturn=null; this.ctLookup = ''; this.ctCompletion=null;this.ctCommentText='';this.ctCommentGlobal=false;
                 if(run.full && this.ctTool==='preview')this.ctTool='dictionary';
                 this.ctPreviewGggVars={};
-                this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;
+                this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;this.ctDraftStageFailure=null;
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;
                 if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true; }
@@ -1300,7 +1307,7 @@
             },
             ctEdited(field) {
                 this.ctReviewed[field.id] = this.ctReviewHash(field);
-                this.ctDraftDirty = true; this.ctQueueDraft();
+                this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft();
             },
             ctGenderSuggestions(field) {
                 const original=field.target;
@@ -1371,7 +1378,7 @@
                 if(!target || active && active!==input && active!==target && active!==root.document?.body && active!==root.document?.documentElement)return true;
                 target.focus?.({preventScroll:true});target.setSelectionRange?.(caret,caret,'none');this.ctResizeField(target);return true;
             },
-            ctMarkReviewed(field) { this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftDirty = true; this.ctQueueDraft(); },
+            ctMarkReviewed(field) { this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChooseAlternative(choice, side) { const field = this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId); this.ctValues[choice.fieldId] = side === 'local' ? choice.local : choice.upstream ?? choice.remote; this.ctChoices = this.ctChoices.filter(item=>item!==choice); if(field)this.ctEdited(field); },
             ctCompleteForm(field, event) {
                 if(event.isComposing || event.keyCode===229)return;
@@ -1518,6 +1525,16 @@
                     target?.focus();target?.setSelectionRange(completion.start+item.value.length,completion.start+item.value.length);this.ctResizeField(target);
                 });return true;
             },
+            ctRememberDraftStageFailure(ctx,unitId,signature,operation) {
+                if(!this.ctCurrent(ctx) || this.ctSelection!==unitId || !this.ctDraftDirty
+                    || signature!==JSON.stringify([this.ctValues,this.ctReviewed]))return;
+                this.ctDraftStageFailure=raw({context:copy(ctx),unitId,signature,operation});
+            },
+            ctClearDraftStageFailure(ctx,unitId,signature,operation) {
+                const failure=this.ctDraftStageFailure;
+                if(failure && this.ctCurrent(ctx) && this.ctCurrent(failure.context) && failure.unitId===unitId
+                    && failure.signature===signature && (!operation || failure.operation===operation))this.ctDraftStageFailure=null;
+            },
             ctQueueDraft() { clearTimeout(this._ctDraftTimer); this._ctDraftTimer = setTimeout(() => this.ctFlushDraft(), 250); },
             async ctFlushDraft() {
                 clearTimeout(this._ctDraftTimer);
@@ -1536,9 +1553,9 @@
                         if(this.ctCurrent(ctx) && this.ctSelection===unitId){this._ctDraftRevision=saved.revision;this.ctRefreshDraftSummaries(ctx);}
                     });head.queue=pending;
                     this._ctDraftQueue=Promise.all([...heads.values()].map(value=>value.queue));this._ctDraftQueue.catch(()=>{});
-                    await pending; return true;
+                    await pending;this.ctClearDraftStageFailure(ctx,unitId,signature,'checkpoint'); return true;
                 }
-                catch (error) { if (this.ctCurrent(ctx)) this.ctError = 'Draft was not stored: ' + error.message; return false; }
+                catch (error) { if (this.ctCurrent(ctx)) this.ctError = 'Draft was not stored: ' + error.message;this.ctRememberDraftStageFailure(ctx,unitId,signature,'checkpoint'); return false; }
                 finally{head.pending--;}
             },
             async ctSave(close = false, options = {}) {
@@ -1551,14 +1568,15 @@
                 if(!retry && !await this.ctFlushDraft())return false;
                 if(!this.ctCurrent(ctx)||this.ctSelection!==unitId)return false;
                 const job=existing?.unitId===unitId && existing.scopeKey===scopeKey ? existing : {unitId,scopeKey,id:uuid()};
-                this._ctSaveJob=job;this.ctBusy = true;
+                this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {
                     const command=job.command ||= { jobId:job.id, values: copy(this.ctValues), reviewed: copy(this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
                         ...(options.origin ? {origin:options.origin}: {}) };
+                    submittedSignature=JSON.stringify([command.values,command.reviewed]);
                     const result = await this._ctStore.save(ctx.scope, unitId, command);
                     if (!this.ctCurrent(ctx)) return false;
                     const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===JSON.stringify([command.values,command.reviewed]);
-                    this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor; if(this._ctSaveJob===job)this._ctSaveJob = null;
+                    this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
@@ -1570,6 +1588,7 @@
                     }
                     this.ctSync(ctx); return sameEditor;
                 } catch (error) {
+                    this.ctRememberDraftStageFailure(ctx,unitId,submittedSignature,'save');
                     if (this.ctCurrent(ctx)) {
                         this.ctError = error.message;
                         if(error.code==='DRAFT_CHANGED')this._ctSaveJob=null;

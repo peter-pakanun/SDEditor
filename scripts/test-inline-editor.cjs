@@ -960,18 +960,85 @@ test('focusing and leaving unchanged inline text creates neither draft nor stage
   assert.equal(h.editor.inlineActive, false); assert.deepEqual(h.desc.translations.Thai, ['translation']);
 });
 
-test('inline stage link stays hidden for untouched ZIP text and follows live edits, reverts and clears', async () => {
+test('inline changes follow live edits, reverts and clears without showing draft controls for valid typing', async () => {
   const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
   assert.equal(editor.inlineDraftHasChanges, false, 'opening a translated row is not an edit');
+  assert.equal(editor.editorDraftBlocked, false);
   editor.editorBlocks[0].translation = 'new draft';
-  assert.equal(editor.inlineDraftHasChanges, true, 'show Stage draft before the draft debounce writes');
+  assert.equal(editor.inlineDraftHasChanges, true, 'detect edits before the draft debounce writes');
+  assert.equal(editor.editorDraftBlocked, false);
+  await editor.flushEditorDraft();
+  assert.equal(editor.editorDraftBlocked, false, 'a durable checkpoint alone does not need draft controls');
   editor.editorBlocks[0].translation = 'translation';
-  assert.equal(editor.inlineDraftHasChanges, false, 'reverting to ZIP text removes the action');
+  assert.equal(editor.inlineDraftHasChanges, false, 'reverting to ZIP text removes the edit');
+  assert.equal(editor.editorDraftBlocked, false);
   editor.editorBlocks[0].translation = '';
   assert.equal(editor.inlineDraftHasChanges, true, 'clearing an existing translation is a real edit');
+  assert.equal(editor.editorDraftBlocked, false, 'missing text can still stage after confirmation');
 });
 
-test('inline stage link stays hidden when opening empty or incomplete ZIP translations', async t => {
+test('discard is offered for live draft errors and hides immediately after correcting them', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  const block = editor.editorBlocks[0];
+  block.translationDiagnostics = [{ level: 'error', message: 'Invalid tag' }];
+  assert.equal(editor.editorDraftBlocked, false, 'errors in unchanged committed text are not a draft');
+  block.translation = 'broken draft';
+  assert.equal(editor.editorDraftBlocked, true);
+  block.translation = 'corrected draft'; block.translationDiagnostics = [];
+  assert.equal(editor.editorDraftBlocked, false, 'stale row findings must not keep the action visible');
+  editor.inlineDraftFindings[desc.filepath] = [{ level: 'error', message: 'A staged deletion failed' }];
+  assert.equal(editor.editorDraftBlocked, false, 'a deletion failure does not block saving the draft');
+});
+
+test('declined warnings expose discard only for the exact declined draft, including after reopening', async () => {
+  const { editor, desc, calls } = harness(); await editor.activateInlineRow(desc.filepath);
+  editor.editorSaveFindings = () => ({ errors: [], warnings: [{ message: 'Review wording' }], confirmations: ['Review wording'] });
+  editor.editorSaveConfirmations = () => ['Review wording'];
+  editor.editorBlocks[0].translation = 'warning draft';
+  assert.equal(editor.editorDraftBlocked, false, 'an unconfirmed warning remains stageable');
+  assert.equal(await editor.editorSave({ close: false, automatic: true }), false);
+  assert.equal(editor.editorDraftBlocked, true);
+  await editor.finishInlineSession({ promote: false }); await editor.activateInlineRow(desc.filepath);
+  assert.equal(editor.editorDraftBlocked, true);
+  editor.editorBlocks[0].translation = 'changed wording';
+  assert.equal(editor.editorDraftBlocked, false);
+  calls.confirms.length = 0; editor.appConfirm = async () => true;
+  assert.equal(await editor.editorSave({ close: false }), true);
+  assert.equal(editor.editorDraftBlocked, false);
+});
+
+test('a declined warning no longer shows discard once the current save checks no longer require it', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  const block = editor.editorBlocks[0]; block.translation = '';
+  assert.equal(await editor.editorSave({ close: false, automatic: true }), false);
+  assert.equal(editor.editorDraftBlocked, true);
+  editor.editorSaveConfirmations = () => [];
+  assert.equal(editor.editorDraftBlocked, false, 'a resolved warning is stageable even when the text did not change');
+});
+
+test('failed draft staging exposes discard without leaking to new typing, another row or another language', async () => {
+  const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
+  const persist = editor.persistTranslationBatch;
+  editor.persistTranslationBatch = async () => { throw new Error('Storage unavailable'); };
+  editor.editorBlocks[0].translation = 'failed save';
+  assert.equal(await editor.editorSave({ close: false }), false);
+  assert.equal(editor.editorDraftBlocked, true);
+  editor.editorBlocks[0].translation = 'new typing';
+  assert.equal(editor.editorDraftBlocked, false);
+  editor.editorBlocks[0].translation = 'failed save';
+  await editor.finishInlineSession({ promote: false }); await editor.activateInlineRow(editor.descs[1].filepath);
+  editor.editorBlocks[0].translation = 'failed save';
+  assert.equal(editor.editorDraftBlocked, false);
+  await editor.finishInlineSession({ promote: false }); await editor.activateInlineRow(desc.filepath);
+  assert.equal(editor.editorDraftBlocked, true);
+  editor.lang = 'German';
+  assert.equal(editor.editorDraftBlocked, false);
+  editor.lang = 'Thai'; editor.persistTranslationBatch = persist;
+  assert.equal(await editor.editorSave({ close: false }), true);
+  assert.equal(editor.editorDraftBlocked, false);
+});
+
+test('empty or incomplete ZIP translations remain unchanged when opened', async t => {
   for (const translations of [undefined, [], [''], ['kept first entry']]) {
     await t.test(JSON.stringify(translations) || 'missing language', async () => {
       const { editor, desc, calls, records } = harness();
@@ -997,7 +1064,7 @@ test('inline stage link follows live edits, reverts and peer changes to the curr
     { filepath: desc.filepath, translations: ['translation'] }, 'Thai', { source: desc });
   assert.equal(editor.inlineDraftHasChanges, false);
   editor.editorBlocks[0].translation = 'new draft';
-  assert.equal(editor.inlineDraftHasChanges, true, 'new input must show Stage draft before the draft debounce writes');
+  assert.equal(editor.inlineDraftHasChanges, true, 'new input must be detected before the draft debounce writes');
   editor.editorBlocks[0].translation = 'translation';
   assert.equal(editor.inlineDraftHasChanges, false);
   staged.translations[0] = 'peer saved text';
