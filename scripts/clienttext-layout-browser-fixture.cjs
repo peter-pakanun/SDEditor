@@ -124,6 +124,14 @@ async function run() {
         const nav = page.getByRole('navigation', {name:'Workbook sheets'});
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
+        const rowHeader = page.getByRole('columnheader', {name:'Row number'});
+        assert.equal(await rowHeader.getAttribute('aria-sort'), 'ascending', 'Worksheet row order is the default');
+        assert.equal(await page.locator('.ctTable > tbody > tr > .ctRowNumber').textContent(), '2', 'Show the original worksheet row');
+        await rowHeader.getByRole('button', {name:'Row number'}).click();
+        assert.equal(await rowHeader.getAttribute('aria-sort'), 'descending', 'Pointer activation reverses row order');
+        await rowHeader.getByRole('button', {name:'Row number'}).press('Enter');
+        assert.equal(await rowHeader.getAttribute('aria-sort'), 'ascending', 'Keyboard activation restores ascending row order');
+        results.push({name:'Worksheet row number, default ASC and pointer/keyboard sort toggle'});
         const assertPreserved = async () => assert.deepEqual(await page.evaluate(() => {
             const host=window.__ctLayoutFixture;
             return {sheet:host.ctSheet,selection:host.ctSelection,search:host.ctSearch,applied:host.ctAppliedSearch};
@@ -202,6 +210,14 @@ async function run() {
             await page.setViewportSize({width,height:900});
             await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);window.__ctLayoutFixture.ctEditor=false;},theme);
             await settle();
+            const tableGeometry=await page.locator('.ctTable').evaluate(table=>({
+                headers:[...table.tHead.rows[0].cells].map(cell=>cell.getBoundingClientRect().width),
+                number:table.tBodies[0].rows[0].cells[0].textContent.trim(),
+                numberFits:table.tBodies[0].rows[0].cells[0].scrollWidth<=table.tBodies[0].rows[0].cells[0].clientWidth
+            }));
+            assert.equal(tableGeometry.headers.length,4,theme+'/'+width+': worksheet row column is visible');
+            assert.equal(tableGeometry.number,'2');assert.equal(tableGeometry.numberFits,true,theme+'/'+width+': row number fits');
+            assert.ok(Math.abs(tableGeometry.headers[2]-tableGeometry.headers[3])<1,theme+'/'+width+': equal English/translation widths');
             const longButton=nav.getByRole('button',{name:longSheet,exact:true}).first();
             const ellipsis=await longButton.evaluate(element=>({whiteSpace:getComputedStyle(element).whiteSpace,overflow:getComputedStyle(element).overflow,textOverflow:getComputedStyle(element).textOverflow,client:element.clientWidth,scroll:element.scrollWidth}));
             assert.equal(ellipsis.whiteSpace,'nowrap');assert.equal(ellipsis.overflow,'hidden');assert.equal(ellipsis.textOverflow,'ellipsis');

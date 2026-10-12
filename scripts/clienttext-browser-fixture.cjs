@@ -863,7 +863,7 @@ async function run() {
                 assert.equal(await workspace.locator('.workspaceHeader .workspaceSearch .searchField').count(), 1);
                 assert.equal(await workspace.locator('.workspaceHeader .workspaceActions').count(), 1);
                 assert.equal(await workspace.locator('.workspaceHeader .filterToggle').count(), 1);
-                assert.equal(await workspace.locator('.ctTable.fileTable thead th').count(), 3, 'ClientText reuses the filename/English/translation table columns');
+                assert.equal(await workspace.locator('.ctTable.fileTable > thead > tr > th').count(), 4, 'ClientText shows worksheet row number with the filename/English/translation columns');
                 assert.ok(await workspace.locator('.workspaceFooter .workspaceStatus').count() === 1);
                 assert.equal(await navigation.count(), 1, 'Worksheet navigation remains beside the shared ClientText file list');
                 assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth <= 1), theme + ': ClientText shared table fits the resized desktop');
@@ -1324,8 +1324,8 @@ async function run() {
                 await workspace.locator('.ctTable tbody > tr').filter({ has: page.getByRole('button', { name: 'record', exact: true }) }).first().click();
                 assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctEditor), false, 'Inline ClientText row clicks respect the normal inline-editor preference');
                 const inlineRow = workspace.locator('.ctTable tbody > tr').filter({ has: page.getByRole('button', { name: 'record', exact: true }) }).first();
-                assert.equal(await inlineRow.locator('td').count(), 3, 'Inline editing stays in the three shared table columns');
-                assert.equal(await inlineRow.locator('td:nth-child(3)').getByRole('textbox', { name: 'Name', exact: true }).count(), 1, 'The selected row edits translation directly in its table cell');
+                assert.equal(await inlineRow.locator(':scope > td').count(), 4, 'Inline editing keeps the worksheet row number and three shared table columns');
+                assert.equal(await inlineRow.locator('.inlineTranslationCell').getByRole('textbox', { name: 'Name', exact: true }).count(), 1, 'The selected row edits translation directly in its table cell');
                 assert.equal(await workspace.locator('.ctExpanded').count(), 0, 'Inline ClientText uses table cells rather than a separate expanded row');
                 if (!dictionaryOnly) {
                 await workspace.locator('.ctTools').getByRole('button', { name: 'TM', exact: true }).click();
@@ -1333,11 +1333,11 @@ async function run() {
                     await page.setViewportSize(size);
                     for (const theme of themes) {
                         await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
-                        assert.equal(await inlineRow.locator('td:nth-child(2) .ctFields[data-side="source"]').count(), 1);
-                        assert.equal(await inlineRow.locator('td:nth-child(3) .ctFields[data-side="translation"]').count(), 1);
+                        assert.equal(await inlineRow.locator('.inlineSourceCell .ctFields[data-side="source"]').count(), 1);
+                        assert.equal(await inlineRow.locator('.inlineTranslationCell .ctFields[data-side="translation"]').count(), 1);
                         assert.equal(await workspace.locator('.ctTools .sideTabs .tabBtn').count(),5,'Inline CT tools reuse the SD sidebar tabs including Preview');
                         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth <= 1), theme + ': inline CT table/tools remain inside the desktop');
-                        const target = inlineRow.locator('td:nth-child(3)').getByRole('textbox', { name: 'Name', exact: true });
+                        const target = inlineRow.locator('.inlineTranslationCell').getByRole('textbox', { name: 'Name', exact: true });
                         await target.scrollIntoViewIfNeeded();
                         const bounds = await target.boundingBox();
                         assert.ok(bounds && bounds.width > 80 && bounds.x >= 0 && bounds.x + bounds.width <= size.width, theme + ': inline CT target is reachable in its shared table cell');

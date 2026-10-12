@@ -16,6 +16,7 @@
 .ctNavigation .ctSheetFilter { box-sizing:border-box; width:100%; min-width:0; margin-bottom:8px; padding:6px 8px; font:inherit; }.ctSheetEmpty { color:var(--ui-muted); font-size:12px; margin:12px 0 0; }
 .ctList { min-width:0; }.ctFilePath { display:block; margin-top:4px; color:var(--ui-muted); font-size:11px; overflow-wrap:anywhere; }.ctMetadataValue { display:block; margin-top:4px; font-size:11px; color:var(--ui-muted); }
 .ctTable tr.isOutdated > td { background-color:color-mix(in srgb,var(--ui-dropped) 8%,transparent); }
+.ctTable .ctRowNumber { width:76px; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .statusPill.outdated .statusDot,.filterChip.outdated { --filter-color:var(--ui-dropped); color:var(--ui-dropped); }
 .filterChip.outdated.selected { border-color:var(--ui-dropped); background:color-mix(in srgb,var(--ui-dropped) 10%,var(--color-element)); }
 .ctFullEditor.clipboardHidden { --clipboard-height:0px; }

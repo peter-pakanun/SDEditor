@@ -82,7 +82,7 @@
         data() { return {
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
-            ctSort: 'filename', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
+            ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
             ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
@@ -660,7 +660,9 @@
                 let cache=this._ctOrderCache;
                 if(!cache || cache.units!==units || cache.key!==key || cache.saved!==saved){
                     const collator=this._ctCollator ||= new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
-                    const ascending=units.slice().sort((a,b)=>collator.compare(this.ctSortValue(a,key),this.ctSortValue(b,key))
+                    const ascending=units.slice().sort((a,b)=>(key==='row'
+                        ? this.ctSortValue(a,key)-this.ctSortValue(b,key) || collator.compare(a.role,b.role) || collator.compare(a.sheet,b.sheet)
+                        : collator.compare(this.ctSortValue(a,key),this.ctSortValue(b,key)))
                         || collator.compare(a.recordId,b.recordId) || a.id.localeCompare(b.id));
                     cache=this._ctOrderCache={units,key,saved,ascending,descending:null};
                 }
@@ -668,7 +670,11 @@
             },
             ctSortValue(unit,key) {
                 const cache=this._ctSortCache ||= new WeakMap(),saved=this.ctSaved[unit.id];let item=cache.get(unit);
-                if(!item){item={filename:String(unit.recordId)};cache.set(unit,item);}
+                if(!item){
+                    // Use the immutable worksheet position, independent of filtering and pagination.
+                    const cell=unit.fields[0]?.targetCell || unit.fields[0]?.sourceCell || '';
+                    item={filename:String(unit.recordId),row:Number(/\d+$/.exec(cell)?.[0] || 0)};cache.set(unit,item);
+                }
                 if(key==='english' && item.english===undefined)item.english=this.ctListText(unit,'source');
                 if(key==='translation' && (item.saved!==saved || item.translation===undefined)){
                     item.saved=saved;item.translation=this.ctListText(unit,'target');
@@ -676,7 +682,7 @@
                 return item[key] ?? item.filename;
             },
             ctSortBy(key) {
-                if(!['filename','english','translation'].includes(key) || this.ctBusy)return;
+                if(!['row','filename','english','translation'].includes(key) || this.ctBusy)return;
                 this.ctSortDir=this.ctSort===key && this.ctSortDir==='asc'?'desc':'asc';this.ctSort=key;this.ctPage=1;
             },
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},

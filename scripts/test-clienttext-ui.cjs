@@ -266,6 +266,14 @@ test('late ClientText save failures cannot expose draft controls after typing, u
 test('ClientText table sorting and search preserve raw @, literal escapes, newlines and committed values',()=>{
     const first=namedUnit('ID10','A@literal\\nactual\nline','Z'),second=namedUnit('ID2','B','A'),
         {app}=listHarness({ctUnits:[first,second],ctSelectedFilters:['unchanged','saved','revised']});
+    first.fields[0].sourceCell='B2';first.fields[0].targetCell='C2';
+    second.fields[0].sourceCell='B10';second.fields[0].targetCell='C10';
+    assert.equal(app.ctSort,'row');assert.equal(app.ctSortDir,'asc');
+    assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID10','ID2'],'default row sort uses numeric worksheet positions');
+    app.ctSortBy('row');assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID2','ID10']);
+    app.pageSize=1;app.ctPage=2;assert.equal(app.ctSortValue(app.ctPageRows[0],'row'),2,'pagination retains the original row number');
+    app.ctAppliedSearch='B';assert.equal(app.ctSortValue(app.ctRows[0],'row'),10,'filtering retains the original row number');app.ctAppliedSearch='';
+    app.ctSortBy('filename');
     assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID2','ID10']);
     app.ctSortBy('filename');assert.deepEqual(Array.from(app.ctRows,row=>row.recordId),['ID10','ID2']);
     app.ctSortBy('english');assert.equal(app.ctRows[0],first);
