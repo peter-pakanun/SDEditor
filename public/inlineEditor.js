@@ -12,6 +12,10 @@
         draftWritePending: 0, inlineTransitionBusy: false };
     },
     computed: {
+      editorContentGroupScopeKey() {
+        const group = this.activeContentGroup;
+        return JSON.stringify([group?.id || '', group?.versionId || '', group?.contentMode || '', group?.legacyVersionId || '']);
+      },
       inlineDraftCount() { return Object.keys(this.inlineDraftRows).length; },
       deferredDraftSaveError() {
         return Object.values(this.inlineDraftFindings).flat().filter(finding => finding.deferredSave)
@@ -70,7 +74,7 @@
       lang() { this.draftScopeChanged(); },
       gameVersion() { this.draftScopeChanged(); },
       branchId() { this.draftScopeChanged(); },
-      activeContentGroup() { this.draftScopeChanged(); },
+      editorContentGroupScopeKey() { this.draftScopeChanged(); },
       editorVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
       descsDisplay() { this.$nextTick(() => this.observeInlineBlocks()); },
       inlineSidebarVisible() { this.$nextTick(() => this.observeInlineBlocks()); },
@@ -153,6 +157,14 @@
         await this.loadEditorDrafts();
       },
       async loadEditorDrafts() {
+        // The temporary ClientText session owns its own in-memory drafts.
+        // Listing SD drafts here can run durable migrations for its test group.
+        if (this.ctOfflineTest) {
+          this._draftLoadRun = (this._draftLoadRun || 0) + 1;
+          this._draftListingPending = null;
+          this.inlineDraftRows = {}; this.draftRecords = [];
+          return;
+        }
         const scope = this.editorDraftScope('');
         if (!scope.game || !scope.language) { this.inlineDraftRows = {}; this.draftRecords = []; return; }
         const run = this._draftLoadRun = (this._draftLoadRun || 0) + 1;
@@ -325,12 +337,15 @@
             if (result.status === 'discarded') {
               session.declined = '';
               if (session.pendingRecord?.revision === record.revision && this.draftScopeCurrent(session.scope))
-                this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: [] };
+                this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: this.retainedInlineSaveFindings(record.filepath) };
             }
             if (session.resolveConflicts && result.status === 'saved') { session.conflict = false; session.resolveConflicts = false; }
             if (result.status === 'conflict') {
               session.conflict = true;
-              if (this.draftScopeCurrent(session.scope)) this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: [{ level: 'error', message: 'Another tab changed this draft. Open the full editor to review both copies.' }] };
+              if (this.draftScopeCurrent(session.scope)) this.inlineDraftFindings = { ...this.inlineDraftFindings, [record.filepath]: [
+                ...this.retainedInlineSaveFindings(record.filepath),
+                { level: 'error', message: 'Another tab changed this draft. Open the full editor to review both copies.' },
+              ] };
             }
             session.writeError = null;
             session.discardAttempt = null;
@@ -390,6 +405,7 @@
       },
       inlineDraftFor(filepath) { return this.inlineDraftRows[filepath] || null; },
       inlineFindingsFor(filepath) { return this.inlineDraftFindings[filepath] || []; },
+      retainedInlineSaveFindings(filepath) { return this.inlineFindingsFor(filepath).filter(finding => finding.saveFailure || finding.deferredSave); },
       rememberDraftStagingFailure(scope, translations) {
         if (scope && Array.isArray(translations) && this.draftScopeCurrent(scope)) this.draftStagingFailures = { ...this.draftStagingFailures,
           [scope.filepath]: { scope: copy(scope), translations: copy(translations) } };

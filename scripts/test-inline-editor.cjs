@@ -36,6 +36,19 @@ test('early settings hydration scopes draft loading safely before the cloud clie
   assert.equal(editor.editorDraftScope(desc.filepath).profile, 'ready-profile');
 });
 
+test('offline ClientText testing skips durable StatDescription draft listing and fences older results', async () => {
+  const { editor, store } = harness(), listing = deferred(), started = deferred();
+  let reads = 0;
+  store.listTranslationDrafts = async () => { reads++; started.resolve(); return listing.promise; };
+  const pending = editor.loadEditorDrafts(); await started.promise;
+  editor.ctOfflineTest = true;
+  await editor.loadEditorDrafts();
+  assert.equal(reads, 1); assert.equal(editor._draftListingPending, null);
+  listing.resolve([]); await pending;
+  assert.deepEqual(copy(editor.inlineDraftRows), {}); assert.deepEqual(copy(editor.draftRecords), []);
+  await editor.loadEditorDrafts(); assert.equal(reads, 1, 'test calls cannot trigger durable draft migration');
+});
+
 function harness({ records = new Map(), tm = false } = {}) {
   let config, nextId = 0;
   const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };
@@ -1117,6 +1130,67 @@ test('failed draft staging exposes discard without leaking to new typing, anothe
   editor.lang = 'Thai'; editor.persistTranslationBatch = persist;
   assert.equal(await editor.editorSave({ close: false }), true);
   assert.equal(editor.editorDraftBlocked, false);
+});
+
+test('failed inline saves remain visible through metadata refresh, draft reads, unrelated saves and a pending retry', async t => {
+  const { editor, desc, store } = harness();
+  t.after(() => clearTimeout(editor._draftTimer));
+  editor.activeContentGroup = { id: 'group-a', versionId: 'version-a', contentMode: 'statdescription', teams: [] };
+  await editor.activateInlineRow(desc.filepath);
+  const persist = editor.persistTranslationBatch, listing = store.listTranslationDrafts;
+  editor.persistTranslationBatch = async () => { throw new Error('Storage unavailable'); };
+  editor.editorBlocks[0].translation = 'failed save';
+  assert.equal(await editor.editorSave({ close: false }), false);
+  const failure = editor.inlineFindingsFor(desc.filepath).find(item => item.saveFailure);
+  assert.match(failure.message, /Storage unavailable/);
+  const session = editor._draftSession, blocks = editor.editorBlocks, scope = editor.editorContentGroupScopeKey;
+  let reads = 0;
+  store.listTranslationDrafts = async (...args) => { reads++; return listing(...args); };
+  for (let revision = 1; revision <= 3; revision++) {
+    editor.activeContentGroup = { ...copy(editor.activeContentGroup), teams: [{ language: 'Thai', saved: revision }], revision };
+    assert.equal(editor.editorContentGroupScopeKey, scope);
+    assert.equal(editor._draftSession, session); assert.equal(editor.editorBlocks, blocks);
+    assert.equal(editor.inlineFindingsFor(desc.filepath).includes(failure), true);
+    assert.ok(editor.draftStagingFailures[desc.filepath]);
+  }
+  assert.equal(reads, 0);
+  await editor.loadEditorDrafts();
+  assert.equal(editor.inlineFindingsFor(desc.filepath).includes(failure), true);
+  // An automatic checkpoint cleanup must not resolve a failed staging operation.
+  editor.editorBlocks[0].translation = 'translation'; await editor.flushEditorDraft();
+  assert.equal(editor.inlineFindingsFor(desc.filepath).includes(failure), true);
+  editor.editorBlocks[0].translation = 'failed save'; await editor.flushEditorDraft();
+  await editor.finishInlineSession({ promote: false });
+  await editor.activateInlineRow(editor.descs[1].filepath);
+  editor.persistTranslationBatch = persist; editor.editorBlocks[0].translation = 'other file saved';
+  assert.equal(await editor.editorSave({ close: false }), true);
+  assert.equal(editor.inlineFindingsFor(desc.filepath).includes(failure), true);
+  assert.ok(editor.draftStagingFailures[desc.filepath]);
+  await editor.finishInlineSession({ promote: false }); await editor.activateInlineRow(desc.filepath);
+  const retryGate = deferred(), started = deferred();
+  editor.persistTranslationBatch = async (...args) => { started.resolve(); await retryGate.promise; return persist(...args); };
+  const retry = editor.editorSave({ close: false }); await started.promise;
+  assert.equal(editor.inlineFindingsFor(desc.filepath).includes(failure), true, 'Starting Retry cannot hide the failed operation');
+  assert.ok(editor.draftStagingFailures[desc.filepath]);
+  retryGate.resolve(); assert.equal(await retry, true);
+  assert.deepEqual(copy(editor.inlineFindingsFor(desc.filepath)), []);
+  assert.equal(editor.draftStagingFailures[desc.filepath], undefined);
+});
+
+test('a real content-group switch clears inline failures and detaches the outgoing draft', async t => {
+  const { editor, desc, window } = harness(); t.after(() => clearTimeout(editor._draftTimer));
+  editor.activeContentGroup = { id: 'group-a', versionId: 'version-a', contentMode: 'statdescription' };
+  await editor.activateInlineRow(desc.filepath);
+  editor.editorBlocks[0].translation = 'outgoing draft';
+  editor.inlineDraftFindings[desc.filepath] = [{ level: 'error', message: 'Old save failed', saveFailure: true }];
+  editor.rememberDraftStagingFailure(editor.editorDraftScope(desc.filepath), ['outgoing draft']);
+  const scope = editor.editorContentGroupScopeKey;
+  editor.activeContentGroup.versionId = 'version-b';
+  assert.notEqual(editor.editorContentGroupScopeKey, scope);
+  window.InlineEditor.mixin.watch.editorContentGroupScopeKey.call(editor);
+  await tick();
+  assert.equal(editor._draftSession, null);
+  assert.deepEqual(copy(editor.inlineDraftFindings), {}); assert.deepEqual(copy(editor.draftStagingFailures), {});
 });
 
 test('empty or incomplete ZIP translations remain unchanged when opened', async t => {

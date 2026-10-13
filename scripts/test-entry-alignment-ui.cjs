@@ -150,6 +150,42 @@ test('cancelling alignment does not change blocks, committed text or recovery st
   assert.deepEqual(copy(editor.entryAlignment.slots), [null, null]);
 });
 
+test('same-group metadata refresh preserves placements, selection and alignment being prepared', async t => {
+  const { editor } = await fixture(t), gate = deferred();
+  editor.activeContentGroup = { id: 'group-a', versionId: 'version-a', contentMode: 'statdescription', teams: [] };
+  editor._draftSession.scope = editor.editorDraftScope(editor.editorCurrentEditingDesc.filepath);
+  editor.clearEntryAlignment(); resolveMiddleRemoval(editor);
+  editor.selectEntryAlignmentItem(1);
+  const state = editor.entryAlignment, binding = editor._entryAlignmentBinding, scope = editor.editorContentGroupScopeKey;
+  const placements = copy(state);
+  editor.prepareMatchedEditorBlocks = () => gate.promise;
+  const applying = editor.applyEntryAlignment();
+  for (let revision = 1; revision <= 3; revision++) {
+    editor.activeContentGroup = { ...copy(editor.activeContentGroup), teams: [{ language: 'Thai', saved: revision }], revision };
+    assert.equal(editor.editorContentGroupScopeKey, scope, 'Catalog metadata keeps the watched scope unchanged');
+    assert.equal(editor.entryAlignment, state); assert.equal(editor._entryAlignmentBinding, binding);
+    assert.deepEqual(copy(state), placements); assert.equal(editor.entryAlignmentSelected, 1);
+    assert.equal(editor.entryAlignmentCurrent(), true);
+  }
+  gate.resolve([editor.makeEditorBlock('One', 'one'), editor.makeEditorBlock('Three', 'three')]);
+  assert.equal(await applying, true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+});
+
+test('changing group, version, mode or legacy identity still clears entry alignment', async t => {
+  for (const [field, value] of [['id', 'group-b'], ['versionId', 'version-b'], ['contentMode', 'clienttext'], ['legacyVersionId', 'legacy-b']]) {
+    const { editor, window } = await fixture(t);
+    editor.activeContentGroup = { id: 'group-a', versionId: 'version-a', contentMode: 'statdescription' };
+    editor._draftSession.scope = editor.editorDraftScope(editor.editorCurrentEditingDesc.filepath);
+    editor.clearEntryAlignment(); resolveMiddleRemoval(editor);
+    const scope = editor.editorContentGroupScopeKey;
+    editor.activeContentGroup[field] = value;
+    assert.notEqual(editor.editorContentGroupScopeKey, scope, field + ' changes the editing context even in place');
+    window.EntryAlignmentUI.mixin.watch.editorContentGroupScopeKey.call(editor);
+    assert.equal(editor.entryAlignment, null); assert.equal(editor._entryAlignmentBinding, null);
+  }
+});
+
 test('dropped alignment uses exact preserved old English and requires an explicit removed-block decision', async t => {
   const { editor, desc, calls } = await fixture(t, { translations: ['', ''] });
   editor.editorDroppedCandidate = { id: 'old-copy', revision: 3, originSourceAvailable: true,

@@ -20,6 +20,7 @@ function harness(changes={}){
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
+    Object.defineProperty(app,'ctOfflineTest',{get:()=>mixin.computed.ctOfflineTest.call(app)});
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
@@ -3010,4 +3011,69 @@ test('ClientText history comparison teleports outside the sticky editor sidebar 
     assert.equal(window.ClientTextUI.toolsComponent,window.EditorComponents.Tools);
     assert.match(template,/<Teleport to="body"><div v-if="ctHistoryViewer"/);assert.match(template,/<\/div><\/Teleport>\s*<\/section>/);
     assert.match(fs.readFileSync(path.join(__dirname,'../public/client-text.css'),'utf8'),/\.ctHistoryBackdrop[^}]*z-index:16000/);
+});
+
+test('offline sheet testing is gated to Manager/Admin and does not request publication policy',async()=>{
+    for(const role of ['manager','admin','translator']){
+        const {app}=cloudAccessHarness(harness(), 'Thai');
+        app.cloudUser.role=role;app.ctActive=false;
+        app._cloud={request(){assert.fail('Opening a test must stay local');}};
+        assert.equal(await app.ctOpenOfflineTest(),role!=='translator');
+        assert.equal(app.ctUploadVisible,role!=='translator');
+        if(role!=='translator'){assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);app.ctCloseUpload();}
+        app.cloudSignedIn=false;assert.equal(await app.ctOpenOfflineTest(),false);
+    }
+});
+
+test('offline test preparation accepts individual paired-language roles without cache reads or requests',async()=>{
+    for(const name of ['French.xlsm','French_Gender.xlsm']){
+        const {app,parseCalls,requests,storeCalls}=uploadPreparationHarness([name]);
+        Object.assign(app,{ctUploadTest:true,ctUploadLocal:true,managedManagerAccess:true});
+        app._ctStore=new Proxy({}, {get(){assert.fail('Test preparation must not use durable caches');}});
+        await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(app.ctPrepared.length,1);
+        assert.equal(parseCalls.length,1);assert.deepEqual(requests,[]);assert.deepEqual(storeCalls,[]);
+    }
+    const h=uploadPreparationHarness(['French.xlsm','Thai.xlsm']);
+    Object.assign(h.app,{ctUploadTest:true,ctUploadLocal:true,managedManagerAccess:true});
+    await h.app.ctPrepareUpload();assert.match(h.app.ctUploadError,/one language at a time/);assert.equal(h.parseCalls.length,0);
+});
+
+test('offline test activation, drafts, save/history and exit use memory and restore normal filters',async()=>{
+    const Memory=require('../public/clientTextMemoryStore.js'),store=Memory.create(),original=unit(),
+        testScope={...scope,versionId:'local:test:version',groupId:'local:test:group',language:'French'},
+        metadata={version:{id:testScope.versionId,name:'Test Sheet Offline'},group:{id:testScope.groupId,contentMode:'clienttext',language:'French'}};
+    await store.import(testScope,{units:[original],assets:[asset],metadata});
+    const h=initializationHarness({lang:'Thai',managedManagerAccess:true,ctTool:'history',ctSelectedFilters:['saved'],
+        _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(){assert.fail('Test operation must not access durable storage');}})}),{app,mixin}=h;
+    app.ensureDictionarySnapshot=()=>assert.fail('Test activation must not load/sync Dictionary');
+    app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
+    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);
+    assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),false);
+    for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
+    await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;
+    assert.equal(await app.ctSave(),true);await settle();
+    assert.equal(app.ctSaved[original.id].values[fieldId],'Exact @ text\\n\r\n');assert.equal(app.ctHistory.length,1);
+    app.ctCommentText='Private test text';assert.equal(await app.ctPostComment(),false);
+    assert.equal(await app.ctLoadReplyCommentDraft(original.id),null);await app.ctFlushCommentDraft();
+    const oldScope=clone(testScope);assert.equal(await app.ctShowVersionChooser(),true);
+    assert.equal(app.ctActive,false);assert.equal(app._ctTestStores.size,0);assert.deepEqual(clone(app.ctValues),{});assert.deepEqual(clone(app.ctReviewed),{});
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['saved']);assert.equal(app.ctTool,'history');assert.equal(app._ctDraftHeads.size,0);
+    assert.throws(()=>app.ctStorage(oldScope),/session has ended/);await assert.rejects(store.getSaved(oldScope),{code:'LOCAL_TEST_DISPOSED'});
+});
+
+test('late test draft work cannot fall back to durable storage after disposal',async()=>{
+    const pending=deferred(),started=deferred(),testScope={...scope,versionId:'local:test:v',groupId:'local:test:g'},
+        {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true});
+    let disposed=false;
+    const memory={async putDraft(){started.resolve();await pending.promise;if(disposed)throw Object.assign(new Error('closed'),{stale:true});return{revision:1};},dispose(){disposed=true;}};
+    app._ctTestStores=new Map([[testScope.groupId,memory]]);
+    app._ctStore=new Proxy({}, {get(){assert.fail('A stale test must never use durable storage');}});
+    const saving=app.ctFlushDraft();await started.promise;app.ctFence();pending.resolve();assert.equal(await saving,false);
+    assert.equal(app.ctActive,false);assert.deepEqual(clone(app.ctValues),{});assert.equal(app._ctTestStores.size,0);
+});
+
+test('changing Settings to the test language still ends the temporary session',()=>{
+    const {app,mixin}=harness({lang:'French',ctWorkspace:{scope:{...scope,versionId:'local:test:v',groupId:'local:test:g',language:'French'}}});
+    app._ctStore={};mixin.watch.lang.call(app);
+    assert.equal(app.ctActive,false);assert.equal(app.ctWorkspace,null);assert.deepEqual(clone(app.ctValues),{});
 });

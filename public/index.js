@@ -723,8 +723,9 @@ const config = Vue.defineComponent({
     },
     /** BCP 47 tag for translation `<input>` / `<textarea>` `lang` (browser spellcheck follows this in Chromium). */
     translationEditorBcp47() {
-      if (!this.lang) return undefined;
-      const code = SETTINGS_LANG_TO_BCP47[this.lang];
+      const language = this.ctOfflineTest ? this.ctWorkspace?.scope.language : this.lang;
+      if (!language) return undefined;
+      const code = SETTINGS_LANG_TO_BCP47[language];
       return code || undefined;
     },
     lookupReferenceBcp47() {
@@ -6960,7 +6961,9 @@ const config = Vue.defineComponent({
       if ((this.inlineActive && dropped) || this.editorDroppedConflict) {
         const message = 'Open the full editor to review the dropped translation before saving this file.';
         this.collaborationNotice = message;
-        if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'warning', message }] };
+        if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [
+          ...this.retainedInlineSaveFindings(desc.filepath), { level: 'warning', message },
+        ] };
         return false;
       }
       this.editorSaving = true;
@@ -6991,12 +6994,14 @@ const config = Vue.defineComponent({
           || !arrayEquals(draftAtSave, this.editorBlocks.map(block => block?.translation ?? ''))) return false;
         if (session?.conflict || session?.record?.conflicts?.length) {
           this.collaborationNotice = 'Another tab changed this local draft. Use Review retained edits to review both copies.';
-          if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'error', message: this.collaborationNotice }] };
+          if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [
+            ...this.retainedInlineSaveFindings(desc.filepath), { level: 'error', message: this.collaborationNotice },
+          ] };
           return false;
         }
         const findings = this.editorSaveFindings(newTranslations);
         if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [
-          ...(this.inlineDraftFindings[desc.filepath] || []).filter(finding => finding.deferredSave),
+          ...this.retainedInlineSaveFindings(desc.filepath),
           ...findings.errors.map(item => ({ ...item, level: 'error' })),
           ...findings.warnings.map(item => ({ ...item, level: 'warning' })),
           ...findings.confirmations.slice(findings.warnings.length ? 1 : 0).map(message => ({ level: 'warning', message })),
@@ -7108,7 +7113,10 @@ const config = Vue.defineComponent({
           : 'Could not save this translation. Your local draft has been retained. ' + error.message;
         if (!review) this.cloudStorageError = message;
         this.collaborationNotice = message;
-        if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [{ level: 'error', message }] };
+        if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings, [desc.filepath]: [
+          ...this.retainedInlineSaveFindings(desc.filepath).filter(finding => !finding.saveFailure),
+          { level: 'error', message, saveFailure: true },
+        ] };
         this.rememberDraftStagingFailure?.(draftScope, submittedDraft);
         return false;
       } finally { if (this._editorSaveToken === saveToken) this.editorSaving = false; }

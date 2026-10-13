@@ -364,6 +364,7 @@
             <button class="primaryAction" @click="managedImportOffline(false)" :disabled="managedVersionBusy">Import StatDescriptions.zip</button>
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
+          <div v-if="managedManagerAccess" class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Test Sheet Offline</button></div>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>
@@ -388,10 +389,11 @@
         <p v-else-if="managedDetailsLoaded" class="versionMuted">No assignments are available for this version.</p>
       </section>
     </section>
-    <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!ctUploading && (ctUploadVisible=false)">
+    <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="ctCloseUpload">
       <section class="box ctUploadDialog" aria-label="Content upload">
-        <h2>{{ ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
-        <template v-if="!ctUploadVersion">
+        <h2>{{ ctUploadTest ? 'Test Sheet Offline' : ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
+        <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language. You can test a normal workbook, a Gender workbook, or both. Edits, saves, and history stay in memory. Download workbooks to keep saved edits; leaving the test or reloading clears the session.</p>
+        <template v-if="!ctUploadVersion && !ctUploadTest">
           <label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label>
           <div v-if="!ctUploadLocal" class="ctUploadField">
             <label for="ctUploadDeadline">Advisory deadline · New Zealand time</label>
@@ -404,7 +406,7 @@
           </div>
         </template>
         <div class="ctUploadSelectors">
-          <label class="ctUploadField">Select files<input type="file" multiple accept=".zip,.xlsx,.xlsm,.txt" @change="ctChooseFiles" :disabled="ctUploading"></label>
+          <label class="ctUploadField">Select files<input type="file" multiple :accept="ctUploadTest ? '.xlsx,.xlsm' : '.zip,.xlsx,.xlsm,.txt'" @change="ctChooseFiles" :disabled="ctUploading"></label>
           <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
         </div>
         <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th></tr></thead><tbody><tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.name }}</td><template v-if="!candidate.file.name.toLowerCase().endsWith('.zip')"><td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td><td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td></template><td v-else colspan="2">StatDescription</td></tr></tbody></table>
@@ -421,15 +423,16 @@
           <button class="ctProgressCancel" @click="ctCancel">Cancel</button>
         </div>
         <div v-for="group in ctPrepared.filter(group=>group.duplicateGroups?.length)" :key="group.contentMode" class="ctUploadReport"><section v-for="duplicate in group.duplicateGroups" :key="duplicate.filepath+'|'+duplicate.lang"><strong>{{ duplicate.filepath }} · {{ duplicate.language || duplicate.lang }} · choose one duplicated block</strong><label v-for="option in duplicate.options" :key="option.occurrence"><input type="radio" :name="duplicate.filepath+'|'+duplicate.lang" :value="option.occurrence" v-model="ctDuplicateChoices[duplicate.filepath+'|'+(duplicate.language || duplicate.lang)]">Entry {{ option.occurrence }}<pre>{{ option.content?.join('\n') }}</pre></label></section></div>
-        <footer class="versionActions"><button v-if="!ctUploadLocal && !ctUploadVersion" @click="ctSaveMetadataDraft" :disabled="ctUploading || !ctUploadName.trim()">Save version draft</button><button @click="ctPrepareUpload" :disabled="ctUploading || !ctUploadFiles.length">Prepare and validate</button><button class="primaryAction" @click="ctPublishPrepared" :disabled="ctUploading || !ctPrepared.length">{{ ctUploadLocal ? 'Store local workspaces' : 'Publish complete groups' }}</button><button @click="ctUploadVisible=false" :disabled="ctUploading">Close</button></footer>
+        <footer class="versionActions"><button v-if="!ctUploadLocal && !ctUploadVersion" @click="ctSaveMetadataDraft" :disabled="ctUploading || !ctUploadName.trim()">Save version draft</button><button @click="ctPrepareUpload" :disabled="ctUploading || !ctUploadFiles.length">Prepare and validate</button><button class="primaryAction" @click="ctPublishPrepared" :disabled="ctUploading || !ctPrepared.length">{{ ctUploadTest ? 'Open test sheet' : ctUploadLocal ? 'Store local workspaces' : 'Publish complete groups' }}</button><button @click="ctCloseUpload" :disabled="ctUploading">Close</button></footer>
       </section>
     </div>
     <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="ctWorkspace" :inert="showSetting || workspaceInitializationActive" aria-label="ClientText workspace">
+      <p v-if="ctOfflineTest" class="versionMuted" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
       <editor-workspace-shell v-show="!ctEditor" class="ctListWorkspace" :inline="inlineEditor">
         <template #header>
           <div class="workspaceBrand">
             <img class="brandMark" src="android-chrome-192x192.png" alt="" width="34" height="34">
-            <div><strong>SDEditor</strong><span><a class="workspaceContextLink" href="#settingsGameVersion" @click.prevent="openSettings('general','settingsGameVersion')" title="Change game version">{{ gameVersionLabel }}</a> <span aria-hidden="true">·</span> <a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#settingsLanguage" @click.prevent="openSettings('general','settingsLanguage')" title="Change translation language">{{ lang }}</a><template v-else>{{ lang }}</template></span></div>
+            <div><strong>SDEditor</strong><span><a class="workspaceContextLink" href="#settingsGameVersion" @click.prevent="openSettings('general','settingsGameVersion')" title="Change game version">{{ gameVersionLabel }}</a> <span aria-hidden="true">·</span> <a v-if="cloudCanAccessAllLanguages && !ctOfflineTest" class="workspaceContextLink" href="#settingsLanguage" @click.prevent="openSettings('general','settingsLanguage')" title="Change translation language">{{ lang }}</a><template v-else>{{ ctWorkspace.scope.language }}</template></span></div>
           </div>
           <section class="workspaceSearch" aria-label="Search and filters">
             <div class="searchToolbar"><div class="searchField">
@@ -475,18 +478,18 @@
               <p id="ctFileTableKeyboardHelp" class="srOnly">Arrow keys move between records while the list is focused. Enter or a filename opens the full editor. In inline mode, clicking a row edits its translation in the table. Text fields retain normal arrow keys and newlines.</p>
               <div ref="ctFileTableRegion" class="fileTableScroll" role="region" aria-label="ClientText IDs" aria-describedby="ctFileTableKeyboardHelp" tabindex="0" @keydown="ctRowKeydown(null,$event)">
                 <table class="display compact cell-border fileTable ctTable" role="grid" aria-label="ClientText IDs" aria-multiselectable="false">
-                  <caption class="srOnly">ClientText records in {{ lang }}. Open a filename to edit its translations.</caption>
+                  <caption class="srOnly">ClientText records in {{ ctWorkspace.scope.language }}. Open a filename to edit its translations.</caption>
                   <thead><tr>
                     <th scope="col" class="ctRowNumber" :aria-sort="ctSort==='row' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" aria-label="Row number" title="Workbook row number" @click="ctSortBy('row')"># <span aria-hidden="true">{{ ctSort==='row' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
                     <th scope="col" style="width:20%" :aria-sort="ctSort==='filename' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('filename')">Filename <span aria-hidden="true">{{ ctSort==='filename' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
                     <th scope="col" :aria-sort="ctSort==='english' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('english')">English <span aria-hidden="true">{{ ctSort==='english' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
-                    <th scope="col" :aria-sort="ctSort==='translation' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('translation')">{{ lang }} translation <span aria-hidden="true">{{ ctSort==='translation' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
+                    <th scope="col" :aria-sort="ctSort==='translation' ? (ctSortDir==='asc'?'ascending':'descending') : 'none'"><button class="tableSort" @click="ctSortBy('translation')">{{ ctWorkspace.scope.language }} translation <span aria-hidden="true">{{ ctSort==='translation' ? (ctSortDir==='asc'?'▲':'▼') : '' }}</span></button></th>
                   </tr></thead>
                   <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)" @focusout="ctInlineFocusOut">
                     <td class="ctRowNumber" data-label="Row number">{{ ctSortValue(unit,'row') }}</td>
                     <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><ct-context v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" :items="ctReferenceMetadata(unit)" compact></ct-context><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id && ctDraftBlocked" class="inlineFileActions" @click.stop><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
                     <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
-                    <td class="translationTr inlineTranslationCell" :data-label="lang+' translation'"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
+                    <td class="translationTr inlineTranslationCell" :data-label="ctWorkspace.scope.language+' translation'"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
                   </tr></tbody>
                 </table>
               </div>
@@ -514,6 +517,7 @@
       <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation</h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button v-if="ctDraftBlocked" @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep unsaved edits">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
+          <p v-if="ctOfflineTest" class="versionMuted" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Save keeps edits only for this session.</p>
           <ct-context :host="$root" :items="ctReferenceMetadata()"></ct-context>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button></div>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
@@ -1340,6 +1344,7 @@
   <script src="clientTextState.js"></script>
   <script src="contentAdapters.js"></script>
   <script src="clientTextStore.js"></script>
+  <script src="clientTextMemoryStore.js"></script>
   <script src="clientTextSync.js"></script>
   <script src="vendor/fast-xml-parser-5.11.2.min.js"></script>
   <script src="clientTextCodec.js"></script>

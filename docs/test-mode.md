@@ -6,6 +6,10 @@ For debugging and automation (including AI-driven testing), the app supports a `
 
 ## Validation Scope
 
+Signed-in Managers and Admins can also use **Offline → Test Sheet Offline** in the source-version chooser to test local ClientText `.xlsm`/`.xlsx` files. Prepare one language's normal workbook, Gender workbook, or both, then choose **Open test sheet**. This uses the regular editor and save shortcuts with temporary in-memory drafts, saved translations, and history. **Download workbooks** preserves saved edits in a local workbook download. Nothing from the test is stored in IndexedDB or synchronized; Dictionary editing and shared comments are inactive. Leaving the test through **Versions**, changing account/game/branch/language, or reloading clears the session. Existing offline and published workspaces stay separate.
+
+Run `node scripts/test-clienttext-memory-store.cjs` and `node scripts/clienttext-offline-browser-fixture.cjs` for the isolated storage and desktop workbook round-trip checks. The browser fixture uses a disposable normal-mode origin with simulated Manager/Admin access; it does not verify hosted login or deployment.
+
 UI validation targets desktop and laptop browsers, including resized desktop windows, keyboard navigation, and mouse/trackpad interactions. Mobile phone and tablet layouts and touch-only workflows are unsupported and do not require validation. See [Platform Support](../README.md#platform-support).
 
 ## Usage

@@ -27,7 +27,7 @@
       editorCurrentEditingDesc() { this.clearEntryAlignment(); },
       editorSessionActive(active) { if (!active) this.clearEntryAlignment(); },
       editorToolsScope() { this.clearEntryAlignment(); },
-      activeContentGroup() { this.clearEntryAlignment(); },
+      editorContentGroupScopeKey() { this.clearEntryAlignment(); },
     },
     methods: {
       clearEntryAlignment() {

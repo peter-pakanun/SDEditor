@@ -249,9 +249,13 @@ async function run() {
     assert.equal(droppedDraft.missing, false, 'Blank draft slots do not alter committed Missing status');
     await assertEnglishFixed('Continue editing with blank translations');
     await save().click();
-    const confirmation = page.getByRole('alertdialog', { name: 'Confirm action', exact: true });
-    await confirmation.waitFor(); assert.match(await confirmation.innerText(), /missing fields/);
-    await confirmation.getByRole('button', { name: 'Continue', exact: true }).click();
+    const blankError = page.getByRole('alertdialog', { name: 'Notice', exact: true });
+    await blankError.waitFor(); assert.match(await blankError.innerText(), /Blank StatDescription translation/);
+    await blankError.getByRole('button', { name: 'OK', exact: true }).click();
+    assert.equal((await inspect(dropped)).staged, null, 'Blank alignment drafts cannot stage or resolve Dropped work');
+    await page.locator('[data-editor-ref="translation_2"]').fill('Completed repeat two');
+    await page.locator('[data-editor-ref="translation_3"]').fill('Completed new');
+    await save().click();
     await page.waitForFunction(() => !window.__alignmentApp.editorVisible && !window.__alignmentApp.pendingLocalSaves
       && !window.__alignmentApp._pendingSaves.snapshot().jobs.length);
     await page.waitForFunction(filepath => {
@@ -259,10 +263,10 @@ async function run() {
       return !WorkspaceState.droppedForFile(vm.localDescs, filepath, 'Thai') && !vm.getDescByFilepath(filepath).isDropped;
     }, dropped, { timeout: 3000 });
     const droppedSaved = await inspect(dropped);
-    assert.deepEqual(droppedSaved.committed, ['Old unique', 'Old repeat one', '', '']);
-    assert.equal(droppedSaved.saved, true); assert.equal(droppedSaved.missing, true); assert.equal(droppedSaved.candidate, null);
+    assert.deepEqual(droppedSaved.committed, ['Old unique', 'Old repeat one', 'Completed repeat two', 'Completed new']);
+    assert.equal(droppedSaved.saved, true); assert.equal(droppedSaved.missing, false); assert.equal(droppedSaved.candidate, null);
     assert.equal(droppedSaved.dropped, false); assert.equal(droppedSaved.derivedDropped, false); assert.equal(droppedSaved.localCandidate, null);
-    await assertEnglishFixed('Save blank translations');
+    await assertEnglishFixed('Save completed aligned translations');
     const droppedRevisions = await page.evaluate(async filepath => {
       const vm = window.__alignmentApp; return await OfflineStore.listRevisions(filepath, 'Thai', 100, vm.managedWorkspaceScope());
     }, dropped);
@@ -279,11 +283,11 @@ async function run() {
     await open(dropped);
     const droppedReloaded = await inspect(dropped);
     assert.deepEqual(droppedReloaded.committed, droppedSaved.committed); assert.equal(droppedReloaded.saved, true);
-    assert.equal(droppedReloaded.missing, true); assert.equal(droppedReloaded.dropped, false);
+    assert.equal(droppedReloaded.missing, false); assert.equal(droppedReloaded.dropped, false);
     assert.equal(droppedReloaded.candidate, null); assert.equal(droppedReloaded.localCandidate, null);
     assert.equal(await panel().count(), 0, 'Reload does not offer alignment for already resolved Dropped work');
     await assertEnglishFixed('Reload after Save');
-    results.push('Dropped source evidence placed only a unique exact match; duplicate English stayed manual. Continue kept Dropped unresolved; explicit confirmed Save resolved it, kept blank slots Missing, and retained all old blocks in local history.');
+    results.push('Dropped source evidence placed only a unique exact match; duplicate English stayed manual. Continue kept Dropped unresolved; blank slots blocked Save until completed, then explicit Save resolved Dropped and retained all old blocks in local history.');
     await page.getByRole('button', { name: 'Close', exact: true }).first().click();
     await page.evaluate(async () => {
       const vm = window.__alignmentApp;
@@ -336,6 +340,50 @@ async function run() {
     }
     results.push('28 English entries and 29 translation blocks: available pool stayed fully visible below the toolbar while English #20 was visible, with pointer placement and pool-scroll/button placement in both desktop viewports.');
     await assertEnglishFixed('Long-file drag and placement');
+    const refreshState = await page.evaluate(async filepath => {
+      const vm = window.__alignmentApp, originalGroup = vm.activeContentGroup;
+      vm.activeContentGroup = { id: 'fixture-stat-group', versionId: 'fixture-version', contentMode: 'statdescription', teams: [] };
+      await vm.$nextTick(); await vm.loadEditorDrafts();
+      if (!await vm.editFile(filepath, true) || !vm.entryAlignment) throw new Error('Could not open grouped alignment fixture.');
+      vm.mutateEntryAlignment('assign', 0, 0); vm.mutateEntryAlignment('assign', 24, 20);
+      vm.mutateEntryAlignment('setObsolete', 1, true); vm.selectEntryAlignmentItem(2);
+      const state = vm.entryAlignment, binding = vm._entryAlignmentBinding, session = vm._draftSession;
+      const placements = JSON.stringify(state);
+      const failure = { level: 'error', message: 'Fixture failed save remains actionable', saveFailure: true };
+      vm.inlineDraftFindings = { ...vm.inlineDraftFindings, [filepath]: [failure] };
+      vm.rememberDraftStagingFailure(vm.editorDraftScope(filepath), vm.serializeEditorTranslations());
+      await vm.$nextTick();
+      const node = document.querySelector('.entryAlignmentPanel'), pool = node.querySelector('.entryAlignmentPool');
+      pool.scrollTop = 120;
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const scroll = pool.scrollTop;
+      let draftReads = 0;
+      const list = OfflineStore.listTranslationDrafts;
+      OfflineStore.listTranslationDrafts = async (...args) => { draftReads++; return list(...args); };
+      try {
+        for (let revision = 1; revision <= 3; revision++) {
+          vm.activeContentGroup = { ...vm.activeContentGroup, revision, teams: [{ language: 'Thai', saved: revision }] };
+          await vm.$nextTick();
+        }
+        const retained = { samePanel: document.querySelector('.entryAlignmentPanel') === node,
+          sameState: vm.entryAlignment === state, sameBinding: vm._entryAlignmentBinding === binding,
+          sameSession: vm._draftSession === session, placements: JSON.stringify(vm.entryAlignment) === placements,
+          selected: vm.entryAlignmentSelected, sameScroll: pool.scrollTop === scroll,
+          current: vm.entryAlignmentCurrent(), warnings: vm.inlineFindingsFor(filepath).map(item => item.message),
+          failedSave: !!vm.draftStagingFailures[filepath], draftReads };
+        vm.activeContentGroup = { ...vm.activeContentGroup, versionId: 'fixture-other-version' };
+        await vm.$nextTick();
+        retained.clearedForNewVersion = vm.entryAlignment === null && !vm.draftStagingFailures[filepath]
+          && !vm.inlineFindingsFor(filepath).length;
+        return retained;
+      } finally {
+        OfflineStore.listTranslationDrafts = list; vm.activeContentGroup = originalGroup; await vm.$nextTick();
+      }
+    }, long);
+    assert.deepEqual(refreshState, { samePanel: true, sameState: true, sameBinding: true, sameSession: true,
+      placements: true, selected: 2, sameScroll: true, current: true,
+      warnings: ['Fixture failed save remains actionable'], failedSave: true, draftReads: 0, clearedForNewVersion: true });
+    results.push('Three same-group background metadata replacements retained the exact alignment panel, placements, unused decision, selection, scroll, draft session and failed-save warning without reloading drafts. A real version switch cleared scoped state.');
     assert.deepEqual(pageErrors, [], 'No uncaught browser errors'); results.push('No uncaught browser errors.');
     console.log(JSON.stringify({ origin, results, screenshots, longGeometry }, null, 2)); await context.close();
   } catch (error) {
