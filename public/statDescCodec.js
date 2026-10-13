@@ -20,6 +20,11 @@
     return { valid: !entryCountMismatch && !blankEntries.length, blankEntries, entryCountMismatch,
       expectedCount: expected, actualCount: values.length };
   }
+  function baselineTranslationIssues(desc, language) {
+    const translations = desc?.translations || {};
+    return { ...translationIssues(translations[language], translations.English?.length || 0),
+      languageBlockPresent: Object.hasOwn(translations, language) };
+  }
   function assertCompleteTranslation(lines, expectedCount, filepath = '') {
     const issues = translationIssues(lines, expectedCount);
     if (issues.valid) return;
@@ -442,6 +447,6 @@ function strEncodeUTF16(str) {
     }
     return source.filter(Boolean);
   }
-  return { parserVersion: 1, isBlankTranslation, translationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
+  return { parserVersion: 1, isBlankTranslation, translationIssues, baselineTranslationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
     decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash };
 });

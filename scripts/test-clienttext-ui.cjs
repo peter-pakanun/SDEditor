@@ -1946,6 +1946,35 @@ test('manager role exposes every ClientText language with or without an account 
     }
 });
 
+test('a Manager catalog restores assignments hidden by a cached translator details snapshot',()=>{
+    const {app}=cloudAccessHarness(assignmentHarness(),'Thai'),languages=Array.from(app.ctTeamOptions),
+        groups=languages.map(language=>({id:'ct-'+language,versionId:'v1',contentMode:'clienttext',language,teams:[{language,counts:{}}]}));
+    app.managedVersions=[{id:'v1',game:'poe2',branchId:'default',membershipRevision:12,contentGroups:groups}];
+    app.managedSelectedDetails={version:{id:'v1',membershipRevision:12},teams:[],contentGroups:groups.filter(group=>group.language==='Thai')};
+    assert.equal(app.cloudCanAccessAllLanguages,true);
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.team.language).sort(),languages.sort(),
+        'the full catalog must remain visible while the previously assigned team details are cached');
+    app.cloudUser={...app.cloudUser,role:'translator'};
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.team.language),['Thai']);
+});
+
+test('Manager assignments reconcile legacy team details and respect newer membership removals',()=>{
+    const {app}=cloudAccessHarness(assignmentHarness(),'Thai'),thai={language:'Thai',counts:{saved:2}},french={language:'French',counts:{saved:1}},
+        legacy={id:'legacy',versionId:'v1',legacyVersionId:'v1',contentMode:'statdescription',teams:[thai,french]},
+        ct={id:'ct-French',versionId:'v1',contentMode:'clienttext',language:'French',teams:[french]};
+    app.managedVersions=[{id:'v1',game:'poe2',branchId:'default',membershipRevision:2,contentGroups:[legacy,ct]}];
+    app.managedSelectedDetails={version:{id:'v1',membershipRevision:2},teams:[thai],contentGroups:[{...legacy,teams:[thai]}]};
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),['French — ClientText','French — StatDescription','Thai — StatDescription']);
+    assert.equal(app.ctAssignmentRows.find(row=>row.label==='Thai — StatDescription').team,thai,'rich details for the previously assigned team remain intact');
+    app.managedSelectedDetails={version:{id:'v1',membershipRevision:3},teams:[],contentGroups:[]};
+    assert.equal(app.ctAssignmentRows.length,0,'newer detail membership removes old catalog groups');
+    app.managedSelectedDetails={version:{id:'v1',membershipRevision:1},teams:[thai],contentGroups:[ct]};
+    app.managedVersions[0]={...app.managedVersions[0],contentGroups:[]};
+    assert.equal(app.ctAssignmentRows.length,0,'newer catalog membership removes old cached groups');
+    app.managedVersions=[{id:'v1',game:'poe1',branchId:'default',membershipRevision:2,contentGroups:[legacy]}];
+    assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),['French — ClientText'],'another game cannot supplement the selected assignments');
+});
+
 test('manager opens every ClientText language under its own workspace scope and translator access stays assigned',async()=>{
     for(const assigned of [null,'Thai']){
         const {app}=cloudAccessHarness(harness(),assigned),opened=[],reads=[],version={id:scope.versionId,game:scope.game,branchId:scope.branchId};

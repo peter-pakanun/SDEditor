@@ -105,6 +105,39 @@ const sourceDesc = (english = 'One', translations = { Thai: ['one'], German: ['e
 const modern = (source = sourceDesc(), hash = 'old') => W.initializeWorkspace({ sourceHash: hash, descs: [], status: {} },
   { source: [source], sourceHash: hash, game: 'poe1', language: 'Thai' });
 
+test('an absent SD language is Missing without Error while tagged incomplete blocks are both', () => {
+  const absent = sourceDesc('One', {}), before = structuredClone(absent), workspace = modern(absent, 'current');
+  const state = W.workspaceFile(workspace, absent, 'Thai');
+  assert.equal(state.isMissing, true); assert.equal(state.isInvalidTranslation, false);
+  assert.equal(state.languageBlockPresent, false); assert.equal(state.translationIssues.valid, false);
+  assert.equal(state.hasChanges, false); assert.deepEqual(state.translations, ['']);
+  for (const values of [[], [''], [' \t'], ['\\n@\u200b'], ['useful', '']]) {
+    const tagged = sourceDesc('One', { Thai: values });
+    const projected = W.workspaceFile(modern(tagged, 'current'), tagged, 'Thai');
+    assert.equal(projected.isMissing, true); assert.equal(projected.isInvalidTranslation, true);
+    assert.equal(projected.languageBlockPresent, true); assert.equal(projected.hasChanges, false);
+  }
+  assert.deepEqual(absent, before, 'Rendering a Missing row cannot insert a baseline language tag.');
+});
+
+test('complete saves on an absent SD baseline and their reset preserve language-tag provenance', () => {
+  const source = sourceDesc('One', { German: ['eins'] }), before = structuredClone(source), workspace = modern(source, 'current');
+  assert.throws(() => W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source }),
+    { code: 'SD_TRANSLATION_INVALID' }, 'An absent baseline never permits a newly staged blank.');
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['หนึ่ง'] }, 'Thai', { source });
+  const saved = W.workspaceFile(workspace, source, 'Thai');
+  assert.equal(saved.hasChanges, true); assert.equal(saved.isMissing, false); assert.equal(saved.isInvalidTranslation, false);
+  assert.equal(saved.languageBlockPresent, true); assert.equal(saved.isRevised, false);
+  assert.deepEqual(W.workspaceFile(workspace, source, 'German').translations, ['eins']);
+  assert.equal(W.workspaceFile(workspace, source, 'French').isInvalidTranslation, false);
+  const reset = P.projectWorkspace(workspace, [{ filepath: 'a.txt', translations: [], trackedForExport: false,
+    stagingReset: true, revision: 2 }], 'Thai', [source]);
+  const resetState = W.workspaceFile(reset, source, 'Thai');
+  assert.equal(resetState.hasChanges, false); assert.equal(resetState.isMissing, true);
+  assert.equal(resetState.isInvalidTranslation, false); assert.equal(resetState.languageBlockPresent, false);
+  assert.deepEqual(source, before, 'Saving, switching language and a server reset keep the immutable tag absence.');
+});
+
 test('legacy migration captures staged and dropped text before pruning every modern boolean flag', () => {
   const source = sourceDesc('One', { Thai: ['one'], German: [''] });
   const local = sourceDesc('One', { Thai: ['one'] });

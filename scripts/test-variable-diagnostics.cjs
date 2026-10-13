@@ -136,6 +136,33 @@ test('SD table diagnostics validate the whole quoted entry while permitting blan
   assert.equal(blank.diagnostics[0].code, 'blank-translation');
 });
 
+test('a missing SD language block has no committed blank diagnostics while a present empty block does', () => {
+  const { editor } = loadEditor();
+  const checks = Object.fromEntries(Object.keys(editor.diagnosticScanChecks).map(key => [key, false]));
+  const absent = fixtureDescription('absent-language', 'English {0}', 'unused');
+  delete absent.translations.Thai;
+  absent.translations.English.push('@Second English@');
+  const empty = fixtureDescription('present-empty-language', 'English {0}', '');
+  empty.translations.English.push('@Second English@');
+  empty.translations.Thai.push('@@');
+  const source = new Map([[absent.filepath, absent], [empty.filepath, empty]]);
+  editor.workspaceSourceFile = filepath => source.get(filepath) || null;
+  const paddedAbsent = { ...absent, translations: { ...absent.translations, Thai: ['', ''] } };
+  editor.descs = [paddedAbsent, empty];
+  assert.equal(editor.analyzeDescDiagnostics(absent, 'Thai', null, checks).errorCount, 0,
+    'The absence of a selected language tag is Missing work, not authored blank text');
+  assert.equal(editor.analyzeDescDiagnostics(paddedAbsent, 'Thai', null, checks).errorCount, 0,
+    'Visible editor padding must not manufacture a selected language block in the immutable baseline');
+  const errors = editor.analyzeDescDiagnostics(empty, 'Thai', null, checks);
+  assert.equal(errors.errorCount, 2);
+  assert.deepEqual(Array.from(errors.diagnostics, item => item.code), ['blank-translation', 'blank-translation']);
+  assert.equal(editor.analyzeTranslationDiagnostics('', 'English {0}', 'Thai', checks).errorCount, 1,
+    'An actual empty draft remains a destructive error even if its baseline has no language tag');
+  assert.equal(editor.analyzeDescDiagnostics(paddedAbsent, 'Thai', null, checks,
+    { translationCandidate: true }).errorCount, 2,
+  'Explicit dropped/draft candidates cannot inherit the absent baseline exemption');
+});
+
 test('numeric keyword ID suffixes are allowed without allowing arbitrary nesting', () => {
   const { context } = loadEditor();
   const analyze = text => context.window.TranslationDiagnostics.analyze(text);

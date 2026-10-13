@@ -76,7 +76,7 @@
     }
     return status;
   }
-  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'isInvalidTranslation', 'needsReview', 'trackedForExport']);
+  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'isInvalidTranslation', 'languageBlockPresent', 'translationIssues', 'needsReview', 'trackedForExport']);
   const cleanMetadata = value => Object.fromEntries(Object.entries(value || {})
     .filter(([field]) => !statusFlags.has(field) && !excluded.has(field)));
   function setFileMetadata(status, language, patch = {}, local) {
@@ -335,7 +335,8 @@
     const staged = entry && (!entry.sourceHash || entry.sourceHash === workspace?.sourceHash)
       && (!statDescription(workspace) || complete(entry.translations, count)) ? entry : null;
     const committed = staged ? lines(staged.translations) : lines(desc?.translations?.[language]);
-    const issues = translationIssues(committed, count);
+    const issues = staged ? { ...translationIssues(committed, count), languageBlockPresent: true }
+      : codec().baselineTranslationIssues(desc, language);
     const translations = staged ? lines(staged.translations) : lines(desc?.translations?.[language]);
     while (translations.length < count) translations.push('');
     const candidate = droppedForFile(workspace, desc?.filepath, language);
@@ -343,7 +344,8 @@
     return { translations, hasChanges: !!staged, isRevised: !!staged && complete(baseline, count)
       && !equal(lines(baseline), translations) && !candidate && !wasDroppedInSource(workspace, desc?.filepath, language),
       isMetadataCorrection: !!staged && metadataCorrectionForSource(staged, desc, workspace?.sourceHash),
-      isMissing: !issues.valid, isInvalidTranslation: statDescription(workspace) && !issues.valid, isDropped: !!candidate,
+      isMissing: !issues.valid, isInvalidTranslation: statDescription(workspace) && issues.languageBlockPresent && !issues.valid,
+      languageBlockPresent: issues.languageBlockPresent, translationIssues: issues, isDropped: !!candidate,
       needsReview: !!candidate && !staged && !complete(translations, count), candidate, staged };
   }
   function resolveDroppedPromotion(workspace, filepath, language, promotion, options = {}) {

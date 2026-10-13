@@ -295,9 +295,37 @@ async function run() {
             assert.deepEqual(await translator.evaluate(() => window.__clientFixtureApp.ctAssignmentRows.map(row => row.team.language)), ['Thai'], 'Translator sees only the assigned ClientText language while selected local language is French');
             assert.equal(await translator.getByRole('button', { name: 'Upload next version', exact: true }).count(), 0);
             assert.equal(await translator.getByRole('button', { name: 'Download and end', exact: true }).count(), 0);
+            const assignedDetails = await translator.evaluate(() => JSON.parse(JSON.stringify(window.__clientFixtureApp.managedVersionDetails)));
+            await translator.goto('about:blank');
+            store.assignRole('fixture-admin', 'fixture-translator', 'manager');
+            api.locals.collaborationRealtime.revalidate();
+            await translator.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+            await translator.waitForFunction(() => {
+                const vm = window.__clientFixtureApp;
+                return vm?.offlineStoreReady && vm.cloudUser?.role === 'manager' && !vm.workspaceInitializationActive;
+            });
+            await translator.evaluate(async () => { await window.__clientFixtureApp.activateGameVersion('poe2', { checkMigration: false }); });
+            await translator.getByRole('button', { name: version.name, exact: true }).click();
+            const promotedDetails = translator.getByRole('region', { name: 'Selected version' });
+            await promotedDetails.locator('.contentGroupTeamTable tbody tr').first().waitFor();
+            assert.deepEqual(await translator.evaluate(() => window.__clientFixtureApp.ctAssignmentRows.map(row => row.team.language).sort()),
+                languages.slice().sort(), 'A cached Thai translator promoted before reload sees every assignment without signing in again');
+            assert.equal(await translator.evaluate(() => window.__clientFixtureApp.cloudUser.language), 'Thai', 'Promotion retains the language assignment');
+            await translator.evaluate(details => { window.__clientFixtureApp.managedVersionDetails = details; }, assignedDetails);
+            assert.equal(await promotedDetails.locator('.contentGroupTeamTable tbody tr').count(), languages.length,
+                'A previously scoped details cache cannot hide the Manager catalog assignments');
+            const germanRow = promotedDetails.locator('tr[data-language="German"]');
+            await germanRow.getByRole('button', { name: 'Open editor', exact: true }).focus();
+            await translator.keyboard.press('Enter');
+            await translator.getByRole('region', { name: 'ClientText workspace' }).waitFor();
+            await translator.waitForFunction(() => {
+                const vm = window.__clientFixtureApp;
+                return !vm.ctBusy && !vm.workspaceInitializationActive && vm.ctWorkspace?.scope.language === 'German';
+            });
+            assert.equal(await translator.evaluate(() => window.__clientFixtureApp.cloudUser.language), 'Thai', 'Opening another team retains the Manager account assignment');
             assert.deepEqual(failures, [], 'Manager/translator browser script errors');
             console.log(JSON.stringify({ status: 'PASS', managerAccessOnly: true, languages: languages.length,
-                results: ['Unassigned manager publishes and opens every ClientText language', 'Manager saves Thai, collects and ends its window, reopens it, and downloads paired French workbooks', 'Translator catalog and management controls remain scoped; role policy remains admin-only'] }, null, 2));
+                results: ['Unassigned manager publishes and opens every ClientText language', 'Manager saves Thai, collects and ends its window, reopens it, and downloads paired French workbooks', 'Translator catalog and management controls remain scoped; role policy remains admin-only', 'Thai translator promoted before reload retains every assignment despite its old team cache and opens German with the keyboard'] }, null, 2));
             return;
         }
         if (turkishOnly) {
@@ -2558,6 +2586,10 @@ async function run() {
                         target: workspace?.descs?.find(file => file.filepath === 'specific_skill_stat_descriptions/explosive_grenade/fire.txt')?.translations?.French };
                 }));
                 return { ctError: vm?.ctError, uploadError: vm?.ctUploadError, managedError: vm?.managedVisibleError, activeGroup: vm?.activeContentGroup?.id,
+                    role: vm?.cloudUser?.role, assignedLanguage: vm?.cloudUser?.language, allLanguages: vm?.cloudCanAccessAllLanguages,
+                    signedIn: vm?.cloudSignedIn, catalogAccess: vm?.managedCatalogAccess, catalogLoaded: vm?.managedCatalogLoaded,
+                    game: vm?.gameVersion, gameSelected: vm?.gameVersionSelected, versions: vm?.managedVersions?.map(version => ({ id: version.id, name: version.name })),
+                    settingsVisible: vm?.showSetting, multiInstanceGate: vm?.showMultiInstanceGate,
                     clientActive: vm?.ctActive, clientEditor: vm?.ctEditor, clientSelection: vm?.ctCurrentUnit?.recordId, clientBusy: vm?.ctBusy, clientDraft: vm?.ctDraftDirty, clientNotice: vm?.ctNotice,
                     clientSelectionId: vm?.ctSelection, clientUnits: vm?.ctUnits?.length, clientIndexSize: vm?._ctUnitIndex?.size,
                     clientIndexHasSelection: vm?._ctUnitIndex?.has(vm?.ctSelection), clientSelectionRunId: vm?._ctSelectRun?.unitId,

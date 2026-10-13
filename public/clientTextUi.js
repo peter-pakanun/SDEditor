@@ -102,7 +102,35 @@
             activeContentGroup: null, ctTeamOptions: teams
         }; },
         computed: {
-            ctGroups() { return this.managedSelectedDetails?.contentGroups || this.managedSelectedVersion?.contentGroups || []; },
+            ctGroups() {
+                const version=this.managedSelectedVersion;
+                if(!version)return [];
+                const matches=candidate=>candidate?.id===version.id && (!candidate.game || candidate.game===this.gameVersion)
+                    && (candidate.branchId || 'default')===(this.branchId || 'default');
+                const details=this.managedSelectedDetails;
+                const detailGroups=!details?.version?.id || matches(details.version) ? details?.contentGroups : null;
+                const catalog=this.managedVersions?.find(matches);
+                const catalogGroups=catalog?.contentGroups || version.contentGroups;
+                if(!Array.isArray(detailGroups))return catalogGroups || [];
+                if(!Array.isArray(catalogGroups))return detailGroups;
+                const detailRevision=details?.version?.membershipRevision,catalogRevision=(catalog || version).membershipRevision;
+                const hasDetailRevision=Number.isSafeInteger(detailRevision),hasCatalogRevision=Number.isSafeInteger(catalogRevision);
+                if(hasCatalogRevision && (!hasDetailRevision || catalogRevision>detailRevision))return catalogGroups;
+                if(!hasCatalogRevision || detailRevision>catalogRevision)return detailGroups;
+                // A cached translator snapshot can contain only the assigned
+                // team. Equal membership revisions describe the same groups;
+                // retain the full Manager catalog and enrich its visible teams.
+                // A newer membership revision is authoritative, even if empty.
+                const groups=new Map(catalogGroups.map(group=>[group.id,group]));
+                for(const group of detailGroups){
+                    const existing=groups.get(group.id);
+                    if(!existing || existing===group){groups.set(group.id,group);continue;}
+                    const teams=new Map((existing.teams || []).map(team=>[team.language,team]));
+                    for(const team of group.teams || [])teams.set(team.language,team);
+                    groups.set(group.id,{...existing,...group,teams:[...teams.values()]});
+                }
+                return [...groups.values()];
+            },
             ctAssignmentRows() {
                 const version=this.managedSelectedVersion;
                 if(!version || this.managedCatalogAccess===false || (version.game && version.game!==this.gameVersion)
@@ -127,7 +155,10 @@
                 // legacy row (including presence), deduplicating its group copy.
                 // Modern SD activation also caches its teams at the top level;
                 // explicit groups remain authoritative for that cached payload.
-                const legacyFallback=!groups?.length || eligibleGroups.some(group=>group.legacyVersionId && mode(group)==='statdescription');
+                const hasGroupCatalog=Array.isArray(details?.contentGroups) || Array.isArray(version.contentGroups)
+                    || this.managedVersions?.some(candidate=>candidate.id===version.id && candidate.game===this.gameVersion
+                        && (candidate.branchId || 'default')===(this.branchId || 'default') && Array.isArray(candidate.contentGroups));
+                const legacyFallback=!hasGroupCatalog || eligibleGroups.some(group=>group.legacyVersionId && mode(group)==='statdescription');
                 if(matches && legacyFallback)for(const team of details?.teams || [])add(null,team,true,'statdescription');
                 for(const group of eligibleGroups){
                     const contentMode=mode(group);
@@ -2061,7 +2092,7 @@
                 if(group.teams?.length && !group.teams.some(team=>team.language===language) || mode(group)==='clienttext' && group.language && group.language!==language){this.ctError='This content group is not assigned to '+language+'.';return;}
                 if (mode(group) !== 'clienttext') { if(!await this.ctFlushDraft() || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return;const previousGroup=this.activeContentGroup?.contentMode==='statdescription'?this.activeContentGroup:null;this.ctFence(); return this.managedOpenStatGroup(version, group, language,previousGroup); }
                 if (!this.cloudCanAccessAllLanguages && language !== this.cloudUser?.language) return;
-                version={...version,contentGroups:this.managedSelectedDetails?.version?.id===version.id?this.managedSelectedDetails.contentGroups:version.contentGroups || []};
+                version={...version,contentGroups:this.managedSelectedVersion?.id===version.id?this.ctGroups:version.contentGroups || []};
                 const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
                 const opening=this._ctOpenRun={};
                 const initialization=activate ? this.ctBeginInitialization('Opening '+(version.name || 'selected version')+' · '+language+' ClientText',null,

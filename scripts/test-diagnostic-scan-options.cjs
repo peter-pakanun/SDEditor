@@ -75,6 +75,71 @@ test('manual scan defaults select every category except dictionary terminology',
   for (const key of CHECKS) assert.equal(editor.diagnosticScanChecks[key], key !== 'terminology', key);
 });
 
+test('manual SD scans exclude absent language blocks from errors and consistency variants', async () => {
+  const { editor } = loadEditor();
+  const absent = description('no-thai-tag', 'Fire damage {0}', 'unused');
+  delete absent.translations.Thai;
+  const translated = description('translated-peer', 'Fire damage {0}', 'ความเสียหายไฟ {0}');
+  const blank = description('blank-thai-tag', 'Other source', '');
+  const originals = new Map([absent, translated, blank].map(desc => [desc.filepath, desc]));
+  editor.workspaceSourceFile = filepath => originals.get(filepath) || null;
+  const padded = { ...absent, translations: { ...absent.translations, Thai: [''] } };
+  editor.descs = [padded, translated, blank];
+  editor.diagnosticScanChecks = only('consistency', 'variables');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanErrorFileCount, 1, 'Only the present blank Thai block is an error');
+  assert.equal(editor.diagnosticScanWarningFileCount, 0, 'Absent language tags cannot create empty consistency variants');
+  assert.equal(editor.diagnosticScanResults[absent.filepath].diagnostics.length, 0);
+  assert.equal(editor.diagnosticScanResults[translated.filepath].diagnostics.length, 0);
+  assert.deepEqual(Array.from(editor.diagnosticScanResults[blank.filepath].diagnostics, item => item.code), ['blank-translation']);
+});
+
+test('incremental consistency removes a reset absent language block even if its padded text stays empty', () => {
+  const Diagnostics = require('../public/translationDiagnostics.js');
+  const oldBlank = description('reset-to-no-tag', 'Shared source', '');
+  const translated = description('complete-peer', 'Shared source', 'Useful text');
+  const index = Diagnostics.createConsistencyIndex([oldBlank, translated], 'Thai');
+  assert.equal(index.get('Shared source').variants.size, 2);
+  const padded = { ...oldBlank, translations: { ...oldBlank.translations, Thai: [''] } };
+  const previousResults = { [oldBlank.filepath]: { englishLines: ['Shared source'], translationLines: [''] } };
+  const affected = Diagnostics.updateConsistencyIndex(index, [padded], 'Thai', previousResults, () => false);
+  assert.deepEqual([...index.get('Shared source').variants.keys()], ['Useful text']);
+  assert.equal(index.get('Shared source').entryCount, 1);
+  assert.equal(affected.has(translated.filepath), true, 'Removing the empty variant refreshes its complete peer');
+  assert.equal(Diagnostics.getConsistencyDiagnostic(index, 'Shared source', 'Useful text'), null);
+  padded.translations.Thai = ['New complete text'];
+  Diagnostics.updateConsistencyIndex(index, [padded], 'Thai', previousResults, () => true);
+  assert.equal(index.get('Shared source').entryCount, 2, 'A later complete save contributes its own current variant');
+  assert.equal(index.get('Shared source').variants.has('New complete text'), true);
+});
+
+test('a completed manual scan refreshes absent baseline resets and later complete staged translations', async () => {
+  const { editor } = loadEditor();
+  const absent = description('reset-absent-baseline', 'Shared source', 'unused');
+  delete absent.translations.Thai;
+  const visible = { ...absent, translations: { ...absent.translations, Thai: ['Different complete text'] } };
+  const peer = description('reset-complete-peer', 'Shared source', 'Useful text');
+  const originals = new Map([[absent.filepath, absent], [peer.filepath, peer]]);
+  editor.workspaceSourceFile = filepath => originals.get(filepath) || null;
+  editor.localDescs.staged = { Thai: { [absent.filepath]: { translations: ['Different complete text'] } } };
+  editor.descs = [visible, peer];
+  editor.diagnosticScanChecks = only('consistency');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  delete editor.localDescs.staged.Thai[absent.filepath];
+  visible.translations.Thai = [''];
+  editor.updateScannedDescDiagnostics(visible);
+  assert.equal(editor.diagnosticScanWarningFileCount, 0, 'The removed stage no longer contributes an empty variant');
+  assert.equal(editor.diagnosticScanErrorFileCount, 0, 'The restored absent tag is Missing work rather than an Error');
+  assert.equal(editor.diagnosticScanResults[absent.filepath].diagnostics.length, 0);
+  editor.localDescs.staged.Thai[absent.filepath] = { translations: ['A corrected complete translation'] };
+  visible.translations.Thai = ['A corrected complete translation'];
+  editor.updateScannedDescDiagnostics(visible);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2, 'A subsequent Saved translation is analyzed against its real peers');
+  assert.equal(editor.diagnosticScanErrorFileCount, 0);
+});
+
 test('shared scanner refs preserve SD modal heading and return focus without root DOM refs', () => {
   const { editor, dialog } = loadEditor();
   const focused = [], heading = { focus() { focused.push('heading'); } };

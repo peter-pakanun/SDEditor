@@ -1707,6 +1707,7 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
             filename: String(i).padStart(5, '0') + '.txt', filedir: 'normalized', stats: ['normalized_' + i], variables: ['#'], remarks: [''],
             translations: { English: ['Damage amount ' + i], Thai: ['Original damage ' + i] }, isDNT: false }));
         source[Math.min(30, count - 1)].translations.Thai = [''];
+        delete source[Math.min(31, count - 2)].translations.Thai;
         // Include one real duplicate-language choice so asset hydration verifies
         // decision content rather than only the presence of an empty array.
         const duplicateText = new TextDecoder('utf-16le').decode(descEncode(source[0]))
@@ -1798,18 +1799,39 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     const path = i => 'normalized/' + String(i).padStart(5, '0') + '.txt';
     const field = (inline, filepath) => inline ? page.locator('tr[data-filepath="' + filepath + '"] .textHL input:not([readonly]), tr[data-filepath="'
         + filepath + '"] .textHL textarea:not([readonly])').first() : page.locator('.editor .textHL input:not([readonly]), .editor .textHL textarea:not([readonly])').first();
-    const invalidPath = path(Math.min(30, count - 1)), invalidText = '\\n@\u200b';
-    const intrinsic = await page.evaluate(async filepath => {
+    const invalidPath = path(Math.min(30, count - 1)), absentPath = path(Math.min(31, count - 2)), invalidText = '\\n@\u200b';
+    const intrinsic = await page.evaluate(async ({ filepath, absentPath }) => {
         const vm = window.__normalizedApp;
         vm.selectedFileFilters = ['diagnosticError']; vm.filterDesc(); await vm.$nextTick();
-        return { errors: vm.statistic.hasDiagnosticError, manualScan: vm.diagnosticScanCompleted,
+        const errors = vm.filteredDescs.map(desc => desc.filepath);
+        vm.selectedFileFilters = ['missing']; vm.filterDesc(); await vm.$nextTick();
+        const missing = vm.filteredDescs.map(desc => desc.filepath);
+        vm.selectedFileFilters = ['diagnosticError']; vm.filterDesc(); await vm.$nextTick();
+        return { errors: vm.statistic.hasDiagnosticError, missingCount: vm.statistic.isMissing,
+            manualScan: vm.diagnosticScanCompleted, errorFiles: errors, missingFiles: missing,
             filtered: vm.filteredDescs.map(desc => desc.filepath),
+            absentTag: Object.hasOwn(vm.workspaceSourceFile(absentPath).translations, 'Thai'),
             stage: vm.localDescs.staged.Thai?.[filepath], baseline: vm.workspaceSourceFile(filepath).translations.Thai };
-    }, invalidPath);
-    assert.deepEqual(intrinsic, { errors: 1, manualScan: false, filtered: [invalidPath], stage: undefined, baseline: [''] });
+    }, { filepath: invalidPath, absentPath });
+    assert.deepEqual(intrinsic, { errors: 1, missingCount: 2, manualScan: false, errorFiles: [invalidPath],
+        missingFiles: [invalidPath, absentPath], filtered: [invalidPath], absentTag: false, stage: undefined, baseline: [''] });
     assert.equal(await page.locator('tr[data-filepath="' + invalidPath + '"]').evaluate(row => row.classList.contains('diagnosticError')), true,
         'An invalid immutable baseline appears in Error before a manual scan.');
     assert.match(await page.locator('.statusPill.error').innerText(), /Errors\s+1/);
+    const scanned = await page.evaluate(async ({ invalidPath, absentPath }) => {
+        const vm = window.__normalizedApp;
+        vm.diagnosticScanChecks = Object.fromEntries(vm.diagnosticScanTypes.map(type => [type.key, type.key === 'whitespace']));
+        await vm.scanAllDiagnostics(); vm.filterDesc(); await vm.$nextTick();
+        return { errors: vm.statistic.hasDiagnosticError, missing: vm.statistic.isMissing,
+            filtered: vm.filteredDescs.map(desc => desc.filepath), complete: vm.diagnosticScanCompleted,
+            absentHasScanError: !!vm.diagnosticScanResults[absentPath]?.hasDiagnosticError,
+            blankHasScanError: !!vm.diagnosticScanResults[invalidPath]?.hasDiagnosticError,
+            absentTag: Object.hasOwn(vm.workspaceSourceFile(absentPath).translations, 'Thai') };
+    }, { invalidPath, absentPath });
+    assert.deepEqual(scanned, { errors: 1, missing: 2, filtered: [invalidPath], complete: true,
+        absentHasScanError: false, blankHasScanError: true, absentTag: false },
+    'A real manual scan leaves untagged Missing files out of Errors.');
+    results.push({ scenario: 'real Vue missing language tag is Missing only before and after manual scan', missing: 2, errors: 1 });
     await page.evaluate(async filepath => {
         const vm = window.__normalizedApp; vm.inlineEditor = false; vm.shiftEnterSave = true;
         await vm.editFile(filepath, true);
@@ -1852,6 +1874,25 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     assert.deepEqual(completed, { stage: ['Completed SD translation'], errors: 0, filtered: [], baseline: [''], missing: false, saved: true });
     results.push({ scenario: 'real Vue intrinsic Error filter and strict Save & close preserve focused draft until complete text clears Error',
         rejectedWorkerDispatches: 0, immutableBlankBaselineRetained: true });
+    const exportedAbsent = await page.evaluate(async absentPath => {
+        const vm = window.__normalizedApp, originalConfirm = vm.appConfirm, originalSaveAs = window.saveAs;
+        let captured;
+        vm.appConfirm = async () => true; window.saveAs = (blob, name) => { captured = { blob, name }; };
+        try {
+            await vm.exportZip(true);
+            if (!captured) throw new Error('Full export did not create a ZIP.');
+            const zip = await JSZip.loadAsync(await captured.blob.arrayBuffer());
+            const bytes = await zip.file(absentPath).async('uint8array');
+            const desc = StatDescCodec.parseText(absentPath, StatDescCodec.decodeUTF16(bytes), 'Thai', { strict: true });
+            return { exportedTag: Object.hasOwn(desc.translations, 'Thai'),
+                baselineTag: Object.hasOwn(vm.workspaceSourceFile(absentPath).translations, 'Thai'),
+                english: desc.translations.English, filename: captured.name };
+        } finally { vm.appConfirm = originalConfirm; window.saveAs = originalSaveAs; }
+    }, absentPath);
+    assert.deepEqual(exportedAbsent, { exportedTag: false, baselineTag: false,
+        english: ['Damage amount ' + Math.min(31, count - 2)], filename: 'StatDescriptions_Translated.zip' },
+    'A full export keeps absent language tags absent rather than exporting padded blank UI entries.');
+    results.push({ scenario: 'full ZIP export retains untranslated tag absence without writing destructive blank blocks' });
     for (const [i, navigation] of [
         { key: 'F2', from: 0, to: 1, inline: false }, { key: 'F1', from: 4, to: 3, inline: false },
         { key: 'Control+ArrowDown', from: 10, to: 11, inline: true }, { key: 'Control+ArrowUp', from: 14, to: 13, inline: true },

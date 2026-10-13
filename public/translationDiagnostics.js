@@ -485,19 +485,20 @@
     return index;
   }
 
-  function updateConsistencyIndex(index, descs, lang, previousResults) {
+  function updateConsistencyIndex(index, descs, lang, previousResults, includesTranslation = null) {
     const changed = Array.isArray(descs) ? descs : [];
     const changedPaths = new Set(changed.map(desc => desc.filepath));
     const affectedPaths = new Set(changedPaths);
     const sources = new Set();
     for (const desc of changed) {
       const previous = previousResults[desc.filepath];
+      const present = !includesTranslation || includesTranslation(desc);
       const english = desc.translations?.English || [];
       const translations = desc.translations?.[lang] || [];
       for (let i = 0; i < Math.max(english.length, previous?.englishLines?.length || 0); i++) {
         const source = normalizeConsistencyText(english[i]);
         const oldSource = normalizeConsistencyText(previous?.englishLines?.[i]);
-        if (source === oldSource && normalizeConsistencyText(translations[i])
+        if (present && source === oldSource && normalizeConsistencyText(translations[i])
           === normalizeConsistencyText(previous?.translationLines?.[i])) continue;
         if (source) sources.add(source);
         if (oldSource) sources.add(oldSource);
@@ -520,6 +521,9 @@
       if (!group.entryCount) index.delete(source);
     }
     for (const desc of changed) {
+      // A staging reset can restore a baseline without this language tag.
+      // Remove its previous variants above, but do not index display padding.
+      if (includesTranslation && !includesTranslation(desc)) continue;
       const english = desc.translations?.English || [];
       const translations = desc.translations?.[lang] || [];
       for (let blockIndex = 0; blockIndex < english.length; blockIndex++) {

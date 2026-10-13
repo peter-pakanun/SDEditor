@@ -1864,7 +1864,7 @@ const config = Vue.defineComponent({
         if (candidateMatchesDraft) this.refreshEditorDiagnostics();
         const candidateErrors = candidate && !candidateMatchesDraft
           ? this.analyzeDescDiagnostics({ ...desc, translations: { ...desc.translations, [this.lang]: lines } },
-            this.lang, null, defaultDiagnosticScanChecks()).errorCount : 0;
+            this.lang, null, defaultDiagnosticScanChecks(), { translationCandidate: true }).errorCount : 0;
         if (candidate && (candidateErrors || (candidateMatchesDraft && this.collectEditorDiagnostics('error').length))) {
           this.appAlert('The dropped translation has errors against the current source. Correct them and save a replacement.'); return;
         }
@@ -2608,9 +2608,19 @@ const config = Vue.defineComponent({
       }
       return diagnostics;
     },
-    analyzeDescDiagnostics(desc, lang = this.lang, consistencyIndex = null, checks = this.diagnosticScanChecks) {
+    committedTranslationIssues(desc, lang = this.lang) {
+      const baseline = this.workspaceSourceFile?.(desc.filepath);
+      return baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, lang).translationIssues
+        : window.StatDescCodec.baselineTranslationIssues(desc, lang);
+    },
+    analyzeDescDiagnostics(desc, lang = this.lang, consistencyIndex = null, checks = this.diagnosticScanChecks, options = {}) {
       const englishLines = Array.isArray(desc?.translations?.English) ? desc.translations.English : [];
       const translationLines = Array.isArray(desc?.translations?.[lang]) ? desc.translations[lang] : [];
+      const issues = options.translationCandidate ? window.StatDescCodec.baselineTranslationIssues(desc, lang)
+        : this.committedTranslationIssues(desc, lang);
+      if (!issues.languageBlockPresent) return { warningCount: 0, errorCount: 0, diagnostics: [], diagnosticsTruncated: 0,
+        consistencyDiagnostics: [], terminologyDiagnostics: [], lang, englishLines: [...englishLines], translationLines: [],
+        hasDiagnosticWarning: false, hasDiagnosticError: false };
       let warningCount = 0;
       let errorCount = 0;
       const terminologyDiagnostics = [];
@@ -2756,7 +2766,8 @@ const config = Vue.defineComponent({
         .filter(desc => desc && results[desc.filepath]);
       if (!changed.length) return [];
       const affected = checks.consistency
-        ? window.TranslationDiagnostics.updateConsistencyIndex(cache.consistencyIndex, changed, this.lang, results)
+        ? window.TranslationDiagnostics.updateConsistencyIndex(cache.consistencyIndex, changed, this.lang, results,
+          desc => this.committedTranslationIssues(desc, this.lang).languageBlockPresent)
         : new Set(changed.map(desc => desc.filepath));
       // Refresh saved files and peers of changed entries, including clean peers
       // that now have a conflict. Retain unrelated findings and scan selections.
@@ -2897,7 +2908,7 @@ const config = Vue.defineComponent({
         await new Promise(resolve => setTimeout(resolve, 0));
         if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
         const consistencyIndex = checks.consistency
-          ? window.TranslationDiagnostics.createConsistencyIndex(descs, scanLang) : null;
+          ? window.TranslationDiagnostics.createConsistencyIndex(descs.filter(desc => this.committedTranslationIssues(desc, scanLang).languageBlockPresent), scanLang) : null;
         this.diagnosticScanPhase = 'Checking files…';
         await new Promise(resolve => setTimeout(resolve, 0));
         for (let i = 0; i < descs.length; i++) {
@@ -6295,9 +6306,8 @@ const config = Vue.defineComponent({
           if (hiddenDNT && !(showDroppedConflicts && droppedReviewPaths.has(desc.filepath))) return record;
           const baseline = workspace?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
           const state = baseline ? window.WorkspaceState.workspaceFile(workspace, baseline, lang) : desc;
-          const issues = window.StatDescCodec.translationIssues(Array.isArray(state.translations) ? state.translations : desc.translations?.[lang],
-            desc.translations?.English?.length || 0);
-          const invalidTranslation = !issues.valid;
+          const issues = baseline ? state.translationIssues : window.StatDescCodec.baselineTranslationIssues(desc, lang);
+          const invalidTranslation = issues.languageBlockPresent && !issues.valid;
           if (!hiddenDNT) {
             for (const field of Object.keys(counts)) record.counts[field] = !!state[field];
           }
@@ -6337,7 +6347,7 @@ const config = Vue.defineComponent({
               hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
               hasDiagnosticError: invalidTranslation || !!diagnosticResult?.hasDiagnosticError,
               diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
-              diagnosticErrorCount: Math.max(Number(diagnosticResult?.errorCount || 0), issues.blankEntries.length + Number(issues.entryCountMismatch)),
+              diagnosticErrorCount: Math.max(Number(diagnosticResult?.errorCount || 0), invalidTranslation ? issues.blankEntries.length + Number(issues.entryCountMismatch) : 0),
               diagnosticScanTitle: [invalidTranslation ? 'Incomplete StatDescription translation. '
                 + (issues.blankEntries.length ? 'Blank entries: ' + issues.blankEntries.join(', ') + '. ' : '')
                 + (issues.entryCountMismatch ? 'Entry count differs from English. ' : '')
@@ -7748,8 +7758,10 @@ const config = Vue.defineComponent({
         this.appAlert(`There're no files to be export!`);
         return;
       }
-      const invalidFiles = descsToExport.filter(desc => !window.StatDescCodec.translationIssues(
-        desc.translations?.[this.lang], desc.translations?.English?.length || 0).valid);
+      const invalidFiles = descsToExport.filter(desc => {
+        const issues = this.committedTranslationIssues(desc, this.lang);
+        return issues.languageBlockPresent && !issues.valid;
+      });
       if (invalidFiles.length) {
         await this.appAlert('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. '
           + 'Complete every entry before exporting.\n\n' + invalidFiles.slice(0, 12).map(desc => desc.filepath).join('\n'));
@@ -7760,7 +7772,14 @@ const config = Vue.defineComponent({
       let vueThis = this;
       let zip = new JSZip();
       for (const desc of descsToExport) {
-        let buffer = descEncode(desc);
+        const translations = { ...desc.translations };
+        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
+        const committed = baseline && window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang);
+        // The editor displays placeholders for an absent original block. A full
+        // export must retain that absence instead of creating blank game text.
+        if (!this.committedTranslationIssues(desc, this.lang).languageBlockPresent) delete translations[this.lang];
+        else if (committed) translations[this.lang] = [...committed.translations];
+        let buffer = descEncode({ ...desc, translations });
         zip.file(desc.filepath, buffer);
       }
       let zippedBuffer = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, function (metadata) {

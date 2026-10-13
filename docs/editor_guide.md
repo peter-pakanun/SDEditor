@@ -105,7 +105,7 @@ Status filters are hidden by default. Use the filter icon beside search to show 
 
 Click **Conflicting dropped copies need review…** in the workspace or editor status bar to show only files whose dropped copies need a decision or whose saved result needs another review before sharing. This clears the text search and activates a special filter that is hidden from the ordinary status choices. It includes affected DNT files while preserving the **Hide DNT entries** setting. Files removed from the current source show their competing preserved copies below the list, where you can choose a copy without staging a translation. Click the **Conflicting dropped copies ×** chip to return to the default search and filters.
 
-Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Errors**, **Dropped**, **Scan warnings**, **Revised**, **Saved**. Unsaved edits have no separate counter. Errors include incomplete committed SD files immediately, together with manual scan errors. Scan warnings appear during/after a scan. Clearing a scan retains intrinsic completeness errors. **Missing**, **Dropped**, **Saved**, **Revised**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. The current version name opens the source chooser; unnamed versions show the shortened ZIP hash. Hover over or focus the name/hash for full version details. A managed deadline reminder follows **Saved**. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
+Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Errors**, **Dropped**, **Scan warnings**, **Revised**, **Saved**. Unsaved edits have no separate counter. Errors include present incomplete committed SD language blocks immediately, together with manual scan errors. An absent selected-language tag counts as Missing only. Scan warnings appear during/after a scan. Clearing a scan retains intrinsic completeness errors. **Missing**, **Dropped**, **Saved**, **Revised**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. The current version name opens the source chooser; unnamed versions show the shortened ZIP hash. Hover over or focus the name/hash for full version details. A managed deadline reminder follows **Saved**. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
 
 ### File Status Indicators
 
@@ -121,8 +121,9 @@ In the file list, colors indicate each file's state. The bottom navigation bar s
 
 | Counter | Meaning                                                                                |
 |---------|----------------------------------------------------------------------------------------|
-| Missing | Current committed translation has blank lines or doesn't match English line count     |
-| Saved   | A staged translation exists for this language, including blanks or unchanged confirmations |
+| Missing | The selected language tag is absent, or its committed block has blanks or a different English entry count |
+| Saved   | A complete staged SD translation exists for this language, including unchanged complete confirmations |
+| Error   | A present committed SD language block is incomplete, or a manual scan reports an error |
 | Revised | Saved text differs from a complete original ZIP translation, for a file that has not been Dropped in this source version |
 | Dropped | An unresolved dropped copy exists for this file and language, even when its current translation is complete |
 | Unchanged | Current translation is complete, with no staged save or unresolved dropped copy      |
@@ -133,16 +134,17 @@ To remove a saved translation, open the full editor, use the red **Delete staged
 
 If deletion cannot verify the saved text, it requires a fresh review instead of repeatedly retrying the old decision. The saved translation and private drafts remain available. **Review saved translation** opens the affected file; **Cancel deletion requests** keeps the saved work and cancels only rejected deletion requests. If local and shared saved text disagree, review and save the translation you want to keep before confirming deletion again. Use **Review retained edits** from an actionable warning to compare competing private copies; deleting a staged translation does not resolve a draft conflict.
 
-**Revised** identifies corrections outside this source version's Missing or Dropped workload. A file that started Missing stays **Saved** without becoming **Revised**, even after you complete it and edit it again. A file that was Dropped in this source version also stays outside **Revised** after confirmation, replacement, or discard. For an eligible file, saving exactly its original ZIP translation is **Saved** without **Revised**; saving different text is **Saved** and **Revised**. A saved blank can still be **Missing**. See the [workspace status contract](workspace_statuses.md) for examples and the precise scope.
+**Revised** identifies corrections outside this source version's Missing or Dropped workload. A file that started Missing stays **Saved** without becoming **Revised**, even after you complete it and edit it again. A file that was Dropped in this source version also stays outside **Revised** after confirmation, replacement, or discard. For an eligible file, saving exactly its original ZIP translation is **Saved** without **Revised**; saving different text is **Saved** and **Revised**. Every staged SD entry must contain text. See the [workspace status contract](workspace_statuses.md) for examples and the precise scope.
 
 #### What “Missing” Actually Means
 
 “Missing” is calculated from your current committed translation: the staged save, if one exists, otherwise the original ZIP translation.
 
-- Any blank/empty translation line → Missing
+- No selected-language tag in the original ZIP → Missing only
+- A present language block with any blank/empty translation line → Missing + Error
 - Different number of lines compared to English → Missing
 
-So it is “missing translation content”, not “missing file”.
+Missing describes translation work, not a missing file. A present block with a different entry count is also an Error. An absent tag has no quoted translation to classify as blank; its empty editor fields are only display padding. Complete every field before saving a new translation.
 
 ### Opening a File
 
@@ -188,7 +190,7 @@ ClientText uses this same scanner, with **Records with findings** and worksheet,
 
 Completed results show warning/error totals and a paginated list of affected files, with entry and column details. Expand additional issues when needed, or click **Open file** to inspect a translation in the editor. Reopening the modal retains the completed results until a workspace change clears them. **Scan again** uses the currently selected checks. The file list's diagnostic warning/error status filters also help you focus on affected files.
 
-The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations count as differences. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
+The scan also warns about **inconsistent translations**: when two or more complete English entries are identical but their translations differ, every entry in that group receives a warning. This includes duplicates within one file and across different files. Case, spacing, punctuation, tags, and blank-versus-filled translations in present language blocks count as differences. Absent committed SD language tags are excluded from scan errors and consistency comparisons; empty display fields do not create a translation variant. Equivalent escaped and actual line breaks compare equally. Multiline and table entries are compared as complete entries, including table separators; matching fragments alone do not trigger a warning.
 
 Open a flagged file and click **Compare & resolve** below the affected block. The comparison shows the full versions, their file locations and entry counts, and an inline diff. Pick another version from **Compare with** when there are more than two. Changes are highlighted character by character, including Thai text; enable **Show spaces & line breaks** to inspect small formatting differences.
 
@@ -468,7 +470,7 @@ If you see a keyword in the English text that isn't in your Dictionary yet:
 
 ### Missing Fields
 
-An SD file with any blank or whitespace-only translation entry is a destructive error. Save is blocked for the whole file, even if other entries are useful. The local draft stays editable and the previous committed translation remains intact. Incomplete baseline translations show Missing and Error immediately. ClientText permits blank fields. Existing incomplete SD saves are removed from Saved and retained in scoped recovery. Open History and choose **Recover into draft** to align and complete their old text. Drafts and historical originals can contain blanks for repair; they cannot become a new SD save or export.
+An SD file with any blank or whitespace-only translation entry is a destructive error. Save is blocked for the whole file, even if other entries are useful. The local draft stays editable and the previous committed translation remains intact. An original ZIP without the selected language tag shows Missing only. A present language block with blanks or a different English entry count shows Missing and Error immediately. Drafts and recovery/promotion candidates require complete text before Save even when the original tag was absent. ClientText permits blank fields. Existing incomplete SD saves are removed from Saved and retained in scoped recovery. Open History and choose **Recover into draft** to align and complete their old text. Drafts and historical originals can contain blanks for repair; they cannot become a new SD save or export. Full export preserves an untouched absent language tag without adding blank translation entries.
 
 ### Line Count Mismatch
 

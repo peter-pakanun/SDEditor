@@ -28,6 +28,32 @@ test('SD completeness rejects every blank entry without rewriting meaningful raw
   assert.deepEqual(codec.translationIssues(['หนึ่ง'], 2).blankEntries, [2]);
   assert.equal(codec.translationIssues(['หนึ่ง', 'สอง'], 1).valid, false);
 });
+
+test('baseline completeness distinguishes an absent language tag from a tagged incomplete block', () => {
+  for (const parser of [codec, browser(), require(vendorPath)]) {
+    const englishOnly = parser.parseText('source/absent.txt', source.split('\nlang "Thai"')[0], 'Thai', { strict: true });
+    const original = plain(englishOnly);
+    const absent = parser.baselineTranslationIssues(englishOnly, 'Thai');
+    assert.equal(absent.languageBlockPresent, false);
+    assert.equal(absent.valid, false, 'A missing language is still untranslated.');
+    assert.equal(englishOnly.isMissing, true);
+    assert.equal(Object.hasOwn(englishOnly.translations, 'Thai'), false);
+    for (const values of [[], [''], [' \t'], ['\\n@\u200b'], ['first', '']]) {
+      const tagged = { translations: { English: ['One', 'Two'], Thai: values } };
+      const issues = parser.baselineTranslationIssues(tagged, 'Thai');
+      assert.equal(issues.languageBlockPresent, true);
+      assert.equal(issues.valid, false);
+    }
+    const inherited = { translations: Object.assign(Object.create({ Thai: [''] }), { English: ['One'] }) };
+    assert.equal(parser.baselineTranslationIssues(inherited, 'Thai').languageBlockPresent, false,
+      'Only an actual own language block is baseline evidence.');
+    assert.equal(parser.baselineTranslationIssues({ translations: { English: ['One'], Thai: ['one'] } }, 'Thai').valid, true);
+    assert.deepEqual(plain(englishOnly), original, 'Checking a missing language never manufactures a blank block.');
+    const encoded = parser.decodeUTF16(parser.descEncode(englishOnly));
+    assert.doesNotMatch(encoded, /lang "Thai"/);
+    assert.equal(Object.hasOwn(parser.parseText(englishOnly.filepath, encoded, 'Thai', { strict: true }).translations, 'Thai'), false);
+  }
+});
 function browser() {
   const context = vm.createContext({ window: {}, crypto: webcrypto, TextEncoder, TextDecoder });
   vm.runInContext(browserSource, context, { filename: 'statDescCodec.js' });
