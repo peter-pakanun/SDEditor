@@ -739,10 +739,15 @@ test('an alias across source histories resumes a queued reviewed save for the sa
       promoteDropped: { id: yours.id, revision: yours.revision, targetSourceHash: hash } };
     if (wire) op.wire = { mutationId: op.id, origin: 'save', promoteDropped: copy(op.promoteDropped),
       files: [{ filepath: 'a.txt', baseRevision: base.revision, translations: ['reviewed'], needsReview: false }] };
+    W.stageTranslation(store.workspace, saved, 'Thai', { source, sourceHash: hash,
+      promoteDropped: { id: shared.id, revision: shared.revision, targetSourceHash: hash } });
+    const originalWire = copy(op.wire);
     const original = server.request.bind(server);
     client.request = async (path, options) => {
       if (path.endsWith('/mutations') && options.body.promoteDropped?.id === yours.id) {
-        server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared);
+        server.requests.push({ path, options: copy(options) });
+        if (wire) assert.deepEqual(options.body, originalWire);
+        throw candidateConflict(shared);
       }
       return original(path, options);
     };
@@ -751,7 +756,10 @@ test('an alias across source histories resumes a queued reviewed save for the sa
     assert.equal(client.room().outbox.length, 0);
     assert.deepEqual(client.snapshot().droppedReviewPaths, []);
     const requests = server.requests.filter(request => request.path.endsWith('/mutations'));
+    assert.equal(requests.length, wire ? 2 : 1);
+    if (wire) assert.deepEqual(requests[0].options.body, originalWire);
     assert.equal(requests.at(-1).options.body.promoteDropped.id, shared.id);
+    assert.ok(requests.every(request => request.options.body.mutationId === op.id));
     assert.ok(requests.every(request => request.options.body.files[0].baseRevision === base.revision));
   });
 });
@@ -859,7 +867,193 @@ test('successive identical candidate aliases keep the original explicit recovery
   assert.equal(server.records[0].status, 'promoted');
 });
 
-test('automatic consolidation preserves a prior review decision and resumes an explicit discard for equal text', async t => {
+async function persistedReviewedPromotion(t, status = 'needs_candidate_review') {
+  const fixtureState = fixture(), { client, store, server } = fixtureState;
+  t.after(() => client.destroy());
+  drop(store); await client.syncDropped(client.epoch, { force: true });
+  const original = copy(store.workspace.droppedArchive['server-id']);
+  server.offline = true;
+  await client.save({ files: [{ filepath: 'a.txt', translations: ['reviewed'], trackedForExport: true }],
+    promoteDropped: { id: original.id, revision: original.revision, targetSourceHash: hash } });
+  const pending = store.state.rooms[client.key].outbox[0];
+  pending.status = status;
+  const shared = { ...copy(original), id: 'replacement', revision: 3, originSourceHash: 'c'.repeat(64) };
+  shared.snapshot.remarks = ['current source metadata differs'];
+  server.records = [shared]; server.offline = false; client.lastDroppedSync = 0;
+  client.state = copy(store.state);
+  return { ...fixtureState, original, pending, shared };
+}
+
+test('persisted equivalent review flags resume the exact saved promotion with or without a conflict record', async t => {
+  for (const scenario of ['needs-with-conflict', 'needs-without-conflict', 'candidate-without-conflict']) await t.test(scenario, async t => {
+    const { client, store, server, original, pending, shared } = await persistedReviewedPromotion(t,
+      scenario.startsWith('needs') ? 'needs_candidate_review' : 'candidate_conflict');
+    const base = copy(pending.files[0].base), saved = copy(store.workspace.staged.Thai['a.txt'].translations);
+    const expectedPromotion = { id: shared.id, revision: shared.revision, targetSourceHash: hash };
+    if (scenario === 'needs-with-conflict') W.recordDroppedConflict(store.workspace, { kind: 'promotion', operationId: pending.id,
+      filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours: copy(store.workspace.droppedArchive[original.id]), shared });
+    assert.equal(W.sameDroppedContent(original, shared), true);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(client.room().outbox.length, 0);
+    assert.equal(store.workspace.droppedConflicts.Thai?.['a.txt'], undefined);
+    assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, saved);
+    assert.deepEqual(server.file.translations, saved);
+    assert.equal(server.records[0].status, 'promoted');
+    const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+    assert.equal(mutations.length, 1);
+    assert.equal(mutations[0].options.body.mutationId, pending.id);
+    assert.equal(mutations[0].options.body.files[0].baseRevision, base.revision);
+    assert.deepEqual(mutations[0].options.body.promoteDropped, expectedPromotion);
+  });
+});
+
+test('persisted legacy review aliases resume equal text while keeping the original recovery and shared-file base', async t => {
+  for (const prepared of [false, true]) await t.test('prepared:' + prepared, async t => {
+    const { client, store, server, original, pending, shared } = await persistedReviewedPromotion(t, 'pending');
+    const expectedPromotion = { id: shared.id, revision: shared.revision, targetSourceHash: hash };
+    let originalWire;
+    if (prepared) {
+      await client.prepare(pending.id, client.epoch);
+      assert.ok(store.state.rooms[client.key].outbox[0].wire);
+      originalWire = copy(store.state.rooms[client.key].outbox[0].wire);
+      const request = server.request.bind(server);
+      client.request = async (path, options) => {
+        if (path.endsWith('/mutations') && options.body.promoteDropped?.id === original.id) {
+          server.requests.push({ path, options: copy(options) });
+          assert.deepEqual(options.body, originalWire, 'An uncertain prepared request must replay its exact original bytes.');
+          throw candidateConflict(shared);
+        }
+        return request(path, options);
+      };
+    }
+    W.acceptDropped(store.workspace, [shared], { game: 'poe1', language: 'Thai', acknowledge: true,
+      acknowledgeId: original.id, preserveOriginal: true });
+    store.workspace.droppedAliases[original.id].requiresReview = true;
+    const retained = copy(store.workspace.droppedArchive[original.id]), base = copy(pending.files[0].base);
+    client.state = copy(store.state);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(client.room().outbox.length, 0);
+    assert.equal(store.workspace.droppedAliases[original.id].requiresReview, undefined);
+    assert.deepEqual(store.workspace.droppedArchive[original.id].snapshot, retained.snapshot);
+    const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+    assert.equal(mutations.length, prepared ? 2 : 1);
+    if (prepared) assert.deepEqual(mutations[0].options.body, originalWire);
+    for (const mutation of mutations) {
+      assert.equal(mutation.options.body.mutationId, pending.id);
+      assert.equal(mutation.options.body.files[0].baseRevision, base.revision);
+    }
+    assert.deepEqual(mutations.at(-1).options.body.promoteDropped, expectedPromotion);
+    assert.deepEqual(server.file.translations, ['reviewed']);
+  });
+});
+
+test('persisted review repair retains genuinely different copy decisions and unavailable captured evidence', async t => {
+  for (const scenario of ['different-selected-copy', 'missing-original-snapshot', 'different-english', 'alias-revision-mismatch']) await t.test(scenario, async t => {
+    const { client, store, server, original, pending, shared } = await persistedReviewedPromotion(t);
+    if (scenario === 'different-selected-copy') {
+      shared.snapshot.translations = ['different preserved text'];
+      W.recordDroppedConflict(store.workspace, { kind: 'promotion', operationId: pending.id, filepath: 'a.txt', language: 'Thai',
+        targetSourceHash: hash, yours: copy(store.workspace.droppedArchive[original.id]), shared });
+      W.resolveDroppedConflict(store.workspace, 'a.txt', 'Thai', 'shared', shared);
+    } else if (scenario === 'missing-original-snapshot') delete store.workspace.droppedArchive[original.id].snapshot;
+    else if (scenario === 'different-english') shared.snapshot.english = ['Different preserved English'];
+    else store.workspace.droppedAliases[original.id] = { id: shared.id, fromRevision: original.revision + 1,
+      revision: shared.revision, targetSourceHash: hash, requiresReview: true };
+    server.records = [shared]; client.state = copy(store.state);
+    const saved = copy(store.workspace.staged.Thai['a.txt']);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+    assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
+    assert.deepEqual(store.workspace.staged.Thai['a.txt'], saved);
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  });
+});
+
+test('keeping a genuinely different local dropped copy requires a fresh save after its replacement upload', async t => {
+  const { client, store, server, original, pending, shared } = await persistedReviewedPromotion(t, 'candidate_conflict');
+  shared.snapshot.translations = ['a different competing dropped copy']; server.records = [shared];
+  W.recordDroppedConflict(store.workspace, { kind: 'promotion', operationId: pending.id, filepath: 'a.txt', language: 'Thai',
+    targetSourceHash: hash, yours: copy(store.workspace.droppedArchive[original.id]), shared });
+  await client.resolveDroppedConflict('a.txt', 'local', shared);
+  await client.retry();
+  const selected = W.droppedForFile(store.workspace, 'a.txt', 'Thai');
+  assert.ok(selected);
+  assert.deepEqual(selected.snapshot.translations, original.snapshot.translations);
+  assert.equal(server.requests.filter(request => request.options.method === 'PUT').length, 2,
+    'The original upload and the explicit replacement upload both completed.');
+  assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
+  assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, ['reviewed']);
+  const saved = await client.save({ files: [{ filepath: 'a.txt', translations: ['reviewed'], trackedForExport: true }],
+    promoteDropped: { id: selected.id, revision: selected.revision, targetSourceHash: hash } });
+  assert.equal(saved.status, 'synced');
+  assert.equal(client.room().outbox.length, 0);
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+  assert.equal(mutations.length, 1);
+  assert.notEqual(mutations[0].options.body.mutationId, pending.id);
+});
+
+test('equal resolved candidate tombstones retain the original shared-file revision guard', async t => {
+  for (const status of ['promoted', 'discarded']) await t.test(status, async t => {
+    const { client, store, server, original, pending } = await persistedReviewedPromotion(t);
+    const resolved = { ...copy(original), status, revision: original.revision + 1, snapshot: null };
+    server.records = [resolved];
+    server.file = P.fileState({ filepath: 'a.txt', translations: ['newer shared translation'], revision: pending.files[0].base.revision + 1 });
+    store.state.rooms[client.key].shared['a.txt'] = copy(server.file); client.state = copy(store.state);
+    const originalBase = copy(pending.files[0].base), saved = copy(store.workspace.staged.Thai['a.txt'].translations);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(client.room().outbox[0].status, 'conflict');
+    assert.equal(client.room().conflicts.length, 1);
+    assert.deepEqual(client.room().conflicts[0].base, originalBase);
+    assert.deepEqual(client.room().conflicts[0].shared.translations, ['newer shared translation']);
+    assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, saved);
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+    assert.equal(server.records[0].status, status);
+    assert.deepEqual(server.file.translations, ['newer shared translation']);
+  });
+});
+
+test('persisted equivalent reviews cannot supersede newer staged text or a later queued save', async t => {
+  for (const scenario of ['newer-stage', 'newer-operation']) await t.test(scenario, async t => {
+    const { client, store, server, pending } = await persistedReviewedPromotion(t);
+    if (scenario === 'newer-stage') store.workspace.staged.Thai['a.txt'].translations = ['newer local result'];
+    else store.state.rooms[client.key].outbox.push({ id: 'later-save', status: 'pending', origin: 'save',
+      files: [{ base: copy(pending.files[0].base), yours: copy(pending.files[0].yours) }] });
+    client.state = copy(store.state);
+    const saved = copy(store.workspace.staged.Thai['a.txt']);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+    assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
+    assert.deepEqual(store.workspace.staged.Thai['a.txt'], saved);
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+    if (scenario === 'newer-operation') assert.ok(client.room().outbox.some(operation => operation.id === 'later-save'));
+  });
+});
+
+test('persisted equal review repair remains fenced by candidate and promotion scope', async t => {
+  for (const scenario of ['game', 'language', 'branch', 'promotion-source', 'workspace-account', 'workspace-source']) await t.test(scenario, async t => {
+    const { client, store, server, pending, shared } = await persistedReviewedPromotion(t);
+    if (scenario === 'game') shared.game = 'poe2';
+    else if (scenario === 'language') shared.language = 'German';
+    else if (scenario === 'branch') shared.branchId = 'release';
+    else if (scenario === 'promotion-source') pending.promoteDropped.targetSourceHash = oldHash;
+    else if (scenario === 'workspace-account') store.workspace.collaborationAccountId = 'another-account';
+    else store.workspace.sourceHash = oldHash;
+    server.records = [shared]; client.state = copy(store.state);
+    await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+    assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+    assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, ['reviewed']);
+  });
+});
+
+test('automatic consolidation preserves a genuinely different prior copy decision and resumes an explicit discard for equal text', async t => {
   for (const decision of ['needs_candidate_review', 'discard']) await t.test(decision, async t => {
     const { client, store, server } = fixture(); t.after(() => client.destroy());
     drop(store); await client.syncDropped(client.epoch, { force: true });
@@ -872,8 +1066,10 @@ test('automatic consolidation preserves a prior review decision and resumes an e
     if (pending) pending.status = decision;
     client.state = copy(store.state);
     const shared = { ...copy(originalCandidate), id: 'replacement', revision: 3 };
+    if (decision === 'needs_candidate_review') shared.snapshot.translations = ['a different selected dropped copy'];
     W.recordDroppedConflict(store.workspace, { kind: decision === 'discard' ? 'discard' : 'promotion', operationId: pending?.id,
       filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours: copy(store.workspace.droppedArchive[originalCandidate.id]), shared });
+    if (decision === 'needs_candidate_review') W.resolveDroppedConflict(store.workspace, 'a.txt', 'Thai', 'shared', shared);
     server.records = [shared]; server.offline = false; client.lastDroppedSync = 0;
     await client.retry();
     if (decision === 'discard') {

@@ -22,7 +22,7 @@ function harness() {
     },
     Vue: { nextTick(fn) { fn?.(); return Promise.resolve(); }, defineComponent(value) { config = value; return value; },
       createApp: () => ({ component() {}, directive() {}, mount() {} }) } });
-  for (const file of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'index.js']) {
+  for (const file of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationUi.js', 'collaborationIntegration.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', file), 'utf8'), context, { filename: file });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -1842,6 +1842,72 @@ test('resolving competing dropped copies reopens a clean editor but preserves an
       assert.equal(e.editorBlocks[0].translation, 'Shared preserved translation');
     }
   }
+});
+
+test('a failed dropped-copy decision keeps its notice through presence and cancellation, then clears after a successful retry', async () => {
+  const { editor: e, desc } = droppedConflictFixture();
+  const resolve = e._collaboration.resolveDroppedConflict;
+  e._collaboration.resolveDroppedConflict = async () => { throw new Error('The shared dropped copy changed. Review both copies again.'); };
+  await e.resolveDroppedTranslationConflict('shared');
+  const message = e.collaborationNotice;
+  assert.match(message, /Could not resolve the dropped copies: The shared dropped copy changed/);
+  assert.equal(e._collaborationDroppedResolutionFailure.filepath, desc.filepath);
+  e.collabReceiveState({ ...e.collaborationState, peers: [{ sessionId: 'another-translator' }], error: '' });
+  assert.equal(e.collaborationNotice, message, 'An unrelated successful request cannot clear a failed copy decision.');
+  e.appConfirm = async () => false;
+  await e.resolveDroppedTranslationConflict('shared');
+  assert.equal(e.collaborationNotice, message, 'Cancelling a retry preserves the unresolved failure.');
+  e.appConfirm = async () => true;
+  e._collaboration.resolveDroppedConflict = resolve;
+  await e.resolveDroppedTranslationConflict('shared');
+  assert.equal(e.editorDroppedConflict, null);
+  assert.equal(e.collaborationNotice, '');
+  assert.equal(e._collaborationDroppedResolutionFailure, null);
+});
+
+test('successful dropped-copy decisions preserve errors for other files and newer unrelated failures', async () => {
+  for (const differentFile of [false, true]) {
+    const { editor: e, desc } = droppedConflictFixture();
+    const message = 'Could not resolve the dropped copies: unresolved copy';
+    e._collaborationDroppedResolutionFailure = { filepath: differentFile ? 'another-file.txt' : desc.filepath,
+      context: e.captureCollaborationContext(), message };
+    e.collaborationNotice = differentFile ? message : 'Dictionary access expired';
+    await e.resolveDroppedTranslationConflict('shared');
+    assert.equal(e.collaborationNotice, differentFile ? message : 'Dictionary access expired');
+    assert.equal(!!e._collaborationDroppedResolutionFailure, differentFile);
+  }
+});
+
+test('automatic dropped-copy consolidation clears its recovered decision only after copies and queued review are resolved', async () => {
+  const { editor: e, window, conflict, desc } = droppedConflictFixture();
+  e._collaboration.resolveDroppedConflict = async () => { throw new Error('The shared dropped copy changed. Review both copies again.'); };
+  await e.resolveDroppedTranslationConflict('shared');
+  const message = e.collaborationNotice;
+  e.collabReceiveState({ ...e.collaborationState, droppedConflicts: { [desc.filepath]: conflict } });
+  window.WorkspaceState.resolveDroppedConflict(e.localDescs, desc.filepath, e.lang, 'shared');
+  e.collabReceiveState({ ...e.collaborationState, peers: [{ sessionId: 'translator' }] });
+  assert.equal(e.collaborationNotice, message, 'The client still reports the conflicting copy.');
+  e.collabReceiveState({ ...e.collaborationState, droppedConflicts: {},
+    droppedReviewPaths: [desc.filepath] });
+  assert.equal(e.collaborationNotice, message, 'A queued promotion of this file still needs a fresh review.');
+  assert.ok(e._collaborationDroppedResolutionFailure);
+  assert.deepEqual(Array.from(e.collaborationState.droppedReviewPaths), [desc.filepath],
+    'The promotion awaiting fresh review remains actionable.');
+  e.collabReceiveState({ ...e.collaborationState, droppedReviewPaths: ['unrelated-file.txt'] });
+  assert.equal(e.collaborationNotice, '', 'This file has completed its review.');
+  assert.equal(e._collaborationDroppedResolutionFailure, null);
+});
+
+test('an old-scope dropped-copy completion cannot clear the new scope notice', () => {
+  const { editor: e, desc } = droppedConflictFixture();
+  const message = 'Could not resolve the dropped copies: unresolved copy';
+  e._collaborationDroppedResolutionFailure = { filepath: desc.filepath, context: e.captureCollaborationContext(), message };
+  e.collaborationNotice = message;
+  delete e.localDescs.droppedConflicts[e.lang][desc.filepath];
+  e.cloudUser = { id: 'different-account' };
+  e.collabReceiveState({ ...e.collaborationState, droppedConflicts: {} });
+  assert.equal(e.collaborationNotice, message);
+  assert.ok(e._collaborationDroppedResolutionFailure);
 });
 
 test('a source change or newer conflict while confirmation is open cannot resolve the captured copies', async () => {

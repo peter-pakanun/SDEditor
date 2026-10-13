@@ -1970,6 +1970,20 @@ const config = Vue.defineComponent({
       }
       return '';
     },
+    clearDroppedResolutionFailure(filepath) {
+      const failure = this._collaborationDroppedResolutionFailure;
+      if (!failure || (filepath && failure.filepath !== filepath) || !this.collaborationContextCurrent(failure.context)) return false;
+      // A successful request or automatic consolidation must remove this
+      // file's competing copies and queued review from workspace and client.
+      // Presence, unrelated saves, and a retry that is still conflicting do
+      // not establish that this failed decision has recovered.
+      if (this.localDescs?.droppedConflicts?.[failure.context.language]?.[failure.filepath]
+        || this.collaborationState?.droppedConflicts?.[failure.filepath]
+        || this.collaborationState?.droppedReviewPaths?.includes(failure.filepath)) return false;
+      this._collaborationDroppedResolutionFailure = null;
+      if (this.collaborationNotice === failure.message) this.collaborationNotice = '';
+      return true;
+    },
     async resolveDroppedTranslationConflict(choice, filepath = this.editorCurrentEditingDesc?.filepath) {
       const desc = this.editorVisible && this.editorCurrentEditingDesc?.filepath === filepath ? this.editorCurrentEditingDesc : null;
       const conflict = this.localDescs?.droppedConflicts?.[this.lang]?.[filepath];
@@ -1987,13 +2001,20 @@ const config = Vue.defineComponent({
         if (!context.client?.resolveDroppedConflict) throw new Error('Reconnect to resolve these dropped copies.');
         await context.client.resolveDroppedConflict(filepath, choice, { id: conflict.shared.id, revision: conflict.shared.revision });
         if (!this.collaborationContextCurrent(context)) return;
+        this.clearDroppedResolutionFailure(filepath);
         if (desc && this.editorCurrentEditingDesc === desc) {
           this.editorDroppedCandidate = this.toPlainForStorage(window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang));
           this.editorShowEnglishDiff = false;
         }
         this.applyWorkspaceOverlay(); this.filterDesc();
         if (desc && this.editorVisible && this.editorCurrentEditingDesc === desc && !hadChanges && !this.editorHaveChanges()) await this.openEditorFile(filepath);
-      } catch (error) { if (this.collaborationContextCurrent(context)) this.collaborationNotice = 'Could not resolve the dropped copies: ' + error.message; }
+      } catch (error) {
+        if (this.collaborationContextCurrent(context)) {
+          const message = 'Could not resolve the dropped copies: ' + error.message;
+          this._collaborationDroppedResolutionFailure = { filepath, context, message };
+          this.collaborationNotice = message;
+        }
+      }
       finally { this.editorSaving = false; }
     },
     async discardDroppedTranslation() {

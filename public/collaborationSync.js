@@ -964,29 +964,46 @@
       let pending;
       if (conflict.kind === 'promotion') {
         pending = room.outbox.find(operation => operation.id === conflict.operationId);
-        if (!pending || !['pending', 'candidate_conflict'].includes(pending.status) || pending.files.length !== 1
+        if (!pending || !['pending', 'candidate_conflict', 'needs_candidate_review'].includes(pending.status) || pending.files.length !== 1
           || pending.files[0].yours.filepath !== conflict.filepath) return false;
         const reviewed = pending.wire?.promoteDropped || pending.promoteDropped;
         const alias = workspace.droppedAliases?.[reviewed?.id];
         const bound = alias && alias.fromRevision === Number(reviewed?.revision || 0) ? alias : reviewed;
         if (!reviewed || reviewed.targetSourceHash !== room.identity.sourceHash) return false;
+        if (alias?.requiresReview && alias.fromRevision !== Number(reviewed.revision || 0)) return false;
         const captured = workspace.droppedArchive?.[reviewed.id] || workspace.droppedArchive?.[bound.id];
         if (!W.sameDroppedContent(captured, conflict.yours)) return false;
+        // Keeping a genuinely different local copy reactivates it for a fresh
+        // Save. Legacy reactivated copies have no proof of that fresh review.
+        if (pending.droppedCopyDecision?.requiresFreshSave
+          || pending.status === 'needs_candidate_review' && captured.status === 'dropped') return false;
         if (bound.id !== conflict.yours.id && !W.sameDroppedContent(workspace.droppedArchive?.[bound.id], conflict.yours)) return false;
+        const staged = workspace.staged?.[room.identity.language]?.[conflict.filepath];
+        if (staged?.sourceHash !== room.identity.sourceHash || !P.equal(staged.translations, pending.files[0].yours.translations)
+          || room.outbox.slice(room.outbox.indexOf(pending) + 1).some(operation => !inactiveOperation(operation)
+            && operation.files?.some(entry => entry.yours?.filepath === conflict.filepath))) return false;
       } else if (!['upload', 'discard'].includes(conflict.kind)) return false;
+      // A retained review flag does not prove that an already prepared request
+      // was rejected. Replay its exact bytes before changing any request guard.
+      const preservePrepared = pending?.wire && pending.status !== 'candidate_conflict';
       if (!W.coalesceDroppedConflict(workspace, conflict.filepath, room.identity.language, shared)) return false;
       if (pending) {
         // The user already reviewed precisely this content. Only its canonical
         // candidate ID/revision changed; keep the original shared-file base.
-        if (shared.status === 'dropped') pending.promoteDropped = { ...copy(pending.promoteDropped), id: shared.id,
-          revision: Number(shared.revision) || 0, targetSourceHash: room.identity.sourceHash };
-        else delete pending.promoteDropped;
-        pending.status = 'pending'; delete pending.wire; delete pending.upload;
+        if (!preservePrepared) {
+          if (shared.status === 'dropped') pending.promoteDropped = { ...copy(pending.promoteDropped), id: shared.id,
+            revision: Number(shared.revision) || 0, targetSourceHash: room.identity.sourceHash };
+          else { pending.reviewedDroppedPromotion = true; delete pending.promoteDropped; }
+          delete pending.wire; delete pending.upload;
+        }
+        pending.status = 'pending';
       }
       return true;
     }
     async coalesceDroppedCopies(records, epoch) {
-      if (!Object.keys(this.droppedConflicts).length) return;
+      const promotions = (this.room()?.outbox || []).filter(operation => operation.promoteDropped
+        && ['pending', 'candidate_conflict', 'needs_candidate_review'].includes(operation.status));
+      if (!Object.keys(this.droppedConflicts).length && !promotions.length) return;
       const identity = copy(this.room()?.identity);
       let workspace, changed = false;
       await this.update(() => {}, { projectWorkspace: (current, state) => {
@@ -996,12 +1013,33 @@
         for (const record of records) if (record.game === identity.game && record.language === identity.language
           && (!latest.has(record.filepath) || Number(record.revision) > Number(latest.get(record.filepath).revision)
             || (Number(record.revision) === Number(latest.get(record.filepath).revision) && record.status === 'dropped'))) latest.set(record.filepath, record);
+        const room = state.rooms[this.key];
         for (const conflict of Object.values(current.droppedConflicts?.[identity.language] || {})) {
-          if (this.coalesceDroppedCopy(current, state.rooms[this.key], conflict, latest.get(conflict.filepath))) changed = true;
+          if (this.coalesceDroppedCopy(current, room, conflict, latest.get(conflict.filepath))) changed = true;
+        }
+        // Old clients can retain the upload's review flag without its conflict
+        // row. Reconstruct only from the original captured recovery generation,
+        // the matching canonical text and the unchanged durable saved result.
+        for (const operation of room.outbox) {
+          const reviewed = operation.wire?.promoteDropped || operation.promoteDropped;
+          const alias = current.droppedAliases?.[reviewed?.id];
+          if (!reviewed || !(['candidate_conflict', 'needs_candidate_review'].includes(operation.status)
+            || operation.status === 'pending' && alias?.requiresReview) || operation.files?.length !== 1) continue;
+          const filepath = operation.files[0].yours?.filepath;
+          if (!filepath || current.droppedConflicts?.[identity.language]?.[filepath]) continue;
+          const yours = current.droppedArchive?.[reviewed.id], shared = latest.get(filepath);
+          if (!yours || yours.filepath !== filepath || !W.sameDroppedContent(yours, W.droppedComparisonRecord(current, shared))) continue;
+          const conflict = { kind: 'promotion', operationId: operation.id, filepath, language: identity.language,
+            targetSourceHash: identity.sourceHash, yours: copy(yours), shared: copy(shared) };
+          ((current.droppedConflicts ||= {})[identity.language] ||= {})[filepath] = conflict;
+          if (this.coalesceDroppedCopy(current, room, conflict, shared)) changed = true;
+          else delete current.droppedConflicts[identity.language][filepath];
         }
         workspace = current;
         return current;
-      }, records: this.records('coalesce-dropped', records.map(record => record.filepath), [], { includeDropped: true }) }, epoch);
+      }, records: this.records('coalesce-dropped', [...new Set([...records.map(record => record.filepath),
+        ...promotions.flatMap(operation => operation.files.map(entry => entry.yours.filepath))])],
+        promotions.map(operation => operation.id), { includeDropped: true }) }, epoch);
       if (changed) await this.deliverDropped(workspace, records, epoch);
       return workspace ? this.mergeDroppedWorkspace(workspace) : workspace;
     }
@@ -1064,19 +1102,21 @@
           ...(observed.operationId ? { id: observed.operationId } : {}), candidate: observed.yours }, observed.kind, epoch);
         throw Object.assign(new Error('The shared dropped copy changed. Review both copies again.'), { stale: true });
       }
-      let chosen;
-      const workspace = await this.store.updateWorkspace(current => {
+      let chosen, workspace;
+      await this.update((state, room) => {
+        const pending = room.outbox.find(item => item.id === observed.operationId);
+        if (pending) {
+          pending.status = 'needs_candidate_review';
+          pending.droppedCopyDecision = { choice, requiresFreshSave: !W.sameDroppedContent(observed.yours, observed.shared) };
+        }
+      }, { projectWorkspace: current => {
         if (!this.current(epoch) || current?.sourceHash !== identity.sourceHash
           || (current.collaborationAccountId && String(current.collaborationAccountId) !== identity.accountId)) throw staleError();
         chosen = W.resolveDroppedConflict(current, filepath, identity.language, choice, observed.shared);
-        return current;
-      }, this.workspaceScope(identity), { filepaths: [filepath], includeDropped: true, command: 'resolve-dropped-conflict' });
+        return (workspace = current);
+      }, records: this.records('resolve-dropped-conflict', [filepath], [observed.operationId].filter(Boolean), { includeDropped: true }) }, epoch);
       // Choosing an old copy does not approve publishing a previously rejected
       // promotion. Keep its saved text durable until a fresh explicit save.
-      if (observed.operationId) await this.update((state, room) => {
-        const pending = room.outbox.find(item => item.id === observed.operationId);
-        if (pending) pending.status = 'needs_candidate_review';
-      }, { records: this.records('require-dropped-review', [filepath], [observed.operationId]) }, epoch);
       await this.deliverDropped(workspace, [chosen], epoch);
       this.lastDroppedSync = 0; await this.retry();
       return { status: this.droppedConflicts[filepath] ? 'conflict' : this.lastError ? 'pending' : 'resolved' };
@@ -1502,7 +1542,7 @@
           if (entry.base && !P.equal(merged.file.translations, entry.yours.translations)) incorporatedRemoteEntries = true;
           // Confirm unchanged approves the exact translation the reviewer saw.
           // A fresh review is required even if an ordinary text merge is possible.
-          if ((op.promoteDropped || ['confirm', 'confirm_unchanged', 'restore'].includes(op.origin)) && entry.base
+          if ((op.promoteDropped || op.reviewedDroppedPromotion || ['confirm', 'confirm_unchanged', 'restore'].includes(op.origin)) && entry.base
             && (entry.base.revision !== shared.revision || !P.equal(entry.base.translations, shared.translations))) {
             merged.conflict = true;
             merged.indexes = shared.translations.map((text, index) => text !== entry.base.translations[index] ? index : -1).filter(index => index >= 0);

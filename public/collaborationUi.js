@@ -166,8 +166,8 @@
             && JSON.stringify(next[key]) === JSON.stringify(previous[key]))) next[key] = previous[key];
           else changed = true;
         }
-        if (!changed) return;
-        this.collaborationState = next;
+        if (changed) this.collaborationState = next;
+        this.clearDroppedResolutionFailure?.();
       },
       collaborationPeersFor(filepath) {
         if (!filepath || !this.collaborationState.connected) return [];
@@ -191,6 +191,7 @@
         this._collaborationRestoreRequest = (this._collaborationRestoreRequest || 0) + 1;
         this.collaborationCloseConflicts(); this.collaborationCloseHistory();
         this.collaborationConflictBusy = false; this.collaborationHistoryRestoring = false;
+        this._collaborationDroppedResolutionFailure = null;
         this.collaborationNotice = ''; this.collaborationConflictId = ''; this.collaborationConflictDraft = []; this.collaborationConflictChoices = {};
         this.collaborationConflictEdited = {}; this.collaborationConflictMetadataChoices = {}; this.collaborationConflictMetadataDraft = {};
         this._collaborationConflictDrafts = new Map();
