@@ -174,7 +174,7 @@ async function run() {
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
     const classOpeningOnly = process.argv.includes('--class-editor-opening-only');
-    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only'), turkishOnly = process.argv.includes('--turkish-forms-only');
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only'), turkishOnly = process.argv.includes('--turkish-forms-only'), progressOnly = process.argv.includes('--progress-only');
     let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
     if (classOnly) {
         const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
@@ -1027,7 +1027,7 @@ async function run() {
             await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
             results.push(`${admin ? 'Admin publication' : 'Local import'} layout: two desktop sizes and four themes; spaced file/folder selectors${admin ? ' and role configuration' : ''}; fixed-right Cancel and stable progress controls from 0 to 1000000`);
         };
-        if (!dictionaryOnly) await checkUploadLayout();
+        if (!dictionaryOnly && !progressOnly) await checkUploadLayout();
         await upload.locator('input[type=text]').fill('ClientText browser fixture');
         await upload.locator('input[type=file]').first().setInputFiles(files.slice(0, 1));
         await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
@@ -1096,8 +1096,62 @@ async function run() {
         if (await selectAllClientFilters.isEnabled()) await selectAllClientFilters.click();
         assert.equal(await clientFilters.locator('.filterChip input[type=checkbox]').evaluateAll(inputs => inputs.every(input => input.checked)), true);
         await workspace.getByRole('button', { name: 'Filters', exact: true }).click();
-        assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctWorkProgress.total), 5, 'ClientText retains the exact initial field-workload denominator');
-        assert.match(await workspace.locator('.workspaceFooter .collaborationFooterMessage').textContent(), /0\s*\/\s*5.*initial.*fields/i, 'The shared footer labels field workload explicitly');
+        assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctWorkProgress.total), 1, 'ClientText excludes four Missing-only fields from progress and retains the Outdated field');
+        assert.match(await workspace.locator('.workspaceFooter .collaborationFooterMessage').textContent(), /0\s*\/\s*1.*workload fields/i, 'The shared footer labels counted field workload explicitly');
+        if (progressOnly) {
+            const { emptyCounts, addCounts, unitCounts } = await load('client-text-trusted.js');
+            const facts = await page.evaluate(() => window.__clientFixtureApp.ctUnits.map(unit => ClientTextState.clientFacts(unit)));
+            const counts = facts.reduce((summary, unit) => addCounts(summary, unitCounts(unit)), emptyCounts());
+            assert.equal(counts.workloadFields, 5); assert.equal(counts.outdatedFields, 1);
+            await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+            await page.waitForFunction(() => window.__clientFixtureApp.versionChooserVisible);
+            await page.evaluate(async counts => {
+                const vm = window.__clientFixtureApp;
+                vm.closeManagedPresence();
+                const group = { id: 'progress-group', versionId: 'progress-version', contentMode: 'clienttext', teams: [{ language: 'French', counts }] };
+                const version = { id: 'progress-version', name: 'ClientText progress fixture', game: vm.gameVersion, branchId: vm.branchId, contentGroups: [group] };
+                vm.managedVersions = [version]; vm.selectedManagedVersionId = version.id;
+                vm.managedVersionDetails = { version, contentGroups: [group], teams: [] };
+                await vm.$nextTick();
+            }, counts);
+            const meter = page.locator('tr[data-content-group="progress-group"][data-language="French"] .versionProgress');
+            const cases = [
+                { counts, fraction: '0 / 1', percent: '0%', saved: '0%', outdated: '100%', now: '0', max: '1' },
+                { counts: { ...counts, resolvedFields: 1, outdatedFields: 0 }, fraction: '1 / 1', percent: '100%', saved: '100%', outdated: '0%', now: '1', max: '1' },
+                { counts: { ...counts, resolvedFields: 1, outdatedFields: 1 }, fraction: '1 / 2', percent: '50%', saved: '50%', outdated: '50%', now: '1', max: '2' },
+                { counts: { ...counts, resolvedFields: 0, outdatedFields: 0 }, fraction: '—', percent: null, saved: '0%', outdated: '0%', now: '0', max: '1' }
+            ];
+            for (const size of desktopSizes) {
+                await page.setViewportSize(size);
+                for (const theme of themes) {
+                    await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+                    for (const sample of cases) {
+                        await page.evaluate(async counts => {
+                            const vm = window.__clientFixtureApp;
+                            vm.managedVersionDetails.contentGroups[0].teams[0].counts = counts; await vm.$nextTick();
+                        }, sample.counts);
+                        assert.equal(await meter.locator('.versionProgressSummary strong').textContent(), sample.fraction);
+                        assert.equal(await meter.locator('.versionProgressSummary > span').count(), sample.percent === null ? 0 : 1);
+                        if (sample.percent !== null) assert.equal(await meter.locator('.versionProgressSummary > span').textContent(), sample.percent);
+                        for (const [kind, expected] of [['saved', sample.saved], ['outdated', sample.outdated], ['missing', '0%'], ['revised', '0%']]) {
+                            assert.equal(await meter.locator('.versionProgressTrack .' + kind).evaluate(element => element.style.width), expected);
+                        }
+                        assert.equal(await meter.getAttribute('aria-valuenow'), sample.now); assert.equal(await meter.getAttribute('aria-valuemax'), sample.max);
+                        await meter.hover(); await page.getByRole('tooltip').waitFor();
+                        assert.match(await page.getByRole('tooltip').textContent(), /Missing-only fields are excluded from progress/);
+                        await meter.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
+                        assert.equal(await meter.evaluate(element => element === document.activeElement), true);
+                        await page.mouse.move(0, 0); await meter.evaluate(element => element.blur());
+                    }
+                    await page.screenshot({ path: join(directory, `clienttext-progress-${size.width}-${theme}.png`), fullPage: true });
+                }
+            }
+            assert.deepEqual(failures, []);
+            console.log(JSON.stringify({ status: 'PASS', progressOnly: true, themes: themes.length, desktopSizes: desktopSizes.length,
+                results: ['Native cached workbook footer excludes four Missing-only fields while retaining Outdated review work',
+                    'Assignment bars render resolved, Outdated and neutral cases with no Missing segment; mouse and keyboard tooltips explain exclusion'] }, null, 2));
+            return;
+        }
         await workspace.getByRole('button', { name: 'Scan diagnostics', exact: true }).click();
         const scanDialog = page.getByRole('dialog', { name: 'Scan diagnostics', exact: true });
         await scanDialog.waitFor(); assert.equal(await scanDialog.locator('.diagnosticScanForm .diagnosticScanActions').count(), 1);
@@ -1992,10 +2046,12 @@ async function run() {
                         assert.ok(['Open editor', 'Download', 'Download and end'].every(text => group.actions.some(action => action.text === text && !action.disabled)), 'Shared table keeps the team actions available');
                         if (group.contentMode === 'clienttext') {
                             assert.equal(group.loadedText, `${group.counts.loaded ?? 0} IDs`, 'ClientText table shows the exact ID count');
-                            assert.equal(group.progressText, group.counts.workloadFields ? `${group.counts.resolvedFields ?? 0} / ${group.counts.workloadFields}` : '—', 'ClientText progress uses field workload, rather than unit counts');
-                            assert.equal(group.progressPercent, group.counts.workloadFields ? `${Math.round(100 * (group.counts.resolvedFields ?? 0) / group.counts.workloadFields)}%` : undefined);
+                            const total = (group.counts.resolvedFields ?? 0) + (group.counts.outdatedFields ?? 0);
+                            assert.equal(group.progressText, total ? `${group.counts.resolvedFields ?? 0} / ${total}` : '—', 'ClientText progress excludes Missing-only fields using accepted field counts');
+                            assert.equal(group.progressPercent, total ? `${Math.round(100 * (group.counts.resolvedFields ?? 0) / total)}%` : undefined);
                             assert.equal(group.progressNow, String(group.counts.resolvedFields ?? 0));
-                            assert.equal(group.progressMax, String(Math.max(1, group.counts.workloadFields ?? 0)));
+                            assert.equal(group.progressMax, String(Math.max(1, total)));
+                            assert.equal(group.segments.find(segment => segment.kind === 'missing').width, '0%', 'Missing-only fields never add a red progress segment');
                             assert.equal(group.segments.find(segment => segment.kind === 'revised').width, '0%', 'Revised corrections remain outside the initial ClientText workload');
                         } else {
                             const total = (group.counts.missing ?? 0) + (group.counts.saved ?? 0);
@@ -2013,7 +2069,7 @@ async function run() {
             await page.evaluate(async groupId => {
                 const vm = window.__clientFixtureApp; window.__fixtureOriginalDetails = vm.managedVersionDetails;
                 vm.managedVersionDetails = { ...vm.managedVersionDetails, contentGroups: vm.ctGroups.map(group => group.id !== groupId ? group : { ...group, teams: group.teams.map(team => team.language !== 'French' ? team : { ...team,
-                    counts: { ...team.counts, loaded: 0, total: 999, resolved: 999, workload: 999, resolvedFields: 0, workloadFields: 0 } }) }) };
+                    counts: { ...team.counts, loaded: 0, total: 999, resolved: 999, workload: 999, resolvedFields: 0, outdatedFields: 0, workloadFields: 0 } }) }) };
                 await vm.$nextTick();
             }, clientGroup.id);
             const emptyTeam = details.locator(`tr[data-content-group="${clientGroup.id}"][data-language="French"]`);

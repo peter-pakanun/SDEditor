@@ -322,7 +322,9 @@
                 for (const unit of this._ctWorkUnits?.values() || []) {
                     const status = this.ctStatus(unit);
                     for (const field of unit.fields) if (field.originalMissing || field.outdated || this.ctSaved[unit.id]?.outdated?.includes(field.id)) {
-                        total++; if (!status.fields[field.id]?.missing && !status.fields[field.id]?.outdated) resolved++;
+                        const current = status.fields[field.id];
+                        if (current?.missing && !current.outdated) continue;
+                        total++; if (!current?.outdated) resolved++;
                     }
                 }
                 return { total, resolved, percent: total ? Math.floor(100 * resolved / total) : 100 };
@@ -875,14 +877,14 @@
                 }
                 const counts=row.team.counts || {},count=value=>Number.isFinite(Number(value))?Math.max(0,Math.floor(Number(value))):0;
                 const known=counts.workloadFields!==undefined && counts.workloadFields!==null && Number.isFinite(Number(counts.workloadFields));
-                const total=count(counts.workloadFields),saved=Math.min(total,count(counts.resolvedFields)),unresolved=total-saved;
-                // Outdated is always initial workload; Missing can also arise
-                // from a correction outside it. Do not use all Missing counts
-                // as a segment. Orange owns overlap; red is unresolved without
-                // Outdated, so the initial-workload segments sum exactly once.
-                const outdated=Math.min(unresolved,count(counts.outdatedFields)),missing=unresolved-outdated;
+                const initial=count(counts.workloadFields),saved=Math.min(initial,count(counts.resolvedFields));
+                // Blank Missing-only fields can intentionally use English.
+                // Keep Outdated review work, including Missing/Outdated overlap,
+                // and exclude only the unresolved remainder of initial work.
+                const outdated=Math.min(initial-saved,count(counts.outdatedFields)),total=saved+outdated,unresolved=outdated,missing=0;
+                const excludedMissing=initial-total;
                 const width=value=>total?100*value/total+'%':'0%';
-                return {saved,total,percent:total?Math.round(100*saved/total):0,ordinarySaved:saved,revised:0,missing,outdated,unresolved,
+                return {saved,total,percent:total?Math.round(100*saved/total):0,ordinarySaved:saved,revised:0,missing,outdated,unresolved,excludedMissing,
                     savedWidth:width(saved),revisedWidth:'0%',missingWidth:width(missing),outdatedWidth:width(outdated),empty:!total,known,
                     loaded:count(counts.loaded),savedIds:count(counts.saved),revisedIds:count(counts.revised),missingIds:count(counts.missing),outdatedIds:count(counts.outdated),
                     fields:count(counts.fields),savedFields:count(counts.savedFields),revisedFields:count(counts.revisedFields),
@@ -891,11 +893,11 @@
             ctAssignmentProgressTooltip(row) {
                 if(row.contentMode!=='clienttext')return this.managedProgressTooltip(row.team);
                 const progress=this.ctAssignmentProgress(row),lines=[row.label+' progress',
-                    progress.known?`Resolved initial fields: ${progress.saved} / ${progress.total} (${progress.percent}%)`:'Initial field workload counts are unavailable.',
-                    'Workload denominator: original Missing or Outdated fields, including carried source changes. Each field is counted once.'];
-                if(progress.known && !progress.total)lines.push('No initial field workload; the bar is neutral.');
-                lines.push(`Remaining initial fields: ${progress.unresolved} · Missing only: ${progress.missing} · Outdated: ${progress.outdated}`,
-                    'Orange fields are Outdated and may also be Missing; red fields are unresolved without Outdated.',
+                    progress.known?`Resolved workload fields: ${progress.saved} / ${progress.total} (${progress.percent}%)`:'Initial field workload counts are unavailable.',
+                    'Workload denominator: resolved initial fields + remaining Outdated fields, including carried source changes. Each field is counted once.'];
+                if(progress.known && !progress.total)lines.push('No counted workload fields; the bar is neutral.');
+                lines.push(`Remaining Outdated fields: ${progress.outdated} · Missing-only fields excluded: ${progress.excludedMissing}`,
+                    'Missing-only fields are excluded from progress because blank ClientText values can intentionally use English. Orange Outdated fields still require review, including fields that are also Missing.',
                     `IDs: ${progress.loaded} loaded · Saved: ${progress.savedIds} · Revised: ${progress.revisedIds} · Missing: ${progress.missingIds} · Outdated: ${progress.outdatedIds}`,
                     `Field statuses: ${progress.fields} fields · Saved: ${progress.savedFields} · Revised corrections: ${progress.revisedFields} · Missing: ${progress.missingFields} · Outdated: ${progress.outdatedFields}`,
                     'Saved and Revised counts describe explicit accepted saves; status counts can overlap. They do not define this progress denominator.',
