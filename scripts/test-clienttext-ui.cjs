@@ -3124,3 +3124,25 @@ test('changing Settings to the test language still ends the temporary session',(
     app._ctStore={};mixin.watch.lang.call(app);
     assert.equal(app.ctActive,false);assert.equal(app.ctWorkspace,null);assert.deepEqual(clone(app.ctValues),{});
 });
+
+test('combined offline Open waits for validation, rejects duplicate clicks and leaves normal uploads alone',async()=>{
+    const {app}=harness({ctUploadTest:true,ctUploadVisible:true,managedManagerAccess:true,ctUploadFiles:[{}]}),gate=deferred(),calls=[];
+    app.ctPrepareUpload=async()=>{calls.push('prepare');app._ctAbort=new AbortController();await gate.promise;app.ctPrepared=[{}];};
+    app.ctPublishPrepared=async()=>{calls.push('open');return true;};
+    const opening=app.ctOpenTestSheet();assert.deepEqual(calls,['prepare']);
+    assert.equal(await app.ctOpenTestSheet(),false,'duplicate click cannot prepare or open twice');
+    gate.resolve();assert.equal(await opening,true);assert.deepEqual(calls,['prepare','open']);
+    assert.equal(app._ctTestOpenRun,null);
+    app.ctUploadTest=false;assert.equal(await app.ctOpenTestSheet(),false);assert.deepEqual(calls,['prepare','open']);
+});
+
+test('combined offline Open never opens failed, cancelled or superseded preparation',async()=>{
+    for(const change of [app=>{app.ctUploadError='Invalid workbook';},app=>{app._ctAbort.abort();},
+        app=>{app.managedCatalogScope='another-account';},app=>{app._ctEpoch=1;},app=>{app.ctUploadVisible=false;},app=>{app.managedManagerAccess=false;}]){
+        const {app}=harness({ctUploadTest:true,ctUploadVisible:true,managedManagerAccess:true,ctUploadFiles:[{}],ctPrepared:[{old:true}]}),gate=deferred();
+        app.ctPrepareUpload=async()=>{app._ctAbort=new AbortController();await gate.promise;};
+        app.ctPublishPrepared=()=>assert.fail('A failed or stale preparation cannot open old prepared work');
+        const opening=app.ctOpenTestSheet();change(app);gate.resolve();
+        assert.equal(await opening,false);assert.equal(app._ctTestOpenRun,null);
+    }
+});

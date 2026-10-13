@@ -214,14 +214,16 @@ async function run() {
             await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
             assert.equal(await upload.locator('input[type=file]').first().getAttribute('accept'), '.xlsx,.xlsm');
             assert.equal(await upload.locator('.ctUploadPolicy').count(), 0, 'Offline tests offer no API policy edit');
+            assert.equal(await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).count(), 0, 'Test sheets combine preparation and opening into one action');
+            assert.equal(await upload.getByRole('button', { name: 'Open test sheet', exact: true }).count(), 0, 'The previous separate opening action is absent');
             if (!layoutChecked) await layout(page, upload, 'Offline workbook importer');
             await upload.locator('input[type=file]').first().setInputFiles(files);
-            await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
-            await page.waitForFunction(() => !window.__offlineTestApp.ctUploading);
-            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '');
-            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctPrepared.length), 1);
-            await upload.getByRole('button', { name: 'Open test sheet', exact: true }).click();
-            await page.waitForFunction(() => !window.__offlineTestApp.ctUploading && !window.__offlineTestApp.ctBusy && !window.__offlineTestApp.workspaceInitializationActive);
+            await upload.getByRole('button', { name: 'Open', exact: true }).click();
+            await page.waitForFunction(() => {
+                const vm = window.__offlineTestApp;
+                return !vm.ctUploading && !vm.ctBusy && !vm.workspaceInitializationActive && (vm.ctActive || vm.ctUploadError);
+            });
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '', 'One Open click prepares and validates the workbooks');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), true, 'Prepared test sheet opens successfully');
             await workspace.waitFor();
             await page.waitForFunction(() => window.__offlineTestApp.ctActive && !window.__offlineTestApp.ctBusy && !window.__offlineTestApp.workspaceInitializationActive);
@@ -329,6 +331,19 @@ async function run() {
         await monitor(page, false);
         results.push('Manager/Admin access is allowed; Translator button and direct invocation are denied; Gender-only tests remain local');
         results.push('Different test language preserves account language; importer, list and full editor fit all four themes at 1440px and 1100px');
+        for (const version of [null, { id: 'fixture-normal-version', name: 'Existing fixture version' }]) {
+            // Inspect the ordinary importer without beginning a publication or
+            // invoking its API policy/preparation actions.
+            await page.evaluate(version => {
+                const vm = window.__offlineTestApp;
+                vm.ctUploadTest = false; vm.ctUploadLocal = false; vm.ctUploadVersion = version; vm.ctUploadVisible = true;
+            }, version);
+            await upload.waitFor();
+            assert.equal(await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).isVisible(), true, 'Ordinary new-version/Add Content importers retain preparation');
+            assert.equal(await upload.getByRole('button', { name: 'Publish complete groups', exact: true }).isVisible(), true, 'Ordinary new-version/Add Content importers retain separate publication');
+            assert.equal(await upload.getByRole('button', { name: 'Open', exact: true }).count(), 0, 'The combined Open button is test-only');
+        }
+        results.push('Ordinary New Version and Add Content retain separate Prepare and validate/Publish complete groups actions');
         assert.deepEqual(failures, [], 'No browser runtime errors');
         console.log(JSON.stringify({ ok: true, results }, null, 2));
     } catch (error) {

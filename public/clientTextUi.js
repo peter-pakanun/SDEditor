@@ -2359,6 +2359,18 @@
                 try { await this._cloud.request('/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/presence', { method: 'POST', body: { unitId: this.ctSelection || null, sessionId: this.instanceTabId, language: ctx.scope.language } }); const response=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(ctx.scope.groupId)+'/presence'); if (this.ctCurrent(ctx)) this.ctPeers = response.presence || []; } catch (_) { /* Translation requests retain their own failures. */ }
             },
             ctOpenOfflineTest() { return this.ctOpenUpload(null, true, true); },
+            async ctOpenTestSheet() {
+                if(!this.ctUploadTest || !this.ctUploadVisible || !this.managedManagerAccess || this.ctUploading || this.ctBusy || this._ctTestOpenRun || !this.ctUploadFiles.length)return false;
+                const run=this._ctTestOpenRun={},key=this.managedCatalogScope,epoch=this._ctEpoch || 0;
+                try{
+                    const preparation=this.ctPrepareUpload(),signal=this._ctAbort?.signal;
+                    await preparation;
+                    if(this._ctTestOpenRun!==run || key!==this.managedCatalogScope || epoch!==(this._ctEpoch || 0)
+                        || !this.ctUploadTest || !this.ctUploadVisible || !this.managedManagerAccess || signal?.aborted
+                        || this.ctUploadError || !this.ctPrepared.length)return false;
+                    return await this.ctPublishPrepared();
+                }finally{if(this._ctTestOpenRun===run)this._ctTestOpenRun=null;}
+            },
             ctCloseUpload() {
                 if(this.ctUploading)return false;
                 this.ctUploadVisible=false;
