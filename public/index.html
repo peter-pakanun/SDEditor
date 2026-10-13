@@ -427,7 +427,6 @@
       </section>
     </div>
     <section v-if="ctActive && !versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="ctWorkspace" :inert="showSetting || workspaceInitializationActive" aria-label="ClientText workspace">
-      <p v-if="ctOfflineTest" class="versionMuted" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
       <editor-workspace-shell v-show="!ctEditor" class="ctListWorkspace" :inline="inlineEditor">
         <template #header>
           <div class="workspaceBrand">
@@ -454,6 +453,7 @@
             <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctSelectedFilters.length===ctStatusFilterOptions.length">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
           </div></fieldset>
           <workspace-alerts></workspace-alerts>
+          <p v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
         </template>
         <template #content>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
@@ -515,9 +515,11 @@
         </template>
       </editor-workspace-shell>
       <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
+        <template v-if="ctOfflineTest" #notice>
+          <p class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
+        </template>
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation</h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button v-if="ctDraftBlocked" @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep unsaved edits">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
-          <p v-if="ctOfflineTest" class="versionMuted" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Save keeps edits only for this session.</p>
           <ct-context :host="$root" :items="ctReferenceMetadata()"></ct-context>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button></div>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>

@@ -1197,9 +1197,9 @@ button, label, th, td, input[type="checkbox"] {
 
 .editor>.fixed {
   position: fixed;
-  height: calc(100% - var(--clipboard-height));
+  height: calc(100% - var(--clipboard-height) - var(--editor-notice-height, 0px));
   z-index: 1;
-  top: 0;
+  top: var(--editor-notice-height, 0px);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -1301,7 +1301,7 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewStrip {
   position: sticky;
   height: calc(200px * var(--density));
-  top: 0;
+  top: var(--editor-notice-height, 0px);
   z-index: 40;
   margin: 0 calc(-0.35em * var(--density)) calc(0.75em * var(--density));
   padding: calc(0.55em * var(--density)) calc(0.6em * var(--density));

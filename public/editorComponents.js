@@ -249,7 +249,30 @@
     name: 'EditorFullShell',
     props: { controller: { type: Object, required: true }, previewHostId: { type: String, required: true },
       sidebarHostId: { type: String, required: true } },
+    mounted() {
+      this._noticeObserver = new ResizeObserver(() => this.measureNotice());
+      this.syncNotice();
+    },
+    updated() { this.syncNotice(); },
+    beforeUnmount() { this._noticeObserver?.disconnect(); },
+    methods: {
+      syncNotice() {
+        const notice = this.$refs.notice;
+        if (notice !== this._observedNotice) {
+          this._noticeObserver?.disconnect();
+          this._observedNotice = notice;
+          if (notice) this._noticeObserver?.observe(notice);
+        }
+        this.measureNotice();
+      },
+      measureNotice() {
+        const height = Math.ceil(this.$refs.notice?.getBoundingClientRect().height || 0) + 'px';
+        if (this.$el.style.getPropertyValue('--editor-notice-height') !== height)
+          this.$el.style.setProperty('--editor-notice-height', height);
+      },
+    },
     template: `<div class="editor" :class="{ clipboardHidden: controller.hideEditorClipboard }" aria-label="Translation editor">
+      <div v-if="$slots.notice" ref="notice" class="editorNotice"><slot name="notice"></slot></div>
       <div class="edit"><div :id="previewHostId"></div><slot></slot></div>
       <div :id="sidebarHostId" class="side fixed editorSidebarHost"></div>
       <div class="fixed clipboard" v-show="!controller.hideEditorClipboard">

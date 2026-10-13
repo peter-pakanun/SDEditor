@@ -363,7 +363,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .editorCopyFilePath.copied svg { animation: editorCopyConfirm .25s ease-out; }
 @keyframes editorCopyConfirm { 0% { transform: scale(.65); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .editorCopyFilePath.copied svg { animation: none; } }
-.editor .editorActions { position: sticky; top: calc(200px * var(--density)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
+.editor .editorActions { position: sticky; top: calc(200px * var(--density) + var(--editor-notice-height, 0px)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
+.editor > .editorNotice { position: sticky; top: 0; z-index: 42; padding: 0; }
 .editor .editorActions button, .editor .applyRegexButton { flex-shrink: 0; white-space: nowrap; }
 @media (max-width: 1200px) {
   .workspaceHeader { grid-template-columns: max-content minmax(0, 1fr); }

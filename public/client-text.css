@@ -1,6 +1,8 @@
 .ctWorkspaceBody { display:grid; grid-template-columns:190px minmax(0,1fr); align-items:start; gap:18px; min-width:0; }
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
 .ctListWorkspace { padding-bottom:var(--workspace-footer-height,110px); }
+.ctTestBanner { margin:0; padding:8px 20px; background:var(--color-element-alt); color:var(--color-font); border-bottom:1px solid var(--ui-border); font-size:calc(12px * var(--density)); line-height:1.5; overflow-wrap:anywhere; }
+.ctListWorkspace .workspaceHeader > .ctTestBanner { grid-column:1 / -1; margin:0 -20px -10px; border-top:1px solid var(--ui-border); border-bottom:0; }
 .ctHistoryActions {display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.ctHistoryError {color:var(--ui-error)}
 .ctHistoryBackdrop {position:fixed;inset:0;z-index:16000;display:flex;align-items:center;justify-content:center;background:#0009;padding:24px}
 .ctHistoryViewer {width:min(1120px,95vw);max-height:90vh;overflow:auto;padding:18px;background:var(--color-element);color:var(--color-font);border:1px solid var(--ui-border);border-radius:8px;box-shadow:0 12px 40px #0005}
