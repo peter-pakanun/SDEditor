@@ -359,12 +359,12 @@ test('admin language switching keeps Saved and Dropped counts within their langu
     return local;
   }), status: { 'source/review.txt': { needsReview: true } } };
   e.applyWorkspaceOverlay(); e.filterDesc();
-  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1 });
+  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1, hasDiagnosticError: 2 });
   e.lang = 'German'; e.applyWorkspaceOverlay(); e.filterDesc();
-  assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
   assert.deepEqual(plain(e.localDescs.descs[0].translations.Thai), ['เดิม {0}', 'สอง']);
   e.lang = 'Thai'; e.applyWorkspaceOverlay(); e.filterDesc();
-  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1 });
+  assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 2, isDropped: 1, hasDiagnosticError: 2 });
 });
 
 test('German collaboration metadata does not erase Saved or Dropped state in Thai', () => {
@@ -427,7 +427,7 @@ test('stored sources rederive DNT from a later English entry without changing ba
     window.WorkspaceState.initializeWorkspace(workspace, {
       game: 'poe1', sourceHash: archive.baselineId, source, language: 'Thai',
     });
-    window.WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['', ''] }, 'Thai',
+    window.WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['First saved entry', 'Second saved entry'] }, 'Thai',
       { source: source[0], sourceHash: archive.baselineId, savedAt: 123 });
     const baselineBefore = plain(baseline), workspaceBefore = plain(workspace);
     e.importBaseline = baseline; e._workspaceSourceBaseline = source;
@@ -439,21 +439,21 @@ test('stored sources rederive DNT from a later English entry without changing ba
     e.filterDesc();
     assert.equal(e.filteredDescs.length, 0);
     assert.equal(e.diagnosticScanDescs.length, 0);
-    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
 
     // Shared baseline selection and language changes also project stored
     // descriptions, including caches created before the stricter DNT check.
     e.descs = plain(source); e.applyWorkspaceOverlay(); e.filterDesc();
     assert.equal(e.descs[0].isDNT, true, 'Workspace overlays must also replace the stale DNT cache.');
     assert.equal(e.filteredDescs.length, 0); assert.equal(e.diagnosticScanDescs.length, 0);
-    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+    assert.deepEqual(plain(e.statistic), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
 
     e.hideDNT = false; e.filterDesc();
     assert.deepEqual(Array.from(e.filteredDescs, desc => desc.filepath), [source[0].filepath]);
     assert.equal(e.diagnosticScanDescs.length, 1);
-    assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 1, isDropped: 0 });
+    assert.deepEqual(plain(e.statistic), { hasChanges: 1, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
     assert.equal(e.descs.length, 1, 'Hiding DNT does not remove a loaded description.');
-    assert.deepEqual(plain(e.descs[0].translations.Thai), ['', ''], 'The intentional blank save is retained.');
+    assert.deepEqual(plain(e.descs[0].translations.Thai), ['First saved entry', 'Second saved entry'], 'The valid save is retained.');
     assert.deepEqual(plain(baseline), baselineBefore, 'DNT derivation cannot rewrite immutable ZIP evidence.');
     assert.deepEqual(plain(workspace), workspaceBefore, 'DNT eligibility cannot rewrite saved work or workspace identity.');
     assert.equal(e.sourceIdentity, archive.baselineId);
@@ -995,8 +995,8 @@ test('conflict resolution blocks invalid translation diagnostics before queuing 
 test('declining conflict warning confirmation preserves the pending comparison', async () => {
   const { editor: e, approve, confirmations } = harness(); approve(false); let saves = 0; const filepath = e.descs[0].filepath;
   e._collaboration = { snapshot: () => ({ conflicts: [{ id: 'conflict', filepath }] }), resolve: async () => { saves++; } };
-  e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Empty translation' }] });
-  assert.equal((await e.collabResolve('conflict', ['', ''])).status, 'conflict');
+  e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Review wording' }] });
+  assert.equal((await e.collabResolve('conflict', ['Complete first', 'Complete second'])).status, 'conflict');
   assert.equal(confirmations.length, 1); assert.equal(saves, 0);
 });
 
@@ -1031,9 +1031,9 @@ test('conflict warnings cannot authorize resolution after the workspace changes'
   const { editor: e } = harness(); const answer = deferred(); let saves = 0;
   const filepath = e.descs[0].filepath;
   e._collaboration = { snapshot: () => ({ conflicts: [{ id: 'conflict', filepath }] }), resolve: async () => { saves++; } };
-  e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Empty translation' }] });
+  e.analyzeTranslationDiagnostics = () => ({ diagnostics: [{ level: 'warning', message: 'Review wording' }] });
   e.appConfirm = () => answer.promise;
-  const resolution = e.collabResolve('conflict', ['', '']);
+  const resolution = e.collabResolve('conflict', ['Complete first', 'Complete second']);
   await tick(); e.gameVersion = 'poe2'; e.sourceIdentity = 'new-source'; answer.resolve(true);
   const result = await resolution;
   assert.equal(saves, 0); assert.ok(result.stale || result.status === 'conflict');
@@ -1446,18 +1446,26 @@ test('changing English block metadata retains Saved text with factual correction
   assert.deepEqual(plain(state.staged.sourceCarry.metadataCorrection.after.remarks), ['new_rule']);
 });
 
-test('reimporting the selected accepted baseline preserves explicit unchanged and blank saves in every language', async () => {
+test('reimporting the selected accepted baseline preserves explicit unchanged saves and quarantines historical blanks', async () => {
   const { editor: e, window } = harness({ realImport: true });
   const source = description('same', ['Same source']); source.translations.Thai = ['']; source.translations.German = ['unchanged'];
   e.sourceIdentity = 'current-source'; e.descs = plain([source]); e._workspaceSourceBaseline = plain([source]);
   e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
   window.WorkspaceState.initializeWorkspace(e.localDescs, { source: [source], sourceHash: e.sourceIdentity, game: 'poe1', language: 'Thai' });
-  for (const language of ['Thai', 'German']) window.WorkspaceState.stageTranslation(e.localDescs,
-    { filepath: source.filepath, translations: source.translations[language] }, language, { source, savedAt: 10 });
-  const before = plain(e.localDescs.staged);
+  window.WorkspaceState.stageTranslation(e.localDescs,
+    { filepath: source.filepath, translations: source.translations.German }, 'German', { source, savedAt: 10 });
+  const historicalBlank = { sourceHash: e.sourceIdentity, translations: [''], before: [''], savedAt: 10, saveOrigin: 'save' };
+  e.localDescs.staged.Thai = { [source.filepath]: plain(historicalBlank) };
+  const germanBefore = plain(e.localDescs.staged.German);
+  window.OfflineStore.saveSourceWorkspaceWithRevisions = async (baseline, incoming) =>
+    window.WorkspaceState.mergeSourceImportWorkspace(undefined, incoming, { source: baseline, game: 'poe1', accountId: 'account-one' });
   e.buildImportedBaseline = async () => ({ archive: { baselineId: 'current-source' }, source: plain([source]) });
   await e.importUpdateZipFile({ size: 10, lastModified: 1 }, plain([source]));
-  assert.deepEqual(plain(e.localDescs.staged), before);
+  assert.deepEqual(plain(e.localDescs.staged.German), germanBefore);
+  assert.equal(e.localDescs.staged.Thai[source.filepath], undefined);
+  assert.ok(Object.values(e.localDescs.invalidTranslationArchive).some(record =>
+    JSON.stringify(plain(record.stage)) === JSON.stringify(historicalBlank)));
+  assert.equal(window.WorkspaceState.workspaceFile(e.localDescs, source, 'Thai').hasChanges, false);
   assert.equal(window.WorkspaceState.workspaceFile(e.localDescs, source, 'Thai').isDropped, false);
 });
 

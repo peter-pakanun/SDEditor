@@ -137,6 +137,40 @@ async function fixture(options = {}) {
   return { client, store, server, remote };
 }
 
+test('invalid historical commands retain their payload but cannot upload, project or block a corrected save', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  const base = copy(client.fileBase('a.txt'));
+  const bad = { id: 'historical-invalid', origin: 'save', kind: 'edit', status: 'pending',
+    files: [{ base, yours: { ...copy(base), trackedForExport: true, translations: ['useful', '  '] } }],
+    wire: { mutationId: 'historical-invalid', origin: 'save', files: [{ filepath: 'a.txt', baseRevision: base.revision,
+      translations: ['useful', '  '], trackedForExport: true }] } };
+  const originalWire = copy(bad.wire);
+  store.state.rooms[client.key].outbox.push(copy(bad));
+  client.state = copy(store.state); client.rebuild(client.room());
+  assert.equal(client.room().outbox[0].status, 'invalid_translation');
+  assert.equal(client.snapshot().pending, 0);
+  assert.deepEqual(client.fileBase('a.txt').translations, base.translations);
+  server.requests.length = 0;
+  await client.retry();
+  assert.equal(server.requests.some(request => request.options?.body?.mutationId === bad.id), false);
+  assert.deepEqual(client.room().outbox.find(op => op.id === bad.id).wire, originalWire);
+  await client.save({ files: [{ ...base, trackedForExport: true, translations: ['complete', 'corrected'] }] });
+  assert.deepEqual(server.files.find(file => file.filepath === 'a.txt').translations, ['complete', 'corrected']);
+  assert.equal(client.room().outbox.find(op => op.id === bad.id).status, 'invalid_translation_resolved');
+  assert.deepEqual(client.room().outbox.find(op => op.id === bad.id).wire, originalWire);
+  assert.equal(client.snapshot().pending, 0);
+});
+
+test('partial SD save is rejected atomically before local history or collaboration writes', async t => {
+  const { client, store, server } = await fixture(); t.after(() => client.destroy());
+  const previous = copy(store.state), revisions = copy(store.revisions), workspace = copy(store.workspace);
+  server.requests.length = 0;
+  await assert.rejects(client.save({ files: [{ ...client.fileBase('a.txt'), translations: ['useful', '\\n @ \u200e'] }] }),
+    error => error.code === 'SD_TRANSLATION_INVALID' && error.blankEntries[0] === 2);
+  assert.deepEqual(store.state, previous); assert.deepEqual(store.revisions, revisions); assert.deepEqual(store.workspace, workspace);
+  assert.equal(server.requests.length, 0);
+});
+
 test('source hash ignores order and translations, includes every canonical source field', async () => {
   const hash = await P.sourceHash(source);
   const translated = copy(source).reverse(); translated[0].translations.Thai = ['different']; translated[0].hasChanges = true;

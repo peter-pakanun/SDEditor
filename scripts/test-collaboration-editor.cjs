@@ -938,12 +938,14 @@ test('history restore confirmation cannot write into a workspace selected while 
   e.gameVersion = 'poe2'; e.sourceIdentity = 'source-two'; answer(true); await restoring;
   assert.equal(writes.length, 0); assert.equal(e.editorSaving, false); assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
 });
-test('save writes workspace and history together before closing and preserves intentional blanks', async () => {
-  const { editor: e, writes } = saveFixture();
+test('a mixed blank save preserves committed text and draft without writing history or closing', async () => {
+  const { editor: e, writes, desc, alerts } = saveFixture();
+  const before = [...desc.translations.Thai], blocks = e.editorBlocks;
   e.editorBlocks[1].translation = '';
-  assert.equal(await e.editorSave(), true); assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].workspace.descs[0].translations.Thai, ['ใหม่', '']);
-  assert.deepEqual(writes[0].revisions[0].translations, ['ใหม่', '']); assert.equal(e.editorVisible, false);
+  assert.equal(await e.editorSave(), false); assert.equal(writes.length, 0);
+  assert.deepEqual(desc.translations.Thai, before);
+  assert.equal(e.editorBlocks, blocks); assert.deepEqual(blocks.map(block => block.translation), ['ใหม่', '']);
+  assert.equal(e.editorVisible, true); assert.match(alerts.join(' '), /blank|complete.*entr/i);
 });
 
 test('saving a diagnostic correction preserves the completed scan and remaining error filter', async () => {
@@ -2111,8 +2113,8 @@ function unchangedReviewFixture(existingLocal) {
     filedir: 'stat_descriptions', filename: 'crossbow_bolt_additional_number_of_targets_to_pierce.txt', name: null,
     stats: ['crossbow_bolt_additional_number_of_targets_to_pierce'], variables: ['1', '2|#'], remarks: ['', ''],
     translations: { English: ['Bolts [Pierce] an additional target', 'Bolts [Pierce] {0} additional targets'],
-      Japanese: ['ボルトは対象を追加で1体[Pierce|貫通]する', ''], French: ['Autre langue', 'Deuxième ligne'] },
-    hasChanges: false, needsReview: true, isMissing: true,
+      Japanese: ['ボルトは対象を追加で1体[Pierce|貫通]する', 'ボルトは対象を追加で{0}体[Pierce|貫通]する'], French: ['Autre langue', 'Deuxième ligne'] },
+    hasChanges: false, needsReview: true, isMissing: false,
   };
   const desc = reactiveFixture(plain), unrelated = description(2);
   unrelated.translations.French = ['Bonjour', 'Deuxième'];
@@ -2136,7 +2138,7 @@ for (const existingLocal of [false, true]) {
     await e.confirmTranslationUnchanged();
     assert.equal(writes.length, 1, e.collaborationNotice);
     const saved = writes[0], local = saved.workspace.descs.find(item => item.filepath === desc.filepath);
-    assert.deepEqual(local.translations.Japanese, translations, 'The unchanged review retains the intentional blank.');
+    assert.deepEqual(local.translations.Japanese, translations, 'The unchanged review retains the complete translated entries.');
     assert.deepEqual(local.translations.English, [...desc.translations.English]);
     for (const key of ['stats', 'variables', 'remarks']) assert.deepEqual(local[key], [...desc[key]]);
     if (existingLocal) assert.deepEqual(local.translations.French, originalWorkspace.descs[0].translations.French);
@@ -2155,7 +2157,7 @@ for (const existingLocal of [false, true]) {
     assert.equal(saved.workspace.status[desc.filepath].marker, 'keep review metadata');
     assert.equal(local.hasChanges, undefined); assert.equal(local.isMissing, undefined);
     const state = window.WorkspaceState.workspaceFile(saved.workspace, desc, 'Japanese');
-    assert.equal(state.hasChanges, true); assert.equal(state.isMissing, true);
+    assert.equal(state.hasChanges, true); assert.equal(state.isMissing, false);
     assert.equal(saved.revisions.length, 1); assert.equal(saved.revisions[0].note, 'confirm');
     assert.equal(saved.revisions[0].lang, 'Japanese'); assert.equal(saved.revisions[0].sourceHash, e.sourceIdentity);
     assert.deepEqual(saved.revisions[0].translations, translations);
@@ -2163,6 +2165,19 @@ for (const existingLocal of [false, true]) {
     assert.equal(e.localDescs.status[desc.filepath].needsReview, undefined); assert.equal(e.editorSaving, false);
   });
 }
+
+test('blank reactive confirmation preserves the original workspace and exact review draft', async () => {
+  const { editor: e, writes, desc } = unchangedReviewFixture(true);
+  desc.translations.Japanese[1] = '';
+  e.editorBlocks[1].translation = ''; e.editorOriginalTranslations[1] = '';
+  const before = JSON.parse(JSON.stringify(e.localDescs)), blocks = e.editorBlocks;
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 0);
+  assert.equal(e.editorVisible, true); assert.equal(e.editorBlocks, blocks); assert.equal(blocks[1].translation, '');
+  assert.deepEqual(JSON.parse(JSON.stringify(e.localDescs)), before);
+  assert.match(e.collaborationNotice, /blank|complete.*entr/i);
+  assert.equal(e.editorSaving, false);
+});
 
 test('a failed reactive confirmation preserves staged work and legacy recovery metadata', async () => {
   const { editor: e, window, writes, desc } = unchangedReviewFixture(true);

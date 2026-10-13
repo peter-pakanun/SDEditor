@@ -7,12 +7,16 @@ const vm = require('node:vm');
 
 const window = {};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), { window });
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
 test('Lookup reference metadata displays mapped English with the shared focusable tooltip before notes', () => {
-  assert.match(Lookup.template, /v-for="item in lookupSelectedReference\.referenceMetadata \|\| \[\]"[^>]*><h4>\{\{ item\.name \}\}<\/h4><pre class="lookupText"[^>]*>\{\{ item\.display \?\? item\.value \}\}<\/pre>/);
-  assert.match(Lookup.template, /:tabindex="item\.tooltip \? 0 : undefined" :aria-label="item\.tooltip \|\| undefined" v-tooltip="item\.tooltip"/);
-  assert.doesNotMatch(Lookup.template, /:title="item\./);
+  assert.match(Lookup.template, /<ct-context :host="\$props\.controller" :items="lookupSelectedReference\.referenceMetadata \|\| \[\]"><\/ct-context>/);
+  const context = window.ClientTextUI.contextComponent.template;
+  assert.match(context, /v-for="item in items"[^>]*><dt>\{\{ item\.name \}\}<\/dt>/);
+  assert.match(context, /v-for="\(part,index\) in item\.parts"[^>]*>\{\{ part\.text \}\}/);
+  assert.match(context, /:tabindex="part\.tooltip \? 0 : undefined" :aria-label="part\.tooltip \|\| undefined" v-tooltip="part\.tooltip"/);
+  assert.doesNotMatch(context, /:title="(?:item|part)\./);
   assert.ok(Lookup.template.indexOf('lookupSelectedReference.referenceMetadata') < Lookup.template.indexOf('lookupSelectedReference.developerNotes'));
   const css = fs.readFileSync(path.join(__dirname, '../public/editor-lookup.css'), 'utf8');
   assert.match(css, /\.lookupText\s*\{[^}]*user-select:\s*text/);

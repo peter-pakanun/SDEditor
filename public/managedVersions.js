@@ -862,11 +862,11 @@
       },
       managedProgressTooltip(team) {
         const progress = this.managedProgress(team);
-        return `${team.language} progress\nSaved: ${progress.saved} / ${progress.total} (${progress.percent}%)\nMissing: ${progress.missing}\nRevised: ${progress.revised} (included in Saved)\nWorkload denominator: Missing + Saved. Status counts can overlap.\nOnly server-accepted work is counted; unsaved drafts and pending offline saves are excluded.`;
+        return `${team.language} progress\nSaved: ${progress.saved} / ${progress.total} (${progress.percent}%)\nMissing: ${progress.missing}\nIncomplete SD errors: ${team.counts?.error || 0}\nRevised: ${progress.revised} (included in Saved)\nWorkload denominator: Missing + Saved. Status counts can overlap.\nOnly server-accepted work is counted; unsaved drafts and pending offline saves are excluded.`;
       },
       managedExistingTeamTooltip(team) {
         const online = (team.presence || []).map(peer => peer.name || peer.displayName || peer.userName || 'Translator');
-        return `${team.language} · ${team.isManaged ? 'Published room' : 'Standalone / Offline import'}\nSaved: ${team.counts?.saved ?? team.savedFileCount ?? 0} · Missing: ${team.counts?.missing || 0} · Revised: ${team.counts?.revised || 0}\nDropped: ${team.counts?.dropped || 0} · Shared history: ${team.historyCount || 0} changes\n${online.length ? 'Online: ' + online.join(', ') : 'No translators currently online.'}\nThis existing room and its work will be reused. Unuploaded offline work and local drafts are not visible here.`;
+        return `${team.language} · ${team.isManaged ? 'Published room' : 'Standalone / Offline import'}\nSaved: ${team.counts?.saved ?? team.savedFileCount ?? 0} · Missing: ${team.counts?.missing || 0} · Revised: ${team.counts?.revised || 0}\nIncomplete SD errors: ${team.counts?.error || 0} · Dropped: ${team.counts?.dropped || 0} · Shared history: ${team.historyCount || 0} changes\n${online.length ? 'Online: ' + online.join(', ') : 'No translators currently online.'}\nThis existing room and its work will be reused. Unuploaded offline work and local drafts are not visible here.`;
       },
       managedVersionOpenWarning(version, team, language) {
         const warnings = [];

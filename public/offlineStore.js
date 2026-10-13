@@ -14,7 +14,8 @@
   // replay a redundant initial shared merge after scoped cleanup.
   // Keep every store and durable retry receipt while excluding older editors/workers.
   // v18 also fences writers that cannot retain standalone carry repair outcomes.
-  const DB_VERSION = 18;
+  // v19 excludes writers that could stage incomplete StatDescription text.
+  const DB_VERSION = 19;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -146,7 +147,10 @@
   }
 
   function pruneWorkspace(workspace) {
-    if (Number(workspace?.stagedVersion) >= 1) WorkspaceState.pruneWorkspaceStatus(workspace);
+    if (Number(workspace?.stagedVersion) >= 1) {
+      WorkspaceState.pruneWorkspaceStatus(workspace);
+      WorkspaceState.quarantineInvalidTranslations(workspace);
+    }
     return workspace;
   }
 
@@ -336,8 +340,10 @@
   }
   async function getLegacyWorkspaceView(version, language, frozen = false, capturedSelection) {
     const selectedKey = capturedSelection?.workspaceKey || workspaceKey(version);
-    if ((!language || language === 'English') && !frozen) {
+    if ((!language || language === 'English') && !frozen && !capturedSelection?.checkInvalidTranslations) {
       const workspace = await kvGet(selectedKey);
+      if (workspace?.invalidTranslationPolicyVersion !== 1 && Number(workspace?.stagedVersion) >= 1)
+        return getLegacyWorkspaceView(version, language || 'English', frozen, { ...capturedSelection, workspaceKey: selectedKey, checkInvalidTranslations: true });
       if (Number(workspace?.stagedVersion) >= 1 && workspace.statusMetadataVersion !== 1) {
         if (capturedSelection) return withStore(STORE_KV, 'readwrite', async store => {
           const latest = (await requestToPromise(store.get(selectedKey)))?.value;
@@ -358,7 +364,7 @@
     req.onsuccess = () => {
       try {
         result = req.result?.value;
-        if (result && (Number(result.stagedVersion) < 1 || result.statusMetadataVersion !== 1 || result.placeholderRepairVersion !== 1)) {
+        if (result && (Number(result.stagedVersion) < 1 || result.statusMetadataVersion !== 1 || result.placeholderRepairVersion !== 1 || result.invalidTranslationPolicyVersion !== 1)) {
           const beforeMigration = JSON.stringify(result);
           let source, collaboration, receipts, waiting = 4;
           const revisions = [], originSources = {};
@@ -370,12 +376,46 @@
                 game: normalizeGameVersion(version), language, collaboration, revisions, originSources,
                 ...(frozen ? { migrationAt: Number(result.lastModified) || 1,
                   migrationId: (filepath, lang, origin) => 'migration-' + stableRepairId([scopedVersion(version), filepath, lang, origin]) } : {}) });
-              else pruneWorkspace(result);
+              else WorkspaceState.pruneWorkspaceStatus(result);
+              WorkspaceState.quarantineInvalidTranslations(result, { source: source || result.descs || [], archivedAt: Number(result.lastModified) || 1 });
+              let invalidCommands = false;
+              const originals = new Map((source || result.descs || []).map(file => [file.filepath, file]));
+              const selectedScope = capturedSelection?.scope || scopedVersion(version);
+              const statDescription = !String(result.contentMode || result.mode || '').toLowerCase().startsWith('clienttext');
+              for (const room of Object.values(statDescription ? collaboration?.rooms || {} : {})) {
+                const identity = room.identity;
+                if (!identity || identity.game !== normalizeGameVersion(version) || identity.sourceHash !== result.sourceHash
+                  || (identity.branchId || DEFAULT_BRANCH) !== (result.branchId || selectedScope?.branchId || DEFAULT_BRANCH)
+                  || String(identity.accountId || 'guest') !== String(result.accountId || result.collaborationAccountId || selectedScope?.accountId || 'guest')
+                  || !sameContentScope(identity, result)) continue;
+                for (const command of room.outbox || []) {
+                  if (command.resetStaging || command.status === 'invalid_translation_resolved') continue;
+                  const invalid = [];
+                  for (const entry of command.files || []) {
+                    const file = entry.yours || entry;
+                    if (file.needsReview && !file.trackedForExport) continue;
+                    const original = originals.get(file.filepath);
+                    const issues = WorkspaceState.translationIssues(file.translations, original?.translations?.English?.length ?? file.translations?.length ?? 0);
+                    if (!Array.isArray(original?.translations?.English)) { issues.valid = false; issues.sourceUnavailable = true; }
+                    if (!issues.valid) {
+                      invalid.push({ filepath: file.filepath, ...issues });
+                      WorkspaceState.archiveInvalidTranslation(result, file, identity.language, { filepath: file.filepath, source: original,
+                        operationId: command.id, archivedAt: Number(result.lastModified) || 1, sourceUnavailable: !!issues.sourceUnavailable });
+                    }
+                  }
+                  if (!invalid.length) continue;
+                  const error = { code: 'SD_TRANSLATION_INVALID', message: 'Complete every translation entry before saving.', files: invalid };
+                  if (command.status !== 'invalid_translation' || JSON.stringify(command.translationError) !== JSON.stringify(error)) invalidCommands = true;
+                  command.status = 'invalid_translation'; command.translationError = error;
+                }
+              }
+              if (!frozen) retainLegacyInvalidDrafts(store, result, originals, normalizeGameVersion(version), error => { failure = error; tx.abort(); });
+              result.invalidTranslationPolicyVersion = 1;
               const repaired = WorkspaceState.repairLegacyPlaceholders(result, { source, collaboration, receipts, revisions,
                 game: normalizeGameVersion(version), evidenceComplete: !!history.openCursor,
                 ...(frozen ? { repairId: (filepath, lang) => stableRepairId([scopedVersion(version), filepath, lang]), repairAt: Number(result.lastModified) || 0 } : {}) });
-              if (frozen && repaired && collaboration) preparedRoomRepairs.set(normalized.scopeKey(scopedVersion(version)), collaboration);
-              if (repaired && collaboration && !frozen) store.put({ key: 'collaboration_v1', value: collaboration });
+              if (frozen && (repaired || invalidCommands) && collaboration) preparedRoomRepairs.set(normalized.scopeKey(selectedScope), collaboration);
+              if ((repaired || invalidCommands) && collaboration && !frozen) store.put({ key: 'collaboration_v1', value: collaboration });
               if (JSON.stringify(result) !== beforeMigration && !frozen) store.put({ key, value: pruneWorkspace(result) });
             } catch (error) { failure = error; tx.abort(); }
           };
@@ -384,7 +424,7 @@
           sourceRead.onsuccess = () => { source = result.importArchive ? sourceRead.result?.value?.source : sourceRead.result?.value; finish(); };
           const collaborationRead = store.get('collaboration_v1');
           collaborationRead.onsuccess = () => { collaboration = collaborationRead.result?.value; finish(); };
-          const migratedScope = capturedSelection ? capturedSelection.scope : scopedVersion(version);
+          const migratedScope = capturedSelection?.scope || scopedVersion(version);
           const receiptsRead = store.get(capturedSelection?.receiptsKey
             || (migratedScope ? receiptScopeKey(migratedScope) : 'translation_save_receipts_' + normalizeGameVersion(version)));
           receiptsRead.onsuccess = () => { receipts = receiptsRead.result?.value || []; finish(); };
@@ -416,6 +456,49 @@
     const hashes = [2166136261, 2246822519, 3266489917, 668265263];
     for (let i = 0; i < text.length; i++) for (let j = 0; j < hashes.length; j++) hashes[j] = Math.imul(hashes[j] ^ (text.charCodeAt(i) + j), 16777619);
     return 'placeholder-v9-' + hashes.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+  function retainLegacyInvalidDrafts(store, workspace, originals, game, fail) {
+    const groups = new Map();
+    for (const archived of Object.values(workspace.invalidTranslationArchive || {})) {
+      if (!archived.sourceHash || archived.sourceHash !== workspace.sourceHash) continue;
+      const scope = { profile: archived.accountId || workspace.accountId || workspace.collaborationAccountId || 'guest',
+        game: archived.game || game, sourceHash: archived.sourceHash, language: archived.language, filepath: archived.filepath,
+        branchId: archived.branchId || workspace.branchId || DEFAULT_BRANCH,
+        ...contentScope(archived.groupId ? archived : workspace) };
+      const key = translationDraftKey(scope);
+      if (!groups.has(key)) groups.set(key, { scope, archives: [] });
+      groups.get(key).archives.push(archived);
+    }
+    for (const [key, { scope, archives }] of groups) {
+      const read = store.get(key);
+      read.onsuccess = () => {
+        (async () => {
+          const previous = read.result?.value;
+          let current = previous;
+          for (const archived of archives) {
+            const recoveryKey = 'invalid_translation_draft_receipt_v1:' + JSON.stringify([scope.profile, scope.game, scope.sourceHash,
+              scope.language, scope.filepath, scope.branchId || DEFAULT_BRANCH, ...contentParts(scope), archived.id]);
+            if (await requestToPromise(store.get(recoveryKey))) continue;
+            if (current?.id === archived.id && ['promoted', 'discarded'].includes(current.state)) {
+              store.put({ key: recoveryKey, value: { state: 'retained', draftKey: key, identity: archived.id } });
+              continue;
+            }
+            const original = originals.get(archived.filepath), base = [...(original?.translations?.[archived.language] || [])];
+            while (base.length < (original?.translations?.English?.length || 0)) base.push('');
+            const recovered = { ...scope, key, id: archived.id, revision: archived.id, state: 'active',
+              translations: archived.stage.translations, base: { translations: base }, source: original || null,
+              sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: scope.filepath }, updatedAt: archived.archivedAt };
+            if (!current || current.state !== 'active') current = { ...recovered, conflicts: current?.conflicts || [],
+              recovery: [...(current?.recovery || []), ...(current?.translations?.length ? [current] : [])] };
+            else if (JSON.stringify(current.translations) !== JSON.stringify(recovered.translations)
+              && !(current.conflicts || []).some(variant => variant.id === archived.id)) current = { ...current,
+                revision: current.revision + ':' + archived.id, conflicts: [...(current.conflicts || []), recovered] };
+            store.put({ key: recoveryKey, value: { state: 'retained', draftKey: key, identity: archived.id } });
+          }
+          if (JSON.stringify(previous) !== JSON.stringify(current)) store.put({ key, value: current });
+        })().catch(fail);
+      };
+    }
   }
   async function normalizePreparedRoomRepairs(scope) {
     const state = preparedRoomRepairs.get(normalized.scopeKey(scope));
@@ -1124,6 +1207,11 @@
         || !Array.isArray(draft.base?.translations) || draft.base.translations.some(line => typeof line !== 'string')) {
         throw new TypeError('The saved draft does not match its translation save scope.');
       }
+      if (Object.hasOwn(draft, 'replaceCheckpoint') && typeof draft.replaceCheckpoint !== 'boolean')
+        throw new TypeError('The draft checkpoint replacement flag must be boolean.');
+      if (draft.replaceCheckpoint && (!batch.checkpoint || batch.checkpoint.key !== draft.key
+        || batch.checkpoint.id !== draft.id || batch.checkpoint.revision !== draft.revision))
+        throw new TypeError('A draft checkpoint replacement must capture the same checkpoint identity and revision.');
     }
     if (checkpoint) {
       const draftScope = translationDraftScopeFromKey(checkpoint.key);
@@ -1226,6 +1314,16 @@
           && String(workspace.collaborationAccountId) !== String(batch.accountId)) {
           throw stale('The signed-in account changed before this translation could be saved.');
         }
+        // A durable receipt above wins even when an older editor accepted an
+        // incomplete save. New commands must validate every entry before any
+        // workspace, draft, history or retry state is changed.
+        if (!resetStaging && !String(workspace.contentMode || '').toLowerCase().startsWith('clienttext')) for (const file of files) {
+          const original = values[batchSourceKey]?.find(desc => desc.filepath === file.filepath)
+            || workspace.descs.find(desc => desc.filepath === file.filepath)
+            || batch.descriptions?.find(desc => desc.filepath === file.filepath);
+          if (!Array.isArray(original?.translations?.English)) throw new Error('The English source is unavailable. Reimport the source archive before saving.');
+          WorkspaceState.assertCompleteTranslation(file.translations, original.translations.English.length, file.filepath);
+        }
         workspace.descs ||= []; workspace.status ||= {};
         const legacyWorkspace = Number(workspace.stagedVersion || 0) < 1;
         if (!recordMode) WorkspaceState.initializeWorkspace(workspace, { source: values[batchSourceKey] || batch.descriptions || [],
@@ -1269,6 +1367,8 @@
           if (current.conflicts?.length) {
             throw Object.assign(new Error('Another local draft exists for this file. Review both drafts before saving.'), { code: 'DRAFT_CONFLICT' });
           }
+          if (draft.replaceCheckpoint && current.revision !== draft.revision)
+            throw Object.assign(new Error('This checkpoint changed before its corrected translation could be saved.'), { code: 'DRAFT_CHANGED' });
         }
         if (draft) {
           const filepath = files[0].filepath;
@@ -1414,7 +1514,7 @@
         if (draft) {
           const current = values[draft.key];
           if (current?.state === 'active' && current.id === draft.id && current.revision === draft.revision) {
-            if (JSON.stringify(current.translations) !== JSON.stringify(files[0].translations)) {
+            if (!draft.replaceCheckpoint && JSON.stringify(current.translations) !== JSON.stringify(files[0].translations)) {
               throw Object.assign(new Error('The saved translation does not match the captured draft.'), { code: 'DRAFT_CHANGED' });
             }
             kv.put({ key: draft.key, value: { ...current, state: 'promoted', consumedRevision: current.revision,

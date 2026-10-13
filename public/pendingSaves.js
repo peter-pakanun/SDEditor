@@ -9,7 +9,7 @@
   const plain = value => JSON.parse(JSON.stringify(value));
   const asError = value => value instanceof Error ? value : new Error(value?.message || String(value));
   const reviewCodes = new Set(['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT', 'SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED',
-    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']);
+    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED', 'SD_TRANSLATION_INVALID']);
   const requiresReview = error => reviewCodes.has(error?.code) && !error?.durableUnknown;
   let fallbackId = 0;
   const contentScope = value => value.workspaceScope || value;

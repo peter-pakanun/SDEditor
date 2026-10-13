@@ -236,6 +236,8 @@
       trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
       ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}),
       ...(file.sourceCarry ? { sourceCarry: copy(file.sourceCarry) } : {}),
+      ...(file.invalidStageRecovery ? { invalidStageRecovery: copy(file.invalidStageRecovery) } : {}),
+      ...(file.originalTranslationIssues ? { originalTranslationIssues: copy(file.originalTranslationIssues) } : {}),
       ...(Array.isArray(file.beforeTranslations) ? { beforeTranslations: copy(file.beforeTranslations) } : {}) };
   }
   function contentEqual(a, b) {
@@ -309,12 +311,24 @@
       }
       desc.translations ||= {};
       originals ||= new Map(source.map(desc => [desc.filepath, desc]));
+      const original = originals.get(file.filepath) || desc;
+      const invalid = !WorkspaceState.translationIssues(file.translations, original.translations?.English?.length ?? file.translations.length).valid;
+      if (file.invalidStageRecovery) {
+        const recovery = file.invalidStageRecovery;
+        WorkspaceState.archiveInvalidTranslation(result, { translations: recovery.translations, revision: recovery.revision,
+          savedAt: recovery.createdAt, sourceHash: result.sourceHash }, language, { filepath: file.filepath, source: original,
+          recoveryId: recovery.id, archivedAt: recovery.createdAt });
+      }
       if (file.needsReview) {
         if (!WorkspaceState.droppedForFile(result, file.filepath, language) && file.translations.some(text => text.trim())) {
           WorkspaceState.dropTranslation(result, desc, language, { translations: file.translations,
             originSourceHash: '', originSourceAvailable: false, targetSourceHash: result.sourceHash,
             reason: 'Preserved legacy dropped translation' });
         }
+      } else if (invalid) {
+        if (file.trackedForExport && !file.stagingReset) WorkspaceState.archiveInvalidTranslation(result, file, language,
+          { filepath: file.filepath, source: original });
+        if (result.staged[language]) delete result.staged[language][file.filepath];
       } else if (file.stagingReset && !file.trackedForExport
         || WorkspaceState.carriedBaselineReplay(result, originals.get(file.filepath), language, file)) {
         if (result.staged[language]) delete result.staged[language][file.filepath];
@@ -328,9 +342,7 @@
         WorkspaceState.stageTranslation(result, received, language, { source: originals.get(file.filepath),
           sourceCarry: file.sourceCarry, ...(unchanged ? { savedAt: current.savedAt } : {}) });
       }
-      desc.translations[language] = file.needsReview
-        ? WorkspaceState.workspaceFile(result, originals.get(file.filepath) || desc, language).translations
-        : copy(file.translations);
+      desc.translations[language] = WorkspaceState.workspaceFile(result, original, language).translations;
     }
     return WorkspaceState.pruneWorkspaceStatus(result);
   }

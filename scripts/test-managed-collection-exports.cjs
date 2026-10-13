@@ -61,7 +61,9 @@ test('client ZIP reproduces the server codec bytes from frozen Saved files and c
   assert.deepEqual(desc.variables, ['1', '2']); assert.deepEqual(desc.remarks, ['remark', '']);
   const apiRoot = process.env.SDEDITOR_FIXTURE_API_ROOT || path.resolve(__dirname, '../../SDEditor-API');
   const { exportCollection } = await import(pathToFileURL(path.join(apiRoot, 'src/version-codec.js')).href);
-  const expected = await exportCollection({ files: manifest.files.map(file => ({ ...file, trackedForExport: true })) }, source, 'Thai');
+  const frozen = { files: manifest.files.map(file => ({ ...file, trackedForExport: true })) };
+  await assert.rejects(exportCollection(frozen, source, 'Thai'), error => error.code === 'SD_TRANSLATION_INVALID');
+  const expected = await exportCollection(frozen, source, 'Thai', { allowHistoricalInvalid: true });
   assert.deepEqual(Object.keys((await JSZip.loadAsync(expected)).files), ['source/a.txt']);
   assert.deepEqual(Buffer.from(bytes), expected);
   assert.deepEqual(bytes, await Exports.generate(manifest, source, JSZip, { type: 'uint8array' }));

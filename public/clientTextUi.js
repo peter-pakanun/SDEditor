@@ -1970,7 +1970,7 @@
                         decorations:!!checks.decorations,substitutions:!!checks.substitutions,controls:!!checks.controls});
                     if(checks.whitespace || checks.dash){
                         if(!root.TranslationDiagnostics?.analyze)throw new Error('Translation diagnostic checks are unavailable.');
-                        issues.push(...root.TranslationDiagnostics.analyze(text,{lang,checks:{whitespace:!!checks.whitespace,dash:!!checks.dash,tagSyntax:false}}).diagnostics);
+                        issues.push(...root.TranslationDiagnostics.analyze(text,{lang,contentMode:'clienttext',checks:{whitespace:!!checks.whitespace,dash:!!checks.dash,tagSyntax:false}}).diagnostics);
                     }
                     if(checks.terminology)issues.push(...root.TerminologyDiagnostics.analyze(state.maskAudioMarkers(state.canonicalSource(field.source)),state.maskAudioMarkers(text),terminology,{lang}));
                     return issues.map(issue=>({...issue,level:issue.level || issue.severity,severity:issue.level || issue.severity,fieldId:field.id,fieldName:field.name,form:field.form || ''}));

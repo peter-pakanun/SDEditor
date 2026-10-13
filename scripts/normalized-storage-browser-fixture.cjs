@@ -50,6 +50,7 @@ function browserProbe() {
             super(...args);
             this.addEventListener('message', event => {
                 if (event.data?.type === 'saved') probe.events.push({ name: 'saved', at: performance.now() });
+                if (event.data?.type === 'error') probe.events.push({ name: 'worker.error', at: performance.now(), id: event.data.id, error: event.data.error });
                 if (event.data?.type === 'storageProbe') probe.workerOperations.push(...event.data.operations);
             });
         }
@@ -138,6 +139,8 @@ async function runFixture({ storageOnly = false } = {}) {
     cloudStore.registerIdentity({ sub: 'normalized-admin', email: 'admin@normalized.fixture', name: 'Fixture Admin' });
     cloudStore.registerIdentity({ sub: 'normalized-translator', email: 'translator@normalized.fixture', name: 'Fixture Translator' });
     cloudStore.assignLanguage('normalized-admin', 'normalized-translator', 'Thai');
+    cloudStore.registerIdentity({ sub: 'normalized-policy-translator', email: 'policy@normalized.fixture', name: 'Fixture Policy Translator' });
+    cloudStore.assignLanguage('normalized-admin', 'normalized-policy-translator', 'Thai');
     const api = createApp({ config, database, store: cloudStore, oauthProvider: null }), apiServer = createServer(api);
     api.locals.collaborationRealtime.attach(apiServer);
     await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
@@ -179,7 +182,8 @@ async function runFixture({ storageOnly = false } = {}) {
             WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: ['Saved Thai'] }, 'Thai', { source: source[0] });
             WorkspaceState.stageTranslation(workspace, { filepath: source[6].filepath, translations: ['Saved six'] }, 'Thai', { source: source[6] });
             WorkspaceState.stageTranslation(workspace, { filepath: source[10].filepath, translations: ['Saved ten'] }, 'Thai', { source: source[10] });
-            WorkspaceState.stageTranslation(workspace, { filepath: source[0].filepath, translations: [''] }, 'German', { source: source[0] });
+            (workspace.staged.German ||= {})[source[0].filepath] = { sourceHash: scope.sourceHash,
+                translations: [''], before: copy(source[0].translations.German), savedAt: 1, saveOrigin: 'save' };
             WorkspaceState.dropTranslation(workspace, source[1], 'Thai', { id: 'retained-recovery', recoveryId: 'explicit-generation',
                 originSourceHash: 'predecessor', targetSourceHash: scope.sourceHash, translations: ['Dropped Thai'] });
             const request = indexedDB.open('sdeditor', 8);
@@ -228,7 +232,9 @@ async function runFixture({ storageOnly = false } = {}) {
                 const suffix = JSON.stringify([tinyScope.accountId, tinyScope.game, tinyScope.branchId, tinyScope.sourceHash]);
                 const tinySource = [copy(source[0])], tinyWorkspace = { ...tinyScope, descs: copy(tinySource), status: {} };
                 WorkspaceState.initializeWorkspace(tinyWorkspace, { source: tinySource, sourceHash: tinyScope.sourceHash, game: tinyScope.game, language: 'Thai' });
-                WorkspaceState.stageTranslation(tinyWorkspace, { filepath: source[0].filepath, translations: [index === 1 ? '' : 'Tiny scoped save ' + index] }, 'Thai', { source: tinySource[0] });
+                if (index === 1) (tinyWorkspace.staged.Thai ||= {})[source[0].filepath] = { sourceHash: tinyScope.sourceHash,
+                    translations: [''], before: copy(tinySource[0].translations.Thai), savedAt: 1, saveOrigin: 'save' };
+                else WorkspaceState.stageTranslation(tinyWorkspace, { filepath: source[0].filepath, translations: ['Tiny scoped save ' + index] }, 'Thai', { source: tinySource[0] });
                 values['workspace_version_v1:' + suffix] = tinyWorkspace;
                 values['source_version_v1:' + suffix] = tinySource;
             }
@@ -252,8 +258,8 @@ async function runFixture({ storageOnly = false } = {}) {
                 yours: copy(unresolved), shared: { ...copy(unresolved), id: 'unresolved-shared', revision: 3,
                     snapshot: { ...copy(unresolved.snapshot), translations: ['Unresolved shared text'] } },
                 recoveryEvidence: { emptySnapshotMetadata: {}, decisions: [] } });
-            WorkspaceState.stageTranslation(conversionWorkspace, { filepath: conversionSource[2].filepath, translations: [''] }, 'German',
-                { source: conversionSource[2], savedAt: 1, saveOrigin: 'save' });
+            (conversionWorkspace.staged.German ||= {})[conversionSource[2].filepath] = { sourceHash: conversionScope.sourceHash,
+                translations: [''], before: copy(conversionSource[2].translations.German), savedAt: 1, saveOrigin: 'save' };
             WorkspaceState.stageTranslation(conversionWorkspace, { filepath: conversionSource[3].filepath, translations: copy(conversionSource[3].translations.Thai) },
                 'Thai', { source: conversionSource[3], savedAt: 2, saveOrigin: 'save' });
             WorkspaceState.dropTranslation(conversionWorkspace, conversionSource[4], 'Thai', { id: 'z-first',
@@ -387,7 +393,8 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.deepEqual(byPath(migration.source), byPath(migration.originalSource), 'Immutable source survives migration');
         assert.deepEqual(migration.frozen, migration.values, 'v8 evidence is frozen, including unrelated settings');
         assert.deepEqual(migration.recovered.staged.Thai['storage/0.txt'].translations, ['Saved Thai']);
-        assert.deepEqual(migration.recovered.staged.German['storage/0.txt'].translations, ['']);
+        assert.equal(migration.recovered.staged.German?.['storage/0.txt'], undefined);
+        assert.deepEqual(Object.values(migration.recovered.invalidTranslationArchive)[0].stage.translations, [''], 'Legacy invalid German save remains recoverable outside Saved');
         assert.ok(migration.recovered.dropped.Thai['storage/1.txt']);
         assert.equal(migration.orphanedDrafts.length, 1, 'Older-version recovery stays available without a full retained baseline');
         assert.deepEqual(migration.orphanedDrafts[0].source, migration.values[migration.orphanKey].source, 'Orphan checkpoint preserves original comparison evidence');
@@ -407,9 +414,10 @@ async function runFixture({ storageOnly = false } = {}) {
             'Native recovery and seed snapshots are physically stored as individually keyed file records');
         assert.equal(Object.hasOwn(migration.roomMetadata.seedUpload, 'files'), false, 'Legacy seed upload files are excluded from room metadata');
         assert.deepEqual(room.seedUpload, originalRoom.seedUpload, 'Cold room adapters hydrate exact seed-upload files and retry ticket');
-        assert.deepEqual(migration.tinyWorkspaces.map(workspace => workspace.staged.Thai['storage/0.txt'].translations),
-            [['Tiny scoped save 0'], [''], ['Tiny scoped save 2'], ['Tiny scoped save 3'], ['Tiny scoped save 4']],
-            'Accounts, branches, games, versions and intentional blank saves remain independent');
+        assert.deepEqual(migration.tinyWorkspaces.map(workspace => workspace.staged.Thai?.['storage/0.txt']?.translations),
+            [['Tiny scoped save 0'], undefined, ['Tiny scoped save 2'], ['Tiny scoped save 3'], ['Tiny scoped save 4']],
+            'Accounts, branches, games and versions stay independent while legacy invalid work is quarantined');
+        assert.deepEqual(Object.values(migration.tinyWorkspaces[1].invalidTranslationArchive)[0].stage.translations, ['']);
         assert.deepEqual(migration.legacyHistory.map(row => row.id), [51], 'Scoped history index preserves the original legacy revision ID');
         assert.equal(migration.legacyHistory[0].accountId, 'fixture-history-owner');
         assert.equal(migration.legacyHistory[0].branchId, 'default');
@@ -421,7 +429,8 @@ async function runFixture({ storageOnly = false } = {}) {
         assert.ok(migration.conversionRows.some(row => row.value.field === 'droppedConflicts' && row.value.language === 'German'),
             'Failed verification retains the actual persisted conflict for a safe retry');
         assert.equal(migration.conversionRetryOperations.filter(operation => operation.store === 'workspace_records' && operation.method === 'put').length, 0,
-            'Final verification retry resumes existing batches instead of rebuilding converted recovery rows');
+            'Final verification retry resumes existing batches instead of rebuilding converted recovery rows: '
+            + JSON.stringify(migration.conversionRetryOperations.filter(operation => operation.store === 'workspace_records' && operation.method === 'put').map(operation => operation.key)));
         assert.equal(migration.conversionRetryOperations.some(operation => operation.store === 'kv' && ['put', 'add', 'delete'].includes(operation.method)), false,
             'Final verification retry never mutates frozen legacy aggregates');
         assert.deepEqual(migration.conversionFrozen, migration.conversionWorkspace, 'Frozen recovery evidence remains exact after successful retry');
@@ -437,7 +446,8 @@ async function runFixture({ storageOnly = false } = {}) {
         const unresolvedPath = migration.conversionSource[1].filepath;
         assert.deepEqual(migration.converted.droppedConflicts.German[unresolvedPath], migration.conversionWorkspace.droppedConflicts.German[unresolvedPath],
             'The unresolved conflict and its nested empty recovery evidence survive exactly');
-        assert.deepEqual(migration.converted.staged.German[migration.conversionSource[2].filepath].translations, [''], 'Explicit blank Saved presence survives conversion');
+        assert.equal(migration.converted.staged.German?.[migration.conversionSource[2].filepath], undefined);
+        assert.deepEqual(Object.values(migration.converted.invalidTranslationArchive)[0].stage.translations, [''], 'Invalid explicit legacy save survives conversion as recovery evidence');
         assert.deepEqual(migration.converted.staged.Thai[migration.conversionSource[3].filepath].translations,
             migration.conversionSource[3].translations.Thai, 'Explicit unchanged Saved presence survives conversion');
         assert.deepEqual(migration.converted.droppedOutbox, migration.conversionWorkspace.droppedOutbox,
@@ -692,6 +702,7 @@ async function runFixture({ storageOnly = false } = {}) {
             'Hot shared save, events and acknowledgments preserve every unselected recovery member');
         await malformedDeletionRecoveryChecks(page, results);
         await sourceCarryChecks(page, results);
+        await invalidTranslationChecks(page, { apiOrigin, policySession: cloudStore.createSession('normalized-policy-translator'), api, database, apiRoot, results });
         await orphanCarryChecks(page, { apiOrigin, secret, api, database, results });
         console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
         if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
@@ -718,6 +729,147 @@ async function runFixture({ storageOnly = false } = {}) {
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-normalized-browser-')) throw new Error('Refusing cleanup outside fixture directory.');
         rmSync(absolute, { recursive: true, force: true });
     }
+}
+
+async function invalidTranslationChecks(page, { apiOrigin, policySession, api, database, apiRoot, results }) {
+    const isolated = await page.context().newPage();
+    const errors = [];
+    isolated.on('pageerror', error => errors.push(error.message));
+    try {
+        await isolated.goto(new URL('/fixture/storage', page.url()).href);
+        await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
+        const prepared = await isolated.evaluate(async () => {
+            const source = [0, 1, 2].map(index => ({ filepath: 'policy/' + index + '.txt', filename: index + '.txt', filedir: 'policy',
+                name: 'policy_' + index, stats: ['policy_' + index], variables: ['#', '#'], remarks: ['', ''],
+                translations: { English: ['First English ' + index, 'Second English ' + index],
+                    Thai: index === 1 ? ['Useful baseline', '\\n@\u200b'] : ['First baseline ' + index, 'Second baseline ' + index] } }));
+            const zip = new JSZip();
+            for (const desc of source) zip.file(desc.filepath, StatDescCodec.descEncode(desc));
+            const bytes = await zip.generateAsync({ type: 'uint8array' }), tree = await CollaborationProtocol.buildBaselineTree(source);
+            const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1, decisions: [], treeRoot: tree.root,
+                zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.length, fileCount: source.length, descriptionCount: source.length });
+            const baseline = { archive, tree, source, rawSource: structuredClone(source) };
+            const scope = { accountId: 'fixture-policy-valid', game: 'poe1', branchId: 'default', sourceHash: archive.baselineId };
+            const workspace = WorkspaceState.initializeWorkspace({ ...scope, descs: structuredClone(source), status: {}, importArchive: archive },
+                { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
+            await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], scope, baseline);
+            const filepath = source[0].filepath, valid = ['Committed first', 'Committed second'];
+            await OfflineStore.saveTranslationBatch({ jobId: 'policy-valid-save', ...scope, workspaceScope: scope, language: 'Thai',
+                files: [{ filepath, translations: valid }], revisions: [{ filepath, lang: 'Thai', savedAt: 20, translations: valid, note: 'save' }] });
+            const draft = { ...scope, profile: scope.accountId, language: 'Thai', filepath, id: 'policy-blank-draft', revision: 'policy-draft-r1',
+                translations: ['Useful unsaved draft', '\\n@\u200b'], base: { translations: valid }, source: source[0], updatedAt: 21 };
+            await OfflineStore.putTranslationDraft(draft);
+            const read = async () => ({ workspace: await OfflineStore.getVersionWorkspace(scope, 'Thai'), source: await OfflineStore.getVersionSource(scope),
+                draft: await OfflineStore.getTranslationDraft(OfflineStore.translationDraftKey(draft)),
+                history: await OfflineStore.listRevisions(filepath, 'Thai', 100, scope) });
+            const before = await read(), rejected = [];
+            for (const [index, translations] of [['Useful text', ''], ['Useful text', '\\n'], ['Useful text', '@\u200b'], ['Only one entry']].entries()) {
+                window.__normalizedProbe.operations = [];
+                let error;
+                try { await OfflineStore.saveTranslationBatch({ jobId: 'policy-invalid-' + index, ...scope, workspaceScope: scope, language: 'Thai',
+                    files: [{ filepath, translations }], revisions: [{ filepath, lang: 'Thai', translations, savedAt: 30 + index, note: 'save' }] }); }
+                catch (caught) { error = { code: caught.code, blankEntries: caught.blankEntries, entryCountMismatch: caught.entryCountMismatch }; }
+                rejected.push({ error, writes: window.__normalizedProbe.operations.filter(operation => ['put', 'add', 'delete'].includes(operation.method)) });
+            }
+            const after = await read(), baselineState = WorkspaceState.workspaceFile(after.workspace, source[1], 'Thai');
+            const legacyScope = { ...scope, accountId: 'fixture-policy-legacy' }, suffix = NormalizedStore.scopeKey(legacyScope);
+            const legacy = WorkspaceState.initializeWorkspace({ ...legacyScope, descs: structuredClone(source), status: {}, importArchive: archive },
+                { source, sourceHash: legacyScope.sourceHash, game: legacyScope.game, language: 'Thai' });
+            legacy.staged = { Thai: {
+                [source[0].filepath]: { sourceHash: scope.sourceHash, translations: ['Legacy useful text', ''], before: source[0].translations.Thai,
+                    savedAt: 10, saveOrigin: 'save' },
+                [source[2].filepath]: { sourceHash: scope.sourceHash, translations: ['Legacy one entry'], before: source[2].translations.Thai,
+                    savedAt: 11, saveOrigin: 'save' }
+            } };
+            const opening = indexedDB.open('sdeditor'), db = await new Promise((resolve, reject) => {
+                opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+            });
+            const tx = db.transaction('kv', 'readwrite');
+            for (const [key, value] of [['workspace_version_v1:' + suffix, legacy], ['source_version_v1:' + suffix, source],
+                ['import_baseline_poe1_' + scope.sourceHash, baseline]]) tx.objectStore('kv').put({ key, value });
+            await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); }); db.close();
+            const migrated = await OfflineStore.getVersionWorkspace(legacyScope, 'Thai');
+            const migrationDrafts = await OfflineStore.listTranslationDrafts({ ...legacyScope, profile: legacyScope.accountId, language: 'Thai' });
+            return { baseline, scope, legacyScope, filepath, before, after, rejected, baselineState, legacy, migrated, migrationDrafts };
+        });
+        for (const attempt of prepared.rejected) {
+            assert.equal(attempt.error?.code, 'SD_TRANSLATION_INVALID');
+            assert.deepEqual(attempt.writes, [], 'Invalid new saves cannot alter IndexedDB state or create receipts');
+        }
+        assert.deepEqual(prepared.after, prepared.before, 'Rejected mixed-entry saves preserve committed text, exact draft and source history');
+        assert.equal(prepared.baselineState.isInvalidTranslation, true, 'Original blank entries are intrinsically invalid before a manual scan');
+        assert.equal(prepared.baselineState.isMissing, true); assert.equal(prepared.baselineState.hasChanges, false);
+        assert.equal(Object.keys(prepared.migrated.staged.Thai || {}).length, 0);
+        const archives = Object.values(prepared.migrated.invalidTranslationArchive);
+        assert.equal(archives.length, 2);
+        assert.deepEqual(archives.slice().sort((a,b) => a.filepath.localeCompare(b.filepath)).map(item => item.stage.translations),
+            [['Legacy useful text', ''], ['Legacy one entry']]);
+        assert.ok(archives.every(item => item.source.english.length === 2 && item.language === 'Thai' && !item.issues.valid));
+        assert.deepEqual(prepared.migrationDrafts.slice().sort((a,b) => a.filepath.localeCompare(b.filepath)).map(item => item.translations),
+            archives.slice().sort((a,b) => a.filepath.localeCompare(b.filepath)).map(item => item.stage.translations),
+            'Legacy invalid saves return as editable drafts with their exact text');
+        await isolated.reload(); await isolated.waitForFunction(() => !!window.OfflineStore);
+        const reloaded = await isolated.evaluate(async prepared => ({
+            current: await OfflineStore.getVersionWorkspace(prepared.scope, 'Thai'),
+            migrated: await OfflineStore.getVersionWorkspace(prepared.legacyScope, 'Thai'),
+            drafts: await OfflineStore.listTranslationDrafts({ ...prepared.legacyScope, profile: prepared.legacyScope.accountId, language: 'Thai' })
+        }), prepared);
+        assert.deepEqual(reloaded.current, prepared.before.workspace);
+        assert.deepEqual(reloaded.migrated.invalidTranslationArchive, prepared.migrated.invalidTranslationArchive);
+        assert.deepEqual(reloaded.drafts, prepared.migrationDrafts);
+
+        const P = require('../public/collaborationProtocol.js'), collaboration = api.locals.collaboration;
+        const accountId = 'normalized-policy-translator', apiScope = { ...prepared.scope, accountId, language: 'Thai' };
+        collaboration.resolveArchive(accountId, apiScope.game, prepared.baseline.archive);
+        const joined = collaboration.join(accountId, { ...apiScope, archive: prepared.baseline.archive });
+        const file = prepared.baseline.source[0], proof = P.baselineProof(prepared.baseline.tree, file.filepath);
+        collaboration.mutate(accountId, joined.roomId, { mutationId: randomUUID(), origin: 'save', files: [{ filepath: file.filepath,
+            baseRevision: 0, translations: ['Cloud first', 'Cloud second'], baseline: P.witness(file), proof }] });
+        const accepted = collaboration.file(joined.roomId, file.filepath);
+        const apiRejections = await isolated.evaluate(async ({ apiOrigin, policySession, joined, accepted }) => {
+            const outcomes = [];
+            for (const translations of [['Cloud useful', ''], ['Cloud useful', '\\n@\u200b']]) {
+                const response = await fetch(apiOrigin + '/v1/collaboration/rooms/' + joined.roomId + '/mutations', { method: 'POST',
+                    headers: { Authorization: 'Bearer ' + policySession.token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mutationId: crypto.randomUUID(), origin: 'save', files: [{ filepath: accepted.filepath,
+                        baseRevision: accepted.revision, translations }] }) });
+                outcomes.push({ status: response.status, body: await response.json() });
+            }
+            return outcomes;
+        }, { apiOrigin, policySession, joined, accepted });
+        for (const rejected of apiRejections) { assert.equal(rejected.status, 400); assert.equal(rejected.body.error.code, 'SD_TRANSLATION_INVALID'); }
+        assert.deepEqual(collaboration.file(joined.roomId, file.filepath), accepted, 'HTTP policy rejection preserves accepted server text and revision');
+        const { storePayload } = await import(pathToFileURL(join(apiRoot, 'src/payload-store.js')).href);
+        const oldInvalid = ['Legacy cloud useful', ''];
+        database.prepare('UPDATE collaboration_files SET translations=? WHERE room_id=? AND filepath=?').run(storePayload(database, oldInvalid), joined.roomId, file.filepath);
+        database.prepare("UPDATE sd_translation_migrations SET state='deferred' WHERE room_id=?").run(joined.roomId);
+        await collaboration.content.versions.translationMigration.ensure(joined.roomId);
+        const reset = collaboration.file(joined.roomId, file.filepath);
+        assert.equal(reset.stagingReset, true); assert.equal(reset.trackedForExport, false);
+        assert.deepEqual(reset.translations, file.translations.Thai);
+        assert.deepEqual(reset.invalidStageRecovery.translations, oldInvalid);
+        assert.equal(reset.invalidStageRecovery.baselineRestored, true);
+        await collaboration.content.versions.translationMigration.ensure(joined.roomId);
+        assert.deepEqual(collaboration.file(joined.roomId, file.filepath), reset, 'Rechecking the policy cannot duplicate resets or recovery generations');
+        const received = await isolated.evaluate(async ({ baseline, apiScope, reset }) => {
+            const current = WorkspaceState.initializeWorkspace({ ...apiScope, descs: structuredClone(baseline.source), status: {}, importArchive: baseline.archive },
+                { source: baseline.source, sourceHash: apiScope.sourceHash, game: apiScope.game, language: 'Thai' });
+            const projected = CollaborationProtocol.projectWorkspace(current, [reset], 'Thai', baseline.source);
+            await OfflineStore.saveSourceWorkspaceWithRevisions(baseline.source, projected, [], apiScope, baseline);
+            return await OfflineStore.getVersionWorkspace(apiScope, 'Thai');
+        }, { baseline: prepared.baseline, apiScope, reset });
+        assert.equal(received.staged.Thai?.[file.filepath], undefined);
+        const wireRecovery = Object.values(received.invalidTranslationArchive);
+        assert.equal(wireRecovery.length, 1); assert.deepEqual(wireRecovery[0].stage.translations, oldInvalid);
+        await isolated.reload(); await isolated.waitForFunction(() => !!window.OfflineStore);
+        const receivedReload = await isolated.evaluate(scope => OfflineStore.getVersionWorkspace(scope, 'Thai'), apiScope);
+        assert.deepEqual(receivedReload.invalidTranslationArchive, received.invalidTranslationArchive);
+        assert.deepEqual(errors, []);
+        results.push({ scenario: 'strict SD save rejection and legacy quarantine retain drafts and recovery across reload', rejectedSaves: 4,
+            legacyRecoveries: 2, immediateBaselineError: true });
+        results.push({ scenario: 'API blank save rejection and revisioned invalid-stage reset retain browser recovery', rejectedSaves: 2,
+            serverReset: true, preservedRecovery: true });
+    } finally { await isolated.close(); }
 }
 
 async function orphanCarryChecks(page, { apiOrigin, secret, api, database, results }) {
@@ -810,9 +962,15 @@ async function sourceCarryChecks(page, results) {
             };
             const workspace = (scope, source, baseline) => WorkspaceState.initializeWorkspace({ ...scope, descs: copy(source), status: {}, importArchive: copy(baseline.archive) },
                 { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
-            const stage = (work, source, index, translations, savedAt, language = 'Thai', sourceCarry) =>
-                WorkspaceState.stageTranslation(work, { filepath: source[index].filepath, translations }, language,
-                    { source: source[index], savedAt, sourceCarry });
+            const stage = (work, source, index, translations, savedAt, language = 'Thai', sourceCarry) => {
+                if (StatDescCodec.translationIssues(translations, source[index].translations.English.length).valid)
+                    return WorkspaceState.stageTranslation(work, { filepath: source[index].filepath, translations }, language,
+                        { source: source[index], savedAt, sourceCarry });
+                // Deliberately seed pre-policy facts; ordinary staging must reject them.
+                return (work.staged[language] ||= {})[source[index].filepath] = { sourceHash: work.sourceHash,
+                    translations: copy(translations), before: copy(source[index].translations[language] || []), savedAt,
+                    ...(sourceCarry ? { sourceCarry: copy(sourceCarry) } : {}) };
+            };
             const blankIndexes = Array.from({ length: 80 }, (_, index) => index + 7), explicitBlankIndex = 87;
             const previousSource = Array.from({ length: 88 }, (_, index) => describe(index));
             for (const index of [...blankIndexes, explicitBlankIndex]) {
@@ -897,11 +1055,13 @@ async function sourceCarryChecks(page, results) {
         assert.ok(prepared.repaired.staged.Thai['carry/4.txt'], 'Uncertain unchanged stage is retained');
         assert.ok(prepared.repaired.staged.Thai['carry/3.txt'], 'Resolved Dropped promotion is retained');
         assert.ok(prepared.repaired.staged.Thai['carry/6.txt'], 'Unresolved Dropped work is retained');
-        for (let index = 7; index < 87; index++) assert.equal(prepared.repaired.staged.Thai['carry/' + index + '.txt'], undefined,
-            'Inherited blank DNT padding is removed even after v1 completion');
-        assert.deepEqual(prepared.repaired.staged.Thai['carry/87.txt'].translations, [''], 'Explicit current-version blank stays Saved');
+        for (let index = 7; index < 88; index++) assert.equal(prepared.repaired.staged.Thai['carry/' + index + '.txt'], undefined,
+            'Legacy blank quoted work remains outside active Saved translations');
+        const invalid = Object.values(prepared.repaired.invalidTranslationArchive);
+        assert.equal(invalid.length, 81, 'Inherited and explicit invalid records retain their exact recovery evidence');
+        assert.deepEqual(invalid.find(item => item.filepath === 'carry/87.txt').stage.translations, ['']);
         assert.deepEqual(prepared.repaired.staged.Thai['carry/2.txt'].sourceCarry.metadataCorrection.after.remarks, ['corrected metadata']);
-        assert.equal(Object.values(prepared.repaired.sourceCarryRepairArchive).length, 82, 'Removed inherited entries have durable recovery archives');
+        assert.equal(Object.values(prepared.repaired.sourceCarryRepairArchive).length, 2, 'Redundant valid inherited entries have durable carry recovery archives');
         assert.deepEqual(prepared.merged.staged.Thai['carry/import.txt'].translations, ['Newer destination Thai']);
         assert.deepEqual(prepared.imported.staged.German['carry/import.txt'].translations, ['Newer destination German']);
         assert.deepEqual(prepared.imported.dropped.Thai['carry/import.txt'].snapshot.translations, ['Older saved Thai']);
@@ -910,8 +1070,8 @@ async function sourceCarryChecks(page, results) {
         assert.deepEqual(prepared.missing.dropped.Thai['carry/missing.txt'].snapshot.translations, ['Thai missing']);
         const replay = await isolated.evaluate(async prepared => {
             const scope = { ...prepared.scopes.currentScope, language: 'Thai' }, snapshot = await OfflineStore.getWorkspaceSnapshot(scope, 'Thai');
-            const key = CollaborationProtocol.scopeKey(scope), paths = ['carry/0.txt', 'carry/7.txt'];
-            const files = paths.map(filepath => ({ filepath, revision: 1, translations: filepath.endsWith('/0.txt') ? ['Included saved work'] : [''],
+            const key = CollaborationProtocol.scopeKey(scope), paths = ['carry/0.txt'];
+            const files = paths.map(filepath => ({ filepath, revision: 1, translations: ['Included saved work'],
                 trackedForExport: true, needsReview: false }));
             await OfflineStore.updateCollaborationRecords({ key, scope, filepaths: paths }, state => {
                 state.rooms[key] = { identity: scope, mode: 'sparse', roomId: 'carry-room', archive: snapshot.baseline.archive,
@@ -929,8 +1089,8 @@ async function sourceCarryChecks(page, results) {
                     oldWitnesses: client.room().outbox.map(op => Object.keys(op.previousBaselines || {})) };
             } finally { client.destroy(); }
         }, prepared);
-        assert.equal(replay.ids.length, 2, 'Both nonblank and blank first merges get durable predecessor relays');
-        assert.deepEqual(replay.saved, [], 'Unmarked cached R1 snapshots cannot revive either removed inherited save');
+        assert.equal(replay.ids.length, 1, 'Valid first merges get durable predecessor relays');
+        assert.deepEqual(replay.saved, [], 'Unmarked cached R1 snapshots cannot revive removed inherited saves');
         assert.deepEqual(replay.oldWitnesses.flat().sort(), replay.paths.slice().sort(), 'Only affected old immutable files enter the proof relay');
         await isolated.reload();
         await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
@@ -946,6 +1106,7 @@ async function sourceCarryChecks(page, results) {
         }, prepared);
         assert.deepEqual(restored.repaired.staged, prepared.repaired.staged, 'Reload retains repaired and protected staged entries');
         assert.deepEqual(restored.repaired.sourceCarryRepairArchive, prepared.repaired.sourceCarryRepairArchive, 'Reload retains repair recovery evidence');
+        assert.deepEqual(restored.repaired.invalidTranslationArchive, prepared.repaired.invalidTranslationArchive, 'Reload retains invalid quoted-work recovery evidence');
         assert.equal(restored.correction.isMetadataCorrection, true); assert.equal(restored.correction.hasChanges, true); assert.equal(restored.correction.isRevised, false);
         assert.deepEqual(restored.imported.staged, prepared.imported.staged, 'Reload preserves both destination languages');
         assert.deepEqual(restored.previous.staged.Thai['carry/import.txt'].translations, ['Older saved Thai'], 'The predecessor workspace is retained');
@@ -958,7 +1119,7 @@ async function sourceCarryChecks(page, results) {
         assert.equal(restored.missing.hasChanges, false); assert.equal(restored.missing.isDropped, true); assert.equal(restored.missing.isMissing, true); assert.equal(restored.missing.needsReview, true);
         assert.deepEqual(errors, []);
         results.push({ scenario: 'source-carry migration and reload', removed: Object.keys(restored.repaired.sourceCarryRepairArchive).length,
-            inheritedBlankDntRemoved: 80, protected: Object.keys(restored.repaired.staged.Thai).length,
+            invalidQuotedEntriesQuarantined: 81, protected: Object.keys(restored.repaired.staged.Thai).length,
             recoveryArchives: Object.keys(restored.repaired.sourceCarryRepairArchive).length });
         results.push({ scenario: 'existing destination import and language isolation', preservedLanguages: ['Thai', 'German'], competingTextPreserved: true });
         results.push({ scenario: 'missing incoming baseline preserves previous translation for review', saved: false, dropped: true });
@@ -1362,10 +1523,10 @@ async function sameBaselineImportChecks(page, results) {
             desc.hasChanges = true; desc.needsReview = true;
         }
         const offlineWorkspace = makeWorkspace(offlineScope, offlineSource, 'German');
-        WorkspaceState.stageTranslation(offlineWorkspace, { filepath, translations: [''] }, 'German', { source: offlineSource[0] });
+        WorkspaceState.stageTranslation(offlineWorkspace, { filepath, translations: ['Offline Saved German'] }, 'German', { source: offlineSource[0] });
         window.__normalizedProbe.operations = [];
         await OfflineStore.saveSourceWorkspaceWithRevisions(copy(offlineSource), offlineWorkspace,
-            [{ filepath, lang: 'German', savedAt: 333, translations: [''] }], offlineScope, { ...copy(baseline), source: copy(offlineSource), rawSource: copy(offlineSource) });
+            [{ filepath, lang: 'German', savedAt: 333, translations: ['Offline Saved German'] }], offlineScope, { ...copy(baseline), source: copy(offlineSource), rawSource: copy(offlineSource) });
         const reimportOperations = copy(window.__normalizedProbe.operations);
         const offline = await OfflineStore.getVersionWorkspace(offlineScope, 'German');
         const afterImport = await readRows(['baseline_files']);
@@ -1455,7 +1616,7 @@ async function sameBaselineImportChecks(page, results) {
         assert.equal(operations.filter(operation => operation.store === 'baseline_files' && ['put', 'add', 'delete'].includes(operation.method)).length, 0,
             label + ' never overwrites an existing baseline row');
     }
-    assert.deepEqual(repeated.offlineSaved, [''], 'Explicit blank German Saved presence survives a same-archive offline import');
+    assert.deepEqual(repeated.offlineSaved, ['Offline Saved German'], 'Valid German Saved presence survives a same-archive offline import');
     assert.deepEqual(repeated.migratedSaved, ['Legacy Saved Thai'], 'Legacy staged work survives reuse of the online baseline');
     assert.deepEqual(repeated.onlineAfter, repeated.preservedOnline, 'Other-profile imports cannot change online Saved facts');
     assert.deepEqual(repeated.historyAfter, repeated.preservedHistory, 'Other-profile imports and rejected identity changes preserve original history');
@@ -1545,6 +1706,7 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
         const source = Array.from({ length: count }, (_, i) => ({ filepath: 'normalized/' + String(i).padStart(5, '0') + '.txt',
             filename: String(i).padStart(5, '0') + '.txt', filedir: 'normalized', stats: ['normalized_' + i], variables: ['#'], remarks: [''],
             translations: { English: ['Damage amount ' + i], Thai: ['Original damage ' + i] }, isDNT: false }));
+        source[Math.min(30, count - 1)].translations.Thai = [''];
         // Include one real duplicate-language choice so asset hydration verifies
         // decision content rather than only the presence of an empty array.
         const duplicateText = new TextDecoder('utf-16le').decode(descEncode(source[0]))
@@ -1636,6 +1798,60 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     const path = i => 'normalized/' + String(i).padStart(5, '0') + '.txt';
     const field = (inline, filepath) => inline ? page.locator('tr[data-filepath="' + filepath + '"] .textHL input:not([readonly]), tr[data-filepath="'
         + filepath + '"] .textHL textarea:not([readonly])').first() : page.locator('.editor .textHL input:not([readonly]), .editor .textHL textarea:not([readonly])').first();
+    const invalidPath = path(Math.min(30, count - 1)), invalidText = '\\n@\u200b';
+    const intrinsic = await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp;
+        vm.selectedFileFilters = ['diagnosticError']; vm.filterDesc(); await vm.$nextTick();
+        return { errors: vm.statistic.hasDiagnosticError, manualScan: vm.diagnosticScanCompleted,
+            filtered: vm.filteredDescs.map(desc => desc.filepath),
+            stage: vm.localDescs.staged.Thai?.[filepath], baseline: vm.workspaceSourceFile(filepath).translations.Thai };
+    }, invalidPath);
+    assert.deepEqual(intrinsic, { errors: 1, manualScan: false, filtered: [invalidPath], stage: undefined, baseline: [''] });
+    assert.equal(await page.locator('tr[data-filepath="' + invalidPath + '"]').evaluate(row => row.classList.contains('diagnosticError')), true,
+        'An invalid immutable baseline appears in Error before a manual scan.');
+    assert.match(await page.locator('.statusPill.error').innerText(), /Errors\s+1/);
+    await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp; vm.inlineEditor = false; vm.shiftEnterSave = true;
+        await vm.editFile(filepath, true);
+        window.__normalizedProbe.operations = []; window.__normalizedProbe.workerOperations = []; window.__normalizedProbe.events = [];
+    }, invalidPath);
+    await field(false, invalidPath).fill(invalidText);
+    await field(false, invalidPath).evaluate(input => { input.focus(); input.setSelectionRange(1, 2); });
+    await page.keyboard.press('Shift+Enter');
+    const invalidDialog = page.getByRole('alertdialog'); await invalidDialog.waitFor();
+    assert.match(await invalidDialog.innerText(), /Blank|blank/);
+    assert.doesNotMatch(await invalidDialog.innerText(), /save anyway/i, 'Incomplete quoted entries have no bypass.');
+    await invalidDialog.getByRole('button', { name: 'OK', exact: true }).click();
+    await page.waitForFunction(() => !window.__normalizedApp.editorSaving);
+    assert.equal(await field(false, invalidPath).evaluate(input => input === document.activeElement), true,
+        'Rejected keyboard Save & close restores translation-field focus.');
+    assert.equal(await field(false, invalidPath).inputValue(), invalidText);
+    const rejected = await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp, scope = vm.managedWorkspaceScope(), workspace = await OfflineStore.getWorkspace(scope);
+        const drafts = await OfflineStore.listTranslationDrafts(vm.editorDraftScope(filepath));
+        return { open: vm.editorVisible, stage: workspace.staged.Thai?.[filepath], current: vm.editorCurrentEditingDesc.translations.Thai,
+            draft: drafts.find(draft => draft.filepath === filepath)?.translations,
+            submissions: (await OfflineStore.listSaveSubmissions(vm.pendingSaveScope())).length,
+            workerDispatches: window.__normalizedProbe.events.filter(event => event.name === 'dispatch').length,
+            errors: vm.statistic.hasDiagnosticError };
+    }, invalidPath);
+    assert.deepEqual(rejected, { open: true, stage: undefined, current: [''], draft: [invalidText], submissions: 0, workerDispatches: 0, errors: 1 });
+    await field(false, invalidPath).fill('Completed SD translation');
+    await page.locator('.editor').getByRole('button', { name: 'Save & close', exact: true }).click();
+    await page.waitForFunction(() => !window.__normalizedApp.editorVisible && !window.__normalizedApp.pendingLocalSaves
+        && !window.__normalizedApp._pendingSaves?.snapshot().jobs.length);
+    await page.waitForFunction(() => !window.__normalizedApp._collaboration?.snapshot({ includeFiles: false }).pending);
+    const completed = await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp, workspace = await OfflineStore.getWorkspace(vm.managedWorkspaceScope());
+        const result = { stage: workspace.staged.Thai?.[filepath]?.translations, errors: vm.statistic.hasDiagnosticError,
+            filtered: vm.filteredDescs.map(desc => desc.filepath), baseline: vm.workspaceSourceFile(filepath).translations.Thai,
+            missing: vm.getDescByFilepath(filepath).isMissing, saved: vm.getDescByFilepath(filepath).hasChanges };
+        vm.shiftEnterSave = false; vm.selectAllFileFilters(); vm.applyFileSearch(); await vm.$nextTick();
+        return result;
+    }, invalidPath);
+    assert.deepEqual(completed, { stage: ['Completed SD translation'], errors: 0, filtered: [], baseline: [''], missing: false, saved: true });
+    results.push({ scenario: 'real Vue intrinsic Error filter and strict Save & close preserve focused draft until complete text clears Error',
+        rejectedWorkerDispatches: 0, immutableBlankBaselineRetained: true });
     for (const [i, navigation] of [
         { key: 'F2', from: 0, to: 1, inline: false }, { key: 'F1', from: 4, to: 3, inline: false },
         { key: 'Control+ArrowDown', from: 10, to: 11, inline: true }, { key: 'Control+ArrowUp', from: 14, to: 13, inline: true },

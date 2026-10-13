@@ -237,7 +237,7 @@ test('unchanged shared projection preserves original save time and before text w
     const source = { filepath: 'a.txt', name: '', stats: ['stat'], variables: ['#'], remarks: [''], translations: { English: ['Fire'], Thai: ['Thai'] } };
     const workspace = { sourceHash: 'current', descs: [], staged: {}, status: {} };
     W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', language: 'Thai' });
-    W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Thai'] }, 'Thai', { savedAt: 41, before: ['Old Thai'] });
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Thai'] }, 'Thai', { source, savedAt: 41, before: ['Old Thai'] });
     const shared = { filepath: 'a.txt', translations: ['Thai'], beforeTranslations: ['Thai'], trackedForExport: true, revision: 1 };
     const projected = P.projectWorkspace(workspace, [shared], 'Thai', [source]);
     assert.equal(projected.staged.Thai['a.txt'].savedAt, 41); assert.deepEqual(projected.staged.Thai['a.txt'].before, ['Old Thai']);
@@ -709,7 +709,7 @@ test('carry repair adds factual metadata correction provenance and preserves Dro
     assert.ok(workspace.staged.Thai['dropped.txt'], 'A resolved Dropped assignment remains meaningful');
 });
 
-test('blank carry cleanup revisits a completed v1 checkpoint and retains explicit current-version blank saves', async () => {
+test('blank carry cleanup revisits a completed v1 checkpoint and archives explicit current-version blanks', async () => {
     const f = recordFixture(), files = ['inherited.txt', 'legacy.txt', 'explicit.txt'].map(path => f.source(path));
     for (const file of files) delete file.translations.Thai;
     const previous = { ...f.scope, sourceHash: 'previous' };
@@ -722,7 +722,9 @@ test('blank carry cleanup revisits a completed v1 checkpoint and retains explici
     f.data.get('revisions_poe2').set(1, { ...f.scope, filepath: 'explicit.txt', lang: 'Thai', translations: [''], savedAt: 42 });
     const result = await f.n.repairCarriedStages(f.scope), workspace = await f.n.workspace(f.scope);
     assert.equal(result.removed.length, 2);
-    assert.deepEqual(Object.keys(workspace.staged.Thai), ['explicit.txt']);
+    assert.equal(workspace.staged.Thai?.['explicit.txt'], undefined);
+    assert.equal(Object.keys(workspace.invalidTranslationArchive).length, 1);
+    assert.deepEqual(Object.values(workspace.invalidTranslationArchive)[0].stage.translations, ['']);
     assert.equal(Object.keys(workspace.sourceCarryRepairArchive).length, 2);
     const writes = f.writes.length; await f.n.activation(f.scope);
     assert.equal(f.writes.length, writes, 'The new checkpoint settles without repeated writes');
@@ -1120,6 +1122,7 @@ test('the collaboration client reconnects through normalized records without hyd
 test('OfflineStore cold snapshot captures one scope and shares its baseline across workspace, source and imported assets', async () => {
     const f = recordFixture(), files = Array.from({ length: 128 }, (_, index) => f.source('file-' + index + '.txt', index));
     f.workspace(files, true);
+    f.put(N.stores.migration, { key: f.n.key('invalid-statdescription-stage-v1', N.scopeKey(f.scope)), value: { state: 'ready' } });
     const root = { WorkspaceState: require('../public/workspaceState.js'), NormalizedStore: N };
     const context = require('node:vm').createContext({ window: root, console: { log() {} }, setTimeout, clearTimeout,
         indexedDB: { open() { const req = {}; queueMicrotask(() => { req.result = f.db; req.onsuccess(); }); return req; } } });
@@ -1280,4 +1283,187 @@ for (const legacy of [false, true]) test((legacy ? 'legacy' : 'normalized') + ' 
     assert.ok(f.transactions.some(tx => tx.aborted && tx.mode === 'readwrite'));
     assert.deepEqual(f.data.get('kv').get(pointer).value, previous, 'An uncommitted superseded put cannot replace the last successful selection');
     assert.equal(store.captureWorkspaceScope().sourceHash, previous.sourceHash, 'Failed and superseded requests cannot publish cached context');
+});
+
+test('v19 quarantine archives every invalid stage origin and retains draft, receipt and pending-command evidence', async () => {
+    const f = recordFixture(), originals = ['authored.txt', 'imported.txt', 'restore.txt', 'complete.txt'].map(path => f.source(path));
+    const id = N.scopeKey(f.scope), invalid = { translations: [' \r\n\t '], sourceHash: f.scope.sourceHash, before: ['earlier'], savedAt: 43 };
+    putCarryWorkspace(f, f.scope, originals, { Thai: Object.fromEntries(originals.slice(0, 3).map((file, index) => [file.filepath,
+        { ...invalid, saveOrigin: ['save', 'translated_import', 'restore'][index] }])), German: { 'authored.txt': { ...invalid } } });
+    const receipt = { jobId: 'accepted-invalid', signature: 'immutable-signature', result: { files: [{ filepath: 'authored.txt', translations: invalid.translations }] } };
+    f.put(N.stores.receipts, f.n.row(id, receipt.jobId, receipt));
+    const draftKey = 'translation_draft_v1:' + f.n.key('owner', 'poe2', 'accepted', 'Thai', 'authored.txt');
+    const priorDraft = { profile: 'owner', game: 'poe2', sourceHash: 'accepted', language: 'Thai', filepath: 'authored.txt', key: draftKey,
+        id: 'active-draft', revision: 'draft-v1', state: 'active', translations: ['unsaved editor text'], base: { translations: originals[0].translations.Thai }, updatedAt: 11 };
+    f.put('kv', { key: draftKey, value: priorDraft });
+    const command = jobId => ({ jobId, workspaceScope: f.scope, game: 'poe2', accountId: 'owner', sourceHash: 'accepted', language: 'Thai',
+        files: [{ filepath: 'authored.txt', translations: ['partial', ''] }] });
+    for (const jobId of ['pending-invalid', receipt.jobId]) f.put(N.stores.submissions, f.n.row(id, jobId, { batch: command(jobId), state: 'queued', createdAt: 1 }));
+    const roomKey = require('../public/normalizedRooms.js').create(f.n).identityKey(f.scope);
+    f.put(N.stores.rooms, { key: roomKey, value: { identity: f.scope } });
+    f.put(N.stores.operations, f.n.row(roomKey, 'old-invalid-op', { id: 'old-invalid-op', status: 'pending', files: [{ yours: { filepath: 'authored.txt', translations: [''] } }] }));
+    const result = await f.n.repairInvalidStages(f.scope), workspace = await f.n.workspace(f.scope);
+    assert.equal(result.removed.length, 4); assert.equal(Object.keys(workspace.staged).length, 0);
+    assert.equal(Object.keys(workspace.invalidTranslationArchive).length, 5);
+    assert.deepEqual(Object.values(workspace.invalidTranslationArchive).find(archive => archive.language === 'German').stage, invalid);
+    assert.deepEqual(await f.n.source(f.scope), originals, 'Quarantine cannot rewrite the immutable multilingual baseline.');
+    assert.deepEqual(f.data.get(N.stores.receipts).get(f.n.key(id, receipt.jobId)).value, receipt);
+    assert.equal(f.data.get(N.stores.submissions).get(f.n.key(id, 'pending-invalid')).value.state, 'review');
+    assert.equal(f.data.get(N.stores.submissions).get(f.n.key(id, 'pending-invalid')).value.error.code, 'SD_TRANSLATION_INVALID');
+    assert.equal(f.data.get(N.stores.submissions).get(f.n.key(id, receipt.jobId)).value.state, 'queued', 'Accepted receipt evidence is immutable.');
+    assert.equal(f.data.get(N.stores.operations).get(f.n.key(roomKey, 'old-invalid-op')).value.status, 'invalid_translation');
+    const recovered = await f.n.draftGet(draftKey);
+    assert.deepEqual(recovered.translations, priorDraft.translations); assert.deepEqual(f.data.get('kv').get(draftKey).value, priorDraft);
+    assert.equal(recovered.conflicts.length, 3, 'The invalid historical stage, upload and pending submission remain recoverable.');
+    assert.ok(recovered.submissionJobIds.includes('pending-invalid'));
+    const writes = f.writes.length;
+    await f.n.repairInvalidStages(f.scope); await f.n.activation(f.scope);
+    assert.equal(f.writes.length, writes, 'Reload must not duplicate archives or checkpoint conflicts.');
+});
+
+test('v19 quarantine resumes bounded batches after an aborted final transaction without deleting unarchived stages', async () => {
+    let fail = true;
+    const f = recordFixture({ onPut({ name, value }) {
+        if (fail && name === N.stores.migration && value.key.startsWith('["invalid-statdescription-stage-v1"') && value.value.state === 'ready') throw new Error('Quota blocked final quarantine batch');
+    } }), files = Array.from({ length: 70 }, (_, index) => f.source('invalid-' + String(index).padStart(3, '0') + '.txt'));
+    putCarryWorkspace(f, f.scope, files, { Thai: Object.fromEntries(files.map(file => [file.filepath, { sourceHash: 'accepted', translations: [''], savedAt: 2 }])) });
+    await assert.rejects(f.n.repairInvalidStages(f.scope), /Quota blocked/);
+    const field = name => [...f.data.get(N.stores.records).values()].filter(row => row.value.field === name);
+    assert.equal(field('staged').length, 6); assert.equal(field('invalidTranslationArchive').length, 64);
+    fail = false; await f.n.repairInvalidStages(f.scope);
+    assert.equal(field('staged').length, 0); assert.equal(field('invalidTranslationArchive').length, 70);
+    const drafts = [...f.data.get(N.stores.drafts).values()].map(row => row.value);
+    assert.equal(drafts.length, 70); assert.ok(drafts.every(draft => draft.translations[0] === ''));
+});
+
+test('late legacy room conversion fences invalid uploads even after the workspace quarantine checkpoint settled', async () => {
+    const f = recordFixture(), original = f.source('a.txt'); f.workspace([original]);
+    await f.n.repairInvalidStages(f.scope);
+    const rooms = require('../public/normalizedRooms.js').create(f.n), roomKey = rooms.identityKey(f.scope);
+    const invalid = { id: 'late-invalid', kind: 'edit', origin: 'save', status: 'pending', files: [{
+        base: { filepath: 'a.txt', translations: original.translations.Thai, revision: 0 },
+        yours: { filepath: 'a.txt', translations: [' \t '], trackedForExport: true, revision: 0 } }] };
+    const legacy = { identity: f.scope, mode: 'legacy', manifest: { version: 1, files: [{ filepath: 'a.txt', english: original.translations.English }] },
+        shared: {}, local: {}, outbox: [invalid], conflicts: [], recovery: [] };
+    await rooms.ensureRoom(roomKey, f.scope, legacy);
+    const records = await rooms.getRecords({ key: roomKey, scope: f.scope, filepaths: ['a.txt'] });
+    assert.equal(records.room.outbox[0].status, 'invalid_translation');
+    assert.equal(records.room.outbox[0].translationError.code, 'SD_TRANSLATION_INVALID');
+    assert.deepEqual(records.room.local['a.txt'].translations, original.translations.Thai, 'Invalid upload text cannot overlay the current committed translation.');
+    assert.deepEqual(legacy.outbox[0], invalid, 'Frozen legacy input remains unmodified.');
+    const recovered = await f.n.workspace(f.scope), archive = Object.values(recovered.invalidTranslationArchive)[0];
+    assert.equal(archive.operationId, invalid.id); assert.deepEqual(archive.stage, invalid.files[0].yours);
+    assert.deepEqual(archive.source.english, original.translations.English);
+    const draftKey = 'translation_draft_v1:' + f.n.key('owner', 'poe2', 'accepted', 'Thai', 'a.txt');
+    assert.deepEqual((await f.n.draftGet(draftKey)).translations, invalid.files[0].yours.translations);
+    const writes = f.writes.length, reloaded = require('../public/normalizedRooms.js').create(f.n);
+    await reloaded.getRecords({ key: roomKey, scope: f.scope, filepaths: ['a.txt'] });
+    assert.equal(f.writes.length, writes, 'Disk reload keeps the same recovery artifact and checkpoint.');
+});
+
+test('same-source reimport retains history without reopening a promoted or discarded automatic recovery draft', async () => {
+    for (const state of ['promoted', 'discarded']) {
+        const f = recordFixture(), original = f.source('a.txt');
+        putCarryWorkspace(f, f.scope, [original], { Thai: { 'a.txt': { sourceHash: 'accepted', translations: [' \t '], savedAt: 3 } } });
+        const recovered = await f.n.workspace(f.scope), archiveId = Object.keys(recovered.invalidTranslationArchive)[0];
+        const draftKey = 'translation_draft_v1:' + f.n.key('owner', 'poe2', 'accepted', 'Thai', 'a.txt');
+        const active = await f.n.draftGet(draftKey);
+        await f.n.draftUpdate(draftKey, current => ({ record: { ...current, state, revision: current.revision + ':' + state,
+            translations: [], consumedRevision: current.revision } }));
+        const consumed = await f.n.draftGet(draftKey), W = require('../public/workspaceState.js');
+        if (state === 'discarded') f.data.get(N.stores.migration).delete(f.n.key('invalid-draft-recovery-v1', N.scopeKey(f.scope), archiveId));
+        W.stageTranslation(recovered, { filepath: 'a.txt', translations: ['accepted correction'] }, 'Thai', { source: original });
+        await f.n.saveWorkspace(f.scope, recovered);
+        const imported = { ...f.scope, descs: [structuredClone(original)], staged: {}, stagedVersion: 1, statusMetadataVersion: 1 };
+        await f.n.importScope(f.scope, [original], imported, [], undefined);
+        const reloaded = await f.n.workspace(f.scope);
+        assert.deepEqual(await f.n.draftGet(draftKey), consumed, 'Automatic history recovery cannot reactivate consumed text.');
+        assert.deepEqual(reloaded.staged.Thai['a.txt'].translations, ['accepted correction']);
+        assert.deepEqual(Object.keys(reloaded.invalidTranslationArchive), [archiveId]);
+        assert.equal(active.id, archiveId, 'A reimport retains the original recovery identity.');
+    }
+});
+
+test('normalized backup writes quarantine invalid stages despite an existing policy checkpoint and keep ClientText exempt', async () => {
+    const f = recordFixture(), original = f.source('a.txt'); f.workspace([original]);
+    const current = await f.n.workspace(f.scope); current.invalidTranslationPolicyVersion = 1;
+    current.staged.Thai = { 'a.txt': { sourceHash: 'accepted', translations: [''], savedAt: 2, saveOrigin: 'cloud_restore' } };
+    await f.n.saveWorkspace(f.scope, current);
+    const restored = await f.n.workspace(f.scope);
+    assert.equal(restored.staged.Thai?.['a.txt'], undefined); assert.equal(Object.keys(restored.invalidTranslationArchive).length, 1);
+    const invalidCommand = { jobId: 'new-invalid', workspaceScope: f.scope, files: [{ filepath: 'a.txt', translations: [''] }], language: 'Thai' };
+    await assert.rejects(f.n.putSubmission(invalidCommand), { code: 'SD_TRANSLATION_INVALID' });
+    assert.equal(f.data.get(N.stores.submissions).size, 0);
+    restored.contentMode = 'clienttext'; restored.staged.Thai = current.staged.Thai = { 'a.txt': { sourceHash: 'accepted', translations: [''], savedAt: 3 } };
+    await f.n.saveWorkspace(f.scope, restored); await f.n.putSubmission(invalidCommand);
+    assert.equal((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations[0], '');
+    assert.equal(f.data.get(N.stores.submissions).size, 1);
+});
+
+test('resolved invalid operations survive disk reconversion without overlaying a later accepted corrected save', async () => {
+    const f = recordFixture(), original = f.source('a.txt'); f.workspace([original]);
+    const W = require('../public/workspaceState.js'), workspace = await f.n.workspace(f.scope);
+    W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['accepted correction'] }, 'Thai', { source: original });
+    await f.n.saveWorkspace(f.scope, workspace);
+    const rooms = require('../public/normalizedRooms.js').create(f.n), roomKey = rooms.identityKey(f.scope);
+    const retained = { id: 'older-invalid', status: 'invalid_translation_resolved', resolvedByMutationId: 'corrected-save',
+        files: [{ base: { filepath: 'a.txt', translations: ['old base'], revision: 0 },
+            yours: { filepath: 'a.txt', translations: [''], trackedForExport: true, revision: 0 } }] };
+    await rooms.ensureRoom(roomKey, f.scope, { identity: f.scope, mode: 'legacy', manifest: { version: 1, files: [{ filepath: 'a.txt', english: original.translations.English }] },
+        shared: { 'a.txt': { filepath: 'a.txt', translations: ['accepted correction'], trackedForExport: true, revision: 2 } },
+        local: {}, outbox: [retained], conflicts: [], recovery: [] });
+    const reloaded = require('../public/normalizedRooms.js').create(f.n);
+    f.data.get(N.stores.migration).delete(f.n.key('invalid-statdescription-stage-v1', N.scopeKey(f.scope)));
+    await f.n.repairInvalidStages(f.scope);
+    const records = await reloaded.getRecords({ key: roomKey, scope: f.scope, filepaths: ['a.txt'] });
+    assert.equal(records.room.outbox[0].status, 'invalid_translation_resolved');
+    assert.equal(records.room.outbox[0].resolvedByMutationId, 'corrected-save');
+    assert.deepEqual(records.room.local['a.txt'].translations, ['accepted correction']);
+    assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, ['accepted correction']);
+});
+
+test('frozen legacy preparation reproduces invalid recovery evidence without rewriting originals on retry', async () => {
+    const f = recordFixture(), original = f.source('a.txt'), suffix = f.n.key('owner', 'poe2', 'default', 'accepted');
+    const legacy = { ...f.scope, stagedVersion: 1, statusMetadataVersion: 1, descs: [original], status: {},
+        staged: { Thai: { 'a.txt': { sourceHash: 'accepted', translations: [' \t '], savedAt: 8, saveOrigin: 'save' } } } };
+    f.put('kv', { key: 'workspace_version_v1:' + suffix, value: legacy });
+    f.put('kv', { key: 'source_version_v1:' + suffix, value: [original] });
+    let captured;
+    const root = { WorkspaceState: require('../public/workspaceState.js'), NormalizedStore: { ...N, create(dependencies) {
+        captured = dependencies; return N.create(dependencies);
+    } } };
+    const vm = require('node:vm'), context = vm.createContext({ window: root, console: { log() {} }, setTimeout, clearTimeout,
+        indexedDB: { open() { const req = {}; queueMicrotask(() => { req.result = f.db; req.onsuccess(); }); return req; } } });
+    vm.runInContext(require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/offlineStore.js'), 'utf8'), context);
+    const first = await captured.prepareWorkspace(f.scope, 'Thai'), again = await captured.prepareWorkspace(f.scope, 'Thai');
+    assert.deepEqual(JSON.parse(JSON.stringify(first)), JSON.parse(JSON.stringify(again)));
+    assert.equal(Object.values(first.invalidTranslationArchive)[0].archivedAt, 1);
+    assert.equal(f.writes.length, 0); assert.deepEqual(f.data.get('kv').get('workspace_version_v1:' + suffix).value, legacy);
+});
+
+test('normalized receipt replay checks the original signature before draft transfer, room conversion or quarantine writes', async () => {
+    const f = recordFixture(), original = f.source('a.txt');
+    putCarryWorkspace(f, f.scope, [original], { Thai: { 'a.txt': { sourceHash: 'accepted', translations: [''], savedAt: 3 } } });
+    const id = N.scopeKey(f.scope), draftKey = 'translation_draft_v1:' + f.n.key('owner', 'poe2', 'accepted', 'Thai', 'a.txt');
+    const command = { jobId: 'old-accepted', accountId: 'owner', game: 'poe2', branchId: 'default', sourceHash: 'accepted', language: 'Thai', workspaceScope: f.scope,
+        files: [{ filepath: 'a.txt', translations: [''], needsReview: false, trackedForExport: true, revision: 0 }], descriptions: [original], revisions: [],
+        checkpoint: { key: draftKey, id: 'legacy-draft', revision: 'legacy-draft-v1' } };
+    const signature = JSON.stringify({ scope: ['poe2', 'Thai', 'accepted', 'owner'], files: command.files, descriptions: command.descriptions,
+        statuses: {}, revisions: [], collaboration: null, promoteDropped: null, promoteDroppedByPath: null, checkpoint: command.checkpoint });
+    const receipt = { jobId: command.jobId, signature, result: { jobId: command.jobId, status: 'local', files: command.files } };
+    f.put(N.stores.receipts, f.n.row(id, command.jobId, receipt));
+    f.put('kv', { key: draftKey, value: { profile: 'owner', game: 'poe2', sourceHash: 'accepted', language: 'Thai', filepath: 'a.txt',
+        key: draftKey, id: 'legacy-draft', revision: 'legacy-draft-v1', state: 'active', translations: ['unfinished'], base: { translations: original.translations.Thai } } });
+    const store = offlineFixture(f), beforeRecords = structuredClone([...f.data.get(N.stores.records)]);
+    const replay = await store.saveTranslationBatch(command);
+    assert.equal(replay.duplicate, true); assert.deepEqual(Array.from(replay.files[0].translations), original.translations.Thai);
+    assert.equal(f.writes.length, 0); assert.equal(f.data.get(N.stores.drafts).size, 0);
+    assert.deepEqual([...f.data.get(N.stores.records)], beforeRecords);
+    await assert.rejects(store.saveTranslationBatch({ ...command, files: [{ ...command.files[0], translations: ['changed retry'] }] }), /identifier was reused/);
+    assert.equal(f.writes.length, 0);
+    let roomPrepared = false;
+    const handle = await f.n.beginBatch({ ...command, collaboration: { key: 'unconverted-room' } }, f.scope,
+        { workspace: 'workspace', source: 'source', receipts: 'receipts' }, { ensureRoom() { roomPrepared = true; throw new Error('Room conversion must wait for new work'); } });
+    await new Promise(resolve => { handle.tx.oncomplete = resolve; });
+    assert.equal(roomPrepared, false); assert.equal(f.writes.length, 0);
 });

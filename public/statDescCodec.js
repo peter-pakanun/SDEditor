@@ -5,6 +5,30 @@
   else root.StatDescCodec = api;
 })(typeof window === 'object' ? window : globalThis, function () {
   'use strict';
+  function isBlankTranslation(value) {
+    // Decode only for validation. Keep authored bytes, table columns and
+    // meaningful zero-width word separators unchanged in stored text.
+    return String(value ?? '').replaceAll('\\n', '\n').replaceAll('@', '')
+      .replace(/\p{Cf}/gu, '').trim() === '';
+  }
+  function translationIssues(lines, expectedCount) {
+    const expected = Number.isInteger(expectedCount) && expectedCount >= 0 ? expectedCount : 0;
+    const values = Array.isArray(lines) ? lines : [];
+    const blankEntries = [];
+    for (let index = 0; index < Math.max(expected, values.length); index++) if (isBlankTranslation(values[index])) blankEntries.push(index + 1);
+    const entryCountMismatch = !Array.isArray(lines) || values.length !== expected;
+    return { valid: !entryCountMismatch && !blankEntries.length, blankEntries, entryCountMismatch,
+      expectedCount: expected, actualCount: values.length };
+  }
+  function assertCompleteTranslation(lines, expectedCount, filepath = '') {
+    const issues = translationIssues(lines, expectedCount);
+    if (issues.valid) return;
+    const blank = issues.blankEntries.length ? 'Blank translation in ' + (issues.blankEntries.length === 1 ? 'entry ' : 'entries ')
+      + issues.blankEntries.slice(0, 8).join(', ') + (issues.blankEntries.length > 8 ? ', …' : '') + '. ' : '';
+    const count = issues.entryCountMismatch ? 'The translation entry count must match English. ' : '';
+    throw Object.assign(new Error((filepath ? filepath + ': ' : '') + blank + count + 'Complete every translation entry before saving.'),
+      { code: 'SD_TRANSLATION_INVALID', filepath, ...issues });
+  }
   function detectGameVersionFromFilepaths(filepaths) {
     const paths = (Array.isArray(filepaths) ? filepaths : [])
       .map(path => String(path || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase())
@@ -21,7 +45,7 @@
     if (!Number.isFinite(engLen) || engLen < 0) engLen = 0;
     if (!Array.isArray(lines)) return engLen > 0;
     if (lines.length !== engLen) return true;
-    for (let index = 0; index < engLen; index++) if (String(lines[index] ?? '').trim() === '') return true;
+    for (let index = 0; index < engLen; index++) if (isBlankTranslation(lines[index])) return true;
     return false;
   }
   function computeIsDNT(english) {
@@ -418,6 +442,6 @@ function strEncodeUTF16(str) {
     }
     return source.filter(Boolean);
   }
-  return { parserVersion: 1, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
+  return { parserVersion: 1, isBlankTranslation, translationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
     decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash };
 });

@@ -91,7 +91,7 @@ test('protocol projection migrates Thai review text while German shared files ch
   const local = projected.descs[0], status = projected.status['a.txt'];
   assert.deepEqual(workspace, before, 'Public projection leaves caller-owned state unchanged.');
   assert.deepEqual(local.translations.Thai, ['one']);
-  assert.deepEqual(local.translations.German, ['eins']);
+  assert.deepEqual(local.translations.German, [''], 'A baseline projection cannot create a staged German save.');
   assert.equal(W.descriptionStatus(local, 'Thai').hasChanges, false);
   assert.equal(W.descriptionStatus(local, 'German').hasChanges, false);
   assert.deepEqual(W.droppedForFile(projected, 'a.txt', 'Thai').snapshot.translations, ['one']);
@@ -160,11 +160,12 @@ test('legacy migration ignores display padding after a partial ZIP translation w
   extra.translations.Thai = ['one', '', ''];
   const mismatched = { descs: [extra], status: {} };
   W.initializeWorkspace(mismatched, { source: [source], sourceHash: 'current', language: 'Thai' });
-  assert.deepEqual(mismatched.staged.Thai['a.txt'].translations, ['one', '', '']);
+  assert.equal(mismatched.staged.Thai?.['a.txt'], undefined);
+  assert.deepEqual(Object.values(mismatched.invalidTranslationArchive)[0].stage.translations, ['one', '', '']);
   assert.equal(W.workspaceFile(mismatched, source, 'Thai').isMissing, true);
 });
 
-test('legacy migration preserves real translation differences and explicit blank or unchanged saves', () => {
+test('legacy migration preserves valid differences and unchanged saves while archiving explicit blanks', () => {
   for (const [baseline, saved, hasChanges] of [
     [{}, ['authored'], false],
     [{ Thai: ['one'] }, ['changed'], false],
@@ -177,8 +178,14 @@ test('legacy migration preserves real translation differences and explicit blank
     local.hasChanges = hasChanges;
     const workspace = { descs: [local], status: {} };
     W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', language: 'Thai' });
-    assert.deepEqual(workspace.staged.Thai['a.txt'].translations, saved);
-    assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+    if (saved.some(text => !text.trim())) {
+      assert.equal(workspace.staged.Thai?.['a.txt'], undefined);
+      assert.deepEqual(Object.values(workspace.invalidTranslationArchive)[0].stage.translations, saved);
+      assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, false);
+    } else {
+      assert.deepEqual(workspace.staged.Thai['a.txt'].translations, saved);
+      assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+    }
   }
 });
 
@@ -249,12 +256,12 @@ test('own pending placeholder joins are canceled without removing unrelated queu
   assert.deepEqual(room.placeholderRepairs, queued);
 });
 
-test('already shared placeholder remains Saved until the server validates its queued repair', () => {
+test('already shared invalid placeholder is excluded from Saved while its server repair remains queued', () => {
   const { workspace, source, room, options } = placeholderRepairFixture({ shared: true });
   const shared = structuredClone(room.shared['a.txt']), stage = structuredClone(workspace.staged.Thai['a.txt']);
   assert.equal(W.repairLegacyPlaceholders(workspace, options), true);
   assert.deepEqual(workspace.staged.Thai['a.txt'], stage);
-  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, false);
   assert.deepEqual(room.shared['a.txt'], shared);
   assert.equal(room.placeholderRepairs.length, 1); assert.equal(room.placeholderRepairs[0].baseRevision, 1);
   assert.equal(Object.values(workspace.placeholderRepairArchive)[0].status, 'pending');
@@ -318,8 +325,8 @@ test('placeholder repair waits for complete evidence and preserves unrelated lan
 
 test('authored staged provenance survives unchanged server acknowledgments', () => {
   const source = sourceDesc('One', {}), workspace = modern(source, 'current');
-  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source, saveOrigin: 'legacy_save' });
-  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''], beforeTranslations: [] }, 'Thai', { source });
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['authored'] }, 'Thai', { source, saveOrigin: 'legacy_save' });
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['authored'], beforeTranslations: [] }, 'Thai', { source });
   assert.equal(workspace.staged.Thai['a.txt'].saveOrigin, 'legacy_save');
 });
 
@@ -377,9 +384,9 @@ test('persisted status flags do not control modern Saved, Revised, Missing, or D
   const before = W.workspaceFile(workspace, source, 'Thai');
   assert.equal(before.hasChanges, false); assert.equal(before.isRevised, false); assert.equal(before.isMissing, false); assert.equal(before.isDropped, false);
   const candidate = W.dropTranslation(workspace, sourceDesc(), 'Thai', { id: 'candidate', game: 'poe1', originSourceHash: 'old' });
-  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''], trackedForExport: false, isRevised: false, isMissing: false }, 'Thai', { source });
+  W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['one'], trackedForExport: false, isRevised: false, isMissing: true }, 'Thai', { source });
   const after = W.workspaceFile(workspace, source, 'Thai');
-  assert.equal(after.hasChanges, true); assert.equal(after.isRevised, false); assert.equal(after.isMissing, true);
+  assert.equal(after.hasChanges, true); assert.equal(after.isRevised, false); assert.equal(after.isMissing, false);
   assert.equal(after.isDropped, true, 'A saved file still has Dropped status while its separate candidate is unresolved.');
   W.discardDropped(workspace, 'a.txt', 'Thai', { id: candidate.id, revision: candidate.revision });
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, false);
@@ -393,9 +400,9 @@ test('an initially Missing ZIP translation stays ordinary Saved after fills and 
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false);
   W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['corrected fill'] }, 'Thai', { source });
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false);
-  W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source });
+  assert.throws(() => W.stageTranslation(workspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source }), { code: 'SD_TRANSLATION_INVALID' });
   assert.equal(W.workspaceFile(workspace, source, 'Thai').hasChanges, true);
-  assert.equal(W.workspaceFile(workspace, source, 'Thai').isMissing, true);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isMissing, false);
   assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, false);
 });
 
@@ -650,7 +657,7 @@ test('new ZIP translations that exactly include saved work remove inherited stag
   }
 });
 
-test('source advancement omits blank padding already represented by a missing translation block', () => {
+test('source advancement archives invalid predecessors without creating Dropped generations', () => {
   for (const english of [['[DNT] Internal'], ['First', 'Second']]) for (const incoming of [undefined, [], ['']]) {
     const previous = sourceDesc(), current = sourceDesc(), workspace = modern(previous);
     for (const desc of [previous, current]) {
@@ -659,11 +666,12 @@ test('source advancement omits blank padding already represented by a missing tr
     }
     if (incoming !== undefined) current.translations.Thai = incoming;
     const blank = english.map(() => '');
-    W.stageTranslation(workspace, { filepath: 'a.txt', translations: blank }, 'Thai', { source: previous, savedAt: 10 });
-    assert.equal(W.workspaceFile(workspace, previous, 'Thai').hasChanges, true, 'Explicit same-version blank saves remain Saved');
+    workspace.staged.Thai = { 'a.txt': { sourceHash: 'old', translations: blank, before: [], savedAt: 10, saveOrigin: 'save' } };
+    assert.equal(W.workspaceFile(workspace, previous, 'Thai').hasChanges, false);
     W.upgradeSource(workspace, { previousSource: [previous], source: [current], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
     assert.equal(workspace.staged.Thai?.['a.txt'], undefined);
     assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai'), null);
+    assert.deepEqual(Object.values(workspace.invalidTranslationArchive)[0].stage.translations, blank);
     assert.deepEqual(W.workspaceFile(workspace, current, 'Thai').translations, blank);
   }
   const previous = sourceDesc(), current = sourceDesc(); delete current.translations.Thai;
@@ -715,7 +723,7 @@ test('incomplete incoming translation still requires review when source metadata
   assert.deepEqual(state.candidate.snapshot.remarks, ['remark']);
 });
 
-test('baseline-identical carry removal preserves prior Dropped assignments and authored blank intent', () => {
+test('baseline-identical carry removal preserves prior Dropped assignments and archives legacy blank intent', () => {
   const previous = sourceDesc(), current = sourceDesc(), workspace = modern(previous);
   const candidate = W.dropTranslation(workspace, sourceDesc('Older'), 'Thai', { id: 'preserved', originSourceHash: 'older' });
   W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['one'] }, 'Thai', { source: previous });
@@ -723,15 +731,16 @@ test('baseline-identical carry removal preserves prior Dropped assignments and a
   assert.equal(W.workspaceFile(workspace, current, 'Thai').hasChanges, false);
   assert.equal(W.droppedForFile(workspace, 'a.txt', 'Thai').id, candidate.id);
   const blankWorkspace = modern(previous), blankSource = sourceDesc('One', { Thai: [''] });
-  W.stageTranslation(blankWorkspace, { filepath: 'a.txt', translations: [''] }, 'Thai', { source: previous });
+  blankWorkspace.staged.Thai = { 'a.txt': { sourceHash: 'old', translations: [''], before: ['one'], savedAt: 10, saveOrigin: 'save' } };
   W.upgradeSource(blankWorkspace, { previousSource: [previous], source: [blankSource], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
   assert.equal(W.workspaceFile(blankWorkspace, blankSource, 'Thai').hasChanges, false);
-  assert.equal(W.droppedForFile(blankWorkspace, 'a.txt', 'Thai'), null, 'An explicit blank supersedes the old ZIP translation.');
+  assert.equal(W.droppedForFile(blankWorkspace, 'a.txt', 'Thai'), null);
+  assert.deepEqual(Object.values(blankWorkspace.invalidTranslationArchive)[0].stage.translations, ['']);
 });
 
 test('missing historical source preserves staged text with honestly unavailable source context', () => {
   const workspace = modern(sourceDesc());
-  W.stageTranslation(workspace, { filepath: 'orphan.txt', translations: ['recover me'] }, 'Thai');
+  workspace.staged.Thai = { 'orphan.txt': { sourceHash: 'old', translations: ['recover me'], before: [], savedAt: 1 } };
   W.upgradeSource(workspace, { previousSource: [], source: [sourceDesc()], previousSourceHash: 'old', sourceHash: 'new', game: 'poe1' });
   const candidate = W.droppedForFile(workspace, 'orphan.txt', 'Thai');
   assert.deepEqual(candidate.snapshot.translations, ['recover me']); assert.deepEqual(candidate.snapshot.english, []);
@@ -1087,4 +1096,33 @@ test('Dropped projection and assignment cache follow both persisted and UI group
     assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true,
       'Leaving the group also invalidates the cached assignment.');
   }
+});
+
+test('an invalid StatDescription save rejects the whole file before resolving its Dropped copy', () => {
+  const source = sourceDesc('One', { Thai: ['one', 'two'] }); source.translations.English = ['One', 'Two'];
+  const workspace = modern(source, 'current');
+  const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'protected', originSourceHash: 'older' });
+  const before = structuredClone(workspace);
+  for (const translations of [['translated', ''], ['translated', ' \t\n '], ['translated'], ['translated', 'two', 'extra']]) {
+    assert.throws(() => W.stageTranslation(workspace, { filepath: 'a.txt', translations }, 'Thai', { source,
+      promoteDropped: { id: candidate.id, revision: candidate.revision } }), { code: 'SD_TRANSLATION_INVALID' });
+    assert.deepEqual(workspace, before, 'Rejected saves leave staged work, promotion state and metadata untouched.');
+  }
+});
+
+test('invalid stage recovery preserves exact bytes and source while isolating managed content groups', () => {
+  const source = sourceDesc(), workspace = modern(source, 'current');
+  Object.assign(workspace, { accountId: 'owner', workspaceVersionId: 'release', workspaceGroupId: 'stats' });
+  const stage = { sourceHash: 'current', translations: [' \r\n\t '], savedAt: 42, before: ['one'], saveOrigin: 'restore' };
+  workspace.staged.Thai = { 'a.txt': structuredClone(stage) };
+  const result = W.quarantineInvalidTranslations(workspace, { source: [source], archivedAt: 100 });
+  const archived = result.removed[0].archive;
+  assert.equal(workspace.staged.Thai['a.txt'], undefined); assert.deepEqual(archived.stage, stage);
+  assert.deepEqual(archived.source.english, source.translations.English);
+  assert.equal(archived.versionId, 'release'); assert.equal(archived.groupId, 'stats'); assert.equal(archived.accountId, 'owner');
+  assert.equal(W.quarantineInvalidTranslations(workspace, { source: [source] }).changed, false);
+  assert.deepEqual(source.translations.Thai, ['one']);
+  const clientText = { ...modern(source, 'current'), contentMode: 'clienttext', staged: { Thai: { 'a.txt': structuredClone(stage) } } };
+  assert.equal(W.quarantineInvalidTranslations(clientText, { source: [source] }).changed, false);
+  assert.deepEqual(W.stageTranslation(clientText, { filepath: 'a.txt', translations: [''] }, 'Thai', { source }).translations, ['']);
 });

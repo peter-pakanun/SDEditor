@@ -198,7 +198,7 @@
         <p>{{ c.entryAlignment.english.length }} current English entries · {{ c.entryAlignment.items.length }} translation blocks.
           Drag a block onto its English entry, or select a block and click Place selected. Each block can be used once.</p>
         <p>English text and its order are fixed. Only translation blocks can be moved.</p>
-        <p>Unique exact matches with preserved old English are placed automatically. Leave the translation blank for new entries and mark removed translation blocks as unused. Continue creates a local draft; Save keeps the original blocks in local history.</p>
+        <p>Unique exact matches with preserved old English are placed automatically. New entries can remain blank in the draft; complete every entry before Save. Mark removed translation blocks as unused. Continue creates a local draft; Save keeps the original blocks in local history.</p>
         <div class="entryAlignmentColumns">
           <section>
             <h3>Current English → translation</h3>

@@ -260,7 +260,8 @@ test('avatars keep namesakes separate and initials preserve Unicode graphemes', 
 
 test('footer avatars precede pagination and away shading preserves the collaborator color border', () => {
   const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
-  const footer = html.slice(html.indexOf('<footer class="workspaceFooter">'), html.indexOf('</footer>', html.indexOf('<footer class="workspaceFooter">')));
+  const start = html.lastIndexOf('<template #footer>');
+  const footer = html.slice(start, html.indexOf('</template>', start));
   assert.ok(footer.indexOf('class="collaborationAvatars"') < footer.indexOf('aria-label="File pagination"'));
   assert.match(footer, /:aria-label="collaborationParticipantLabel\(participant\)"/);
   assert.match(footer, /v-tooltip="collaborationParticipantLabel\(participant\)"/);

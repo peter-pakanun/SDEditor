@@ -71,7 +71,7 @@ function harness({ records = new Map(), tm = false } = {}) {
       nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } } });
   for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
     ...(tm ? ['translationMemory.js', 'tmWorkerClient.js', 'tmUi.js'] : []),
-    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'index.js']) {
+    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'entryAlignment.js', 'entryAlignmentUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -467,7 +467,7 @@ test('a draft acknowledgement supersedes a stale pending listing without losing 
   assert.equal(editor.draftRecords.length, 2);
 });
 
-test('staged deletion is available only for the current language and source, including intentionally blank staged saves', async () => {
+test('staged deletion is available only for a valid current-language stage in the current source', async () => {
   const h = harness(), { editor, desc, window } = h;
   await editor.editFile(desc.filepath);
   assert.equal(editor.editorHasStagedTranslation, false);
@@ -475,13 +475,92 @@ test('staged deletion is available only for the current language and source, inc
     { filepath: desc.filepath, translations: ['other language'] }, 'German', { source: desc });
   assert.equal(editor.editorHasStagedTranslation, false);
   const staged = window.WorkspaceState.stageTranslation(editor.localDescs,
-    { filepath: desc.filepath, translations: [''] }, 'Thai', { source: desc });
+    { filepath: desc.filepath, translations: ['current staged text'] }, 'Thai', { source: desc });
   assert.equal(editor.editorHasStagedTranslation, true);
+  staged.translations = [''];
+  assert.equal(editor.editorHasStagedTranslation, false, 'A historical blank stage is inactive and remains recovery work.');
+  staged.translations = ['current staged text'];
   staged.sourceHash = 'older-source';
   assert.equal(editor.editorHasStagedTranslation, false);
   staged.sourceHash = editor.sourceIdentity;
   editor.localDescs.sourceHash = 'another-workspace';
   assert.equal(editor.editorHasStagedTranslation, false);
+});
+
+function incompleteHistoryFixture() {
+  const h = harness(), { editor, desc } = h;
+  desc.translations.English = ['Source one', 'Source two'];
+  desc.translations.Thai = ['First baseline', 'Second baseline'];
+  editor._workspaceSourceBaseline = copy(editor.descs);
+  editor.localDescs.workspaceGroupId = 'selected-group';
+  editor.managedWorkspaceScope = () => ({ accountId: 'guest', game: editor.gameVersion, branchId: 'default',
+    sourceHash: editor.sourceIdentity, groupId: 'selected-group' });
+  editor.localDescs.invalidTranslationArchive = { incomplete: { id: 'incomplete', filepath: desc.filepath,
+    language: 'Thai', game: 'poe1', accountId: 'guest', branchId: 'default', groupId: 'selected-group',
+    sourceHash: editor.sourceIdentity, archivedAt: 123,
+    source: { english: [...desc.translations.English] }, stage: { translations: ['Retained first entry', ''] } } };
+  return h;
+}
+
+test('incomplete SD History recovery creates a retained editable draft without staging its blank entry', async () => {
+  const h = incompleteHistoryFixture(), { editor, desc, calls, records } = h;
+  await editor.editFile(desc.filepath);
+  const archive = copy(editor.localDescs.invalidTranslationArchive), baseline = copy(desc.translations.Thai);
+  await editor.refreshHistory();
+  const recovery = editor.historyItems.find(item => item.incompleteRecovery);
+  assert.ok(recovery); assert.equal(recovery.id, 'invalid-sd:incomplete');
+  assert.deepEqual(copy(recovery.translations), ['Retained first entry', '']);
+  assert.equal(await editor.restoreHistoryRevision(recovery), true, 'Restore routes incomplete recovery through explicit entry alignment.');
+  assert.equal(editor.entryAlignmentReady, true);
+  assert.equal(await editor.applyEntryAlignment(), true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['Retained first entry', '']);
+  assert.deepEqual(copy(records.get(editor._draftSession.key).translations), ['Retained first entry', '']);
+  assert.deepEqual(copy(desc.translations.Thai), baseline);
+  assert.equal(editor.editorHasStagedTranslation, false); assert.equal(calls.promotions.length, 0);
+  assert.equal(await editor.editorSave({ close: false }), false);
+  assert.equal(calls.promotions.length, 0); assert.equal(editor.editorVisible, true);
+  assert.deepEqual(copy(editor.localDescs.invalidTranslationArchive), archive, 'Recovery evidence survives alignment and rejected Save.');
+});
+
+test('incomplete SD History recovery is hidden outside its account, source, branch, group, language and file', async t => {
+  const changes = { account: { accountId: 'other-account' }, source: { sourceHash: 'other-source' },
+    branch: { branchId: 'other-branch' }, group: { groupId: 'other-group' }, language: { language: 'German' },
+    file: { filepath: 'another-file.txt' } };
+  for (const [name, fields] of Object.entries(changes)) await t.test(name, async () => {
+    const { editor, desc } = incompleteHistoryFixture();
+    Object.assign(editor.localDescs.invalidTranslationArchive.incomplete, fields);
+    await editor.editFile(desc.filepath); await editor.refreshHistory();
+    assert.equal(editor.historyItems.some(item => item.incompleteRecovery), false);
+    assert.equal(editor.editorHasStagedTranslation, false);
+  });
+  await t.test('source History', async () => {
+    const { editor, desc } = incompleteHistoryFixture(); await editor.editFile(desc.filepath);
+    editor.historyMode = 'source'; await editor.refreshHistory();
+    assert.equal(editor.historyItems.some(item => item.incompleteRecovery), false);
+  });
+});
+
+test('full and inline Save can complete a rejected blank draft using its original guarded checkpoint', async t => {
+  for (const inline of [false, true]) await t.test(inline ? 'inline' : 'full', async () => {
+    const { editor, desc, calls, records } = harness();
+    await (inline ? editor.activateInlineRow(desc.filepath) : editor.editFile(desc.filepath));
+    editor.editorBlocks[0].translation = '\\n@\u200b';
+    assert.equal(await editor.editorSave({ close: false }), false);
+    assert.equal(calls.promotions.length, 0);
+    const retained = copy(records.get(editor._draftSession.key)), baseline = copy(editor._workspaceSourceBaseline);
+    assert.deepEqual(retained.translations, ['\\n@\u200b']);
+    editor.editorBlocks[0].translation = 'Completed translation';
+    assert.equal(await editor.editorSave({ close: false }), true);
+    const command = calls.promotions[0];
+    assert.deepEqual(command.updates[0].lines, ['Completed translation']);
+    assert.deepEqual([command.options.draft.id, command.options.draft.revision], [retained.id, retained.revision]);
+    assert.equal(command.options.draft.replaceCheckpoint, true, 'Changed submitted text replaces only the captured checkpoint after the durable guard.');
+    assert.equal(command.options.checkpoint.revision, retained.revision);
+    assert.equal(calls.writes.length, 1, 'Direct Save journals new text without an extra draft write.');
+    assert.deepEqual(copy(desc.translations.Thai), ['Completed translation']);
+    assert.deepEqual(copy(editor._workspaceSourceBaseline), baseline);
+    assert.equal(records.get(retained.key).state, 'promoted');
+  });
 });
 
 test('staged deletion requires a danger confirmation and declining retains staged text and local drafts', async () => {
@@ -1009,7 +1088,9 @@ test('declined warnings expose discard only for the exact declined draft, includ
 
 test('a declined warning no longer shows discard once the current save checks no longer require it', async () => {
   const { editor, desc } = harness(); await editor.activateInlineRow(desc.filepath);
-  const block = editor.editorBlocks[0]; block.translation = '';
+  editor.editorSaveFindings = () => ({ errors: [], warnings: [{ message: 'Review wording' }], confirmations: ['Review wording'] });
+  editor.editorSaveConfirmations = () => ['Review wording'];
+  const block = editor.editorBlocks[0]; block.translation = 'warning draft';
   assert.equal(await editor.editorSave({ close: false, automatic: true }), false);
   assert.equal(editor.editorDraftBlocked, true);
   editor.editorSaveConfirmations = () => [];
@@ -1075,15 +1156,15 @@ test('inline stage link follows live edits, reverts and peer changes to the curr
   assert.equal(editor.inlineDraftHasChanges, true, 'clearing staged text can be staged');
 });
 
-test('inline stage link treats intentionally blank stages as committed text and preserves whitespace and entry-count edits', async () => {
+test('inline stage comparison preserves whitespace around useful text and detects entry-count edits', async () => {
   const { editor, desc, window } = harness(); await editor.activateInlineRow(desc.filepath);
-  editor.editorBlocks[0].translation = '';
+  editor.editorBlocks[0].translation = 'committed text';
   window.WorkspaceState.stageTranslation(editor.localDescs,
-    { filepath: desc.filepath, translations: [''] }, 'Thai', { source: desc });
+    { filepath: desc.filepath, translations: ['committed text'] }, 'Thai', { source: desc });
   assert.equal(editor.inlineDraftHasChanges, false);
-  editor.editorBlocks[0].translation = ' ';
+  editor.editorBlocks[0].translation = ' committed text ';
   assert.equal(editor.inlineDraftHasChanges, true, 'whitespace is part of the saved text');
-  editor.editorBlocks[0].translation = '';
+  editor.editorBlocks[0].translation = 'committed text';
   editor.editorBlocks.push({ translation: '' });
   assert.equal(editor.inlineDraftHasChanges, true, 'an extra translation entry is a real edit');
 });
@@ -1155,9 +1236,17 @@ test('inline stage link stays hidden for untouched table padding, empty separato
     await editor.activateInlineRow(desc.filepath);
     assert.deepEqual(copy(editor.serializeEditorTranslations()), [fixture.serialized]);
     assert.equal(editor.inlineDraftHasChanges, false, 'editor display normalization does not make a ZIP translation dirty');
-    window.WorkspaceState.stageTranslation(editor.localDescs,
-      { filepath: desc.filepath, translations: [fixture.translation] }, 'Thai', { source: desc });
-    assert.equal(editor.inlineDraftHasChanges, false, 'the same normalization applies to staged translations');
+    if (window.StatDescCodec.isBlankTranslation(fixture.translation)) {
+      assert.throws(() => window.WorkspaceState.stageTranslation(editor.localDescs,
+        { filepath: desc.filepath, translations: [fixture.translation] }, 'Thai', { source: desc }),
+      error => error.code === 'SD_TRANSLATION_INVALID');
+      assert.equal(editor.editorHasStagedTranslation, false);
+      assert.equal(editor.inlineDraftHasChanges, false, 'Untouched invalid ZIP text remains the committed baseline.');
+    } else {
+      window.WorkspaceState.stageTranslation(editor.localDescs,
+        { filepath: desc.filepath, translations: [fixture.translation] }, 'Thai', { source: desc });
+      assert.equal(editor.inlineDraftHasChanges, false, 'the same normalization applies to staged translations');
+    }
     const field = editor.editorBlocks[0].isTable ? editor.editorBlocks[0].tableColumns[0] : editor.editorBlocks[0];
     const before = field.translation;
     field.translation = 'actual edit';
@@ -1285,7 +1374,7 @@ test('reverting a resumed draft to the committed text removes its saved copy and
 });
 
 test('reverting to the current staged translation clears the draft even when ZIP text differs', async t => {
-  for (const stagedText of ['', 'current staged text']) await t.test(stagedText || 'intentionally blank stage', async () => {
+  for (const stagedText of [' current staged text ', 'current staged text']) await t.test(JSON.stringify(stagedText), async () => {
     const h = harness(), { editor, desc, window, calls } = h;
     window.WorkspaceState.stageTranslation(editor.localDescs,
       { filepath: desc.filepath, translations: [stagedText] }, 'Thai', { source: desc });

@@ -28,7 +28,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
+  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -59,6 +59,82 @@ function variableErrors(editor, english, translation) {
   return editor.analyzeTranslationDiagnostics(translation, english).diagnostics
     .filter(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch');
 }
+
+test('StatDescription blank entries are hard diagnostics even with every optional check disabled', () => {
+  const Diagnostics = require('../public/translationDiagnostics.js');
+  const checks = { whitespace: false, dash: false, tagSyntax: false };
+  for (const text of ['', ' \t\r\n ', '\\n', ' @ @@ \\n ', '\u200b\u200c\u200d\u2060\ufeff', '\u200b@\\n\u200d']) {
+    const result = Diagnostics.analyze(text, { checks });
+    assert.equal(result.errorCount, 1, JSON.stringify(text));
+    assert.equal(result.diagnostics[0].code, 'blank-translation');
+    assert.equal(result.diagnostics[0].level, 'error');
+    assert.equal(result.diagnostics[0].start, 0);
+    assert.equal(result.diagnostics[0].end, text.length);
+  }
+  for (const text of ['Text', 'Text\\n', '@Text@', '\u200bภาษาไทย\u200d', ' @ Text \\n ']) {
+    const result = Diagnostics.analyze(text, { checks });
+    assert.equal(result.errorCount, 0, JSON.stringify(text));
+    assert.equal(result.diagnostics.length, 0, 'Validation preserves authored text without rewriting it');
+  }
+});
+
+test('blank table cells and optional ClientText fields do not become whole-entry SD errors', () => {
+  const Diagnostics = require('../public/translationDiagnostics.js');
+  const checks = { whitespace: false, dash: false, tagSyntax: false };
+  for (const text of ['', '@', '\\n']) {
+    assert.equal(Diagnostics.analyze(text, { checks, contentMode: 'clienttext' }).errorCount, 0);
+    assert.equal(Diagnostics.analyze(text, { checks, translationFragment: true }).errorCount, 0);
+  }
+  assert.equal(Diagnostics.analyze('@Useful@', { checks }).errorCount, 0);
+  assert.equal(Diagnostics.analyze('@@', { checks }).errorCount, 1, 'A table with no text still has a blank quoted entry');
+});
+
+test('one blank quoted entry blocks mixed-entry saves while preserving draft and completed scan results', async () => {
+  const { editor, alerts, confirmations, context } = loadEditor();
+  const desc = fixtureDescription('partial-save', 'First English', 'First committed');
+  desc.translations.English.push('Second English');
+  desc.translations.Thai.push('Second committed');
+  const unrelated = fixtureDescription('unrelated-scan', 'Damage {1}%', 'Wrong {1}');
+  editor.descs = [desc, unrelated];
+  await editor.scanAllDiagnostics();
+  const results = editor.diagnosticScanResults, unrelatedResult = results[unrelated.filepath];
+  editor.diagnosticScanChecks = Object.fromEntries(Object.keys(editor.diagnosticScanChecks).map(key => [key, false]));
+  editor.editorCurrentEditingDesc = desc;
+  editor.editorVisible = true;
+  editor.editorOriginalTranslations = [...desc.translations.Thai];
+  editor.editorBlocks = [{ english: 'First English', translation: 'Useful unsaved draft' },
+    { english: 'Second English', translation: '\\n\u200b' }];
+  const blocks = editor.editorBlocks, originalTranslations = editor.editorOriginalTranslations;
+  const focus = { selectionStart: 2, selectionEnd: 3, scrollTop: 17, focus() {} };
+  context.document.activeElement = focus;
+  let persisted = 0;
+  editor.persistTranslationBatch = async () => { persisted++; throw new Error('Invalid save reached persistence'); };
+  assert.equal(await editor.editorSave(), false);
+  assert.equal(persisted, 0);
+  assert.deepEqual(Array.from(desc.translations.Thai), ['First committed', 'Second committed']);
+  assert.equal(editor.editorVisible, true);
+  assert.equal(editor.editorBlocks, blocks);
+  assert.deepEqual(blocks.map(block => block.translation), ['Useful unsaved draft', '\\n\u200b']);
+  assert.equal(editor.editorOriginalTranslations, originalTranslations);
+  assert.equal(context.document.activeElement, focus);
+  assert.deepEqual({ start: focus.selectionStart, end: focus.selectionEnd, scroll: focus.scrollTop }, { start: 2, end: 3, scroll: 17 });
+  assert.equal(editor.diagnosticScanResults, results);
+  assert.equal(editor.diagnosticScanResults[unrelated.filepath], unrelatedResult);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.match(alerts.join(' '), /blank|complete.*entr/i);
+  assert.deepEqual(confirmations, [], 'A blank quoted entry has no save-anyway path');
+});
+
+test('SD table diagnostics validate the whole quoted entry while permitting blank cells beside text', () => {
+  const { editor } = loadEditor();
+  const checks = Object.fromEntries(Object.keys(editor.diagnosticScanChecks).map(key => [key, false]));
+  const desc = fixtureDescription('table-blank-policy', '@English@', '@Translated@');
+  assert.equal(editor.analyzeDescDiagnostics(desc, 'Thai', null, checks).errorCount, 0);
+  desc.translations.Thai = ['@@'];
+  const blank = editor.analyzeDescDiagnostics(desc, 'Thai', null, checks);
+  assert.equal(blank.errorCount, 1);
+  assert.equal(blank.diagnostics[0].code, 'blank-translation');
+});
 
 test('numeric keyword ID suffixes are allowed without allowing arbitrary nesting', () => {
   const { context } = loadEditor();

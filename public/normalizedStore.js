@@ -606,7 +606,7 @@
         }
       });
     }
-    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive', 'sourceCarryRepairArchive'];
+    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive', 'sourceCarryRepairArchive', 'invalidTranslationArchive'];
     const languageMaps = new Set(['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']);
     function verificationMap(field, value) {
       const map = value || {};
@@ -731,6 +731,7 @@
       W.pruneWorkspaceStatus(workspace);
       const id = scopeKey(scope), paths = filepaths || workspace.descs.map(file => file.filepath);
       const originals = new Map((await originalFiles(tx, scope, paths)).filter(Boolean).map(desc => [desc.filepath, desc]));
+      W.quarantineInvalidTranslations(workspace, { source: [...originals.values()] });
       const parts = splitWorkspace(scope, workspace, originals), beforeMeta = await get(tx, stores.meta, id);
       if (filepaths != null) parts.records = parts.records.filter(item => item.value.field !== 'importRecovery');
       let oldFiles, oldRecords;
@@ -779,6 +780,7 @@
             throw new Error('The retained source differs from its saved version identity.');
           }
           W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game });
+          W.quarantineInvalidTranslations(workspace, { source, archivedAt: Number(workspace.lastModified) || 1 });
           W.pruneWorkspaceStatus(workspace);
           const originals = new Map(source.map(desc => [desc.filepath, desc])), parts = splitWorkspace(scope, workspace, originals);
           const baseId = baselineKey(scope);
@@ -1063,8 +1065,151 @@
       carryRepairs.set(id, work);
       try { return await work; } finally { carryRepairs.delete(id); }
     }
+    const invalidRepairs = new Map();
+    const invalidRepairKey = scope => key('invalid-statdescription-stage-v1', scopeKey(scope));
+    async function retainInvalidDraft(tx, scope, language, filepath, translations, original, identity, submissionJobId) {
+      const draftKey = 'translation_draft_v1:' + key(scope.accountId || 'guest', scope.game, scope.sourceHash, language, filepath,
+        ...(scope.branchId && scope.branchId !== 'default' ? [scope.branchId] : []), ...contentParts(scope));
+      const recoveryKey = key('invalid-draft-recovery-v1', scopeKey(scope), identity);
+      // Automatic recovery runs once per retained artifact. Later correction,
+      // promotion or discard must not reopen it when the source is reimported.
+      if (await get(tx, stores.migration, recoveryKey)) return;
+      const previous = await hydrateDraft(tx, await get(tx, stores.drafts, draftKey) || await get(tx, 'kv', draftKey));
+      if (previous?.id === identity && ['promoted', 'discarded'].includes(previous.state)) {
+        tx.objectStore(stores.migration).put({ key: recoveryKey, scope: scopeKey(scope), value: { state: 'retained', draftKey, identity } });
+        return;
+      }
+      const base = copy(original?.translations?.[language] || []);
+      while (base.length < (original?.translations?.English?.length || 0)) base.push('');
+      const recovered = { profile: scope.accountId || 'guest', game: scope.game, sourceHash: scope.sourceHash, language, filepath,
+        ...(scope.branchId && scope.branchId !== 'default' ? { branchId: scope.branchId } : {}), ...contentScope(scope),
+        key: draftKey, id: identity, revision: identity, state: 'active', translations: copy(translations || []), base: { translations: base },
+        sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath }, updatedAt: Date.now(),
+        ...(submissionJobId ? { submissionJobId, submissionJobIds: [submissionJobId] } : {}) };
+      const submissionJobIds = [...new Set([previous?.submissionJobId, ...(previous?.submissionJobIds || []), submissionJobId].filter(Boolean))];
+      if (!previous || previous.state !== 'active') tx.objectStore(stores.drafts).put(draftRow({ ...recovered,
+        conflicts: previous?.conflicts || [], recovery: previous?.recovery || [], ...(submissionJobIds.length ? { submissionJobIds } : {}) }, original));
+      else {
+        const differs = !same(previous.translations, recovered.translations), known = (previous.conflicts || []).some(variant => variant.id === identity);
+        const next = { ...previous, ...(submissionJobIds.length ? { submissionJobIds } : {}),
+          ...(differs && !known ? { revision: previous.revision + ':' + identity, conflicts: [...(previous.conflicts || []), recovered] } : {}) };
+        // Copy a pre-v19 KV checkpoint before normalized absence becomes authoritative.
+        if (!same(previous, next) || !await get(tx, stores.drafts, draftKey)) tx.objectStore(stores.drafts).put(draftRow(next, original));
+      }
+      tx.objectStore(stores.migration).put({ key: recoveryKey, scope: scopeKey(scope), value: { state: 'retained', draftKey, identity } });
+    }
+    async function repairInvalidStages(scope) {
+      const captured = normalizeScope ? normalizeScope(scope) : { ...scope }, id = scopeKey(captured), markerKey = invalidRepairKey(captured);
+      if (invalidRepairs.has(id)) return invalidRepairs.get(id);
+      const work = (async () => {
+        const initial = await transaction([stores.meta, stores.records, stores.rooms, stores.operations, stores.submissions, stores.migration], 'readonly', async tx => {
+          const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
+          if (ready?.state !== 'ready' || !meta || marker?.state === 'ready' || String(meta.contentMode || meta.mode || '').toLowerCase().startsWith('clienttext')) return null;
+          const records = tx.objectStore(stores.records).index('by_kind');
+          const stages = await request(records.getAll(key(id, 'staged'))), archives = await request(records.getAll(key(id, 'invalidTranslationArchive')));
+          const items = [...stages, ...archives].map(record => ({ kind: 'stage', key: record.key }));
+          for (const row of await all(tx, stores.submissions, id)) items.push({ kind: 'submission', key: row.key });
+          for (const room of await request(tx.objectStore(stores.rooms).getAll())) if (scopeKey(room.value?.identity || {}) === id)
+            for (const row of await all(tx, stores.operations, room.key)) items.push({ kind: 'operation', key: row.key, language: room.value.identity.language });
+          return { items: items.map(item => ({ ...item, cursor: key(item.kind, item.key) })).sort((a,b) => a.cursor < b.cursor ? -1 : a.cursor > b.cursor ? 1 : 0)
+            .filter(item => !marker?.afterKey || item.cursor > marker.afterKey), meta };
+        });
+        if (!initial) return { changed: false, removed: [] };
+        return trackMigration('invalid-translation', id, captured, async () => {
+          const removed = []; let changed = false;
+          const names = [stores.meta, stores.records, stores.baseline, stores.operations, stores.submissions, stores.receipts, stores.drafts, stores.migration, 'kv'];
+          const count = Math.max(1, Math.ceil(initial.items.length / 64));
+          for (let batch = 0; batch < count; batch++) {
+            const items = initial.items.slice(batch * 64, (batch + 1) * 64);
+            const result = await transaction(names, 'readwrite', async tx => {
+              const meta = await get(tx, stores.meta, id), ready = await get(tx, stores.migration, id);
+              if (!meta || ready?.state !== 'ready') return { stopped: true, removed: [], changed: false };
+              const removed = []; let changed = false;
+              for (const item of items) {
+                if (item.kind === 'stage') {
+                  const record = await request(tx.objectStore(stores.records).get(item.key));
+                  if (!record || record.scope !== id) continue;
+                  if (record.value.field === 'invalidTranslationArchive') {
+                    const archived = record.value.data;
+                    if (archived?.sourceHash === captured.sourceHash) {
+                      const original = await get(tx, stores.baseline, key(baselineKey(captured), archived.filepath));
+                      await retainInvalidDraft(tx, captured, archived.language, archived.filepath, archived.stage?.translations, original, archived.id || record.value.entry);
+                    }
+                    continue;
+                  }
+                  const { language, entry: filepath, data: stage } = record.value;
+                  const stageScope = { ...captured, sourceHash: stage.sourceHash || captured.sourceHash };
+                  const original = await get(tx, stores.baseline, key(baselineKey(stageScope), filepath));
+                  const current = { ...captured, invalidTranslationArchive: {} };
+                  const archive = W.archiveInvalidTranslation(current, stage, language, { filepath, source: original,
+                    sourceUnavailable: !Array.isArray(original?.translations?.English) });
+                  if (!archive) continue;
+                  const archiveKey = key(id, ['invalidTranslationArchive', archive.id]), previous = await get(tx, stores.records, archiveKey);
+                  if (previous && (!same(previous.data?.stage, archive.stage) || !same(previous.data?.source, archive.source))) throw new Error('Invalid translation recovery evidence differs.');
+                  if (!previous) tx.objectStore(stores.records).put(row(id, ['invalidTranslationArchive', archive.id],
+                    { field: 'invalidTranslationArchive', entry: archive.id, data: archive }, { pathKey: key(id, filepath), kindScope: key(id, 'invalidTranslationArchive') }));
+                  await retainInvalidDraft(tx, stageScope, language, filepath, stage.translations, original, archive.id);
+                  tx.objectStore(stores.records).delete(item.key);
+                  removed.push({ language, filepath, archiveId: archive.id }); changed = true;
+                  continue;
+                }
+                const store = item.kind === 'operation' ? stores.operations : stores.submissions;
+                const record = await request(tx.objectStore(store).get(item.key));
+                if (!record) continue;
+                if (item.kind === 'operation' && record.value.status === 'invalid_translation_resolved') continue;
+                const command = item.kind === 'operation' ? record.value : record.value.batch;
+                if (!command || command.resetStaging) continue;
+                // A consumed local command remains accepted evidence. The
+                // retry adapter checks its immutable signature before replay.
+                if (item.kind === 'submission' && await get(tx, stores.receipts, key(id, command.jobId))) continue;
+                const invalid = [];
+                for (const entry of command.files || []) {
+                  const file = item.kind === 'operation' ? entry.yours || entry : entry;
+                  if (item.kind === 'operation' && file.needsReview && !file.trackedForExport) continue;
+                  const original = await get(tx, stores.baseline, key(baselineKey(captured), file.filepath));
+                  const issues = W.translationIssues(file.translations, original?.translations?.English?.length ?? file.translations?.length ?? 0);
+                  if (!Array.isArray(original?.translations?.English)) { issues.valid = false; issues.sourceUnavailable = true; }
+                  if (!issues.valid) invalid.push({ filepath: file.filepath, issues, original, translations: file.translations, stage: file });
+                }
+                if (!invalid.length) continue;
+                const error = { code: 'SD_TRANSLATION_INVALID', message: 'Complete every translation entry before saving.',
+                  files: invalid.map(({ filepath, issues }) => ({ filepath, ...issues })) };
+                const next = item.kind === 'operation' ? { ...record.value, status: 'invalid_translation', translationError: error }
+                  : { ...record.value, state: 'review', error };
+                if (!same(next, record.value)) { tx.objectStore(store).put({ ...record, value: next }); changed = true; }
+                for (const file of invalid) {
+                  let identity = 'submission:' + command.jobId;
+                  const language = command.language || item.language || initial.meta.language || scope.language;
+                  if (item.kind === 'operation') {
+                    const archive = W.archiveInvalidTranslation({ ...captured, invalidTranslationArchive: {} }, file.stage, language,
+                      { filepath: file.filepath, source: file.original, operationId: command.id,
+                        sourceUnavailable: !Array.isArray(file.original?.translations?.English) });
+                    identity = archive.id;
+                    const archiveKey = key(id, ['invalidTranslationArchive', archive.id]), previous = await get(tx, stores.records, archiveKey);
+                    if (previous && (!same(previous.data?.stage, archive.stage) || !same(previous.data?.source, archive.source))) throw new Error('Invalid translation recovery evidence differs.');
+                    if (!previous) tx.objectStore(stores.records).put(row(id, ['invalidTranslationArchive', archive.id],
+                      { field: 'invalidTranslationArchive', entry: archive.id, data: archive }, { pathKey: key(id, file.filepath), kindScope: key(id, 'invalidTranslationArchive') }));
+                  }
+                  await retainInvalidDraft(tx, captured, language, file.filepath, file.translations, file.original, identity,
+                    item.kind === 'submission' ? command.jobId : undefined);
+                }
+              }
+              tx.objectStore(stores.migration).put({ key: markerKey, scope: id, value: batch === count - 1 ? { state: 'ready' }
+                : { state: 'converting', afterKey: items.at(-1).cursor } });
+              return { removed, changed };
+            });
+            if (result.stopped) break;
+            removed.push(...result.removed); changed ||= result.changed;
+          }
+          return { changed, removed };
+        });
+      })();
+      invalidRepairs.set(id, work);
+      try { return await work; } finally { invalidRepairs.delete(id); }
+    }
     async function workspace(scope, options = {}) {
       await ensure(scope);
+      await repairInvalidStages(scope);
       if (options.filepaths == null) await repairCarriedStages(scope);
       return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', tx => readWorkspace(tx, scope, options.filepaths, options.includeDropped, options.allDropped));
     }
@@ -1187,6 +1332,7 @@
     async function activation(scope) {
       const captured = { ...scope };
       await ensure(captured);
+      await repairInvalidStages(captured);
       await repairCarriedStages(captured);
       const id = scopeKey(captured), baseId = baselineKey(captured);
       // Do no corpus cloning, sorting or assembly while this consistent read
@@ -1245,6 +1391,7 @@
         for (const item of metadataRows) tx.objectStore('kv').put(item);
         tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
         tx.objectStore(stores.migration).delete(carryRepairKey(scope));
+        tx.objectStore(stores.migration).delete(invalidRepairKey(scope));
       });
       return committed;
     }
@@ -1307,8 +1454,14 @@
     async function beginBatch(batch, scope, logical, rooms) {
       await ensure(scope);
       const paths = batch.files.map(file => file.filepath), checkpoint = batch.checkpoint || batch.draft;
-      if (checkpoint?.key) await draftGet(checkpoint.key);
-      if (batch.collaboration) await rooms.ensureRoom(batch.collaboration.key);
+      // A receipt identifies an already accepted command. Its immutable signature
+      // is checked in the atomic replay branch before any preparation may write.
+      const receipt = await transaction([stores.receipts], 'readonly', tx => get(tx, stores.receipts, key(scopeKey(scope), batch.jobId)));
+      if (!receipt) {
+        if (checkpoint?.key) await draftGet(checkpoint.key);
+        if (batch.collaboration) await rooms.ensureRoom(batch.collaboration.key);
+        await repairInvalidStages(scope);
+      }
       const db = await openDb(), tx = db.transaction([stores.meta, stores.baseline, stores.files, stores.records, stores.drafts,
         stores.rooms, stores.shared, stores.operations, stores.roomRecords, stores.submissions, stores.receipts, revisionStoreName(scope.game),
         ...(batch.tmCapture?.length ? tmStores : [])], 'readwrite');
@@ -1481,7 +1634,7 @@
     async function putSubmission(batch) {
       const scope = normalizeScope(batch.workspaceScope || { ...batch, accountId: batch.accountId || 'guest' }), id = scopeKey(scope);
       await ensure(scope);
-      return transaction([stores.submissions, stores.receipts, stores.migration], 'readwrite', async tx => {
+      return transaction([stores.submissions, stores.receipts, stores.migration, stores.meta, stores.baseline], 'readwrite', async tx => {
         const previous = await get(tx, stores.submissions, key(id, batch.jobId));
         if (previous && !same(previous.batch, batch)) throw new Error('A save identifier cannot be reused for different content.');
         if (previous) return previous;
@@ -1489,6 +1642,12 @@
         // The worker still verifies the original receipt signature before
         // acknowledging a retry. A completed command needs no new journal.
         if (receipt) return { batch: copy(batch), state: 'completed', createdAt: receipt.createdAt || 0 };
+        const meta = await get(tx, stores.meta, id);
+        if (!batch.resetStaging && !String(meta?.contentMode || meta?.mode || '').toLowerCase().startsWith('clienttext')) for (const file of batch.files) {
+          const original = await get(tx, stores.baseline, key(baselineKey(scope), file.filepath));
+          if (!Array.isArray(original?.translations?.English)) throw new Error('The English source is unavailable. Reimport the source archive before saving.');
+          W.assertCompleteTranslation(file.translations, original.translations.English.length, file.filepath);
+        }
         const sequenceKey = key('submission-order', id), last = await get(tx, stores.migration, sequenceKey);
         const sequence = Number(last?.sequence || 0) + 1;
         if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error('The save submission sequence is invalid.');
@@ -1500,6 +1659,8 @@
     }
     async function listSubmissions(scope) {
       const normalized = normalizeScope(scope), id = scopeKey(normalized);
+      await ensure(normalized);
+      await repairInvalidStages(normalized);
       return transaction([stores.submissions], 'readonly', async tx => (await all(tx, stores.submissions, id)).map(row => row.value)
         .filter(value => ['queued', 'pending', 'review'].includes(value.state) && (!scope.language || value.batch.language === scope.language))
         .sort((a,b) => {
@@ -1549,7 +1710,7 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages,
+      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages, repairInvalidStages,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same,
       tmStores, tmCapture, getTranslationMemory, getTranslationMemoryState, putTranslationMemoryUnits, deleteTranslationMemoryUnit, getTranslationMemoryPending,
       applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,

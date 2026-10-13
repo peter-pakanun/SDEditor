@@ -283,7 +283,7 @@ test('sparse join shares only the cached descriptor and retains immutable local 
   assert.deepEqual(room.manifest.files, [{ filepath: 'a.txt', entryCount: 2 }, { filepath: 'b.txt', entryCount: 1 }]);
 });
 
-test('sparse first save sends one edited witness; later saves omit it and intentional blanks remain edits', async t => {
+test('sparse first save sends one edited witness; later valid saves omit it and blank saves are rejected', async t => {
   const { client, server, store } = await fixture(); t.after(() => client.destroy());
   await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['new', 'two'], trackedForExport: true }] });
   let mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
@@ -291,11 +291,15 @@ test('sparse first save sends one edited witness; later saves omit it and intent
   assert.equal(mutations[0].options.body.files[0].baseRevision, 0);
   assert.deepEqual(mutations[0].options.body.files[0].baseline.translations.French, ['un', 'deux']);
   assert.equal(server.files.length, 1);
-  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }] });
+  await client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['new again', 'two'], trackedForExport: true }] });
   mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
   assert.equal(mutations[1].options.body.files[0].baseline, undefined);
   assert.equal(mutations[1].options.body.files[0].proof, undefined);
-  assert.deepEqual(server.files[0].translations, ['', '']); assert.equal(server.files[0].trackedForExport, true);
+  assert.deepEqual(server.files[0].translations, ['new again', 'two']); assert.equal(server.files[0].trackedForExport, true);
+  const before = copy(store.workspace), requests = server.requests.length;
+  await assert.rejects(client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }] }),
+    error => error.code === 'SD_TRANSLATION_INVALID');
+  assert.deepEqual(store.workspace, before); assert.equal(server.requests.length, requests);
 });
 
 test('joining with a legacy carried translation does not author it; committed text preserves recovery before callbacks', async t => {
@@ -475,13 +479,25 @@ async function ghostFixture({ pending = false } = {}) {
     if (pending) server.failMutations = 10;
   } });
   result.source = baselineSource;
+  // Seed a durable state written by an older client. The current client must
+  // never create that blank save merely to exercise historical repair retries.
+  const room = result.store.state.rooms[result.client.key];
+  const ghost = P.fileState({ filepath: 'a.txt', translations: ['', ''], trackedForExport: true, revision: pending ? 0 : 1 });
+  if (!pending) { result.server.change('a.txt', ['', '']); room.shared['a.txt'] = copy(ghost); }
+  room.local['a.txt'] = copy(ghost);
+  result.store.workspace.staged.Thai ||= {};
+  result.store.workspace.staged.Thai['a.txt'] = { sourceHash: result.archive.baselineId, translations: ['', ''], before: [], savedAt: 7 };
+  result.client.state = copy(result.store.state);
   return result;
 }
 function queueGhostRepair(value) {
-  const repaired = W.repairLegacyPlaceholders(value.store.workspace, { source: value.source, collaboration: value.store.state,
-    game: 'poe1', revisions: value.store.revisions, receipts: [], evidenceComplete: true });
-  assert.equal(repaired, true);
   const room = Object.values(value.store.state.rooms)[0];
+  const repairId = 'historical-ghost-repair-' + ++id;
+  value.store.workspace.placeholderRepairArchive ||= {};
+  value.store.workspace.placeholderRepairArchive[repairId] = { filepath: 'a.txt', language: 'Thai', sourceHash: value.archive.baselineId,
+    staged: copy(value.store.workspace.staged.Thai['a.txt']), status: 'pending', reason: 'Recovered migration placeholder' };
+  room.placeholderRepairs ||= [];
+  room.placeholderRepairs.push({ id: repairId, filepath: 'a.txt', baseRevision: 1 });
   assert.equal(room.placeholderRepairs.length, 1);
   return room.placeholderRepairs[0].id;
 }
@@ -509,7 +525,8 @@ test('pending migration placeholder joins repair locally and never repost a muta
 test('accepted ghost repair clears Saved for its owner and peers across reload and reconnect', async t => {
   const value = await ghostFixture(); value.client.destroy();
   const peer = await fixture({ source: value.source, server: value.server, accountId: 'peer' }); t.after(() => peer.client.destroy());
-  assert.equal(W.workspaceFile(peer.store.workspace, value.source[0], 'Thai').hasChanges, true);
+  assert.equal(W.workspaceFile(peer.store.workspace, value.source[0], 'Thai').hasChanges, false, 'Old blank shared work is never active Saved text');
+  assert.ok(Object.values(peer.store.workspace.invalidTranslationArchive).some(item => item.filepath === 'a.txt'));
   const repairId = queueGhostRepair(value), mutationsBefore = value.server.requests.filter(request => request.path.endsWith('/mutations')).length;
   const owner = await reconnectGhost(value); t.after(() => owner.client.destroy());
   assert.equal(owner.client.snapshot().pending, 0);
@@ -529,24 +546,24 @@ test('accepted ghost repair clears Saved for its owner and peers across reload a
   assert.equal(value.server.requests.filter(request => request.path.endsWith('/mutations')).length, mutationsBefore);
 });
 
-test('an explicit blank save after placeholder repair remains Saved and syncs as a new revision', async t => {
+test('an explicit blank save after historical placeholder repair is rejected without restaging or sharing it', async t => {
   const value = await ghostFixture(); value.client.destroy(); queueGhostRepair(value);
   const repaired = await reconnectGhost(value); t.after(() => repaired.client.destroy());
-  await repaired.client.save({ workspace: repaired.store.workspace,
-    files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }], origin: 'save' });
+  await assert.rejects(repaired.client.save({ workspace: repaired.store.workspace,
+    files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }], origin: 'save' }), error => error.code === 'SD_TRANSLATION_INVALID');
   const file = value.server.files.find(row => row.filepath === 'a.txt');
-  assert.equal(file.revision, 3); assert.equal(file.trackedForExport, true); assert.equal(file.stagingReset, undefined);
+  assert.equal(file.revision, 2); assert.equal(file.trackedForExport, false); assert.equal(file.stagingReset, true);
   const state = W.workspaceFile(repaired.store.workspace, value.source[0], 'Thai');
-  assert.equal(state.hasChanges, true); assert.equal(state.isMissing, true);
-  assert.equal(repaired.store.workspace.staged.Thai['a.txt'].saveOrigin, 'save');
+  assert.equal(state.hasChanges, false); assert.equal(state.isMissing, true);
+  assert.equal(repaired.store.workspace.staged.Thai?.['a.txt'], undefined);
   await repaired.client.sync();
   repaired.client.destroy();
   const reloaded = await reconnectGhost(value); t.after(() => reloaded.client.destroy());
-  assert.equal(W.workspaceFile(reloaded.store.workspace, value.source[0], 'Thai').hasChanges, true);
-  assert.equal(value.server.files.find(row => row.filepath === 'a.txt').revision, 3);
+  assert.equal(W.workspaceFile(reloaded.store.workspace, value.source[0], 'Thai').hasChanges, false);
+  assert.equal(value.server.files.find(row => row.filepath === 'a.txt').revision, 2);
 });
 
-test('a held repair cannot erase an explicit blank save committed while its request is in flight', async t => {
+test('a held historical repair cannot erase a valid explicit save committed while its request is in flight', async t => {
   const value = await ghostFixture(); value.client.destroy(); queueGhostRepair(value);
   const gate = deferred(), started = deferred();
   value.server.repairGate = gate.promise;
@@ -559,9 +576,10 @@ test('a held repair cannot erase an explicit blank save committed while its requ
   const connection = reconnectGhost(value, { beforeConnect(active) { client = active.client; } });
   await started.promise; t.after(() => client.destroy());
   await client.save({ workspace: value.store.workspace,
-    files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }], origin: 'save', waitForSync: false });
+    files: [{ filepath: 'a.txt', translations: ['Authored first', 'Authored second'], trackedForExport: true }], origin: 'save', waitForSync: false });
   assert.equal(W.workspaceFile(value.store.workspace, value.source[0], 'Thai').hasChanges, true);
-  assert.equal(client.room().outbox.length, 1);
+  assert.equal(client.room().outbox.filter(operation => !String(operation.status || '').startsWith('invalid_translation')).length, 1,
+    'Only the complete explicit save remains active; quarantined historical commands remain recovery evidence.');
   gate.resolve(); await connection; await client.retry();
   const file = value.server.files.find(row => row.filepath === 'a.txt');
   assert.equal(file.revision, 3); assert.equal(file.trackedForExport, true); assert.equal(file.stagingReset, undefined);
@@ -575,7 +593,7 @@ test('failed repair attempts retain their stable id and replay uncertain complet
   value.server.failRepairs = 1;
   const repaired = await reconnectGhost(value); t.after(() => repaired.client.destroy());
   assert.equal(repaired.client.snapshot().pending, 1);
-  assert.equal(W.workspaceFile(value.store.workspace, value.source[0], 'Thai').hasChanges, true);
+  assert.equal(W.workspaceFile(value.store.workspace, value.source[0], 'Thai').hasChanges, false, 'Uncertain invalid shared work remains recovery evidence, never Saved');
   value.server.loseRepairReply = 1;
   await repaired.client.flushPlaceholderRepairs(repaired.client.epoch);
   assert.equal(repaired.client.snapshot().pending, 1);

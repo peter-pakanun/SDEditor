@@ -92,7 +92,7 @@ test('public workspace projection remains pure and preserves other languages and
 test('owned workspace projection updates edited rows without serializing untouched content', () => {
   const untouched = { filepath: 'b.txt', translations: { Thai: ['keep'] } };
   Object.defineProperty(untouched, 'unreadPayload', { enumerable: true, get() { throw new Error('Unedited content was serialized'); } });
-  const owned = { descs: [{ filepath: 'a.txt', translations: { Thai: ['old'], German: ['German'] } }, untouched], status: {} };
+  const owned = { descs: [{ filepath: 'a.txt', translations: { English: ['Source'], Thai: ['old'], German: ['German'] } }, untouched], status: {} };
   const file = { filepath: 'a.txt', translations: ['saved'], needsReview: false, trackedForExport: true };
   const result = P.projectWorkspace(owned, [file], 'Thai', [], { mutate: true });
   assert.equal(result, owned);

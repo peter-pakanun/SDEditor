@@ -12,6 +12,7 @@
     && (!error.status || error.status >= 500 || error.status === 429 || error.code === 'UPLOAD_EXPIRED');
   const staleError = () => Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
   const byPath = files => Object.fromEntries(files.map(file => [file.filepath, copy(file)]));
+  const inactiveOperation = operation => String(operation.status || '').startsWith('invalid_translation');
   class Client {
     constructor(options) {
       this.store = options.store; this.request = options.request;
@@ -52,7 +53,7 @@
       const room = this.room();
       return { identity: copy(room?.identity || null), roomId: room?.roomId || null,
         connected: this.connected, disconnected: this.disconnected, hashing: this.hashing,
-        pending: (room?.outbox?.length || 0) + (room?.placeholderRepairs?.length || 0),
+        pending: (room?.outbox || []).filter(operation => !inactiveOperation(operation)).length + (room?.placeholderRepairs?.length || 0),
         conflicts: copy(room?.conflicts || []), droppedConflicts: copy(this.droppedConflicts),
         droppedReviewPaths: [...new Set([...Object.keys(this.droppedConflicts), ...(room?.outbox || [])
           .filter(operation => ['candidate_conflict', 'needs_candidate_review'].includes(operation.status))
@@ -489,7 +490,7 @@
         if (room.mode !== 'sparse' || room.archive.baselineId !== archive.baselineId) throw new Error('The stored collaboration baseline differs.');
         legacyCarries = copy(room.carries || {});
         room.carries = {}; room.carryRevisions = {};
-        const pendingPaths = new Set(room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
+        const pendingPaths = new Set(room.outbox.filter(operation => !inactiveOperation(operation)).flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
         // Repair a proven local carry already accepted as an automatic first
         // merge. The API retains explicit saves and uncertain shared evidence,
         // including when the predecessor was never uploaded.
@@ -550,7 +551,7 @@
         room.outbox = room.outbox.filter(operation => !canceled.includes(operation));
         for (const operation of canceled) for (const entry of operation.files) {
           const staged = current.staged?.[language]?.[entry.yours.filepath];
-          if (!staged?.saveOrigin || room.outbox.some(op => op.files.some(file => file.yours.filepath === entry.yours.filepath))) continue;
+          if (!staged?.saveOrigin || room.outbox.some(op => !inactiveOperation(op) && op.files.some(file => file.yours.filepath === entry.yours.filepath))) continue;
           room.outbox.push({ id: this.uuid(), origin: 'save', kind: 'edit', status: 'pending', files: [{
             base: copy(room.shared[entry.yours.filepath] || this.baselineStates[entry.yours.filepath]),
             yours: fileState({ filepath: entry.yours.filepath, translations: staged.translations, trackedForExport: true }),
@@ -702,14 +703,22 @@
     }
     rebuild(room) {
       room.local = copy(room.shared);
-      for (const operation of room.outbox) for (const entry of operation.files) {
-        const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
-        room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
-        if (shared?.stagingReset && operation.kind !== 'join' && !operation.resetStaging) {
-          room.local[entry.yours.filepath].trackedForExport = true;
-          delete room.local[entry.yours.filepath].stagingReset;
+      for (const operation of room.outbox) {
+        if (!inactiveOperation(operation) && !operation.resetStaging && !operation.repairInitialMerge && operation.files.some(entry => !entry.yours.needsReview
+          && !W.translationIssues(entry.yours.translations, this.sourceFiles?.get(entry.yours.filepath)?.english?.length
+            ?? entry.yours.translations.length).valid)) operation.status = 'invalid_translation';
+        if (inactiveOperation(operation)) continue;
+        for (const entry of operation.files) {
+          const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
+          room.local[entry.yours.filepath] = shared ? mergeFile(entry.base, entry.yours, shared).file : copy(entry.yours);
+          if (shared?.stagingReset && operation.kind !== 'join' && !operation.resetStaging) {
+            room.local[entry.yours.filepath].trackedForExport = true;
+            delete room.local[entry.yours.filepath].stagingReset;
+          }
         }
       }
+      const invalidIds = new Set(room.outbox.filter(inactiveOperation).map(operation => operation.id));
+      room.conflicts = room.conflicts.filter(conflict => !invalidIds.has(conflict.mutationId));
       for (const conflict of room.conflicts) {
         const shared = room.shared[conflict.filepath];
         if (!shared) continue;
@@ -737,7 +746,7 @@
         else if (initial) {
           const local = copy(room.local);
           room.recovery.push({ at: Date.now(), reason: 'Before joining shared workspace', files: Object.values(local) });
-          const pendingPaths = new Set(room.outbox.flatMap(op => op.files.map(entry => entry.yours.filepath)));
+          const pendingPaths = new Set(room.outbox.filter(op => !inactiveOperation(op)).flatMap(op => op.files.map(entry => entry.yours.filepath)));
           for (const shared of files) {
             const yours = local[shared.filepath];
             if (yours && !contentEqual(yours, shared) && !pendingPaths.has(shared.filepath)) {
@@ -753,7 +762,7 @@
         room.roomId = snapshot.roomId;
         room.shared = byPath(files);
         if (room.mode === 'sparse') {
-          room.outbox = room.outbox.filter(operation => operation.kind !== 'join'
+          room.outbox = room.outbox.filter(operation => inactiveOperation(operation) || operation.kind !== 'join'
             || !operation.files.every(entry => contentEqual(entry.yours, room.shared[entry.yours.filepath])));
           const pending = new Set(room.outbox.map(operation => operation.id));
           room.conflicts = room.conflicts.filter(conflict => pending.has(conflict.mutationId));
@@ -763,7 +772,7 @@
         delete room.seedUpload;
         this.rebuild(room);
       }, { ...(records ? { records } : {}), projectWorkspace: this.projection(projected, epoch) }, epoch);
-      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...projected, ...this.room().outbox.flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
+      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...projected, ...this.room().outbox.filter(op => !inactiveOperation(op)).flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
       if (!this.current(epoch)) throw staleError();
     }
     async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, promoteDropped, promoteDroppedByPath = {}, waitForSync = true }) {
@@ -774,6 +783,9 @@
       const normalized = files.map(file => {
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
+        const issues = W.translationIssues(file.translations, original.english.length);
+        if (!file.needsReview && !issues.valid) throw Object.assign(new Error(file.filepath
+          + ': Complete every StatDescription translation entry before saving.'), { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, ...issues });
         return fileState(file, original.english.length);
       });
       if (room.mode === 'sparse' && typeof restore?.eventId === 'string' && restore.eventId.startsWith('local-baseline:')) {
@@ -845,7 +857,7 @@
       // retry disconnected rooms or saves that still need to be uploaded.
       if (background && this.connected && this.socket?.readyState === 1
         && !this.pendingDropped
-        && !this.room()?.outbox.some(operation => operation.status !== 'conflict' && !operation.blockedByConflict)) {
+        && !this.room()?.outbox.some(operation => !inactiveOperation(operation) && operation.status !== 'conflict' && !operation.blockedByConflict)) {
         return Promise.resolve();
       }
       return this.retry();
@@ -883,6 +895,8 @@
           else if (this.presenceError) this.reportPresenceError();
           else if (Object.keys(this.droppedConflicts).length || this.room().outbox.some(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)))
             this.status('Conflicting dropped copies need review before these files can be shared.', true);
+          else if (this.room().outbox.some(op => op.status === 'invalid_translation'))
+            this.status('An incomplete SD translation was retained for recovery. Complete every entry and save the file again.', true);
           else this.status('');
           if (this.pendingDropped) this.schedule();
         } catch (error) {
@@ -1184,7 +1198,7 @@
     placeholderRepairIndex(room) {
       const repairs = room.placeholderRepairs || [], outbox = room.outbox;
       const blocked = new Set();
-      for (const operation of outbox) for (const entry of operation.files) blocked.add(entry.yours.filepath);
+      for (const operation of outbox) if (!inactiveOperation(operation)) for (const entry of operation.files) blocked.add(entry.yours.filepath);
       return { room, repairs, outbox, outboxLength: outbox.length,
         byId: new Map(repairs.map(repair => [repair.id, repair])), blocked };
     }
@@ -1320,7 +1334,7 @@
       const paths = new Set(op.files.map(entry => entry.yours.filepath));
       if (!files.some(file => file.revision !== 1 || file.needsReview || !file.trackedForExport || file.sourceCarry?.metadataCorrection
         || W.classifySourceCarry(this.baselineFiles.get(file.filepath), this.baselineFiles.get(file.filepath), room.identity.language, file.translations).action !== 'baseline')
-        && !room.outbox.some(other => other.id !== op.id && !other.carryRepair && other.files.some(entry => paths.has(entry.yours.filepath)))) return false;
+        && !room.outbox.some(other => !inactiveOperation(other) && other.id !== op.id && !other.carryRepair && other.files.some(entry => paths.has(entry.yours.filepath)))) return false;
       await this.retainSourceCarryRepair(op, files, epoch, 'newer_work'); return true;
     }
     async flush(epoch) {
@@ -1329,7 +1343,7 @@
       const ids = this.room().outbox.map(op => op.id);
       for (const id of ids) {
         const op = this.room().outbox.find(item => item.id === id);
-        if (!op) continue;
+        if (!op || inactiveOperation(op)) continue;
         if (await this.retainChangedSourceCarryRepair(op, epoch)) continue;
         const paths = op.files.map(entry => entry.yours.filepath);
         if (['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(op.status) || paths.some(path => blocked.has(path))) {
@@ -1341,6 +1355,7 @@
         for (let attempt = 0; attempt < 4; attempt++) {
           await this.prepare(id, epoch);
           const current = this.room().outbox.find(item => item.id === id);
+          if (current && inactiveOperation(current)) break;
           if (!current || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(current.status)) { paths.forEach(path => blocked.add(path)); break; }
           try {
             this.onWork({ key: 'upload', label: 'Saving translations to shared workspace', active: true });
@@ -1359,17 +1374,37 @@
                   && entry.base && contentEqual(entry.base, file)) entry.base = copy(file);
               }
               room.outbox = room.outbox.filter(item => item.id !== id);
+              for (const operation of room.outbox) if (operation.status === 'invalid_translation') {
+                const invalidEntries = operation.files.filter(entry => !W.translationIssues(entry.yours.translations,
+                  this.sourceFiles?.get(entry.yours.filepath)?.english?.length ?? entry.yours.translations.length).valid);
+                if (invalidEntries.length && invalidEntries.every(entry => accepted.some(file => file.filepath === entry.yours.filepath
+                  && file.trackedForExport && W.translationIssues(file.translations,
+                    this.sourceFiles?.get(file.filepath)?.english?.length ?? file.translations.length).valid))) {
+                  operation.status = 'invalid_translation_resolved'; operation.resolvedBy = id;
+                }
+              }
               room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id);
               // A mutation reply may skip commits by other users, so do not advance
               // the replay cursor here. Only ordered catch-up events can do that.
               this.rebuild(room);
-            }, { records: this.records('acknowledge-operation', accepted.map(file => file.filepath), [id],
+            }, { records: this.records('acknowledge-operation', accepted.map(file => file.filepath),
+              [id, ...this.room().outbox.filter(inactiveOperation).map(operation => operation.id)],
               { includeDropped: !!current.promoteDropped }), projectWorkspace: this.projection(accepted, epoch) }, epoch);
             if (result.candidate) await this.receiveDropped([result.candidate], epoch);
             await this.onRemote(this.remoteFiles(accepted));
             if (!this.current(epoch)) throw staleError();
             break;
           } catch (error) {
+            if (error.code === 'SD_TRANSLATION_INVALID') {
+              await this.update((state, room) => {
+                const rejected = room.outbox.find(item => item.id === id);
+                if (rejected) { rejected.status = 'invalid_translation'; rejected.validationError = error.message; }
+                this.rebuild(room);
+              }, { records: this.records('reject-invalid-translation', paths, [id]), projectWorkspace: this.projection(
+                paths.map(filepath => this.room().shared[filepath] || this.baselineStates?.[filepath]).filter(Boolean), epoch) }, epoch);
+              await this.onRemote(this.remoteFiles(paths.map(filepath => this.room().local[filepath]).filter(Boolean)));
+              break;
+            }
             if (current.repairInitialMerge && error.code === 'SOURCE_CARRY_REPAIR_CONFLICT') {
               const accepted = error.current?.files;
               if (!Array.isArray(accepted)) throw error;
@@ -1488,6 +1523,11 @@
     }
     async sendMutation(op, epoch) {
       const path = '/rooms/' + encodeURIComponent(this.room().roomId);
+      if (!op.resetStaging && !op.repairInitialMerge && !op.restore) for (const file of op.wire.files) {
+        const issues = W.translationIssues(file.translations, this.sourceFiles?.get(file.filepath)?.english?.length ?? file.translations.length);
+        if (!file.needsReview && !issues.valid) throw Object.assign(new Error(file.filepath
+          + ': Complete every StatDescription translation entry before sharing.'), { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, ...issues });
+      }
       if (op.repairInitialMerge) return this.api(path + '/source-carry-repairs', { method: 'POST', body: { mutationId: op.id,
         files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: 1,
           fromSourceHash: file.sourceCarry.fromSourceHash, baseline: copy(file.baseline), proof: copy(file.proof),

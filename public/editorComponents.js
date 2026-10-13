@@ -433,8 +433,8 @@
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
                   <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)" :disabled="!!entryAlignment">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
-                  <button v-if="historyMode !== 'source' && !rev.legacyReference" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)" :disabled="!!entryAlignment">↩</button>
-                  <button v-if="historyMode !== 'source' && String(rev.note || '').startsWith('Before entry alignment')" type="button" @click="alignHistoryRevision(rev)" :disabled="editorSaving || !!entryAlignment">Align these blocks</button>
+                  <button v-if="historyMode !== 'source' && !rev.legacyReference && !rev.incompleteRecovery" class="historyRestore" title="Restore this saved translation" :aria-label="'Restore translation saved ' + formatHistoryTime(rev.savedAt)" @click="restoreHistoryRevision(rev)" :disabled="!!entryAlignment">↩</button>
+                  <button v-if="historyMode !== 'source' && (rev.incompleteRecovery || String(rev.note || '').startsWith('Before entry alignment'))" type="button" @click="alignHistoryRevision(rev)" :disabled="editorSaving || !!entryAlignment">{{ rev.incompleteRecovery ? 'Recover into draft' : 'Align these blocks' }}</button>
                 </div>
                 <div v-if="historyItems.length === 0" class="historyEmpty">No revisions yet</div>
               </div>

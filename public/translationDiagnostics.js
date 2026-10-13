@@ -1,4 +1,6 @@
 (function (global) {
+  const StatDescCodec = typeof module !== 'undefined' && module.exports
+    ? require('./statDescCodec.js') : null;
   const LEVEL_WARNING = "warning";
   const LEVEL_ERROR = "error";
 
@@ -416,6 +418,21 @@
     const text = String(value ?? "");
     const diagnostics = [];
     const addDiagnostic = makeAddDiagnostic(text, diagnostics);
+
+    // A quoted StatDescription entry must contain text. Scanner checkboxes
+    // cannot disable this rule; table columns are fragments of that entry.
+    // ClientText owns separate required/optional field rules.
+    if (options.contentMode !== 'clienttext' && !options.translationFragment) {
+      const codec = StatDescCodec || global.StatDescCodec;
+      if (!codec?.isBlankTranslation) throw new Error('StatDescription translation validation is unavailable.');
+      if (codec.isBlankTranslation(text)) diagnostics.push({
+        level: LEVEL_ERROR,
+        code: 'blank-translation',
+        message: 'Blank StatDescription translation. Complete this entry before saving.',
+        start: 0,
+        end: text.length
+      });
+    }
 
     if (!options.checks || options.checks.whitespace) scanWhitespace(text, addDiagnostic);
     if (!options.checks || options.checks.dash) scanDashBoundaries(text, addDiagnostic, options.lang);

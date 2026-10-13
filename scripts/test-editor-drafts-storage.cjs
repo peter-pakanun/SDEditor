@@ -39,7 +39,7 @@ function fixture({ failRevision = false } = {}) {
   } };
   const root = {}, indexedDB = { open(name, version) { versions.push(version); const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess?.(); }); return req; } };
   const ctx = vm.createContext({ window: root, indexedDB, console: { log() {} } });
-  for (const filename of ['workspaceState.js', 'offlineStore.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', filename), 'utf8'), ctx);
+  for (const filename of ['statDescCodec.js', 'workspaceState.js', 'offlineStore.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', filename), 'utf8'), ctx);
   return { store: root.OfflineStore, kv, revisions, transactions, versions, source };
 }
 async function commit(f, promise) { await tick(); f.transactions.at(-1).complete(); return promise; }
@@ -75,7 +75,7 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [14]);
+  assert.deepEqual(f.versions, [19]);
 });
 
 test('English cannot create or replace an editable translation checkpoint', async () => {

@@ -11,6 +11,23 @@ const browserSource = fs.readFileSync(path.join(__dirname, '../public/statDescCo
 const vendorPath = path.join(__dirname, '../../SDEditor-API/src/vendor/stat-desc-codec.cjs');
 const source = 'description test\n1 damage\n1\n# "English 😀" negate 1\nlang "Thai"\n1\n# "ไทย"';
 const plain = value => JSON.parse(JSON.stringify(value));
+test('SD completeness rejects every blank entry without rewriting meaningful raw text', () => {
+  for (const empty of ['', ' \t\n\r', '\\n\\n', '@ @', '\u200b\u2060\ufeff', '\u200e\u061c\u202e\u2069']) {
+    assert.equal(codec.isBlankTranslation(empty), true);
+    assert.deepEqual(codec.translationIssues(['ใช้ได้', empty, 'ยังใช้ได้'], 3).blankEntries, [2]);
+    assert.throws(() => codec.assertCompleteTranslation(['ใช้ได้', empty, 'ยังใช้ได้'], 3, 'mixed.txt'),
+      error => error.code === 'SD_TRANSLATION_INVALID' && error.filepath === 'mixed.txt' && error.blankEntries[0] === 2);
+  }
+  for (const useful of [' ไทย ', 'first@@third', 'line\\nnext', 'คำ\u200bไทย', '{0}']) {
+    const values = [useful];
+    assert.equal(codec.isBlankTranslation(useful), false);
+    assert.doesNotThrow(() => codec.assertCompleteTranslation(values, 1));
+    assert.deepEqual(values, [useful]);
+  }
+  assert.equal(codec.translationIssues(['หนึ่ง'], 2).entryCountMismatch, true);
+  assert.deepEqual(codec.translationIssues(['หนึ่ง'], 2).blankEntries, [2]);
+  assert.equal(codec.translationIssues(['หนึ่ง', 'สอง'], 1).valid, false);
+});
 function browser() {
   const context = vm.createContext({ window: {}, crypto: webcrypto, TextEncoder, TextDecoder });
   vm.runInContext(browserSource, context, { filename: 'statDescCodec.js' });

@@ -38,7 +38,7 @@ function fixture({ failRevision = false } = {}) {
   } };
   const indexedDB = { open() { const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess(); }); return req; } };
   const context = vm.createContext({ window: {}, indexedDB, console: { log() {} } });
-  for (const file of ['workspaceState.js', 'offlineStore.js', 'helper.js']) {
+  for (const file of ['statDescCodec.js', 'workspaceState.js', 'offlineStore.js', 'helper.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), context);
   }
   return { store: context.window.OfflineStore, helpers: context, kv, revisions, transactions };
@@ -79,6 +79,7 @@ test('modern workspace cleanup commits once and preserves staged work, dropped s
     dropped: { Thai: { 'a.txt': { id: 'drop', status: 'dropped', snapshot: { english: ['Old'], translations: ['old one'] } } } },
     droppedArchive: { previous: { status: 'discarded', snapshot: { translations: ['older'] } } } };
   kv.set('workspace_poe1', structuredClone(original));
+  kv.set('source_poe1', structuredClone(original.descs));
   const loading = store.getWorkspace('poe1', 'German');
   await queued();
   assert.equal(kv.get('workspace_poe1').descs[0].hasChanges, true, 'Cleanup cannot claim durability before commit.');
@@ -215,6 +216,7 @@ test('wire preparation uses the newest alias from the real atomic workspace tran
   f.store.setWorkspaceContext({ ...identity, branchId: 'default' });
   const workspaceKey = 'workspace_version_v1:' + JSON.stringify(['user', 'poe1', 'default', identity.sourceHash]);
   f.kv.set(workspaceKey, { descs: [], sourceHash: identity.sourceHash, collaborationAccountId: 'user', stagedVersion: 1, statusMetadataVersion: 1,
+    invalidTranslationPolicyVersion: 1, placeholderRepairVersion: 1,
     droppedAliases: { local: { id: 'server', fromRevision: 0, revision: 1 } } });
   const state = { version: 1, rooms: { [key]: { identity, outbox: [op], shared: { 'a.txt': base }, local: { 'a.txt': base }, conflicts: [] } } };
   f.kv.set('collaboration_v1', state);
@@ -228,4 +230,19 @@ test('wire preparation uses the newest alias from the real atomic workspace tran
   const wire = f.kv.get('collaboration_v1').rooms[key].outbox[0].wire;
   assert.equal(wire.promoteDropped.id, 'server'); assert.equal(wire.promoteDropped.revision, 3);
   assert.equal(wire.promoteDropped.targetSourceHash, identity.sourceHash);
+});
+
+test('restoring a workspace backup cannot reintroduce invalid stages even when its policy marker is current', async () => {
+  const { store, kv, transactions } = fixture();
+  const original = { filepath: 'a.txt', translations: { English: ['One', 'Two'], Thai: ['one', 'two'] }, variables: ['#'], remarks: [''], stats: ['stat'] };
+  const stage = { sourceHash: 'current', translations: ['translated first entry', ' \r\n\t '], before: ['one', 'two'], savedAt: 5, saveOrigin: 'restore' };
+  const backup = { stagedVersion: 1, sourceHash: 'current', game: 'poe1', invalidTranslationPolicyVersion: 1,
+    descs: [structuredClone(original)], staged: { Thai: { 'a.txt': structuredClone(stage) } }, status: {} };
+  const saving = store.setWorkspace(backup, 'poe1');
+  await queued(); assert.equal(kv.get('workspace_poe1').unrelated, true, 'Restoration remains atomic.');
+  transactions[0].complete(); await saving;
+  const restored = kv.get('workspace_poe1');
+  assert.equal(restored.staged.Thai['a.txt'], undefined);
+  assert.deepEqual(Object.values(restored.invalidTranslationArchive)[0].stage, stage);
+  assert.deepEqual(restored.descs[0].translations, original.translations);
 });

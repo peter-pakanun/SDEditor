@@ -62,8 +62,8 @@ function fixture({ collaboration = false, worker = false, failRevision = false }
     transactions.push(tx); return tx;
   } };
   const indexedDB = { open() { const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess(); }); return req; } };
-  const root = {}; const context = vm.createContext({ ...(worker ? { self: root } : { window: root }), indexedDB, console: { log() {} } });
-  for (const file of ['workspaceState.js', 'offlineStore.js']) {
+  const root = { StatDescCodec: require('../public/statDescCodec.js') }; const context = vm.createContext({ ...(worker ? { self: root } : { window: root }), indexedDB, console: { log() {} } });
+  for (const file of ['statDescCodec.js', 'workspaceState.js', 'offlineStore.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), context);
   }
   return { store: root.OfflineStore, kv, revisions, transactions, reads };
@@ -624,7 +624,7 @@ test('worker entrypoint queues actual save commands and sends ACK only after sto
     return value.jobId === 'save-1' ? new Promise(resolve => { resolveFirst = resolve; }) : Promise.resolve({ jobId: value.jobId });
   } } };
   const context = vm.createContext({ self: root, importScripts: (...files) => assert.deepEqual(files,
-    ['workspaceState.js', 'collaborationProtocol.js', 'regexEngine.js', 'translationDiagnostics.js', 'translationMemory.js', 'normalizedStore.js', 'normalizedRooms.js', 'offlineStore.js']) });
+    ['workspaceState.js', 'statDescCodec.js', 'collaborationProtocol.js', 'regexEngine.js', 'translationDiagnostics.js', 'translationMemory.js', 'normalizedStore.js', 'normalizedRooms.js', 'offlineStore.js']) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'saveWorker.js'), 'utf8'), context);
   assert.equal(messages[0].type, 'ready');
   root.onmessage({ data: { type: 'saveTranslations', id: 'save-1', batch: batch() } });
@@ -632,4 +632,60 @@ test('worker entrypoint queues actual save commands and sends ACK only after sto
   await queued(); assert.deepEqual(writes, ['save-1']); assert.equal(messages.length, 1);
   resolveFirst({ jobId: 'save-1' }); await queued(); assert.deepEqual(writes, ['save-1', 'save-2']);
   assert.equal(messages[1].id, 'save-1'); assert.equal(messages[2].id, 'save-2');
+});
+
+test('a bulk save containing one blank entry rejects before any staged, history, outbox or receipt change', async () => {
+  const f = fixture({ worker: true, collaboration: true }), before = copy([...f.kv]);
+  const command = batch({ files: [file('complete'), { filepath: 'other.txt', translations: [' \t\n '] }],
+    collaboration: { key, identity, origin: 'save' } });
+  await assert.rejects(f.store.saveTranslationBatch(command), error => error.code === 'SD_TRANSLATION_INVALID' && error.filepath === 'other.txt');
+  assert.deepEqual(copy([...f.kv]), before); assert.equal(f.revisions.length, 0);
+});
+
+test('a receipt for a historical invalid save replays before current validation without restaging its bytes', async () => {
+  const f = fixture({ worker: true }), command = batch({ files: [file('')] });
+  const result = { jobId: command.jobId, status: 'local', files: command.files };
+  const signature = JSON.stringify({ scope: [command.game, command.language, command.sourceHash, command.accountId],
+    files: command.files, descriptions: command.descriptions || [], statuses: command.statuses || {}, revisions: command.revisions || [],
+    collaboration: command.collaboration || null, promoteDropped: command.promoteDropped || null, promoteDroppedByPath: command.promoteDroppedByPath || null });
+  f.kv.set('translation_save_receipts_poe1', [{ jobId: command.jobId, signature, result }]);
+  const replay = await commit(f, f.store.saveTranslationBatch(command));
+  assert.equal(replay.duplicate, true);
+  assert.equal(f.kv.get('workspace_poe1').staged, undefined); assert.equal(f.revisions.length, 0);
+  await assert.rejects(f.store.saveTranslationBatch({ ...command, files: [file('different')] }), /identifier was reused/);
+  await assert.rejects(f.store.saveTranslationBatch({ ...command, jobId: 'new-invalid-save' }), { code: 'SD_TRANSLATION_INVALID' });
+});
+
+test('a corrected recovery save replaces only its captured invalid checkpoint atomically and receipt replay preserves later typing', async () => {
+  const f = fixture({ worker: true }), workspace = f.kv.get('workspace_poe1'), source = copy(workspace.descs);
+  f.kv.set('source_poe1', source);
+  W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const scope = { profile: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai', filepath: 'stat.txt' };
+  const draftKey = f.store.translationDraftKey(scope), recovered = { ...scope, key: draftKey, id: 'invalid-recovery', revision: 'recovery-v1',
+    state: 'active', translations: [' \t '], base: { translations: ['old'] } };
+  f.kv.set(draftKey, copy(recovered));
+  const command = batch({ files: [file('corrected')], checkpoint: { key: draftKey, id: recovered.id, revision: recovered.revision },
+    draft: { key: draftKey, id: recovered.id, revision: recovered.revision, base: recovered.base, replaceCheckpoint: true } });
+  const saving = f.store.saveTranslationBatch(command); await queued();
+  assert.deepEqual(f.kv.get(draftKey), recovered); assert.equal(workspace.staged.Thai?.['stat.txt'], undefined);
+  f.transactions.at(-1).complete(); const ack = await saving;
+  assert.equal(ack.draftConsumed, true); assert.equal(f.kv.get(draftKey).state, 'promoted');
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].translations, ['corrected']);
+  const later = { ...recovered, revision: 'later-v2', translations: ['later unsaved typing'], base: { translations: ['corrected'] } };
+  f.kv.set(draftKey, copy(later));
+  assert.equal((await commit(f, f.store.saveTranslationBatch(command))).duplicate, true);
+  assert.deepEqual(f.kv.get(draftKey), later); assert.equal(f.revisions.length, 1);
+});
+
+test('checkpoint replacements reject malformed identity, flags and newer revisions without persisting any part of the save', async () => {
+  for (const variant of ['flag', 'checkpoint', 'revision']) {
+    const f = fixture({ worker: true }), scope = { profile: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai', filepath: 'stat.txt' };
+    const draftKey = f.store.translationDraftKey(scope), draft = { key: draftKey, id: 'recovery', revision: 'captured-v1', base: { translations: ['old'] }, replaceCheckpoint: true };
+    f.kv.set(draftKey, { ...scope, ...draft, state: 'active', translations: [''], ...(variant === 'revision' ? { revision: 'newer-v2' } : {}) });
+    const command = batch({ draft: { ...draft, ...(variant === 'flag' ? { replaceCheckpoint: 'yes' } : {}) },
+      checkpoint: { key: draftKey, id: draft.id, revision: variant === 'checkpoint' ? 'wrong-v1' : draft.revision } });
+    const before = copy([...f.kv]);
+    await assert.rejects(f.store.saveTranslationBatch(command), variant === 'revision' ? { code: 'DRAFT_CHANGED' } : { name: 'TypeError' });
+    assert.deepEqual(copy([...f.kv]), before); assert.equal(f.revisions.length, 0);
+  }
 });

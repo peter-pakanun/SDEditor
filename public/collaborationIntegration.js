@@ -849,6 +849,13 @@
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
           const original = this.workspaceSourceFile(file.filepath) || desc;
+          const invalid = !window.StatDescCodec.translationIssues(file.translations, original.translations?.English?.length || 0).valid;
+          if (file.invalidStageRecovery) {
+            const recovery = file.invalidStageRecovery;
+            window.WorkspaceState.archiveInvalidTranslation(this.localDescs, { translations: recovery.translations,
+              revision: recovery.revision, savedAt: recovery.createdAt, sourceHash: this.sourceIdentity }, lang,
+            { filepath: file.filepath, source: original, recoveryId: recovery.id, archivedAt: recovery.createdAt });
+          }
           if (file.sourceCarryRepairProtection?.revision === file.revision) {
             for (const repair of Object.values(this.localDescs.sourceCarryRepairArchive || {})) if (repair.filepath === file.filepath
               && repair.language === lang && repair.sourceHash === this.sourceIdentity) repair.protectedRevision = file.revision;
@@ -860,11 +867,8 @@
             && candidate.id === promotion.id && Number(candidate.revision || 0) === Number(promotion.revision || 0)) {
             // Do not resolve a later candidate/revision when replaying an old
             // receipt. Use the same guarded resolution as its durable commit.
-            window.WorkspaceState.stageTranslation(this.localDescs, file, lang, {
-              source: original, sourceHash: this.sourceIdentity, game: this.gameVersion, promoteDropped: promotion,
-              sourceCarry: file.sourceCarry,
-              savedAt: this.localDescs.staged?.[lang]?.[file.filepath]?.savedAt,
-            });
+            window.WorkspaceState.resolveDroppedPromotion(this.localDescs, file.filepath, lang, promotion,
+              { sourceHash: this.sourceIdentity, savedAt: this.localDescs.staged?.[lang]?.[file.filepath]?.savedAt });
           }
           if (file.needsReview) {
             if (!window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang)
@@ -874,6 +878,10 @@
                 targetSourceHash: this.sourceIdentity, reason: 'Recovered dropped translation',
               });
             }
+          } else if (invalid) {
+            if (file.trackedForExport && !file.stagingReset) window.WorkspaceState.archiveInvalidTranslation(this.localDescs, file, lang,
+              { filepath: file.filepath, source: original });
+            if (this.localDescs.staged?.[lang]) delete this.localDescs.staged[lang][file.filepath];
           } else if (file.stagingReset && !file.trackedForExport
             || window.WorkspaceState.carriedBaselineReplay(this.localDescs, original, lang, file)) {
             if (this.localDescs.staged?.[lang]) delete this.localDescs.staged[lang][file.filepath];
@@ -1027,6 +1035,8 @@
       },
       async persistTranslationBatch(updates, origin, options = {}) {
         if (this._reconcilingImport) return { stale: true };
+        for (const { desc, lines } of updates) window.StatDescCodec.assertCompleteTranslation(
+          lines, desc.translations?.English?.length || 0, desc.filepath);
         this._translationWrites = (this._translationWrites || 0) + 1;
         try {
           const ctx = options.context || this.captureCollaborationContext();
@@ -1230,13 +1240,15 @@
         const retainedChoice = resetChoice || sharedChoice;
         if (!desc || !Array.isArray(lines) || (!retainedChoice && lines.length !== desc.translations.English.length)) throw new Error('The comparison no longer matches the current source.');
         const diagnostics = [];
+        if (!retainedChoice) window.StatDescCodec.assertCompleteTranslation(lines, desc.translations.English.length, desc.filepath);
         for (let index = 0; !retainedChoice && index < lines.length; index++) {
           const english = this.decodeEscapedNewlines(desc.translations.English[index]);
           const value = this.decodeEscapedNewlines(lines[index]);
           const sourceColumns = this.splitTableColumns(english), translatedColumns = this.splitTableColumns(value);
           if (sourceColumns.length !== translatedColumns.length) throw new Error('Match the English table column count in entry ' + (index + 1) + ' before saving the result.');
           for (let column = 0; column < Math.max(sourceColumns.length, translatedColumns.length); column++) {
-            diagnostics.push(...this.analyzeTranslationDiagnostics(translatedColumns[column] || '', sourceColumns[column] || '').diagnostics);
+            diagnostics.push(...this.analyzeTranslationDiagnostics(translatedColumns[column] || '', sourceColumns[column] || '',
+              this.lang, null, { translationFragment: sourceColumns.length > 1 || this.isTableText(value) }).diagnostics);
           }
         }
         const errors = diagnostics.filter(item => item.level === 'error');

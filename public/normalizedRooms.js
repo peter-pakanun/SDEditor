@@ -87,6 +87,29 @@
       });
       restorePlaceholderRepairs(room, evidence.workspace, evidence.originals);
     }
+    async function fenceInvalidLegacyOperations(room, scope) {
+      if (!dependencies.W?.translationIssues) return;
+      await transaction([S.meta, S.baseline], 'readonly', async tx => {
+        const meta = await get(tx, S.meta, n.scopeKey(scope));
+        if (String(meta?.contentMode || meta?.mode || '').toLowerCase().startsWith('clienttext')) return;
+        for (const operation of room.outbox || []) {
+          if (operation.resetStaging || operation.status === 'invalid_translation_resolved') continue;
+          const invalid = [];
+          for (const entry of operation.files || []) {
+            const file = entry.yours || entry;
+            if (file.needsReview && !file.trackedForExport) continue;
+            const original = await get(tx, S.baseline, key(n.baselineKey(scope), file.filepath));
+            const issues = dependencies.W.translationIssues(file.translations, original?.translations?.English?.length ?? file.translations?.length ?? 0);
+            if (!Array.isArray(original?.translations?.English)) { issues.valid = false; issues.sourceUnavailable = true; }
+            if (!issues.valid) invalid.push({ filepath: file.filepath, ...issues });
+          }
+          if (invalid.length) {
+            operation.status = 'invalid_translation';
+            operation.translationError = { code: 'SD_TRANSLATION_INVALID', message: 'Complete every translation entry before saving.', files: invalid };
+          }
+        }
+      });
+    }
     function split(roomKey, room) {
       const files = new Map(), operations = [], records = [];
       const file = path => { if (!files.has(path)) files.set(path, { filepath: path }); return files.get(path); };
@@ -243,7 +266,7 @@
       ]);
       const baselineByPath = new Map(originals.filter(Boolean).map(desc => [desc.filepath, desc]));
       const descriptions = new Map((workspace?.descs || []).map(desc => [desc.filepath, desc])), P = protocol();
-      const pending = new Set(room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
+      const pending = new Set(room.outbox.filter(operation => !String(operation.status || '').startsWith('invalid_translation')).flatMap(operation => operation.files.map(entry => entry.yours.filepath)));
       for (const path of selected.paths) {
         const shared = room.shared[path], desc = descriptions.get(path), staged = workspace?.staged?.[room.identity.language]?.[path];
         if (shared) room.local[path] = copy(shared);
@@ -256,7 +279,7 @@
         if (!room.local[path] && desc && room.mode !== 'sparse') room.local[path] = P.fileState({ filepath: path,
           translations: desc.translations?.[room.identity.language] || [], revision: 0 }, desc.translations?.English?.length);
       }
-      for (const operation of room.outbox) for (const entry of operation.files) {
+      for (const operation of room.outbox) if (!String(operation.status || '').startsWith('invalid_translation')) for (const entry of operation.files) {
         const path = entry.yours.filepath, desc = baselineByPath.get(path);
         // An aligned staged/shared file is authoritative for this replay. The
         // immutable ZIP can still contain its preserved excess translations.
@@ -332,7 +355,10 @@
       if (migrating.has(roomKey)) return migrating.get(roomKey);
       const work = (async () => {
         const marker = await transaction([S.migration], 'readonly', tx => get(tx, S.migration, markerKey(roomKey)));
-        if (marker?.state === 'ready') { ready.add(roomKey); return; }
+        if (marker?.state === 'ready') {
+          await n.repairInvalidStages?.(scopeOf(identity || identityFromKey(roomKey)));
+          ready.add(roomKey); return;
+        }
         const trackMigration = n.trackMigration || ((kind, id, scope, action) => action());
         return trackMigration('room', roomKey, identity || identityFromKey(roomKey), async () => {
           let legacy = suppliedLegacy === undefined ? (await dependencies.legacyGet('collaboration_v1'))?.rooms?.[roomKey] : suppliedLegacy;
@@ -356,6 +382,7 @@
           // Workspace readiness may have survived a crash before room conversion.
           // Rebuild the canceled joins and stable repair queue from durable facts.
           if (!prepared) await restoreDurablePlaceholderRepairs(room, scopeOf(identity));
+          await fenceInvalidLegacyOperations(room, scopeOf(identity));
           for (let index = 0; index < (room.recovery || []).length; index++) {
             const recovery = room.recovery[index]; recovery.localRecordId ||= recovery.id || ('legacy:' + index);
             recovery._storageRecovery = { order: index + 1, fileCount: recovery.files?.length || 0,
@@ -409,7 +436,9 @@
               tx.objectStore(S.rooms).put({ key: roomKey, scope: roomKey, value: parts.meta });
             }
             tx.objectStore(S.migration).put({ key: markerKey(roomKey), scope: roomKey, value: { state: 'ready' } });
+            tx.objectStore(S.migration).delete(key('invalid-statdescription-stage-v1', n.scopeKey(scopeOf(identity))));
           });
+          await n.repairInvalidStages?.(scopeOf(identity));
           ready.add(roomKey);
         });
       })();

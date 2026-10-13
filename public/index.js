@@ -221,7 +221,8 @@ const config = Vue.defineComponent({
         hasChanges: 0,
         isRevised: 0,
         isMissing: 0,
-        isDropped: 0
+        isDropped: 0,
+        hasDiagnosticError: 0
       },
       currentSort: "english",
       currentSortDir: 'asc',
@@ -855,7 +856,7 @@ const config = Vue.defineComponent({
         { key: 'saved', label: 'Saved changes', tone: 'saved' },
         { key: 'revised', label: 'Revised translations', tone: 'revised' },
         { key: 'dropped', label: 'Dropped translations', tone: 'dropped' },
-        { key: 'diagnosticError', label: 'Diagnostic errors', tone: 'error' },
+        { key: 'diagnosticError', label: 'Errors', tone: 'error' },
         { key: 'diagnosticWarning', label: 'Diagnostic warnings', tone: 'warning' },
         { key: 'unchanged', label: 'Unchanged', tone: '' },
       ];
@@ -2208,6 +2209,7 @@ const config = Vue.defineComponent({
     },
     makeEditorTableColumn(english, translation, englishExists = true, translationExists = true, hydrate = true, pack = this.getEditorDictionaryMatchPack()) {
       let column = {
+        translationFragment: true,
         english: String(english ?? ""),
         translation: String(translation ?? ""),
         englishHLter: "",
@@ -2438,9 +2440,11 @@ const config = Vue.defineComponent({
         ? this.splitTableColumns(resolver.sourceEnglish) : [resolver.sourceEnglish];
       const translationColumns = englishColumns.length > 1 || this.isTableText(text) ? this.splitTableColumns(text) : [text];
       for (let i = 0; i < Math.max(englishColumns.length, translationColumns.length); i++) {
-        diagnostics.push(...this.analyzeTranslationDiagnostics(translationColumns[i] ?? '', englishColumns[i] ?? '', resolver.lang).diagnostics);
+        diagnostics.push(...this.analyzeTranslationDiagnostics(translationColumns[i] ?? '', englishColumns[i] ?? '', resolver.lang,
+          null, { translationFragment: englishColumns.length > 1 || this.isTableText(text) }).diagnostics);
       }
-      if (!text.trim()) diagnostics.push({ level: 'warning', message: 'Empty translation: applying this version clears all matching entries.' });
+      if (window.StatDescCodec.isBlankTranslation(text)) diagnostics.push({ level: 'error', code: 'blank-translation',
+        message: 'Complete the translation before applying this version to matching entries.' });
       if (englishColumns.length !== translationColumns.length) diagnostics.push({ level: 'error', message: 'Match the English table column count before applying this version to all entries.' });
       if (this.computeTextStats(text).lines !== this.computeTextStats(resolver.sourceEnglish).lines) {
         diagnostics.push({ level: 'warning', message: 'The number of lines differs from English.' });
@@ -2576,9 +2580,9 @@ const config = Vue.defineComponent({
       this.closeConsistencyResolver();
       return true;
     },
-    analyzeTranslationDiagnostics(text, english = null, lang = this.lang, checks = null) {
+    analyzeTranslationDiagnostics(text, english = null, lang = this.lang, checks = null, options = {}) {
       const result = window.TranslationDiagnostics && typeof window.TranslationDiagnostics.analyze === "function"
-        ? window.TranslationDiagnostics.analyze(text, { lang, checks })
+        ? window.TranslationDiagnostics.analyze(text, { lang, checks, contentMode: 'statdescription', ...options })
         : this.emptyTranslationDiagnostics();
       const analysis = this.addTagIdentityDiagnostics(result, english, text, checks);
       // Terminology is opt-in for a manual scan, never part of editor/save validation.
@@ -2641,6 +2645,11 @@ const config = Vue.defineComponent({
 
         if (isTable) {
           const englishColumns = this.splitTableColumns(english);
+          if (window.StatDescCodec.isBlankTranslation(translation)) {
+            const result = this.analyzeTranslationDiagnostics(translation, null, lang, checks);
+            errorCount += result.errorCount;
+            collectDiagnostics(result, i);
+          }
           const translationColumns = this.splitTableColumns(translation);
           const columnCount = Math.max(englishColumns.length, translationColumns.length);
           for (let columnIndex = 0; columnIndex < columnCount; columnIndex++) {
@@ -2648,7 +2657,7 @@ const config = Vue.defineComponent({
               translationColumns[columnIndex] ?? "",
               englishColumns[columnIndex] ?? "",
               lang,
-              checks
+              checks, { translationFragment: true }
             );
             warningCount += Number(result.warningCount || 0);
             errorCount += Number(result.errorCount || 0);
@@ -2931,7 +2940,8 @@ const config = Vue.defineComponent({
     },
     refreshTranslationDiagnostics(target) {
       if (!target) return this.emptyTranslationDiagnostics();
-      const result = this.analyzeTranslationDiagnostics(target.translation ?? "", target.english ?? null);
+      const result = this.analyzeTranslationDiagnostics(target.translation ?? "", target.english ?? null,
+        this.lang, null, { translationFragment: !!target.translationFragment });
       target.translationDiagnostics = result.diagnostics;
       target.diagnosticWarningCount = result.warningCount;
       target.diagnosticErrorCount = result.errorCount;
@@ -3267,6 +3277,12 @@ const config = Vue.defineComponent({
           diagnostics.push({ ...diagnostic, columnIndex: col });
         }
       }
+      if (window.StatDescCodec.isBlankTranslation(this.joinTableColumns(
+        this.getSerializableTableColumns(editorBlock).map(column => column.translation ?? '')))) {
+        diagnostics.push({ level: 'error', code: 'blank-translation', start: 0, end: 0,
+          message: 'Blank StatDescription translation. Complete this entry before saving.' });
+        errorCount++;
+      }
       editorBlock.translationDiagnostics = diagnostics;
       editorBlock.diagnosticWarningCount = warningCount;
       editorBlock.diagnosticErrorCount = errorCount;
@@ -3284,6 +3300,8 @@ const config = Vue.defineComponent({
           items.push({ ...consistency, blockIndex: i });
         }
         if (block.isTable) {
+          for (const diagnostic of block.translationDiagnostics || []) if (diagnostic.code === 'blank-translation'
+            && (!level || diagnostic.level === level)) items.push({ ...diagnostic, blockIndex: i });
           for (let col = 0; col < (block.tableColumns || []).length; col++) {
             const column = block.tableColumns[col];
             for (const diagnostic of (column?.translationDiagnostics || [])) {
@@ -3315,6 +3333,8 @@ const config = Vue.defineComponent({
       if (!editorBlock) return "";
       let diagnostics = [];
       if (editorBlock.isTable) {
+        diagnostics.push(...(editorBlock.translationDiagnostics || []).filter(diagnostic => diagnostic.code === 'blank-translation'
+          && (!level || diagnostic.level === level)));
         for (let col = 0; col < (editorBlock.tableColumns || []).length; col++) {
           for (const diagnostic of (editorBlock.tableColumns[col]?.translationDiagnostics || [])) {
             if (level && diagnostic.level !== level) continue;
@@ -6265,7 +6285,7 @@ const config = Vue.defineComponent({
         if (!draftOnly || !canPatch) this.invalidateEditorLookupIndex?.();
         const entries = canPatch ? snapshot.entries : [];
         const files = canPatch ? snapshot.files : new Map();
-        const counts = canPatch ? { ...snapshot.counts } : { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 };
+        const counts = canPatch ? { ...snapshot.counts } : { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 };
         // Read raw data once and prepare a replaced display/search snapshot.
         // Typing then only searches strings, without recalculating statuses,
         // copying translation arrays, escaping HTML, or invalidating Lookup.
@@ -6275,11 +6295,15 @@ const config = Vue.defineComponent({
           if (hiddenDNT && !(showDroppedConflicts && droppedReviewPaths.has(desc.filepath))) return record;
           const baseline = workspace?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
           const state = baseline ? window.WorkspaceState.workspaceFile(workspace, baseline, lang) : desc;
+          const issues = window.StatDescCodec.translationIssues(Array.isArray(state.translations) ? state.translations : desc.translations?.[lang],
+            desc.translations?.English?.length || 0);
+          const invalidTranslation = !issues.valid;
           if (!hiddenDNT) {
             for (const field of Object.keys(counts)) record.counts[field] = !!state[field];
           }
 
           const diagnosticResult = diagnosticResults?.[desc.filepath] || null;
+          if (!hiddenDNT) record.counts.hasDiagnosticError = invalidTranslation || !!diagnosticResult?.hasDiagnosticError;
           const statuses = {
             localDraft: !!this.inlineDraftRows?.[desc.filepath],
             missing: !!state.isMissing,
@@ -6288,7 +6312,7 @@ const config = Vue.defineComponent({
             dropped: !!state.isDropped,
             droppedConflict: droppedReviewPaths.has(desc.filepath),
             unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
-            diagnosticError: !!diagnosticResult?.hasDiagnosticError,
+            diagnosticError: invalidTranslation || !!diagnosticResult?.hasDiagnosticError,
             diagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
           };
           if (!selectedFilters.some(key => statuses[key])) return record;
@@ -6311,10 +6335,13 @@ const config = Vue.defineComponent({
               isRevised: !!state.isRevised,
               isDropped: !!state.isDropped,
               hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
-              hasDiagnosticError: !!diagnosticResult?.hasDiagnosticError,
+              hasDiagnosticError: invalidTranslation || !!diagnosticResult?.hasDiagnosticError,
               diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),
-              diagnosticErrorCount: Number(diagnosticResult?.errorCount || 0),
-              diagnosticScanTitle: this.getDiagnosticScanTitle(diagnosticResult),
+              diagnosticErrorCount: Math.max(Number(diagnosticResult?.errorCount || 0), issues.blankEntries.length + Number(issues.entryCountMismatch)),
+              diagnosticScanTitle: [invalidTranslation ? 'Incomplete StatDescription translation. '
+                + (issues.blankEntries.length ? 'Blank entries: ' + issues.blankEntries.join(', ') + '. ' : '')
+                + (issues.entryCountMismatch ? 'Entry count differs from English. ' : '')
+                + 'Complete every entry before saving or exporting.' : '', this.getDiagnosticScanTitle(diagnosticResult)].filter(Boolean).join('\n'),
             },
           };
           return record;
@@ -6628,6 +6655,11 @@ const config = Vue.defineComponent({
             tableDiagnostics.push({ ...diagnostic, columnIndex: col });
           }
         }
+        if (window.StatDescCodec.isBlankTranslation(translation)) {
+          tableDiagnostics.push({ level: 'error', code: 'blank-translation', start: 0, end: 0,
+            message: 'Blank StatDescription translation. Complete this entry before saving.' });
+          tableErrorCount++;
+        }
         translationDiagnosticResult = {
           diagnostics: tableDiagnostics,
           warningCount: tableWarningCount,
@@ -6861,13 +6893,19 @@ const config = Vue.defineComponent({
       this.refreshEditorDiagnostics();
       const errors = this.collectEditorDiagnostics("error");
       const warnings = this.collectEditorDiagnostics("warning");
+      const issues = window.StatDescCodec.translationIssues(newTranslations, this.editorCurrentEditingDesc?.translations?.English?.length || 0);
+      for (const entry of issues.blankEntries) if (!errors.some(error => error.code === 'blank-translation' && error.blockIndex === entry - 1)) {
+        errors.push({ level: 'error', code: 'blank-translation', blockIndex: entry - 1,
+          message: 'Blank StatDescription translation. Complete this entry before saving.' });
+      }
+      if (issues.entryCountMismatch) errors.push({ level: 'error', code: 'translation-entry-count',
+        message: 'The translation entry count must match English before saving.' });
       return { errors, warnings, confirmations: this.editorSaveConfirmations(newTranslations, warnings) };
     },
     editorSaveConfirmations(newTranslations, warnings = this.collectEditorDiagnostics("warning")) {
       const confirmations = [];
       if (warnings.length) confirmations.push('Translation warnings found:\n' + this.formatDiagnosticsForDisplay(warnings, 12));
       const english = this.editorCurrentEditingDesc?.translations?.English || [];
-      if (computeIsMissing(english.length, newTranslations)) confirmations.push("There are missing fields in translation.");
       const lineMismatch = [], columnMismatch = [];
       for (const [index, block] of (this.editorBlocks || []).entries()) {
         const source = this.computeTextStats(block.english || ''), target = this.computeTextStats(block.translation || '');
@@ -6992,6 +7030,9 @@ const config = Vue.defineComponent({
           inline: !!this.inlineActive,
           awaitDurable: true,
           ...(record && !this.testMode ? { draft: { key: record.key, id: record.id, revision: record.revision, base: record.base,
+            // The submission durably replaces this captured checkpoint. A
+            // rejected blank draft can be corrected before its debounce writes.
+            ...(!arrayEquals(record.translations, newTranslations) ? { replaceCheckpoint: true } : {}),
             ...(record.submissionJobId ? { submissionJobId: record.submissionJobId } : {}),
             ...(record.submissionJobIds?.length ? { submissionJobIds: [...record.submissionJobIds] } : {}) } } : {}),
           ...(session && !this.testMode ? { checkpoint: { key: session.key, revision: session.expectedRevision || null,
@@ -7105,6 +7146,19 @@ const config = Vue.defineComponent({
           }
         } else {
           this.historyItems = [];
+        }
+        if (lang === this.lang) {
+          const recoveries = Object.values(this.localDescs?.invalidTranslationArchive || {}).filter(record => record.filepath === filepath
+            && record.language === lang && record.sourceHash === this.sourceIdentity
+            && (record.branchId || 'default') === (this.branchId || 'default')
+            && (!record.groupId || record.groupId === (scope?.groupId || this.localDescs?.workspaceGroupId || this.localDescs?.groupId || ''))
+            && (!record.accountId || record.accountId === String(context?.account || 'guest')));
+          if (recoveries.length && !this.historyItems.length) this.historyItems.push({ id: 'current-version', filepath, lang,
+            sourceHash: this.sourceIdentity, translations: [...(desc.translations?.[lang] || [])], note: '(current)' });
+          this.historyItems.push(...recoveries.map(record => ({ id: 'invalid-sd:' + record.id, filepath, lang,
+            sourceHash: record.sourceHash, branchId: record.branchId, translations: [...record.stage.translations],
+            english: [...(record.source?.english || [])], savedAt: record.archivedAt,
+            incompleteRecovery: true, note: 'Incomplete SD recovery · complete every entry before saving' })));
         }
       } catch (_) {
         if (current()) this.historyItems = [];
@@ -7245,6 +7299,7 @@ const config = Vue.defineComponent({
     async restoreHistoryRevision(rev) {
       const desc = this.editorCurrentEditingDesc;
       if (!desc || !rev || this.editorSaving || this.entryAlignment) return;
+      if (rev.incompleteRecovery) return this.alignHistoryRevision(rev);
       if (rev.legacyReference) { this.appAlert('Legacy local records are reference copies. Compare their text and explicitly recover it in the intended source version.'); return; }
       if (rev.branchId && rev.branchId !== this.branchId) { this.appAlert('Cannot restore: revision belongs to another branch.'); return; }
       if (this.historyMode === 'source' || String(rev.lang) === 'English') { this.appAlert('Restoring source English text is disabled.'); return; }
@@ -7691,6 +7746,13 @@ const config = Vue.defineComponent({
       });
       if (!descsToExport.length) {
         this.appAlert(`There're no files to be export!`);
+        return;
+      }
+      const invalidFiles = descsToExport.filter(desc => !window.StatDescCodec.translationIssues(
+        desc.translations?.[this.lang], desc.translations?.English?.length || 0).valid);
+      if (invalidFiles.length) {
+        await this.appAlert('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. '
+          + 'Complete every entry before exporting.\n\n' + invalidFiles.slice(0, 12).map(desc => desc.filepath).join('\n'));
         return;
       }
 

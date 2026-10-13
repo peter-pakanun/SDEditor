@@ -1,9 +1,9 @@
 /* Local workspace metadata belongs to the language whose translations it describes. */
 (function (root, factory) {
-  const api = factory();
+  const api = factory(() => typeof module === 'object' && module.exports ? require('./statDescCodec.js') : root.StatDescCodec);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.WorkspaceState = api;
-})(typeof window === 'object' ? window : typeof self === 'object' ? self : this, function () {
+})(typeof window === 'object' ? window : typeof self === 'object' ? self : this, function (codec) {
   'use strict';
   const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
   const own = (value, key) => object(value) && Object.hasOwn(value, key);
@@ -76,7 +76,7 @@
     }
     return status;
   }
-  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'needsReview', 'trackedForExport']);
+  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'isInvalidTranslation', 'needsReview', 'trackedForExport']);
   const cleanMetadata = value => Object.fromEntries(Object.entries(value || {})
     .filter(([field]) => !statusFlags.has(field) && !excluded.has(field)));
   function setFileMetadata(status, language, patch = {}, local) {
@@ -145,7 +145,53 @@
     const count = desc.translations?.English?.length || 0;
     return equal(displayedLines(translations, count), displayedLines(desc.translations?.[language], count));
   };
-  const complete = (value, count) => Array.isArray(value) && value.length === count && value.every(text => String(text).trim());
+  const translationIssues = (value, count) => codec().translationIssues(value, count);
+  const assertCompleteTranslation = (value, count, filepath) => codec().assertCompleteTranslation(value, count, filepath);
+  const complete = (value, count) => translationIssues(value, count).valid;
+  const statDescription = workspace => !String(workspace?.contentMode || workspace?.mode || '').toLowerCase().startsWith('clienttext');
+  function invalidArchiveId(value) {
+    const text = serialized(value), hashes = [2166136261, 2246822519, 3266489917, 668265263];
+    for (let i = 0; i < text.length; i++) for (let j = 0; j < hashes.length; j++) hashes[j] = Math.imul(hashes[j] ^ (text.charCodeAt(i) + j), 16777619);
+    return 'invalid-v1-' + hashes.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+  function archiveInvalidTranslation(workspace, stage, language, options = {}) {
+    if (!object(workspace) || !statDescription(workspace) || !stage) return null;
+    const filepath = options.filepath || stage.filepath, source = options.source;
+    if (!filepath || !languageName(language)) throw new Error('Invalid translation recovery scope.');
+    const count = source?.translations?.English?.length ?? options.expectedCount ?? stage.translations?.length ?? 0;
+    const issues = translationIssues(stage.translations, count);
+    if (options.sourceUnavailable) { issues.valid = false; issues.sourceUnavailable = true; }
+    if (issues.valid) return null;
+    const scope = { filepath, language, sourceHash: stage.sourceHash || options.sourceHash || workspace.sourceHash || '',
+      game: workspace.game || options.game, branchId: workspace.branchId || options.branchId || 'default',
+      accountId: String(workspace.accountId || workspace.collaborationAccountId || options.accountId || 'guest'),
+      ...((workspace.groupId || workspace.workspaceGroupId || options.groupId) ? { versionId: String(workspace.versionId || workspace.workspaceVersionId || options.versionId || ''),
+        groupId: String(workspace.groupId || workspace.workspaceGroupId || options.groupId) } : {}) };
+    const retainedSource = source && { ...sourceMetadata(source), english: lines(source.translations?.English) };
+    const id = invalidArchiveId(options.operationId ? [scope, 'operation', options.operationId, stage, retainedSource]
+      : options.recoveryId ? [scope, 'server', options.recoveryId] : [scope, stage, retainedSource]);
+    const previous = workspace.invalidTranslationArchive?.[id];
+    if (previous && (!equal(previous.stage, stage) || !equal(previous.source, retainedSource))) throw new Error('Translation recovery identifier collision.');
+    workspace.invalidTranslationArchive ||= {};
+    return workspace.invalidTranslationArchive[id] ||= { id, schemaVersion: 1, ...scope, reason: 'Incomplete StatDescription translation',
+      ...(options.recoveryId ? { serverRecoveryId: options.recoveryId } : {}),
+      ...(options.operationId ? { operationId: options.operationId } : {}),
+      issues, stage: copy(stage), ...(retainedSource ? { source: retainedSource } : {}), archivedAt: options.archivedAt || Date.now() };
+  }
+  function quarantineInvalidTranslations(workspace, options = {}) {
+    const removed = [];
+    if (!object(workspace) || !statDescription(workspace)) return { changed: false, removed };
+    const sources = new Map((options.source || workspace.descs || []).map(desc => [desc.filepath, desc]));
+    for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, stage] of Object.entries(entries)) {
+      const matchingSource = !stage.sourceHash || !workspace.sourceHash || stage.sourceHash === workspace.sourceHash;
+      const source = matchingSource ? sources.get(filepath) : undefined;
+      const archived = archiveInvalidTranslation(workspace, stage, language, { ...options, source, filepath,
+        sourceUnavailable: !Array.isArray(source?.translations?.English) });
+      if (!archived) continue;
+      delete entries[filepath]; removed.push({ language, filepath, archive: archived });
+    }
+    return { changed: removed.length > 0, removed };
+  }
   const snapshot = (desc, language, translations) => ({ english: lines(desc?.translations?.English),
     variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []), stats: copy(desc?.stats || []),
     name: String(desc?.name || ''), translations: lines(translations ?? desc?.translations?.[language]) });
@@ -285,8 +331,11 @@
   }
   function workspaceFile(workspace, desc, language) {
     const entry = workspace?.staged?.[language]?.[desc?.filepath];
-    const staged = entry && (!entry.sourceHash || entry.sourceHash === workspace?.sourceHash) ? entry : null;
     const count = desc?.translations?.English?.length || 0;
+    const staged = entry && (!entry.sourceHash || entry.sourceHash === workspace?.sourceHash)
+      && (!statDescription(workspace) || complete(entry.translations, count)) ? entry : null;
+    const committed = staged ? lines(staged.translations) : lines(desc?.translations?.[language]);
+    const issues = translationIssues(committed, count);
     const translations = staged ? lines(staged.translations) : lines(desc?.translations?.[language]);
     while (translations.length < count) translations.push('');
     const candidate = droppedForFile(workspace, desc?.filepath, language);
@@ -294,26 +343,35 @@
     return { translations, hasChanges: !!staged, isRevised: !!staged && complete(baseline, count)
       && !equal(lines(baseline), translations) && !candidate && !wasDroppedInSource(workspace, desc?.filepath, language),
       isMetadataCorrection: !!staged && metadataCorrectionForSource(staged, desc, workspace?.sourceHash),
-      isMissing: !complete(translations, count), isDropped: !!candidate,
+      isMissing: !issues.valid, isInvalidTranslation: statDescription(workspace) && !issues.valid, isDropped: !!candidate,
       needsReview: !!candidate && !staged && !complete(translations, count), candidate, staged };
+  }
+  function resolveDroppedPromotion(workspace, filepath, language, promotion, options = {}) {
+    if (!object(workspace) || !languageName(language) || !filepath || !promotion) throw new Error('Invalid dropped promotion.');
+    maps(workspace);
+    const candidate = droppedForFile(workspace, filepath, language);
+    if (!candidate || candidate.id !== promotion.id || Number(candidate.revision || 0) !== Number(promotion.revision || 0)
+      || (promotion.targetSourceHash && promotion.targetSourceHash !== (options.sourceHash || workspace.sourceHash))) {
+      throw Object.assign(new Error('The dropped translation changed before it could be promoted. Review its current preserved copy before saving again.'), { stale: true, code: 'DROPPED_PROMOTION_CHANGED' });
+    }
+    rememberDroppedScope(candidate, options.sourceHash || workspace.sourceHash);
+    workspace.droppedArchive[candidate.id] = { ...copy(candidate), status: 'promoted', resolvedAt: options.savedAt || Date.now() };
+    delete workspace.dropped[language][filepath];
+    invalidateDroppedScopes(workspace);
+    return candidate;
   }
   function stageTranslation(workspace, file, language, options = {}) {
     if (!object(workspace) || !languageName(language) || !file?.filepath) throw new Error('Invalid staged translation.');
-    maps(workspace);
-    const source = Array.isArray(options.source) ? options.source.find(desc => desc.filepath === file.filepath) : options.source;
-    const current = workspace.staged[language]?.[file.filepath];
-    const promotion = options.promoteDropped;
-    if (promotion) {
-      const candidate = droppedForFile(workspace, file.filepath, language);
-      if (!candidate || candidate.id !== promotion.id || Number(candidate.revision || 0) !== Number(promotion.revision || 0)
-        || (promotion.targetSourceHash && promotion.targetSourceHash !== (options.sourceHash || workspace.sourceHash))) {
-        throw Object.assign(new Error('The dropped translation changed before it could be promoted. Review its current preserved copy before saving again.'), { stale: true, code: 'DROPPED_PROMOTION_CHANGED' });
-      }
-      rememberDroppedScope(candidate, options.sourceHash || workspace.sourceHash);
-      workspace.droppedArchive[candidate.id] = { ...copy(candidate), status: 'promoted', resolvedAt: options.savedAt || Date.now() };
-      delete workspace.dropped[language][file.filepath];
-      invalidateDroppedScopes(workspace);
+    const source = (Array.isArray(options.source) ? options.source.find(desc => desc.filepath === file.filepath) : options.source)
+      || workspace.descs?.find(desc => desc.filepath === file.filepath);
+    if (statDescription(workspace)) {
+      if (!Array.isArray(source?.translations?.English) && !Number.isInteger(options.expectedCount)) throw Object.assign(
+        new Error('The English source is unavailable. Reimport the source archive before saving.'), { code: 'SOURCE_UNAVAILABLE', filepath: file.filepath });
+      codec().assertCompleteTranslation(file.translations, source?.translations?.English?.length ?? options.expectedCount, file.filepath);
     }
+    maps(workspace);
+    const current = workspace.staged[language]?.[file.filepath];
+    if (options.promoteDropped) resolveDroppedPromotion(workspace, file.filepath, language, options.promoteDropped, options);
     const entry = { sourceHash: options.sourceHash || workspace.sourceHash || '', translations: lines(file.translations),
       before: lines(file.beforeTranslations ?? options.before ?? (current && equal(current.translations, file.translations) ? current.before : current?.translations)
         ?? source?.translations?.[language]), savedAt: options.savedAt || Date.now() };
@@ -377,10 +435,16 @@
         } else if (state.hasChanges || (original && !changedSource && !equal(
           displayedLines(desc.translations[language], original.translations?.English?.length || 0),
           displayedLines(original.translations?.[language], original.translations?.English?.length || 0)))) {
-          if (!workspace.staged[language]?.[desc.filepath]) stageTranslation(workspace,
-            { filepath: desc.filepath, translations: desc.translations[language] }, language,
-            { source: original, sourceHash, savedAt: status.lastTranslatedAt || status.lastEditedAt || options.migrationAt,
+          if (!workspace.staged[language]?.[desc.filepath]) {
+            const file = { filepath: desc.filepath, translations: desc.translations[language] };
+            const savedAt = status.lastTranslatedAt || status.lastEditedAt || options.migrationAt;
+            if (!complete(file.translations, (original || desc).translations?.English?.length || 0))
+              archiveInvalidTranslation(workspace, { sourceHash, translations: lines(file.translations),
+                before: lines(original?.translations?.[language]), savedAt, saveOrigin: state.hasChanges ? 'legacy_save' : 'legacy_inferred' }, language,
+                { filepath: desc.filepath, source: original || desc, archivedAt: options.migrationAt || 1 });
+            else stageTranslation(workspace, file, language, { source: original, sourceHash, savedAt,
               saveOrigin: state.hasChanges ? 'legacy_save' : 'legacy_inferred' });
+          }
         }
       }
     }
@@ -496,6 +560,7 @@
       Object.keys(entries).map(filepath => serialized([language, filepath]))));
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
       const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
+      if (archiveInvalidTranslation(workspace, entry, language, { filepath, source: desc })) { delete entries[filepath]; continue; }
       const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations);
       if (decision.action === 'carry') {
         entry.sourceCarry = { fromSourceHash: entry.sourceHash || options.previousSourceHash || workspace.sourceHash,
@@ -621,7 +686,11 @@
     return null;
   }
   function mergeSourceImportWorkspace(existing, incoming, options = {}) {
-    if (!existing) return copy(incoming);
+    incoming = copy(incoming);
+    quarantineInvalidTranslations(incoming, options);
+    if (!existing) return incoming;
+    existing = copy(existing);
+    quarantineInvalidTranslations(existing, options);
     if (!object(incoming) || existing.sourceHash !== incoming.sourceHash)
       throw new Error('Source imports can merge only the same destination workspace.');
     if ((existing.branchId || 'default') !== (incoming.branchId || 'default')
@@ -642,7 +711,7 @@
       for (const language of new Set([...Object.keys(incoming[field] || {}), ...Object.keys(existing[field] || {})]))
         merged[field][language] = { ...copy(incoming[field]?.[language] || {}), ...copy(existing[field]?.[language] || {}) };
     }
-    for (const field of ['droppedArchive', 'droppedAliases', 'sourceCarryRepairArchive'])
+    for (const field of ['droppedArchive', 'droppedAliases', 'sourceCarryRepairArchive', 'invalidTranslationArchive'])
       if (existing[field] || incoming[field]) merged[field] = { ...copy(incoming[field] || {}), ...copy(existing[field] || {}) };
     const resolvedImports = new Set();
     for (const [language, candidates] of Object.entries(incoming.dropped || {})) for (const [filepath, candidate] of Object.entries(candidates)) {
@@ -872,6 +941,7 @@
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
     initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
     sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
+    translationIssues, assertCompleteTranslation, archiveInvalidTranslation, quarantineInvalidTranslations, resolveDroppedPromotion,
     dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, coalesceDroppedConflict };
 });
