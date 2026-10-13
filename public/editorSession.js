@@ -170,7 +170,7 @@
     const diagnostics=()=>{
       const text=value(),exempt=field.kind==='gender' || root.ClientTextState?.allowsNonexistent(field) && text.trim()==='NONEXISTENT' || root.ClientTextState?.audioOnly(field.source);
       if(exempt)return [];
-      const common=root.TranslationDiagnostics?.analyze(text,{lang:host.lang,checks:{whitespace:true,dash:true,tagSyntax:false}})?.diagnostics || [],
+      const common=root.TranslationDiagnostics?.analyze(text,{lang:host.lang,contentMode:'clienttext',checks:{whitespace:true,dash:true,tagSyntax:false}})?.diagnostics || [],
         manualCurrent=!host.ctValuesFor || host.ctValuesFor(unit)[fieldId]===text;
       return [...(root.ClientTextState?.diagnose(field,text) || []),...common,
         ...(manualCurrent ? host.ctDiagnostics?.[unit?.id] || [] : []).filter(issue=>issue.fieldId===fieldId && ['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))];

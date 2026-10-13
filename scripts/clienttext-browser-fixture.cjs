@@ -386,6 +386,11 @@ async function run() {
             await page.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','BaseItemTypes']);});await choose('named');
             assert.equal(await target('Normal').inputValue(),normalValue);assert.equal(await target('Possessive').inputValue(),possessiveValue);
             await choose('blank');assert.deepEqual(await page.evaluate(()=>{const vm=window.__clientFixtureApp,fields=vm.ctCurrentUnit.fields,status=vm.ctStatus();return fields.map(field=>({form:field.form,required:field.required,missing:status.fields[field.id].missing}));}),[{form:'Normal Translation',required:true,missing:true},{form:'Possessive Translation',required:false,missing:false}]);
+            for(const form of ['Normal','Possessive']){
+                assert.equal(await target(form).getAttribute('aria-invalid'),null,'ClientText blank fields have no StatDescription error');
+                assert.doesNotMatch(await target(form).getAttribute('title')||'',/Blank StatDescription/);
+            }
+            assert.equal(await target('Possessive').getAttribute('placeholder'),'Optional translation');
             await target('Normal').press('Control+s');await settleSave('blank',{[fid('Normal')]:'',[fid('Possessive')]:''});
             await choose('outdated');assert.equal(await page.evaluate(()=>{const vm=window.__clientFixtureApp;return vm.ctStatus().fields[JSON.stringify(['Display Name','Possessive Translation'])].outdated;}),true);
             await workspace.getByRole('button',{name:'Close',exact:true}).click();const downloaded=page.waitForEvent('download');await workspace.getByRole('button',{name:'Download workbooks',exact:true}).click();const download=await downloaded,output=readFileSync(await download.path());

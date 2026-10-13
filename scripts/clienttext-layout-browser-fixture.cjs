@@ -80,7 +80,7 @@ const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','
 })));
 const namedFormUnit=Vue.markRaw({id:'named-form-layout-record',role:'normal',sheet:'BaseItemTypes',recordId:'Metadata/Items/Currency/CurrencyAddModToRare',notes:[],fields:
     ['Normal Translation','Possessive Translation'].map((form,index)=>({id:JSON.stringify(['Display Name',form]),kind:'form',group:'Display Name',name:'Display Name',form,
-        source:'Exalted Orb {0}',target:index?'Yüce Küresi {0}':'Yüce Küre {0}',sourceCell:'B2',targetCell:(index?'D':'C')+'2',required:true,originalMissing:false,outdated:false}))});
+        source:'Exalted Orb {0}',target:index?'':'Yüce Küre {0}',sourceCell:'B2',targetCell:(index?'D':'C')+'2',required:!index,originalMissing:false,outdated:false}))});
 const app = Vue.createApp({
     data() { return {...ct.data(),ctActive:true,ctUnits:initialUnits,ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
@@ -136,7 +136,7 @@ async function run() {
         <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
-        <script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -451,7 +451,17 @@ async function run() {
             assert.deepEqual(await grid.locator('thead th').allTextContents(),['Form','Translation'],name+': named form headings');
             assert.deepEqual(await grid.locator('tbody th').allTextContents(),['Normal','Possessive'],name+': short row labels preserve raw identities');
             assert.equal(await page.locator('.ctSourceBlock textarea[data-ct-source]').count(),1,name+': both targets share one English source');
-            assert.equal(await normal.inputValue(),'Yüce Küre {0}');assert.equal(await possessive.inputValue(),'Yüce Küresi {0}');
+            assert.equal(await normal.inputValue(),'Yüce Küre {0}');assert.equal(await possessive.inputValue(),'');
+            assert.equal(await possessive.getAttribute('placeholder'),'Optional translation',name+': original blank possessive stays optional');
+            assert.equal(await possessive.getAttribute('aria-invalid'),null,name+': optional blank is not an SD validation error');
+            assert.equal(await grid.locator('tbody tr').nth(1).locator('.diagnosticErrorPill').count(),0,name+': no blank-translation error pill');
+            assert.deepEqual(await page.evaluate(()=>{
+                const host=window.__ctLayoutFixture,[normal,possessive]=host.ctCurrentUnit.fields;
+                return {analyzer:typeof window.TranslationDiagnostics.analyze,normalRequired:normal.required,possessiveRequired:possessive.required,
+                    source:possessive.source,original:possessive.target,missing:host.ctFieldStatus(possessive).missing,outdated:host.ctFieldStatus(possessive).outdated,
+                    diagnostics:host.ctFieldController(possessive).diagnostics.map(issue=>issue.code)};
+            }),{analyzer:'function',normalRequired:true,possessiveRequired:false,source:'Exalted Orb {0}',original:'',missing:false,outdated:false,diagnostics:[]},
+                name+': real shared analyzer preserves independent workbook status and blank optional form facts');
             await normal.fill('NON');await normal.press('Tab');await settle();
             assert.equal(await possessive.evaluate(element=>element===document.activeElement),true,name+': C to D Tab traversal');
             assert.equal(await normal.inputValue(),'NON',name+': named form does not complete NONEXISTENT');
@@ -472,7 +482,7 @@ async function run() {
                 assert.deepEqual(await possessive.evaluate(element=>[element.selectionStart,element.selectionEnd,element.selectionDirection]),[1,5,'backward']);
                 assert.equal(await normal.inputValue(),'Normal raw @\\n\n{0}');assert.equal(await possessive.inputValue(),'Independent possessive {0}');
             }
-            results.push({name:name+' independent fields, shared English, worksheet keyboard order and exact full/inline handoff'});
+            results.push({name:name+' blank optional validation, independent fields, shared English, worksheet keyboard order and exact full/inline handoff'});
         }
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));

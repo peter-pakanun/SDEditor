@@ -110,6 +110,29 @@ test('named Turkish controls diagnose literal NONEXISTENT without changing older
     assert.equal(h.session.fieldController(h.host,h.field).diagnostics.length,0);
 });
 
+test('ClientText blank fields never inherit StatDescription blank errors while Missing and Outdated retain their field rules',()=>{
+    for(const text of ['', ' \t\r\n '])for(const options of [
+        {kind:'text',name:'Text',required:true},
+        {kind:'form',name:'Display Name',form:'Normal Translation',required:true},
+        {kind:'form',name:'Display Name',form:'Possessive Translation',required:false},
+        {kind:'form',name:'Display Name',form:'Possessive Translation',required:false,outdated:true},
+        {kind:'form',name:'Display Name',form:'Possessive Translation',required:true},
+        {kind:'form',name:'Text',form:'MS',required:false},
+        {kind:'form',name:'Text',form:'StrFour',required:false}
+    ]){
+        const h=harness(text,'[CurrencyItem] {0}');Object.assign(h.field,{target:'',outdated:false},options);
+        const control=h.session.fieldController(h.host,h.field),status=State.statusFor(h.unit,{values:h.host.ctValues,reviewed:{}}).fields.text;
+        assert.equal(control.diagnostics.some(issue=>issue.code==='blank-translation'),false);
+        assert.equal(control.diagnosticPresentation.errorCount,0);assert.equal(control.diagnosticPresentation.errorTitle,'');
+        assert.equal(control.field.dataAttrs['aria-invalid'],undefined);
+        assert.equal(control.field.placeholder,options.kind==='form'&&!options.required?'Optional translation':'Translation');
+        assert.equal(status.missing,options.required);assert.equal(status.outdated,!!options.outdated);
+        assert.equal(h.host.ctValues.text,text,'diagnostic presentation preserves exact blank/whitespace input');
+    }
+    assert.equal(Diagnostics.analyze('').diagnostics.some(issue=>issue.code==='blank-translation'&&issue.level==='error'),true,
+        'The default StatDescription analyzer still requires nonblank translation');
+});
+
 test('ClientText live common whitespace and dash diagnostics retain workbook gender, form sentinel and audio-only exemptions',()=>{
     for(const exemption of ['gender','sentinel','audio']){
         const h=harness('  - NONEXISTENT \r\n','source {0}');
