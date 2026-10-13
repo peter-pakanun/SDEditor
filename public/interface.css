@@ -314,6 +314,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .workspaceStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; color: var(--ui-muted); }
 .workspaceLoaded { font-size: 12px; white-space: nowrap; }
 .workspaceLoaded strong { color: var(--color-font); font-variant-numeric: tabular-nums; }
+.workspaceStatus .workspaceFilterLink { color: inherit; text-decoration: none; border-radius: 3px; }
+.workspaceStatus .workspaceFilterLink:hover { text-decoration: underline; }
+.workspaceStatus .workspaceFilterLink:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 4px; }
 .statusPill { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
 .statusPill strong { color: var(--color-font); font-variant-numeric: tabular-nums; }
 .statusDot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }

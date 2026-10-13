@@ -293,10 +293,10 @@ test('the status bar includes Revised and shares red, orange, purple, and green 
   const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
   for (const tone of ['missing', 'dropped', 'revised', 'saved', 'error', 'warning']) {
     assert.match(css, new RegExp('\\.statusPill\\.' + tone + '\\s+\\.statusDot\\s*\\{[^}]*color:\\s*var\\(--ui-' + tone + '\\)'));
-    assert.match(html, new RegExp('class="statusPill ' + tone + '"'));
+    assert.match(html, new RegExp('class="statusPill ' + tone + '(?: [^"]*)?"'));
   }
-  assert.match(html, /class="statusPill revised"[^>]*>[\s\S]*?Revised <strong>\{\{ statistic\.isRevised \}\}/);
-  assert.match(html, /class="statusPill dropped"[^>]*>[\s\S]*?Dropped <strong>\{\{ statistic\.isDropped \}\}/);
+  assert.match(html, /class="statusPill revised(?: [^"]*)?"[^>]*>[\s\S]*?Revised <strong>\{\{ statistic\.isRevised \}\}/);
+  assert.match(html, /class="statusPill dropped(?: [^"]*)?"[^>]*>[\s\S]*?Dropped <strong>\{\{ statistic\.isDropped \}\}/);
   assert.doesNotMatch(html, /class="statusPill review"/);
   const declarations = block => Object.fromEntries(Array.from(block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g), match => [match[1], match[2].trim()]));
   const root = declarations(css.match(/:root\s*\{([^}]*)\}/)[1]);

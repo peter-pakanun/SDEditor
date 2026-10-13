@@ -721,6 +721,17 @@
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
             ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
             ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=defaultFilters();this.ctSearch='';this.ctApplySearch();},
+            ctFilterByStatus(status,event) {
+                const current=this.ctFilter ? [this.ctFilter] : this.ctSelectedFilters;
+                this.ctFilter='';
+                this.ctSelectedFilters=event?.ctrlKey ? [...new Set([...current,status])] : [status];
+                this.ctPage=1;
+            },
+            ctShowAllLoaded() {
+                this.ctFilter='';this.ctSheet='';this.ctSheetFilter='';
+                this.ctSelectedFilters=statusFilters.map(item=>item.key);
+                this.ctSearch='';this.ctApplySearch();
+            },
             ctDiagnosticDialog() {return this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs?.ctDiagnosticDialog;},
             ctOpenScanDialog() {
                 if(!this.ctActive || this.ctBusy)return false;

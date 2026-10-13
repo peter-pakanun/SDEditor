@@ -6076,6 +6076,25 @@ const config = Vue.defineComponent({
     selectAllFileFilters() {
       this.selectedFileFilters = this.fileFilterOptions.map(option => option.key);
     },
+    filterFilesByStatus(status, event) {
+      this.selectedFileFilters = event?.ctrlKey
+        ? [...new Set([...this.selectedFileFilters, status])]
+        : [status];
+    },
+    showAllLoadedFiles() {
+      if (this.inlineActive && !this.inlineTransitionBusy) {
+        this.finishInlineSession({ promote: true }).then(ok => { if (ok) this.showAllLoadedFiles(); });
+        return;
+      }
+      clearTimeout(this._fileSearchTimer);
+      this._fileSearchTimer = null;
+      this._fileSearchComposing = false;
+      this.searchText = '';
+      this.hideDNT = false;
+      this.selectAllFileFilters();
+      this.currentPage = 1;
+      this.filterDesc();
+    },
     syncFileSelection() {
       const rows = this.descsDisplay;
       if (rows.some(row => row.filepath === this.selectedFilepath)) return;
