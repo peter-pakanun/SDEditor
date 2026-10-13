@@ -6,12 +6,12 @@ test('cached sparse rooms queue local-only staged saves against accepted text an
     const P = require('../public/collaborationProtocol.js'), W = require('../public/workspaceState.js');
     const { Client } = require('../public/collaborationSync.js');
     for (const cached of ['none', 'empty', 'shared']) await t.test(cached, async t => {
-        const f = recordFixture(), source = [f.source('a.txt')], tree = await P.buildBaselineTree(source);
-        const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
-            fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+        const f = recordFixture(), source = [f.source('a.txt')];
+        const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+            fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [] });
         f.scope.sourceHash = archive.baselineId;
         f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
-        f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive, tree } });
+        f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive } });
         let workspace = await f.n.workspace(f.scope);
         W.initializeWorkspace(workspace, { source, sourceHash: f.scope.sourceHash, game: f.scope.game });
         W.stageTranslation(workspace, { filepath: 'a.txt', translations: ['Local save while session expired'] }, 'Thai',
@@ -29,7 +29,7 @@ test('cached sparse rooms queue local-only staged saves against accepted text an
             WebSocket: null, presenceEnabled: () => false, request: async () => { throw new Error('Remote work remains deferred'); } });
         t.after(() => client.destroy());
         workspace = await f.n.workspace(f.scope);
-        await client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive, workspace, deferRemote: true,
+        await client.connect({ ...f.scope, source, baselineSource: source, archive, workspace, deferRemote: true,
             files: [{ filepath: 'a.txt', translations: workspace.staged.Thai['a.txt'].translations, trackedForExport: true }] });
         assert.equal(client.room().outbox.length, 1, 'A local-only save needs its own durable join operation even in a cached room');
         const operation = client.room().outbox[0], originalId = operation.id;
@@ -38,7 +38,7 @@ test('cached sparse rooms queue local-only staged saves against accepted text an
         assert.deepEqual((await f.n.workspace(f.scope)).staged.Thai['a.txt'].translations, ['Local save while session expired']);
         assert.equal(client.room().outbox[0].id, originalId);
         assert.equal(client.room().recovery.length, 1, 'The local copy is retained before joining');
-        await client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive,
+        await client.connect({ ...f.scope, source, baselineSource: source, archive,
             workspace: await f.n.workspace(f.scope), deferRemote: true,
             files: [{ filepath: 'a.txt', translations: ['Local save while session expired'], trackedForExport: true }] });
         assert.equal(client.room().outbox.length, 1, 'Another reconnect reuses the pending operation instead of adding a duplicate');
@@ -49,12 +49,12 @@ test('cached sparse rooms queue local-only staged saves against accepted text an
 async function cachedSparseFixture(t, { cached = 'empty', pending = false, stageText = 'Later local-only save', sourceCarry } = {}) {
     const P = require('../public/collaborationProtocol.js'), W = require('../public/workspaceState.js');
     const { Client } = require('../public/collaborationSync.js');
-    const f = recordFixture(), source = [f.source('a.txt')], tree = await P.buildBaselineTree(source);
-    const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([4, 5, 6])), zipSize: 3,
-        fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    const f = recordFixture(), source = [f.source('a.txt')];
+    const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([4, 5, 6])), zipSize: 3,
+        fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [] });
     f.scope.sourceHash = archive.baselineId;
     f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
-    f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive, tree } });
+    f.workspace(source, true); f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive } });
     const carry = sourceCarry && { ...structuredClone(sourceCarry), toSourceHash: f.scope.sourceHash };
     const workspace = await f.n.workspace(f.scope);
     W.initializeWorkspace(workspace, { source, sourceHash: f.scope.sourceHash, game: f.scope.game });
@@ -79,7 +79,7 @@ async function cachedSparseFixture(t, { cached = 'empty', pending = false, stage
         const workspace = await f.n.workspace(f.scope);
         const files = Object.entries(workspace.staged.Thai || {}).map(([filepath, stage]) => ({ filepath,
             translations: stage.translations, trackedForExport: true, ...(stage.sourceCarry ? { sourceCarry: stage.sourceCarry } : {}) }));
-        return client.connect({ ...f.scope, source, baselineSource: source, baselineTree: tree, archive, workspace, deferRemote: true, files });
+        return client.connect({ ...f.scope, source, baselineSource: source, archive, workspace, deferRemote: true, files });
     };
     return { f, P, W, source, archive, rooms, key, client, connect, shared, first, carry };
 }
@@ -1071,13 +1071,12 @@ test('editing a hydrated draft source cannot mutate the original reused by its a
 test('the collaboration client reconnects through normalized records without hydrating untouched manifest originals', async t => {
     const f = recordFixture(), P = require('../public/collaborationProtocol.js'), { Client } = require('../public/collaborationSync.js');
     const files = Array.from({ length: 256 }, (_, index) => f.source('file-' + index + '.txt', index));
-    const tree = await P.buildBaselineTree(files);
-    const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
-        fileCount: files.length, descriptionCount: files.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
+    const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+        fileCount: files.length, descriptionCount: files.length, parserVersion: 1, decisions: [] });
     f.scope.sourceHash = archive.baselineId;
     f.put(N.stores.migration, { key: N.scopeKey(f.scope), value: { state: 'ready' } });
     f.workspace(files, true);
-    f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive, tree } });
+    f.put(N.stores.assets, { key: N.baselineKey(f.scope), value: { archive } });
     const rooms = require('../public/normalizedRooms.js').create(f.n), roomKey = rooms.identityKey(f.scope), selected = files[8].filepath;
     f.put(N.stores.migration, { key: f.n.key('room', roomKey), value: { state: 'ready' } });
     await f.n.transaction([N.stores.rooms, N.stores.shared, N.stores.operations, N.stores.roomRecords], 'readwrite', tx => rooms.writeRoom(tx, roomKey,
@@ -1094,7 +1093,7 @@ test('the collaboration client reconnects through normalized records without hyd
     t.after(() => client.destroy());
     const workspace = await f.n.workspace(f.scope);
     f.reads.length = 0;
-    await client.connect({ ...f.scope, source: files, baselineSource: files, baselineTree: tree, archive,
+    await client.connect({ ...f.scope, source: files, baselineSource: files, archive,
         files: files.map(file => ({ filepath: file.filepath, translations: file.translations.Thai })), workspace, deferRemote: true });
     assert.equal(networkRequests, 0);
     assert.equal(client.fileBase(selected).translations[0], 'Accepted shared text');
@@ -1110,7 +1109,7 @@ test('the collaboration client reconnects through normalized records without hyd
     f.data.get(N.stores.shared).clear();
     f.reads.length = 0;
     const oldRows = structuredClone([...f.data.get(N.stores.files)]);
-    await client.connect({ ...f.scope, source: files, baselineSource: files, baselineTree: tree, archive,
+    await client.connect({ ...f.scope, source: files, baselineSource: files, archive,
         files: files.map(file => ({ filepath: file.filepath, translations: file.translations.Thai })), workspace, deferRemote: true });
     assert.equal(networkRequests, 0);
     assert.equal(f.reads.filter(read => read.name === N.stores.baseline).length, 0,

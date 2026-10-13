@@ -1403,9 +1403,10 @@ const config = Vue.defineComponent({
           if (!current()) return;
           const archive = window.CollaborationProtocol.normalizeArchive(workspace.importArchive);
           if (!importedBaseline || importedBaseline.archive?.baselineId !== archive.baselineId
-            || importedBaseline.tree?.root !== archive.treeRoot || importedBaseline.source?.length !== archive.descriptionCount) {
+            || importedBaseline.source?.length !== archive.descriptionCount) {
             throw new Error('The imported baseline is unavailable. Reimport the original upstream ZIP; your translations have been preserved.');
           }
+          window.CollaborationProtocol.validateBaselineSource(importedBaseline.source, archive);
           // Normalized activation supplies an independently detached accepted
           // source. Render that view rather than copying the immutable baseline
           // again. Legacy adapters retain the baseline as their authority.
@@ -5704,7 +5705,7 @@ const config = Vue.defineComponent({
       let importedBaseline = null;
       if (options.initialization?.ownsPlan) this.setWorkspaceInitializationPlan(options.initialization, [
         ...new Set(this.workspaceInitializationRows.filter(row => row.status === 'done').map(row => row.label)),
-        ...(identity ? ['Applying agreed language choices', 'Building original source baseline proofs', 'Verifying accepted source baseline identity'] : []),
+        ...(identity ? ['Applying agreed language choices', 'Verifying accepted source baseline identity'] : []),
         'Carrying translations and preserved copies into the new source', 'Saving source, translations and recovery history',
         ...(this.initializeCollaboration ? ['Preparing cached shared translations and queued work'] : []),
       ]);

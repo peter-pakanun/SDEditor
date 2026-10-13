@@ -1,6 +1,6 @@
 // Disposable normal-mode desktop acceptance fixture. Real Vue/production mixins;
 // normalized imported-source/room adapters and unresolved network gates isolate
-// scheduling. Archive identity/tree are real protocol output; ZIP parsing is
+// scheduling. Archive identity are real protocol output; ZIP parsing is
 // outside this fixture's controlled cache boundary.
 // Run: node scripts/startup-performance-browser-fixture.cjs
 // No production storage, network account, or imported user files are used.
@@ -67,17 +67,16 @@ async function configureCachedWorkspace(page) {
             translations: { English: ['Fire damage ' + index], Thai: ['คำแปล ' + index],
                 French: index === 0 ? ['Français'] : [], German: index === 0 ? ['Deutsch'] : [] },
         }));
-        const tree = await CollaborationProtocol.buildBaselineTree(source);
         const descriptorBytes = new TextEncoder().encode('Disposable startup fixture archive identity');
-        const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+        const archive = await CollaborationProtocol.finalizeArchive({ version: 2, parserVersion: 1,
             zipHash: await CollaborationProtocol.zipHash(descriptorBytes), zipSize: descriptorBytes.length,
-            fileCount: source.length, descriptionCount: source.length, decisions: [], treeRoot: tree.root });
+            fileCount: source.length, descriptionCount: source.length, decisions: [] });
         const hash = archive.baselineId;
         const freeze = value => {
             if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
             return value;
         };
-        f.baseline = { source: freeze(clone(source)), archive, tree };
+        f.baseline = { source: freeze(clone(source)), archive };
         f.baselineText = JSON.stringify(f.baseline.source);
         f.hash = hash; f.source = source; f.openPath = source[0].filepath;
         const cachedWorkspace = () => ({ descs: [

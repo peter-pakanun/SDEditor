@@ -738,7 +738,7 @@
             ...(!source?.length ? [
               { label: 'Downloading the original source ZIP', weight: 3 }, 'Unpacking the source ZIP',
               'Reading published baseline metadata', { label: 'Parsing source description files', weight: 3 },
-              'Verifying the source ZIP identity', 'Applying import choices and verifying baseline proofs',
+              'Verifying the source ZIP identity', 'Applying import choices and verifying baseline identity',
               'Storing the verified source version locally',
             ] : []),
             'Storing selected version and team details', { label: 'Opening the prepared workspace', weight: 3 },
@@ -771,7 +771,7 @@
             const identity = await task('Verifying the source ZIP identity', () => this.readImportZipIdentity(blob, zip));
             if (!current()) return;
             if (identity.zipHash !== version.zipHash) throw new Error('The downloaded ZIP does not match this published version. Existing work has been preserved.');
-            const baseline = await task('Applying import choices and verifying baseline proofs', () => this.buildImportedBaseline(identity, rawSource, [], archive));
+            const baseline = await task('Applying import choices and verifying baseline identity', () => this.buildImportedBaseline(identity, rawSource, [], archive));
             if (!current()) return;
             const workspace = { descs: [], status: {}, branchId: scope.branchId, sourceHash: version.sourceHash, importArchive: baseline.archive, catalogVersionId: version.id };
             root.WorkspaceState.initializeWorkspace(workspace, { game: version.game, branchId: scope.branchId, sourceHash: version.sourceHash, source: baseline.source, language: targetLanguage });
@@ -780,7 +780,8 @@
           if (!current()) return;
           if(contentGroup && source?.length && !groupWorkspaceReady){
             const baseline=await task('Reading the retained immutable baseline',()=>root.OfflineStore.getImportedBaseline(version.sourceHash,scope));if(!current())return;
-            if(!baseline || baseline.archive?.baselineId!==version.sourceHash || baseline.tree?.root!==version.archive.treeRoot)throw new Error('The cached original baseline is unavailable. Open this group while connected to verify its original ZIP.');
+            if(!baseline || baseline.archive?.baselineId!==version.sourceHash)throw new Error('The cached original baseline is unavailable. Open this group while connected to verify its original ZIP.');
+            root.CollaborationProtocol.validateBaselineSource(baseline.source, version.archive);
             const workspace={descs:[],status:{},branchId:scope.branchId,sourceHash:version.sourceHash,importArchive:baseline.archive,catalogVersionId:version.id};
             root.WorkspaceState.initializeWorkspace(workspace,{game:version.game,branchId:scope.branchId,sourceHash:version.sourceHash,source:baseline.source,language:targetLanguage});
             await task('Creating this content group workspace',()=>root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source),workspace,[],scope,baseline));if(!current())return;

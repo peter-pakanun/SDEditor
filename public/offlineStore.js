@@ -15,7 +15,8 @@
   // Keep every store and durable retry receipt while excluding older editors/workers.
   // v18 also fences writers that cannot retain standalone carry repair outcomes.
   // v19 excludes writers that could stage incomplete StatDescription text.
-  const DB_VERSION = 19;
+  // v20 fences proof-producing pages/workers and retires baseline tree caches.
+  const DB_VERSION = 20;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -219,6 +220,7 @@
           }
         }
         runtime.NormalizedStore?.upgrade(db, req.transaction);
+        if (event.oldVersion < 20) runtime.NormalizedStore?.removeProofTrees(db, req.transaction);
         // Every page and legacy SD save worker creates the same additive stores.
         // ClientTextStore need not be loaded in the SD-only worker to fence old writers.
         for (const name of ['clienttext_workspaces','clienttext_assets','clienttext_units','clienttext_saved',
@@ -1089,6 +1091,33 @@
     return 'import_baseline_' + normalizeGameVersion(version) + '_' + id;
   }
 
+  async function findImportedArchives(zipHash, version) {
+    if (typeof zipHash !== 'string' || !/^[a-f0-9]{64}$/.test(zipHash)) throw new TypeError('Invalid original ZIP hash');
+    const game = normalizeGameVersion(version), db = await openDb(), candidates = new Map();
+    const scan = async (name, prefix) => {
+      if (!db.objectStoreNames.contains(name)) return;
+      await withStore(name, 'readonly', store => new Promise((resolve, reject) => {
+        const range = IDBKeyRange.bound(prefix, prefix + '\uffff'), read = store.openCursor(range);
+        read.onerror = () => reject(read.error);
+        read.onsuccess = () => {
+          try {
+            const cursor = read.result;
+            if (!cursor) { resolve(); return; }
+            const archive = cursor.value.value?.archive;
+            if (archive?.zipHash === zipHash && /^[a-f0-9]{64}$/.test(archive.baselineId))
+              candidates.set(archive.baselineId, JSON.parse(JSON.stringify(archive)));
+            cursor.continue();
+          } catch (error) { reject(error); }
+        };
+      }));
+    };
+    // Immutable archives can be reused across profiles; authored work stays
+    // scoped separately. Never inspect request journals or recovery history.
+    await scan('baseline_assets', '["' + game + '",');
+    await scan(STORE_KV, 'import_baseline_' + game + '_');
+    return [...candidates.values()];
+  }
+
   async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version, baseline) {
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
@@ -1137,7 +1166,9 @@
       }
       if (baseline) {
         if (baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
-        kv.put({ key: importedBaselineKey(baseline.archive.baselineId, gameVersion), value: baseline });
+        const retainedBaseline = { ...baseline };
+        delete retainedBaseline.tree; delete retainedBaseline.baselineTree;
+        kv.put({ key: importedBaselineKey(baseline.archive.baselineId, gameVersion), value: retainedBaseline });
       }
       for (const revision of revisions) tx.objectStore(revisionsStore).add(scopedRevision(revision, captured));
     } catch (error) {
@@ -1790,6 +1821,7 @@
     setWorkspace,
     saveWorkspaceWithRevisions,
     saveSourceWorkspaceWithRevisions,
+    findImportedArchives,
     getImportedBaseline: async (id, version) => {
       const scope = normalizeWorkspaceScope({ game: normalizeGameVersion(version), sourceHash: id });
       if (await usesRecords(scope)) {

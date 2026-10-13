@@ -4,6 +4,8 @@ SDEditor saves locally in IndexedDB first. Google sign-in adds personal settings
 
 The implemented storage boundary is recorded in [Local-first baselines and incremental server storage](local_first_server_storage.md): client-generated managed downloads, compact managed baseline metadata in SQLite, lossless shared-data deduplication, and compressed backups. Deployment and deliberate production compaction remain separate operational work.
 
+Trusted StatDescription storage requires API schema v22 before browser IndexedDB v20. Deploy the API first, then the editor and reload older tabs. Browser migration removes obsolete proof trees while retaining originals, IDs, history, pending bodies and receipts. API startup logically prunes obsolete proof caches; existing descriptor roots remain part of historical identity. Inspect with `npm run cleanup:statdescription -- --dry-run`; stopped `--stopped --compact` maintenance creates a safety backup and physically reclaims free pages. Keep original artifacts and historical backups. See [the storage contract](local_first_server_storage.md#trusted-statdescription-parsing).
+
 ## What Is Saved Where
 
 | Data | Browser storage | Cloud |

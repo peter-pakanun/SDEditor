@@ -89,12 +89,7 @@ test('source ZIP hashing and accepted baseline checks report their phases only d
   editor.initializing = true;
   window.CollaborationProtocol = {
     zipHash: async () => 'zip-hash',
-    buildBaselineTree: async (source, provider, options) => {
-      assert.equal(provider, undefined, 'Initialization passes options separately from the crypto provider.');
-      options.onProgress?.({ completed: 0, total: 3, unit: 'items' });
-      options.onProgress?.({ completed: 3, total: 3, unit: 'items' });
-      return { root: 'tree-root' };
-    },
+    validateBaselineSource() {},
     finalizeArchive: async descriptor => descriptor,
   };
   editor.sourceWithImportDecisions = async source => source;
@@ -104,20 +99,15 @@ test('source ZIP hashing and accepted baseline checks report their phases only d
   assert.deepEqual(phases.map(task => task.label), [
     'Verifying original ZIP identity',
     'Applying agreed language choices',
-    'Building original source baseline proofs',
     'Verifying accepted source baseline identity',
   ]);
   assert.ok(phases.every(task => task.result && !task.result.error));
-  assert.deepEqual(phases[2].progress, [
-    { completed: 0, total: 3, unit: 'items' },
-    { completed: 3, total: 3, unit: 'items' },
-  ]);
   editor.initializing = false;
   await editor.buildImportedBaseline(identity, [{ filepath: 'source.txt' }]);
-  assert.equal(phases.length, 4, 'Ordinary work outside initialization leaves the terminal history unchanged.');
+  assert.equal(phases.length, 3, 'Ordinary work outside initialization leaves the terminal history unchanged.');
 });
 
-test('a baseline builder superseded during language decisions cannot append proof work to the replacement activity', async () => {
+test('a baseline builder superseded during language decisions cannot append identity work to the replacement activity', async () => {
   const { editor, window } = harness();
   const initialization = require('../public/workspaceInitialization.js').mixin;
   Object.assign(editor, initialization.data(), initialization.methods);
@@ -125,7 +115,7 @@ test('a baseline builder superseded during language decisions cannot append proo
   const decisions = new Promise(resolve => { releaseDecisions = resolve; });
   editor.sourceWithImportDecisions = () => decisions;
   window.CollaborationProtocol = {
-    buildBaselineTree: async () => ({ root: 'tree-root' }),
+    validateBaselineSource() {},
     finalizeArchive: async descriptor => descriptor,
   };
   editor.beginWorkspaceInitialization({ label: 'Importing previous source' });

@@ -44,7 +44,7 @@ function serverFixture(archive) {
         if (this.receipts.has(body.mutationId)) return copy(this.receipts.get(body.mutationId));
         const files = [];
         for (const file of body.files) {
-          assert.ok(await P.verifyBaselineProof(file.baseline, file.proof, this.archive.treeRoot, this.archive.descriptionCount));
+          P.witness(file.baseline); if (!this.acceptLegacyProof) assert.equal(file.proof, undefined);
           const current = this.files.find(row => row.filepath === file.filepath);
           if (!current || current.revision !== file.baseRevision || current.revision !== 1 || !current.trackedForExport
             || current.translations.some(text => text !== '') || current.needsReview) {
@@ -66,7 +66,7 @@ function serverFixture(archive) {
         }
         const files = [];
         for (const file of body.files) {
-          assert.ok(await P.verifyBaselineProof(file.baseline, file.proof, this.archive.treeRoot, this.archive.descriptionCount));
+          P.witness(file.baseline); assert.equal(file.proof, undefined);
           const translations = [...(file.baseline.translations.Thai || [])];
           while (translations.length < file.baseline.translations.English.length) translations.push('');
           assert.deepEqual(file.translations, translations);
@@ -84,7 +84,7 @@ function serverFixture(archive) {
           files: body.files.map(file => copy(this.files.find(row => row.filepath === file.filepath))) };
         if (body.files.some(file => file.baseRevision !== (this.files.find(row => row.filepath === file.filepath)?.revision || 0))) throw Object.assign(new Error('Conflict'), { status: 409, current: this.snapshot() });
         for (const file of body.files) if (!file.baseRevision) {
-          assert.ok(await P.verifyBaselineProof(file.baseline, file.proof, this.archive.treeRoot, this.archive.descriptionCount));
+          P.witness(file.baseline); if (!this.acceptLegacyProof) assert.equal(file.proof, undefined);
         }
         const files = body.files.map(file => P.fileState({ ...file, revision: file.baseRevision + 1 }));
         for (const file of files) this.files = this.files.filter(row => row.filepath !== file.filepath).concat(copy(file));
@@ -100,9 +100,8 @@ function serverFixture(archive) {
 let id = 0;
 async function fixture(options = {}) {
   const baselineSource = options.source || source;
-  const tree = await P.buildBaselineTree(baselineSource);
-  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
-    fileCount: baselineSource.length, descriptionCount: baselineSource.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
+    fileCount: baselineSource.length, descriptionCount: baselineSource.length, parserVersion: 1, decisions: [] });
   const store = options.store || storeFixture(baselineSource), server = options.server || serverFixture(archive), remote = [];
   const client = new Client({ store, request: server.request.bind(server), WebSocket: null, uuid: () => 'sparse-' + ++id,
     onStatus: options.onStatus, onWork: options.onWork,
@@ -110,10 +109,10 @@ async function fixture(options = {}) {
   const baselineInitial = options.files || (options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
     translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
   const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: baselineInitial,
-    workspace: store.workspace, archive, baselineSource, baselineTree: tree, deferRemote: !!options.deferRemote, onProgress: options.onProgress };
-  await options.beforeConnect?.({ client, store, server, remote, connection, archive, tree });
+    workspace: store.workspace, archive, baselineSource, deferRemote: !!options.deferRemote, onProgress: options.onProgress };
+  await options.beforeConnect?.({ client, store, server, remote, connection, archive });
   await client.connect(connection);
-  return { client, store, server, remote, connection, archive, tree };
+  return { client, store, server, remote, connection, archive };
 }
 async function queueDeletion(value, filepath = 'a.txt') {
   const { client } = value, base = client.fileBase(filepath), original = client.baselineFiles.get(filepath);
@@ -926,6 +925,67 @@ test('sparse snapshot replacement resets removed shared files to the immutable b
   assert.deepEqual(client.fileBase('a.txt').translations, source[0].translations.Thai);
   assert.equal(remote.at(-1)[0].stagingReset, true);
   assert.equal(remote.at(-1)[0].trackedForExport, false);
+});
+
+test('a prepared legacy proof request retries the exact body and ID after its accepted reply is lost', async t => {
+  const { client, server, store } = await fixture({ deferRemote: true }); t.after(() => client.destroy());
+  const saved = await client.save({ workspace: store.workspace, waitForSync: false,
+    files: [{ filepath: 'a.txt', translations: ['legacy queued save', 'two'], trackedForExport: true }] });
+  await client.prepare(saved.mutationId, client.epoch);
+  await client.update((state, room) => {
+    room.outbox.find(operation => operation.id === saved.mutationId).wire.files[0].proof = { index: 0, siblings: [{ hash: 'd'.repeat(64), left: false }] };
+  });
+  const wire = copy(client.room().outbox[0].wire);
+  server.acceptLegacyProof = true; server.loseMutationReply = 1;
+  await client.startRemote();
+  assert.equal(client.room().outbox[0].id, saved.mutationId);
+  assert.deepEqual(client.room().outbox[0].wire, wire);
+  await client.retry();
+  const requests = server.requests.filter(request => request.path.endsWith('/mutations'));
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(request => request.options.body), [wire, wire]);
+  assert.equal(server.events.length, 1); assert.equal(server.receipts.size, 1);
+  assert.equal(client.snapshot().pending, 0);
+  assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, ['legacy queued save', 'two']);
+});
+
+test('prepared saves and uploads require known original entry counts and reject incomplete review-marked text atomically', async t => {
+  const { client, server, store } = await fixture(); t.after(() => client.destroy());
+  const valid = { filepath: 'a.txt', baseRevision: 0, translations: ['complete first', 'complete second'],
+    trackedForExport: true, baseline: P.witness(source[0]) };
+  const requests = server.requests.length, workspace = copy(store.workspace);
+  for (const file of [
+    { ...valid, filepath: 'invented.txt', translations: ['self-reported count'], baseline: { ...valid.baseline, filepath: 'invented.txt' } },
+    { ...valid, translations: ['one entry'], needsReview: true },
+    { ...valid, translations: ['first', ' '], needsReview: true },
+    { ...valid, translations: ['x'.repeat(500001), ''], needsReview: true },
+  ]) {
+    const packet = { id: 'preserved-original-id', wire: { mutationId: 'preserved-original-id', origin: 'save', files: [valid, file] } };
+    const original = copy(packet);
+    await assert.rejects(client.sendMutation(packet, client.epoch), error => error.code === 'SD_TRANSLATION_INVALID');
+    assert.deepEqual(packet, original, 'Rejected historical command content remains exact recovery evidence.');
+    assert.equal(server.requests.length, requests, 'No mutation, upload ticket or chunk can precede whole-command validation.');
+  }
+  await assert.rejects(client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['one entry'], needsReview: true }] }),
+    error => error.code === 'SD_TRANSLATION_INVALID');
+  assert.deepEqual(store.workspace, workspace); assert.equal(server.requests.length, requests);
+});
+
+test('a queued prepared save missing its original file is retained with an actionable recovery warning and never uploads', async t => {
+  const notices = [], { client, server, store } = await fixture({ deferRemote: true, onStatus: value => notices.push(copy(value)) });
+  t.after(() => client.destroy());
+  const file = { filepath: 'absent-original.txt', translations: ['retained text'], trackedForExport: true, needsReview: true };
+  const wire = { mutationId: 'legacy-source-unavailable', origin: 'save', files: [{ ...file, baseRevision: 0, proof: { index: 0, siblings: [] } }] };
+  await client.update((state, room) => room.outbox.push({ id: wire.mutationId, origin: 'save', status: 'pending',
+    files: [{ base: null, yours: copy(file) }], wire: copy(wire) }));
+  await client.startRemote();
+  const retained = store.state.rooms[client.key].outbox.find(operation => operation.id === wire.mutationId);
+  assert.equal(retained.status, 'invalid_translation'); assert.deepEqual(retained.wire, wire);
+  assert.deepEqual(retained.files[0].yours, file);
+  assert.match(retained.validationError, /matching original source file is unavailable/);
+  assert.match(notices.at(-1).message, /Reimport its original ZIP/);
+  assert.equal(server.requests.some(request => /\/(mutations|uploads)(?:\/|$)/.test(request.path)), false);
+  assert.equal(server.events.length, 0);
 });
 
 test('cold sparse activation and snapshot replacement select actual work rather than untouched manifest paths', async t => {

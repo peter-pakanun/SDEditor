@@ -319,7 +319,7 @@
         originSourceAvailable: options.originSourceAvailable !== false,
         revision: Number(options.revision) || 0, createdAt: options.createdAt || Date.now(),
         ...(options.provenance ? { provenance: copy(options.provenance) } : {}),
-        ...(options.baseline ? { baseline: copy(options.baseline), proof: copy(options.proof), originArchive: copy(options.originArchive) } : {}) };
+        ...(options.baseline ? { baseline: copy(options.baseline), originArchive: copy(options.originArchive) } : {}) };
       rememberDroppedScope(candidate, targetSourceHash);
     }
     if (active && active.id !== candidate.id) workspace.droppedArchive[active.id] = copy(rememberDroppedScope(active, workspace.sourceHash));

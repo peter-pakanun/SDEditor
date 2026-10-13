@@ -103,10 +103,9 @@ function browserControls(account, secret, settings) {
     const zip = new JSZip();
     for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
     const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-    const tree = await CollaborationProtocol.buildBaselineTree(source);
-    const archive = await CollaborationProtocol.finalizeArchive({ version: 1, zipHash: await CollaborationProtocol.zipHash(bytes),
-      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
-    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)), tree };
+    const archive = await CollaborationProtocol.finalizeArchive({ version: 2, zipHash: await CollaborationProtocol.zipHash(bytes),
+      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [] });
+    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)) };
     const workspace = { descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: bytes.byteLength,
       sourceHash: archive.baselineId, importArchive: archive };
     await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], 'poe1', baseline);
@@ -270,14 +269,13 @@ function browserControls(account, secret, settings) {
     const zip = new JSZip();
     for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
     const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-    const tree = await CollaborationProtocol.buildBaselineTree(source);
-    const archive = await CollaborationProtocol.finalizeArchive({ version: 1, zipHash: await CollaborationProtocol.zipHash(bytes),
-      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [], treeRoot: tree.root });
-    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)), tree };
+    const archive = await CollaborationProtocol.finalizeArchive({ version: 2, zipHash: await CollaborationProtocol.zipHash(bytes),
+      zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [] });
+    const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)) };
     await vm._cloud.request('/v1/collaboration/archives/resolve', { method: 'POST', body: { game: 'poe1', archive } });
     const joined = await vm._cloud.request('/v1/collaboration/join', { method: 'POST', body: { game: 'poe1', language: 'Thai', sourceHash: archive.baselineId, archive } });
     const ghostFiles = source.slice(0, 2).map(desc => ({ filepath: desc.filepath, baseRevision: 0, translations: [''],
-      trackedForExport: true, needsReview: false, baseline: CollaborationProtocol.witness(desc), proof: CollaborationProtocol.baselineProof(tree, desc.filepath) }));
+      trackedForExport: true, needsReview: false, baseline: CollaborationProtocol.witness(desc) }));
     const accepted = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/mutations',
       { method: 'POST', body: { mutationId: crypto.randomUUID(), origin: 'merge', files: ghostFiles } });
     assertRepair(accepted.files.length === 2 && accepted.files.every(file => file.revision === 1 && file.trackedForExport), 'Both accidental first merges must be acknowledged.');

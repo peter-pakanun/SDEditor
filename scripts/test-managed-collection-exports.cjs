@@ -27,9 +27,8 @@ async function fixture() {
   const decisions = await Promise.all(groups.map(async group => ({ filepath: group.filepath, language: group.lang,
     occurrence: 2, blockHash: await Codec.blockHash(group.options[1]) })));
   const source = await Codec.applyDuplicateSelections(rawSource, decisions, { language: 'Thai' });
-  const tree = await Protocol.buildBaselineTree(source);
-  const archive = await Protocol.finalizeArchive({ version: 1, zipHash: await Protocol.zipHash(bytes), zipSize: bytes.byteLength,
-    fileCount: 3, descriptionCount: 2, parserVersion: 1, decisions, treeRoot: tree.root });
+  const archive = await Protocol.finalizeArchive({ version: 2, zipHash: await Protocol.zipHash(bytes), zipSize: bytes.byteLength,
+    fileCount: 3, descriptionCount: 2, parserVersion: 1, decisions });
   const version = { id: 'weekly-1', game: 'poe2', branchId: 'default', sourceHash: archive.baselineId, zipHash: archive.zipHash,
     name: 'Weekly export', archive, revision: 1, status: 'published' };
   const collection = { id: 'frozen-1', versionId: version.id, language: 'Thai', sequence: 2,
@@ -69,16 +68,17 @@ test('client ZIP reproduces the server codec bytes from frozen Saved files and c
   assert.deepEqual(bytes, await Exports.generate(manifest, source, JSZip, { type: 'uint8array' }));
 });
 
-test('cached immutable baseline is verified and a draft-contaminated cache cannot be used', async () => {
+test('cached browser baseline is structurally validated without proof data', async () => {
   const data = await fixture(), archive = data.baseline.archive;
   assert.equal((await Exports.cachedBaseline(data.baseline, archive)).length, 2);
-  data.baseline.source[0].translations.Thai[0] = 'Unsaved draft';
-  await assert.rejects(Exports.cachedBaseline(data.baseline, archive), /does not reproduce/);
+  assert.equal(data.baseline.tree, undefined);
+  data.baseline.source[0].variables = [];
+  await assert.rejects(Exports.cachedBaseline(data.baseline, archive), /Invalid/);
   const different = copy(data.baseline); different.archive.zipSize++;
   assert.equal(await Exports.cachedBaseline(different, archive), null);
 });
 
-test('wrong ZIP, parser choices, tree, team and frozen file metadata are rejected', async () => {
+test('wrong ZIP, parser choices, archive identity, team and frozen file metadata are rejected', async () => {
   const data = await fixture();
   const wrongBytes = data.bytes.slice(); wrongBytes[0] ^= 1;
   await assert.rejects(Exports.parseOriginal(wrongBytes, data.baseline.archive, 'Thai', JSZip), /does not match/);

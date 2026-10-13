@@ -117,7 +117,7 @@ test('duplicate English choices recompute DNT from every selected entry without 
     const cached = structuredClone(selected);
     cached[0].isDNT = false;
     assert.equal(await protocol.sourceHash(cached), await protocol.sourceHash(selected));
-    assert.equal(await protocol.leafHash(cached[0]), await protocol.leafHash(selected[0]));
+    assert.deepEqual(protocol.witness(cached[0]), protocol.witness(selected[0]));
     // A later choice of the ordinary block must also clear a previously cached flag.
     const flaggedRaw = plain(raw); flaggedRaw[0].isDNT = true;
     const ordinary = await parser.applyDuplicateSelections(flaggedRaw, await decisions(group.options[0]), { language: 'Thai' });

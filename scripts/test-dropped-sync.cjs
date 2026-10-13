@@ -393,7 +393,8 @@ test('history restore forwards the same guarded promotion to the atomic restore 
   const { client } = fixture(); t.after(() => client.destroy()); let request;
   client.request = async (path, options) => { request = { path, options }; return {}; };
   const promotion = { id: 'candidate', revision: 4, targetSourceHash: hash };
-  await client.sendMutation({ id: 'operation', restore: { eventId: 42, version: 'before' }, wire: { files: [{ baseRevision: 3 }], promoteDropped: promotion } }, client.epoch);
+  await client.sendMutation({ id: 'operation', restore: { eventId: 42, version: 'before' },
+    wire: { files: [{ filepath: source.filepath, baseRevision: 3, translations: ['Reviewed historical text'] }], promoteDropped: promotion } }, client.epoch);
   assert.ok(request.path.endsWith('/history/42/restore')); assert.deepEqual(request.options.body.promoteDropped, promotion);
 });
 

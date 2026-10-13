@@ -142,7 +142,7 @@ test('browser engine interoperates with API seed, presence claims, entry merges,
   a.leaveEdit(); await until(() => !b.isEditing(filepath));
 });
 
-test('sparse browser clients share a canonical ZIP baseline with proofed edits, untouched presence, conflicts, and incremental history', async t => {
+test('sparse browser clients share a canonical ZIP baseline with trusted edits, untouched presence, conflicts, and incremental history', async t => {
   const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }] = await Promise.all([
     load('src/database.js'), load('src/config.js'), load('src/app.js'),
   ]);
@@ -172,14 +172,13 @@ test('sparse browser clients share a canonical ZIP baseline with proofed edits, 
   t.after(async () => { clients.forEach(client => client.destroy()); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
   const source = Array.from({ length: 4 }, (_, index) => ({ filepath: `source/file-${index}.txt`, name: '', stats: ['stat-' + index],
     variables: ['#', '#'], remarks: ['', ''], translations: { English: ['One', 'Two'], Thai: ['หนึ่ง', 'สอง'], French: ['un', 'deux'] } }));
-  const tree = await P.buildBaselineTree(source);
   const decision = { filepath: source[0].filepath, language: 'Thai', occurrence: 2,
     blockHash: await P.blockHash({ content: source[0].translations.Thai, variables: ['#', '#'], remarks: ['', ''] }) };
-  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([9, 8, 7])), zipSize: 3,
-    fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [decision], treeRoot: tree.root });
+  const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([9, 8, 7])), zipSize: 3,
+    fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [decision] });
   const files = source.map(file => ({ filepath: file.filepath, translations: [...file.translations.Thai], needsReview: false, trackedForExport: false }));
   const connection = (index, selectedArchive = archive) => ({ accountId: users[index].user.id, game: 'poe1', language: 'Thai', source, files,
-    workspace: { descs: copy(source), status: {}, sourceHash: selectedArchive.baselineId }, archive: selectedArchive, baselineSource: source, baselineTree: tree });
+    workspace: { descs: copy(source), status: {}, sourceHash: selectedArchive.baselineId }, archive: selectedArchive, baselineSource: source });
   const [a, b] = clients;
   await a.connect(connection(0));
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 0);
@@ -207,7 +206,7 @@ test('sparse browser clients share a canonical ZIP baseline with proofed edits, 
   assert.deepEqual(a.fileBase(filepath).translations, ['first changed', 'second changed']);
   assert.deepEqual(b.fileBase(filepath).translations, ['first changed', 'second changed']);
   const firstWires = requests.filter(request => request.pathname.endsWith('/mutations')).flatMap(request => request.options.body.files);
-  assert.ok(firstWires.some(file => file.baseRevision === 0 && file.baseline && file.proof));
+  assert.ok(firstWires.some(file => file.baseRevision === 0 && file.baseline && !Object.hasOwn(file, 'proof')));
   assert.ok(firstWires.every(file => file.filepath === filepath));
   assert.ok(requests.every(request => !request.pathname.includes('/uploads')), 'No initial baseline upload or archive contents are sent.');
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 1);
@@ -270,9 +269,8 @@ test('real API and client recover identical resolved history as a new generation
   const apiBase = 'http://127.0.0.1:' + server.address().port;
   const source = [{ filepath: 'source/fixture.txt', name: '', stats: ['fixture'], variables: ['#'], remarks: [''],
     translations: { English: ['One'], Thai: ['ZIP translation'] } }];
-  const tree = await P.buildBaselineTree(source);
-  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([6, 7, 8])), zipSize: 3,
-    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([6, 7, 8])), zipSize: 3,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [] });
   const store = memoryStore();
   store.getWorkspace = async () => copy(store.workspace);
   store.updateWorkspace = async fn => { store.workspace = fn(copy(store.workspace)); return copy(store.workspace); };
@@ -289,7 +287,7 @@ test('real API and client recover identical resolved history as a new generation
   t.after(async () => { client.destroy(); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
   await client.connect({ accountId: user.user.id, game: 'poe1', language: 'Thai', source,
     files: [{ filepath: source[0].filepath, translations: ['ZIP translation'], needsReview: false, trackedForExport: false }],
-    workspace, archive, baselineSource: source, baselineTree: tree });
+    workspace, archive, baselineSource: source });
   const input = { id: 'recover-first', recoveryId: 'recover-first', game: 'poe1', language: 'Thai', filepath: source[0].filepath,
     originSourceHash: archive.baselineId, targetSourceHash: archive.baselineId, reason: 'Recovered translation', originSourceAvailable: true,
     snapshot: { name: '', english: ['One'], stats: ['fixture'], variables: ['#'], remarks: [''], translations: ['Historical Thai'] } };
@@ -328,9 +326,8 @@ test('real API coalesces identical unavailable legacy copies across source hashe
   const apiBase = 'http://127.0.0.1:' + server.address().port;
   const source = [{ filepath: 'source/legacy.txt', name: '', stats: ['fixture'], variables: ['#'], remarks: [''],
     translations: { English: ['One'], Thai: ['ZIP translation'] } }];
-  const tree = await P.buildBaselineTree(source);
-  const archive = await P.finalizeArchive({ version: 1, zipHash: await P.zipHash(new Uint8Array([7, 8, 9])), zipSize: 3,
-    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([7, 8, 9])), zipSize: 3,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [] });
   const store = memoryStore(), requests = [];
   store.getWorkspace = async () => copy(store.workspace);
   store.updateWorkspace = async fn => { store.workspace = fn(copy(store.workspace)); return copy(store.workspace); };
@@ -351,13 +348,13 @@ test('real API coalesces identical unavailable legacy copies across source hashe
   t.after(async () => { client.destroy(); await realtime.close(); await new Promise(resolve => server.close(resolve)); db.close(); });
   await client.connect({ accountId: user.user.id, game: 'poe1', language: 'Thai', source,
     files: [{ filepath: source[0].filepath, translations: ['ZIP translation'], needsReview: false, trackedForExport: false }],
-    workspace, archive, baselineSource: source, baselineTree: tree });
+    workspace, archive, baselineSource: source });
   const oldTarget = 'b'.repeat(64), localTarget = 'c'.repeat(64), legacyOrigin = 'a'.repeat(64);
   const snapshot = { name: '', english: ['One'], stats: ['fixture'], variables: ['#'], remarks: [''], translations: ['Historical Thai'] };
   const receipt = await client.api('/dropped', { method: 'PUT', body: {
     game: 'poe1', language: 'Thai', filepath: source[0].filepath, originSourceHash: archive.baselineId,
     originSourceAvailable: true, targetSourceHash: oldTarget, snapshot, baseRevision: 0, reason: 'Shared preserved copy',
-    baseline: P.witness(source[0]), proof: P.baselineProof(tree, source[0].filepath), originArchive: archive,
+    baseline: P.witness(source[0]), originArchive: archive,
   } }, client.epoch);
   const shared = receipt.candidate;
   assert.equal(shared.originVerified, true);

@@ -44,11 +44,6 @@
     if (!count || desc.variables.length !== count || desc.remarks.length !== count) throw new Error('Invalid baseline English entries.');
     return { filepath: desc.filepath, name: desc.name || '', stats: [...desc.stats], variables: [...desc.variables], remarks: [...desc.remarks], translations };
   }
-  const leafHash = (file, provider) => digest('sdeditor:baseline:leaf:v1', witness(file), provider);
-  function parentHash(left, right, provider) {
-    if (!HEX.test(left) || !HEX.test(right)) throw new Error('Invalid baseline tree hash.');
-    return digest('sdeditor:baseline:parent:v1', [left, right], provider);
-  }
   function blockHash(block, provider) {
     if (!block || !strings(block.content) || !strings(block.variables) || !strings(block.remarks)
       || block.content.length !== block.variables.length || block.content.length !== block.remarks.length) throw new Error('Invalid baseline language block.');
@@ -72,16 +67,21 @@
     return digest('sdeditor:baseline:config:v1', { parserVersion: 1, decisions: normalizeDecisions(value.decisions) }, provider);
   }
   function baselineId(value, provider) {
-    if (![value?.zipHash, value?.configHash, value?.treeRoot].every(item => HEX.test(item))) throw new Error('Invalid archive identity.');
+    if (![value?.zipHash, value?.configHash].every(item => HEX.test(item))) throw new Error('Invalid archive identity.');
+    if (value.version === 2) return digest('sdeditor:baseline:id:v2', { zipHash: value.zipHash, configHash: value.configHash }, provider);
+    if (value.version !== 1 || !HEX.test(value.treeRoot)) throw new Error('Invalid archive identity.');
+    // Existing accepted identities retain their original root as identity data.
+    // The browser never rebuilds its former proof tree.
     return digest('sdeditor:baseline:id:v1', { zipHash: value.zipHash, configHash: value.configHash, treeRoot: value.treeRoot }, provider);
   }
   function normalizeArchive(value) {
-    if (!value || value.version !== 1 || value.parserVersion !== 1 || !HEX.test(value.zipHash) || !HEX.test(value.treeRoot)
+    if (!value || ![1, 2].includes(value.version) || value.parserVersion !== 1 || !HEX.test(value.zipHash)
+      || (value.version === 1 && !HEX.test(value.treeRoot)) || (value.version === 2 && value.treeRoot != null)
       || !Number.isSafeInteger(value.zipSize) || value.zipSize <= 0 || !Number.isSafeInteger(value.fileCount) || value.fileCount <= 0
       || value.fileCount > 100000 || !Number.isSafeInteger(value.descriptionCount) || value.descriptionCount <= 0 || value.descriptionCount > value.fileCount
       || (value.configHash != null && !HEX.test(value.configHash)) || (value.baselineId != null && !HEX.test(value.baselineId))) throw new Error('Invalid archive descriptor.');
-    return { version: 1, zipHash: value.zipHash, zipSize: value.zipSize, fileCount: value.fileCount, descriptionCount: value.descriptionCount,
-      parserVersion: 1, decisions: normalizeDecisions(value.decisions), treeRoot: value.treeRoot,
+    return { version: value.version, zipHash: value.zipHash, zipSize: value.zipSize, fileCount: value.fileCount, descriptionCount: value.descriptionCount,
+      parserVersion: 1, decisions: normalizeDecisions(value.decisions), ...(value.version === 1 ? { treeRoot: value.treeRoot } : {}),
       ...(value.configHash ? { configHash: value.configHash } : {}), ...(value.baselineId ? { baselineId: value.baselineId } : {}) };
   }
   async function finalizeArchive(value, provider) {
@@ -94,50 +94,12 @@
     archive.baselineId = calculatedId;
     return archive;
   }
-  async function buildBaselineTree(source, provider, options = {}) {
+  function validateBaselineSource(source, archive) {
     if (!Array.isArray(source) || !source.length) throw new Error('A baseline requires descriptions.');
     const files = source.map(witness).sort((a, b) => compare(a.filepath, b.filepath));
     if (files.some((file, index) => index && file.filepath === files[index - 1].filepath)) throw new Error('Duplicate baseline filepath.');
-    let total = files.length;
-    for (let width = files.length; width > 1;) { width = Math.ceil(width / 2); total += width; }
-    let completed = 0;
-    const report = () => {
-      if (options.isCancelled?.()) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
-      options.onProgress?.({ completed, total, unit: 'items' });
-    };
-    report();
-    const track = async pending => { const hash = await pending; completed++; report(); return hash; };
-    const levels = [await Promise.all(files.map(file => track(leafHash(file, provider))))];
-    while (levels[levels.length - 1].length > 1) {
-      const previous = levels[levels.length - 1]; const next = [];
-      for (let index = 0; index < previous.length; index += 2) next.push(track(parentHash(previous[index], previous[index + 1] || previous[index], provider)));
-      levels.push(await Promise.all(next));
-    }
-    return { version: 1, root: levels[levels.length - 1][0], paths: files.map(file => file.filepath), levels };
-  }
-  function baselineProof(tree, filepath) {
-    let index = tree?.paths?.indexOf(filepath);
-    if (tree?.version !== 1 || index == null || index < 0 || !Array.isArray(tree.levels)) throw new Error('Baseline file is absent from the proof cache.');
-    const proof = { index, siblings: [] };
-    for (let level = 0; level < tree.levels.length - 1; level++) {
-      const nodes = tree.levels[level];
-      proof.siblings.push({ hash: nodes[index ^ 1] || nodes[index], left: !!(index % 2) });
-      index = Math.floor(index / 2);
-    }
-    return proof;
-  }
-  async function verifyBaselineProof(file, proof, treeRoot, count, provider) {
-    if (!HEX.test(treeRoot) || !Number.isSafeInteger(count) || count < 1 || count > 100000 || !Number.isSafeInteger(proof?.index)
-      || proof.index < 0 || proof.index >= count || !Array.isArray(proof.siblings) || proof.siblings.length > 17) return false;
-    let hash = await leafHash(file, provider); let index = proof.index; let width = count; let offset = 0;
-    while (width > 1) {
-      const sibling = proof.siblings[offset++];
-      if (!sibling || !HEX.test(sibling.hash) || sibling.left !== !!(index % 2)) return false;
-      if (index === width - 1 && width % 2 && sibling.hash !== hash) return false;
-      hash = sibling.left ? await parentHash(sibling.hash, hash, provider) : await parentHash(hash, sibling.hash, provider);
-      index = Math.floor(index / 2); width = Math.ceil(width / 2);
-    }
-    return offset === proof.siblings.length && hash === treeRoot;
+    if (archive && files.length !== archive.descriptionCount) throw new Error('The original ZIP description count differs from its accepted baseline.');
+    return files;
   }
   function manifestFile(desc, paths) {
     const english = desc?.english || desc?.translations?.English;
@@ -347,6 +309,6 @@
     return WorkspaceState.pruneWorkspaceStatus(result);
   }
   return { copy, equal, manifest, manifestAsync, sourceHash, sourceHashAsync, fingerprint: sourceHash, fileState, contentEqual, mergeFile, scopeKey, projectWorkspace,
-    zipHash, witness, leafHash, parentHash, blockHash, normalizeDecisions, configHash, baselineId, normalizeArchive, finalizeArchive,
-    buildBaselineTree, baselineProof, verifyBaselineProof };
+    zipHash, witness, blockHash, normalizeDecisions, configHash, baselineId, normalizeArchive, finalizeArchive,
+    validateBaselineSource };
 });

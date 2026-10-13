@@ -51,12 +51,7 @@
   }
   async function verifyBaseline(source, archive, { current } = {}) {
     checkpoint(current);
-    const files = source.map(protocol.witness).sort((a, b) => compare(a.filepath, b.filepath));
-    if (files.length !== archive.descriptionCount) throw new Error('The original ZIP description count differs from the collection.');
-    const tree = await protocol.buildBaselineTree(files);
-    checkpoint(current);
-    if (tree.root !== archive.treeRoot) throw new Error('The original ZIP does not reproduce the collection baseline.');
-    return files;
+    return protocol.validateBaselineSource(source, archive);
   }
   async function cachedBaseline(baseline, archive, options = {}) {
     if (!baseline?.source?.length || !baseline.archive) return null;

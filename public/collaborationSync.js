@@ -13,6 +13,15 @@
   const staleError = () => Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
   const byPath = files => Object.fromEntries(files.map(file => [file.filepath, copy(file)]));
   const inactiveOperation = operation => String(operation.status || '').startsWith('invalid_translation');
+  function translationError(file, sourceFiles) {
+    const count = sourceFiles?.get(file.filepath)?.english?.length;
+    if (!Number.isSafeInteger(count) || count < 1) return Object.assign(new Error(file.filepath
+      + ': The matching original source file is unavailable. Reimport its original ZIP before sharing. The queued translation is retained for recovery.'),
+    { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, sourceUnavailable: true });
+    const issues = W.translationIssues(file.translations, count);
+    return issues.valid ? null : Object.assign(new Error(file.filepath
+      + ': Complete every StatDescription translation entry before sharing.'), { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, ...issues });
+  }
   class Client {
     constructor(options) {
       this.store = options.store; this.request = options.request;
@@ -339,11 +348,11 @@
       if (!this.current(epoch)) throw staleError();
       return result;
     }
-    async connect({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
-      if (archive) return this.connectSparse({ accountId, game, branchId, versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote, onProgress });
+    async connect({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, deferRemote = false, onProgress }) {
+      if (archive) return this.connectSparse({ accountId, game, branchId, versionId, groupId, language, source, files, workspace, archive, baselineSource, deferRemote, onProgress });
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
-      this.baselineStates = null; this.baselineTree = null; this.archive = null;
+      this.baselineStates = null; this.archive = null;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
       const preparation = this.connectionPreparation((source?.length || 0) * 6 + (files?.length || 0) + 3, epoch, onProgress);
@@ -409,22 +418,21 @@
       await this.finishConnection(epoch, deferRemote);
       return this.snapshot({ includeFiles: false });
     }
-    async connectSparse({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, baselineTree, deferRemote = false, onProgress }) {
+    async connectSparse({ accountId, game, branchId = 'default', versionId, groupId, language, source, files, workspace, archive, baselineSource, deferRemote = false, onProgress }) {
       this.disconnect(); this.destroyed = false;
       this.remoteDeferred = true;
       if (!accountId || !language || !['poe1', 'poe2'].includes(game)) throw new Error('A signed-in assigned translator is required.');
       const epoch = this.epoch;
       archive = await P.finalizeArchive(archive);
       if (epoch !== this.epoch) throw staleError();
-      if (!Array.isArray(baselineSource) || baselineSource.length !== archive.descriptionCount
-        || baselineTree?.version !== 1 || baselineTree.root !== archive.treeRoot || baselineTree.paths?.length !== archive.descriptionCount) throw new Error('The imported baseline cache is unavailable. Import the original ZIP again.');
+      P.validateBaselineSource(baselineSource, archive);
       const preparation = this.connectionPreparation(baselineSource.length * 4 + (files?.length || 0), epoch, onProgress);
       let manifest;
       await this.prepareWork(async () => {
         manifest = await P.manifestAsync(baselineSource, { isCancelled: () => epoch !== this.epoch || this.destroyed,
           onProgress: preparation.report });
         preparation.advance(baselineSource.length);
-        this.archive = archive; this.baselineTree = baselineTree; this.source = baselineSource;
+        this.archive = archive; this.source = baselineSource;
         this.sourceDescriptions = new Map(baselineSource.map(desc => [desc.filepath, desc]));
         this.baselineFiles = new Map(); this.sourceFiles = new Map(); this.baselineStates = {};
         await preparation.items(baselineSource, file => {
@@ -544,7 +552,7 @@
           ? (current.descs || []).map(desc => this.baselineFiles.get(desc.filepath)).filter(Boolean) : baselineSource,
           sourceHash: identity.sourceHash, game, language });
         const room = state.rooms[this.key];
-        // Recheck the transaction's workspace after asynchronous proof reads.
+        // Recheck the transaction's workspace after asynchronous source reads.
         // A newer explicit local save cancels this automatic relay.
         const canceled = room.outbox.filter(operation => operation.carryRepair && !operation.files.every(entry =>
           W.carriedBaselineReplay(current, this.baselineFiles.get(entry.yours.filepath), language, entry.base)));
@@ -704,9 +712,10 @@
     rebuild(room) {
       room.local = copy(room.shared);
       for (const operation of room.outbox) {
-        if (!inactiveOperation(operation) && !operation.resetStaging && !operation.repairInitialMerge && operation.files.some(entry => !entry.yours.needsReview
-          && !W.translationIssues(entry.yours.translations, this.sourceFiles?.get(entry.yours.filepath)?.english?.length
-            ?? entry.yours.translations.length).valid)) operation.status = 'invalid_translation';
+        if (!inactiveOperation(operation) && !operation.resetStaging && !operation.repairInitialMerge) {
+          const error = operation.files.map(entry => translationError(entry.yours, this.sourceFiles)).find(Boolean);
+          if (error) { operation.status = 'invalid_translation'; operation.validationError = error.message; }
+        }
         if (inactiveOperation(operation)) continue;
         for (const entry of operation.files) {
           const shared = room.local[entry.yours.filepath] || (room.mode === 'sparse' && this.baselineStates[entry.yours.filepath]);
@@ -784,7 +793,7 @@
         const original = this.sourceFiles.get(file.filepath);
         if (!original) throw new Error('Saved file is absent from the source: ' + file.filepath);
         const issues = W.translationIssues(file.translations, original.english.length);
-        if (!file.needsReview && !issues.valid) throw Object.assign(new Error(file.filepath
+        if (!issues.valid) throw Object.assign(new Error(file.filepath
           + ': Complete every StatDescription translation entry before saving.'), { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, ...issues });
         return fileState(file, original.english.length);
       });
@@ -896,7 +905,8 @@
           else if (Object.keys(this.droppedConflicts).length || this.room().outbox.some(op => ['candidate_conflict', 'needs_candidate_review'].includes(op.status)))
             this.status('Conflicting dropped copies need review before these files can be shared.', true);
           else if (this.room().outbox.some(op => op.status === 'invalid_translation'))
-            this.status('An incomplete SD translation was retained for recovery. Complete every entry and save the file again.', true);
+            this.status(this.room().outbox.find(op => op.status === 'invalid_translation').validationError
+              || 'An incomplete SD translation was retained for recovery. Complete every entry and save the file again.', true);
           else this.status('');
           if (this.pendingDropped) this.schedule();
         } catch (error) {
@@ -1097,7 +1107,9 @@
           ...(candidate.recoveryId && operation.id === candidate.recoveryId ? { recoveryId: candidate.recoveryId } : {}),
           ...(operation.replace ? { replace: true } : {}),
           reason: candidate.reason || 'Source changed', originSourceAvailable: candidate.originSourceAvailable !== false,
-          ...(candidate.baseline ? { baseline: copy(candidate.baseline), proof: copy(candidate.proof), originArchive: copy(candidate.originArchive) } : {}),
+          ...(candidate.baseline ? { baseline: copy(candidate.baseline), originArchive: copy(candidate.originArchive),
+            // Previously queued requests retain their original proof bytes.
+            ...(candidate.proof ? { proof: copy(candidate.proof) } : {}) } : {}),
         } }, epoch);
         } catch (error) {
           if (error.code !== 'CANDIDATE_CONFLICT') throw error;
@@ -1285,7 +1297,7 @@
           this.onWork({ key: 'placeholder-repair', label: 'Correcting saved translation status', active: true });
           const result = await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/placeholder-repairs', {
             method: 'POST', body: { mutationId: repair.id, files: [{ filepath: repair.filepath, baseRevision: repair.baseRevision,
-              baseline: P.witness(this.baselineFiles.get(repair.filepath)), proof: P.baselineProof(this.baselineTree, repair.filepath) }] },
+              baseline: P.witness(this.baselineFiles.get(repair.filepath)) }] },
           }, epoch);
           if (!Array.isArray(result.files) || !result.files.some(file => file.filepath === repair.filepath)) {
             throw new Error('Saved status repair response has no committed file state.');
@@ -1490,8 +1502,8 @@
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
             ...(room.mode === 'sparse' && op.kind === 'join' && wireCarry ? { sourceCarry: wireCarry,
               ...(op.previousBaselines?.[shared.filepath] ? { previousBaseline: copy(op.previousBaselines[shared.filepath]) } : {}) } : {}),
-            ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging || op.kind === 'join' && merged.file.sourceCarry) ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)),
-              proof: P.baselineProof(this.baselineTree, shared.filepath) } : {}) });
+            ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging || op.kind === 'join' && merged.file.sourceCarry)
+              ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)) } : {}) });
         }
         room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id).concat(conflicts);
         if (conflicts.length) op.status = 'conflict';
@@ -1523,18 +1535,18 @@
     }
     async sendMutation(op, epoch) {
       const path = '/rooms/' + encodeURIComponent(this.room().roomId);
-      if (!op.resetStaging && !op.repairInitialMerge && !op.restore) for (const file of op.wire.files) {
-        const issues = W.translationIssues(file.translations, this.sourceFiles?.get(file.filepath)?.english?.length ?? file.translations.length);
-        if (!file.needsReview && !issues.valid) throw Object.assign(new Error(file.filepath
-          + ': Complete every StatDescription translation entry before sharing.'), { code: 'SD_TRANSLATION_INVALID', filepath: file.filepath, ...issues });
+      if (!op.resetStaging && !op.repairInitialMerge) for (const file of op.wire.files) {
+        const error = translationError(file, this.sourceFiles);
+        if (error) throw error;
       }
       if (op.repairInitialMerge) return this.api(path + '/source-carry-repairs', { method: 'POST', body: { mutationId: op.id,
         files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: 1,
-          fromSourceHash: file.sourceCarry.fromSourceHash, baseline: copy(file.baseline), proof: copy(file.proof),
+          fromSourceHash: file.sourceCarry.fromSourceHash, baseline: copy(file.baseline),
+          ...(file.proof ? { proof: copy(file.proof) } : {}),
           ...(file.previousBaseline ? { previousBaseline: copy(file.previousBaseline) } : {}) })) } }, epoch);
       if (op.resetStaging) return this.api(path + '/staged-deletions', { method: 'POST', body: { mutationId: op.id,
         files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: file.baseRevision, translations: copy(file.translations),
-          ...(this.room().mode === 'sparse' ? { baseline: copy(file.baseline), proof: copy(file.proof) } : {}) })) } }, epoch);
+          ...(this.room().mode === 'sparse' ? { baseline: copy(file.baseline), ...(file.proof ? { proof: copy(file.proof) } : {}) } : {}) })) } }, epoch);
       if (op.restore) return this.api(path + '/history/' + encodeURIComponent(op.restore.eventId) + '/restore', {
         method: 'POST', body: { mutationId: op.id, baseRevision: op.wire.files[0].baseRevision, version: op.restore.version,
           ...(op.wire.promoteDropped ? { promoteDropped: copy(op.wire.promoteDropped) } : {}) },

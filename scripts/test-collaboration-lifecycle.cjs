@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const protocol = require('../public/collaborationProtocol.js');
+const legacyProtocol = require('./legacy-baseline-fixtures.cjs');
 
 function deferred() {
   let resolve, reject;
@@ -418,7 +419,7 @@ test('stored sources rederive DNT from a later English entry without changing ba
     const source = [description('later-dnt', ['Ordinary first entry', marker])];
     source[0].isDNT = false; source[0].hasChanges = false;
     source[0].translations.Thai = [];
-    const tree = await protocol.buildBaselineTree(source);
+    const tree = await legacyProtocol.buildBaselineTree(source);
     const archive = await protocol.finalizeArchive({ version: 1,
       zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
       fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
@@ -457,7 +458,7 @@ test('stored sources rederive DNT from a later English entry without changing ba
     assert.deepEqual(plain(baseline), baselineBefore, 'DNT derivation cannot rewrite immutable ZIP evidence.');
     assert.deepEqual(plain(workspace), workspaceBefore, 'DNT eligibility cannot rewrite saved work or workspace identity.');
     assert.equal(e.sourceIdentity, archive.baselineId);
-    assert.equal((await protocol.buildBaselineTree(e.workspaceSource())).root, archive.treeRoot);
+    assert.deepEqual(protocol.validateBaselineSource(e.workspaceSource()), protocol.validateBaselineSource(source));
   }
 });
 
@@ -475,7 +476,7 @@ test('joining an empty German sparse room does not publish Thai saved or review 
     status: { [source[1].filepath]: { needsReview: true } } };
   e.applyWorkspaceOverlay();
   e.lang = 'German'; e.applyWorkspaceOverlay();
-  const tree = await protocol.buildBaselineTree(source);
+  const tree = await legacyProtocol.buildBaselineTree(source);
   const archive = await protocol.finalizeArchive({ version: 1,
     zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
     fileCount: source.length, descriptionCount: source.length, parserVersion: 1,
@@ -632,7 +633,7 @@ test('activated workspace reuses its detached baseline without reopening storage
   const { editor: e, window } = harness({ realImport: true });
   e.cloudProfileId = 'account-one';
   const source = [description('activated')]; source[0].translations.Thai = ['', ''];
-  const tree = await protocol.buildBaselineTree(source);
+  const tree = await legacyProtocol.buildBaselineTree(source);
   const archive = await protocol.finalizeArchive({ version: 1,
     zipHash: await protocol.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
     fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
@@ -656,7 +657,7 @@ test('activated workspace reuses its detached baseline without reopening storage
 async function acceptedActivationFixture(window, count = 1) {
   const source = Array.from({ length: count }, (_, index) => description('detached' + (count > 1 ? index : '')));
   for (const desc of source) desc.translations.Thai = ['', ''];
-  const tree = await protocol.buildBaselineTree(source);
+  const tree = await legacyProtocol.buildBaselineTree(source);
   const archive = await protocol.finalizeArchive({ version: 1,
     zipHash: await protocol.zipHash(new Uint8Array([4, 5, 6])), zipSize: 3,
     fileCount: count, descriptionCount: count, parserVersion: 1, decisions: [], treeRoot: tree.root });
@@ -1222,7 +1223,7 @@ test('a source upgrade drops the last saved translation instead of the older ZIP
   assert.equal(e.descs[0].hasChanges, false); assert.equal(e.descs[0].needsReview, true);
 });
 
-test('archive reload reuses persisted identity and proof cache while retaining separate dropped candidates', async () => {
+test('archive reload reuses persisted identity without a proof cache while retaining separate dropped candidates', async () => {
   const imported = harness({ realImport: true });
   await imported.editor.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true }));
   const [source, workspace, , , baseline] = imported.writes[0];
@@ -1245,7 +1246,7 @@ test('archive reload reuses persisted identity and proof cache while retaining s
   assert.deepEqual(plain(loaded.window.WorkspaceState.droppedForFile(e.localDescs, repairedPath, 'Thai').snapshot.translations), ['local recovery candidate']);
   assert.equal(e.descs[0].needsReview, true); assert.equal(e.descs[0].hasChanges, false);
   assert.deepEqual(plain(e.importBaseline.source[0].translations.Thai), ['']);
-  assert.deepEqual(plain(e.importBaseline.tree), baseline.tree);
+  assert.equal(e.importBaseline.tree, undefined);
   assert.equal(loaded.writes.length, 0);
 });
 
@@ -1254,7 +1255,8 @@ test('identical parsed exports with different ZIP bytes retain separate archive 
   await first.editor.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true, envelope: 'original compression' }));
   await second.editor.importUpdateZipFile(zipFixture(importText({ broken: false }), { archive: true, envelope: 'repacked compression' }));
   const a = first.editor.importBaseline, b = second.editor.importBaseline;
-  assert.equal(a.tree.root, b.tree.root); assert.notEqual(a.archive.zipHash, b.archive.zipHash);
+  assert.deepEqual(plain(a.source), plain(b.source)); assert.equal(a.tree, undefined); assert.equal(b.tree, undefined);
+  assert.notEqual(a.archive.zipHash, b.archive.zipHash);
   assert.notEqual(first.editor.sourceIdentity, second.editor.sourceIdentity);
 });
 
@@ -1331,6 +1333,76 @@ test('shared decisions reconstruct the alternate original baseline from retained
   assert.deepEqual(plain(raw[0].translations.Thai), ['First original']);
 });
 
+test('accepted legacy archive reconstruction preserves its exact ID without constructing a proof tree', async () => {
+  const { editor: e, window } = harness({ realImport: true });
+  const { second, raw, identity } = await duplicateBaselines(e);
+  const tree = await legacyProtocol.buildBaselineTree(second.source);
+  const accepted = await protocol.finalizeArchive({ ...second.archive, version: 1, treeRoot: tree.root, baselineId: undefined });
+  window.CollaborationProtocol.buildBaselineTree = () => assert.fail('Accepted legacy IDs must not rebuild their former proof tree.');
+  const rebuilt = await e.buildImportedBaseline(identity, raw, [], accepted);
+  assert.deepEqual(plain(rebuilt.archive), accepted);
+  assert.equal(rebuilt.tree, undefined);
+  assert.deepEqual(plain(rebuilt.source), plain(second.source));
+  await assert.rejects(e.buildImportedBaseline({ ...identity, zipSize: identity.zipSize + 1 }, raw, [], accepted), /does not reproduce/);
+  await assert.rejects(e.buildImportedBaseline({ ...identity, fileCount: identity.fileCount + 1 }, raw, [], accepted), /does not reproduce/);
+  await assert.rejects(e.buildImportedBaseline(identity, [...raw, ...raw], [], accepted), /shared import decisions|Duplicate baseline filepath|description count/);
+});
+
+test('signed-out and disconnected reimports preserve the active accepted v1 ID, saves, history and pending work', async t => {
+  for (const signedIn of [false, true]) await t.test(signedIn ? 'disconnected' : 'signed out', async () => {
+    const { editor: e, window, writes, alerts } = harness({ realImport: true });
+    const file = zipFixture(importText({ broken: false, translated: 'Original Thai' }), { archive: true });
+    await e.importUpdateZipFile(file);
+    const current = e.importBaseline, tree = await legacyProtocol.buildBaselineTree(current.source);
+    const archive = await protocol.finalizeArchive({ ...current.archive, version: 1, treeRoot: tree.root, baselineId: undefined });
+    e.importBaseline = { ...current, archive }; e.sourceIdentity = archive.baselineId;
+    e.localDescs = { game: 'poe1', sourceHash: archive.baselineId, importArchive: plain(archive), descs: [], status: {} };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, { source: current.source, sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+    const original = current.source[0];
+    window.WorkspaceState.stageTranslation(e.localDescs, { filepath: original.filepath, translations: ['Pending authored Thai'] }, 'Thai',
+      { source: original, sourceHash: archive.baselineId, saveOrigin: 'save', savedAt: 777 });
+    e.descs = plain(current.source); e.applyWorkspaceOverlay();
+    const stage = plain(e.localDescs.staged.Thai[original.filepath]);
+    const commands = [{ id: 'legacy-pending', wire: { mutationId: 'legacy-pending', files: [{ filepath: original.filepath,
+      baseRevision: 0, translations: ['Pending authored Thai'], baseline: protocol.witness(original), proof: { index: 0, siblings: [] } }] } }];
+    const history = [{ id: 'accepted-history', sourceHash: archive.baselineId, translations: ['Old saved Thai'] }];
+    e.localDescs.pendingCommands = plain(commands); e.localDescs.recoveryHistory = plain(history);
+    e.localDescs.saveReceipts = { 'same-save-job': { mutationId: 'legacy-pending', sourceHash: archive.baselineId } };
+    const receipts = plain(e.localDescs.saveReceipts);
+    e.cloudSignedIn = signedIn; e.cloudUser.language = 'Thai';
+    e._cloud = { request: async () => { throw new Error('Offline'); } };
+    e.initializeCollaboration = async () => {};
+    window.WorkspaceState.upgradeSource = () => assert.fail('Identical accepted ZIP reimport must not advance the source.');
+    window.OfflineStore.findImportedArchives = () => assert.fail('The active accepted descriptor takes precedence over retained candidates.');
+    writes.length = 0;
+    await e.importUpdateZipFile(file);
+    assert.deepEqual(alerts, []); assert.equal(writes.length, 1);
+    assert.equal(e.sourceIdentity, archive.baselineId); assert.equal(e.importBaseline.archive.version, 1);
+    assert.equal(e.importBaseline.tree, undefined); assert.deepEqual(writes[0][2], [], 'Reimport adds no source history event.');
+    assert.deepEqual(plain(e.localDescs.staged.Thai[original.filepath]), stage);
+    assert.deepEqual(plain(e.localDescs.pendingCommands), commands); assert.deepEqual(plain(e.localDescs.recoveryHistory), history);
+    assert.deepEqual(plain(e.localDescs.saveReceipts), receipts);
+  });
+});
+
+test('offline imports reuse an unopened retained v1 descriptor and refuse to guess conflicting import choices', async () => {
+  const { editor: e, window } = harness({ realImport: true });
+  const { first, second, identity } = await duplicateBaselines(e), tree = await legacyProtocol.buildBaselineTree(first.source);
+  const archive = await protocol.finalizeArchive({ ...first.archive, version: 1, treeRoot: tree.root, baselineId: undefined });
+  const reads = [];
+  window.OfflineStore.findImportedArchives = async (zipHash, game) => { reads.push({ zipHash, game }); return [archive]; };
+  assert.deepEqual(plain(await e.lookupImportArchive(identity)), archive);
+  assert.deepEqual(reads, [{ zipHash: identity.zipHash, game: 'poe1' }]);
+  window.OfflineStore.findImportedArchives = async () => [archive, first.archive];
+  assert.deepEqual(plain(await e.lookupImportArchive(identity)), archive, 'The existing v1 ID survives equivalent v2 descriptor data.');
+  window.OfflineStore.findImportedArchives = async () => [archive, second.archive];
+  await assert.rejects(e.lookupImportArchive(identity), /several retained import configurations/);
+  e.importBaseline = { archive, source: first.source }; e.localDescs.game = 'poe1';
+  assert.deepEqual(plain(await e.lookupImportArchive(identity)), archive, 'An explicitly opened source selects its offline decisions.');
+  e.localDescs.game = 'poe2';
+  await assert.rejects(e.lookupImportArchive(identity), /several retained import configurations/, 'An archive from another game cannot choose this import.');
+});
+
 test('wrong duplicate fingerprints or raw archive identity abort shared baseline reconstruction', async () => {
   const { editor: e } = harness({ realImport: true });
   const { second, raw, identity } = await duplicateBaselines(e);
@@ -1366,10 +1438,10 @@ test('a stale canonical reconstruction cannot replace a switched local workspace
   const { first, second } = await duplicateBaselines(e);
   e.importBaseline = first; e.sourceIdentity = first.archive.baselineId;
   e.descs = plain(first.source); e.localDescs = { sourceHash: e.sourceIdentity, descs: plain(e.descs), status: {} };
-  const tree = deferred(); window.CollaborationProtocol.buildBaselineTree = () => tree.promise;
+  const descriptor = deferred(); window.CollaborationProtocol.finalizeArchive = () => descriptor.promise;
   const reconciling = e.reconcileImportArchive(second.archive); await tick();
   e.localDescs = { descs: [], status: {}, sourceHash: 'switched-workspace' }; const workspace = e.localDescs;
-  tree.resolve(second.tree); assert.equal(await reconciling, false);
+  descriptor.resolve(second.archive); assert.equal(await reconciling, false);
   assert.equal(e.localDescs, workspace); assert.equal(writes.length, 0);
 });
 
@@ -1948,7 +2020,7 @@ function prepareSourceImportCollaboration(editor, window, join = async () => {})
 }
 
 test('source import survives an old join 404 throughout parsing and archive preparation', async t => {
-  for (const stage of ['parse', 'zipHash', 'archiveLookup', 'baselineTree']) await t.test(stage, async () => {
+  for (const stage of ['parse', 'zipHash', 'archiveLookup', 'baselineIdentity']) await t.test(stage, async () => {
     const { editor: e, window, writes, alerts } = harness({ realImport: true });
     const initialization = require('../public/workspaceInitialization.js').mixin;
     Object.assign(e, initialization.data(), initialization.methods);
@@ -1970,7 +2042,7 @@ test('source import survives an old join 404 throughout parsing and archive prep
       const lookup = e.lookupImportArchive;
       e.lookupImportArchive = async (...args) => { entered.resolve(); await release.promise; return lookup.apply(e, args); };
     } else {
-      const method = stage === 'zipHash' ? 'zipHash' : 'buildBaselineTree';
+      const method = stage === 'zipHash' ? 'zipHash' : 'finalizeArchive';
       window.CollaborationProtocol[method] = async (...args) => { entered.resolve(); await release.promise; return protocol[method](...args); };
     }
     const previousSource = e.descs, previousWorkspace = e.localDescs;
@@ -2134,7 +2206,7 @@ test('cancelling source duplicate choices resumes collaboration without writing 
 });
 
 test('stale source import failures preserve a newer workspace load and remain quiet', async t => {
-  for (const stage of ['parse', 'archiveLookup', 'baselineTree']) await t.test(stage, async () => {
+  for (const stage of ['parse', 'archiveLookup', 'baselineIdentity']) await t.test(stage, async () => {
     const { editor: e, window, writes, alerts } = harness({ realImport: true });
     const entered = deferred(), failure = deferred(), newerSource = deferred();
     const file = zipFixture(importText({ broken: false }), { archive: true });
@@ -2143,7 +2215,7 @@ test('stale source import failures preserve a newer workspace load and remain qu
     } else if (stage === 'archiveLookup') {
       e.lookupImportArchive = () => { entered.resolve(); return failure.promise; };
     } else {
-      window.CollaborationProtocol.buildBaselineTree = () => { entered.resolve(); return failure.promise; };
+      window.CollaborationProtocol.finalizeArchive = () => { entered.resolve(); return failure.promise; };
     }
     const importing = e.importUpdateZipFile(file); await entered.promise;
     window.OfflineStore.getSource = game => game === 'poe2' ? newerSource.promise : Promise.resolve(undefined);

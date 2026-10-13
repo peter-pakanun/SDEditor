@@ -18,6 +18,33 @@
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(name => [name, canonical(value[name])])) : value;
   const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+  function withoutProofTrees(value) {
+    if (!value || typeof value !== 'object') return value;
+    const result = { ...value };
+    delete result.tree;
+    delete result.baselineTree;
+    return result;
+  }
+  // Only immutable baseline caches contain obsolete proof trees. Request
+  // journals, history and receipts retain their exact bodies and identities.
+  function removeProofTrees(db, tx) {
+    for (const name of [stores.assets, 'kv']) {
+      if (!db.objectStoreNames.contains(name)) continue;
+      const store = tx.objectStore(name), scan = store.openCursor();
+      scan.onsuccess = () => {
+        try {
+          const cursor = scan.result;
+          if (!cursor) return;
+          const record = cursor.value;
+          if (name === stores.assets || /^import_baseline_poe[12]_[a-f0-9]{64}$/.test(String(record.key))) {
+            if (record.value && (Object.hasOwn(record.value, 'tree') || Object.hasOwn(record.value, 'baselineTree')))
+              store.put({ ...record, value: withoutProofTrees(record.value) });
+          }
+          cursor.continue();
+        } catch (_) { tx.abort(); }
+      };
+    }
+  }
   // Accepted file identity contains every original language and entry field.
   // Parser/UI decorations such as isMissing depend on the selected language.
   const baselineFile = file => ({ filepath: file?.filepath, name: file?.name == null ? '' : file.name,
@@ -770,11 +797,13 @@
           if (baseline && !sameBaselineSource(baseline.source, source)) throw new Error('Retained source records disagree. Existing work has been kept for recovery.');
           const P = typeof window === 'object' ? window.CollaborationProtocol : typeof self === 'object' ? self.CollaborationProtocol : null;
           if (workspace.importArchive) {
-            if (!baseline || baseline.archive?.baselineId !== scope.sourceHash || baseline.tree?.root !== baseline.archive.treeRoot)
+            if (!baseline || baseline.archive?.baselineId !== scope.sourceHash)
               throw new Error('The accepted baseline evidence is incomplete. Reimport the matching original ZIP.');
             if (P) {
-              const archive = await P.finalizeArchive(baseline.archive), tree = await P.buildBaselineTree(source);
-              if (archive.baselineId !== scope.sourceHash || tree.root !== archive.treeRoot) throw new Error('The retained files do not reproduce their accepted baseline.');
+              const archive = await P.finalizeArchive(baseline.archive);
+              if (archive.baselineId !== scope.sourceHash)
+                throw new Error('The retained files do not reproduce their accepted baseline.');
+              P.validateBaselineSource(source, archive);
             }
           } else if (P && /^[a-f0-9]{64}$/.test(scope.sourceHash) && await P.sourceHash(source) !== scope.sourceHash) {
             throw new Error('The retained source differs from its saved version identity.');
@@ -828,7 +857,7 @@
             for (const field of fieldMaps) if (!same(verificationMap(field, restored[field]), verificationMap(field, workspace[field]))) throw new Error('Workspace conversion verification failed: ' + field);
             if (!same(restored.importRecovery, workspace.importRecovery)) throw new Error('Import recovery conversion verification failed.');
             tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
-            const assets = baseline ? { ...copy(baseline), source: undefined } : { sourceHash: scope.sourceHash };
+            const assets = baseline ? { ...withoutProofTrees(copy(baseline)), source: undefined } : { sourceHash: scope.sourceHash };
             tx.objectStore(stores.assets).put({ key: baseId, scope: baseId, value: assets });
             for (const receipt of receipts) tx.objectStore(stores.receipts).put(row(id, receipt.jobId, receipt));
             tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
@@ -1384,7 +1413,7 @@
         await writeDifference(tx, stores.records, await all(tx, stores.records, id), parts.records);
         tx.objectStore(stores.meta).put({ key: id, scope: id, value: parts.meta });
         if (workspace.importArchive && !assets?.archive && !previousAssets?.archive) throw new Error('The accepted archive assets are required for an atomic source import.');
-        const retained = assets ? { ...copy(assets) } : previousAssets || { sourceHash: scope.sourceHash };
+        const retained = withoutProofTrees(assets ? copy(assets) : previousAssets || { sourceHash: scope.sourceHash });
         delete retained.source;
         if (!same(previousAssets, retained)) tx.objectStore(stores.assets).put({ key: baseId, scope: baseId, value: retained });
         for (const revision of revisions || []) tx.objectStore(revisionStoreName(scope.game)).add(scopedRevision(revision, scope));
@@ -1716,5 +1745,5 @@
       applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,
       listTranslationMemoryHistory, adoptTranslationMemoryProfile, resetTranslationMemoryBootstrap };
   }
-  return { stores, names, upgrade, create, scopeKey, baselineKey, baselineFile, sameBaselineFile, sameBaselineSource };
+  return { stores, names, upgrade, create, scopeKey, baselineKey, baselineFile, sameBaselineFile, sameBaselineSource, withoutProofTrees, removeProofTrees };
 });

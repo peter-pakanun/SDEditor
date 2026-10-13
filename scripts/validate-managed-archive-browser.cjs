@@ -26,7 +26,7 @@ async function run() {
   const started = Date.now(), timings = {}, apiRoot = resolve(__dirname, '../../SDEditor-API');
   const fromApi = createRequire(join(apiRoot, 'package.json'));
   const load = name => import(pathToFileURL(join(apiRoot, 'src', name)).href);
-  const [{ loadConfig }, { openDatabase, CloudStore }, { createApp }, { leafHash }] = await Promise.all([
+  const [{ loadConfig }, { openDatabase, CloudStore }, { createApp }, { baselineWitness }] = await Promise.all([
     load('config.js'), load('database.js'), load('app.js'), load('collaboration-protocol.js'),
   ]);
   const express = fromApi('express'), directory = mkdtempSync(join(tmpdir(), 'sdeditor-archive-browser-'));
@@ -94,7 +94,7 @@ async function run() {
         measurements.parseFileMs += performance.now() - began; measurements.parseFileCalls++;
         if (desc) measurements.parsedDescriptions++; return desc;
       };
-      for (const [target, method, label] of [[vm, 'buildImportedBaseline', 'canonicalTreeMs'],
+      for (const [target, method, label] of [[vm, 'buildImportedBaseline', 'baselineValidationMs'],
         [vm, 'readImportZipIdentity', 'rawIdentityMs'], [OfflineStore, 'saveSourceWorkspaceWithRevisions', 'indexedDbCommitMs']]) {
         const original = target[method].bind(target);
         target[method] = async (...args) => { const began = performance.now(); try { return await original(...args); } finally { measurements[label] = performance.now() - began; } };
@@ -115,7 +115,9 @@ async function run() {
       const storedSource = await OfflineStore.getVersionSource(scope);
       return { error: vm.managedVisibleError, loaded: vm.sourceLoaded, identity: vm.sourceIdentity, testMode: vm.testMode,
         archive: JSON.parse(JSON.stringify(baseline.archive)), sourceCount: baseline.source.length,
-        leaves: await fingerprint(baseline.tree.levels[0]), paths: await fingerprint(baseline.tree.paths),
+        originals: await fingerprint(baseline.source.map(CollaborationProtocol.witness).sort((a, b) => a.filepath < b.filepath ? -1 : a.filepath > b.filepath ? 1 : 0)),
+        paths: await fingerprint(baseline.source.map(file => file.filepath).sort()),
+        hasTree: Object.hasOwn(baseline, 'tree'),
         storedIdentity: stored.importArchive?.baselineId, storedSourceCount: storedSource?.length,
         measurements: window.__archiveMeasurements };
     });
@@ -124,7 +126,8 @@ async function run() {
     assert.equal(actual.identity, canonical.archive.baselineId); assert.equal(actual.storedIdentity, canonical.archive.baselineId);
     assert.deepEqual(actual.archive, canonical.archive);
     assert.equal(actual.sourceCount, canonical.files.length); assert.equal(actual.storedSourceCount, canonical.files.length);
-    assert.equal(actual.leaves, digest(canonical.files.map(leafHash)), 'Every browser leaf matches the API witness');
+    assert.equal(actual.hasTree, false);
+    assert.equal(actual.originals, digest(canonical.files.map(baselineWitness).sort((a, b) => a.filepath < b.filepath ? -1 : a.filepath > b.filepath ? 1 : 0)), 'Every browser original matches the parsed source facts');
     assert.equal(actual.paths, digest(canonical.files.map(file => file.filepath)), 'Canonical ordering matches');
     const catalog = await page.evaluate(async () => {
       const vm = window.__managedFixtureApp, reads = [], started = performance.now();

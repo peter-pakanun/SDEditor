@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const P = require('../public/collaborationProtocol.js');
+const Legacy = require('./legacy-baseline-fixtures.cjs');
 
 function description(name = 'a', translations = {}) {
   return { filepath: 'source/' + name + '.txt', name: '', stats: ['stat'],
@@ -14,10 +15,10 @@ function description(name = 'a', translations = {}) {
 }
 const clone = value => JSON.parse(JSON.stringify(value));
 async function descriptor(source, overrides = {}) {
-  const tree = await P.buildBaselineTree(source);
-  return P.finalizeArchive({ version: 1, zipHash: 'a'.repeat(64), zipSize: 1024,
+  P.validateBaselineSource(source);
+  return P.finalizeArchive({ version: 2, zipHash: 'a'.repeat(64), zipSize: 1024,
     fileCount: source.length + 1, descriptionCount: source.length, parserVersion: 1,
-    decisions: [], treeRoot: tree.root, ...overrides });
+    decisions: [], ...overrides });
 }
 
 test('raw upstream ZIP hashing matches SHA-256 for bytes and File-shaped inputs', async () => {
@@ -29,79 +30,40 @@ test('raw upstream ZIP hashing matches SHA-256 for bytes and File-shaped inputs'
   await assert.rejects(P.zipHash({ name: 'StatDescriptions.zip', size: bytes.length }), /bytes/);
 });
 
-test('baseline identity covers all languages and ignores local editor metadata', async () => {
+test('trusted baseline identity binds ZIP bytes and parser choices without a tree', async () => {
   const original = [description()];
   const first = await descriptor(original);
   const local = clone(original); local[0].hasChanges = true; local[0].needsReview = true;
   local[0].isMissing = false; local[0].savedAt = 123; local[0].importRepairs = [{ line: 1 }];
   assert.deepEqual(await descriptor(local), first);
   const otherLanguage = clone(original); otherLanguage[0].translations.French = ['Modifié {0}'];
-  assert.notEqual((await descriptor(otherLanguage)).baselineId, first.baselineId);
+  assert.equal((await descriptor(otherLanguage)).baselineId, first.baselineId, 'Parsed facts belong to the browser; raw ZIP identity is authoritative.');
   const repacked = await descriptor(original, { zipHash: 'b'.repeat(64) });
   assert.notEqual(repacked.baselineId, first.baselineId);
-  assert.equal(repacked.treeRoot, first.treeRoot);
+  assert.equal(first.version, 2); assert.equal(first.treeRoot, undefined);
+  assert.equal(P.buildBaselineTree, undefined); assert.equal(P.baselineProof, undefined); assert.equal(P.verifyBaselineProof, undefined);
+  assert.equal(first.baselineId, crypto.createHash('sha256').update('sdeditor:baseline:id:v2\n' + JSON.stringify({ zipHash: first.zipHash, configHash: first.configHash })).digest('hex'));
 });
 
-test('Merkle cache uses stable filepath and language order and never mutates imported originals', async () => {
+test('browser source validation uses stable filepath and language order without changing originals', async () => {
   const source = [description('c'), description('a'), description('b')];
   const before = clone(source);
-  const tree = await P.buildBaselineTree(source);
+  const files = P.validateBaselineSource(source);
   const reordered = source.slice().reverse().map(desc => ({ ...desc, translations: {
     Thai: desc.translations.Thai, French: desc.translations.French, English: desc.translations.English,
   } }));
-  assert.deepEqual(await P.buildBaselineTree(reordered), tree);
+  assert.deepEqual(P.validateBaselineSource(reordered), files);
   assert.deepEqual(source, before);
-  assert.deepEqual(tree.paths, ['source/a.txt', 'source/b.txt', 'source/c.txt']);
-  assert.deepEqual(tree.levels.map(level => level.length), [3, 2, 1]);
-  for (const desc of source) {
-    assert.equal(await P.verifyBaselineProof(desc, P.baselineProof(tree, desc.filepath), tree.root, source.length), true);
-  }
+  assert.deepEqual(files.map(file => file.filepath), ['source/a.txt', 'source/b.txt', 'source/c.txt']);
 });
 
-test('baseline proof progress counts hash completions independently of concurrent leaf order', async () => {
-  const source = [description('a'), description('b'), description('c')], reports = [], releases = [];
-  let calls = 0, firstCompleted;
-  const first = new Promise(resolve => { firstCompleted = resolve; });
-  const provider = { subtle: { async digest(...args) {
-    if (calls++ < source.length) await new Promise(resolve => releases.push(resolve));
-    return crypto.webcrypto.subtle.digest(...args);
-  } } };
-  const pending = P.buildBaselineTree(source, provider, { onProgress: progress => {
-    reports.push(progress); if (progress.completed === 1) firstCompleted();
-  } });
-  assert.equal(releases.length, 3);
-  assert.deepEqual(reports, [{ completed: 0, total: 6, unit: 'items' }]);
-  releases[2](); await first;
-  assert.deepEqual(reports.at(-1), { completed: 1, total: 6, unit: 'items' });
-  releases[1](); releases[0]();
-  assert.deepEqual(await pending, await P.buildBaselineTree(source), 'Progress preserves custom crypto providers and canonical proof ordering.');
-  assert.deepEqual(reports.map(progress => progress.completed), [0, 1, 2, 3, 4, 5, 6]);
-  assert.ok(reports.every(progress => progress.total === 6 && progress.unit === 'items'));
-});
-
-test('proof checks reject changed original text, paths, indexes, sibling directions and extra nodes', async () => {
-  const source = [description('a'), description('b'), description('c')];
-  const tree = await P.buildBaselineTree(source);
-  const original = source[2], proof = P.baselineProof(tree, original.filepath);
-  const changed = clone(original); changed.translations.Thai = ['altered original'];
-  assert.equal(await P.verifyBaselineProof(changed, proof, tree.root, source.length), false);
-  assert.equal(await P.verifyBaselineProof({ ...original, filepath: 'source/d.txt' }, proof, tree.root, source.length), false);
-  assert.equal(await P.verifyBaselineProof(original, { ...proof, index: 0 }, tree.root, source.length), false);
-  assert.equal(await P.verifyBaselineProof(original, proof, tree.root, 2), false);
-  const swapped = clone(proof); swapped.siblings[0].left = !swapped.siblings[0].left;
-  assert.equal(await P.verifyBaselineProof(original, swapped, tree.root, source.length), false);
-  const tamperedOdd = clone(proof); tamperedOdd.siblings[0].hash = 'a'.repeat(64);
-  assert.equal(await P.verifyBaselineProof(original, tamperedOdd, tree.root, source.length), false);
-  const extra = clone(proof); extra.siblings.push({ hash: tree.root, left: false });
-  assert.equal(await P.verifyBaselineProof(original, extra, tree.root, source.length), false);
-  assert.throws(() => P.baselineProof(tree, 'unknown.txt'), /absent/);
-});
-
-test('a single description produces an empty reusable proof', async () => {
-  const source = [description()]; const tree = await P.buildBaselineTree(source);
-  const proof = P.baselineProof(tree, source[0].filepath);
-  assert.deepEqual(proof, { index: 0, siblings: [] });
-  assert.equal(await P.verifyBaselineProof(source[0], proof, tree.root, 1), true);
+test('existing v1 descriptors retain their exact baseline IDs without rebuilding proof trees', async () => {
+  const tree = await Legacy.buildBaselineTree([description()]);
+  const old = await P.finalizeArchive({ version: 1, zipHash: 'a'.repeat(64), zipSize: 1024,
+    fileCount: 2, descriptionCount: 1, parserVersion: 1, decisions: [], treeRoot: tree.root });
+  assert.deepEqual(await P.finalizeArchive(old), old);
+  assert.equal(old.baselineId, crypto.createHash('sha256').update('sdeditor:baseline:id:v1\n' + JSON.stringify({ zipHash: old.zipHash, configHash: old.configHash, treeRoot: old.treeRoot })).digest('hex'));
+  assert.notEqual(old.baselineId, (await descriptor([description()])).baselineId);
 });
 
 test('shared duplicate decisions are order independent and fingerprint source metadata too', async () => {
@@ -130,12 +92,13 @@ test('archive descriptors reject stale configuration identity and impossible siz
   await assert.rejects(P.finalizeArchive({ ...first, descriptionCount: first.fileCount + 1 }), /Invalid/);
 });
 
-test('invalid or ambiguous original source cannot generate a baseline tree', async () => {
+test('invalid or ambiguous original source fails strict browser validation', async () => {
   const original = description();
-  await assert.rejects(P.buildBaselineTree([original, clone(original)]), /Duplicate baseline filepath/);
-  await assert.rejects(P.buildBaselineTree([{ ...original, filepath: '../source/a.txt' }]), /Invalid/);
-  await assert.rejects(P.buildBaselineTree([{ ...original, variables: [] }]), /Invalid/);
-  await assert.rejects(P.buildBaselineTree([{ ...original, translations: { ...original.translations, Thai: [1] } }]), /Invalid/);
+  assert.throws(() => P.validateBaselineSource([original, clone(original)]), /Duplicate baseline filepath/);
+  assert.throws(() => P.validateBaselineSource([{ ...original, filepath: '../source/a.txt' }]), /Invalid/);
+  assert.throws(() => P.validateBaselineSource([{ ...original, variables: [] }]), /Invalid/);
+  assert.throws(() => P.validateBaselineSource([{ ...original, translations: { ...original.translations, Thai: [1] } }]), /Invalid/);
+  assert.throws(() => P.validateBaselineSource([original], { descriptionCount: 2 }), /description count/);
 });
 
 function storageFixture({ failRevision = false } = {}) {
@@ -184,7 +147,7 @@ const queued = () => new Promise(resolve => setImmediate(resolve));
 
 test('source, cached baseline, workspace and recovery history commit together while old queues survive', async () => {
   const f = storageFixture(), source = [description()], archive = await descriptor(source);
-  const baseline = { archive, source, rawSource: clone(source), tree: await P.buildBaselineTree(source) };
+  const baseline = { archive, source, rawSource: clone(source) };
   const workspace = { sourceHash: archive.baselineId, importArchive: archive, descs: source, status: {} };
   const beforeQueues = clone(f.kv.get('collaboration_v1'));
   let settled = false;

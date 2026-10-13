@@ -127,16 +127,35 @@
         return { ...identity };
       },
       async lookupImportArchive(identity, game = this.gameVersion) {
-        if (!identity || !this.cloudSignedIn || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !this._cloud?.request) return null;
-        try {
-          const result = await initializationTask(this, 'Checking agreed import configuration', () =>
-            this._cloud.request('/v1/collaboration/archives/' + game + '/' + identity.zipHash));
-          return result?.archive || result;
-        } catch (error) {
-          if (error.stale || (error.status && ![404, 408, 429].includes(error.status) && error.status < 500)) throw error;
-          // An offline import retains its decisions; the room accepts or reconciles them on reconnect.
-          return null;
+        if (!identity) return null;
+        if (this.cloudSignedIn && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang) && this._cloud?.request) {
+          try {
+            const result = await initializationTask(this, 'Checking agreed import configuration', () =>
+              this._cloud.request('/v1/collaboration/archives/' + game + '/' + identity.zipHash));
+            if (result) return result?.archive || result;
+          } catch (error) {
+            if (error.stale || (error.status && ![404, 408, 429].includes(error.status) && error.status < 500)) throw error;
+          }
         }
+        // Reimporting accepted bytes offline must reuse the retained descriptor.
+        // Creating a v2 identity for an existing v1 ZIP would invent a source
+        // advancement and detach history and queued work from their version.
+        const active = game === this.gameVersion && (!this.localDescs?.game || this.localDescs.game === game)
+          ? [this.importBaseline?.archive, this.localDescs?.importArchive].find(archive => archive?.zipHash === identity.zipHash) : null;
+        if (active) return window.CollaborationProtocol.finalizeArchive(active);
+        if (!window.OfflineStore?.findImportedArchives) return null;
+        const retained = await window.OfflineStore.findImportedArchives(identity.zipHash, game);
+        const candidates = new Map();
+        for (const value of retained || []) {
+          const archive = await window.CollaborationProtocol.finalizeArchive(value);
+          if (archive.zipHash === identity.zipHash) candidates.set(archive.baselineId, archive);
+        }
+        if (!candidates.size) return null;
+        if (candidates.size === 1) return candidates.values().next().value;
+        const archives = [...candidates.values()], configs = new Set(archives.map(archive => archive.configHash));
+        const legacy = archives.filter(archive => archive.version === 1);
+        if (configs.size === 1 && legacy.length === 1) return legacy[0];
+        throw new Error('This ZIP has several retained import configurations. Open the intended saved source version before reimporting it while offline. Existing work has been preserved.');
       },
       async importDecisionRecords(groups) {
         const protocol = window.CollaborationProtocol;
@@ -177,18 +196,18 @@
         const selectedDecisions = acceptedArchive?.decisions || decisions;
         const source = await initializationTask(this, 'Applying agreed language choices', reportProgress =>
           this.sourceWithImportDecisions(rawSource, selectedDecisions, { onProgress: reportProgress }), initializationSession);
-        const tree = await initializationTask(this, 'Building original source baseline proofs', reportProgress =>
-          window.CollaborationProtocol.buildBaselineTree(source, undefined, { onProgress: reportProgress }), initializationSession);
         const archive = await initializationTask(this, 'Verifying accepted source baseline identity', async () => {
-          const descriptor = await window.CollaborationProtocol.finalizeArchive({ version: 1, zipHash: identity.zipHash,
+          const descriptor = await window.CollaborationProtocol.finalizeArchive(acceptedArchive || { version: 2, zipHash: identity.zipHash,
             zipSize: identity.zipSize, fileCount: identity.fileCount,
-            descriptionCount: source.length, parserVersion: 1, decisions: selectedDecisions, treeRoot: tree.root });
-          if (acceptedArchive && JSON.stringify(descriptor) !== JSON.stringify(await window.CollaborationProtocol.finalizeArchive(acceptedArchive))) {
+            descriptionCount: source.length, parserVersion: 1, decisions: selectedDecisions });
+          window.CollaborationProtocol.validateBaselineSource(source, descriptor);
+          if (descriptor.zipHash !== identity.zipHash || descriptor.zipSize !== identity.zipSize
+            || descriptor.fileCount !== identity.fileCount) {
             throw new Error('The local ZIP does not reproduce the shared import baseline.');
           }
           return descriptor;
         }, initializationSession);
-        return { archive, source, rawSource: copy(rawSource), tree };
+        return { archive, source, rawSource: copy(rawSource) };
       },
       async reconcileImportArchive(archive) {
         if (this._reconcilingImport || this._importingSource || this.versionStorageLoading || this.editorSaving || this.navigationBusy
@@ -730,7 +749,7 @@
           } finally { if (this._collaboration === client) this.setBrowserWork?.('collaboration', { key: 'source', active: false }); }
           if (!this.collaborationContextCurrent(context) || this.descs !== activeSource || this.localDescs !== activeWorkspace) throw Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
           await client.connect({ ...ctx, source, deferRemote: typeof client.startRemote === 'function',
-            ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source, baselineTree: this.importBaseline.tree } : {}),
+            ...(this.importBaseline ? { archive: this.importBaseline.archive, baselineSource: this.importBaseline.source } : {}),
             onProgress: progress => reportProgress(selectedSource.length + progress.completed, selectedSource.length + progress.total),
             files, workspace });
           this.finishWorkspaceInitializationTask?.(initializationTaskToken, {

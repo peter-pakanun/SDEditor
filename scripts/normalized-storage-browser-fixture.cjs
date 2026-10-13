@@ -745,10 +745,10 @@ async function invalidTranslationChecks(page, { apiOrigin, policySession, api, d
                     Thai: index === 1 ? ['Useful baseline', '\\n@\u200b'] : ['First baseline ' + index, 'Second baseline ' + index] } }));
             const zip = new JSZip();
             for (const desc of source) zip.file(desc.filepath, StatDescCodec.descEncode(desc));
-            const bytes = await zip.generateAsync({ type: 'uint8array' }), tree = await CollaborationProtocol.buildBaselineTree(source);
-            const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1, decisions: [], treeRoot: tree.root,
+            const bytes = await zip.generateAsync({ type: 'uint8array' });
+            const archive = await CollaborationProtocol.finalizeArchive({ version: 2, parserVersion: 1, decisions: [],
                 zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.length, fileCount: source.length, descriptionCount: source.length });
-            const baseline = { archive, tree, source, rawSource: structuredClone(source) };
+            const baseline = { archive, source, rawSource: structuredClone(source) };
             const scope = { accountId: 'fixture-policy-valid', game: 'poe1', branchId: 'default', sourceHash: archive.baselineId };
             const workspace = WorkspaceState.initializeWorkspace({ ...scope, descs: structuredClone(source), status: {}, importArchive: archive },
                 { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
@@ -822,9 +822,9 @@ async function invalidTranslationChecks(page, { apiOrigin, policySession, api, d
         const accountId = 'normalized-policy-translator', apiScope = { ...prepared.scope, accountId, language: 'Thai' };
         collaboration.resolveArchive(accountId, apiScope.game, prepared.baseline.archive);
         const joined = collaboration.join(accountId, { ...apiScope, archive: prepared.baseline.archive });
-        const file = prepared.baseline.source[0], proof = P.baselineProof(prepared.baseline.tree, file.filepath);
+        const file = prepared.baseline.source[0];
         collaboration.mutate(accountId, joined.roomId, { mutationId: randomUUID(), origin: 'save', files: [{ filepath: file.filepath,
-            baseRevision: 0, translations: ['Cloud first', 'Cloud second'], baseline: P.witness(file), proof }] });
+            baseRevision: 0, translations: ['Cloud first', 'Cloud second'], baseline: P.witness(file) }] });
         const accepted = collaboration.file(joined.roomId, file.filepath);
         const apiRejections = await isolated.evaluate(async ({ apiOrigin, policySession, joined, accepted }) => {
             const outcomes = [];
@@ -879,10 +879,10 @@ async function orphanCarryChecks(page, { apiOrigin, secret, api, database, resul
         const current = structuredClone(old); current.translations.Thai = ['Recognized baseline'];
         const baseline = async source => {
             const zip = new JSZip(); zip.file(source[0].filepath, StatDescCodec.descEncode(source[0]));
-            const bytes = await zip.generateAsync({ type: 'uint8array' }), tree = await CollaborationProtocol.buildBaselineTree(source);
-            const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1, decisions: [], treeRoot: tree.root,
+            const bytes = await zip.generateAsync({ type: 'uint8array' });
+            const archive = await CollaborationProtocol.finalizeArchive({ version: 2, parserVersion: 1, decisions: [],
                 zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.length, fileCount: 1, descriptionCount: 1 });
-            return { archive, tree, source, rawSource: structuredClone(source) };
+            return { archive, source, rawSource: structuredClone(source) };
         };
         return { old: await baseline([old]), current: await baseline([current]) };
     });
@@ -919,7 +919,7 @@ async function orphanCarryChecks(page, { apiOrigin, secret, api, database, resul
             const response = await fetch(apiOrigin + path, { method: options.method || 'GET', headers: { Authorization: 'Bearer ' + session.token, 'Content-Type': 'application/json' }, body: options.body ? JSON.stringify(options.body) : undefined });
             const result = await response.json(); if (!response.ok) throw Object.assign(new Error(result.error.message), result.error, { status: response.status }); return result;
         } });
-        await client.connect({ ...scope, source: prepared.current.source, baselineSource: prepared.current.source, baselineTree: prepared.current.tree,
+        await client.connect({ ...scope, source: prepared.current.source, baselineSource: prepared.current.source,
             archive: prepared.current.archive, workspace, files: [], deferRemote: true });
         if (client.room().outbox.length !== 1) throw new Error('Orphan repair was not queued exactly once.');
         await client.flush(client.epoch); client.destroy();
@@ -954,11 +954,10 @@ async function sourceCarryChecks(page, results) {
                 const zip = new JSZip();
                 for (const desc of source) zip.file(desc.filepath, StatDescCodec.descEncode(desc));
                 const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'STORE' });
-                const tree = await CollaborationProtocol.buildBaselineTree(source);
-                const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+                const archive = await CollaborationProtocol.finalizeArchive({ version: 2, parserVersion: 1,
                     zipHash: await CollaborationProtocol.zipHash(bytes), zipSize: bytes.byteLength, fileCount: source.length,
-                    descriptionCount: source.length, decisions: [], treeRoot: tree.root });
-                return { source: copy(source), rawSource: copy(source), archive, tree };
+                    descriptionCount: source.length, decisions: [] });
+                return { source: copy(source), rawSource: copy(source), archive };
             };
             const workspace = (scope, source, baseline) => WorkspaceState.initializeWorkspace({ ...scope, descs: copy(source), status: {}, importArchive: copy(baseline.archive) },
                 { source, sourceHash: scope.sourceHash, game: scope.game, language: 'Thai' });
@@ -1081,7 +1080,7 @@ async function sourceCarryChecks(page, results) {
             const client = new CollaborationSync.Client({ store: OfflineStore, WebSocket: null, presenceEnabled: () => false,
                 request: async () => { throw new Error('Fixture offline'); } });
             try {
-                await client.connect({ ...scope, source: snapshot.source, baselineSource: snapshot.source, baselineTree: snapshot.baseline.tree,
+                await client.connect({ ...scope, source: snapshot.source, baselineSource: snapshot.source,
                     archive: snapshot.baseline.archive, workspace: snapshot.workspace, files: [], deferRemote: true });
                 await client.acceptSnapshot({ roomId: 'carry-room', sequence: 1, files }, client.epoch, true);
                 const workspace = await OfflineStore.getVersionWorkspace(scope, 'Thai');
@@ -1091,7 +1090,7 @@ async function sourceCarryChecks(page, results) {
         }, prepared);
         assert.equal(replay.ids.length, 1, 'Valid first merges get durable predecessor relays');
         assert.deepEqual(replay.saved, [], 'Unmarked cached R1 snapshots cannot revive removed inherited saves');
-        assert.deepEqual(replay.oldWitnesses.flat().sort(), replay.paths.slice().sort(), 'Only affected old immutable files enter the proof relay');
+        assert.deepEqual(replay.oldWitnesses.flat().sort(), replay.paths.slice().sort(), 'Only affected old immutable files enter the trusted fact relay');
         await isolated.reload();
         await isolated.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
         const restored = await isolated.evaluate(async prepared => {
@@ -1472,11 +1471,11 @@ async function sameBaselineImportChecks(page, results) {
         for (const entry of entries) zip.file(entry.filepath, entry.bytes, { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
         const zipBytes = await zip.generateAsync({ type: 'uint8array', compression: 'STORE' });
         const parse = language => entries.map(entry => StatDescCodec.parseDesc(entry.filepath, StatDescCodec.decodeUTF16(entry.bytes), language, { strict: true }));
-        const onlineSource = parse('Thai'), offlineSource = parse('German'), tree = await CollaborationProtocol.buildBaselineTree(onlineSource);
-        const archive = await CollaborationProtocol.finalizeArchive({ version: 1, parserVersion: 1,
+        const onlineSource = parse('Thai'), offlineSource = parse('German');
+        const archive = await CollaborationProtocol.finalizeArchive({ version: 2, parserVersion: 1,
             zipHash: await CollaborationProtocol.zipHash(zipBytes), zipSize: zipBytes.byteLength,
-            fileCount: entries.length, descriptionCount: entries.length, decisions: [], treeRoot: tree.root });
-        const baseline = { source: copy(onlineSource), rawSource: copy(onlineSource), archive, tree };
+            fileCount: entries.length, descriptionCount: entries.length, decisions: [] });
+        const baseline = { source: copy(onlineSource), rawSource: copy(onlineSource), archive };
         const onlineScope = { accountId: 'same-baseline-online', game: 'poe2', branchId: 'release', sourceHash: archive.baselineId };
         const offlineScope = { ...onlineScope, accountId: 'guest', branchId: 'default' };
         const legacyScope = { ...onlineScope, accountId: 'same-baseline-legacy', branchId: 'default' };
