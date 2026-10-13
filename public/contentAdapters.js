@@ -110,7 +110,7 @@
         const status=options.saved?state.statusFor(unit,options.saved):null;
         for(const field of unit.fields){
             const source=field.source,target=current[field.id];
-            if(field.kind==='gender'||!source.trim()||state.audioOnly(source)||!target.trim()||target.trim()==='NONEXISTENT'
+            if(field.kind==='gender'||!source.trim()||state.audioOnly(source)||!target.trim()||target.trim()==='NONEXISTENT'&&!state.isNamedForm(field)
                 || source.length>32768 || target.length>32768 || status?.fields[field.id]?.outdated)continue;
             if(state.diagnose(field,target).some(issue=>issue.level==='error'||issue.code==='clienttext-token-identity'||issue.code==='clienttext-unknown-syntax'))continue;
             const context=contextFor(unit,field),gameScope=options.game||'poe2';
@@ -148,7 +148,7 @@
         const threshold=Math.max(0,Math.min(100,Number.isFinite(options.threshold)?options.threshold:75)),limit=Math.max(1,Math.min(100,options.limit||20));
         const result=[];
         for(const candidate of units||[]){
-            if(candidate.deleted||candidate.suppressed||candidate.enabled===false||!candidate.target?.trim()||candidate.target.trim()==='NONEXISTENT'
+            if(candidate.deleted||candidate.suppressed||candidate.enabled===false||!candidate.target?.trim()||candidate.target.trim()==='NONEXISTENT'&&!state.isNamedForm(field)
                 ||!compatibleContext(candidate.context,context)||options.game&&candidate.gameScope!==options.game&&candidate.gameScope!=='all')continue;
             const before=state.canonicalSource(candidate.source),exact=before===source,right=Array.from(fold(before)),maximum=Math.max(left.length,right.length);
             if(!exact&&threshold===100)continue;

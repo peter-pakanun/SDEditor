@@ -35,6 +35,8 @@
     const defaultScanChecks = () => Object.fromEntries(scanTypes.map(type=>[type.key,type.key!=='terminology']));
     const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter,.ctReferenceContext');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
+    const russianGenderSuggestions = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP', 'M'];
+    const pairedLanguages = ['French', 'German', 'Polish', 'Portuguese', 'Russian', 'Spanish'];
     const classForms = new Set(['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
         'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb']);
     const isClassField = field => field.kind === 'form' && classForms.has(field.form);
@@ -304,7 +306,7 @@
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
                     for (const field of this.ctFieldsFor(unit)) {
                         const target = values[field.id];
-                        if (field.kind === 'gender' || !target?.trim() || target.trim() === 'NONEXISTENT' || !kinds.has(JSON.stringify([field.kind, field.form || null]))) continue;
+                        if (field.kind === 'gender' || !target?.trim() || !root.ClientTextState.isNamedForm(field) && target.trim() === 'NONEXISTENT' || !kinds.has(JSON.stringify([field.kind, field.form || null]))) continue;
                         if (field.source.toLocaleLowerCase().includes(query)) output.push({ unitId: unit.id, sheet: unit.sheet, recordId: unit.recordId, name: field.name, form: field.form, source: field.source, target });
                         if (output.length >= 40) return output;
                     }
@@ -921,7 +923,9 @@
             ctStatusLabel(unit) { const s = this.ctStatus(unit); return ['Missing', 'Outdated', 'Revised', 'Saved'].filter(label => s[label.toLowerCase()]).join(' · ') || 'Unchanged'; },
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
             ctClassFields(group) { return group.fields.filter(isClassField); },
-            ctDefaultForms(group) { return group.fields.filter(field=>field.kind==='form' && !isClassField(field)); },
+            ctNamedForms(group) { return group.fields.filter(root.ClientTextState.isNamedForm); },
+            ctNamedFormLabel(field) { return root.ClientTextState.isNamedForm(field) ? field.form.replace(/ Translation$/, '') : field.form; },
+            ctDefaultForms(group) { return group.fields.filter(field=>field.kind==='form' && !isClassField(field) && !root.ClientTextState.isNamedForm(field)); },
             ctClassVariantName(field) {
                 if(this.mapClientTextClassNames===false || !isClassField(field))return field.form || '';
                 const units=this.ctUnits,workspace=this.ctWorkspace;
@@ -1047,12 +1051,17 @@
             ctInitializationStep(label,callback,owner) {
                 return owner && this.runWorkspaceInitializationTask ? this.runWorkspaceInitializationTask(label,callback,owner) : callback(()=>{});
             },
-            async ctRequireTrustedProtocol(signal) {
+            async ctRequireTrustedProtocol(signal,parserVersions=[]) {
                 const key=this.managedCatalogScope,client=this._cloud;
                 const policy=await client.request('/v1/content-policy',{signal});
                 if(key!==this.managedCatalogScope || client!==this._cloud || signal?.aborted)throw Object.assign(new Error('ClientText context changed.'),{stale:true});
                 if(!policy.clientTextStorageProtocols?.includes(trustedProtocol))throw new Error('This server needs the trusted ClientText API update before workbook publication or synchronization. Cached local work remains available.');
+                this.ctCheckParserCapability(policy,parserVersions);
                 this.ctPolicy=policy;return policy;
+            },
+            ctCheckParserCapability(policy,parserVersions) {
+                const unsupported=[...new Set(parserVersions)].filter(version=>version==='clienttext-v3' && !policy?.clientTextParserVersions?.includes(version));
+                if(unsupported.length)throw new Error('This server needs the ClientText v3 API update before preparing or publishing these workbooks. Update the API first, then retry. Cached local work and existing v1/v2 publications remain available.');
             },
             async ctOriginalHash(bytes) {
                 if(root.crypto?.subtle){const digest=await root.crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');}
@@ -1351,12 +1360,13 @@
                 this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft();
             },
             ctGenderSuggestions(field) {
-                const original=field.target;
-                return typeof original==='string' && original!=='' && !/[\r\n]/.test(original) && !genderSuggestions.includes(original)
-                    ? [...genderSuggestions,original] : genderSuggestions.slice();
+                const original=field.target,suggestions=this.ctGenderDefaults();
+                return typeof original==='string' && original!=='' && !/[\r\n]/.test(original) && !suggestions.includes(original)
+                    ? [...suggestions,original] : suggestions.slice();
             },
+            ctGenderDefaults() { return (this.ctWorkspace?.scope.language || this.lang)==='Russian' ? russianGenderSuggestions : genderSuggestions; },
             ctGenderSuggestionLabel(value,field) {
-                if(genderSuggestions.includes(value))return value;
+                if(this.ctGenderDefaults().includes(value))return value;
                 if(/^ +$/.test(value))return 'Original value ('+value.length+' '+(value.length===1?'space':'spaces')+')';
                 if(/^\s+$/.test(value))return 'Original value ('+value.length+' whitespace characters)';
                 return value===field.target?'Original value: '+value:value;
@@ -1441,7 +1451,7 @@
                 }
                 if(this.ctCompletion && (event.key==='Tab' || event.key==='Enter' || ['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key)))this.ctCloseCompletion();
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id);
-                if (field.kind !== 'form' || event.key !== 'Tab' || !plain || !this.ctActive || this.ctBusy
+                if (!root.ClientTextState.allowsNonexistent(field) || event.key !== 'Tab' || !plain || !this.ctActive || this.ctBusy
                     || this.ctHistoryViewer || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctDiagnosticDialog()?.open
                     || !current || current.source!==field.source || current.kind!==field.kind) return;
                 const value = this.ctValues[field.id];
@@ -1536,7 +1546,7 @@
                     || !Number.isInteger(caret) || !Number.isInteger(selectionEnd) || !options.manual && selectionEnd!==caret)return false;
                 const rawCaret=root.EditorSession?.rawOffset(text,caret) ?? caret,rawEnd=root.EditorSession?.rawOffset(text,selectionEnd) ?? selectionEnd;
                 const before=text.slice(0,rawCaret),match=selectionEnd===caret ? /([\[<{])([^\]\}>\r\n]*)$/.exec(before) : null;
-                const wholeForm=field.kind==='form' && caret===text.length && selectionEnd===caret && 'NONEXISTENT'.startsWith(text.toUpperCase());
+                const wholeForm=root.ClientTextState.allowsNonexistent(field) && caret===text.length && selectionEnd===caret && 'NONEXISTENT'.startsWith(text.toUpperCase());
                 let start=rawCaret,end=rawEnd,items;
                 if(match){start=rawCaret-match[0].length;items=this.ctCompletionItems(field,match[1],match[0]);}
                 else if(wholeForm && (text || options.manual)){start=0;end=text.length;items=options.manual && !text ? this.ctCompletionItems(field) : root.ClientTextState.suggestions(field).filter(item=>item.replaceWholeField);}
@@ -1553,7 +1563,7 @@
                     : (this.dictionary || []).find(word=>String(word._id)===String(item.dictEntryId))) : null;
                 if(!this.ctCompletionValid(field,target) || !completion.items.includes(item)
                     || item.dictEntryId && (!entry || this.isDictionaryEntryActive && !this.isDictionaryEntryActive(entry))
-                    || item.replaceWholeField && (field.kind!=='form' || completion.start!==0 || completion.end!==completion.text.length)
+                    || item.replaceWholeField && (!root.ClientTextState.allowsNonexistent(field) || completion.start!==0 || completion.end!==completion.text.length)
                     || item.dictionaryKey && !(completion.allItems || completion.items).some(current=>current.value===item.value && current.dictionaryKey===item.dictionaryKey)){
                     this.ctCloseCompletion();return false;
                 }
@@ -1932,7 +1942,8 @@
             ctConsistencyKey(field) {return JSON.stringify([field.kind,field.form || null,root.ClientTextState.canonicalSource(field.source)]);},
             ctAddConsistency(results,key,allowed,index=this._ctConsistencyIndex,units=this._ctUnitIndex) {
                 const peers=index?.get(key)||[];if(peers.length<2)return;
-                const entries=peers.map(entry=>({...entry,target:this.ctValuesFor(units.get(entry.unitId))[entry.fieldId]})).filter(entry=>entry.target?.trim() && entry.target.trim()!=='NONEXISTENT');
+                const entries=peers.map(entry=>({...entry,field:units.get(entry.unitId).fields.find(field=>field.id===entry.fieldId),target:this.ctValuesFor(units.get(entry.unitId))[entry.fieldId]}))
+                    .filter(entry=>entry.target?.trim() && !(!root.ClientTextState.isNamedForm(entry.field) && entry.target.trim()==='NONEXISTENT'));
                 if(new Set(entries.map(entry=>entry.target)).size<2)return;
                 for(const entry of entries)if(!allowed || allowed.has(entry.unitId)){
                     const field=units.get(entry.unitId).fields.find(field=>field.id===entry.fieldId);
@@ -1965,7 +1976,7 @@
                 const values=this.ctValuesFor(unit),state=root.ClientTextState,lang=this.ctWorkspace?.scope.language || this.lang;
                 return this.ctFieldsFor(unit).flatMap(field=>{
                     const text=String(values[field.id] ?? '');
-                    if(field.kind==='gender' || state.audioOnly(field.source) || field.kind==='form' && text.trim()==='NONEXISTENT')return [];
+                    if(field.kind==='gender' || state.audioOnly(field.source) || state.allowsNonexistent(field) && text.trim()==='NONEXISTENT')return [];
                     const issues=state.diagnose(field,text,{tagSyntax:!!checks.tagSyntax,variables:!!checks.variables,keywords:!!checks.keywords,
                         decorations:!!checks.decorations,substitutions:!!checks.substitutions,controls:!!checks.controls});
                     if(checks.whitespace || checks.dash){
@@ -2232,7 +2243,7 @@
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 const key=this.managedCatalogScope;
                 if (!local) try { const policy = await this.ctRequireTrustedProtocol();if(key!==this.managedCatalogScope)return;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
-                else this.ctPolicy = { clientTextRoles: { default: ['normal'], French: ['normal', 'gender'], German: ['normal', 'gender'] } };
+                else this.ctPolicy = { clientTextRoles: { default: ['normal'], ...Object.fromEntries(pairedLanguages.map(language=>[language,['normal','gender']])) } };
             },
             ctChooseFiles(event) {
                 this.ctPrepared = raw([]); this.ctUploadError = '';
@@ -2259,9 +2270,9 @@
                         const candidates = groups.get(candidate.language) || []; if (candidates.some(item => item.role === candidate.role)) throw new Error('Duplicate ' + candidate.role + ' workbook for ' + candidate.language + '.'); candidates.push(candidate); groups.set(candidate.language, candidates);
                     }
                     for (const [language, candidates] of groups) {
+                        if(!this.ctUploadLocal)await this.ctRequireTrustedProtocol(this._ctAbort.signal,[root.ClientTextState.PARSER_VERSION]);
                         const required = this.ctPolicy.clientTextRoles[language] || this.ctPolicy.clientTextRoles.default || ['normal'];
                         if (required.some(role => !candidates.some(item => item.role === role)) || candidates.some(item => !required.includes(item.role))) throw new Error(language + ' requires exactly these workbook roles: ' + required.join(', ') + '.');
-                        if(!this.ctUploadLocal)await this.ctRequireTrustedProtocol(this._ctAbort.signal);
                         candidates.sort((a,b)=>required.indexOf(a.role)-required.indexOf(b.role));
                         const units = [], assets = [];
                         for (const candidate of candidates) {
@@ -2415,7 +2426,12 @@
             async ctPublishPrepared() {
                 if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; const key = this.managedCatalogScope,client=this._cloud; this._ctAbort = new AbortController();
                 try {
-                    if(!this.ctUploadLocal && this.ctPrepared.some(group=>group.contentMode==='clienttext'))await this.ctRequireTrustedProtocol(this._ctAbort.signal);
+                    if(!this.ctUploadLocal && this.ctPrepared.some(group=>group.contentMode==='clienttext'))await this.ctRequireTrustedProtocol(this._ctAbort.signal,
+                        this.ctPrepared.filter(group=>group.contentMode==='clienttext').flatMap(group=>[
+                            ...(group.originals?.descriptors || []).map(descriptor=>descriptor.parserVersion),
+                            ...(group.finalizeBody?.descriptors || []).map(descriptor=>descriptor.parserVersion),
+                            ...(group.assets || []).map(asset=>asset.parserVersion || asset.parsed?.parserVersion || asset.descriptor?.parserVersion || 'clienttext-v1')
+                        ]));
                     if (this.ctUploadLocal) {
                         const versionId = 'local:' + uuid(), metadataVersion = { id: versionId, game: this.gameVersion, branchId: this.branchId, name: this.ctUploadName, contentGroups: this.ctPrepared.map(prepared=>({ id: 'local:' + uuid(), versionId, contentMode: 'clienttext', language: prepared.language, roles: prepared.assets.map(asset=>asset.role) })) };
                         for (let index=0;index<this.ctPrepared.length;index++) {
@@ -2530,6 +2546,9 @@
                     </template>
                 </div>
                 <div v-if="side !== 'source'" class="ctFieldTranslation">
+                <table v-if="group.forms && host.ctNamedForms(group).length" class="ctFormGrid ctNamedFormGrid"><thead><tr><th>Form</th><th>Translation</th></tr></thead><tbody>
+                    <tr v-for="field in host.ctNamedForms(group)" :key="field.id"><th>{{ host.ctNamedFormLabel(field) }}</th><td><ct-target :host="host" :field="field" :compact="side !== 'both'"></ct-target></td></tr>
+                </tbody></table>
                 <table v-if="group.forms && host.ctDefaultForms(group).length" class="ctFormGrid"><thead><tr><th>Form</th><th>Singular</th><th v-if="host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form))">Plural</th></tr></thead><tbody>
                     <tr v-for="row in ['M','F','N'].filter(row => host.ctDefaultForms(group).some(field => field.form.startsWith(row)))" :key="row"><th>{{ row }}</th>
                     <td v-for="number in (host.ctDefaultForms(group).some(field => ['MP','FP','NP'].includes(field.form)) ? ['S','P'] : ['S'])" :key="number">

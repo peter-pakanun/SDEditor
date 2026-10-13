@@ -167,3 +167,24 @@ test('unknown syntax and whitespace-wrapped NONEXISTENT are excluded from learne
     const record={source:original.fields[0].source,target,language:'Thai',gameScope:'poe2',context:A.clienttext.contextFor(original,original.fields[0])};
     assert.deepEqual(A.clienttext.findMemory([record],original,original.fields[0],{game:'poe2'}),[]);
 });
+
+test('Turkish Normal and Possessive memory stays independent and preserves literal NONEXISTENT',()=>{
+    const original=unit('English item','unused');
+    original.fields=['Normal Translation','Possessive Translation'].map((form,index)=>({
+        ...original.fields[0],id:JSON.stringify(['Display Name',form]),kind:'form',name:'Display Name',form,
+        target:index?'Possessive raw\r\nvalue':'  NONEXISTENT  ',targetCell:index?'D2':'C2',required:!index
+    }));
+    const rows=A.clienttext.memoryUnits(original,S.valuesFor(original),'Turkish',{game:'poe2'});
+    assert.equal(rows.length,2);
+    assert.equal(new Set(rows.map(row=>TM.identityFor(row))).size,2);
+    for(const field of original.fields){
+        const matches=A.clienttext.findMemory(rows,original,field,{game:'poe2',threshold:100});
+        assert.equal(matches.length,1);assert.equal(matches[0].target,field.target);
+        assert.equal(matches[0].unit.context.form,field.form);
+    }
+    const invalid={...original,fields:[{...original.fields[0],source:'Item {0}'}]};
+    assert.equal(A.clienttext.memoryUnits(invalid,S.valuesFor(invalid),'Turkish').length,0);
+    const ordinary={...original,fields:[{...original.fields[0],kind:'text',form:undefined}]};
+    assert.equal(A.clienttext.memoryUnits(ordinary,S.valuesFor(ordinary),'Turkish').length,0);
+    assert.deepEqual(A.clienttext.findMemory([{...rows[0],context:A.clienttext.contextFor(ordinary,ordinary.fields[0])}],ordinary,ordinary.fields[0]),[]);
+});

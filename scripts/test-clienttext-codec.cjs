@@ -50,7 +50,8 @@ const classDialogue = () => sheet([
 ]);
 
 test('v2 class dialogue variants are exact form identities with shared raw English and field-specific workload', async () => {
-    const parsed = await Codec.parseWorkbook(await workbook({ normal: classDialogue() }), { filename: 'German.xlsx', role: 'gender', language: 'German' });
+    const bytes = await workbook({ normal: classDialogue() });
+    const parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsx', role: 'gender', language: 'German', parserVersion: 'clienttext-v2' });
     const unit = get(parsed, 'dialogue');
     assert.equal(parsed.parserVersion, 'clienttext-v2'); assert.equal(parsed.version, 1);
     assert.deepEqual(Codec.CLASS_FORMS, State.CLASS_FORMS);
@@ -71,6 +72,14 @@ test('v2 class dialogue variants are exact form identities with shared raw Engli
     assert.equal(field(unit, 'Text', 'StrIntFour').target, 'NONEXISTENT');
     assert.equal(field(unit, 'Text', 'StrFourb').required, true);
     assert.doesNotThrow(() => State.normalizeUnit(unit));
+    const current = await Codec.parseWorkbook(bytes, { filename: 'German.xlsx', role: 'gender', language: 'German' });
+    assert.equal(current.parserVersion, 'clienttext-v3'); assert.deepEqual(current.units, parsed.units, 'v3 retains the complete v2 class interpretation');
+    const asset = version => ({ role: 'gender', hash: parsed.artifactHash, parserVersion: version });
+    const accepted = await State.buildDescriptors(parsed.units, [asset('clienttext-v2')]), replayed = await State.buildDescriptors(parsed.units, [asset('clienttext-v2')]);
+    assert.deepEqual(replayed, accepted, 'Explicit v2 descriptors replay the same accepted baseline identity');
+    const upgraded = await State.buildDescriptors(current.units, [asset('clienttext-v3')]);
+    assert.notEqual(upgraded.descriptors[0].baselineId, accepted.descriptors[0].baselineId, 'A new parser version establishes a separate baseline identity');
+    await assert.rejects(Codec.exportWorkbook(bytes, parsed, {}, { parserVersion: 'clienttext-v3' }), /parser version does not match/);
 });
 test('class identities survive safe moved columns, notes and multiple identified source groups', async () => {
     const normal = sheet([
@@ -101,7 +110,7 @@ test('ambiguous class sources, duplicate identities, reserved sources and editab
     await assert.rejects(Codec.parseWorkbook(await workbook({ normal: original.replace('</worksheet>', '<mergeCells><mergeCell ref="L2:M2"/></mergeCells></worksheet>') }), { filename: 'German.xlsx' }), /Merged editable/);
 });
 test('class exports patch only the chosen target while retaining exact text, native parts and other cells', async () => {
-    const bytes = await workbook({ normal: classDialogue(), macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender' });
+    const bytes = await workbook({ normal: classDialogue(), macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender', parserVersion: 'clienttext-v2' });
     const unit = get(parsed, 'dialogue'), current = field(unit, 'Text', 'StrFourb'), authored = '=raw @\\n literal\r\nactual\n_x0020_ <continue> [Tag|display]';
     const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: authored } } }, { parserVersion: 'clienttext-v2' });
     const reopened = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'gender' }), result = get(reopened, 'dialogue');
@@ -148,8 +157,99 @@ test('v1 snapshots replay their metadata authority and cannot silently export as
     assert.deepEqual(await after.file('xl/vbaProject.bin').async('uint8array'), await before.file('xl/vbaProject.bin').async('uint8array'));
     const current = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender' });
     await assert.rejects(Codec.exportWorkbook(bytes, current, {}, { parserVersion: 'clienttext-v1' }), /parser version does not match/);
-    await assert.rejects(Codec.parseWorkbook(bytes, { ...options, parserVersion: 'clienttext-v3' }), /Unsupported ClientText parser version/);
-    await assert.rejects(Codec.exportWorkbook(bytes, { ...legacy, parserVersion: 'clienttext-v3' }, {}), /Unsupported ClientText parser version/);
+    await assert.rejects(Codec.parseWorkbook(bytes, { ...options, parserVersion: 'clienttext-v4' }), /Unsupported ClientText parser version/);
+    await assert.rejects(Codec.exportWorkbook(bytes, { ...legacy, parserVersion: 'clienttext-v4' }, {}), /Unsupported ClientText parser version/);
+});
+test('v3 accepts absent shared-string value elements without weakening present indexes or formula guards', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Gender'), cell('E1', 'Context'), '<c r="F1" t="s"/>']),
+        row(2, [cell('A2', 'blank'), cell('B2', 'English'), '<c r="C2" s="2" t="s"/>', '<c r="D2" s="3" t="s"/>', '<c r="E2" t="s"/>']),
+        row(3, ['<c r="A3" t="s"/>', '<c r="B3" t="s"/>', '<c r="C3" t="s"/>']),
+    ]);
+    const bytes = await workbook({ normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx' }), unit = get(parsed, 'blank');
+    assert.equal(parsed.parserVersion, 'clienttext-v3'); assert.equal(parsed.units.filter(item => item.sheet === 'Normal').length, 1);
+    assert.equal(field(unit, 'Name').target, ''); assert.equal(field(unit, 'Name').originalFill, 'FA8072'); assert.equal(field(unit, 'Name').originalMissing, true);
+    assert.equal(field(unit, 'Gender').target, ''); assert.equal(field(unit, 'Gender').outdated, true); assert.deepEqual(unit.metadata, { Context: '' });
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
+    for (const parserVersion of ['clienttext-v1', 'clienttext-v2'])
+        await assert.rejects(Codec.parseWorkbook(bytes, { filename: 'French.xlsx', parserVersion }), /Invalid shared-string reference/);
+    for (const badValue of ['<v/>', '<v></v>', '<v>bad</v>', '<v>-1</v>', '<v>1.0</v>', '<v>1</v>']) {
+        const malformed = normal.replace('<c r="C2" s="2" t="s"/>', '<c r="C2" s="2" t="s">' + badValue + '</c>');
+        await assert.rejects(Codec.parseWorkbook(await workbook({ normal: malformed, replace: { 'xl/sharedStrings.xml': `<sst xmlns="${NS}"><si><t>Only one value</t></si></sst>` } }), { filename: 'French.xlsx' }), /Invalid shared-string reference/);
+    }
+    for (const coordinate of ['A2', 'B2', 'C2', 'D2']) {
+        const guarded = normal.replace(new RegExp('<c\\b[^>]*?\\br="' + coordinate + '"[^>]*?(?:/>|>[\\s\\S]*?</c>)'), '<c r="' + coordinate + '" t="s"><f>1+1</f></c>');
+        await assert.rejects(Codec.parseWorkbook(await workbook({ normal: guarded }), { filename: 'French.xlsx' }), /Formula/);
+    }
+    const orphan = normal.replace('<c r="B3" t="s"/>', cell('B3', 'Unidentified source'));
+    await assert.rejects(Codec.parseWorkbook(await workbook({ normal: orphan }), { filename: 'French.xlsx' }), /Nonempty row has no ID/);
+});
+const namedForms = () => sheet([
+    row(1, [cell('A1', 'ID'), cell('B1', 'Display Name'), cell('C1', 'Normal Translation'), cell('D1', 'Possessive Translation'), cell('E1', 'Notes')]),
+    row(2, [cell('A2', 'optional'), cell('B2', ' Raw English @\\n\r\nactual '), cell('C2', 'Normal target', 1), empty('D2', 1), cell('E2', 'Source note')]),
+    row(3, [cell('A3', 'required'), cell('B3', 'New English'), empty('C3', 1), empty('D3', 2)]),
+    row(4, [cell('A4', 'outdated'), cell('B4', 'Changed English'), cell('C4', 'Old normal', 3), empty('D4', 3)]),
+    row(5, [cell('A5', 'filled'), cell('B5', 'Original English'), cell('C5', 'Original normal', 1), cell('D5', 'Original possessive', 1)]),
+    row(6, [cell('A6', 'audio'), cell('B6', '[NOAUDIO]'), empty('C6', 2), empty('D6', 2)]),
+]);
+const namedWorkbook = normal => workbook({ normal, replace: { 'xl/workbook.xml': `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="BaseItemTypes" sheetId="1" r:id="rId1"/><sheet name="Words_Gender" sheetId="2" r:id="rId2"/></sheets></workbook>` } });
+test('v3 BaseItemTypes named forms share exact English but keep identities and requiredness distinct', async () => {
+    const bytes = await namedWorkbook(namedForms()), parsed = await Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx', language: 'Turkish' });
+    const unit = get(parsed, 'optional', 'BaseItemTypes'), normal = field(unit, 'Display Name', 'Normal Translation'), possessive = field(unit, 'Display Name', 'Possessive Translation');
+    assert.equal(normal.id, '["Display Name","Normal Translation"]'); assert.equal(possessive.id, '["Display Name","Possessive Translation"]');
+    for (const current of [normal, possessive]) {
+        assert.equal(current.kind, 'form'); assert.equal(current.group, 'Display Name'); assert.equal(current.sourceCell, 'B2'); assert.equal(current.source, ' Raw English @\\n\r\nactual ');
+        assert.equal(State.isNamedForm(current), true); assert.equal(State.allowsNonexistent(current), false);
+    }
+    assert.equal(normal.targetCell, 'C2'); assert.equal(possessive.targetCell, 'D2'); assert.equal(normal.required, true); assert.equal(possessive.required, false);
+    const missing = get(parsed, 'required', 'BaseItemTypes');
+    assert.equal(field(missing, 'Display Name', 'Normal Translation').originalMissing, true, 'Normal remains required when an active English field has an unmarked blank');
+    assert.equal(field(missing, 'Display Name', 'Possessive Translation').originalMissing, true);
+    const outdated = field(get(parsed, 'outdated', 'BaseItemTypes'), 'Display Name', 'Possessive Translation');
+    assert.equal(outdated.required, false); assert.equal(outdated.originalMissing, false); assert.equal(outdated.outdated, true);
+    assert.equal(field(get(parsed, 'filled', 'BaseItemTypes'), 'Display Name', 'Possessive Translation').required, true);
+    assert.equal(get(parsed, 'audio', 'BaseItemTypes').fields.some(current => current.required || current.originalMissing || current.outdated), false);
+    assert.equal(unit.developerNotes, 'Source note'); assert.deepEqual(unit.metadata, {}); assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
+    assert.equal(parsed.warnings.length, 0); assert.doesNotThrow(() => parsed.units.forEach(State.normalizeUnit));
+    for (const parserVersion of ['clienttext-v1', 'clienttext-v2'])
+        await assert.rejects(Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx', parserVersion }), /no recognized translation fields/);
+    const descriptor = await State.buildDescriptors(parsed.units, [{ role: 'normal', hash: parsed.artifactHash, parserVersion: parsed.parserVersion }]);
+    assert.equal(descriptor.descriptors[0].parserVersion, 'clienttext-v3');
+    await assert.rejects(Codec.exportWorkbook(bytes, parsed, {}, { parserVersion: 'clienttext-v2' }), /parser version does not match/);
+});
+test('named forms require the exact supported source cluster and preserve literal NONEXISTENT without sentinel semantics', async () => {
+    for (const normal of [namedForms().replace('Display Name</t>', 'Other source</t>'), namedForms().replace('r="D1"', 'r="F1"'),
+        namedForms().replace(cell('D1', 'Possessive Translation'), ''), namedForms().replace(cell('D1', 'Possessive Translation'), cell('D1', 'Normal Translation'))])
+        await assert.rejects(Codec.parseWorkbook(await namedWorkbook(normal), { filename: 'Turkish.xlsx' }), /Unsupported named-form columns/);
+    await assert.rejects(Codec.parseWorkbook(await workbook({ normal: namedForms() }), { filename: 'Turkish.xlsx' }), /Unsupported named-form columns/);
+    const bytes = await namedWorkbook(namedForms()), parsed = await Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx' }), unit = get(parsed, 'optional', 'BaseItemTypes');
+    for (const current of unit.fields) {
+        const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: ' NONEXISTENT ' } } });
+        const reopened = await Codec.parseWorkbook(output, { filename: 'Turkish.xlsx' }), exported = get(reopened, 'optional', 'BaseItemTypes').fields.find(item => item.id === current.id);
+        assert.equal(exported.target, ' NONEXISTENT '); assert.equal(State.allowsNonexistent(exported), false, 'A named-form literal is not a grammatical absent-form sentinel');
+    }
+    const sentinel = await Codec.parseWorkbook(await namedWorkbook(namedForms().replace('Normal target</t>', 'NONEXISTENT</t>')), { filename: 'Turkish.xlsx' });
+    assert.equal(sentinel.warnings.some(warning => warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
+    for (const coordinate of ['B2', 'C2', 'D2']) {
+        const guarded = namedForms().replace(new RegExp('<c\\b[^>]*?\\br="' + coordinate + '"[^>]*?(?:/>|>[\\s\\S]*?</c>)'), '<c r="' + coordinate + '"><f>1+1</f><v>2</v></c>');
+        await assert.rejects(Codec.parseWorkbook(await namedWorkbook(guarded), { filename: 'Turkish.xlsx' }), /Formula/);
+    }
+});
+test('named-form exports patch each independent target without rewriting English, notes or neighboring cells', async () => {
+    const bytes = await namedWorkbook(namedForms()), parsed = await Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx' }), unit = get(parsed, 'optional', 'BaseItemTypes');
+    const before = await JSZip.loadAsync(bytes);
+    for (const form of ['Normal Translation', 'Possessive Translation']) {
+        const current = field(unit, 'Display Name', form), authored = '=Raw ı İ @\\n literal\r\nactual\n_x0020_ <continue> [Tag|display]';
+        const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: authored } } });
+        const reopened = await Codec.parseWorkbook(output, { filename: 'Turkish.xlsx' }), result = get(reopened, 'optional', 'BaseItemTypes');
+        assert.equal(field(result, 'Display Name', form).target, authored);
+        for (const original of unit.fields) if (original.id !== current.id) assert.deepEqual(result.fields.find(item => item.id === original.id), original);
+        assert.equal(result.developerNotes, unit.developerNotes); assert.deepEqual(result.metadata, unit.metadata);
+        const after = await JSZip.loadAsync(output), omitTarget = text => text.replace(new RegExp('<c\\b[^>]*?\\br="' + current.targetCell + '"[^>]*?(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
+        for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
+            assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+        assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')));
+    }
 });
 test('headers map notes, optional Gender and sparse forms without changing raw text', async () => {
     const bytes = await workbook(), progress = [];

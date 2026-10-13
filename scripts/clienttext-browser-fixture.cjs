@@ -121,6 +121,23 @@ async function workbook(JSZip, role, genderAudit = false, classSample = null) {
     return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
+async function turkishWorkbook(JSZip) {
+    const zip = new JSZip(), names = ['BaseItemTypes', 'Words'];
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>');
+    zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${names.map((name,i)=>`<sheet name="${name}" sheetId="${i+1}" r:id="rId${i+1}"/>`).join('')}</sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${names.map((_,i)=>`<Relationship Id="rId${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`).join('')}</Relationships>`);
+    zip.file('xl/styles.xml', styles);
+    zip.file('xl/worksheets/sheet1.xml', sheet([
+        row(1, [cell('A1','ID'),cell('B1','Display Name'),cell('C1','Normal Translation'),cell('D1','Possessive Translation')]),
+        row(2, [cell('A2','named'),cell('B2','Sword {0}'),cell('C2','Normal {0}',1),cell('D2','Possessive {0}',1)]),
+        row(3, [cell('A3','blank'),cell('B3','Blank item'),'<c r="C3" s="2" t="s"/>','<c r="D3" s="1" t="s"/>']),
+        row(4, [cell('A4','outdated'),cell('B4','Updated item'),cell('C4','Current',1),'<c r="D4" s="3" t="s"/>'])
+    ]));
+    zip.file('xl/worksheets/sheet2.xml', sheet([row(1,[cell('A1','ID'),cell('B1','Text'),cell('C1','Translation')]),row(2,[cell('A2','untouched'),cell('B2','Other source'),cell('C2','Other target',1)])]));
+    zip.file('xl/metadata', new Uint8Array([0,255,8,99]));
+    return zip.generateAsync({ type:'nodebuffer', compression:'DEFLATE' });
+}
+
 async function run() {
     const apiRoot = resolve(process.env.SDEDITOR_FIXTURE_API_ROOT || join(__dirname, '../../SDEditor-API'));
     const fromApi = createRequire(join(apiRoot, 'package.json'));
@@ -157,7 +174,7 @@ async function run() {
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
     const classOpeningOnly = process.argv.includes('--class-editor-opening-only');
-    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only');
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only'), turkishOnly = process.argv.includes('--turkish-forms-only');
     let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
     if (classOnly) {
         const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
@@ -172,8 +189,8 @@ async function run() {
             console.log('Class browser fixture: actual German sample verified, 68,484 IDs and zero warnings.');
         }
     }
-    const normal = await workbook(JSZip, 'normal', genderOnly), gender = await workbook(JSZip, 'gender', false, classSample);
-    const files = [{ name: genderOnly || classOnly ? 'German.xlsm' : 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
+    const normal = turkishOnly ? await turkishWorkbook(JSZip) : await workbook(JSZip, 'normal', genderOnly), gender = await workbook(JSZip, 'gender', false, classSample);
+    const files = turkishOnly ? [{name:'Turkish.xlsx',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',buffer:normal}] : [{ name: genderOnly || classOnly ? 'German.xlsm' : 'French_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
         { name: genderOnly || classOnly ? 'German_Gender.xlsm' : 'French_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }];
     const statDescription = { filepath: 'specific_skill_stat_descriptions/explosive_grenade/fire.txt', filedir: 'specific_skill_stat_descriptions/explosive_grenade', filename: 'fire.txt', name: 'fire',
         stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], French: [''] } };
@@ -210,7 +227,7 @@ async function run() {
             const languages = await page.evaluate(() => window.__clientFixtureApp.ctTeamOptions.slice());
             const managerFiles = languages.flatMap(language => [
                 { name: language + '_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
-                ...(['French', 'German'].includes(language) ? [{ name: language + '_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }] : [])
+                ...(['French','German','Polish','Portuguese','Russian','Spanish'].includes(language) ? [{ name: language + '_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }] : [])
             ]);
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
             assert.equal(await upload.locator('.ctUploadPolicy').count(), 0, 'Content-role configuration remains admin-only');
@@ -282,6 +299,71 @@ async function run() {
             console.log(JSON.stringify({ status: 'PASS', managerAccessOnly: true, languages: languages.length,
                 results: ['Unassigned manager publishes and opens every ClientText language', 'Manager saves Thai, collects and ends its window, reopens it, and downloads paired French workbooks', 'Translator catalog and management controls remain scoped; role policy remains admin-only'] }, null, 2));
             return;
+        }
+        if (turkishOnly) {
+            await page.evaluate(async()=>{const vm=window.__clientFixtureApp;vm.lang='Turkish';vm.autoOpenNextFile=false;await vm.saveSettings();});
+            await page.getByRole('button',{name:'Upload next version',exact:true}).click();
+            const upload=page.getByRole('region',{name:'Content upload'}),workspace=page.getByRole('region',{name:'ClientText workspace'});
+            await upload.locator('input[type=text]').fill('Turkish v3 browser fixture');await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.getByRole('button',{name:'Prepare and validate',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
+            assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
+            assert.deepEqual(await page.evaluate(()=>window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(d=>d.parserVersion)),['clienttext-v3']);
+            await upload.getByRole('button',{name:'Publish complete groups',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
+            assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
+            const accepted=await page.evaluate(()=>({version:window.__clientFixtureApp.managedSelectedVersion,group:window.__clientFixtureApp.ctGroups.find(group=>group.language==='Turkish')}));
+            assert.ok(accepted.group);await page.evaluate(async({version,group})=>window.__clientFixtureApp.ctOpenGroup(version,group,'Turkish'),accepted);
+            await workspace.waitFor();await page.waitForFunction(()=>!window.__clientFixtureApp.ctBusy&&!window.__clientFixtureApp.workspaceInitializationActive);
+            const id=record=>JSON.stringify(['normal','BaseItemTypes',record]),fid=form=>JSON.stringify(['Display Name',form+' Translation']);
+            const target=form=>workspace.getByRole('textbox',{name:'Display Name '+form+' Translation',exact:true});
+            const active=async form=>page.waitForFunction(field=>document.activeElement?.dataset.ctTarget===field,fid(form));
+            const choose=async record=>{if(await page.evaluate(()=>window.__clientFixtureApp.ctEditor))await workspace.getByRole('button',{name:'Close',exact:true}).click();await workspace.getByRole('button',{name:record,exact:true}).click();await page.waitForFunction(unitId=>window.__clientFixtureApp.ctSelection===unitId&&!window.__clientFixtureApp.ctBusy,id(record));};
+            const settleSave=async(record,values)=>{
+                await waitForAsync(page,async({unitId,values})=>{const vm=window.__clientFixtureApp,saved=(await vm._ctStore.getSaved(vm.ctWorkspace.scope))[unitId];return !vm.ctBusy&&saved&&Object.entries(values).every(([key,value])=>saved.values[key]===value)&&!(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length;},{unitId:id(record),values});
+                return page.evaluate(async unitId=>{const vm=window.__clientFixtureApp;return{saved:(await vm._ctStore.getSaved(vm.ctWorkspace.scope))[unitId],original:await vm._ctStore.getUnit(vm.ctWorkspace.scope,unitId),history:await vm._ctStore.listHistory(vm.ctWorkspace.scope,unitId)};},id(record));
+            };
+            await page.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','BaseItemTypes']);});
+            await choose('named');await active('Normal');
+            const themeChecks=[];
+            for(const theme of ['light','grey','dark','modern-dark']){
+                await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
+                for(const full of [true,false]){
+                    if(!full){await page.keyboard.press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await page.evaluate(async()=>{const vm=window.__clientFixtureApp;vm.inlineEditor=true;await vm.$nextTick();});await workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:'named',exact:true})}).click({position:{x:5,y:5}});}
+                    else if(!await page.evaluate(()=>window.__clientFixtureApp.ctEditor)){await target('Normal').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);}
+                    await target('Normal').focus();await target('Normal').press('Tab');await active('Possessive');await target('Possessive').press('Shift+Tab');await active('Normal');
+                    assert.deepEqual(await workspace.locator('.ctNamedFormGrid tbody th').allTextContents(),['Normal','Possessive']);
+                    assert.equal(await workspace.locator('[data-ct-source]').count(),1,'English renders once');
+                    const bounds=await workspace.locator('.ctNamedFormGrid').evaluate(grid=>{const b=grid.getBoundingClientRect();return{left:b.left,right:b.right,viewport:innerWidth};});assert.ok(bounds.left>=0&&bounds.right<=bounds.viewport);
+                    themeChecks.push({theme,editor:full?'full':'inline'});
+                }
+            }
+            await target('Possessive').focus();await target('Possessive').evaluate(input=>input.setSelectionRange(2,7));await target('Possessive').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await active('Possessive');
+            assert.deepEqual(await target('Possessive').evaluate(input=>[input.selectionStart,input.selectionEnd]),[2,7]);
+            await target('Possessive').press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await active('Possessive');
+            assert.deepEqual(await target('Possessive').evaluate(input=>[input.selectionStart,input.selectionEnd]),[2,7]);
+            await target('Normal').fill('Non');await target('Normal').press('Tab');await active('Possessive');assert.equal(await target('Normal').inputValue(),'Non','Tab does not expand named-form sentinel');
+            const normalValue='  Normal {0}\nindependent  ',possessiveValue='  Possessive {0}\nother  ';
+            await target('Normal').fill(normalValue);await target('Possessive').fill(possessiveValue);await target('Possessive').press('Control+s');
+            const values={[fid('Normal')]:normalValue,[fid('Possessive')]:possessiveValue},first=await settleSave('named',values);
+            assert.equal(first.original.fields[0].target,'Normal {0}');assert.equal(first.original.fields[1].target,'Possessive {0}');
+            assert.deepEqual(first.history.find(entry=>entry.after.jobId===first.saved.jobId).after.values,values);
+            assert.ok(first.saved.serverRevision>0,'v3 API acknowledges both independent fields');
+            await target('Possessive').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);
+            await workspace.locator('.ctTools').getByRole('button',{name:/History$/}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctHistoryLoading&&window.__clientFixtureApp.ctHistory.length);
+            await workspace.locator('.ctHistoryEvent').first().getByRole('button',{name:'Compare change',exact:true}).click();
+            const viewer=page.getByRole('dialog',{name:'Compare · BaseItemTypes · named',exact:true});await viewer.waitFor();
+            for(const form of ['Normal','Possessive'])assert.equal(await viewer.locator('.ctHistoryDiffField[data-form="'+form+' Translation"] .ctHistory-after .ctHistoryTarget').textContent(),values[fid(form)]);
+            await viewer.getByRole('button',{name:'Close history comparison',exact:true}).click();await workspace.getByRole('button',{name:'Close',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor);
+            await workspace.getByRole('button',{name:'Versions',exact:true}).click();await bootstrap();
+            await page.evaluate(async({version,group})=>window.__clientFixtureApp.ctOpenGroup(version,group,'Turkish'),accepted);await workspace.waitFor();await page.waitForFunction(()=>!window.__clientFixtureApp.ctBusy&&!window.__clientFixtureApp.workspaceInitializationActive);
+            await page.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','BaseItemTypes']);});await choose('named');
+            assert.equal(await target('Normal').inputValue(),normalValue);assert.equal(await target('Possessive').inputValue(),possessiveValue);
+            await choose('blank');assert.deepEqual(await page.evaluate(()=>{const vm=window.__clientFixtureApp,fields=vm.ctCurrentUnit.fields,status=vm.ctStatus();return fields.map(field=>({form:field.form,required:field.required,missing:status.fields[field.id].missing}));}),[{form:'Normal Translation',required:true,missing:true},{form:'Possessive Translation',required:false,missing:false}]);
+            await target('Normal').press('Control+s');await settleSave('blank',{[fid('Normal')]:'',[fid('Possessive')]:''});
+            await choose('outdated');assert.equal(await page.evaluate(()=>{const vm=window.__clientFixtureApp;return vm.ctStatus().fields[JSON.stringify(['Display Name','Possessive Translation'])].outdated;}),true);
+            await workspace.getByRole('button',{name:'Close',exact:true}).click();const downloaded=page.waitForEvent('download');await workspace.getByRole('button',{name:'Download workbooks',exact:true}).click();const download=await downloaded,output=readFileSync(await download.path());
+            const parsed=await Codec.parseWorkbook(output,{filename:'Turkish.xlsx',role:'normal',language:'Turkish'}),edited=parsed.units.find(unit=>unit.recordId==='named');assert.deepEqual(Object.fromEntries(edited.fields.map(field=>[field.id,field.target])),values);
+            const before=await JSZip.loadAsync(normal),after=await JSZip.loadAsync(output);for(const part of ['[Content_Types].xml','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/worksheets/sheet2.xml','xl/metadata'])assert.deepEqual(await after.file(part).async('uint8array'),await before.file(part).async('uint8array'));
+            assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,results:['v3 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
         }
         const captureTrustedCache = async () => {
             const preparedUnits=[],preparedAssets=[],legacyAssets=[];
@@ -371,7 +453,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
             const prepared = await page.evaluate(() => ({ warnings: window.__clientFixtureApp.ctPrepared[0].assets.flatMap(asset => asset.parsed.warnings),
                 versions: window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(descriptor => descriptor.parserVersion) }));
-            assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v2','clienttext-v2'] });
+            assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v3','clienttext-v3'] });
             await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
             await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'German')));

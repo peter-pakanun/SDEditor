@@ -3,8 +3,12 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
+const JSZip = require('../../SDEditor-API/node_modules/jszip');
+const XMLParser = require('../public/vendor/fast-xml-parser-5.11.2.min.js').default;
 const Codec = require('../public/clientTextCodec.js');
 const State = require('../public/clientTextState.js');
+const allLanguages = process.argv.includes('--all-languages');
 const samples = process.argv.includes('--german') ? [
     ['German.xlsm', 'normal', 'German', 89902, 206],
     ['German_Gender.xlsm', 'gender', 'German', 68484, 10],
@@ -13,10 +17,81 @@ const samples = process.argv.includes('--german') ? [
     ['French_PoE2.xlsm', 'normal', 'French', 89659, 206],
     ['French_Gender_PoE2.xlsm', 'gender', 'French', 68250, 10],
 ];
+const allLanguageSamples = [
+    ...['French', 'German', 'Polish', 'Portuguese', 'Russian', 'Spanish'].flatMap(language => [
+        [language + '.xlsx', 'normal', language, 90500, 207],
+        [language + '_Gender.xlsx', 'gender', language, 68682, 10],
+    ]),
+    ...['Thai', 'Japanese', 'Korean', 'Traditional Chinese', 'Turkish'].map(language => [language + '.xlsx', 'normal', language, 150808, 212]),
+];
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+function selectedEdits(parsed) {
+    const selected = [], coordinates = new Set();
+    function choose(predicate) {
+        for (const unit of parsed.units) for (const field of unit.fields) if (predicate(field, unit) && !coordinates.has(unit.sheet + '/' + field.targetCell)) {
+            coordinates.add(unit.sheet + '/' + field.targetCell); selected.push({ unit, field }); return;
+        }
+    }
+    choose(field => field.kind === 'text' && field.source.trim() && !State.audioOnly(field.source));
+    choose(field => field.kind === 'gender');
+    choose(field => field.kind === 'form' && !State.isNamedForm(field) && field.source.trim() && !State.audioOnly(field.source));
+    choose(field => State.CLASS_FORMS.includes(field.form) && field.target.trim());
+    for (const form of ['Normal Translation', 'Possessive Translation']) choose(field => State.isNamedForm(field) && field.form === form);
+    assert.ok(selected.length, 'The workbook must provide an editable target for preservation validation');
+    return selected;
+}
+async function validateTargetedPatches(bytes, parsed) {
+    const selected = selectedEdits(parsed), records = {}, editsByPath = new Map();
+    for (const { unit, field } of selected) {
+        const authored = '=Literal @\\n raw\r\nactual\nไทย Türkçe _x0020_ <continue> [Tag|display] · ' + field.id;
+        (records[unit.id] ||= { values: {} }).values[field.id] = authored;
+        const worksheet = parsed.sheets.find(item => item.name === unit.sheet);
+        if (!editsByPath.has(worksheet.path)) editsByPath.set(worksheet.path, new Map());
+        editsByPath.get(worksheet.path).set(field.targetCell, authored);
+    }
+    const output = await Codec.exportWorkbook(bytes, parsed, records), before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    assert.deepEqual(Object.keys(after.files).filter(name => !after.files[name].dir).sort(), Object.keys(before.files).filter(name => !before.files[name].dir).sort());
+    const parser = new XMLParser({ ignoreAttributes: false, parseTagValue: false, trimValues: false, processEntities: true, htmlEntities: true, alwaysCreateTextNode: true });
+    for (const name of Object.keys(before.files)) {
+        if (before.files[name].dir || name === 'xl/styles.xml') continue;
+        if (!editsByPath.has(name)) {
+            assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), 'Untouched workbook part: ' + name);
+            continue;
+        }
+        const original = await before.file(name).async('string'), changed = await after.file(name).async('string');
+        let originalRemainder = original, changedRemainder = changed;
+        for (const [coordinate, authored] of editsByPath.get(name)) {
+            const pattern = new RegExp('<((?:[\\w.-]+:)?c)\\b[^>]*?\\br="' + coordinate + '"[^>]*?(?:/>|>[\\s\\S]*?</\\1\\s*>)', 'g');
+            const oldCells = Array.from(original.matchAll(pattern)), newCells = Array.from(changed.matchAll(pattern));
+            assert.equal(newCells.length, 1, 'Exactly one edited target exists: ' + name + '!' + coordinate);
+            assert.ok(oldCells.length <= 1, 'An original target coordinate must never be duplicated');
+            const target = parser.parse(newCells[0][0]);
+            const cell = target[Object.keys(target).find(key => key === 'c' || key.endsWith(':c'))];
+            const inline = cell.is || cell[Object.keys(cell).find(key => key.endsWith(':is'))];
+            const text = inline.t || inline[Object.keys(inline).find(key => key.endsWith(':t'))];
+            const value = String(text['#text'] ?? '').replace(/_x([0-9a-f]{4})_/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+            assert.equal(value, authored, 'Authored target preserves raw text: ' + name + '!' + coordinate);
+            assert.equal(cell['@_t'], 'inlineStr'); assert.equal(Object.keys(cell).some(key => key === 'f' || key.endsWith(':f')), false);
+            // All production sample targets have original cells. This also
+            // verifies that a self-closing blank patch cannot consume a neighbor.
+            assert.equal(oldCells.length, 1, 'Production target has an original cell: ' + name + '!' + coordinate);
+            originalRemainder = originalRemainder.replace(pattern, '<validated-target coordinate="' + coordinate + '"/>');
+            changedRemainder = changedRemainder.replace(pattern, '<validated-target coordinate="' + coordinate + '"/>');
+        }
+        assert.equal(changedRemainder, originalRemainder, 'English, metadata, notes and unrelated cells remain byte-exact: ' + name);
+    }
+    return selected.length;
+}
 (async () => {
-    const directory = process.argv.slice(2).find(value => !value.startsWith('--')) || 'C:/Users/lpeac/Downloads/2026-10-05_POE2';
-    for (const [filename, role, language, expectedUnits, expectedSheets] of samples) {
-        const started = performance.now(), bytes = await fs.readFile(path.join(directory, filename));
+    const argumentDirectory = process.argv.slice(2).find(value => !value.startsWith('--'));
+    if (allLanguages && !argumentDirectory) throw new Error('--all-languages requires the supplied export directory as a positional argument.');
+    const directory = argumentDirectory || 'C:/Users/lpeac/Downloads/2026-10-05_POE2';
+    if (allLanguages) {
+        const filenames = (await fs.readdir(directory)).filter(name => /\.xlsx$/i.test(name)).sort();
+        assert.deepEqual(filenames, allLanguageSamples.map(sample => sample[0]).sort(), 'The supplied all-language export contains exactly the expected 17 workbooks; ZIP files are ignored');
+    }
+    for (const [filename, role, language, expectedUnits, expectedSheets] of allLanguages ? allLanguageSamples : samples) {
+        const started = performance.now(), originalPath = path.join(directory, filename), bytes = await fs.readFile(originalPath), originalHash = sha256(bytes);
         const parsed = await Codec.parseWorkbook(bytes, { filename, role, language });
         assert.equal(parsed.units.length, expectedUnits); assert.equal(parsed.sheets.length, expectedSheets);
         assert.equal(new Set(parsed.units.map(unit => unit.id)).size, expectedUnits);
@@ -35,7 +110,7 @@ const samples = process.argv.includes('--german') ? [
                 originalJsonBytes: measuredBytes(parsed.units), compactJsonBytes: measuredBytes(manifest.units),
                 treeJsonBytes: Buffer.byteLength(JSON.stringify(manifest.trees)), heapMb: Math.round(process.memoryUsage().heapUsed / 1048576) };
         }
-        if (process.argv.includes('--trusted')) {
+        if (allLanguages || process.argv.includes('--trusted')) {
             const descriptorStarted = performance.now();
             const preparation = await State.buildDescriptors(parsed.units, [{ role, hash: parsed.artifactHash, parserVersion: parsed.parserVersion }]);
             const descriptorMs = Math.round(performance.now() - descriptorStarted), descriptor = preparation.descriptors[0];
@@ -49,9 +124,16 @@ const samples = process.argv.includes('--german') ? [
             manifestFacts = { ...manifestFacts, descriptorMs, publicationMetadataBytes, storageProtocol: preparation.storageProtocol,
                 baselineId: descriptor.baselineId, summary: preparation.summaries[role] };
         }
+        let targetedEdits;
+        if (allLanguages) {
+            assert.equal(parsed.parserVersion, 'clienttext-v3');
+            targetedEdits = await validateTargetedPatches(bytes, parsed);
+            assert.equal(sha256(bytes), originalHash, 'Parsing/export preserves the retained input bytes');
+            assert.equal(sha256(await fs.readFile(originalPath)), originalHash, 'The supplied workbook remains unchanged on disk');
+        }
         const count = predicate => parsed.units.reduce((sum, unit) => sum + unit.fields.filter(predicate).length, 0);
         console.log(JSON.stringify({ filename, units: parsed.units.length, sheets: parsed.sheets.length,
             fields: count(() => true), missing: count(field => field.originalMissing), outdated: count(field => field.outdated),
-            warnings: parsed.warnings.length, durationMs: Math.round(performance.now() - started), ...(manifestFacts || {}) }));
+            warnings: parsed.warnings.length, durationMs: Math.round(performance.now() - started), ...(targetedEdits ? { targetedEdits, originalHash } : {}), ...(manifestFacts || {}) }));
     }
 })().catch(error => { console.error(error); process.exitCode = 1; });

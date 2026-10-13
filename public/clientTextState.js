@@ -5,11 +5,14 @@
     else root.ClientTextState = api;
 })(typeof globalThis === 'object' ? globalThis : self, function () {
     'use strict';
-    const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v2';
-    const PARSER_VERSIONS = Object.freeze(['clienttext-v1', PARSER_VERSION]);
+    const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v3';
+    const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', PARSER_VERSION]);
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
     const isClassForm = field => CLASS_FORMS.includes(typeof field === 'string' ? field : field?.kind === 'form' ? field.form : null);
+    const isNamedForm = field => field?.kind === 'form' && field.name === 'Display Name'
+        && ['Normal Translation', 'Possessive Translation'].includes(field.form);
+    const allowsNonexistent = field => field?.kind === 'form' && !isNamedForm(field);
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const copy = value => value === undefined || value === null || typeof value === 'string' || typeof value === 'boolean' ? value : JSON.parse(JSON.stringify(value));
     function canonical(value) {
@@ -401,7 +404,7 @@
     function diagnose(field, value, options = {}) {
         const text = String(value ?? ''), result = [];
         if (field.kind === 'gender') return result;
-        if (field.kind === 'form' && text.trim() === 'NONEXISTENT') return result;
+        if (allowsNonexistent(field) && text.trim() === 'NONEXISTENT') return result;
         if (audioOnly(field.source)) return result;
         const add = (level, code, message, start, end) => result.push({ level, code, message,
             ...(Number.isInteger(start) && Number.isInteger(end) ? {start,end} : {}) });
@@ -487,10 +490,10 @@
             seen.add(value);
             items.push({ ...insertion, label: insertion.label || value, matchText: value, matchTextLower: value.toLocaleLowerCase() });
         }
-        if (field.kind === 'form' && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
+        if (allowsNonexistent(field) && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
-    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
+    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };

@@ -167,9 +167,14 @@ test('identical originals reuse one cache across accounts and groups while draft
     assert.equal((await f.store.getAsset(other)).name,'Renamed.xlsx');assert.equal((await f.store.getAsset(scope)).name,'Thai.xlsx');
     await f.store.save(other,unit().id,{jobId:'bob',values:{[fieldId]:'Bob work'},reviewed:{}});
     assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Alice work');
-    const original=await f.store.getCachedOriginal(asset.hash,'clienttext-v2','normal');assert.equal(original.units[0].fields[0].target,'Thai');
+    const original=await f.store.getCachedOriginal(asset.hash,S.PARSER_VERSION,'normal');assert.equal(original.units[0].fields[0].target,'Thai');
     const v1={...other,groupId:'legacy-parser'};await f.store.import(v1,{units:[unit('Legacy source')],assets:[{...asset,parserVersion:'clienttext-v1'}]});
     assert.equal(f.tables.get(CT.stores.cacheMeta).size,2);assert.equal((await f.store.getUnits(v1))[0].fields[0].source,'Legacy source');
+    const v2={...other,groupId:'class-parser'};await f.store.import(v2,{units:[unit('Accepted v2 source')],assets:[{...asset,parserVersion:'clienttext-v2'}]});
+    assert.equal(f.tables.get(CT.stores.cacheMeta).size,3);
+    assert.equal((await f.store.getCachedOriginal(asset.hash,'clienttext-v2','normal')).units[0].fields[0].source,'Accepted v2 source');
+    assert.equal((await f.store.getCachedOriginal(asset.hash,'clienttext-v1','normal')).units[0].fields[0].source,'Legacy source');
+    assert.equal((await f.store.getCachedOriginal(asset.hash,S.PARSER_VERSION,'normal')).units[0].fields[0].source,'Source');
     const operation=(await f.store.getOutbox(other))[0];assert.equal(operation.storageProtocol,S.STORAGE_PROTOCOL);assert.equal(operation.proof,undefined);assert.equal(operation.baseline,undefined);
     assert.deepEqual(operation.clientFacts,S.clientFacts(unit()));assert.deepEqual(operation.originalValues,S.originalValues(unit()));
 });

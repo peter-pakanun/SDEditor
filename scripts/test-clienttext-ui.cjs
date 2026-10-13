@@ -15,7 +15,7 @@ function harness(changes={}){
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
-        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
+        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS,clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
         appConfirm:async()=>true,
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
@@ -1288,6 +1288,69 @@ function keyboardHarness(original=worksheetUnit(),changes={}){
     return {...h,inputFor,inputs,event,focuses,row,region,controls,documentControls};
 }
 
+function namedFormUnit(id='NamedForms',row=2){
+    const original=namedUnit(id),base=original.fields[0];
+    original.sheet='BaseItemTypes';original.id=JSON.stringify(['normal',original.sheet,id]);
+    original.fields=['Normal Translation','Possessive Translation'].map((form,index)=>({...base,id:JSON.stringify(['Display Name',form]),name:'Display Name',kind:'form',form,
+        group:'Display Name',source:'Exalted Orb {0}',target:index?'Yüce Küresi {0}':'Yüce Küre {0}',sourceCell:'B'+row,targetCell:(index?'D':'C')+row,required:true}));
+    return original;
+}
+
+for(const full of [false,true])test(`named Normal/Possessive forms retain worksheet navigation and literal NONEXISTENT in ${full?'full':'inline'} mode`,async()=>{
+    const original=namedFormUnit(),{app,inputFor,event,focuses,window}=keyboardHarness(original,{ctEditor:full}),[normal,possessive]=original.fields;
+    assert.deepEqual(Array.from(app.ctNamedForms(app.ctFieldGroups[0]),field=>app.ctNamedFormLabel(field)),['Normal','Possessive']);
+    assert.equal(app.ctDefaultForms(app.ctFieldGroups[0]).length,0);assert.equal(app.ctGroupSources(app.ctFieldGroups[0]).length,1);
+    assert.match(window.ClientTextUI.fieldsComponent.template,/ctNamedFormGrid/);assert.match(window.ClientTextUI.fieldsComponent.template,/<th>Form<\/th><th>Translation<\/th>/);
+    app.ctValues[normal.id]='NON';const input=inputFor(original,normal);input.focus();input.setSelectionRange(3,3);
+    assert.equal(app.ctSuggest(normal,{target:input}),false);assert.equal(app.ctSuggest(normal,{target:input},{manual:true}),true);
+    assert.equal(app.ctCompletion.items.some(item=>item.replaceWholeField),false);
+    const injected={value:'NONEXISTENT',replaceWholeField:true};app.ctCompletion.items.push(injected);app.ctCompletion.start=0;app.ctCompletion.end=3;
+    assert.equal(app.ctApplyCompletion(normal,injected,input),false,'stale/manual whole-field sentinel items cannot expand named forms');assert.equal(app.ctValues[normal.id],'NON');
+    app.ctCloseCompletion();
+    await app.ctTargetKeydown(normal,event(normal,'Tab'));assert.equal(focuses.at(-1).fieldId,possessive.id);assert.equal(app.ctValues[normal.id],'NON');
+    await app.ctTargetKeydown(possessive,event(possessive,'Tab',{shiftKey:true}));assert.equal(focuses.at(-1).fieldId,normal.id);
+    app.ctValues[normal.id]='NONEXISTENT';app.ctSaved={[original.id]:{values:{...app.ctValues}}};
+    assert.ok(app.ctAnalyzeScanUnit(original,{variables:true}).some(issue=>issue.fieldId===normal.id),'named forms still compare required variables in committed values');
+});
+
+test('named forms save independently without changing immutable originals and learn separate Translation Memory contexts',async()=>{
+    const original=namedFormUnit(),before=clone(original),[normal,possessive]=original.fields,f=fixture();
+    await f.store.import(scope,{units:[original],assets:[asset]});const retainedBefore=await f.store.getUnit(scope,original.id);
+    const {app}=visibleFieldsHarness(original,{ctDraftDirty:true});app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    app.ctValues[normal.id]='Authored normal {0}';assert.equal(await app.ctSave(),true);
+    const saved=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id);
+    assert.equal(saved.values[normal.id],'Authored normal {0}');assert.equal(saved.values[possessive.id],before.fields[1].target);
+    assert.equal(history.at(-1).after.values[possessive.id],before.fields[1].target);assert.deepEqual(await f.store.getUnit(scope,original.id),retainedBefore);assert.deepEqual(original,before);
+    const adapter=require('../public/contentAdapters.js'),memory=adapter.clienttext.memoryUnits(original,saved.values,scope.language,{game:scope.game,saved});
+    assert.deepEqual(memory.map(match=>match.context.form),['Normal Translation','Possessive Translation']);assert.notEqual(memory[0].id,memory[1].id);
+    assert.deepEqual(adapter.clienttext.findMemory(memory,original,normal,{game:scope.game}).map(match=>match.target),['Authored normal {0}']);
+    assert.deepEqual(adapter.clienttext.findMemory(memory,original,possessive,{game:scope.game}).map(match=>match.target),[before.fields[1].target]);
+});
+
+test('Russian Gender suggestions use observed codes and retain raw custom originals in both editor modes',()=>{
+    for(const full of [false,true])for(const value of ['M','MS','F','  custom\tvalue  ',' ',' first\r\nsecond\n ']){
+        const original=worksheetUnit(),gender=original.fields.find(field=>field.kind==='gender');gender.target=value;
+        const {app}=keyboardHarness(original,{ctEditor:full,lang:'Thai',ctWorkspace:{scope:{...scope,language:'Russian'}}});
+        const suggestions=Array.from(app.ctGenderSuggestions(gender));assert.deepEqual(suggestions.slice(0,7),['MS','FS','NS','MP','FP','NP','M']);
+        assert.equal(app.ctValues[gender.id],value);if(!/[\r\n]/.test(value))assert.ok(suggestions.includes(value));
+        if(value===' ')assert.equal(app.ctGenderSuggestionLabel(value,gender),'Original value (1 space)');
+        if(value==='F')assert.equal(app.ctGenderSuggestionLabel(value,gender),'Original value: F');
+    }
+});
+
+test('named literal NONEXISTENT participates in Lookup and consistency while legacy text sentinels stay excluded',async()=>{
+    const first=namedFormUnit('First'),second=namedFormUnit('Second');
+    for(const original of [first,second])for(const field of original.fields)field.source='Exalted Orb';
+    second.fields[0].target='NONEXISTENT';
+    const {app}=visibleFieldsHarness(first,{ctUnits:[first,second],_ctUnitIndex:new Map([[first.id,first],[second.id,second]]),ctLookup:'Exalted',ctFocusedField:first.fields[0].id});
+    assert.deepEqual(Array.from(app.ctLookupResults,result=>result.target),['NONEXISTENT']);
+    assert.equal(await app.ctScan({consistency:true,variables:false,whitespace:false,dash:false,tagSyntax:false,keywords:false,decorations:false,substitutions:false,controls:false,terminology:false}),true);
+    assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='clienttext-consistency' && issue.fieldId===first.fields[0].id));
+    assert.ok(app.ctDiagnostics[second.id].some(issue=>issue.code==='clienttext-consistency' && issue.fieldId===second.fields[0].id));
+    for(const original of [first,second])for(const field of original.fields){field.kind='text';field.form=null;}
+    app._ctVisibleFields=null;assert.equal(app.ctLookupResults.some(result=>result.target==='NONEXISTENT'),false);
+});
+
 const CLASS_VARIANT_FORMS=['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
     'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb'];
 function classVariantUnit(id='ClassVariants',row=2){
@@ -1904,7 +1967,7 @@ test('manager opens every ClientText language under its own workspace scope and 
 
 test('manager upload offers every ClientText language independently of assignment and selected editor language',async()=>{
     for(const assigned of [null,'Thai']){
-        const {app}=cloudAccessHarness(harness(),assigned),requests=[],policy={clientTextStorageProtocols:[S.STORAGE_PROTOCOL],
+        const {app}=cloudAccessHarness(harness(),assigned),requests=[],policy={clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS,
             clientTextRoles:{default:['normal'],French:['normal','gender'],German:['normal','gender']}};
         app._cloud={async request(route){requests.push(route);return policy;}};
         await app.ctOpenUpload({id:'v1',name:'All language release'});
@@ -2599,7 +2662,7 @@ test('published originals replay each accepted parser version instead of reinter
             group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:scope.language,
                 assets:[{filename:'Thai_PoE2.xlsx',descriptor}]};
         app.cloudCanAccessAllLanguages=true;app._ctStore={async getMetadata(){return null;},async import(captured,payload){imports.push({captured,payload});}};
-        app._cloud={async request(route){return route==='/v1/content-policy'?{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]}:route.endsWith('/original')?new Blob(['original bytes']):{group};}};
+        app._cloud={async request(route){return route==='/v1/content-policy'?{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS}:route.endsWith('/original')?new Blob(['original bytes']):{group};}};
         app._ctWorker={async parseWorkbook(bytes,options){parsedWith.push(options.parserVersion);return{units:[original],artifactHash:'verified',
             filename:'Thai_PoE2.xlsx',parserVersion:options.parserVersion,sheets:[]};},async buildManifest(units,assets){return{descriptors:[descriptor]};}};
         await app.ctOpenGroup(version,group,scope.language,false);
@@ -2667,10 +2730,41 @@ function uploadPreparationHarness(names,game='poe2'){
         }
     };
     h.app._ctStore=new Proxy({}, {get(_target,name){return async()=>{if(name==='getCachedOriginal')return null;storeCalls.push(String(name));throw Error('Preparation must not write to storage: '+String(name));};}});
-    h.app._cloud={async request(url,options){if(url==='/v1/content-policy')return{...h.app.ctPolicy,clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};requests.push({url,options});assert.match(url,/^\/v1\/content-predecessor\?/);
+    h.app._cloud={async request(url,options){if(url==='/v1/content-policy')return{...h.app.ctPolicy,clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS};requests.push({url,options});assert.match(url,/^\/v1\/content-predecessor\?/);
         assert.equal(options?.method,undefined,'preparation only reads predecessor metadata');return{version:null,group:null};}};
     h.app.ctChooseFiles({target:{files}});return{...h,files,parseCalls,manifestCalls,requests,storeCalls};
 }
+
+test('new ClientText v3 preparation stops before parsing on an older trusted API with an actionable error',async()=>{
+    for(const names of [['Thai.xlsx'],['Polish.xlsx','Polish_Gender.xlsx']]){
+        const {app,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(names);
+        app._cloud={async request(route){assert.equal(route,'/v1/content-policy');return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};}};
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,/ClientText v3 API update/);assert.match(app.ctUploadError,/Update the API first, then retry/);
+        assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploading,false);assert.equal(parseCalls.length,0);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);assert.equal(storeCalls.length,0);
+    }
+});
+
+test('new ClientText v3 publication stops before journaling or requests on an older trusted API',async()=>{
+    const {app}=harness(),calls=[];app.ctPrepared=[{contentMode:'clienttext',originals:{descriptors:[{parserVersion:'clienttext-v3'}]}}];
+    app._cloud={async request(route){calls.push(route);return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};}};
+    app.ctRememberPublication=()=>assert.fail('Unsupported v3 must not write a publication request');
+    await app.ctPublishPrepared();assert.match(app.ctUploadError,/ClientText v3 API update/);assert.deepEqual(calls,['/v1/content-policy']);assert.equal(app.ctUploading,false);
+});
+
+test('parser capability checks retain v1/v2 replay and only require the new contract for v3',async()=>{
+    const {app}=harness();app._cloud={async request(){return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};}};
+    assert.ok(await app.ctRequireTrustedProtocol(undefined,['clienttext-v1','clienttext-v2']));
+    await assert.rejects(app.ctRequireTrustedProtocol(undefined,['clienttext-v2','clienttext-v3']),/ClientText v3 API update/);
+    app._cloud={async request(){return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:['clienttext-v1','clienttext-v2','clienttext-v3']};}};
+    assert.ok(await app.ctRequireTrustedProtocol(undefined,['clienttext-v3']));
+});
+
+test('local ClientText defaults require normal and Gender roles for all six observed paired languages',async()=>{
+    const {app,window}=harness();window.ManagedVersions={defaults:()=>({name:'Local ClientText'}),deadlineInput:()=>''};
+    await app.ctOpenUpload(null,true);
+    for(const language of ['French','German','Polish','Portuguese','Russian','Spanish'])assert.deepEqual(Array.from(app.ctPolicy.clientTextRoles[language]),['normal','gender']);
+    assert.deepEqual(Array.from(app.ctPolicy.clientTextRoles.default),['normal']);
+});
 
 for(const game of ['poe1','poe2'])test('neutral German normal/Gender filenames prepare in the explicitly selected '+game+' version',async()=>{
     const {app,files,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(['German_Gender.xlsm','German.xlsm'],game);
@@ -2805,7 +2899,7 @@ function coldOpeningHarness({cache=false}={}){
         version={id:scope.versionId,game:scope.game,branchId:scope.branchId,name:'Cold version'},group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:scope.language,assets:[{role:'normal',filename:'Thai.xlsx',artifactHash:asset.hash,descriptor}]};
     const originalAsset={...asset,parserVersion:S.PARSER_VERSION,parsed:{parserVersion:S.PARSER_VERSION,sheets:[]}};
     app._ctStore={...f.store,async getCachedOriginal(...args){return cache?{units:[original],asset:originalAsset,summary:S.emptySummary()}:null;}};
-    app._cloud={async request(route,options){calls.push(route);if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};if(route.endsWith('/original')){options.onDownloadProgress(8,8);return asset.blob;}return{group};}};
+    app._cloud={async request(route,options){calls.push(route);if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS};if(route.endsWith('/original')){options.onDownloadProgress(8,8);return asset.blob;}return{group};}};
     app._ctWorker={async parseWorkbook(bytes,options){parse.push(options);options.onProgress({phase:'Parsing sheet',processed:1,total:1,sheet:'ClientStrings'});return{...originalAsset.parsed,artifactHash:asset.hash,filename:'Thai.xlsx',units:[original]};},buildManifest(){throw Error('Trusted openings must not build manifests');}};
     return{app,original,f,calls,parse,version,group};
 }
@@ -2840,7 +2934,7 @@ test('trusted publication sends only original assets, small descriptors and spar
         {app}=harness({_ctStore:f.store,ctUploadVersion:{id:'v1',game:'poe2',branchId:'default',membershipRevision:0},ctUploadName:'Trusted release'}),requests=[];
     app.ctPrepared=[{contentMode:'clienttext',storageProtocol:S.STORAGE_PROTOCOL,language:'Thai',assignments:['Thai'],units:[original],assets:[originalAsset],originals,
         candidates:[{file:new File(['original'],'Thai.xlsx'),role:'normal',language:'Thai'}],carry:[],warnings:[]}];
-    app._cloud={async request(route,options){requests.push({route,body:clone(options?.body)});if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};
+    app._cloud={async request(route,options){requests.push({route,body:clone(options?.body)});if(route==='/v1/content-policy')return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS};
         if(route==='/v1/content-uploads' || route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'awaiting_assets'}};
         if(route.endsWith('/finalize'))return{version:{...app.ctUploadVersion,membershipRevision:1},group:{id:'published-group',contentMode:'clienttext',language:'Thai'}};return{};}};
     app.refreshManagedVersions=async()=>{};app.managedReadDetails=async()=>{};await app.ctPublishPrepared();assert.equal(app.ctUploadError,'');

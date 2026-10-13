@@ -9,7 +9,7 @@
 })(typeof globalThis === 'object' ? globalThis : self, function (root, XMLParser, State, JSZip) {
     'use strict';
     const VERSION = 1, RED = 'FA8072', ORANGE = 'FF9966';
-    const PARSER_VERSION = 'clienttext-v2', PARSER_VERSIONS = Object.freeze(['clienttext-v1', PARSER_VERSION]);
+    const PARSER_VERSION = 'clienttext-v3', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', PARSER_VERSION]);
     const FILLS = { missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' };
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
@@ -122,11 +122,14 @@
             return typeof rgb === 'string' && /^(?:[a-f0-9]{8}|[a-f0-9]{6})$/i.test(rgb) ? rgb.slice(-6).toUpperCase() : null;
         } };
     }
-    function cellValue(cell, shared, location, forbidFormula = false) {
+    function cellValue(cell, shared, location, forbidFormula = false, version = 'clienttext-v1') {
         if (!cell) return '';
         if (forbidFormula && local(cell, 'f') !== undefined) throw error('Formula in an editable or identifying cell: ' + location + '.', 'CLIENTTEXT_EDITABLE_FORMULA');
-        const type = attr(cell, 't'), raw = scalar(local(cell, 'v'));
+        const type = attr(cell, 't'), value = local(cell, 'v'), raw = scalar(value);
         if (type === 's') {
+            // Current exports write styled blank shared-string cells without
+            // a value element. Present references still require a valid index.
+            if (version === PARSER_VERSION && value === undefined) return '';
             if (!/^\d+$/.test(raw) || Number(raw) >= shared.length) throw error('Invalid shared-string reference: ' + location + '.');
             return shared[Number(raw)];
         }
@@ -141,15 +144,28 @@
         const used = new Set([id[0].column]), definitions = [], fieldIds = new Set(), gender = headers.filter(item => item.name === 'Gender');
         if (gender.length > 1) throw error('Duplicate Gender columns in sheet ' + sheet + '.');
         const at = new Map(headers.map(item => [item.column, item.name]));
+        const classForms = version !== 'clienttext-v1';
         function add(sourceColumn, targetColumn, kind, form = null) {
             const heading = kind === 'gender' ? 'Gender' : at.get(sourceColumn);
-            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || (version === PARSER_VERSION && CLASS_FORMS.includes(heading)) || NOTES.has(heading) || METADATA.has(heading)) {
+            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || (classForms && CLASS_FORMS.includes(heading)) || NOTES.has(heading) || METADATA.has(heading)) {
                 throw error('Cannot identify the English source for ' + sheet + '!' + letters(targetColumn) + '1.');
             }
             const fieldId = JSON.stringify([heading, form]);
             if (fieldIds.has(fieldId)) throw error('Duplicate source field ' + heading + ' in sheet ' + sheet + '.');
             fieldIds.add(fieldId); used.add(sourceColumn); used.add(targetColumn);
             definitions.push({ id: fieldId, name: heading, kind, sourceColumn, targetColumn, ...(form ? { form, group: heading } : {}) });
+        }
+        if (version === PARSER_VERSION) {
+            const named = headers.filter(item => ['Normal Translation', 'Possessive Translation'].includes(item.name));
+            if (named.length) {
+                const normal = named.filter(item => item.name === 'Normal Translation'), possessive = named.filter(item => item.name === 'Possessive Translation');
+                if (sheet !== 'BaseItemTypes' || normal.length !== 1 || possessive.length !== 1
+                    || at.get(normal[0].column - 1) !== 'Display Name' || possessive[0].column !== normal[0].column + 1) {
+                    throw error('Unsupported named-form columns in sheet ' + sheet + '. Expected Display Name/Normal Translation/Possessive Translation.', 'CLIENTTEXT_LAYOUT_CHANGED');
+                }
+                add(normal[0].column - 1, normal[0].column, 'form', 'Normal Translation');
+                add(normal[0].column - 1, possessive[0].column, 'form', 'Possessive Translation');
+            }
         }
         for (let index = 0; index < headers.length; index++) {
             const header = headers[index];
@@ -161,7 +177,7 @@
                     throw error('Unsupported gender-form columns in sheet ' + sheet + ': ' + cluster.join(', ') + '. Expected MS/FS or MS/FS/NS/MP/FP/NP.', 'CLIENTTEXT_LAYOUT_CHANGED');
                 }
                 for (let offset = 0; offset < cluster.length; offset++) add(header.column - 1, header.column + offset, 'form', cluster[offset]);
-            } else if (version === PARSER_VERSION && CLASS_FORMS.includes(header.name)) {
+            } else if (classForms && CLASS_FORMS.includes(header.name)) {
                 // A class variant shares the nearest already identified English
                 // field. Unknown intervening headings could be another source;
                 // retain no guessed mapping when the source cluster is unclear.
@@ -239,7 +255,7 @@
             }
             const headerCells = cellsFor(first), headers = [];
             for (const [number, cell] of headerCells) {
-                const value = cellValue(cell, shared, name + '!' + attr(cell, 'r'), true);
+                const value = cellValue(cell, shared, name + '!' + attr(cell, 'r'), true, version);
                 if (value) headers.push({ column: number, name: value });
             }
             headers.sort((a, b) => a.column - b.column);
@@ -254,9 +270,9 @@
             for (const row of rows) {
                 const number = Number(attr(row, 'r'));
                 if (number === 1) continue;
-                const cells = cellsFor(row), read = (col, strict = false) => cellValue(cells.get(col), shared, name + '!' + letters(col) + number, strict), recordId = read(schema.idColumn, true);
+                const cells = cellsFor(row), read = (col, strict = false) => cellValue(cells.get(col), shared, name + '!' + letters(col) + number, strict, version), recordId = read(schema.idColumn, true);
                 if (!recordId.trim()) {
-                    if (Array.from(cells.values()).some(cell => cellValue(cell, shared, name + '!' + attr(cell, 'r')).trim())) throw error('Nonempty row has no ID: ' + name + '!' + number + '.');
+                    if (Array.from(cells.values()).some(cell => cellValue(cell, shared, name + '!' + attr(cell, 'r'), false, version).trim())) throw error('Nonempty row has no ID: ' + name + '!' + number + '.');
                     continue;
                 }
                 if (records.has(recordId)) throw error('Duplicate ID in ' + name + ': ' + recordId + '.', 'CLIENTTEXT_DUPLICATE_ID');
@@ -265,7 +281,9 @@
                     const targetCell = cells.get(definition.targetColumn), source = definition.sourceColumn ? read(definition.sourceColumn, true) : '', target = read(definition.targetColumn, true), originalStyleId = attr(targetCell, 's') || '0', originalFill = styles.color(originalStyleId);
                     if (styles.styles.length && (!/^\d+$/.test(originalStyleId) || Number(originalStyleId) >= styles.styles.length)) throw error('Invalid cell style in ' + name + '.');
                     const markedMissing = originalFill === RED, sourceActive = !!source.trim() && !State.audioOnly(source);
-                    const required = definition.kind === 'text' ? sourceActive : definition.kind === 'form' ? sourceActive && (markedMissing || !!target.trim()) : markedMissing || !!target.trim();
+                    const required = definition.kind === 'text' ? sourceActive : definition.kind === 'form'
+                        ? sourceActive && (State.isNamedForm(definition) && definition.form === 'Normal Translation' || markedMissing || !!target.trim())
+                        : markedMissing || !!target.trim();
                     const field = { id: definition.id, name: definition.name, kind: definition.kind, source, target, required,
                         originalMissing: required && !target.trim(), outdated: originalFill === ORANGE && !State.audioOnly(source),
                         sourceCell: definition.sourceColumn ? letters(definition.sourceColumn) + number : '', targetCell: letters(definition.targetColumn) + number,

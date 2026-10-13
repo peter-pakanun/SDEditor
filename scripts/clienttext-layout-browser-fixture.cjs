@@ -78,6 +78,9 @@ const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','
     id:'character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,notes:[],
     fields:[{id:'Name',kind:'text',name:'Name',source,target:'Localized label '+form,targetCell:'D2',required:true,originalMissing:false,outdated:false}]
 })));
+const namedFormUnit=Vue.markRaw({id:'named-form-layout-record',role:'normal',sheet:'BaseItemTypes',recordId:'Metadata/Items/Currency/CurrencyAddModToRare',notes:[],fields:
+    ['Normal Translation','Possessive Translation'].map((form,index)=>({id:JSON.stringify(['Display Name',form]),kind:'form',group:'Display Name',name:'Display Name',form,
+        source:'Exalted Orb {0}',target:index?'Yüce Küresi {0}':'Yüce Küre {0}',sourceCell:'B2',targetCell:(index?'D':'C')+'2',required:true,originalMissing:false,outdated:false}))});
 const app = Vue.createApp({
     data() { return {...ct.data(),ctActive:true,ctUnits:initialUnits,ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
@@ -97,6 +100,13 @@ const app = Vue.createApp({
             this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));
             this.ctSelection=classUnit.id;this.ctValues=Object.fromEntries(classUnit.fields.map(field=>[field.id,field.target]));
             this.ctVariantSelections={};this.ctFocusedField='class-MS';this.ctInitializeVariants();
+        },
+        ctStartNamedFormFixture(){
+            this.ctEditor=false;this.ctInlineClosed=false;this.ctSheet='';this.ctUnits=Vue.markRaw([namedFormUnit]);this.ctSaved=Vue.markRaw({});
+            this._ctUnitIndex=Vue.markRaw(new Map([[namedFormUnit.id,namedFormUnit]]));this.ctSelection=namedFormUnit.id;
+            this.ctValues=Object.fromEntries(namedFormUnit.fields.map(field=>[field.id,field.target]));this.ctReviewed={};this.ctDraftDirty=false;
+            this.ctVariantSelections={};this.ctFocusedField=namedFormUnit.fields[0].id;this.lang='Turkish';this.ctWorkspace.scope.language='Turkish';
+            this._ctInlineReturn=null;this.ctCloseCompletion();
         },
     },
     created(){this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));this._ctSheets=Vue.markRaw(sheets);},
@@ -432,6 +442,37 @@ async function run() {
                 const path=join(tmpdir(),'sdeditor-clienttext-class-mapping-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
             }
+        }
+        for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
+            await page.setViewportSize({width:1100,height:900});
+            await page.evaluate(({theme,full})=>{document.documentElement.setAttribute('data-theme',theme);const host=window.__ctLayoutFixture;
+                host.ctStartNamedFormFixture();host.ctEditor=full;}, {theme,full});await settle();
+            const name=theme+' named forms '+(full?'full':'inline'),normal=page.locator('#ctfield-C2'),possessive=page.locator('#ctfield-D2'),grid=page.locator('.ctNamedFormGrid');
+            assert.deepEqual(await grid.locator('thead th').allTextContents(),['Form','Translation'],name+': named form headings');
+            assert.deepEqual(await grid.locator('tbody th').allTextContents(),['Normal','Possessive'],name+': short row labels preserve raw identities');
+            assert.equal(await page.locator('.ctSourceBlock textarea[data-ct-source]').count(),1,name+': both targets share one English source');
+            assert.equal(await normal.inputValue(),'Yüce Küre {0}');assert.equal(await possessive.inputValue(),'Yüce Küresi {0}');
+            await normal.fill('NON');await normal.press('Tab');await settle();
+            assert.equal(await possessive.evaluate(element=>element===document.activeElement),true,name+': C to D Tab traversal');
+            assert.equal(await normal.inputValue(),'NON',name+': named form does not complete NONEXISTENT');
+            await possessive.press('Shift+Tab');await settle();assert.equal(await normal.evaluate(element=>element===document.activeElement),true,name+': D to C reverse traversal');
+            await normal.fill('Normal raw @\\n\n{0}');await possessive.fill('Independent possessive {0}');
+            assert.equal(await normal.inputValue(),'Normal raw @\\n\n{0}',name+': possessive editing preserves normal draft');
+            const bounds=await grid.evaluate(element=>{const rect=element.getBoundingClientRect();return{left:rect.left,right:rect.right,width:window.innerWidth,
+                rows:[...element.querySelectorAll('tbody th')].map(label=>({text:label.textContent,width:label.clientWidth,scroll:label.scrollWidth}))};});
+            assert.ok(bounds.left>=0 && bounds.right<=bounds.width+1,name+': named forms fit resized desktop');
+            assert.ok(bounds.rows.every(row=>row.scroll<=row.width+1),name+': Normal/Possessive labels remain readable');
+            if(!full){
+                await possessive.focus();await possessive.evaluate(element=>element.setSelectionRange(1,5,'backward'));
+                await possessive.press('Control+Enter');await page.waitForFunction(()=>window.__ctLayoutFixture.ctEditor);await settle();
+                assert.equal(await possessive.evaluate(element=>element===document.activeElement),true,name+': full editor restores exact possessive field');
+                assert.deepEqual(await possessive.evaluate(element=>[element.selectionStart,element.selectionEnd,element.selectionDirection]),[1,5,'backward']);
+                await possessive.press('Escape');await page.waitForFunction(()=>!window.__ctLayoutFixture.ctEditor);await settle();
+                assert.equal(await possessive.evaluate(element=>element===document.activeElement),true,name+': Escape returns to inline possessive field');
+                assert.deepEqual(await possessive.evaluate(element=>[element.selectionStart,element.selectionEnd,element.selectionDirection]),[1,5,'backward']);
+                assert.equal(await normal.inputValue(),'Normal raw @\\n\n{0}');assert.equal(await possessive.inputValue(),'Independent possessive {0}');
+            }
+            results.push({name:name+' independent fields, shared English, worksheet keyboard order and exact full/inline handoff'});
         }
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));

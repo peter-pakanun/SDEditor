@@ -284,6 +284,61 @@ test('whole form sentinels tolerate surrounding whitespace while retaining their
     assert.ok(S.diagnose(field,'NONEXISTENT literal text').some(issue=>issue.code==='clienttext-token-identity'));
 });
 
+test('Turkish named forms preserve raw values without grammatical-form sentinel behavior',()=>{
+    const original=unit('Name {0}','Original'),fields=['Normal Translation','Possessive Translation'].map(form=>({
+        ...original.fields[0],id:JSON.stringify(['Display Name',form]),name:'Display Name',kind:'form',form,group:'Display Name'
+    }));
+    for(const field of fields){
+        assert.equal(S.isNamedForm(field),true);assert.equal(S.allowsNonexistent(field),false);
+        assert.equal(S.suggestions(field).some(item=>item.value==='NONEXISTENT'),false);
+        assert.ok(S.diagnose(field,'NONEXISTENT').some(issue=>issue.code==='clienttext-token-identity'));
+        assert.deepEqual(S.diagnose(field,'Turkish {0}'),[]);
+    }
+    const raw='  literal\r\nNONEXISTENT  ',named={...original,fields};
+    assert.equal(S.normalizeValues(named,{[fields[0].id]:raw,[fields[1].id]:''})[fields[0].id],raw);
+    for(const form of ['MS','FS','StrFour','custom-legacy-form']){
+        const field={...fields[0],form};
+        assert.equal(S.isNamedForm(field),false);assert.equal(S.allowsNonexistent(field),true);
+        assert.deepEqual(S.diagnose(field,'NONEXISTENT'),[]);
+        assert.ok(S.suggestions(field).some(item=>item.value==='NONEXISTENT'));
+    }
+});
+
+test('v3 originals retain distinct cache identities without changing legacy sparse field fingerprints',async()=>{
+    const original=unit(' [NOAUDIO] Exact {0}','Raw\r\n @value\\n '),facts=S.clientFacts(original),ids=new Set(),caches=new Set();
+    assert.deepEqual(S.PARSER_VERSIONS,['clienttext-v1','clienttext-v2','clienttext-v3']);
+    for(const parserVersion of S.PARSER_VERSIONS){
+        const prepared=await S.buildDescriptors([original],[{...asset,parserVersion}]);
+        ids.add(prepared.descriptors[0].baselineId);caches.add(S.originalCacheKey(asset.hash,parserVersion,'normal'));
+        assert.deepEqual(S.clientFacts(original),facts);assert.equal(prepared.descriptors[0].parserVersion,parserVersion);
+    }
+    assert.equal(ids.size,3);assert.equal(caches.size,3);
+    assert.equal(facts.fields[0].sourceHash,S.hash('Exact {0}'));
+    assert.equal(facts.fields[0].originalHash,S.hash('Raw\r\n @value\\n '));
+});
+
+test('Turkish carry-forward keeps independent form conflicts and optional blanks without fallback',()=>{
+    const original=unit('Old item','unused');
+    original.fields=['Normal Translation','Possessive Translation'].map((form,index)=>({
+        ...original.fields[0],id:JSON.stringify(['Display Name',form]),name:'Display Name',kind:'form',form,
+        target:index?'':'Base normal',required:!index,originalMissing:false,outdated:false
+    }));
+    const [normal,possessive]=original.fields,values={[normal.id]:'Authored normal',[possessive.id]:''};
+    const saved={values,reviewed:{[normal.id]:S.sourceHash(normal.source)}},next=structuredClone(original);
+    next.fields.forEach(field=>field.source='New item');next.fields[0].target='Incoming normal';
+    const carried=S.carryForward(original,next,saved);
+    assert.deepEqual(carried.conflicts,[{fieldId:normal.id,base:'Base normal',local:'Authored normal',upstream:'Incoming normal'}]);
+    assert.deepEqual(carried.values,{[normal.id]:'Incoming normal',[possessive.id]:''});
+    assert.deepEqual(carried.outdated,[normal.id]);assert.deepEqual(carried.reviewed,{});
+    next.fields[1].outdated=true;
+    const marked=S.carryForward(original,next,saved),status=S.statusFor(next,marked);
+    assert.equal(status.fields[possessive.id].missing,false);assert.equal(status.fields[possessive.id].outdated,true);
+    const populated={...saved,values:{...values,[possessive.id]:'  Independent possessive\r\n '}};
+    const independent=S.carryForward(original,next,populated);
+    assert.equal(independent.values[possessive.id],populated.values[possessive.id]);
+    assert.deepEqual(independent.outdated,[normal.id,possessive.id]);assert.equal(independent.conflicts.length,1);
+});
+
 test('ClientText variables match SD empty, numeric, sign, format and percent rules with exact raw offsets',()=>{
     const context=vm.createContext({});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);

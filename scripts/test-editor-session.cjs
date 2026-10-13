@@ -97,6 +97,19 @@ test('ClientText live field diagnostics refresh independently of saved scan issu
     assert.equal(control.field.dataAttrs['aria-invalid'],undefined);assert.equal(h.host.ctDiagnostics.record.length,2,'draft presentation does not rewrite committed scan results');
 });
 
+test('named Turkish controls diagnose literal NONEXISTENT without changing older form exemptions',()=>{
+    for(const form of ['Normal Translation','Possessive Translation']){
+        const h=harness('NONEXISTENT','Item {0}');
+        Object.assign(h.field,{name:'Display Name',kind:'form',form,group:'Display Name'});
+        const control=h.session.fieldController(h.host,h.field);
+        assert.ok(control.diagnostics.some(issue=>issue.code==='clienttext-token-identity'));
+        assert.ok(control.diagnosticPresentation.errorCount>0);
+        assert.equal(control.field.translation,'NONEXISTENT');
+    }
+    const h=harness('NONEXISTENT','Item {0}');Object.assign(h.field,{kind:'form',form:'MS'});
+    assert.equal(h.session.fieldController(h.host,h.field).diagnostics.length,0);
+});
+
 test('ClientText live common whitespace and dash diagnostics retain workbook gender, form sentinel and audio-only exemptions',()=>{
     for(const exemption of ['gender','sentinel','audio']){
         const h=harness('  - NONEXISTENT \r\n','source {0}');
