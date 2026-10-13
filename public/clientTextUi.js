@@ -40,6 +40,14 @@
     const classForms = new Set(['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour',
         'StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb']);
     const isClassField = field => field.kind === 'form' && classForms.has(field.form);
+    const previewAffixExamples = [
+        {key:'sword',label:'Dayanıklı / Alev',prefix:'Dayanıklı',suffix:'Alev'},
+        {key:'emerald',label:'Korkusuz / Ölümsüzlük',prefix:'Korkusuz',suffix:'Ölümsüzlük'}
+    ];
+    const previewAffixesFor = unit => {
+        const example=previewAffixExamples[/\bEmerald\b/i.test(unit?.fields?.[0]?.source || '') ? 1 : 0];
+        return {example:example.key,prefix:example.prefix,suffix:example.suffix};
+    };
     function genderRawOffset(value,offset) {
         let raw=0,shown=0;while(raw<value.length && shown<offset){raw+=value[raw]==='\r' && value[raw+1]==='\n'?2:1;shown++;}return raw;
     }
@@ -95,7 +103,8 @@
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
             ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
             ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
-            ctPreviewGggVars: {}, ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
+            ctPreviewGggVars: {}, ctPreviewAffixes:previewAffixesFor(null), ctPreviewAffixExamples:previewAffixExamples,
+            ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
             ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
@@ -179,15 +188,50 @@
                 const fields=this.ctFieldsFor();
                 return fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender') || null;
             },
+            ctPossessivePreviewForms() {
+                if(!this.ctActive || this.ctWorkspace?.scope.language!=='Turkish')return null;
+                const field=this.ctPreviewField;
+                if(!field)return null;
+                if(root.ClientTextState.isNamedForm(field)){
+                    const fields=this.ctFieldsFor().filter(candidate=>root.ClientTextState.isNamedForm(candidate)
+                        && (candidate.group || candidate.name)===(field.group || field.name));
+                    const normal=fields.find(candidate=>candidate.form==='Normal Translation');
+                    if(normal)return {normal,possessive:fields.find(candidate=>candidate.form==='Possessive Translation')};
+                }
+                if(/<if:possessive>/.test(this.ctValues[field.id] || ''))return {normal:field,possessive:null};
+                return null;
+            },
             ctGamePreview() {
                 const empty={segments:[],keysOrder:[]};
                 if(!this.ctActive)return {source:empty,target:empty};
-                const field=this.ctPreviewField;
+                const field=this.ctPossessivePreviewForms?.normal || this.ctPreviewField;
                 if(!field)return {source:empty,target:empty};
                 return {source:this.buildGamePreviewSegments(field.source,{contentMode:'clienttext'}),
-                    target:this.buildGamePreviewSegments(this.ctValues[field.id] ?? '',{contentMode:'clienttext'})};
+                    target:this.buildGamePreviewSegments(this.ctValues[field.id] ?? '',{contentMode:'clienttext',
+                        ...(this.ctPossessivePreviewForms ? {possessive:false} : {})})};
             },
-            ctPreviewKeys() { return [...new Set([...this.ctGamePreview.source.keysOrder,...this.ctGamePreview.target.keysOrder])]; },
+            ctGamePreviewVariants() {
+                const forms=this.ctPossessivePreviewForms;
+                if(!forms)return [];
+                const normal=this.ctGamePreview.target;
+                const prefix=this.buildGamePreviewSegments(this.ctPreviewAffixes.prefix.trim(),{contentMode:'clienttext',possessive:false});
+                const suffix=this.buildGamePreviewSegments(this.ctPreviewAffixes.suffix.trim(),{contentMode:'clienttext',possessive:true});
+                const dedicated=forms.possessive ? String(this.ctValues[forms.possessive.id] ?? '') : '';
+                const possessive=suffix.segments.length ? this.buildGamePreviewSegments(dedicated.trim() ? dedicated : this.ctValues[forms.normal.id] ?? '',
+                    {contentMode:'clienttext',possessive:true}) : normal;
+                const compose=(...parts)=>{
+                    const active=parts.filter(part=>part.segments.length),segments=[];
+                    for(const part of active){if(segments.length)segments.push({type:'text',text:' '});segments.push(...part.segments);}
+                    return {segments,keysOrder:[...new Set(active.flatMap(part=>part.keysOrder))]};
+                };
+                return [
+                    {key:'normal',label:'Normal',...normal},
+                    {key:'prefix',label:'With prefix',...compose(prefix,normal)},
+                    {key:'both',label:'With prefix + suffix',...compose(suffix,prefix,possessive)}
+                ];
+            },
+            ctPreviewKeys() { return [...new Set([...this.ctGamePreview.source.keysOrder,...this.ctGamePreview.target.keysOrder,
+                ...this.ctGamePreviewVariants.flatMap(variant=>variant.keysOrder)])]; },
             ctFieldGroups() { return groupFields({fields:this.ctFieldsFor()}); },
             ctHistoryChoices() {
                 return [{ key: 'original', label: 'Original workbook' }, { key: 'current', label: 'Current translation' },
@@ -930,7 +974,7 @@
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
-                this.ctPreviewGggVars={};this.ctFocusedField='';
+                this.ctPreviewGggVars={};this.ctPreviewAffixes=previewAffixesFor(null);this.ctFocusedField='';
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
                 this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);this.ctSheetFilter='';
                 this.ctResetHistory();
@@ -988,6 +1032,10 @@
             ctClassFields(group) { return group.fields.filter(isClassField); },
             ctNamedForms(group) { return group.fields.filter(root.ClientTextState.isNamedForm); },
             ctNamedFormLabel(field) { return root.ClientTextState.isNamedForm(field) ? field.form.replace(/ Translation$/, '') : field.form; },
+            ctSetPreviewAffixExample(key) {
+                const example=previewAffixExamples.find(example=>example.key===key);
+                if(example)this.ctPreviewAffixes={example:key,prefix:example.prefix,suffix:example.suffix};
+            },
             ctDefaultForms(group) { return group.fields.filter(field=>field.kind==='form' && !isClassField(field) && !root.ClientTextState.isNamedForm(field)); },
             ctClassVariantName(field) {
                 if(this.mapClientTextClassNames===false || !isClassField(field))return field.form || '';
@@ -1280,7 +1328,7 @@
                 if(!current())return false;
                 this.ctSelection = unit.id; this.ctEditor = run.full;this.ctInlineClosed=false;this._ctInlineReturn=null; this.ctLookup = ''; this.ctCompletion=null;this.ctCommentText='';this.ctCommentGlobal=false;
                 if(run.full && this.ctTool==='preview')this.ctTool='dictionary';
-                this.ctPreviewGggVars={};
+                this.ctPreviewGggVars={};this.ctPreviewAffixes=previewAffixesFor(unit);
                 this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;this.ctDraftStageFailure=null;
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;

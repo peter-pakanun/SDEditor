@@ -703,6 +703,77 @@ test('audio preview recognition is exact and does not change StatDescription ren
   }
 });
 
+test('ClientText possessive controls select balanced branches with styles, variables and nested controls', () => {
+  const { editor } = loadEditor();
+  const raw='<b>{<if:possessive>{<fg:rgb(12,34,56)>{Yüce Küresi {1}}}<else>{Yüce Küre {0}}}';
+  for (const possessive of [false,true]) {
+    const preview=editor.buildGamePreviewSegments(raw,{contentMode:'clienttext',possessive});
+    assert.deepEqual(Array.from(preview.keysOrder),[possessive?'1':'0']);
+    assert.equal(preview.segments[0].text,possessive?'Yüce Küresi ':'Yüce Küre ');
+    assert.ok(preview.segments.every(segment=>segment.decorStyle.fontWeight==='bold'));
+    if(possessive)assert.ok(preview.segments.every(segment=>segment.decorStyle.color==='rgb(12, 34, 56)'));
+    const nested=editor.buildGamePreviewSegments('<if:possessive>{<if:possessive>{Kılıcı}<else>{wrong}}<else>{Kılıç}',{contentMode:'clienttext',possessive});
+    assert.equal(nested.segments.map(segment=>segment.text).join(''),possessive?'Kılıcı':'Kılıç');
+  }
+  assert.deepEqual(Array.from(editor.buildGamePreviewSegments('<if:possessive>{Hidden}',{contentMode:'clienttext',possessive:false}).segments),[]);
+  for(const options of [{},{contentMode:'clienttext'}]){
+    const raw='<if:possessive>{Kılıcı}<else>{Kılıç}';
+    assert.equal(editor.buildGamePreviewSegments(raw,options).segments.map(segment=>segment.text).join(''),raw);
+  }
+  for(const raw of ['<if:other>{yes}<else>{no}','<if:possessive>{unclosed','<if:possessive>{yes}<else>{unclosed']){
+    assert.equal(editor.buildGamePreviewSegments(raw,{contentMode:'clienttext',possessive:true}).segments.map(segment=>segment.text).join(''),raw);
+  }
+});
+
+function turkishPreview(source='Sword',normal='Kılıç',possessive='Kılıcı') {
+  const h=loadEditor(),{editor}=h;
+  const fields=['Normal Translation','Possessive Translation'].map((form,index)=>({id:JSON.stringify(['Display Name',form]),name:'Display Name',kind:'form',group:'Display Name',form,source,target:index?possessive:normal}));
+  const unit={id:'turkish-item',fields};
+  editor.ctActive=true;editor.ctWorkspace={scope:{language:'Turkish'}};editor.ctSelection=unit.id;
+  editor._ctUnitIndex=new Map([[unit.id,unit]]);editor.ctValues=Object.fromEntries(fields.map(field=>[field.id,field.target]));
+  return {...h,unit,fields,texts:()=>Array.from(editor.gamePreviewTargetRows,row=>row.segments.map(segment=>segment.text || `{${segment.key}}`).join(''))};
+}
+
+test('Turkish item preview renders both team examples in normal, prefix and suffix-prefix-possessive order', () => {
+  const {editor,texts,fields}=turkishPreview();
+  assert.deepEqual(texts(),['Kılıç','Dayanıklı Kılıç','Alev Dayanıklı Kılıcı']);
+  editor.ctFocusedField=fields[1].id;
+  assert.deepEqual(texts(),['Kılıç','Dayanıklı Kılıç','Alev Dayanıklı Kılıcı'],'field focus cannot substitute possessive into the normal variants');
+  editor.ctValues[fields[0].id]='Zümrüt';editor.ctValues[fields[1].id]='Zümrütü';editor.ctSetPreviewAffixExample('emerald');
+  assert.deepEqual(texts(),['Zümrüt','Korkusuz Zümrüt','Ölümsüzlük Korkusuz Zümrütü']);
+  editor.ctPreviewAffixes.prefix='Custom';editor.ctPreviewAffixes.suffix='Other';
+  assert.equal(texts()[2],'Other Custom Zümrütü');
+});
+
+test('blank possessive preview falls back without changing the draft, baseline or literal named-form values', () => {
+  const {editor,texts,unit,fields}=turkishPreview('Exalted Orb','Yüce Küresi',' \t ');
+  const before=JSON.stringify({unit,values:editor.ctValues});
+  assert.deepEqual(texts(),['Yüce Küresi','Dayanıklı Yüce Küresi','Alev Dayanıklı Yüce Küresi']);
+  assert.equal(JSON.stringify({unit,values:editor.ctValues}),before);assert.equal(editor.ctDraftDirty,false);
+  editor.ctValues[fields[1].id]='NONEXISTENT';assert.equal(texts()[2],'Alev Dayanıklı NONEXISTENT');
+});
+
+test('Turkish inline possessive controls and variables in every variant use the shared parameter inputs', () => {
+  const {editor,fields,texts}=turkishPreview('Sword {0}','<if:possessive>{Kılıcı {1}}<else>{Kılıç {0}}','');
+  assert.deepEqual(texts(),['Kılıç {0}','Dayanıklı Kılıç {0}','Alev Dayanıklı Kılıcı {1}']);
+  assert.deepEqual(Array.from(editor.ctPreviewKeys),['0','1']);
+  editor.hideSourceInPreviewPanel=true;assert.deepEqual(Array.from(editor.gamePreviewVarKeyList),['0','1']);
+  editor.ctPreviewAffixes.prefix='Dayanıklı {2}';editor.ctPreviewAffixes.suffix='Alev {3}';
+  assert.deepEqual(Array.from(editor.gamePreviewVarKeyList),['0','2','3','1']);
+  editor.ctPreviewAffixes.prefix='';editor.ctPreviewAffixes.suffix='';assert.equal(texts()[2],'Kılıç {0}','without a suffix the base returns to Normal');
+  const field={...fields[0],id:'text',kind:'text',form:null};editor.ctCurrentUnit.fields=[field];editor.ctValues={text:fields[0].target};editor.ctFocusedField='text';
+  assert.equal(editor.gamePreviewTargetRows.length,3,'Turkish controls also work in a plain text column');
+});
+
+test('possessive preview is limited to Turkish named forms and the exact supported control', () => {
+  const {editor,fields}=turkishPreview();
+  editor.ctWorkspace.scope.language='French';assert.equal(editor.gamePreviewTargetRows.length,1);
+  assert.equal(editor.gamePreviewDisplayTarget[0].text,'Kılıç');
+  editor.ctWorkspace.scope.language='Turkish';editor.ctCurrentUnit.fields=[{...fields[0],id:'text',kind:'text',form:null}];editor.ctValues={text:'Ordinary text'};
+  assert.equal(editor.gamePreviewTargetRows.length,1);
+  editor.ctActive=false;assert.equal(editor.gamePreviewTargetRows.length,1);
+});
+
 test('ClientText preview balances formatting wrappers and preserves unsupported syntax safely',()=>{
   const {editor}=loadEditor();
   const preview=editor.buildGamePreviewSegments('<unique>{{{0}}} <smaller>{Small {1}} <fg:rgb(255,0,0)>{<glow:rgb(227,125,1)>{Nested {2}}} <<xbox_button_a>> <unknown>{literal}',{contentMode:'clienttext'});

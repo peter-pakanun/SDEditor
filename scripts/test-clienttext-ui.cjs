@@ -1314,6 +1314,21 @@ for(const full of [false,true])test(`named Normal/Possessive forms retain worksh
     assert.ok(app.ctAnalyzeScanUnit(original,{variables:true}).some(issue=>issue.fieldId===normal.id),'named forms still compare required variables in committed values');
 });
 
+test('possessive preview parameters survive editor handoff, reset on entry selection and clear on scope fencing',async()=>{
+    const original=namedFormUnit(),emerald=namedFormUnit('Emerald',3);
+    for(const field of emerald.fields)field.source='Emerald';
+    const {app}=keyboardHarness(original,{ctWorkspace:{scope:{...scope,language:'Turkish'}}});
+    app._ctUnitIndex.set(emerald.id,emerald);app.ctUnits.push(emerald);
+    app.ctPreviewAffixes.prefix='Custom prefix';app.ctPreviewAffixes.suffix='Custom suffix';app.ctPreviewGggVars={'0':'37'};
+    const parameters=app.ctPreviewAffixes;
+    await app.ctSelect(original,true);assert.equal(app.ctPreviewAffixes,parameters);assert.equal(app.ctPreviewGggVars['0'],'37');
+    await app.ctSelect(original,false);assert.equal(app.ctPreviewAffixes,parameters);
+    await app.ctSelect(emerald,false);
+    assert.deepEqual(clone(app.ctPreviewAffixes),{example:'emerald',prefix:'Korkusuz',suffix:'Ölümsüzlük'});
+    assert.deepEqual(clone(app.ctPreviewGggVars),{});
+    app.ctFence();assert.deepEqual(clone(app.ctPreviewAffixes),{example:'sword',prefix:'Dayanıklı',suffix:'Alev'});
+});
+
 test('named forms save independently without changing immutable originals and learn separate Translation Memory contexts',async()=>{
     const original=namedFormUnit(),before=clone(original),[normal,possessive]=original.fields,f=fixture();
     await f.store.import(scope,{units:[original],assets:[asset]});const retainedBefore=await f.store.getUnit(scope,original.id);

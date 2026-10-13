@@ -1014,6 +1014,10 @@ const config = Vue.defineComponent({
     },
     gamePreviewDisplaySource() { return this.ctActive ? this.ctGamePreview.source.segments : this.gamePreviewSourceSegments; },
     gamePreviewDisplayTarget() { return this.ctActive ? this.ctGamePreview.target.segments : this.gamePreviewSegments; },
+    gamePreviewTargetRows() {
+      return this.ctActive && this.ctGamePreviewVariants.length ? this.ctGamePreviewVariants
+        : [{key:'target',label:'',segments:this.gamePreviewDisplayTarget}];
+    },
     gamePreviewSourceIsTable() { return this.gamePreviewDisplaySource.some(segment => segment.type === 'rightAlign'); },
     gamePreviewTargetIsTable() { return this.gamePreviewDisplayTarget.some(segment => segment.type === 'rightAlign'); },
     gamePreviewVarValues() { return this.ctActive ? this.ctPreviewGggVars : this.previewGggVars; },
@@ -1022,7 +1026,7 @@ const config = Vue.defineComponent({
       let out = [];
       let segments = [
         ...(this.hideSourceInPreviewPanel ? [] : (this.gamePreviewDisplaySource || [])),
-        ...(this.gamePreviewDisplayTarget || []),
+        ...this.gamePreviewTargetRows.flatMap(row => row.segments),
       ];
       for (const seg of segments) {
         for (const variable of seg?.type === 'var' ? [seg] : (seg?.parts || []).filter(part=>part.type==='var')) {
@@ -1606,6 +1610,24 @@ const config = Vue.defineComponent({
         }
         return null;
       };
+      const possessiveAtStart = part => {
+        if (!clientText || typeof options.possessive !== 'boolean' || !part.startsWith('<if:possessive>')) return null;
+        const bodyAt = start => {
+          if (part[start] !== '{') return null;
+          let depth = 0;
+          for (let end = start; end < part.length; end++) {
+            if (part[end] === '{') depth++;
+            else if (part[end] === '}' && --depth === 0) return {text:part.slice(start + 1, end),end:end + 1};
+          }
+          return null;
+        };
+        const yes = bodyAt('<if:possessive>'.length);
+        if (!yes) return null;
+        const hasElse = part.startsWith('<else>', yes.end);
+        const no = hasElse ? bodyAt(yes.end + '<else>'.length) : null;
+        if (hasElse && !no) return null;
+        return {text:options.possessive ? yes.text : no?.text || '',length:no?.end || yes.end};
+      };
       const scanInline = (part, decorTag = '', decorStyle = {}, keywordDisplay = false, depth = 0) => {
         const output = [];
         let textBuf = '';
@@ -1624,6 +1646,13 @@ const config = Vue.defineComponent({
         let i = 0;
         while (i < part.length) {
           const slice = part.slice(i);
+          const possessive = part[i] === '<' && depth < 64 ? possessiveAtStart(slice) : null;
+          if (possessive) {
+            flushText();
+            output.push(...scanInline(possessive.text, decorTag, decorStyle, keywordDisplay, depth + 1));
+            i += possessive.length;
+            continue;
+          }
           const wrapper = part[i] === '<' && depth < 64 ? wrapperAtStart(slice) : null;
           if (wrapper) {
             flushText();

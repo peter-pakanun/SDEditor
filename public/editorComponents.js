@@ -485,7 +485,7 @@
     },
     template: String.raw`<span class="gamePreviewAudioMarker" :data-audio-marker="segment.full" tabindex="0" role="img" :aria-label="segment.tooltip" v-tooltip="segment.tooltip"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3z"></path><path d="M19 6v7"></path><circle class="gamePreviewAudioDot" cx="19" cy="17" r="1"></circle></svg></span>`,
   };
-  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip">
+  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1 }">
           <div v-if="gamePreviewFullEditor" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">
@@ -522,10 +522,12 @@
                     <span v-if="gamePreviewDisplaySource.length === 0" class="gamePreviewEmpty">(empty)</span>
                   </div>
                 </div>
-                <div class="gamePreviewLine">
+                <template v-for="row in gamePreviewTargetRows" :key="row.key">
+                <div v-if="row.label" class="gamePreviewVariantLabel">{{ row.label }}</div>
+                <div class="gamePreviewLine" :data-preview-variant="row.key">
                   <div class="gamePreviewLineLabel">{{ translationEditorBcp47 || lang || 'TL' }}</div>
                   <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
-                    <template v-for="(seg, si) in gamePreviewDisplayTarget" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
+                    <template v-for="(seg, si) in row.segments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
                         <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gp-part-' + si + '-' + pi">
@@ -544,18 +546,32 @@
                       <span v-else-if="seg.type === 'break' && gamePreviewTargetIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
                     </template>
-                    <span v-if="gamePreviewDisplayTarget.length === 0" class="gamePreviewEmpty">(empty)</span>
+                    <span v-if="row.segments.length === 0" class="gamePreviewEmpty">(empty)</span>
                   </div>
                 </div>
+                </template>
               </div>
             </div>
-            <div class="gamePreviewVarsColumn" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
-              <div class="gamePreviewVarsPanel" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 }">
-                <div v-if="gamePreviewVarKeyList.length === 0" class="gamePreviewVarField gamePreviewVarsPlaceholder">
+            <div class="gamePreviewVarsColumn" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 && !(ctActive && ctPossessivePreviewForms) }">
+              <div class="gamePreviewVarsPanel" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 && !(ctActive && ctPossessivePreviewForms) }">
+                <template v-if="ctActive && ctPossessivePreviewForms">
+                  <label class="gamePreviewVarField"><span class="gamePreviewVarLabel">Example</span>
+                    <select class="gamePreviewVarInput" :value="ctPreviewAffixes.example" aria-label="Affix example" @change="ctSetPreviewAffixExample($event.target.value)">
+                      <option v-for="example in ctPreviewAffixExamples" :key="example.key" :value="example.key">{{ example.label }}</option>
+                    </select>
+                  </label>
+                  <label class="gamePreviewVarField"><span class="gamePreviewVarLabel">Prefix</span>
+                    <input type="text" class="gamePreviewVarInput" v-model="ctPreviewAffixes.prefix" :lang="translationEditorBcp47" aria-label="Preview prefix">
+                  </label>
+                  <label class="gamePreviewVarField"><span class="gamePreviewVarLabel">Suffix</span>
+                    <input type="text" class="gamePreviewVarInput" v-model="ctPreviewAffixes.suffix" :lang="translationEditorBcp47" aria-label="Preview suffix">
+                  </label>
+                </template>
+                <div v-if="gamePreviewVarKeyList.length === 0 && !(ctActive && ctPossessivePreviewForms)" class="gamePreviewVarField gamePreviewVarsPlaceholder">
                   <div class="gamePreviewVarLabel">{}</div>
                   <div class="gamePreviewVarInput gamePreviewVarInputPlaceholder">No variables</div>
                 </div>
-                <template v-else>
+                <template v-if="gamePreviewVarKeyList.length">
                   <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
                     <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
                     <input type="text" class="gamePreviewVarInput" v-model="gamePreviewVarValues[k]" :lang="translationEditorBcp47"

@@ -1312,6 +1312,10 @@ button, label, th, td, input[type="checkbox"] {
   overflow: hidden;
 }
 
+.editor .gamePreviewStrip--variants {
+  height: calc(340px * var(--density));
+}
+
 .gamePreviewToolbar {
   position: absolute;
   top: 5px;
@@ -1477,6 +1481,13 @@ button, label, th, td, input[type="checkbox"] {
   line-height: 1;
   text-align: right;
   text-transform: uppercase;
+}
+
+.gamePreviewVariantLabel {
+  color: var(--color-font);
+  font-size: calc(11px * var(--density));
+  font-weight: 600;
+  margin-top: calc(0.3em * var(--density));
 }
 
 .gamePreviewWindow {

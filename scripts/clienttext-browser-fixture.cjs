@@ -131,7 +131,10 @@ async function turkishWorkbook(JSZip) {
         row(1, [cell('A1','ID'),cell('B1','Display Name'),cell('C1','Normal Translation'),cell('D1','Possessive Translation')]),
         row(2, [cell('A2','named'),cell('B2','Sword {0}'),cell('C2','Normal {0}',1),cell('D2','Possessive {0}',1)]),
         row(3, [cell('A3','blank'),cell('B3','Blank item'),'<c r="C3" s="2" t="s"/>','<c r="D3" s="1" t="s"/>']),
-        row(4, [cell('A4','outdated'),cell('B4','Updated item'),cell('C4','Current',1),'<c r="D4" s="3" t="s"/>'])
+        row(4, [cell('A4','outdated'),cell('B4','Updated item'),cell('C4','Current',1),'<c r="D4" s="3" t="s"/>']),
+        row(5, [cell('A5','sword'),cell('B5','Sword'),cell('C5','Kılıç',1),cell('D5','Kılıcı',1)]),
+        row(6, [cell('A6','emerald'),cell('B6','Emerald'),cell('C6','Zümrüt',1),cell('D6','Zümrütü',1)]),
+        row(7, [cell('A7','orb'),cell('B7','Exalted Orb'),cell('C7','<if:possessive>{Yüce Küresi}<else>{Yüce Küre}',1),'<c r="D7" s="1" t="s"/>'])
     ]));
     zip.file('xl/worksheets/sheet2.xml', sheet([row(1,[cell('A1','ID'),cell('B1','Text'),cell('C1','Translation')]),row(2,[cell('A2','untouched'),cell('B2','Other source'),cell('C2','Other target',1)])]));
     zip.file('xl/metadata', new Uint8Array([0,255,8,99]));
@@ -345,14 +348,28 @@ async function run() {
             const target=form=>workspace.getByRole('textbox',{name:'Display Name '+form+' Translation',exact:true});
             const active=async form=>page.waitForFunction(field=>document.activeElement?.dataset.ctTarget===field,fid(form));
             const choose=async record=>{if(await page.evaluate(()=>window.__clientFixtureApp.ctEditor))await workspace.getByRole('button',{name:'Close',exact:true}).click();await workspace.getByRole('button',{name:record,exact:true}).click();await page.waitForFunction(unitId=>window.__clientFixtureApp.ctSelection===unitId&&!window.__clientFixtureApp.ctBusy,id(record));};
+            const openInline=async record=>{
+                if(await page.evaluate(()=>window.__clientFixtureApp.ctEditor))await workspace.getByRole('button',{name:'Close',exact:true}).click();
+                await workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:record,exact:true})}).click({position:{x:5,y:5}});
+                await page.waitForFunction(unitId=>window.__clientFixtureApp.ctSelection===unitId&&!window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy,id(record));
+            };
             const settleSave=async(record,values)=>{
                 await waitForAsync(page,async({unitId,values})=>{const vm=window.__clientFixtureApp,saved=(await vm._ctStore.getSaved(vm.ctWorkspace.scope))[unitId];return !vm.ctBusy&&saved&&Object.entries(values).every(([key,value])=>saved.values[key]===value)&&!(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length;},{unitId:id(record),values});
                 return page.evaluate(async unitId=>{const vm=window.__clientFixtureApp;return{saved:(await vm._ctStore.getSaved(vm.ctWorkspace.scope))[unitId],original:await vm._ctStore.getUnit(vm.ctWorkspace.scope,unitId),history:await vm._ctStore.listHistory(vm.ctWorkspace.scope,unitId)};},id(record));
             };
             await page.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','BaseItemTypes']);});
             await choose('named');await active('Normal');
+            const preview=()=>workspace.locator('#'+(previewFull?'ctFullEditorPreviewHost':'inlineEditorPreviewHost'));
+            let previewFull=true;
+            const showPreview=async()=>{
+                previewFull=await page.evaluate(()=>window.__clientFixtureApp.ctEditor);
+                if(!previewFull)await workspace.locator('.ctTools').getByRole('button',{name:'Preview',exact:true}).click();
+                await preview().locator('.gamePreviewStrip').waitFor();
+            };
+            const previewTexts=()=>preview().locator('[data-preview-variant] .gamePreviewWindow').allTextContents();
             const themeChecks=[];
-            for(const theme of ['light','grey','dark','modern-dark']){
+            for(const width of [1440,1024])for(const theme of ['light','grey','dark','modern-dark']){
+                await page.setViewportSize({width,height:1000});
                 await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
                 for(const full of [true,false]){
                     if(!full){await page.keyboard.press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await page.evaluate(async()=>{const vm=window.__clientFixtureApp;vm.inlineEditor=true;await vm.$nextTick();});await workspace.locator('.ctTable > tbody > tr').filter({has:page.getByRole('button',{name:'named',exact:true})}).click({position:{x:5,y:5}});}
@@ -361,9 +378,40 @@ async function run() {
                     assert.deepEqual(await workspace.locator('.ctNamedFormGrid tbody th').allTextContents(),['Normal','Possessive']);
                     assert.equal(await workspace.locator('[data-ct-source]').count(),1,'English renders once');
                     const bounds=await workspace.locator('.ctNamedFormGrid').evaluate(grid=>{const b=grid.getBoundingClientRect();return{left:b.left,right:b.right,viewport:innerWidth};});assert.ok(bounds.left>=0&&bounds.right<=bounds.viewport);
-                    themeChecks.push({theme,editor:full?'full':'inline'});
+                    await showPreview();
+                    await preview().getByRole('combobox',{name:'Affix example'}).selectOption('sword');
+                    await preview().getByRole('textbox',{name:'Variable {0}',exact:true}).fill('37');
+                    assert.deepEqual(await previewTexts(),['Normal 37','Dayanıklı Normal 37','Alev Dayanıklı Possessive 37']);
+                    const previewBounds=await preview().locator('.gamePreviewStrip').evaluate(strip=>{
+                        const rect=strip.getBoundingClientRect();return{left:rect.left,right:rect.right,viewport:innerWidth,inputs:[...strip.querySelectorAll('input,select')].map(input=>({width:input.getBoundingClientRect().width,height:input.getBoundingClientRect().height})),framesVisible:[...strip.querySelectorAll('[data-preview-variant] .gamePreviewWindow')].every(frame=>{const box=frame.getBoundingClientRect();return box.top>=rect.top && box.bottom<=rect.bottom;})};
+                    });
+                    assert.ok(previewBounds.left>=0&&previewBounds.right<=previewBounds.viewport);assert.ok(previewBounds.inputs.every(input=>input.width>0&&input.height>0));
+                    assert.ok(previewBounds.framesVisible,'all three Turkish variants fit in the preview without scrolling');
+                    if(width===1440&&theme==='modern-dark')await page.screenshot({path:join(directory,'turkish-preview-'+(full?'full':'inline')+'.png'),fullPage:true});
+                    themeChecks.push({width,theme,editor:full?'full':'inline',preview:true});
+                    await target('Normal').focus();
                 }
             }
+            await page.setViewportSize({width:1440,height:1000});
+            for(const [record,expected]of [['sword',['Kılıç','Dayanıklı Kılıç','Alev Dayanıklı Kılıcı']],['emerald',['Zümrüt','Korkusuz Zümrüt','Ölümsüzlük Korkusuz Zümrütü']],['orb',['Yüce Küre','Dayanıklı Yüce Küre','Alev Dayanıklı Yüce Küresi']]]){
+                await choose(record);if(record==='sword')await openInline(record);await showPreview();assert.deepEqual(await previewTexts(),expected);
+                if(record==='sword')await page.screenshot({path:join(directory,'turkish-preview-inline.png'),fullPage:true});
+                const before=await page.evaluate(()=>JSON.stringify({values:window.__clientFixtureApp.ctValues,dirty:window.__clientFixtureApp.ctDraftDirty}));
+                await preview().getByRole('textbox',{name:'Preview prefix',exact:true}).fill('Özel');
+                await preview().getByRole('textbox',{name:'Preview suffix',exact:true}).fill('Güç');
+                assert.match((await previewTexts())[2],/^Güç Özel /);
+                assert.equal(await page.evaluate(()=>JSON.stringify({values:window.__clientFixtureApp.ctValues,dirty:window.__clientFixtureApp.ctDraftDirty})),before);
+                if(record==='sword'){
+                    await preview().getByRole('combobox',{name:'Affix example'}).selectOption('emerald');
+                    assert.deepEqual(await previewTexts(),['Kılıç','Korkusuz Kılıç','Ölümsüzlük Korkusuz Kılıcı']);
+                    await preview().getByRole('textbox',{name:'Preview prefix',exact:true}).fill('Özel');
+                    await target('Possessive').focus();await target('Possessive').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor);await showPreview();
+                    assert.equal(await preview().getByRole('textbox',{name:'Preview prefix',exact:true}).inputValue(),'Özel');
+                    await target('Possessive').press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor);await showPreview();
+                    assert.equal(await preview().getByRole('textbox',{name:'Preview prefix',exact:true}).inputValue(),'Özel');
+                }
+            }
+            await choose('named');await openInline('named');
             await target('Possessive').focus();await target('Possessive').evaluate(input=>input.setSelectionRange(2,7));await target('Possessive').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await active('Possessive');
             assert.deepEqual(await target('Possessive').evaluate(input=>[input.selectionStart,input.selectionEnd]),[2,7]);
             await target('Possessive').press('Escape');await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);await active('Possessive');
@@ -396,7 +444,7 @@ async function run() {
             await workspace.getByRole('button',{name:'Close',exact:true}).click();const downloaded=page.waitForEvent('download');await workspace.getByRole('button',{name:'Download workbooks',exact:true}).click();const download=await downloaded,output=readFileSync(await download.path());
             const parsed=await Codec.parseWorkbook(output,{filename:'Turkish.xlsx',role:'normal',language:'Turkish'}),edited=parsed.units.find(unit=>unit.recordId==='named');assert.deepEqual(Object.fromEntries(edited.fields.map(field=>[field.id,field.target])),values);
             const before=await JSZip.loadAsync(normal),after=await JSZip.loadAsync(output);for(const part of ['[Content_Types].xml','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/worksheets/sheet2.xml','xl/metadata'])assert.deepEqual(await after.file(part).async('uint8array'),await before.file(part).async('uint8array'));
-            assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,results:['v3 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
+            assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,screenshots:['turkish-preview-full.png','turkish-preview-inline.png'].map(name=>join(directory,name)),results:['Three previews with editable defaults, number variables, both team examples, conditional and blank-possessive fallback','Preview parameters retain full/inline handoff and leave real drafts unchanged','v3 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes and two desktop widths','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
         }
         const captureTrustedCache = async () => {
             const preparedUnits=[],preparedAssets=[],legacyAssets=[];
