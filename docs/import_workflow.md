@@ -8,6 +8,8 @@ The version chooser appears as soon as the game is selected. Its Online list loa
 
 ## Multi-content versions and ClientText import/export
 
+Managers and admins can view, upload and manage ClientText groups for all 12 languages, with or without an assigned language. Use **Add content group** on the selected version, confirm each workbook's team, then prepare and publish the complete groups. The Assignment table lists every language's groups and offers Open editor, Download, Download and end, previous snapshots and Reopen. Opening a group selects its language and keeps its work and history scoped to that version/group. Translators see only their assigned language's online groups; changing the required workbook-role policy remains admin-only.
+
 A named version is metadata with its own ID. **Add content** accepts any available upstream originals; there is no requirement that the folder contain every file. Keep the upstream folder name, or use the timestamp/game default. Save metadata first when files are not ready. `Missing_XXX.txt` is ignored because the editor computes workload itself.
 
 Choose StatDescription team assignments (all checked by default), and confirm each workbook's detected language and normal/Gender role. ClientText is assigned to that language. French and German default to exactly one normal and one Gender workbook in the same group; uploading either alone is rejected. Admins can change the required-role policy. Original assets and accepted parser identities are immutable; add a new version/group rather than silently replacing their bytes. Older published versions remain one all-team StatDescription group with their existing work/history.

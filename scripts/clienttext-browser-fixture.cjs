@@ -134,12 +134,23 @@ async function run() {
     const config = loadConfig({ ADMIN_GOOGLE_SUB: 'fixture-admin', FRONTEND_ORIGIN: origin, API_PUBLIC_URL: 'http://127.0.0.1:1', DATA_DIR: directory, DATABASE_PATH: ':memory:' });
     const database = openDatabase(':memory:'), store = new CloudStore(database, config);
     store.registerIdentity({ sub: 'fixture-admin', email: 'admin@fixture.example', name: 'ClientText Fixture Admin' });
+    const managerAccessOnly = process.argv.includes('--manager-access-only');
+    if (managerAccessOnly) {
+        store.registerIdentity({ sub: 'fixture-manager', email: 'manager@fixture.example', name: 'ClientText Fixture Manager' });
+        store.assignRole('fixture-admin', 'fixture-manager', 'manager');
+        store.registerIdentity({ sub: 'fixture-translator', email: 'translator@fixture.example', name: 'ClientText Fixture Translator' });
+        store.assignLanguage('fixture-admin', 'fixture-translator', 'Thai');
+    }
     const api = createApp({ config, database, store, oauthProvider: null }), apiServer = createServer(api);
     api.locals.collaborationRealtime.attach(apiServer);
     await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
     const apiOrigin = 'http://127.0.0.1:' + apiServer.address().port;
     frontend.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-    frontend.post('/fixture/session', (req, res) => { if (req.get('X-Fixture-Key') !== secret) return res.sendStatus(403); res.json(store.createSession('fixture-admin')); });
+    frontend.post('/fixture/session', (req, res) => {
+        const account = req.query.account || 'admin';
+        if (req.get('X-Fixture-Key') !== secret || !['admin', ...(managerAccessOnly ? ['manager', 'translator'] : [])].includes(account)) return res.sendStatus(403);
+        res.json(store.createSession('fixture-' + account));
+    });
     frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/fixture/jszip.min.js', (req, res) => res.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
@@ -173,21 +184,105 @@ async function run() {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, ignoreHTTPSErrors: true });
         const page = await context.newPage(); page.on('pageerror', error => failures.push(error.message));
-        const bootstrap = async (target=page) => {
+        const bootstrap = async (target=page, account='admin') => {
             await target.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
             await target.waitForFunction(() => window.__clientFixtureApp?.offlineStoreReady && window.__clientFixtureApp?._cloud?.state, { timeout: 30000 });
-            await target.evaluate(async secret => {
-                const vm = window.__clientFixtureApp, response = await fetch('/fixture/session', { method: 'POST', headers: { 'X-Fixture-Key': secret } });
+            await target.evaluate(async ({ secret, account }) => {
+                const vm = window.__clientFixtureApp, response = await fetch('/fixture/session?account=' + encodeURIComponent(account), { method: 'POST', headers: { 'X-Fixture-Key': secret } });
                 await vm._cloud.acceptLogin(await response.json()); await vm.cloudApply(vm._cloud.snapshot());
                 vm.lang = 'French'; vm.needsInitialSettings = false; vm.showSetting = false; vm.inlineEditor = false;
                 await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
                 await vm.activateGameVersion('poe2', { checkMigration: false });
                 const report = vm.ctReport.bind(vm); window.__ctProgressEvents = [];
                 vm.ctReport = value => { window.__ctProgressEvents.push(JSON.parse(JSON.stringify(value))); report(value); };
-            }, secret);
+            }, { secret, account });
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
-        await bootstrap();
+        await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if (managerAccessOnly) {
+            assert.deepEqual(await page.evaluate(() => {
+                const vm = window.__clientFixtureApp;
+                return { role: vm.cloudUser.role, language: vm.cloudUser.language, everyLanguage: vm.cloudCanAccessAllLanguages, manager: vm.managedManagerAccess };
+            }), { role: 'manager', language: null, everyLanguage: true, manager: true }, 'A real manager needs no language assignment');
+            const upload = page.getByRole('region', { name: 'Content upload' });
+            const details = page.getByRole('region', { name: 'Selected version' });
+            const workspace = page.getByRole('region', { name: 'ClientText workspace' });
+            const languages = await page.evaluate(() => window.__clientFixtureApp.ctTeamOptions.slice());
+            const managerFiles = languages.flatMap(language => [
+                { name: language + '_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
+                ...(['French', 'German'].includes(language) ? [{ name: language + '_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }] : [])
+            ]);
+            await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
+            assert.equal(await upload.locator('.ctUploadPolicy').count(), 0, 'Content-role configuration remains admin-only');
+            await upload.locator('input[type=text]').fill('Manager every-language ClientText fixture');
+            await upload.locator('input[type=file]').first().setInputFiles(managerFiles);
+            assert.deepEqual(await page.evaluate(() => window.__clientFixtureApp.ctUploadFiles.map(file => [file.language, file.role])),
+                managerFiles.map(file => [file.name.split('_')[0], file.name.includes('_Gender_') ? 'gender' : 'normal']), 'Manager upload detects all language teams and paired roles');
+            await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctPrepared.length), languages.length);
+            await upload.getByRole('button', { name: 'Publish complete groups', exact: true }).click();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading, null, { timeout: 60000 });
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'Unassigned manager publishes every ClientText language');
+            const version = await page.evaluate(() => window.__clientFixtureApp.managedSelectedVersion);
+            const groups = await page.evaluate(() => window.__clientFixtureApp.ctGroups.map(group => ({ id: group.id, language: group.language })));
+            assert.deepEqual(groups.map(group => group.language).sort(), languages.slice().sort());
+            assert.equal(await details.locator('.contentGroupTeamTable tbody tr').count(), languages.length);
+            for (const { id, language } of groups) {
+                await details.locator('tr[data-content-group="' + id + '"]').getByRole('button', { name: 'Open editor', exact: true }).click();
+                await workspace.waitFor();
+                await page.waitForFunction(language => {
+                    const vm = window.__clientFixtureApp;
+                    return !vm.ctBusy && !vm.workspaceInitializationActive && vm.ctWorkspace?.scope.language === language;
+                }, language);
+                assert.equal(await page.evaluate(() => window.__clientFixtureApp.lang), language, 'Manager opens ' + language + ' with its own editor language');
+                assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '');
+                await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+                await details.waitFor();
+            }
+            const thai = groups.find(group => group.language === 'Thai');
+            const thaiRow = details.locator('tr[data-content-group="' + thai.id + '"]');
+            await thaiRow.getByRole('button', { name: 'Open editor', exact: true }).click();
+            await workspace.waitFor();
+            await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy && !window.__clientFixtureApp.workspaceInitializationActive);
+            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'Normal', exact: true }).click();
+            await workspace.getByRole('button', { name: 'record', exact: true }).click();
+            await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('Manager Thai translation');
+            await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
+            await waitForAsync(page, async () => {
+                const vm = window.__clientFixtureApp;
+                return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length
+                    && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('Manager Thai translation'));
+            });
+            await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+            const endingDownload = page.waitForEvent('download');
+            await thaiRow.getByRole('button', { name: 'Download and end', exact: true }).click();
+            const exported = await endingDownload;
+            const parsed = await Codec.parseWorkbook(readFileSync(await exported.path()), { filename: exported.suggestedFilename(), role: 'normal', language: 'Thai' });
+            assert.equal(parsed.units.find(unit => unit.recordId === 'record').fields.find(field => field.name === 'Name').target, 'Manager Thai translation');
+            await thaiRow.getByRole('button', { name: 'Reopen', exact: true }).waitFor();
+            await thaiRow.getByRole('button', { name: 'Reopen', exact: true }).click();
+            await page.waitForFunction(id => !window.__clientFixtureApp.ctGroups.find(group => group.id === id)?.teams[0].ended, thai.id);
+            const french = groups.find(group => group.language === 'French');
+            const pairedDownload = page.waitForEvent('download');
+            await details.locator('tr[data-content-group="' + french.id + '"]').getByRole('button', { name: 'Download', exact: true }).click();
+            const paired = await pairedDownload, pairedArchive = await JSZip.loadAsync(readFileSync(await paired.path()));
+            assert.deepEqual(Object.keys(pairedArchive.files).filter(name => !pairedArchive.files[name].dir).sort(), ['French_Gender_PoE2.xlsm', 'French_PoE2.xlsm']);
+            const translatorContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
+            const translator = await translatorContext.newPage();
+            translator.on('pageerror', error => failures.push(error.message));
+            await bootstrap(translator, 'translator');
+            await translator.getByRole('link', { name: version.name, exact: true }).waitFor();
+            await translator.evaluate(async id => { await window.__clientFixtureApp.managedReadDetails(id); }, version.id);
+            assert.deepEqual(await translator.evaluate(() => window.__clientFixtureApp.ctAssignmentRows.map(row => row.team.language)), ['Thai'], 'Translator sees only the assigned ClientText language while selected local language is French');
+            assert.equal(await translator.getByRole('button', { name: 'Upload next version', exact: true }).count(), 0);
+            assert.equal(await translator.getByRole('button', { name: 'Download and end', exact: true }).count(), 0);
+            assert.deepEqual(failures, [], 'Manager/translator browser script errors');
+            console.log(JSON.stringify({ status: 'PASS', managerAccessOnly: true, languages: languages.length,
+                results: ['Unassigned manager publishes and opens every ClientText language', 'Manager saves Thai, collects and ends its window, reopens it, and downloads paired French workbooks', 'Translator catalog and management controls remain scoped; role policy remains admin-only'] }, null, 2));
+            return;
+        }
         const captureTrustedCache = async () => {
             const preparedUnits=[],preparedAssets=[],legacyAssets=[];
             const created=api.locals.content.createUpload('fixture-admin',{game:'poe2',name:'Trusted initialization fixture',contentMode:'clienttext',language:'French',storageProtocol:ClientState.STORAGE_PROTOCOL,idempotencyKey:randomUUID()});

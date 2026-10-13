@@ -35,6 +35,17 @@ function assignmentHarness(changes={}){
     Object.defineProperty(h.app,'ctAssignmentRows',{get:()=>h.mixin.computed.ctAssignmentRows.call(h.app)});
     return h;
 }
+function cloudAccessHarness(h,language=null){
+    h.window.CloudSync=require('../public/cloudSync.js');
+    h.window.ManagedVersions=require('../public/managedVersions.js');
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../public/cloudUi.js'),'utf8'),{window:h.window});
+    Object.assign(h.app,{cloudSignedIn:true,cloudUser:{id:scope.accountId,role:'manager',language},lang:'German'});
+    const computed={cloudCanAccessAllLanguages:h.window.CloudUI.mixin.computed.cloudCanAccessAllLanguages,
+        ...Object.fromEntries(['managedCatalogAccess','managedManagerAccess','managedOnlineAvailable','managedSingleLanguage','managedCatalogScope']
+            .map(name=>[name,h.window.ManagedVersions.mixin.computed[name]]))};
+    for(const[name,getter]of Object.entries(computed))Object.defineProperty(h.app,name,{configurable:true,get:()=>getter.call(h.app)});
+    return h;
+}
 function listHarness(changes={}){
     // Mechanics fixtures deliberately show complete records; product defaults
     // are asserted separately from mixin.data() in the status-filter test.
@@ -1855,6 +1866,57 @@ test('assignment rows use assigned access and selected game/branch/version rathe
     app.branchId='another';assert.equal(app.ctAssignmentRows.length,0);app.branchId='default';
     app.managedSelectedDetails={version:{id:'stale'},teams:[team('German')],contentGroups:[ct]};
     app.managedSelectedVersion.contentGroups=[ct];assert.equal(app.ctAssignmentRows.length,2);assert.ok(app.ctAssignmentRows.every(row=>row.group===ct));
+});
+
+test('manager role exposes every ClientText language with or without an account assignment',()=>{
+    for(const assigned of [null,'Thai']){
+        const {app}=cloudAccessHarness(assignmentHarness(),assigned),languages=Array.from(app.ctTeamOptions);
+        app.managedSelectedDetails.contentGroups=languages.map(language=>({id:'ct-'+language,versionId:'v1',contentMode:'clienttext',language,
+            teams:[{language,counts:{}}]}));
+        assert.equal(app.cloudCanAccessAllLanguages,true);assert.equal(app.managedManagerAccess,true);
+        assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.team.language).sort(),languages.sort());
+        assert.equal(app.ctAssignmentRows.every(row=>row.group.language===row.team.language),true);
+        app.cloudUser={...app.cloudUser,role:'translator',language:'Thai'};
+        assert.equal(app.managedManagerAccess,false);
+        assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),['Thai — ClientText']);
+        app.cloudUser={...app.cloudUser,language:null};assert.equal(app.ctAssignmentRows.length,0);
+    }
+});
+
+test('manager opens every ClientText language under its own workspace scope and translator access stays assigned',async()=>{
+    for(const assigned of [null,'Thai']){
+        const {app}=cloudAccessHarness(harness(),assigned),opened=[],reads=[],version={id:scope.versionId,game:scope.game,branchId:scope.branchId};
+        app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};
+        app._ctStore={async getMetadata(selected){reads.push(clone(selected));return{state:'ready'};}};
+        app.ctActivate=async selected=>{opened.push(clone(selected));return true;};
+        for(const language of app.ctTeamOptions){
+            const group={id:'ct-'+language,versionId:version.id,contentMode:'clienttext',language,teams:[{language}]};
+            assert.equal(await app.ctOpenGroup(version,group,language),true);
+        }
+        assert.equal(opened.length,12);assert.deepEqual(reads,opened);
+        assert.equal(opened.every(selected=>selected.accountId===scope.accountId && selected.versionId===version.id
+            && selected.groupId==='ct-'+selected.language && selected.game===scope.game && selected.branchId===scope.branchId),true);
+        app.cloudUser={...app.cloudUser,role:'translator',language:'Thai'};
+        await app.ctOpenGroup(version,{id:'ct-German',contentMode:'clienttext',language:'German'},'German');
+        assert.equal(reads.length,12,'a translator cannot open another language even when it is cached');
+    }
+});
+
+test('manager upload offers every ClientText language independently of assignment and selected editor language',async()=>{
+    for(const assigned of [null,'Thai']){
+        const {app}=cloudAccessHarness(harness(),assigned),requests=[],policy={clientTextStorageProtocols:[S.STORAGE_PROTOCOL],
+            clientTextRoles:{default:['normal'],French:['normal','gender'],German:['normal','gender']}};
+        app._cloud={async request(route){requests.push(route);return policy;}};
+        await app.ctOpenUpload({id:'v1',name:'All language release'});
+        assert.equal(app.ctUploadVisible,true);assert.equal(app.ctUploadError,'');
+        assert.equal(app.ctTeamOptions.length,12);assert.deepEqual(Array.from(app.ctUploadAssignments).sort(),Array.from(app.ctTeamOptions).sort());
+        app.ctChooseFiles({target:{files:app.ctTeamOptions.map(language=>new File(['original'],language+'.xlsx'))}});
+        assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>candidate.language),Array.from(app.ctTeamOptions));
+        assert.equal(app.ctPolicy.clientTextRoles.French.length,2);assert.equal(app.ctPolicy.clientTextRoles.German.length,2);
+        app.ctUploadVisible=false;app.cloudUser={...app.cloudUser,role:'translator',language:'Thai'};
+        await app.ctOpenUpload({id:'v1',name:'Forbidden upload'});
+        assert.equal(app.ctUploadVisible,false);assert.deepEqual(requests,['/v1/content-policy']);
+    }
 });
 test('the shared assignment sort compares SD file progress against CT initial field progress',()=>{
     const thai={language:'Thai',counts:{saved:2,missing:2,revised:1}},ctThai={language:'Thai',counts:{saved:200,missing:100,workloadFields:4,resolvedFields:3}},
