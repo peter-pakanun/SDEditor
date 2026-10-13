@@ -226,7 +226,7 @@ async function check(fixture) {
     await replaceDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     assert.equal(await inlineTarget.inputValue(), 'existing draft {0}', 'Cancelling replacement preserves the draft');
     await exactMatch.dblclick();
-    await replaceDialog.getByRole('button', { name: 'Replace draft', exact: true }).click();
+    await replaceDialog.getByRole('button', { name: 'Replace translation', exact: true }).click();
     await a.waitForFunction(() => {
       const vm = window.__tmFixtureApp;
       return vm.inlineActive && !vm.editorVisible && vm.serializeEditorTranslations()[0] === 'เพิ่มความเสียหายไฟ {0}%'

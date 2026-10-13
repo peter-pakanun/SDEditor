@@ -1877,7 +1877,7 @@ const config = Vue.defineComponent({
           || !this.collaborationContextCurrent(context) || this._editorCollabBase !== base
           || JSON.stringify(desc.translations.English) !== english
           || !arrayEquals(savedLines, desc.translations[this.lang] || [])) return;
-        if (candidate) this.capturedDroppedPromotion(desc.filepath, candidate);
+        if (candidate) promotion = this.capturedDroppedPromotion(desc.filepath, candidate);
         const result = await this.persistTranslationBatch([{ desc, lines, needsReview: false }], 'confirm', {
           context, bases: base ? { [desc.filepath]: base } : undefined, promoteDropped: promotion,
         });
@@ -1938,13 +1938,6 @@ const config = Vue.defineComponent({
       if (!sameText(text => text)) {
         return sameText(text => String(text).replace(/\s/gu, ''))
           ? 'Spacing or line breaks differ between these copies. Review the exact text before choosing one.' : '';
-      }
-      if (!window.WorkspaceState.sameDroppedContent(yours, shared)) {
-        return 'The text matches, but the preserved entry details differ. Review the copies before choosing one.';
-      }
-      if ((conflict.kind === 'promotion' || yours.id === shared.id) && (yours.originSourceHash !== shared.originSourceHash
-        || (yours.originSourceAvailable !== false) !== (shared.originSourceAvailable !== false))) {
-        return 'The text matches, but the original source information differs. Review the copies before choosing one.';
       }
       return '';
     },
@@ -6050,6 +6043,17 @@ const config = Vue.defineComponent({
         this.appAlert('Could not save imported translations. Existing work is unchanged. ' + error.message);
       }
     },
+    applyBaselineSourceMetadata(desc, source = this.workspaceSourceFile(desc?.filepath)) {
+      if (!desc || !source) return false;
+      let changed = false;
+      const name = String(source.name || '');
+      if (String(desc.name || '') !== name) { desc.name = name; changed = true; }
+      for (const field of ['stats', 'variables', 'remarks']) {
+        const value = Array.isArray(source[field]) ? source[field] : [];
+        if (!arrayEquals(desc[field] || [], value)) { desc[field] = [...value]; changed = true; }
+      }
+      return changed;
+    },
     // Overlay staged text on the immutable ZIP baseline. Status fields on these
     // visible descriptions are caches derived from text and unresolved copies.
     applyWorkspaceOverlay({ filepaths } = {}) {
@@ -6058,7 +6062,9 @@ const config = Vue.defineComponent({
       const rows = filepaths ? filepaths.map(path => this.collaborationFileIndexes().descriptions.get(path)).filter(Boolean) : this.descs || [];
       let translationsChanged = false;
       for (const desc of rows) {
-        const state = window.WorkspaceState.workspaceFile(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc, this.lang);
+        const source = this.workspaceSourceFile(desc.filepath) || desc;
+        this.applyBaselineSourceMetadata(desc, source);
+        const state = window.WorkspaceState.workspaceFile(this.localDescs, source, this.lang);
         if (!desc.translations) desc.translations = { English: [] };
         desc.isDNT = window.StatDescCodec.computeIsDNT(desc.translations.English);
         if (!arrayEquals(desc.translations[this.lang], state.translations)) {
@@ -7801,13 +7807,15 @@ const config = Vue.defineComponent({
       let zip = new JSZip();
       for (const desc of descsToExport) {
         const translations = { ...desc.translations };
-        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
-        const committed = baseline && window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang);
+        const baseline = this.workspaceSourceFile?.(desc.filepath);
+        const committed = this.localDescs?.stagedVersion >= 1 && baseline
+          && window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang);
+        if (baseline) translations.English = [...baseline.translations.English];
         // The editor displays placeholders for an absent original block. A full
         // export must retain that absence instead of creating blank game text.
         if (!this.committedTranslationIssues(desc, this.lang).languageBlockPresent) delete translations[this.lang];
         else if (committed) translations[this.lang] = [...committed.translations];
-        let buffer = descEncode({ ...desc, translations });
+        let buffer = descEncode({ ...(baseline || desc), translations });
         zip.file(desc.filepath, buffer);
       }
       let zippedBuffer = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, function (metadata) {

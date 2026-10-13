@@ -356,6 +356,7 @@ test('promotion conflict retains saved work, lets other files sync, and requires
   const f = fixture(), { client, store, server } = f; t.after(() => client.destroy()); addFile(f, 'b.txt');
   const yours = drop(store); await client.syncDropped(client.epoch, { force: true });
   const shared = { ...copy(server.records[0]), id: 'replacement', revision: 3, status: 'discarded' };
+  shared.snapshot.translations = ['different preserved text'];
   server.records = [shared]; const original = server.request.bind(server); let reject = true;
   client.request = async (path, options) => {
     if (path.endsWith('/mutations') && options.body.promoteDropped && reject) { server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared); }
@@ -475,7 +476,7 @@ test('identical legacy file content consolidates across source histories while p
     assert.equal(preserved.status, 'replaced'); assert.equal(preserved.originSourceHash, originalSnapshot.originSourceHash);
     assert.equal(preserved.originSourceAvailable, false); assert.deepEqual(preserved.snapshot, originalSnapshot.snapshot);
     assert.deepEqual(preserved.baseline, originalSnapshot.baseline);
-    assert.equal(store.workspace.droppedAliases[yours.id].requiresReview, true);
+    assert.equal(store.workspace.droppedAliases[yours.id].requiresReview, undefined);
     assert.deepEqual(new Set(active.targetSourceHashes), new Set([hash, oldHash, 'c'.repeat(64)]));
     assert.deepEqual(store.workspace.staged, {}); assert.equal(client.room().outbox.length, 0);
     assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
@@ -500,6 +501,20 @@ test('explicit recovery retries across source-history aliases stay attached to t
   assert.equal(store.workspace.droppedArchive[yours.id].originSourceHash, oldHash);
   assert.equal(store.workspace.droppedArchive[yours.id].recoveryId, yours.recoveryId);
   assert.equal(store.workspace.droppedOutbox.length, 0);
+  const changedMetadata = copy(desc); changedMetadata.variables = ['a different recovery request'];
+  const changedRequest = copy(yours); changedRequest.snapshot.variables = copy(changedMetadata.variables);
+  assert.throws(() => W.dropTranslation(store.workspace, changedMetadata, 'Thai', changedRequest), /different translation/);
+});
+
+test('legacy recovery aliases retain their exact request identity on a nondefault branch', () => {
+  const { store, client } = fixture(); client.destroy(); store.workspace.branchId = 'release';
+  const yours = drop(store, { id: 'branch-recovery', recoveryId: 'branch-recovery', branchId: 'release' });
+  const shared = { ...copy(yours), id: 'branch-canonical', revision: 2, originSourceHash: 'c'.repeat(64) };
+  W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+  assert.ok(W.coalesceDroppedConflict(store.workspace, 'a.txt', 'Thai', shared));
+  delete store.workspace.droppedArchive[yours.id];
+  const desc = { ...source, translations: { English: ['Old English'], Thai: ['preserved'] } };
+  assert.equal(W.dropTranslation(store.workspace, desc, 'Thai', copy(yours)).id, shared.id);
 });
 
 test('an original recovery keeps its request identity across successive receipts and a later source-history consolidation', async t => {
@@ -562,19 +577,14 @@ test('choosing a same-ID shared resolution preserves its durable receipt even be
   });
 });
 
-test('automatic dropped equality checks every exact snapshot field and source scope', async t => {
+test('automatic dropped equality checks exact English and translation text and source scope', async t => {
   const mutations = {
     translation: record => { record.snapshot.translations[0] += ' '; },
     English: record => { record.snapshot.english[0] += ' '; },
-    variables: record => { record.snapshot.variables[0] = 'changed'; },
-    stats: record => { record.snapshot.stats[0] = 'changed'; },
-    remarks: record => { record.snapshot.remarks[0] = 'changed'; },
-    name: record => { record.snapshot.name = 'changed'; },
     game: record => { record.game = 'poe2'; },
     language: record => { record.language = 'German'; },
     filepath: record => { record.filepath = 'other.txt'; },
-    omitted: record => { delete record.snapshot.remarks; },
-    resolved: record => { record.status = 'discarded'; },
+    branch: record => { record.branchId = 'other'; },
   };
   for (const [label, mutate] of Object.entries(mutations)) await t.test(label, async t => {
     const { client, store, server } = fixture(); t.after(() => client.destroy());
@@ -589,7 +599,108 @@ test('automatic dropped equality checks every exact snapshot field and source sc
   });
 });
 
-test('same-ID source history changes and reviewed promotions still require a decision', async t => {
+test('identical dropped text ignores preserved metadata while retaining the original recovery snapshot', async t => {
+  for (const field of ['variables', 'stats', 'remarks', 'name', 'omitted']) await t.test(field, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store), original = copy(yours.snapshot);
+    const shared = { ...copy(yours), id: 'shared-id', revision: 2 };
+    if (field === 'omitted') delete shared.snapshot.remarks;
+    else if (field === 'name') shared.snapshot.name = 'different metadata';
+    else shared.snapshot[field] = ['different metadata'];
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    server.records = [shared]; await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, shared.id);
+    assert.deepEqual(store.workspace.droppedArchive[yours.id].snapshot, original);
+    assert.equal(store.workspace.droppedArchive[yours.id].status, 'replaced');
+    assert.deepEqual(store.workspace.staged, {});
+    assert.deepEqual(client.source[0], source, 'Consolidation does not rewrite baseline metadata.');
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+  });
+});
+
+test('a direct equivalent API receipt preserves the local metadata and origin without creating a review gate', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  const yours = drop(store, { id: 'original-recovery', recoveryId: 'original-recovery', revision: 8 });
+  const shared = { ...copy(yours), id: 'canonical', revision: 2, originSourceHash: 'c'.repeat(64) };
+  shared.snapshot.variables = ['canonical metadata'];
+  server.records = [shared]; const original = server.request.bind(server);
+  client.request = async (path, options) => {
+    if (path.endsWith('/dropped') && options.method === 'PUT') return { candidate: copy(shared), deduplicated: true };
+    return original(path, options);
+  };
+  await client.retry();
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, shared.id);
+  assert.deepEqual(store.workspace.droppedArchive[yours.id].snapshot, yours.snapshot);
+  assert.equal(store.workspace.droppedArchive[yours.id].originSourceHash, oldHash);
+  assert.equal(store.workspace.droppedAliases[yours.id].requiresReview, undefined);
+  assert.equal(store.workspace.droppedOutbox.length, 0);
+  assert.deepEqual(store.workspace.staged, {});
+});
+
+test('a stale copy decision automatically reconciles matching text at a new candidate ID and revision', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  const yours = drop(store, { revision: 8 });
+  const observed = { ...copy(yours), id: 'obsolete-shared', revision: 7 };
+  W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared: observed });
+  // A fresh server receipt can have a lower revision than a legacy local copy.
+  const latest = { ...copy(yours), id: 'current-shared', revision: 3, originSourceHash: 'c'.repeat(64) };
+  latest.snapshot.remarks = ['current metadata']; server.records = [latest];
+  const result = await client.resolveDroppedConflict('a.txt', 'local', observed);
+  assert.equal(result.status, 'resolved');
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, latest.id);
+  assert.equal(store.workspace.droppedAliases[yours.id].revision, latest.revision);
+  assert.deepEqual(store.workspace.droppedArchive[yours.id].snapshot, yours.snapshot);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+});
+
+test('copy decisions find competing translations from an earlier source version', async t => {
+  const { client, store, server } = fixture(); t.after(() => client.destroy());
+  const yours = drop(store);
+  const shared = { ...copy(yours), id: 'older-source-shared', revision: 2, targetSourceHash: oldHash, targetSourceHashes: [oldHash] };
+  shared.snapshot.translations = ['different preserved text'];
+  W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+  server.records = [shared]; const original = server.request.bind(server);
+  client.request = async (path, options) => {
+    if (path.includes('/dropped?') && new URLSearchParams(path.split('?')[1]).has('sourceHash')) return { candidates: [] };
+    return original(path, options);
+  };
+  const result = await client.resolveDroppedConflict('a.txt', 'shared', shared);
+  assert.equal(result.status, 'resolved');
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai').id, shared.id);
+  assert.deepEqual(store.workspace.droppedArchive[yours.id].snapshot.translations, ['preserved']);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+});
+
+test('an equal resolved shared copy clears the copy conflict without resurrecting it', async t => {
+  for (const status of ['promoted', 'discarded']) await t.test(status, async t => {
+    const { client, store, server } = fixture(); t.after(() => client.destroy());
+    const yours = drop(store), shared = { ...copy(yours), id: 'shared-id', revision: 2, status };
+    W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+    server.records = [{ ...copy(shared), snapshot: null }]; await client.retry();
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
+    assert.equal(store.workspace.droppedArchive[shared.id].status, status);
+    assert.deepEqual(store.workspace.staged, {});
+    assert.equal(server.requests.filter(request => request.options.method === 'PUT').length, 0);
+  });
+});
+
+test('a newer different active copy cannot be overwritten through an older same-ID archive', () => {
+  const { store, client } = fixture(); client.destroy();
+  const yours = drop(store, { id: 'same-id', revision: 1 }), shared = { ...copy(yours), revision: 2 };
+  W.recordDroppedConflict(store.workspace, { kind: 'upload', filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours, shared });
+  const current = { ...copy(yours), revision: 3 };
+  current.snapshot.translations = ['newer different text']; store.workspace.dropped.Thai['a.txt'] = current;
+  assert.equal(W.coalesceDroppedConflict(store.workspace, 'a.txt', 'Thai', shared), null);
+  assert.deepEqual(W.droppedForFile(store.workspace, 'a.txt', 'Thai').snapshot.translations, ['newer different text']);
+  assert.ok(store.workspace.droppedConflicts.Thai['a.txt']);
+});
+
+test('same-ID source history changes and reviewed promotions reconcile when text is identical', async t => {
   for (const kind of ['upload', 'promotion']) for (const difference of ['origin', 'availability']) await t.test(kind + ':' + difference, async t => {
     const { client, store, server } = fixture(); t.after(() => client.destroy());
     drop(store); await client.syncDropped(client.epoch, { force: true });
@@ -604,19 +715,19 @@ test('same-ID source history changes and reviewed promotions still require a dec
     } else {
       const request = server.request.bind(server);
       client.request = async (path, options) => {
-        if (path.endsWith('/mutations')) { server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared); }
+        if (path.endsWith('/mutations') && options.body.promoteDropped?.id === yours.id) { server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared); }
         return request(path, options);
       };
       await client.save({ files: [{ filepath: 'a.txt', translations: ['reviewed'], trackedForExport: true }],
         promoteDropped: { id: yours.id, revision: yours.revision, targetSourceHash: hash } });
     }
-    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
-    assert.equal(server.records[0].status, 'dropped');
-    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, kind === 'promotion' ? 1 : 0);
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    assert.equal(server.records[0].status, kind === 'promotion' ? 'promoted' : 'dropped');
+    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, kind === 'promotion' ? 2 : 0);
   });
 });
 
-test('an alias across source histories cannot silently publish a queued reviewed save', async t => {
+test('an alias across source histories resumes a queued reviewed save for the same text', async t => {
   for (const wire of [false, true]) await t.test('prepared:' + wire, async t => {
     const { client, store, server } = fixture(); t.after(() => client.destroy());
     const yours = drop(store), shared = { ...copy(yours), id: 'shared-id', revision: 2, originSourceHash: 'c'.repeat(64) };
@@ -628,11 +739,20 @@ test('an alias across source histories cannot silently publish a queued reviewed
       promoteDropped: { id: yours.id, revision: yours.revision, targetSourceHash: hash } };
     if (wire) op.wire = { mutationId: op.id, origin: 'save', promoteDropped: copy(op.promoteDropped),
       files: [{ filepath: 'a.txt', baseRevision: base.revision, translations: ['reviewed'], needsReview: false }] };
+    const original = server.request.bind(server);
+    client.request = async (path, options) => {
+      if (path.endsWith('/mutations') && options.body.promoteDropped?.id === yours.id) {
+        server.requests.push({ path, options: copy(options) }); throw candidateConflict(shared);
+      }
+      return original(path, options);
+    };
     store.state.rooms[client.key].outbox.push(op); client.state = copy(store.state);
     await client.retry();
-    assert.equal(client.room().outbox[0].status, 'needs_candidate_review');
-    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
-    assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
+    assert.equal(client.room().outbox.length, 0);
+    assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+    const requests = server.requests.filter(request => request.path.endsWith('/mutations'));
+    assert.equal(requests.at(-1).options.body.promoteDropped.id, shared.id);
+    assert.ok(requests.every(request => request.options.body.files[0].baseRevision === base.revision));
   });
 });
 
@@ -739,7 +859,7 @@ test('successive identical candidate aliases keep the original explicit recovery
   assert.equal(server.records[0].status, 'promoted');
 });
 
-test('automatic consolidation cannot bypass a previous manual review decision or a discarded local copy', async t => {
+test('automatic consolidation preserves a prior review decision and resumes an explicit discard for equal text', async t => {
   for (const decision of ['needs_candidate_review', 'discard']) await t.test(decision, async t => {
     const { client, store, server } = fixture(); t.after(() => client.destroy());
     drop(store); await client.syncDropped(client.epoch, { force: true });
@@ -756,8 +876,16 @@ test('automatic consolidation cannot bypass a previous manual review decision or
       filepath: 'a.txt', language: 'Thai', targetSourceHash: hash, yours: copy(store.workspace.droppedArchive[originalCandidate.id]), shared });
     server.records = [shared]; server.offline = false; client.lastDroppedSync = 0;
     await client.retry();
-    assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
-    assert.equal(server.records[0].status, 'dropped');
+    if (decision === 'discard') {
+      await client.retry();
+      assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+      assert.equal(server.records[0].status, 'discarded');
+      assert.equal(W.droppedForFile(store.workspace, 'a.txt', 'Thai'), null);
+      assert.equal(store.workspace.droppedOutbox.length, 0);
+    } else {
+      assert.deepEqual(client.snapshot().droppedReviewPaths, ['a.txt']);
+      assert.equal(server.records[0].status, 'dropped');
+    }
     assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 0);
   });
 });

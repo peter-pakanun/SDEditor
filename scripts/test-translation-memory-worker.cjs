@@ -131,13 +131,29 @@ test('runtime delays a third compiled generation until a pinned retired query re
   runtime.dispose();
 });
 
-test('classic worker entrypoint loads shared protected-tag helpers and posts its handshake', () => {
+test('classic worker entrypoint prepares PoE2 German matches with shared translation validation', async () => {
   const messages = [], sandbox = vm.createContext({ setTimeout, performance, postMessage: message => messages.push(message) });
   sandbox.self = sandbox;
   sandbox.importScripts = (...files) => files.forEach(file => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), sandbox, { filename: file }));
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'tmWorker.js'), 'utf8'), sandbox);
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'started', version: 1 }]);
   assert.equal(typeof sandbox.extractGGGVarTags, 'function'); assert.equal(typeof sandbox.self.onmessage, 'function');
+  const source = 'Blood Expulsion Duration@{0}s', target = 'Dauer des Blut-Ausstoßes@{0}s';
+  const send = message => sandbox.self.onmessage({ data: { scopeEpoch: 1, ...message } });
+  send({ type: 'setScope', scopeKey: 'account/German/poe2' });
+  send({ type: 'setSnapshot', generation: 1, game: 'poe2', units: [
+    { id: 'german', source, target, gameScope: 'poe2' },
+    { id: 'wrong-variable', source, target: target.replace('{0}', '{1}'), gameScope: 'poe2' },
+  ] });
+  await waitUntil(() => messages.some(message => message.type === 'ready' || message.type === 'error'));
+  send({ type: 'query', requestId: 1, query: { source }, options: { threshold: 100 } });
+  await waitUntil(() => messages.some(message => message.type === 'matches' || message.type === 'error'));
+  assert.deepEqual(messages.filter(message => message.type === 'error'), []);
+  const matches = messages.find(message => message.type === 'matches').matches;
+  assert.equal(matches.find(match => match.id === 'german').score, 100);
+  assert.equal(matches.find(match => match.id === 'german').warnings.length, 0);
+  assert.ok(matches.find(match => match.id === 'wrong-variable').warnings.some(warning => warning.code === 'variables'));
+  assert.ok(sandbox.TranslationDiagnostics.analyze(' @ \\n \u200b').diagnostics.some(finding => finding.code === 'blank-translation'));
 });
 
 async function waitUntil(predicate) {

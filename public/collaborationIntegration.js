@@ -72,16 +72,14 @@
       },
       workspaceSourceFile(filepath) {
         const source = this.workspaceSource();
-        if (!this._workspaceBaselineIndex || this._workspaceBaselineIndex.source !== source) {
-          this._workspaceBaselineIndex = { source, files: new Map(source.map(desc => [desc.filepath, desc])) };
+        if (!this._workspaceBaselineIndex || this._workspaceBaselineIndex.source !== source
+          || this._workspaceBaselineIndex.length !== source.length) {
+          this._workspaceBaselineIndex = { source, length: source.length, files: new Map(source.map(desc => [desc.filepath, desc])) };
         }
         return this._workspaceBaselineIndex.files.get(filepath);
       },
       droppedCandidateMatches(candidate, current) {
-        if (!candidate || !current || candidate.originSourceHash !== current.originSourceHash
-          || (candidate.originSourceAvailable !== false) !== (current.originSourceAvailable !== false)) return false;
-        return ['english', 'variables', 'remarks', 'stats', 'name', 'translations'].every(field =>
-          JSON.stringify(candidate.snapshot?.[field]) === JSON.stringify(current.snapshot?.[field]));
+        return window.WorkspaceState.sameDroppedContent(candidate, current);
       },
       capturedDroppedPromotion(filepath, candidate = this.editorDroppedCandidate) {
         if (!candidate) return null;
@@ -868,6 +866,7 @@
           const desc = descriptions.get(file.filepath);
           if (!desc) continue;
           const original = this.workspaceSourceFile(file.filepath) || desc;
+          const sourceMetadataChanged = this.applyBaselineSourceMetadata(desc, original);
           const invalid = !window.StatDescCodec.translationIssues(file.translations, original.translations?.English?.length || 0).valid;
           if (file.invalidStageRecovery) {
             const recovery = file.invalidStageRecovery;
@@ -918,9 +917,10 @@
             || desc.isMissing !== isMissing || desc.isRevised !== state.isRevised || desc.isDropped !== state.isDropped;
           const local = locals.get(file.filepath);
           const localChanged = !local || !arrayEquals(local.translations?.[lang] || [], state.translations)
-            || !arrayEquals(local.translations?.English || [], desc.translations.English);
-          if (!translationChanged && !metadataChanged && !localChanged) continue;
-          displayChanged ||= translationChanged || metadataChanged;
+            || !arrayEquals(local.translations?.English || [], original.translations.English)
+            || this.applyBaselineSourceMetadata(local, original);
+          if (!translationChanged && !metadataChanged && !localChanged && !sourceMetadataChanged) continue;
+          displayChanged ||= translationChanged || metadataChanged || sourceMetadataChanged;
           if (translationChanged) {
             const expected = batch?.expected.get(file.filepath);
             if (expected && this.collaborationContextCurrent(batch.context)
@@ -929,9 +929,9 @@
           }
           if (translationChanged) desc.translations[lang] = [...state.translations];
           if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; desc.isRevised = state.isRevised; desc.isDropped = state.isDropped; }
-          if (local && localChanged) updateLocalDesc(local, desc, lang, state.translations, { derivedStatus: true });
+          if (local && localChanged) updateLocalDesc(local, original, lang, state.translations, { derivedStatus: true });
           else if (!local) {
-            const added = makeLocalDesc(desc, lang, state.translations, { derivedStatus: true });
+            const added = makeLocalDesc(original, lang, state.translations, { derivedStatus: true });
             this.localDescs.descs.push(added); locals.set(file.filepath, added);
           }
         }
@@ -1106,7 +1106,7 @@
               ...(options.checkpoint ? { checkpoint: copy(options.checkpoint) } : {}),
               bases: capturedBases,
               deferDisplay: true,
-              descriptions: updates.map(({ desc }, index) => makeLocalDesc(desc, ctx.language, files[index].translations,
+              descriptions: updates.map(({ desc }, index) => makeLocalDesc(this.workspaceSourceFile(desc.filepath) || desc, ctx.language, files[index].translations,
                 { derivedStatus: true })),
               revisions: options.revisions || updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
                 lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
@@ -1151,12 +1151,13 @@
           const revisions = options.revisions || [];
           const files = updates.map(update => {
             const desc = update.desc;
+            const source = this.workspaceSourceFile(desc.filepath) || desc;
             const lines = [...update.lines];
             const needsReview = false;
             const isMissing = computeIsMissing(desc.translations.English.length, lines);
             const local = workspace.descs.find(d => d.filepath === desc.filepath);
-            if (local) updateLocalDesc(local, desc, ctx.language, lines, { derivedStatus: true });
-            else workspace.descs.push(makeLocalDesc(desc, ctx.language, lines, { derivedStatus: true }));
+            if (local) updateLocalDesc(local, source, ctx.language, lines, { derivedStatus: true });
+            else workspace.descs.push(makeLocalDesc(source, ctx.language, lines, { derivedStatus: true }));
             workspace.status[desc.filepath] = window.WorkspaceState.setFileMetadata(
               copy((incremental || localRecords ? this.localDescs.status?.[desc.filepath] : workspace.status[desc.filepath]) || {}), ctx.language,
               { lastEditedAt: now, lastTranslatedAt: now });

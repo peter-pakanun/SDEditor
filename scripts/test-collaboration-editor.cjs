@@ -1447,7 +1447,7 @@ test('leaving a modern group rebinds acknowledged Dropped text without replaying
   assert.equal(carried.originSourceHash, candidate.originSourceHash); assert.equal(carried.targetSourceHash, newHash);
   assert.deepEqual(Array.from(carried.targetSourceHashes), [newHash]);
   for (const field of ['snapshot', 'recoveryId', 'baseline', 'proof', 'originArchive', 'createdAt']) {
-    assert.deepEqual(copy(carried[field]), candidate[field], 'Carry retains the original ' + field);
+    assert.deepEqual(carried[field] === undefined ? undefined : copy(carried[field]), candidate[field], 'Carry retains the original ' + field);
   }
   assert.deepEqual(committed.droppedArchive[candidate.id], candidate,
     'The old server ID, revision, group, provenance and target assignments remain recovery evidence.');
@@ -1633,7 +1633,7 @@ test('a dropped candidate updated while confirmation is open cannot promote the 
   assert.deepEqual(Array.from(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), replacement.snapshot.translations);
 });
 
-test('source availability changing during confirmation requires fresh dropped review without replacing the captured draft', async () => {
+test('equal dropped text can adopt a refreshed revision during confirmation while preserving baseline metadata', async () => {
   const { editor: e, window, writes, desc } = droppedReviewFixture();
   const captured = JSON.parse(JSON.stringify(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai')));
   e.editorDroppedCandidate = captured;
@@ -1644,10 +1644,11 @@ test('source availability changing during confirmation requires fresh dropped re
   e.localDescs.dropped.Thai[desc.filepath] = { ...captured, revision: captured.revision + 1,
     originSourceAvailable: false };
   finish(true); await confirming;
-  assert.equal(writes.length, 0); assert.equal(e.editorDroppedCandidate, captured);
+  assert.equal(writes.length, 1); assert.equal(e.editorDroppedCandidate, null);
   assert.equal(e.editorBlocks, blocks);
-  assert.deepEqual(Array.from(desc.translations.Thai), ['', '']);
-  assert.match(e.collaborationNotice, /dropped translation changed.*Reopen this file/);
+  assert.deepEqual(Array.from(desc.translations.Thai), captured.snapshot.translations);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'), null);
+  assert.equal(writes[0].workspace.droppedArchive[captured.id].revision, captured.revision + 1);
 });
 
 test('saving a replacement resolves the dropped candidate while a failed save preserves it', async () => {
@@ -1737,19 +1738,19 @@ test('a competing dropped copy blocks Save and Confirm until the comparison is r
   assert.match(e.collaborationNotice, /competing dropped copies/);
 });
 
-test('dropped comparison explains matching text with different entry details without changing the captured review', () => {
+test('matching dropped text needs no metadata choice and keeps the captured recovery evidence', () => {
   for (const field of ['name', 'variables', 'remarks', 'stats']) {
     const { editor: e } = droppedConflictFixture();
     const conflict = e.editorDroppedConflict;
     conflict.shared.snapshot = JSON.parse(JSON.stringify(conflict.yours.snapshot));
     conflict.shared.snapshot[field] = field === 'name' ? 'Different entry name' : ['Different preserved detail'];
     const captured = JSON.stringify(e.editorDroppedCandidate);
-    assert.match(e.droppedConflictExplanation(conflict), /text matches.*preserved entry details differ/);
+    assert.equal(e.droppedConflictExplanation(conflict), '');
     assert.equal(JSON.stringify(e.editorDroppedCandidate), captured);
   }
 });
 
-test('dropped comparison distinguishes whitespace differences and historical promotion review from differing translations', () => {
+test('dropped comparison distinguishes exact text differences while ignoring metadata and revision provenance', () => {
   const { editor: e } = droppedConflictFixture();
   const conflict = e.editorDroppedConflict;
   assert.equal(e.droppedConflictExplanation(conflict), '', 'Different visible text already appears in the comparison.');
@@ -1762,16 +1763,65 @@ test('dropped comparison distinguishes whitespace differences and historical pro
   assert.equal(e.droppedConflictExplanation(conflict), '', 'Source-only upload differences can consolidate automatically.');
   const sharedId = conflict.shared.id;
   conflict.shared.id = conflict.yours.id;
-  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/,
-    'A same-generation source mismatch cannot silently replace historical information.');
+  assert.equal(e.droppedConflictExplanation(conflict), '');
   conflict.shared.id = sharedId;
   conflict.kind = 'promotion';
-  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/);
+  assert.equal(e.droppedConflictExplanation(conflict), '');
   conflict.shared.originSourceHash = conflict.yours.originSourceHash;
   conflict.shared.originSourceAvailable = false;
-  assert.match(e.droppedConflictExplanation(conflict), /original source information differs/);
+  assert.equal(e.droppedConflictExplanation(conflict), '');
   delete conflict.shared.snapshot;
   assert.equal(e.droppedConflictExplanation(conflict), '', 'Resolved copy guidance is displayed separately.');
+});
+
+test('captured dropped review follows the latest equal text revision but rejects changed text and resolved copies', () => {
+  const { editor: e, window, desc } = droppedReviewFixture();
+  const W = window.WorkspaceState, current = W.droppedForFile(e.localDescs, desc.filepath, e.lang);
+  const captured = JSON.parse(JSON.stringify(current));
+  e.editorDroppedCandidate = captured;
+  current.revision = 8;
+  current.originSourceHash = 'different preserved source';
+  current.originSourceAvailable = false;
+  current.snapshot.variables = ['Different recovery metadata'];
+  current.snapshot.remarks = ['Different preserved remark'];
+  current.snapshot.stats = ['different_stat'];
+  current.snapshot.name = 'Different preserved name';
+  assert.deepEqual(JSON.parse(JSON.stringify(e.capturedDroppedPromotion(desc.filepath))), {
+    id: current.id, revision: 8, targetSourceHash: e.sourceIdentity,
+  });
+  assert.equal(JSON.stringify(e.editorDroppedCandidate), JSON.stringify(captured));
+  current.snapshot.translations[0] += ' ';
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
+  current.snapshot.translations[0] = captured.snapshot.translations[0];
+  current.snapshot.english[0] += ' ';
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
+  current.snapshot.english[0] = captured.snapshot.english[0];
+  current.status = 'promoted';
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
+});
+
+test('active overlays, shared hydration and save descriptors always use immutable baseline metadata', async () => {
+  const { editor: e, window, writes, desc } = saveFixture();
+  const W = window.WorkspaceState, original = JSON.parse(JSON.stringify(desc));
+  original.name = 'current baseline'; original.stats = ['current_stat'];
+  original.variables = ['current #', '#']; original.remarks = ['current remark', ''];
+  e._workspaceSourceBaseline = [original];
+  e.localDescs = { sourceHash: e.sourceIdentity, descs: [JSON.parse(JSON.stringify(desc))], status: {} };
+  W.initializeWorkspace(e.localDescs, { source: [original], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  W.stageTranslation(e.localDescs, { filepath: desc.filepath, translations: desc.translations.Thai }, e.lang,
+    { source: original, sourceHash: e.sourceIdentity });
+  const immutable = JSON.stringify(original), metadata = value => JSON.parse(JSON.stringify(W.sourceMetadata(value)));
+  e.applyWorkspaceOverlay();
+  assert.deepEqual(metadata(desc), metadata(original));
+  desc.name = 'stale visible metadata'; desc.variables = ['stale'];
+  e.localDescs.descs[0].name = 'stale local metadata'; e.localDescs.descs[0].remarks = ['stale'];
+  await e.receiveCollaborationFiles([{ filepath: desc.filepath, translations: desc.translations.Thai, trackedForExport: true, revision: 2 }]);
+  assert.deepEqual(metadata(desc), metadata(original));
+  assert.deepEqual(metadata(e.localDescs.descs[0]), metadata(original));
+  desc.name = 'stale metadata before save'; desc.remarks = ['stale saved detail'];
+  assert.equal(await e.editorSave(), true, e.collaborationNotice);
+  assert.deepEqual(metadata(writes.at(-1).workspace.descs[0]), metadata(original));
+  assert.equal(JSON.stringify(original), immutable);
 });
 
 test('resolving competing dropped copies reopens a clean editor but preserves an existing dirty draft', async () => {
@@ -2065,6 +2115,8 @@ test('normal export includes staged files while full export uses current complet
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/statDescParser.js'), 'utf8'), context,
     { filename: 'statDescParser.js' });
   const saved = description(2, ['', '']); saved.hasChanges = false;
+  saved.name = 'baseline_export_name'; saved.stats = ['baseline_export_stat'];
+  saved.remarks = ['baseline_export_remark', ''];
   const complete = description(3, ['Current ZIP translation', 'Second current ZIP translation']); complete.hasChanges = false;
   const previous = JSON.parse(JSON.stringify(complete));
   previous.translations.English[0] = 'Earlier English'; previous.translations.Thai[0] = 'Old hidden dropped text';
@@ -2087,9 +2139,17 @@ test('normal export includes staged files while full export uses current complet
     async generateAsync() { return {}; }
   };
   context.saveAs = () => {};
+  saved.name = 'stale_export_name'; saved.stats = ['stale_export_stat'];
+  saved.variables = ['stale_export_variable', '#']; saved.remarks = ['stale_export_remark', ''];
+  saved.translations.English = ['Stale visible English', 'Second'];
   await e.exportZip(false);
   assert.deepEqual(exports[0].map(file => file.filepath), [saved.filepath]);
   assert.match(exports[0][0].text, /Explicit saved translation/);
+  assert.match(exports[0][0].text, /baseline_export_name/);
+  assert.match(exports[0][0].text, /baseline_export_stat/);
+  assert.match(exports[0][0].text, /baseline_export_remark/);
+  assert.match(exports[0][0].text, /Original/);
+  assert.doesNotMatch(exports[0][0].text, /stale_export|Stale visible English/);
   await e.exportZip(true);
   assert.deepEqual(exports[1].map(file => file.filepath), [saved.filepath, complete.filepath]);
   assert.match(exports[1][1].text, /Current ZIP translation/);
