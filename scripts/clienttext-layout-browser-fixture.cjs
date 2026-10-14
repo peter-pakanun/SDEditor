@@ -603,7 +603,11 @@ async function run() {
                 const probe=document.createElement('span');probe.style.color='var(--ui-error)';element.append(probe);const color=getComputedStyle(probe).color;probe.remove();return color;
             }),name+': selected NPC name retains red rather than the selection accent');
             assert.equal(await renlyButton.getAttribute('aria-description'),'Missing or Error in related text');
-            assert.equal(await unaName.evaluate(element=>getComputedStyle(element).color),['dark','modern-dark'].includes(theme)?'rgb(243, 211, 107)':'rgb(114, 85, 0)',name+': warning name uses readable yellow');
+            assert.equal(await unaName.evaluate(element=>getComputedStyle(element).color),await page.evaluate(()=>{
+                const filter=document.createElement('label');filter.className='filterChip warning selected';
+                const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=true;filter.append(checkbox);
+                document.body.append(filter);const color=getComputedStyle(checkbox).accentColor;filter.remove();return color;
+            }),name+': warning name matches the warning filter checkbox');
             await page.evaluate(()=>{
                 const vm=window.__ctLayoutFixture,renly=vm.ctUnits.find(unit=>unit.recordId==='RenlyLayoutIntro');
                 vm.ctSaved=Vue.markRaw({[renly.id]:{saved:true,values:{'npc-text':'Complete translation'},reviewed:{}}});vm.ctRevision++;

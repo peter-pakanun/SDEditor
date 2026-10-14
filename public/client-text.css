@@ -24,8 +24,7 @@
 .ctNavigation .ctNpcButton { display:flex; align-items:baseline; gap:8px; }
 .ctNpcName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .ctNpcName.ctNpcSeverity-error { color:var(--ui-error); }
-.ctNpcName.ctNpcSeverity-warning { color:#725500; }
-[data-theme="dark"] .ctNpcName.ctNpcSeverity-warning,[data-theme="modern-dark"] .ctNpcName.ctNpcSeverity-warning { color:#f3d36b; }
+.ctNpcName.ctNpcSeverity-warning { color:var(--ui-warning); }
 .ctNpcButton .ctNpcCount { flex:none; }
 .ctNpcHeading { padding:12px 14px; margin-bottom:12px; background:var(--color-element); border:1px solid var(--ui-border); border-radius:10px; }
 .ctNpcHeadingTitle { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:6px 14px; }
