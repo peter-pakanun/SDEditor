@@ -1646,6 +1646,12 @@ const config = Vue.defineComponent({
         let i = 0;
         while (i < part.length) {
           const slice = part.slice(i);
+          if (!keywordDisplay && slice.slice(0, 10).toLowerCase() === '<continue>') {
+            flushText();
+            output.push({ type: 'continue' });
+            i += 10;
+            continue;
+          }
           const possessive = part[i] === '<' && depth < 64 ? possessiveAtStart(slice) : null;
           if (possessive) {
             flushText();

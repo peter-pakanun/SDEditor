@@ -949,7 +949,7 @@ test('SD preview keeps empty leading and intermediate rows when arranging table 
 test('preview leaves unknown, malformed, control and unsafe color syntax visible', () => {
   const { editor } = loadEditor();
   for (const contentMode of ['statdescription', 'clienttext']) {
-    for (const raw of ['<unknown>{literal}', '<i>{{incomplete}', '<continue>{dialogue}', '<<itemvisual:CurrencyArmourQuality>>',
+    for (const raw of ['<unknown>{literal}', '<i>{{incomplete}', '<if:unknown>{dialogue}', '<<itemvisual:CurrencyArmourQuality>>',
       '<rgb(256,0,0)>{invalid}', '<fg:rgb(1,2,3);position:absolute>{unsafe}']) {
       const preview = editor.buildGamePreviewSegments(raw, { contentMode });
       assert.equal(preview.segments.map(segment => segment.text || '').join(''), raw, `${contentMode}: ${raw}`);

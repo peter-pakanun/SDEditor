@@ -538,6 +538,7 @@
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
+                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">— Continue —</span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewSourceIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
@@ -565,6 +566,7 @@
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
+                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">— Continue —</span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewTargetIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">

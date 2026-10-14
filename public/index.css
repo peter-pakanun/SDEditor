@@ -1540,6 +1540,13 @@ button, label, th, td, input[type="checkbox"] {
   white-space: pre-wrap;
 }
 
+.gamePreviewContinue {
+  display: block;
+  flex-basis: 100%;
+  margin-block: 1lh;
+  text-align: center;
+}
+
 .gamePreviewKw {
   /* Mandela Effect got me, it wasn't bold */
   /* font-weight: 700; */
