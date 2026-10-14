@@ -5,7 +5,8 @@
     else root.ClientTextConvoIndex = api;
 })(typeof globalThis === 'object' ? globalThis : self, function () {
     'use strict';
-    const TURN = /^[A-Z](?:\d+[a-z]?)?(?:=.+)?$/;
+    // Lowercase turns must be numbered; bare lowercase letters remain branch qualifiers.
+    const TURN = /^(?:[A-Z](?:\d+[a-z]?)?|[a-z]\d+[a-z]?)(?:=.+)?$/;
     const CLASS = /^(?:Str|Int|Dex|StrDex|DexInt|StrInt)4b?$/;
     const clean = value => String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
     const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;

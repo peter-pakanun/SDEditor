@@ -42,6 +42,47 @@ test('nested namespaces, chapter context, case and nonstandard fallback stems re
     assert.equal(C.familyForId('Renly_intro_A1').stem,'Renly_intro','exact stem case is an identity');
 });
 
+test('lowercase numbered turns join their conversation stem and retain exact marker evidence',()=>{
+    for(const [id,turn] of [
+        ['Ailith_MonasteryFirstInteract_i1_Dex4','i1'],
+        ['Ailith_MonasteryFirstInteract_i1_StrDex4b_a1','i1'],
+        ['Ailith_MonasteryFirstInteract_i2','i2'],
+        ['Ailith_MonasteryFirstInteract_i2=DexInt4b','i2=DexInt4b'],
+        ['Ailith_MonasteryFirstInteract_Str4b_a1b','a1b']
+    ])assert.deepEqual(C.familyForId(id),{stem:'Ailith_MonasteryFirstInteract',anchor:'Ailith',turn});
+    assert.deepEqual(C.familyForId('ElderMadox_DeliCraft_i1'),{stem:'ElderMadox_DeliCraft',anchor:'ElderMadox',turn:'i1'});
+});
+
+test('nested lowercase branches preserve earlier uppercase turns without broadening bare letters or uppercase suffixes',()=>{
+    for(const [id,stem,turn] of [
+        ['Farrow_TreeOfSouls_B2_b_a1','Farrow_TreeOfSouls','B2'],
+        ['Ailith_MonasteryFirstInteract_F2_a_a1','Ailith_MonasteryFirstInteract','F2'],
+        ['ElderMadox_Saved_A2=Met_d_a1','ElderMadox_Saved','A2=Met']
+    ])assert.deepEqual(C.familyForId(id),{stem,anchor:id.split('_')[0],turn});
+    for(const id of ['Ailith_MonasteryFirstInteract_a','Ailith_MonasteryFirstInteract_b_Dex4',
+        'Ailith_MonasteryFirstInteract_a=NoLore','Matiki_EyeofHinekIntroAfterDead_B2H'])
+        assert.deepEqual(C.familyForId(id),{stem:id,anchor:id.split('_')[0],turn:''});
+});
+
+test('merged lowercase families preserve ownership, full Normal/Gender identities, original casing and source row order',async()=>{
+    const rows=freeze([npc('Metadata/NPC/Ailith','Ailith'),npc('Metadata/NPC/ElderMadox','Elder Madox'),
+        convo('Ailith_MonasteryFirstInteract_F2_a_a1'),convo('Ailith_MonasteryFirstInteract_i1_Dex4'),
+        convo('Ailith_MonasteryFirstInteract_i2=DexInt4b'),convo('Ailith_MonasteryFirstInteract_i1_Dex4',{role:'gender'}),
+        convo('ElderMadox_DeliCraft_A1'),convo('ElderMadox_DeliCraft_i1')]);
+    const before=JSON.stringify(rows),previous=await build([rows[0],rows[1],rows[2],rows[6]]),index=await build(rows);
+    const ailith=index.familyByKey.get('Ailith_MonasteryFirstInteract'),madox=index.familyByKey.get('ElderMadox_DeliCraft');
+    assert.deepEqual(ailith.units,[rows[2],rows[3],rows[4],rows[5]]);
+    assert.deepEqual(madox.units,[rows[6],rows[7]]);
+    assert.deepEqual(index.memberships.get(rows[2].id),previous.memberships.get(rows[2].id),'existing uppercase membership stays exact');
+    assert.deepEqual(index.memberships.get(rows[6].id),previous.memberships.get(rows[6].id));
+    for(const row of ailith.units)assert.equal(index.memberships.get(row.id).parentKey,previous.memberships.get(rows[2].id).parentKey);
+    assert.equal(index.memberships.get(rows[7].id).parentKey,previous.memberships.get(rows[6].id).parentKey);
+    assert.equal(index.memberships.get(rows[3].id).turn,'i1');assert.equal(index.memberships.get(rows[4].id).turn,'i2=DexInt4b');
+    assert.equal(new Set(ailith.units.map(row=>row.id)).size,4);
+    assert.notEqual(rows[3].id,rows[5].id);assert.equal(rows[3].recordId,rows[5].recordId);
+    assert.equal(ailith.units[1],rows[3]);assert.equal(ailith.units[3],rows[5]);assert.equal(JSON.stringify(rows),before);
+});
+
 test('full Name resolves title collisions while suffix speakers and class metadata cannot choose the parent',async()=>{
     const rows=[npc('Metadata/NPC/Doryani','Doryani'),npc('Metadata/Monsters/DoryaniPast','Doryani, Royal Thaumaturge','Doryani'),
         npc('Metadata/NPC/Sin','Sin'),convo('DoryaniA4_Intro_A_Sin'),

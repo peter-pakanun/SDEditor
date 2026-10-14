@@ -594,11 +594,45 @@ async function run() {
                 if (language === 'Thai') await page.screenshot({ path: join(screenshotFolder, 'npc-conversation-renly.png') });
                 await workspace.getByRole('button', { name: 'Close', exact: true }).click();
                 await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
-                const realConvo = await browseConvoFamily(language + ' supplied Convo', 'DoryaniA4_Intro', 25);
-                if (language === 'Thai') {
-                    assert.equal(realConvo.allConversations.families, 1119, 'Thai supplied workbook exposes all 1,119 conversation families');
-                    assert.equal(realConvo.allConversations.units, 11717, 'Thai supplied workbook exposes all 11,717 conversation turns');
+                const ailithConvo = await browseConvoFamily(language + ' lowercase numbered turns', 'Ailith_MonasteryFirstInteract', 103);
+                const numberedTurns = await page.evaluate(() => {
+                    const vm = window.__offlineTestApp, index = vm._ctConvoIndex;
+                    const conversationUnits = vm.ctUnits.filter(unit => unit.sheet.replace(/_Gender$/, '') === 'NPCTalkDialogueTextAudio');
+                    const ailith = conversationUnits.filter(unit => unit.recordId.startsWith('Ailith_MonasteryFirstInteract_'));
+                    const lower = ailith.filter(unit => /_(?:i1|i2)(?:_|=|$)/.test(unit.recordId));
+                    const elder = conversationUnits.filter(unit => unit.recordId === 'ElderMadox_DeliCraft_i1');
+                    const identity = unit => ({ id: unit.id, role: unit.role, sheet: unit.sheet, recordId: unit.recordId,
+                        family: index.memberships.get(unit.id)?.familyKey });
+                    return { ailith: ailith.map(identity), lower: lower.map(identity), elder: elder.map(identity),
+                        displayedIds: vm.ctRows.map(unit => unit.id) };
+                });
+                assert.equal(numberedTurns.ailith.length, 103, language + ': all original Ailith turns and nested responses share one family');
+                assert.equal(numberedTurns.lower.length, 12, language + ': numbered lowercase i1/i2 variants join their existing Ailith family');
+                assert.ok(numberedTurns.lower.some(unit => unit.recordId === 'Ailith_MonasteryFirstInteract_i1_Dex4'), language + ': the reported i1_Dex4 record remains present exactly');
+                assert.ok(numberedTurns.lower.some(unit => unit.recordId === 'Ailith_MonasteryFirstInteract_i1_StrDex4b_a1'), language + ': the nested lowercase a1 response remains present exactly');
+                assert.ok(numberedTurns.lower.some(unit => unit.recordId === 'Ailith_MonasteryFirstInteract_i2=DexInt4b'), language + ': the conditional lowercase i2 turn remains present exactly');
+                for (const unit of numberedTurns.ailith) {
+                    assert.equal(unit.family, 'Ailith_MonasteryFirstInteract', language + ': unchanged original Ailith ID retains its family: ' + unit.recordId);
+                    assert.equal(unit.id, JSON.stringify([unit.role, unit.sheet, unit.recordId]), language + ': grouping preserves the full workbook/sheet/record identity');
                 }
+                assert.deepEqual(numberedTurns.displayedIds.slice().sort(), numberedTurns.ailith.map(unit => unit.id).sort(), language + ': the selected Convo family displays all 103 exact original units');
+                assert.ok(numberedTurns.elder.length > 0, language + ': the original ElderMadox lowercase numbered turn exists');
+                for (const unit of numberedTurns.elder) assert.equal(unit.family, 'ElderMadox_DeliCraft', language + ': ElderMadox_DeliCraft_i1 retains the surrounding conversation family');
+                const conversationFilter = workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true });
+                await conversationFilter.fill('Ailith');
+                const ailithSelector = await page.evaluate(key => '[data-convo-key="' + CSS.escape(key) + '"]', ailithConvo.rowKey);
+                await workspace.getByRole('tree', { name: 'Conversations', exact: true }).locator(ailithSelector).click();
+                await page.waitForFunction(key => window.__offlineTestApp.ctConvoSelection === key && !window.__offlineTestApp.ctBrowseBusy, ailithConvo.rowKey);
+                assert.equal(await page.evaluate(() => window.__offlineTestApp.ctRows.length), 103, language + ': filtered tree selection includes lowercase variants and nested responses');
+                results.push(language + ': Ailith tree selection contains 103 unchanged original units, including 12 numbered lowercase turns and nested replies; ElderMadox i1 joins its original family');
+                await conversationFilter.press('Escape');
+                await workspace.getByRole('button', { name: 'All conversations', exact: true }).click();
+                await page.waitForFunction(() => window.__offlineTestApp.ctConvoSelection === 'all' && !window.__offlineTestApp.ctBrowseBusy);
+                await workspace.getByRole('tab', { name: 'NPCs', exact: true }).click();
+                await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
+                const realConvo = await browseConvoFamily(language + ' supplied Convo', 'DoryaniA4_Intro', 25);
+                assert.equal(realConvo.allConversations.families, 1106, language + ' supplied workbook exposes all 1,106 conversation families');
+                assert.equal(realConvo.allConversations.units, 11717, language + ' supplied workbook exposes all 11,717 conversation turns');
                 await workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true }).fill('Doryani');
                 await layout(page, workspace, language + ' supplied Convo worklist');
                 if (language === 'Thai') {
