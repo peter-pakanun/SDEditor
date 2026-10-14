@@ -274,14 +274,14 @@ test('context reference labels read a prepared scoped index without scanning ori
 test('context shares one component under identity and leaves fields and inline keyboard blocks separate',async()=>{
     const {app,window,original}=listHarness({inlineEditor:true}),context=window.ClientTextUI.contextComponent,
         html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
-    assert.match(context.template,/class="ctReferenceContext"[^>]*tabindex="-1"/);
+    assert.match(context.template,/class="ctReferenceContext"[^>]*:tabindex="rowBounded \? 0 : -1"/);
     assert.match(context.template,/@click\.stop @dblclick\.stop/);
     assert.match(context.template,/v-tooltip="part\.tooltip"/);assert.match(context.template,/\{\{ part\.text \}\}/);
     assert.doesNotMatch(context.template,/v-html|data-inline-block|data-ct-target/);
     assert.doesNotMatch(window.ClientTextUI.fieldsComponent.template,/ctReferenceMetadata|ctReferenceContext/);
     assert.match(window.ClientTextUI.fieldsComponent.template,/ctDeveloperNotes/);
     const identity=html.slice(html.indexOf('<td class="fileIdentityCell"><button class="fileOpenButton ctID"'),html.indexOf('<td data-label="English"',html.indexOf('<td class="fileIdentityCell"><button class="fileOpenButton ctID"')));
-    assert.match(identity,/<small class="ctFilePath">.*<ct-context v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit\.id"[^>]* compact><\/ct-context>/);
+    assert.match(identity,/<small class="ctFilePath">.*<ct-context :host="\$root" :items="ctReferenceMetadata\(unit\)" compact row-bounded><\/ct-context>/);
     const full=html.slice(html.indexOf('<editor-full-shell v-if="ctEditor"'),html.indexOf('</editor-full-shell>',html.indexOf('<editor-full-shell v-if="ctEditor"')));
     assert.ok(full.indexOf('editorFileIdentity')<full.indexOf('<ct-context'));
     assert.ok(full.indexOf('<ct-context')<full.indexOf('ctEditorNavigation'));

@@ -55,7 +55,8 @@ const fields = ['MS','MP','FS','FP','NS','NP'].map((form,index)=>({
 const unit = Vue.markRaw({id:'layout-record',role:'normal',sheet:sheets[0].name,recordId:'FixtureIdentifier',fields,notes:[],
     metadata:{Character:'Metadata/Characters/Dex/DexFourb, Metadata/Characters/Str/StrFourb',Context:'Raw <img src=x onerror=alert(1)> reference',
         Tags:'ring, crossbow, default',Arbitrary:'  keep\\tthese\\nspaces  ',Zero:'0',Flag:'false',Empty:'  '},developerNotes:'Separate developer note'});
-const inactiveUnit=Vue.markRaw({id:'inactive-layout-record',role:'normal',sheet:sheets[0].name,recordId:'InactiveFixtureIdentifier',notes:[],metadata:{Tags:'inactive context'},
+const inactiveUnit=Vue.markRaw({id:'inactive-layout-record',role:'normal',sheet:sheets[0].name,recordId:'InactiveFixtureIdentifier',notes:[],metadata:{Tags:'inactive context',
+    ...Object.fromEntries(Array.from({length:30},(_,index)=>['Reference '+index,'Additional metadata entry '+index]))},
     fields:[{id:'inactive-Text',kind:'text',name:'Text',source:'Inactive English.',target:'Inactive translation.',sourceCell:'J3',targetCell:'K3',required:true,originalMissing:false,outdated:false}]});
 const referenceCharacterUnits=Vue.markRaw([['Dex','DexFourb','Huntress','B10'],['Str','StrFourb','Warrior','B8']].map(([attribute,form,source,sourceCell])=>({
     id:'reference-character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,
@@ -269,8 +270,8 @@ async function run() {
         };
         const checkReferences=async (full,name)=>{
             const prefix=full?'.ctFullEditor':'tr[data-unit-id="layout-record"] .fileIdentityCell',references=page.locator(prefix+' .ctReferenceContext');
-            assert.equal(await page.locator('.ctReferenceContext').count(),1,name+': context appears once for the active record');
-            assert.equal(await page.locator('tr[data-unit-id="inactive-layout-record"] .ctReferenceContext').count(),0,name+': inactive row has no context');
+            assert.equal(await page.locator('.ctReferenceContext:visible').count(),full?1:2,name+': each visible record with metadata has context');
+            assert.equal(await page.locator('tr[data-unit-id="inactive-layout-record"] .ctReferenceContext').count(),1,name+': inactive row retains its context');
             assert.equal(await page.locator('.ctFields .ctReferenceContext').count(),0,name+': context is absent from English and translation fields');
             assert.deepEqual(await references.locator('dt').allTextContents(),['Character','Context','Tags','Arbitrary','Zero','Flag'],name+': all nonblank headings preserve workbook column order');
             assert.deepEqual(await references.locator('dd').allTextContents(),[
@@ -330,10 +331,38 @@ async function run() {
         };
         for(const mode of [{inlineEditor:false,ctInlineClosed:false},{inlineEditor:true,ctInlineClosed:true}]) {
             await page.evaluate(mode=>Object.assign(window.__ctLayoutFixture,mode),mode);await settle();
-            assert.equal(await page.locator('.ctReferenceContext').count(),0,'Inactive inline mode does not show context');
+            assert.equal(await page.locator('.ctReferenceContext:visible').count(),2,'Context is available before selecting or editing a row');
         }
         await page.evaluate(()=>Object.assign(window.__ctLayoutFixture,{inlineEditor:true,ctInlineClosed:false}));await settle();
-        results.push({name:'Context hidden outside active inline editing'});
+        results.push({name:'Context visible on selected and unselected rows in regular and closed inline modes'});
+        const checkContextBounds=async name=>{
+            const context=page.locator('tr[data-unit-id="inactive-layout-record"] .ctReferenceContext'),
+                active=page.locator('tr[data-unit-id="layout-record"] .ctReferenceContext');
+            const short=await context.evaluate(element=>{
+                element.scrollTop=0;
+                const rect=element.getBoundingClientRect(),first=element.querySelector('.ctContextEntry').getBoundingClientRect();
+                const row=element.closest('tr').getBoundingClientRect().height,list=element.firstElementChild,extras=[...list.children].slice(1);
+                extras.forEach(node=>node.remove());const oneEntryRow=element.closest('tr').getBoundingClientRect().height;
+                list.append(...extras);
+                return {height:rect.height,firstInside:first.top>=rect.top && first.bottom<=rect.bottom,
+                    scroll:element.scrollHeight,client:element.clientHeight,row,oneEntryRow};
+            });
+            assert.ok(short.firstInside,name+': at least one complete metadata entry fits in a short row');
+            assert.ok(short.scroll>short.client,name+': excess metadata scrolls inside the context');
+            assert.ok(Math.abs(short.row-short.oneEntryRow)<=1,name+': thirty metadata entries take the same row height as one');
+            const before=await page.evaluate(()=>({selection:window.__ctLayoutFixture.ctSelection,values:JSON.stringify(window.__ctLayoutFixture.ctValues)}));
+            await context.focus();await context.press('End');
+            await page.waitForFunction(()=>document.querySelector('tr[data-unit-id="inactive-layout-record"] .ctReferenceContext').scrollTop>0);
+            assert.deepEqual(await page.evaluate(()=>({selection:window.__ctLayoutFixture.ctSelection,values:JSON.stringify(window.__ctLayoutFixture.ctValues)})),before,name+': keyboard scrolling metadata leaves the active draft intact');
+            await context.evaluate(element=>element.scrollTop=0);
+            const tall=await active.evaluate(element=>({row:element.closest('tr').getBoundingClientRect().height,
+                padding:[...element.closest('tr').children].reduce((maximum,cell)=>{const style=getComputedStyle(cell);return Math.max(maximum,parseFloat(style.paddingTop)+parseFloat(style.paddingBottom)+parseFloat(style.borderBottomWidth));},0),
+                content:Math.max(...[...element.closest('tr').querySelectorAll(':scope > .inlineSourceCell > *,:scope > .inlineTranslationCell > *')].map(node=>node.getBoundingClientRect().height)),
+                height:element.getBoundingClientRect().height}));
+            assert.ok(tall.height>short.height,name+': inline metadata uses the taller source/translation area');
+            assert.ok(tall.row<=tall.content+tall.padding+1,name+': metadata does not increase the tall source/translation row '+JSON.stringify(tall));
+            results.push({name:name+' all-row metadata, one-entry minimum, bounded row height and keyboard scrolling'});
+        };
         for(const theme of ['light','grey','dark','modern-dark']) for(const width of [1440,1100,1000]) {
             await page.setViewportSize({width,height:900});
             await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);window.__ctLayoutFixture.ctEditor=false;},theme);
@@ -353,6 +382,7 @@ async function run() {
             await checkTooltip(longButton,longSheet+'\nNormal workbook',theme+'/'+width);
             await checkGrid(theme+'/'+width+' inline');
             await checkFieldLayout(false,theme+'/'+width+' inline');
+            await checkContextBounds(theme+'/'+width+' inline');
             await checkReferences(false,theme+'/'+width+' inline');
             if(width===1100)await checkContextInteraction(theme+'/'+width+' inline');
             if(theme==='modern-dark' && width===1100) {

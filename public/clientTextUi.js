@@ -2798,11 +2798,42 @@
             }
         }
     };
-    const contextComponent = { name:'ClientTextContext',props:{host:Object,items:{type:Array,default:()=>[]},compact:Boolean},
+    const contextComponent = { name:'ClientTextContext',props:{host:Object,items:{type:Array,default:()=>[]},compact:Boolean,rowBounded:Boolean},
+        mounted() { this.scheduleBounds(); },
+        updated() { this.scheduleBounds(); },
+        beforeUnmount() { this._boundsObserver?.disconnect();root.cancelAnimationFrame?.(this._boundsFrame); },
         methods:{
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
             hideTooltip() { this.host.hideTooltip?.(); },
-        },template:`<section v-if="items.length" class="ctReferenceContext" :class="{ctContextCompact:compact}" tabindex="-1" aria-label="Context" @click.stop @dblclick.stop>
+            scheduleBounds() {
+                if(!this.rowBounded || this._boundsFrame || !root.requestAnimationFrame)return;
+                this._boundsFrame=root.requestAnimationFrame(()=>{this._boundsFrame=null;this.measureBounds();});
+            },
+            measureBounds() {
+                const element=this.$refs.context,row=element?.closest('tr'),identity=element?.parentElement;
+                if(!row || !element.getClientRects().length)return;
+                const cells=[...row.children].filter(cell=>cell.matches('.inlineSourceCell,.inlineTranslationCell')),
+                    siblings=[...identity.children].filter(child=>child!==element),
+                    observed=[...cells.flatMap(cell=>[...cell.children]),...siblings,element.firstElementChild];
+                if(root.ResizeObserver && (!this._boundsNodes || observed.some((node,index)=>node!==this._boundsNodes[index]) || observed.length!==this._boundsNodes.length)){
+                    this._boundsObserver ||= new root.ResizeObserver(()=>this.scheduleBounds());
+                    this._boundsObserver.disconnect();observed.forEach(node=>this._boundsObserver.observe(node));this._boundsNodes=observed;
+                }
+                const style=root.getComputedStyle(element),rect=element.getBoundingClientRect(),
+                    first=element.querySelector('.ctContextEntry'),number=value=>parseFloat(value)||0,
+                    minimum=(first?.getBoundingClientRect().height || 0)+number(style.paddingTop)+number(style.paddingBottom)+number(style.borderTopWidth)+number(style.borderBottomWidth),
+                    before=rect.top-identity.getBoundingClientRect().top-number(root.getComputedStyle(identity).paddingTop),
+                    after=Math.max(number(style.marginBottom),...siblings.filter(node=>element.compareDocumentPosition(node)&4)
+                        .map(node=>node.getBoundingClientRect().bottom-rect.bottom+number(root.getComputedStyle(node).marginBottom)));
+                // Measure the contents, never the table cells: their shared row
+                // height already includes context and would feed back into itself.
+                const contentHeight=Math.max(0,...cells.map(cell=>{
+                    const top=cell.getBoundingClientRect().top+number(root.getComputedStyle(cell).paddingTop);
+                    return Math.max(top,...[...cell.children].map(child=>child.getBoundingClientRect().bottom+number(root.getComputedStyle(child).marginBottom)))-top;
+                })),height=Math.ceil(Math.max(minimum,contentHeight-before-after));
+                if(element.style.maxHeight!==height+'px')element.style.maxHeight=height+'px';
+            },
+        },template:`<section v-if="items.length" ref="context" class="ctReferenceContext" :class="{ctContextCompact:compact,ctContextRowBounded:rowBounded}" :tabindex="rowBounded ? 0 : -1" aria-label="Context" @click.stop @dblclick.stop>
             <dl><div v-for="item in items" :key="item.name" class="ctContextEntry"><dt>{{ item.name }}</dt><dd class="ctContextValue"><span v-for="(part,index) in item.parts" :key="index" class="ctContextPart" :tabindex="part.tooltip ? 0 : undefined" :aria-label="part.tooltip || undefined" v-tooltip="part.tooltip">{{ part.text }}</span></dd></div></dl>
         </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},

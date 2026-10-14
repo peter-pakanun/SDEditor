@@ -67,6 +67,8 @@
 .ctReferenceContext dl { margin:0; }.ctContextEntry + .ctContextEntry { margin-top:8px; }.ctContextEntry dt { font-size:12px; font-weight:600; }.ctContextValue { margin:3px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; tab-size:4; }
 .ctContextPart[tabindex] { cursor:help; text-decoration:underline dotted; text-underline-offset:3px; }.ctContextPart:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
 .ctReferenceContext.ctContextCompact { margin:8px 0; padding:7px 8px; font-size:11px; }.ctContextCompact .ctContextEntry + .ctContextEntry { margin-top:6px; }.ctContextCompact .ctContextEntry dt { font-size:11px; color:var(--ui-muted); }
+.ctReferenceContext.ctContextRowBounded { box-sizing:border-box; max-height:5em; overflow:auto; scrollbar-gutter:stable; overscroll-behavior:contain; }
+.ctContextRowBounded:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
 .ctProgress { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:20px; margin:16px 0; padding:12px; background:var(--color-element); border:1px solid var(--ui-border); border-radius:6px; }
 .ctProgressMain { display:grid; gap:8px; min-width:0; }
 .ctProgressLabel { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
