@@ -108,6 +108,35 @@ async function saved(page, unitId, fieldId, target) {
     }, { unitId, fieldId, target });
     assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
 }
+async function caretFormatting(page, surface, label) {
+    const target=surface.locator('.ctTarget').first(),input=target.locator('[data-ct-target]'),
+        settle=()=>page.evaluate(async()=>{await window.__offlineTestApp.$nextTick();await new Promise(requestAnimationFrame);}),
+        rawValue=()=>input.evaluate(input=>window.__offlineTestApp.ctValues[input.dataset.ctTarget]);
+    for(const style of ['b','i','u']){
+        const name={b:'Bold',i:'Italic',u:'Underline'}[style],other=style==='i'?'u':'i',inner='Outer\r\n<'+other+'>{Nested {0}}\nLine',
+            styled='Prefix <'+style+'>{'+inner+'} suffix',plain='Prefix '+inner+' suffix',button=target.getByRole('button',{name,exact:true});
+        await input.fill(styled.replace(/\r\n/g,'\n'));
+        await input.evaluate(async(input,raw)=>{
+            const vm=window.__offlineTestApp;vm.ctValues[input.dataset.ctTarget]=raw;await vm.$nextTick();input.focus();
+            const caret=input.value.indexOf('Nested')+2;input.setSelectionRange(caret,caret);input.dispatchEvent(new Event('select'));await vm.$nextTick();
+        },styled);
+        assert.equal(await button.getAttribute('aria-pressed'),'true',label+': '+name+' reflects a caret inside nested content');
+        assert.equal(await target.locator('.fieldStyle-'+other).getAttribute('aria-pressed'),'true',label+': the nested style is active too');
+        await button.click();await settle();assert.equal(await rawValue(),plain,label+': removing '+name+' preserves nested tags and CRLF');
+        assert.equal(await input.evaluate(input=>input.value.slice(input.selectionStart,input.selectionEnd)),inner.replace(/\r\n/g,'\n'),label+': removal selects the entire affected content');
+        assert.equal(await button.getAttribute('aria-pressed'),'false');
+        await input.press('Control+z');await settle();assert.equal(await rawValue(),styled,label+': Undo restores the exact wrapper and raw newlines');
+        await input.press('Control+y');await settle();assert.equal(await rawValue(),plain,label+': Redo removes only the selected style');
+        assert.equal(await input.evaluate(input=>input.value.slice(input.selectionStart,input.selectionEnd)),inner.replace(/\r\n/g,'\n'),label+': Redo retains the affected selection');
+        await input.press('Control+'+style);await settle();assert.equal(await rawValue(),styled,label+': the shortcut reapplies to the selected affected content');
+        assert.equal(await button.getAttribute('aria-pressed'),'true');assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctCompletion),null,'Formatting wins over legacy Ctrl+I autocomplete');
+        await input.press('Control+z');await input.press('Control+Shift+z');await settle();assert.equal(await rawValue(),styled,label+': alternate Redo also restores formatting');
+        await input.evaluate(async input=>{input.setSelectionRange(0,0);input.dispatchEvent(new Event('select'));await window.__offlineTestApp.$nextTick();});
+        assert.equal(await button.getAttribute('aria-pressed'),'false',label+': moving outside the wrapper clears the active state');
+        await input.press('Control+End');await input.press('Control+'+style);await settle();assert.equal(await rawValue(),styled+'<'+style+'>{}',label+': an empty selection inserts an empty wrapper');
+        assert.equal(await button.getAttribute('aria-pressed'),'true');await input.press('Control+'+style);await settle();assert.equal(await rawValue(),styled,label+': toggling inside an empty wrapper removes it');
+    }
+}
 async function layout(page, surface, label, screenshot = false) {
     for (const width of [1440, 1100]) for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
         await page.setViewportSize({ width, height: 1000 });
@@ -538,7 +567,7 @@ async function run() {
             // Establish the real editor preference before measuring the test
             // session; changing a personal setting itself is durable work.
             await monitor(page,false);
-            await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.inlineEditor=true;await vm.saveSettings();});
+            await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.inlineEditor=true;vm.autocompleteShortcut='ctrl-i';await vm.$nextTick();await vm.saveSettings();});
             await page.waitForTimeout(500);await monitor(page,true);
             await openTest(files, previousFiles);
             const sample = await page.evaluate(async () => {
@@ -584,6 +613,7 @@ async function run() {
             await source.getByRole('button',{name:'Close revision menu'}).press('Escape');
             assert.equal(await source.locator('.fieldHistoryMenu').count(),0);
             const target=editor.locator('.ctTarget').first(),draft=target.locator('[data-ct-target]');
+            await caretFormatting(page,editor,label+' full editor');
             await draft.fill('Selected\nsecond line');await draft.press('Control+a');await draft.press('Control+b');
             assert.equal(await draft.inputValue(),'<b>{Selected\nsecond line}');await draft.press('Control+z');assert.equal(await draft.inputValue(),'Selected\nsecond line');
             await draft.press('Control+a');await target.getByRole('button',{name:'Italic',exact:true}).click();assert.equal(await draft.inputValue(),'<i>{Selected\nsecond line}');
@@ -602,6 +632,7 @@ async function run() {
             await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             const row=workspace.locator('tr[data-unit-id='+JSON.stringify(sample.id)+']');await row.click();
             await row.locator('[data-ct-target]').first().waitFor();await layout(page,row,label+' inline row toolbar');
+            await caretFormatting(page,row,label+' inline editor');await row.locator('[data-ct-target]').first().fill('Live draft comparison');
             assert.equal(await row.locator('.ctTranslationDiff').count(),1,'Inline/full transition retains the translation comparison');
             await row.locator('[data-ct-target]').first().press('Control+Enter');await editor.waitFor();
             assert.equal(await editor.locator('[data-ct-target]').first().inputValue(),'Live draft comparison','Field toolbar transitions retain the exact draft');

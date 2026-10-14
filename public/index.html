@@ -1078,7 +1078,7 @@
             <span class="metaPill" :class="{ mismatch: editorBlock.metaVarsTr !== editorBlock.metaVarsEn }" v-tooltip="'Variable tags (translation / english)'"><span class="metaIcon">{}</span><span class="metaNum">{{ editorBlock.metaVarsTr }}/{{ editorBlock.metaVarsEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaKwTr !== editorBlock.metaKwEn }" v-tooltip="'Keyword tags (translation / english)'"><span class="metaIcon">[]</span><span class="metaNum">{{ editorBlock.metaKwTr }}/{{ editorBlock.metaKwEn }}</span></span>
             <span class="metaPill" :class="{ mismatch: editorBlock.metaDecorTr !== editorBlock.metaDecorEn }" v-tooltip="'Text decoration tags (translation / english)'"><span class="metaIcon">&lt;&gt;</span><span class="metaNum">{{ editorBlock.metaDecorTr }}/{{ editorBlock.metaDecorEn }}</span></span>
-            <editor-diagnostic-meta :presentation="{ warningCount: blockDiagnosticWarningCount(editorBlock, index), warningTitle: blockDiagnosticTitle(editorBlock, 'warning', index), errorCount: editorBlock.diagnosticErrorCount, errorTitle: blockDiagnosticTitle(editorBlock, 'error') }"></editor-diagnostic-meta>
+            <editor-diagnostic-meta :presentation="{ warningCount: blockDiagnosticWarningCount(editorBlock, index), warningTitle: blockDiagnosticTitle(editorBlock, 'warning', index), errorCount: editorBlock.diagnosticErrorCount, errorTitle: blockDiagnosticTitle(editorBlock, 'error'), missingTags: blockDiagnosticMissingTags(editorBlock) }"></editor-diagnostic-meta>
           </div>
           <div v-if="editorConsistencyDiagnostics[index]" class="consistencyWarning consistencyPrompt" role="note">
             <div><strong>Inconsistent translations</strong><span>{{ editorConsistencyDiagnostics[index].variantCount }} versions across {{ editorConsistencyDiagnostics[index].entryCount }} entries with identical English</span></div>
@@ -1460,6 +1460,7 @@
   <script src="entryAlignmentUi.js"></script>
   <script src="managedCollectionExports.js"></script>
   <script src="managedVersions.js"></script>
+  <script src="clientTextFormatting.js"></script>
   <script src="clientTextComparisons.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="editorSession.js"></script>

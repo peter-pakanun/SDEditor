@@ -65,14 +65,34 @@ test('annotation spans never divide raw CRLF, lone CR or LF newlines from their 
     assert.match(html,/<\/span>\r\n<span/);assert.match(html,/<\/span>\r<span/);assert.match(html,/<\/span>\n<span/);
 });
 
-test('ClientText diagnostic overlays and shared pills locate missing keyword counterparts without painting the whole target',()=>{
+test('ClientText missing keyword labels leave existing counterparts neutral and preserve the raw target',()=>{
     for(const target of ['Feu & <raw & "quote" @literal\\n\r\n[Cold|Froid] chance','Plain translation without tags']){
         const h=harness(target,'[Fire] damage and [Cold] chance'),control=h.session.fieldController(h.host,h.field),spans=highlightSpans(control.highlight),presentation=control.diagnosticPresentation;
         assert.equal(highlightedText(control.highlight),target);assert.equal(presentation.errorCount,1);assert.equal(presentation.warningCount,0);assert.equal(presentation.notes.length,0);
         assert.equal(control.field.dataAttrs['aria-invalid'],true);assert.match(presentation.errorTitle,/English has \[Cold\], \[Fire\]; translation has/);
-        assert.deepEqual(spans.filter(span=>span.classes.includes('diagnosticRange')).map(span=>[span.text,span.classes.includes('diagError')]),target.includes('[Cold')?[['[Cold|Froid]',true]]:[]);
+        assert.deepEqual(spans.filter(span=>span.classes.includes('diagnosticRange')),[]);
+        assert.deepEqual(Array.from(presentation.missingTags,tag=>tag.label),target.includes('[Cold')?['Missing tag: [Fire]']:['Missing tag: [Cold]','Missing tag: [Fire]']);
         assert.equal(h.host.ctValues.text,target);assert.deepEqual(h.calls,[]);
     }
+});
+
+test('Escape Shot names the absent Trigger tag and removes the label when the draft supplies it',()=>{
+    const source='Leap backwards, firing an icy arrow which can [Chill] or [Freeze] enemies. This arrow will [Trigger] [IceFragment|Ice Fragments] on impact.',
+        target="Un bond vers l'arrière pouvant [Chill|Frigorifier] ou [Freeze|Geler] les ennemis. Cette flèche crée des [IceFragment|Fragments de glace] à l'impact.",
+        h=harness(target,source),control=h.session.fieldController(h.host,h.field);
+    assert.deepEqual(Array.from(control.diagnosticPresentation.missingTags,tag=>tag.label),['Missing tag: [Trigger]']);
+    assert.equal(control.diagnosticPresentation.errorCount,1);assert.doesNotMatch(control.highlight,/diagError/);
+    h.host.ctValues.text=target.replace('crée','[Trigger|crée]');
+    assert.equal(control.diagnosticPresentation.missingTags.length,0);assert.equal(control.diagnosticPresentation.errorCount,0);
+    assert.equal(highlightedText(control.highlight),h.host.ctValues.text);
+});
+
+test('shared missing keyword labels name each deficit and retain SD table column locations',()=>{
+    const {session}=harness(),issues=[{code:'keyword-popup-tag-name-mismatch',level:'error',columnIndex:1,message:'Missing repeated tags',
+        missingTags:[{tagName:'Trigger',count:2},{tagName:'Skill::{0}',count:1}]}],before=structuredClone(issues);
+    assert.deepEqual(Array.from(session.diagnosticPresentation(issues).missingTags,tag=>[tag.label,tag.title]),[
+        ['Column 2 · Missing tag: [Trigger] x2','Missing repeated tags'],['Column 2 · Missing tag: [Skill::{0}]','Missing repeated tags']]);
+    assert.deepEqual(issues,before);
 });
 
 test('shared diagnostic presentation normalizes legacy severity and displays only manual notes alongside count hover titles',()=>{
@@ -264,6 +284,101 @@ test('native Undo and Redo recover exact raw CRLF checkpoints after replacing a 
     h.input.value=replacement.replace(/\r\n/g,'\n');events.input({target:h.input,inputType:'historyRedo'});
     assert.equal(h.host.ctValues.text,replacement,'native redo restores pasted raw CRLF bytes');
 });
+function formattingHistoryHarness(original){
+    const h=harness(original),control=h.session.fieldController(h.host,h.field),nativeCalls=[],selectionEvents=[];
+    const document={body:{},documentElement:{},activeElement:h.input,
+        execCommand(command,unused,value){
+            nativeCalls.push(command);
+            h.input.setRangeText(String(value ?? '').replace(/\r\n?/g,'\n'),h.input.selectionStart,h.input.selectionEnd);
+            control.commitInput({target:h.input,inputType:command==='delete'?'deleteContentBackward':'insertText'});
+            return true;
+        }};
+    h.window.document=document;
+    h.input.selectionDirection='none';
+    h.input.setSelectionRange=function(start,end,direction='none'){this.selectionStart=start;this.selectionEnd=end;this.selectionDirection=direction;};
+    h.input.focus=()=>{document.activeElement=h.input;h.calls.push('focus');};
+    h.host.ctFormattingSelectionChanged=(_field,event)=>selectionEvents.push([event.target.selectionStart,event.target.selectionEnd]);
+    const flush=()=>{while(h.ticks.length)h.ticks.shift()();};
+    const nativeHistory=(value,inputType)=>{
+        h.input.value=value.replace(/\r\n?/g,'\n');
+        h.input.setSelectionRange(h.input.value.length,h.input.value.length);
+        control.commitInput({target:h.input,inputType});
+    };
+    return {...h,control,nativeCalls,selectionEvents,flush,nativeHistory};
+}
+
+test('formatting insertion restores affected selection and exact CRLF through native Undo and Redo',()=>{
+    const original='First\r\nSecond@literal\\n\r\nThird',formatted='First\r\n<b>{Second}@literal\\n\r\nThird',h=formattingHistoryHarness(original);
+    h.input.setSelectionRange(6,12,'backward');
+    assert.equal(h.session.insert(h.host,h.field,'<b>{Second}',{raw:true,start:7,end:13,caretOffset:4,selectionEndOffset:10,historySelection:true}),true);
+    h.flush();assert.equal(h.host.ctValues.text,formatted);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[10,16]);
+    assert.deepEqual(h.nativeCalls,['insertText'],'formatting remains one native edit');
+    h.nativeHistory(original,'historyUndo');h.flush();
+    assert.equal(h.host.ctValues.text,original);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd,h.input.selectionDirection],[6,12,'backward']);
+    assert.deepEqual(h.selectionEvents.at(-1),[6,12],'active styles refresh after the restored original selection');
+    h.nativeHistory(formatted,'historyRedo');h.flush();
+    assert.equal(h.host.ctValues.text,formatted);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[10,16]);
+    assert.deepEqual(h.selectionEvents.at(-1),[10,16],'Redo restores the selected affected text before refreshing active styles');
+});
+
+test('removing a containing style restores the original caret on Undo and highlights all inner text on Redo',()=>{
+    const original='prefix <i>{One\r\n<u>{Two}} suffix',removed='prefix One\r\n<u>{Two} suffix',h=formattingHistoryHarness(original),start=original.indexOf('<i>'),end=original.indexOf(' suffix');
+    const inside='One\r\n<u>{Two}';h.input.setSelectionRange(13,13);
+    assert.equal(h.session.insert(h.host,h.field,inside,{raw:true,start,end,caretOffset:0,selectionEndOffset:inside.length,historySelection:true}),true);
+    h.flush();assert.equal(h.host.ctValues.text,removed);
+    assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[start,start+inside.replace(/\r\n/g,'\n').length]);
+    h.nativeHistory(original,'historyUndo');h.flush();assert.equal(h.host.ctValues.text,original);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[13,13]);
+    h.nativeHistory(removed,'historyRedo');h.flush();assert.equal(h.host.ctValues.text,removed);
+    assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[start,start+inside.replace(/\r\n/g,'\n').length]);
+    assert.deepEqual(h.nativeCalls,['insertText']);
+});
+
+test('late native history selection replies cannot steal newer selection across scope, unit, input or focus changes',()=>{
+    const original='First\r\nSecond',formatted='<b>{First\r\nSecond}';
+    const changes=[
+        ['account scope',h=>{h.host.ctWorkspace.scope.accountId='bob';}],
+        ['unit replacement',h=>{h.host.ctCurrentUnit={...h.unit};}],
+        ['field removed from the retained unit',h=>{h.unit.fields=[];}],
+        ['disconnected native field',h=>{h.input.isConnected=false;}],
+        ['changed native text before commit',h=>{h.input.value+=' uncommitted';}],
+        ['newer committed input',h=>{h.input.value+=' newer';h.control.commitInput({target:h.input,inputType:'insertText'});}],
+        ['foreign focus',h=>{h.window.document.activeElement={};}],
+    ];
+    for(const[label,invalidate]of changes){
+        const h=formattingHistoryHarness(original);h.input.setSelectionRange(1,3);
+        assert.equal(h.session.insert(h.host,h.field,formatted,{whole:true,caretOffset:4,selectionEndOffset:formatted.length-1,historySelection:true}),true);h.flush();
+        h.nativeHistory(original,'historyUndo');assert.ok(h.ticks.length,'Undo schedules selection recovery');
+        invalidate(h);h.input.setSelectionRange(2,2);const focusCount=h.calls.filter(call=>call==='focus').length;
+        h.flush();assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[2,2],label);
+        assert.equal(h.calls.filter(call=>call==='focus').length,focusCount,label+' must not reclaim focus');
+    }
+});
+
+test('ordinary insertions retain native Undo selection behavior without formatting selection opt-in',()=>{
+    const original='First\r\nSecond',replacement='New\r\nline',h=formattingHistoryHarness(original);
+    h.input.setSelectionRange(1,4);assert.equal(h.session.insert(h.host,h.field,replacement,{whole:true}),true);h.flush();
+    h.nativeHistory(original,'historyUndo');h.input.setSelectionRange(2,2);h.flush();
+    assert.equal(h.host.ctValues.text,original);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[2,2]);
+});
+
+test('Undo of ordinary typing after formatting preserves native caret instead of recovering the earlier format selection',()=>{
+    const original='First\r\nSecond',formatted='<b>{First\r\nSecond}',h=formattingHistoryHarness(original);
+    h.input.setSelectionRange(1,3);
+    assert.equal(h.session.insert(h.host,h.field,formatted,{whole:true,caretOffset:4,selectionEndOffset:formatted.length-1,historySelection:true}),true);h.flush();
+    h.input.value+=' typed';h.input.setSelectionRange(h.input.value.length,h.input.value.length);
+    h.control.commitInput({target:h.input,inputType:'insertText'});h.flush();
+    const events=h.selectionEvents.length;
+    h.input.value=formatted.replace(/\r\n/g,'\n');h.input.setSelectionRange(2,2);
+    h.control.commitInput({target:h.input,inputType:'historyUndo'});h.flush();
+    assert.equal(h.host.ctValues.text,formatted);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[2,2]);
+    assert.equal(h.selectionEvents.length,events+1,'normal input tracking runs once without an extra asynchronous formatting restore');
+    assert.deepEqual(h.selectionEvents.at(-1),[2,2]);
+    h.nativeHistory(original,'historyUndo');h.flush();
+    assert.equal(h.host.ctValues.text,original);assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[1,3],'the next Undo crosses the format edit and restores its original selection');
+    h.nativeHistory(formatted,'historyRedo');h.flush();
+    assert.deepEqual([h.input.selectionStart,h.input.selectionEnd],[4,formatted.replace(/\r\n/g,'\n').length-1],'Redo of the format edit still highlights affected text');
+});
+
 test('native coalesced Undo retains multiline CRLF checkpoints beyond the ordinary input state ring',()=>{
     const original='First\r\nSecond@literal\\n\r\nThird',replacement='New\r\nline@literal\\n';
     const h=harness(original),control=h.session.fieldController(h.host,h.field);

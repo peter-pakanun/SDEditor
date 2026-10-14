@@ -13,6 +13,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
 ].find(existsSync);
 const publicDir = join(__dirname, '../public');
+const vueScriptPath = process.env.FIXTURE_VUE_PATH || join(__dirname, '../temp/clienttext-fixture-vue.min.js');
 const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
 const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-check.cjs');
 const { checkDiagnosticScanner } = require('./diagnostic-scanner-browser-check.cjs');
@@ -296,7 +297,9 @@ async function run() {
   assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to installed Edge/Chrome.');
   const serverApp = express();
   serverApp.get('/', (_req, res) => res.type('html').send(readFileSync(join(publicDir, 'index.html'), 'utf8')
-    .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
+    .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')
+    .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js', existsSync(vueScriptPath) ? '/fixture/vue.global.prod.js' : 'https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js')));
+  serverApp.get('/fixture/vue.global.prod.js', (_req, res) => res.type('js').send(readFileSync(vueScriptPath)));
   serverApp.get('/fixture/jszip.min.js', (_req, res) => res.type('js').send(readFileSync(require.resolve('jszip/dist/jszip.min.js', { paths: [runtimeModules] }))));
   serverApp.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(publicDir, 'index.js'), 'utf8')
     .replace("app.mount('#app');", "window.__sharedFixtureApp=app.mount('#app');")));

@@ -28,7 +28,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
+  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorSession.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -59,6 +59,50 @@ function variableErrors(editor, english, translation) {
   return editor.analyzeTranslationDiagnostics(translation, english).diagnostics
     .filter(diagnostic => diagnostic.code === 'variable-tag-identity-mismatch');
 }
+
+test('SD missing keyword tags name the actual deficit without highlighting valid translated tags', () => {
+  const { editor } = loadEditor();
+  const english = '[Chill] or [Freeze] will [Trigger] [IceFragment|Ice Fragments]';
+  const translation = '[Chill|Frigorifier] ou [Freeze|Geler] crée [IceFragment|Fragments de glace]';
+  const block = { english, translation };
+  editor.refreshTranslationDiagnostics(block);
+  assert.equal(block.diagnosticErrorCount, 1);
+  const issue = block.translationDiagnostics.find(diagnostic => diagnostic.code === 'keyword-popup-tag-name-mismatch');
+  assert.equal(issue.start, undefined); assert.equal(issue.end, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(issue.missingTags)), [{ tagName: 'Trigger', count: 1 }]);
+  assert.doesNotMatch(editor.buildTagHLter(translation, block.translationDiagnostics), /diagError/);
+  assert.deepEqual(Array.from(editor.blockDiagnosticMissingTags(block), tag => tag.label), ['Missing tag: [Trigger]']);
+  block.translation = translation.replace('crée', '[Trigger|crée]');
+  editor.refreshTranslationDiagnostics(block);
+  assert.equal(block.diagnosticErrorCount, 0); assert.equal(editor.blockDiagnosticMissingTags(block).length, 0);
+});
+
+test('SD keyword deficits preserve counts across multiline text and distinguish unexpected target tags', () => {
+  const { editor } = loadEditor();
+  for (const separator of [' ', '\r\n', '\\n']) {
+    const source = ['[Attack]', '[Attack]', '[Attack]', '[Trigger]'].join(separator);
+    const target = ['[Attack|Attaque]', '[Wrong]'].join(separator);
+    const issue = editor.buildKeywordPopupTagNameDiagnostics(source, target)[0];
+    assert.equal(target.slice(issue.start, issue.end), '[Wrong]');
+    assert.deepEqual(JSON.parse(JSON.stringify(issue.missingTags)), [{ tagName: 'Attack', count: 2 }, { tagName: 'Trigger', count: 1 }]);
+  }
+  const extra = editor.buildKeywordPopupTagNameDiagnostics('[Chill]', '[Chill|Frigorifier] [Chill|Frigorifier]')[0];
+  assert.equal(extra.start, '[Chill|Frigorifier] '.length); assert.equal(extra.missingTags.length, 0);
+  assert.equal(editor.buildKeywordPopupTagNameDiagnostics('[Chill] [Trigger]', '[Trigger|Déclenche] [Chill|Frigorifier]').length, 0);
+});
+
+test('SD table keyword findings keep missing labels in their own column', () => {
+  const { editor } = loadEditor();
+  const columns = [{ english: '[Chill]', translation: '[Chill|Frigorifier]' },
+    { english: '[Trigger] [Attack] [Attack]', translation: '[Attack|Attaque]' }];
+  for (const column of columns) editor.refreshTranslationDiagnostics(column);
+  const block = { isTable: true, tableColumns: columns };
+  editor.syncEditorBlockDiagnosticsFromTableColumns(block);
+  assert.deepEqual(Array.from(editor.blockDiagnosticMissingTags(block), tag => tag.label),
+    ['Column 2 · Missing tag: [Attack]', 'Column 2 · Missing tag: [Trigger]']);
+  assert.equal(block.diagnosticErrorCount, 1);
+  assert.doesNotMatch(editor.buildTagHLter(columns[1].translation, columns[1].translationDiagnostics), /diagError/);
+});
 
 test('StatDescription blank entries are hard diagnostics even with every optional check disabled', () => {
   const Diagnostics = require('../public/translationDiagnostics.js');

@@ -39,7 +39,7 @@
     const scope=key(host,false),unit=host.ctCurrentUnit;
     if(host._ctRawEditHistory?.scope!==scope || host._ctRawEditHistory.unit!==unit)host._ctRawEditHistory={scope,unit,fields:new Map()};
     const records=host._ctRawEditHistory.fields;let record=records.get(field.id);
-    if(!record || record.values[record.at]!==previous){record={values:[previous],at:0,newlines:new Map()};records.set(field.id,record);}
+    if(!record || record.values[record.at]!==previous){record={values:[previous],selections:[null],formatEdits:[false],at:0,newlines:new Map()};records.set(field.id,record);}
     return record;
   }
   function rememberRawNewlines(record,previous,value) {
@@ -55,17 +55,30 @@
   function recordRawValue(record,value) {
     if(record.values[record.at]===value)return;
     rememberRawNewlines(record,record.values[record.at],value);
-    record.values.splice(record.at+1);record.values.push(value);
-    if(record.values.length>128)record.values.shift();record.at=record.values.length-1;
+    record.values.splice(record.at+1);record.values.push(value);record.selections.splice(record.at+1);record.selections.push(null);record.formatEdits.splice(record.at+1);record.formatEdits.push(false);
+    if(record.values.length>128){record.values.shift();record.selections.shift();record.formatEdits.shift();record.formatEdits[0]=false;}record.at=record.values.length-1;
   }
-  function applyRawInput(host,field,shown,inputType) {
-    const previous=String(host.ctValues[field.id] ?? ''),record=rawHistory(host,field,previous),text=String(shown ?? '');
+  function restoreHistorySelection(host,field,input,record,value,run) {
+    // Formatting restores its affected selection; ordinary typing retains the native caret.
+    const selection=record.selections[record.at];if(!selection || !input)return;
+    const scope=key(host,false),unit=host.ctCurrentUnit,at=record.at;
+    host.$nextTick?.(()=>{
+      const active=root.document?.activeElement;
+      if(host._ctRawSelectionRun!==run || key(host,false)!==scope || host.ctCurrentUnit!==unit || !unit?.fields.includes(field) || host.ctFocusedField!==field.id
+        || host.ctValues[field.id]!==value || host._ctRawEditHistory?.fields.get(field.id)!==record || record.at!==at || input.isConnected===false
+        || input.value!==nativeText(value)
+        || active && active!==input && active!==root.document.body && active!==root.document.documentElement)return;
+      input.setSelectionRange?.(selection.start,selection.end,selection.direction || 'none');host.ctFormattingSelectionChanged?.(field,{target:input});
+    });
+  }
+  function applyRawInput(host,field,shown,inputType,input) {
+    const previous=String(host.ctValues[field.id] ?? ''),record=rawHistory(host,field,previous),text=String(shown ?? ''),run=host._ctRawSelectionRun={};
     if(inputType==='historyUndo' || inputType==='historyRedo'){
       const direction=inputType==='historyUndo'?-1:1;
-      for(let at=record.at+direction;at>=0 && at<record.values.length;at+=direction)if(nativeText(record.values[at])===text){record.at=at;return record.values[at];}
+      for(let at=record.at+direction;at>=0 && at<record.values.length;at+=direction)if(nativeText(record.values[at])===text){record.at=at;if(record.formatEdits[direction<0?at+1:at])restoreHistorySelection(host,field,input,record,record.values[at],run);return record.values[at];}
       // Ordinary typing may exceed the small state ring while the browser still
       // retains an older multiline undo step. Its newline checkpoint stays.
-      if(record.newlines.has(text)){const value=record.newlines.get(text);record.values=[value];record.at=0;return value;}
+      if(record.newlines.has(text)){const value=record.newlines.get(text);record.values=[value];record.selections=[null];record.formatEdits=[false];record.at=0;return value;}
     }
     const value=preserveRawEdit(previous,text);recordRawValue(record,value);return value;
   }
@@ -95,13 +108,22 @@
     }
     return html;
   }
+  function missingTagLabels(issues) {
+    return (Array.isArray(issues)?issues:[]).flatMap((issue,index)=>
+      (issue.code==='keyword-popup-tag-name-mismatch' || issue.code==='clienttext-token-identity' && issue.kind==='keyword'
+        ? issue.missingTags || [] : []).map(tag=>({
+          key:index+':'+tag.tagName,
+          label:(Number.isInteger(issue.columnIndex)?'Column '+(issue.columnIndex+1)+' · ':'')+'Missing tag: ['+tag.tagName+']'+(tag.count>1?' x'+tag.count:''),
+          title:issue.message,
+        })));
+  }
   function diagnosticPresentation(issues) {
     const diagnostics=(Array.isArray(issues)?issues:[]).filter(issue=>issue && typeof issue==='object')
       .map(issue=>({...issue,level:issue.level || issue.severity || 'warning',severity:issue.level || issue.severity || 'warning'}));
     const title=level=>{const matching=diagnostics.filter(issue=>issue.level===level),lines=matching.slice(0,8).map(issue=>issue.message || issue.code || 'Translation diagnostic');
       if(matching.length>8)lines.push('...and '+(matching.length-8)+' more');return lines.join('\n');};
     return {diagnostics,warningCount:diagnostics.filter(issue=>issue.level==='warning').length,errorCount:diagnostics.filter(issue=>issue.level==='error').length,
-      warningTitle:title('warning'),errorTitle:title('error'),notes:diagnostics.filter(issue=>['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))
+      warningTitle:title('warning'),errorTitle:title('error'),missingTags:missingTagLabels(diagnostics),notes:diagnostics.filter(issue=>['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))
         .map(issue=>({...issue,kind:issue.code==='dictionary-terminology'?'terminology':'consistency'}))};
   }
   function ranges(host, field, text, source) {
@@ -138,6 +160,7 @@
       caret=next.slice(0,start+offset).replace(/\r\n?/g,'\n').length,
       selectionEnd=Number.isInteger(options.selectionEndOffset) ? next.slice(0,start+Math.max(offset,Math.min(replacement.length,options.selectionEndOffset))).replace(/\r\n?/g,'\n').length : caret;
     const history=rawHistory(host,field,previous);
+    if(options.historySelection)history.selections[history.at]={start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection || 'none'};
     input.focus?.();
     const shownStart=previous.slice(0,start).replace(/\r\n?/g,'\n').length,shownEnd=previous.slice(0,end).replace(/\r\n?/g,'\n').length;
     input.setSelectionRange?.(shownStart,shownEnd);
@@ -148,10 +171,11 @@
     // the exact raw states that historyUndo/historyRedo must recover.
     rememberRawNewlines(history,previous,next);
     if(history.values[history.at]!==previous && nativeText(history.values[history.at])===nativeText(next))history.values[history.at]=next;else recordRawValue(history,next);
+    if(options.historySelection){history.selections[history.at]={start:caret,end:selectionEnd,direction:'none'};history.formatEdits[history.at]=true;}
     host.ctValues[field.id]=next;host.ctFocusedField=field.id;host.ctEdited(field);host.ctCloseCompletion?.();
     host.$nextTick?.(()=>{const active=root.document?.activeElement;if(key(host,false)!==scope || host.ctCurrentUnit!==unit || host.ctFocusedField!==field.id || host.ctValues[field.id]!==next || input.isConnected===false
       || active && active!==input && active!==root.document.body && active!==root.document.documentElement)return;
-      input.focus?.({preventScroll:true});input.setSelectionRange?.(caret,selectionEnd);host.ctResizeField?.(input);});return true;
+      input.focus?.({preventScroll:true});input.setSelectionRange?.(caret,selectionEnd);host.ctFormattingSelectionChanged?.(field,{target:input});host.ctResizeField?.(input);});return true;
   }
   function fieldController(host, field, sourceText) {
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
@@ -182,10 +206,10 @@
       ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
     ]);},highlightAttrs:{},
       input(event){if(!valid() || host.ctBusy || host.ctHistoryViewer || event.isComposing || event.keyCode===229)return;
-        host.ctValues[fieldId]=applyRawInput(host,field,event.target.value,event.inputType);host.ctEdited(field);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
-      focus(event){if(!valid())return;host.ctFocusedField=fieldId;host.ctCompletionSelectionChanged?.(field,event);},
+        host.ctValues[fieldId]=applyRawInput(host,field,event.target.value,event.inputType,event.target);host.ctEdited(field);host.ctFormattingSelectionChanged?.(field,event);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
+      focus(event){if(!valid())return;host.ctFocusedField=fieldId;if(source)host.ctClearFormattingSelection?.();else host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);},
       keydown(event){if(!valid())return;host.ctTargetKeydown?.(field,event);},
-      selection(event){if(valid())host.ctCompletionSelectionChanged?.(field,event);},
+      selection(event){if(valid()){if(!source)host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);}},
       blur(){/* The shared popup is part of the same editor focus surface. */},
       scroll(event){const overlay=event.target.parentElement?.querySelector?.('.HLter'),content=overlay?.querySelector?.('.editorHighlightContent') || overlay;
         if(content)content.style.transform='translate('+(-event.target.scrollLeft)+'px, '+(-event.target.scrollTop)+'px)';},
@@ -374,5 +398,5 @@
       toolsVisible:this.sharedEditorToolsMounted && (this.ctEditor || this.editorVisible || this.inlineSidebarVisible),tool:this.ctActive?this.ctTool:this.sideTab,
       version:this.ctActive ? this.ctWorkspace?.metadata?.version || this.ctWorkspace?.version : this.managedActiveVersion,group:this.activeContentGroup};},
   }};
-  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,diagnosticPresentation,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut,attentionCandidates};
+  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,diagnosticPresentation,missingTagLabels,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut,attentionCandidates};
 });

@@ -1869,7 +1869,10 @@
             ctTargetKeydown(field,event) {
                 if(event.defaultPrevented || event.isComposing || event.keyCode===229 || this.ctKeyboardBlocked()
                     || !this.ctKeyboardTarget(field,event.target))return;
-                const shortcut=this.isAutocompleteShortcut ? this.isAutocompleteShortcut(event)
+                if(this.ctFormattingKeydown?.(event))return;
+                const shortcut=this.autocompleteShortcut==='ctrl-i'
+                    ? event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (event.code==='Space' || event.key===' ')
+                    : this.isAutocompleteShortcut ? this.isAutocompleteShortcut(event)
                     : event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
                         && (this.autocompleteShortcut==='ctrl-i' ? event.code==='KeyI' || event.key.toLowerCase()==='i'
                             : this.autocompleteShortcut!=='disabled' && (event.code==='Space' || event.key===' '));

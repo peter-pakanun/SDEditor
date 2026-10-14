@@ -12,11 +12,12 @@
     const stale = () => Object.assign(new Error('Comparison context changed.'), { stale: true, name: 'AbortError' });
     const mixin = {
         data() { return { ctFieldComparisons: {}, ctComparisonVersions: raw([]), ctComparisonBusy: false,
-            ctComparisonError: '', ctComparisonMore: true, ctComparisonMenuKey: '', ctComparisonDetailsKey: '' }; },
+            ctComparisonError: '', ctComparisonMore: true, ctComparisonMenuKey: '', ctComparisonDetailsKey: '', ctStyleSelection: null }; },
         methods: {
             ctResetComparisons() {
                 this._ctComparisonAbort?.abort(); this._ctComparisonAbort = null; this._ctComparisonRun = {}; this._ctComparisonPending = null;
                 this._ctComparisonAncestors = new Set(); this._ctComparisonCursor = undefined; this._ctComparisonCandidate = null; this._ctToolbarSelection = null;
+                this.ctClearFormattingSelection();
                 this.ctFieldComparisons = {}; this.ctComparisonVersions = raw([]); this.ctComparisonBusy = false;
                 this.ctComparisonError = ''; this.ctComparisonMore = true; this.ctComparisonMenuKey = ''; this.ctComparisonDetailsKey = '';
             },
@@ -218,9 +219,35 @@
                 const fields = source.fieldIds.map(id => this.ctCurrentUnit.fields.find(field => field.id === id));
                 return fields.find(field => this.ctComparisonState(field, 'source').open) || fields[0];
             },
+            ctClearFormattingSelection() { this.ctStyleSelection = null; this._ctStyleSelectionContext = null; this._ctToolbarSelection = null; },
+            ctFormattingSelectionChanged(field, event) {
+                const input = event?.target || this.ctDictionaryTarget(field.id), unit = this.ctCurrentUnit;
+                if (!unit?.fields.includes(field) || field.kind === 'gender' || !input || input.isConnected === false || input.composing
+                    || !Number.isInteger(input.selectionStart) || !Number.isInteger(input.selectionEnd)) return false;
+                const text = String(this.ctValues[field.id] ?? ''), shown = text.replace(/\r\n?/g, '\n');
+                if (input.dataset?.ctSource || input.dataset?.ctTarget && input.dataset.ctTarget !== field.id
+                    || typeof input.value === 'string' && input.value !== shown
+                    || input.selectionStart < 0 || input.selectionEnd < input.selectionStart || input.selectionEnd > shown.length) {
+                    this.ctClearFormattingSelection(); return false;
+                }
+                const start = root.EditorSession.rawOffset(text, input.selectionStart), end = root.EditorSession.rawOffset(text, input.selectionEnd),
+                    styles = root.ClientTextFormatting?.selection(text, start, end) || {};
+                this._ctToolbarSelection = null;
+                this._ctStyleSelectionContext = { ctx: this.ctContext(), unit };
+                this.ctStyleSelection = { fieldId: field.id, text, start, end, active: Object.fromEntries(['b', 'i', 'u'].map(style => [style, !!styles[style]])) };
+                return true;
+            },
+            ctStyleActive(field, style) {
+                const selection = this.ctStyleSelection, context = this._ctStyleSelectionContext;
+                return !!(selection && context && this.ctCurrent(context.ctx) && this.ctCurrentUnit === context.unit
+                    && this.ctFocusedField === field.id && selection.fieldId === field.id && selection.text === this.ctValues[field.id] && selection.active[style]);
+            },
             ctCaptureToolbarSelection(field) {
                 const input = this.ctDictionaryTarget(field.id);
+                this._ctToolbarSelection = null;
                 if (!input || input.composing || !Number.isInteger(input.selectionStart) || !Number.isInteger(input.selectionEnd)) return;
+                this.ctFocusedField = field.id;
+                if (!this.ctFormattingSelectionChanged(field, { target: input })) return;
                 this._ctToolbarSelection = { ctx: this.ctContext(), unit: this.ctCurrentUnit, field, input, value: this.ctValues[field.id],
                     start: input.selectionStart, end: input.selectionEnd };
             },
@@ -231,25 +258,14 @@
                 const selection = this._ctToolbarSelection;
                 if (!selection || !this.ctCurrent(selection.ctx) || this.ctCurrentUnit !== selection.unit || selection.value !== this.ctValues[field.id]
                     || !selection.unit.fields.includes(field) || selection.input.isConnected === false || selection.input.composing) return false;
+                if (!root.ClientTextFormatting) return false;
                 const previous = String(selection.value), start = root.EditorSession.rawOffset(previous, selection.start), end = root.EditorSession.rawOffset(previous, selection.end),
-                    open = '<' + style + '>{', close = '}', text = previous.slice(start, end);
-                let a = start, b = end, replacement, offset = 0, selectionEnd;
-                const exactlyWrapped = value => {
-                    if (!value.startsWith(open)) return false;
-                    let depth = 1;
-                    for (let index = open.length; index < value.length; index++) {
-                        if (value[index] === '{') depth++;
-                        else if (value[index] === '}' && --depth === 0) return index === value.length - 1;
-                    }
-                    return false;
-                };
-                if (exactlyWrapped(text)) replacement = text.slice(open.length, -1);
-                else if (start >= open.length && exactlyWrapped(previous.slice(start - open.length, end + 1))) {
-                    a -= open.length; b++; replacement = text;
-                } else { replacement = open + text + close; offset = open.length; }
-                selectionEnd = offset + (replacement.startsWith(open) ? text.length : replacement.length);
+                    open = '<' + style + '>{', text = previous.slice(start, end), active = root.ClientTextFormatting.selection(previous, start, end)[style];
+                const a = active ? active.start : start, b = active ? active.end : end,
+                    replacement = active ? previous.slice(active.contentStart, active.contentEnd) : open + text + '}',
+                    offset = active ? 0 : open.length, selectionEnd = active ? replacement.length : offset + text.length;
                 this._ctToolbarSelection = null;
-                return root.EditorSession.insert(this, field, replacement, { input: selection.input, raw: true, start: a, end: b, caretOffset: offset, selectionEndOffset: selectionEnd });
+                return root.EditorSession.insert(this, field, replacement, { input: selection.input, raw: true, start: a, end: b, caretOffset: offset, selectionEndOffset: selectionEnd, historySelection: true });
             },
             ctFormattingKeydown(event) {
                 const style = String(event.key || '').toLowerCase(), id = event.target?.dataset?.ctTarget;
@@ -276,6 +292,7 @@
                     get disabled() { return host.ctBusy || !valid(); }, get formatting() { return field.kind !== 'gender'; },
                     get tone() { const status=host.ctFieldStatus(field);return side==='source' ? '' : status.outdated ? 'outdated' : status.missing ? 'missing' : ''; },
                     get formattingDisabled() { return side === 'source' || this.disabled; },
+                    styleActive: style => side === 'translation' && valid() && host.ctStyleActive(field, style),
                     get reference() { return host.ctComparisonReference(field, side); }, get choices() { return host.ctComparisonChoices(field, side); },
                     get groups() { return [...new Set(this.choices.map(value => value.group))]; },
                     get parts() { return host.ctComparisonParts(field, side); }, get display() { return value => host.ctHistoryDisplay(value); },

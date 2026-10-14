@@ -209,11 +209,14 @@ test('ClientText missing and excess keyword diagnostics follow the actual SD ran
         ['[Fire] damage and [Cold] chance','[Fire|Feu] and [Wrong|Froid] chance'],
         ['[Fire] damage\r\n[Cold] chance','& <raw> @literal\\n\r\n[Cold|Froid] chance'],
         ['[Skill::{0}|Name] [Skill<gemlevel={2}>]','[Skill::{1}|Nom] [Skill<gemlevel={2}>]'],
+        ['[Chill] or [Freeze] will [Trigger] [IceFragment|Ice Fragments]','[Chill|Frigorifier] ou [Freeze|Geler] crée [IceFragment|Fragments de glace]'],
+        ['[Attack] [Attack] [Attack] [Trigger]','[Attack|Attaque] [Wrong]'],
     ];
     for(const [source,target] of cases){
         const field={...unit().fields[0],source},before=structuredClone(field),actual=S.diagnose(field,target).filter(issue=>issue.kind==='keyword'),expected=sdKeywordDiagnostics(source,target);
         assert.equal(actual.length,1);assert.equal(expected.length,1);assert.equal(actual[0].level,'error');
         assert.deepEqual({start:actual[0].start,end:actual[0].end,message:actual[0].message},{start:expected[0].start,end:expected[0].end,message:expected[0].message},target);
+        assert.deepEqual(actual[0].missingTags,expected[0].missingTags,target);
         if(actual[0].start!==undefined)assert.ok(target.slice(actual[0].start,actual[0].end).startsWith('['));
         else assert.equal(Object.hasOwn(actual[0],'end'),false,'a missing counterpart cannot paint unrelated translation text');
         assert.deepEqual(field,before);assert.equal(S.normalizeValues({...unit(),fields:[field]},{[fieldId]:target})[fieldId],target);

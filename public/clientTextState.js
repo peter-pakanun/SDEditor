@@ -472,12 +472,14 @@
                 if(![...new Set([...sourceIds.keys(),...targetIds.keys()])].some(id=>(sourceIds.get(id)||0)!==(targetIds.get(id)||0)))continue;
                 const counts=ids=>[...ids.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))
                     .map(id=>(kind==='keyword'?'['+id+']':id)+(ids.get(id)>1?' x'+ids.get(id):'')).join(', ') || 'none';
-                const seen=new Map(),range=tokens.find(token=>{const id=identity(token),count=(seen.get(id)||0)+1;seen.set(id,count);return count>(sourceIds.get(id)||0);}) || tokens[0];
-                // SD locates a tag-count mismatch on the first excess target
-                // tag, or an existing counterpart. Missing tags have no text
-                // range when the target contains none of that kind.
+                const seen=new Map(),excess=tokens.find(token=>{const id=identity(token),count=(seen.get(id)||0)+1;seen.set(id,count);return count>(sourceIds.get(id)||0);}),
+                    range=excess || (kind==='keyword' ? null : tokens[0]);
+                // Missing keyword tags have no target range; keep valid tags neutral.
+                const missingTags=kind==='keyword' ? [...sourceIds.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))
+                    .map(tagName=>({tagName,count:sourceIds.get(tagName)-(targetIds.get(tagName)||0)})).filter(tag=>tag.count>0) : null;
                 result.push({level:'error',code:'clienttext-token-identity',kind,
                     message:settings[kind][1]+' mismatch: English has '+counts(sourceIds)+'; translation has '+counts(targetIds)+'.',
+                    ...(missingTags ? {missingTags} : {}),
                     ...(range ? {start:range.start,end:range.end} : {})});
             }
         }

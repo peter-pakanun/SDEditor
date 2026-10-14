@@ -183,6 +183,7 @@ input:focus, button:focus, textarea:focus {
 
 .fieldMeta {
   display: flex;
+  flex-wrap: wrap;
   gap: calc(0.4em * var(--density));
   align-items: center;
   padding: calc(0.25em * var(--density)) calc(0.05em * var(--density)) calc(0.05em * var(--density)) calc(0.05em * var(--density));
@@ -677,6 +678,14 @@ input:focus, button:focus, textarea:focus {
   background-color: var(--color-diagnostic-error);
   border-color: var(--color-diagnostic-error-border);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-diagnostic-error) 45%, transparent) inset;
+}
+
+.metaPill.diagnosticMissingTagPill {
+  max-width: 100%;
+  border: 1px dashed var(--color-diagnostic-error-border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .metaPill.diagnosticWarningPill .metaNum,

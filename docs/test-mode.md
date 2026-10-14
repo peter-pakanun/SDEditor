@@ -16,6 +16,8 @@ To test previous-version diffs, add the files to open and edit under **Current w
 
 UI validation targets desktop and laptop browsers, including resized desktop windows, keyboard navigation, and mouse/trackpad interactions. Mobile phone and tablet layouts and touch-only workflows are unsupported and do not require validation. See [Platform Support](../README.md#platform-support).
 
+The offline browser fixture also checks caret-aware B/I/U states, nested tags, selected-content restoration, Ctrl+B/I/U, both Redo shortcuts and exact CRLF recovery in the full and inline editors.
+
 The ClientText **NPCs** tab uses the same cross-sheet grouping and editor controls in Test Sheet Offline and persistent workspaces. Open a real workbook or Normal/Gender pair to inspect names, menu topics and related dialogue. **ID match** describes the relationship supplied by workbook IDs; it does not establish a speaker. Test sessions retain their temporary-save notice and do not validate persistence after reload.
 
 ## Usage

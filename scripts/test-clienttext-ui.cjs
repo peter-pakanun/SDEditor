@@ -15,6 +15,7 @@ function harness(changes={}){
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextFormatting.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextComparisons.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
@@ -1571,6 +1572,8 @@ test('ClientText configured completion shortcuts replace only the selected raw t
     assert.equal(app.ctValues[field.id],'@{0}\\n\ntext');
     input.value=app.ctValues[field.id];input.selectionStart=input.selectionEnd=input.value.length;
     app.autocompleteShortcut='ctrl-i';const alternate=event('i',{ctrlKey:true,code:'KeyI'});app.ctTargetKeydown(field,alternate);assert.equal(alternate.defaultPrevented,true);
+    assert.equal(app.ctValues[field.id],'@{0}\\n\ntext<i>{}','Ctrl+I formats the translation even with the legacy completion preference');assert.equal(app.ctCompletion,null);
+    const legacyFallback=event(' ',{ctrlKey:true,code:'Space'});app.ctTargetKeydown(field,legacyFallback);assert.equal(legacyFallback.defaultPrevented,true);assert.ok(app.ctCompletion,'Ctrl+Space remains available for ClientText completion');
     app.ctCloseCompletion();app.autocompleteShortcut='disabled';const disabled=event(' ',{ctrlKey:true,code:'Space'});app.ctTargetKeydown(field,disabled);
     assert.equal(disabled.defaultPrevented,undefined);assert.equal(app.ctCompletion,null);
 });
@@ -3672,6 +3675,55 @@ test('formatting handles nested tags and only unwraps an exactly enclosing tag',
     };
     const nested='<b>{<i>{nested}}';assert.equal(format(nested,0,nested.length),'<i>{nested}');
     assert.equal(format('<b>{one} two}',4,12),'<b>{<b>{one} two}}','a selection spanning beyond the enclosing tag is wrapped');
+});
+
+function formattingHarness(text) {
+    const h=harness({$nextTick:callback=>callback?.()}),{app,original,window}=h,field=original.fields[0];app.ctValues[field.id]=text;
+    app.ctEdited=()=>{app.ctDraftDirty=true;};app.ctCloseCompletion=()=>{};app.ctResizeField=()=>{};app.ctSuggest=()=>{};
+    const input={value:text.replace(/\r\n?/g,'\n'),selectionStart:0,selectionEnd:0,isConnected:true,dataset:{ctTarget:field.id},
+        focus(){app.ctFocusedField=field.id;},setSelectionRange(a,b){this.selectionStart=a;this.selectionEnd=b;},
+        setRangeText(value,a,b){this.value=this.value.slice(0,a)+value+this.value.slice(b);this.selectionStart=this.selectionEnd=a+value.length;}};
+    app.ctDictionaryTarget=()=>input;app.ctKeyboardBlocked=()=>false;app.ctKeyboardTarget=()=>true;
+    const controller=window.EditorSession.fieldController(app,field),select=(start,end=start)=>{input.setSelectionRange(start,end);controller.focus({target:input});controller.selection({target:input});};
+    const shortcut=style=>app.ctTargetKeydown(field,{key:style,ctrlKey:true,target:input,preventDefault(){this.defaultPrevented=true;},stopPropagation(){}});
+    return {...h,field,input,controller,select,shortcut};
+}
+
+test('caret-aware style buttons unwrap the affected text, retain other nested tags, and reapply with all three shortcuts',()=>{
+    for(const style of ['b','i','u']){
+        const other=style==='i'?'u':'i',inner='First\r\n<'+other+'>{Nested {0}}\nlast',raw='Before <'+style+'>{'+inner+'} after',
+            {app,field,input,controller,select,shortcut}=formattingHarness(raw),toolbar=app.ctFieldToolbar(field,'translation');
+        select(input.value.indexOf('Nested')+2);assert.equal(toolbar.styleActive(style),true);assert.equal(toolbar.styleActive(other),true);
+        shortcut(style);assert.equal(app.ctValues[field.id],'Before '+inner+' after');assert.equal(toolbar.styleActive(style),false);
+        assert.equal(input.value.slice(input.selectionStart,input.selectionEnd),inner.replace(/\r\n/g,'\n'),'whole affected content is selected');
+        shortcut(style);assert.equal(app.ctValues[field.id],raw);assert.equal(toolbar.styleActive(style),true);
+        const without='Before '+inner+' after';input.value=without.replace(/\r\n/g,'\n');input.setSelectionRange(7,7+inner.replace(/\r\n/g,'\n').length);
+        controller.input({target:input,inputType:'historyUndo'});assert.equal(app.ctValues[field.id],without);assert.equal(toolbar.styleActive(style),false);
+        input.value=raw.replace(/\r\n/g,'\n');input.setSelectionRange(11,11+inner.replace(/\r\n/g,'\n').length);
+        controller.input({target:input,inputType:'historyRedo'});assert.equal(app.ctValues[field.id],raw);assert.equal(toolbar.styleActive(style),true);
+        select(0);assert.equal(toolbar.styleActive(style),false);assert.equal(toolbar.styleActive(other),false);
+        assert.equal(app.ctFieldToolbar(field,'source').styleActive(style),false);
+    }
+});
+
+test('repeated nested styles remove only the innermost wrapper while accurately retaining the outer style',()=>{
+    const {app,field,input,select}=formattingHarness('<b>{outer <bold>{inner} rest}');
+    select(input.value.indexOf('inner')+2);app.ctCaptureToolbarSelection(field);assert.equal(app.ctFormatSelection(field,'b'),true);
+    assert.equal(app.ctValues[field.id],'<b>{outer inner rest}');assert.equal(input.value.slice(input.selectionStart,input.selectionEnd),'inner');
+    assert.equal(app.ctFieldToolbar(field,'translation').styleActive('b'),true,'the surviving outer Bold still applies');
+});
+
+test('caret tracking rejects stale selections, source focus and scope changes without leaking active formatting',()=>{
+    const {app,field,input,controller,select,window}=formattingHarness('<b>{inside} outside'),toolbar=app.ctFieldToolbar(field,'translation');
+    select(6);app.ctCaptureToolbarSelection(field);assert.equal(toolbar.styleActive('b'),true);
+    select(input.value.length);assert.equal(app._ctToolbarSelection,null);app.ctFormatSelection(field,'b');
+    assert.equal(app.ctValues[field.id],'<b>{inside} outside<b>{}','a later keyboard action uses the current caret');
+    input.composing=true;assert.equal(app.ctFormattingKeydown({key:'b',ctrlKey:true,target:input}),false);input.composing=false;
+    select(6);assert.equal(toolbar.styleActive('b'),true);
+    app.ctValues[field.id]+=' changed';assert.equal(toolbar.styleActive('b'),false,'background text changes invalidate the captured range');
+    input.value=app.ctValues[field.id];select(6);const source=window.EditorSession.fieldController(app,field,field.source);source.focus({target:{dataset:{ctSource:field.id}}});
+    assert.equal(toolbar.styleActive('b'),false);assert.equal(app.ctStyleSelection,null);
+    select(6);app.ctWorkspace.scope.language='German';assert.equal(toolbar.styleActive('b'),false);app.ctResetHistory();assert.equal(app.ctStyleSelection,null);
 });
 
 test('failed earlier-original reads retry the same version and rejected foreign groups never expose source text',async()=>{

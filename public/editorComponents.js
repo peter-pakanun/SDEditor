@@ -45,6 +45,7 @@
             change: event => { if (event.target.composing) compositionend(event); },
             keyup: event => { control.selection?.(event); if (event.altKey) control.altKeyup?.(event); },
             select: event => control.selection?.(event),
+            selectionchange: event => control.selection?.(event),
             click: event => control.selection?.(event),
             blur: event => control.blur?.(event),
             paste: event => control.paste?.(event),
@@ -600,7 +601,8 @@
       hideTooltip() { this.$root.hideTooltip(); },
     },
     template: `<span v-if="presentation.warningCount > 0" class="metaPill diagnosticWarningPill" v-tooltip="presentation.warningTitle"><span class="metaIcon">!</span><span class="metaNum">{{ presentation.warningCount }}</span></span>
-      <span v-if="presentation.errorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="presentation.errorTitle"><span class="metaIcon">x</span><span class="metaNum">{{ presentation.errorCount }}</span></span>`,
+      <span v-if="presentation.errorCount > 0" class="metaPill diagnosticErrorPill" v-tooltip="presentation.errorTitle"><span class="metaIcon">x</span><span class="metaNum">{{ presentation.errorCount }}</span></span>
+      <span v-for="tag in presentation.missingTags || []" :key="tag.key" class="metaPill diagnosticMissingTagPill" role="note" tabindex="0" v-tooltip="tag.title">{{ tag.label }}</span>`,
   };
   const DiagnosticScan = sharedSurface('EditorDiagnosticScan', String.raw`    <dialog ref="diagnosticScanDialog" class="diagnosticScanDialog" aria-labelledby="diagnosticScanDialogTitle" aria-describedby="diagnosticScanDialogDescription" @cancel.prevent="closeDiagnosticScanDialog" @close="diagnosticScanDialogClosed" @keydown.stop="diagnosticScanDialogKeydown">
       <form class="diagnosticScanForm" @submit.prevent="startDiagnosticScan">
@@ -708,7 +710,7 @@
     template: `<div class="editorFieldTools" :data-comparison-side="controller.side" data-inline-focus-surface @click.stop @dblclick.stop @keydown="toolbarKeydown($event)">
       <div class="editorFieldFrame" :class="controller.tone"><slot></slot>
       <div class="editorFieldToolbar" role="group" :aria-label="controller.side === 'source' ? 'English field tools' : 'Translation field tools'">
-        <template v-if="controller.formatting"><button v-for="style in ['b','i','u']" :key="style" type="button" :class="['fieldStyleButton','fieldStyle-'+style]" @pointerdown.prevent="controller.capture()" @click="controller.format(style)" :disabled="controller.formattingDisabled" :aria-label="({b:'Bold',i:'Italic',u:'Underline'})[style]" :aria-keyshortcuts="'Control+'+style" :title="({b:'Bold',i:'Italic',u:'Underline'})[style]+' · Ctrl+'+style.toUpperCase()">{{ style.toUpperCase() }}</button></template>
+        <template v-if="controller.formatting"><button v-for="style in ['b','i','u']" :key="style" type="button" :class="['fieldStyleButton','fieldStyle-'+style,{active:controller.styleActive(style)}]" @pointerdown.prevent="controller.capture()" @click="controller.format(style)" :disabled="controller.formattingDisabled" :aria-pressed="controller.styleActive(style)" :aria-label="({b:'Bold',i:'Italic',u:'Underline'})[style]" :aria-keyshortcuts="'Control+'+style" :title="({b:'Bold',i:'Italic',u:'Underline'})[style]+' · Ctrl+'+style.toUpperCase()">{{ style.toUpperCase() }}</button></template>
         <span class="fieldToolbarSeparator" role="separator" aria-orientation="vertical"></span>
         <button type="button" class="fieldDiffButton" :class="{active:controller.open}" @click="controller.toggle()" :disabled="controller.disabled" :aria-expanded="controller.open" :aria-label="controller.side === 'source' ? 'Compare English source' : 'Compare translation'" :title="controller.side === 'source' ? 'Compare an earlier English source with this version' : 'Compare a revision with the current draft'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
         <button ref="menuButton" type="button" class="fieldHistoryMenuButton" :class="{active:controller.menuOpen}" @click="controller.menu()" :disabled="controller.disabled" :aria-expanded="controller.menuOpen" aria-label="Comparison options and revision history" title="Comparison options and revision history"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.5 2-.6 2.4-1.8 1-2.4-.7-2.5 4.3 1.8 1.7v2l-1.8 1.7 2.5 4.3 2.4-.7 1.8 1 .6 2.4h5l.6-2.4 1.8-1 2.4.7 2.5-4.3-1.8-1.7v-2l1.8-1.7-2.5-4.3-2.4.7-1.8-1-.6-2.4Z"/><circle cx="12" cy="12" r="3"/></svg></button>

@@ -3196,64 +3196,28 @@ const config = Vue.defineComponent({
         seen[key] = (seen[key] || 0) + 1;
         if (seen[key] > (englishCounts[key] || 0)) return { start: tag.start, end: tag.end };
       }
-      if (translationTags.length > 0) return { start: translationTags[0].start, end: translationTags[0].end };
       return null;
     },
     buildKeywordPopupTagNameDiagnostics(english, translation) {
-      const englishLines = this.splitLinesWithOffsets(english);
-      const translationLines = this.splitLinesWithOffsets(translation);
-      const max = Math.max(englishLines.length, translationLines.length);
-      const diagnostics = [];
+      const englishTags = this.extractKeywordPopupIdentityTags(english);
+      const translationTags = this.extractKeywordPopupIdentityTags(translation);
+      const englishCounts = this.countKeywordPopupIdentityTags(englishTags);
+      const translationCounts = this.countKeywordPopupIdentityTags(translationTags);
+      const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
+      if (!keys.some(key => englishCounts[key] !== translationCounts[key])) return [];
 
-      if (max > 1) {
-        const englishTags = this.extractKeywordPopupIdentityTags(english);
-        const translationTags = this.extractKeywordPopupIdentityTags(translation);
-        const englishCounts = this.countKeywordPopupIdentityTags(englishTags);
-        const translationCounts = this.countKeywordPopupIdentityTags(translationTags);
-        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
-        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
-        if (!mismatched) return diagnostics;
-
-        const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, null, translationTags);
-        const diagnostic = {
-          level: "error",
-          code: "keyword-popup-tag-name-mismatch",
-          message: `KeywordPopups tagName mismatch: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`
-        };
-        if (range) {
-          diagnostic.start = range.start;
-          diagnostic.end = range.end;
-        }
-        diagnostics.push(diagnostic);
-        return diagnostics;
-      }
-
-      for (let i = 0; i < max; i++) {
-        const englishLine = englishLines[i] || { text: "", start: 0, end: 0 };
-        const translationLine = translationLines[i] || { text: "", start: String(translation ?? "").length, end: String(translation ?? "").length };
-        const englishTags = this.extractKeywordPopupIdentityTags(englishLine.text);
-        const translationTags = this.extractKeywordPopupIdentityTags(translationLine.text, translationLine.start);
-        const englishCounts = this.countKeywordPopupIdentityTags(englishTags);
-        const translationCounts = this.countKeywordPopupIdentityTags(translationTags);
-        const keys = Array.from(new Set([...Object.keys(englishCounts), ...Object.keys(translationCounts)]));
-        const mismatched = keys.some(key => englishCounts[key] !== translationCounts[key]);
-        if (!mismatched) continue;
-
-        const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, translationLine, translationTags);
-        const linePart = max > 1 ? ` on line ${i + 1}` : "";
-        const diagnostic = {
-          level: "error",
-          code: "keyword-popup-tag-name-mismatch",
-          message: `KeywordPopups tagName mismatch${linePart}: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`
-        };
-        if (range) {
-          diagnostic.start = range.start;
-          diagnostic.end = range.end;
-        }
-        diagnostics.push(diagnostic);
-      }
-
-      return diagnostics;
+      const missingTags = Object.keys(englishCounts).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(tagName => ({ tagName, count: englishCounts[tagName] - (translationCounts[tagName] || 0) }))
+        .filter(tag => tag.count > 0);
+      // An absent tag has no target range. Only an excess target tag can be highlighted.
+      const range = this.findKeywordPopupTagNameMismatchRange(englishCounts, null, translationTags);
+      return [{
+        level: "error",
+        code: "keyword-popup-tag-name-mismatch",
+        message: `KeywordPopups tagName mismatch: English has ${this.formatKeywordPopupIdentityCounts(englishCounts)}; translation has ${this.formatKeywordPopupIdentityCounts(translationCounts)}.`,
+        missingTags,
+        ...(range ? { start: range.start, end: range.end } : {})
+      }];
     },
     extractTextDecorationIdentityTags(text, offset = 0) {
       return window.TranslationDiagnostics.extractTextDecorationTags(text, offset);
@@ -3454,6 +3418,9 @@ const config = Vue.defineComponent({
       return Number(editorBlock.diagnosticWarningCount || 0)
         + this.blockTerminologyDiagnostics(editorBlock, blockIndex).length
         + (this.editorConsistencyDiagnostics[blockIndex] ? 1 : 0);
+    },
+    blockDiagnosticMissingTags(editorBlock) {
+      return window.EditorSession.missingTagLabels(editorBlock?.translationDiagnostics);
     },
     refreshEditorDiagnostics() {
       for (const editorBlock of (this.editorBlocks || [])) {

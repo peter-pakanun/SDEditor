@@ -1,7 +1,8 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { mkdirSync } = require('node:fs');
 const { join } = require('node:path');
-const { tmpdir } = require('node:os');
+const artifactDir = join(__dirname, '../temp/diagnostic-scanner-fixture');
 
 const commonChecks = ['Whitespace', 'Dash spacing', 'Tag syntax', 'Variable tags', 'Keyword popup tags',
   'Text decoration tags', 'Inconsistent translations', 'Dictionary terminology'];
@@ -67,7 +68,7 @@ async function inspectField(page, mode) {
     errors: [...element.querySelectorAll('.diagnosticRange.diagError')].map(span => span.textContent),
     warnings: [...element.querySelectorAll('.diagnosticRange.diagWarning')].map(span => span.textContent),
   }));
-  assert.deepEqual(snapshot.errors, ['[Cold|Froid]'], mode + ': missing keyword marks its remaining target tag exactly');
+  assert.deepEqual(snapshot.errors, [], mode + ': missing keywords leave valid target tags neutral');
   assert.deepEqual(snapshot.warnings, ['  '], mode + ': whitespace warning marks only the extra spaces');
   assert.equal(await block.locator('.diagnosticErrorPill .metaNum').textContent(), '1');
   assert.equal(await block.locator('.diagnosticWarningPill .metaNum').textContent(), '1');
@@ -75,10 +76,22 @@ async function inspectField(page, mode) {
   await page.waitForFunction(() => document.querySelector('.appTooltip')?.textContent.includes('Consecutive whitespace'));
   await block.locator('.diagnosticErrorPill').hover();
   await page.waitForFunction(() => /keyword/i.test(document.querySelector('.appTooltip')?.textContent || ''));
+  const missing = block.locator('.diagnosticMissingTagPill');
+  assert.equal(await missing.textContent(), 'Missing tag: [Fire]');
+  assert.equal(await missing.evaluate(element => getComputedStyle(element).borderStyle), 'dashed');
+  await missing.focus();
+  assert.equal(await missing.evaluate(element => element === document.activeElement), true);
+  await page.waitForFunction(() => document.querySelector('.appTooltip')?.textContent.includes('[Fire]'));
+  const fits = await missing.evaluate(element => {
+    const box = element.getBoundingClientRect(), parent = element.parentElement.getBoundingClientRect();
+    return box.left >= parent.left - 1 && box.right <= parent.right + 1;
+  });
+  assert.ok(fits, mode + ': missing label wraps within the field metadata');
   return { input, block };
 }
 
 async function checkDiagnosticScanner(page) {
+  mkdirSync(artifactDir, { recursive: true });
   let presentations = 0;
   for (const mode of ['statdescription', 'clienttext']) {
     await prepare(page, mode);
@@ -147,7 +160,7 @@ async function checkDiagnosticScanner(page) {
       assert.ok(geometry.footerBottom <= 901 && geometry.bodyClient < geometry.bodyScroll, 'Long results scroll inside the modal and keep actions reachable');
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    const screenshot = join(tmpdir(), 'sdeditor-diagnostic-scanner-' + mode + '.png');
+    const screenshot = join(artifactDir, 'sdeditor-diagnostic-scanner-' + mode + '.png');
     await page.screenshot({ path: screenshot }); console.log('Scanner screenshot: ' + screenshot);
     await dialog.locator('.diagnosticScanClose').click(); await launcher.click();
     assert.equal(await dialog.locator('.diagnosticScanResultCard').count(), 20, 'Close/reopen retains completed results');
@@ -162,7 +175,7 @@ async function checkDiagnosticScanner(page) {
       await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
       await inspectField(page, mode); presentations++;
     }
-    const fieldScreenshot = join(tmpdir(), 'sdeditor-diagnostic-field-' + mode + '.png');
+    const fieldScreenshot = join(artifactDir, 'sdeditor-diagnostic-field-' + mode + '.png');
     await page.screenshot({ path: fieldScreenshot }); console.log('Diagnostic screenshot: ' + fieldScreenshot);
     await page.evaluate(async ({ mode, plainTarget }) => {
       const host = window.__sharedFixtureApp; host.hideTooltip();
@@ -174,11 +187,41 @@ async function checkDiagnosticScanner(page) {
     assert.equal(await targetInput.locator('..').locator('.diagnosticRange').count(), 0, 'No target tag means no whole-field missing keyword paint');
     const targetBlock = mode === 'clienttext' ? targetInput.locator('xpath=ancestor::*[contains(@class,"ctTarget")][1]') : targetInput.locator('xpath=ancestor::*[contains(@class,"editBlock")][1]');
     assert.equal(await targetBlock.locator('.diagnosticErrorPill .metaNum').textContent(), '1');
+    assert.deepEqual(await targetBlock.locator('.diagnosticMissingTagPill').allTextContents(), ['Missing tag: [Cold]', 'Missing tag: [Fire]']);
     assert.equal(await targetBlock.locator('.diagnosticWarningPill').count(), 0);
     await targetBlock.locator('.diagnosticErrorPill').hover();
     await page.waitForFunction(() => /keyword/i.test(document.querySelector('.appTooltip')?.textContent || ''));
+
+    // The reported Escape Shot example uses each real mode's live draft checks.
+    const english = 'Leap backwards, firing an icy arrow which can [Chill] or [Freeze] enemies around the location from which you escaped. This arrow will [Trigger] [IceFragment|Ice Fragments] on impact.';
+    const french = "Un bond vers l'arrière accompagné d'un tir de flèche pouvant [Chill|Frigorifier] ou [Freeze|Geler] les ennemis qui se trouvent autour de votre emplacement initial. Cette flèche crée des [IceFragment|Fragments de glace] à l'impact.";
+    await page.evaluate(async ({ mode, english, french }) => {
+      const host = window.__sharedFixtureApp; host.hideTooltip();
+      if (mode === 'clienttext') {
+        const unit = host.ctCurrentUnit, replacement = Vue.markRaw({ ...unit, fields: unit.fields.map(field => ({ ...field, source: english })) });
+        const units = Vue.markRaw(host.ctUnits.map(item => item.id === unit.id ? replacement : item));
+        host._ctUnitIndex = Vue.markRaw(new Map(units.map(item => [item.id, item])));
+        host._ctWorkUnits = Vue.markRaw(new Map(units.map(item => [item.id, item])));
+        host.ctUnits = units;
+        host.ctValues = { 'diagnostic-text': french }; host.ctRevision++;
+      } else {
+        host.editorBlocks[0].english = english; host.editorBlocks[0].translation = french;
+        host.refreshEditorBlockMeta(host.editorBlocks[0], 0); host.refreshEditorBlockHLter(0);
+      }
+      await host.$nextTick(); host.ctResizeFields();
+    }, { mode, english, french });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    assert.equal(await targetBlock.locator('.diagnosticMissingTagPill').textContent(), 'Missing tag: [Trigger]');
+    assert.equal(await targetInput.locator('..').locator('.diagError').count(), 0, 'Chill stays neutral in Escape Shot');
+    await page.screenshot({ path: join(artifactDir, 'sdeditor-missing-trigger-' + mode + '.png') });
+    await targetInput.fill(french.replace('crée', '[Trigger|crée]'));
+    assert.equal(await targetBlock.locator('.diagnosticMissingTagPill').count(), 0, 'Adding Trigger clears the missing label immediately');
+    assert.equal(await targetBlock.locator('.diagnosticErrorPill').count(), 0);
+    await targetInput.fill(french + ' [Wrong]');
+    assert.equal(await targetBlock.locator('.diagnosticMissingTagPill').textContent(), 'Missing tag: [Trigger]');
+    assert.deepEqual(await targetInput.locator('..').locator('.diagError').allTextContents(), ['[Wrong]'], 'Only the unexpected tag receives a red range');
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  console.log('PASS shared Scanner SD/ClientText real actions, options, progress, Stop, Close/reopen, pagination and Open; ' + presentations + ' diagnostic span/pill/hover presentations across four themes and resized desktop widths.');
+  console.log('PASS shared Scanner SD/ClientText real actions, options, progress, Stop, Close/reopen, pagination and Open; ' + presentations + ' diagnostic span/pill/hover/focus presentations across four themes and resized desktop widths; Escape Shot missing Trigger, live correction and unexpected tag ranges.');
 }
 module.exports = { checkDiagnosticScanner };
