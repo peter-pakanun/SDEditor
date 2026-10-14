@@ -109,6 +109,7 @@
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
             ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
+            ctUploadHistory: false, ctUploadHistoryFiles: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
             activeContentGroup: null, ctTeamOptions: teams
         }; },
@@ -1266,7 +1267,7 @@
                 this.ctResetHistory();
                 this.ctUploadVisible=false;this.ctUploading=false;this.ctRequests=[];
                 for(const [id,store] of this._ctTestStores || [])if(id!==keepTestGroupId){store.dispose();this._ctTestStores.delete(id);}
-                if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctPrepared=raw([]);}
+                if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctUploadHistoryFiles=raw([]);this.ctUploadHistory=false;this.ctPrepared=raw([]);}
                 if(exitingTest){
                     this.ctValues={};this.ctReviewed={};
                     if(this._ctTestFilters)this.ctSelectedFilters=this._ctTestFilters;
@@ -2691,7 +2692,7 @@
             ctCloseUpload() {
                 if(this.ctUploading)return false;
                 this.ctUploadVisible=false;
-                if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctPrepared=raw([]);}
+                if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctUploadHistoryFiles=raw([]);this.ctUploadHistory=false;this.ctPrepared=raw([]);}
                 return true;
             },
             async ctOpenUpload(version = null, local = false, test = false) {
@@ -2699,29 +2700,42 @@
                 if(test){local=true;version=null;}
                 this._ctPublicationRequest=null;this._ctReleaseRequest=null;this._ctReleaseCommand=null;this.ctDuplicateChoices={};
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadTest = test; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
+                this.ctUploadHistory=false;this.ctUploadHistoryFiles=raw([]);
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 const key=this.managedCatalogScope;
                 if (!local) try { const policy = await this.ctRequireTrustedProtocol();if(key!==this.managedCatalogScope)return;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
                 else this.ctPolicy = { clientTextRoles: { default: ['normal'], ...Object.fromEntries(pairedLanguages.map(language=>[language,['normal','gender']])) } };
                 return true;
             },
-            ctChooseFiles(event) {
+            ctSetHistoryComparison(enabled) {
+                if(!this.ctUploadTest || this.ctUploading)return;
+                this.ctUploadHistory=!!enabled;this.ctPrepared=raw([]);this.ctUploadError='';
+            },
+            ctChooseFiles(event, history = false) {
+                if(this.ctUploading || history && (!this.ctUploadTest || !this.ctUploadHistory))return;
                 this.ctPrepared = raw([]); this.ctUploadError = '';
-                const selected = Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name), ...(this.ctUploadTest ? { testVersion: 'current' } : {}) }));
-                this.ctUploadFiles = raw(this.ctUploadTest ? [...this.ctUploadFiles, ...selected] : selected);
+                const selected = Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name), ...(this.ctUploadTest ? { testVersion: history ? 'previous' : 'current' } : {}) }));
+                const list=history ? 'ctUploadHistoryFiles' : 'ctUploadFiles';
+                this[list] = raw(this.ctUploadTest ? [...this[list], ...selected] : selected);
                 if(this.ctUploadTest)event.target.value='';
             },
-            ctRemoveTestFile(index) {
+            ctRemoveTestFile(index, history = false) {
                 if(!this.ctUploadTest || this.ctUploading)return;
-                this.ctUploadFiles=raw(this.ctUploadFiles.filter((_,position)=>position!==index));this.ctPrepared=raw([]);this.ctUploadError='';
+                const list=history ? 'ctUploadHistoryFiles' : 'ctUploadFiles';
+                this[list]=raw(this[list].filter((_,position)=>position!==index));this.ctPrepared=raw([]);this.ctUploadError='';
             },
             async ctPrepareUpload() {
                 if (this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; this._ctAbort = new AbortController();
                 const key = this.managedCatalogScope, prepared = [];
                 try {
-                    if (!this.ctUploadFiles.length) throw new Error('Select original workbook files or StatDescriptions.zip.');
+                    if (!this.ctUploadFiles.length) throw new Error(this.ctUploadTest ? 'Select at least one Current workbook to open.' : 'Select original workbook files or StatDescriptions.zip.');
+                    if(this.ctUploadTest && this.ctUploadHistory && !this.ctUploadHistoryFiles.length)throw new Error('Select a Previous workbook for comparison or turn off Add history workbook for comparison.');
+                    const selectedFiles=this.ctUploadTest ? [
+                        ...this.ctUploadFiles.map(candidate=>({...candidate,testVersion:'current'})),
+                        ...(this.ctUploadHistory ? this.ctUploadHistoryFiles.map(candidate=>({...candidate,testVersion:'previous'})) : [])
+                    ] : this.ctUploadFiles;
                     const groups = new Map();
-                    for (const candidate of this.ctUploadFiles) {
+                    for (const candidate of selectedFiles) {
                         if (/\.zip$/i.test(candidate.file.name)) {
                             if (this.ctUploadLocal) throw new Error('Use Import ZIP for local StatDescription imports.');
                             if (prepared.some(group => group.contentMode === 'statdescription')) throw new Error('A version can contain only one StatDescription ZIP group.');
@@ -2735,13 +2749,13 @@
                         if (!candidate.language) throw new Error('Confirm the language team for ' + candidate.file.name + '.');
                         if (this.ctUploadTest && !['previous','current'].includes(candidate.testVersion || 'current')) throw new Error('Choose Previous or Current for ' + candidate.file.name + '.');
                         const groupKey = this.ctUploadTest ? JSON.stringify([candidate.language, candidate.testVersion || 'current']) : candidate.language;
-                        const candidates = groups.get(groupKey) || []; if (candidates.some(item => item.role === candidate.role)) throw new Error('Duplicate ' + candidate.role + ' workbook for ' + candidate.language + (this.ctUploadTest ? ' (' + (candidate.testVersion || 'current') + '). Choose one Previous and one Current workbook for comparison.' : '.')); candidates.push(candidate); groups.set(groupKey, candidates);
+                        const candidates = groups.get(groupKey) || []; if (candidates.some(item => item.role === candidate.role)) throw new Error('Duplicate ' + candidate.role + ' workbook for ' + candidate.language + (this.ctUploadTest ? ' in ' + (candidate.testVersion==='previous' ? 'Previous' : 'Current') + ' workbooks. Keep one workbook per role in each list.' : '.')); candidates.push(candidate); groups.set(groupKey, candidates);
                     }
                     if(this.ctUploadTest){
-                        if(new Set(this.ctUploadFiles.map(candidate=>candidate.language)).size!==1)throw new Error('Test one language at a time. Select its normal workbook, Gender workbook, or both.');
-                        const current=this.ctUploadFiles.filter(candidate=>(candidate.testVersion || 'current')==='current');
+                        if(new Set(selectedFiles.map(candidate=>candidate.language)).size!==1)throw new Error('Test one language at a time. Select its normal workbook, Gender workbook, or both.');
+                        const current=selectedFiles.filter(candidate=>candidate.testVersion==='current');
                         if(!current.length)throw new Error('Select at least one Current workbook to open.');
-                        if(this.ctUploadFiles.some(candidate=>candidate.testVersion==='previous' && !current.some(next=>next.role===candidate.role)))throw new Error('Each Previous workbook needs a Current workbook with the same role.');
+                        if(selectedFiles.some(candidate=>candidate.testVersion==='previous' && !current.some(next=>next.role===candidate.role)))throw new Error('Each Previous workbook needs a Current workbook with the same role.');
                     }
                     let testPrevious = null;
                     for (const candidates of groups.values()) {
@@ -2920,7 +2934,8 @@
                             if(!opened && key===this.managedCatalogScope && this.ctWorkspace?.scope.groupId===groupId){
                                 const message=this.ctError || 'The test sheet could not be opened. Prepare the workbook and try again.';
                                 this.ctFence();this.versionChooserVisible=true;this.ctUploadVisible=true;this.ctUploadError=message;
-                                this.ctPrepared=raw([prepared]);this.ctUploadFiles=raw([...prepared.candidates,...(prepared.previous?.candidates || [])]);
+                                this.ctPrepared=raw([prepared]);this.ctUploadFiles=raw(prepared.candidates);
+                                this.ctUploadHistory=!!prepared.previous;this.ctUploadHistoryFiles=raw(prepared.previous?.candidates || []);
                             }
                             return opened;
                         }finally{if(this.ctWorkspace?.scope.groupId!==groupId){store.dispose();this._ctTestStores.delete(groupId);}}

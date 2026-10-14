@@ -405,12 +405,44 @@
             </div>
           </div>
         </template>
-        <div class="ctUploadSelectors">
-          <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple :accept="ctUploadTest ? '.xlsx,.xlsm' : '.zip,.xlsx,.xlsm,.txt'" @change="ctChooseFiles" :disabled="ctUploading"></label>
-          <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
-        </div>
-        <p v-if="ctUploadTest">To compare versions, add both versions of the same language's workbook and mark the older one Previous. You can add files from separate folders. Changed English creates in-memory version-import history and Outdated review, using the same audio-marker rules as online.</p>
-        <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th><th v-if="ctUploadTest">Version</th></tr></thead><tbody><tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.webkitRelativePath || candidate.file.name }}</td><template v-if="!candidate.file.name.toLowerCase().endsWith('.zip')"><td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td><td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td><td v-if="ctUploadTest"><select v-model="candidate.testVersion" :aria-label="'Version for ' + (candidate.file.webkitRelativePath || candidate.file.name)" :disabled="ctUploading || ctPrepared.length"><option value="current">Current</option><option value="previous">Previous</option></select><button type="button" @click="ctRemoveTestFile(index)" :disabled="ctUploading" :aria-label="'Remove ' + (candidate.file.webkitRelativePath || candidate.file.name)">Remove</button></td></template><td v-else colspan="2">StatDescription</td></tr></tbody></table>
+        <template v-if="ctUploadTest">
+          <section class="ctTestWorkbookGroup" aria-label="Current workbooks">
+            <h3>Current workbooks</h3><p class="versionMuted">Choose the files to open and edit. You can add files from separate folders.</p>
+            <div class="ctUploadSelectors">
+              <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple accept=".xlsx,.xlsm" @change="ctChooseFiles($event)" :disabled="ctUploading"></label>
+              <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles($event)" :disabled="ctUploading"></label>
+            </div>
+            <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th><th>Actions</th></tr></thead><tbody>
+              <tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.webkitRelativePath || candidate.file.name }}</td>
+                <td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td>
+                <td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td>
+                <td><button type="button" @click="ctRemoveTestFile(index)" :disabled="ctUploading" :aria-label="'Remove ' + (candidate.file.webkitRelativePath || candidate.file.name)">Remove</button></td>
+              </tr>
+            </tbody></table>
+          </section>
+          <label class="ctTestHistoryToggle"><input type="checkbox" :checked="ctUploadHistory" @change="ctSetHistoryComparison($event.target.checked)" :disabled="ctUploading" aria-controls="ctPreviousWorkbooks">Add history workbook for comparison</label>
+          <section v-if="ctUploadHistory" id="ctPreviousWorkbooks" class="ctTestWorkbookGroup" aria-label="Previous workbooks">
+            <h3>Previous workbooks</h3><p class="versionMuted">Choose older files for the same language and roles. These provide the earlier English and translations for comparison.</p>
+            <div class="ctUploadSelectors">
+              <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple accept=".xlsx,.xlsm" @change="ctChooseFiles($event,true)" :disabled="ctUploading"></label>
+              <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles($event,true)" :disabled="ctUploading"></label>
+            </div>
+            <table v-if="ctUploadHistoryFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th><th>Actions</th></tr></thead><tbody>
+              <tr v-for="(candidate,index) in ctUploadHistoryFiles" :key="index"><td>{{ candidate.file.webkitRelativePath || candidate.file.name }}</td>
+                <td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td>
+                <td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td>
+                <td><button type="button" @click="ctRemoveTestFile(index,true)" :disabled="ctUploading" :aria-label="'Remove ' + (candidate.file.webkitRelativePath || candidate.file.name)">Remove</button></td>
+              </tr>
+            </tbody></table>
+          </section>
+        </template>
+        <template v-else>
+          <div class="ctUploadSelectors">
+            <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple accept=".zip,.xlsx,.xlsm,.txt" @change="ctChooseFiles" :disabled="ctUploading"></label>
+            <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
+          </div>
+          <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th></tr></thead><tbody><tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.webkitRelativePath || candidate.file.name }}</td><template v-if="!candidate.file.name.toLowerCase().endsWith('.zip')"><td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td><td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td></template><td v-else colspan="2">StatDescription</td></tr></tbody></table>
+        </template>
         <fieldset v-if="ctUploadFiles.some(candidate=>candidate.file.name.toLowerCase().endsWith('.zip'))"><legend>StatDescription team assignments</legend><label v-for="team in ctTeamOptions" :key="team" style="display:inline-block;margin:8px"><input type="checkbox" v-model="ctUploadAssignments" :value="team" :disabled="ctUploading || ctPrepared.length">{{ team }}</label></fieldset>
         <details v-if="cloudUser?.isAdmin && !ctUploadLocal" class="ctUploadPolicy"><summary>Admin: required ClientText workbook roles</summary><p>Each team requires a complete group. Changing the policy applies to future groups.</p><textarea v-model="ctPolicyText" aria-label="Required workbook roles JSON"></textarea><button @click="ctSavePolicy" :disabled="ctUploading">Save grouping policy</button></details>
         <div v-if="ctPrepared.length" class="ctUploadReport"><article v-for="(group,index) in ctPrepared" :key="index"><h3>{{ group.contentMode }} · {{ group.language || group.assignments.join(', ') }}</h3><p v-if="group.units">{{ group.units.length.toLocaleString() }} IDs · {{ group.assets.length }} workbook(s)</p><p v-for="(warning,i) in group.warnings" :key="i">{{ warning.message || warning }}</p><p v-if="group.published">Published</p></article></div>

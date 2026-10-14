@@ -255,22 +255,50 @@ async function run() {
         const upload = page.getByRole('region', { name: 'Content upload' });
         const workspace = page.getByRole('region', { name: 'ClientText workspace' });
         let layoutChecked = false;
-        async function openTest(files, previousNames = []) {
+        async function openTest(files, previousFiles = [], hiddenPreviousFiles = []) {
             const selectedLanguage = await page.evaluate(() => window.__offlineTestApp.lang);
             await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).click();
             await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
-            assert.equal(await upload.locator('input[type=file]').first().getAttribute('accept'), '.xlsx,.xlsm');
+            const current = upload.getByRole('region', { name: 'Current workbooks', exact: true }),
+                previous = upload.getByRole('region', { name: 'Previous workbooks', exact: true }),
+                historyToggle = upload.getByRole('checkbox', { name: 'Add history workbook for comparison', exact: true });
+            assert.equal(await current.locator('input[type=file]').first().getAttribute('accept'), '.xlsx,.xlsm');
+            assert.equal(await current.locator('input[webkitdirectory]').count(), 1, 'Current workbooks have their own folder selector');
+            assert.equal(await historyToggle.isChecked(), false, 'Every test begins with history comparison turned off');
+            assert.equal(await previous.count(), 0, 'Previous workbook selectors appear only when comparison is checked');
             assert.equal(await upload.locator('.ctUploadPolicy').count(), 0, 'Offline tests offer no API policy edit');
             assert.equal(await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).count(), 0, 'Test sheets combine preparation and opening into one action');
             assert.equal(await upload.getByRole('button', { name: 'Open test sheet', exact: true }).count(), 0, 'The previous separate opening action is absent');
             if (!layoutChecked) await layout(page, upload, 'Offline workbook importer');
-            if(previousNames.length){
-                await upload.locator('input[type=file]').first().setInputFiles(files.slice(0,1));
-                await upload.locator('input[type=file]').first().setInputFiles(files.slice(1));
-                assert.equal(await upload.locator('.ctUploadFiles tbody tr').count(),files.length,'Successive file choices retain both versions');
-            }else await upload.locator('input[type=file]').first().setInputFiles(files);
-            for (const name of previousNames) await upload.getByRole('combobox', { name: 'Version for ' + name, exact: true }).selectOption('previous');
-            if(previousNames.length)await layout(page,upload,'Previous/current workbook selection');
+            await current.locator('input[type=file]').first().setInputFiles(files.slice(0,1));
+            if(files.length>1)await current.locator('input[type=file]').first().setInputFiles(files.slice(1));
+            assert.equal(await current.locator('.ctUploadFiles tbody tr').count(),files.length,'Current workbook choices append within their own list');
+            const selectedPrevious=previousFiles.length ? previousFiles : hiddenPreviousFiles;
+            if(selectedPrevious.length){
+                await historyToggle.check();
+                assert.equal(await previous.locator('input[type=file]').first().getAttribute('accept'), '.xlsx,.xlsm');
+                assert.equal(await previous.locator('input[webkitdirectory]').count(), 1, 'Previous workbooks have a separate folder selector');
+                await previous.locator('input[type=file]').first().setInputFiles(selectedPrevious.slice(0,1));
+                if(selectedPrevious.length>1)await previous.locator('input[type=file]').first().setInputFiles(selectedPrevious.slice(1));
+                assert.equal(await previous.locator('.ctUploadFiles tbody tr').count(),selectedPrevious.length,'Previous workbook choices append within their own list');
+                const retained=await page.evaluate(()=>({current:window.__offlineTestApp.ctUploadFiles.map(item=>({name:item.file.name,version:item.testVersion})),
+                    previous:window.__offlineTestApp.ctUploadHistoryFiles.map(item=>({name:item.file.name,version:item.testVersion}))}));
+                assert.ok(retained.current.every(item=>item.version==='current'));assert.ok(retained.previous.every(item=>item.version==='previous'));
+                assert.equal(await upload.getByRole('combobox',{name:/Version for/}).count(),0,'Separated workbook lists replace per-file version choices');
+                await historyToggle.uncheck();assert.equal(await previous.count(),0);
+                assert.deepEqual(await page.evaluate(()=>({current:window.__offlineTestApp.ctUploadFiles.map(item=>({name:item.file.name,version:item.testVersion})),
+                    previous:window.__offlineTestApp.ctUploadHistoryFiles.map(item=>({name:item.file.name,version:item.testVersion}))})),retained,'Hiding history retains both selections');
+                if(previousFiles.length){
+                    await historyToggle.check();assert.equal(await previous.locator('.ctUploadFiles tbody tr').count(),selectedPrevious.length);
+                    await previous.getByRole('button',{name:/Remove/}).first().click();
+                    assert.equal(await previous.locator('.ctUploadFiles tbody tr').count(),selectedPrevious.length-1);
+                    assert.equal(await current.locator('.ctUploadFiles tbody tr').count(),files.length,'Removing a previous workbook preserves same-named current selections');
+                    await previous.locator('input[type=file]').first().setInputFiles(selectedPrevious.slice(0,1));
+                    await layout(page,upload,'Separate previous/current workbook selection');
+                    mkdirSync(disposableFolder, { recursive: true });
+                    await upload.screenshot({ path: join(disposableFolder, 'workbook-version-selection.png') });
+                }
+            }
             await upload.getByRole('button', { name: 'Open', exact: true }).click();
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
@@ -284,11 +312,14 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctOfflineTest), true);
             assert.match(await workspace.textContent(), /In-memory test/);
             assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), selectedLanguage, 'Opening a test preserves the selected language');
+            if(hiddenPreviousFiles.length)assert.equal(await page.evaluate(async()=>!!(await window.__offlineTestApp.ctStorage(window.__offlineTestApp.ctWorkspace.scope).getMetadata(window.__offlineTestApp.ctWorkspace.scope)).previousScope),false,
+                'Unchecked retained history workbooks are excluded from the in-memory version');
         }
         await monitor(page, true);
         // A French Normal workbook alone is allowed here even though a
         // published French content group normally requires its Gender pair.
-        await openTest([{ name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }]);
+        await openTest([{ name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }], [],
+            [{ name: 'Thai.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }]);
         await layout(page, workspace, 'Offline ClientText list');
         const unit = await page.evaluate(() => {
             const unit = window.__offlineTestApp.ctUnits.find(unit => unit.recordId === 'offline-test-record');
@@ -503,13 +534,13 @@ async function run() {
         assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, workspace: window.__offlineTestApp.ctWorkspace, units: window.__offlineTestApp.ctUnits.length, stores: window.__offlineTestApp._ctTestStores?.size || 0 })),
             { active: false, workspace: null, units: 0, stores: 0 }, 'Versions discards the whole temporary workspace');
         await assertLocal(page, 'Leaving the test', true);
-        async function checkVersionHistory(files, previousNames, label) {
+        async function checkVersionHistory(files, previousFiles, label) {
             // Establish the real editor preference before measuring the test
             // session; changing a personal setting itself is durable work.
             await monitor(page,false);
             await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.inlineEditor=true;await vm.saveSettings();});
             await page.waitForTimeout(500);await monitor(page,true);
-            await openTest(files, previousNames);
+            await openTest(files, previousFiles);
             const sample = await page.evaluate(async () => {
                 const vm = window.__offlineTestApp, store = vm.ctStorage(vm.ctWorkspace.scope),
                     previousScope = (await store.getMetadata(vm.ctWorkspace.scope)).previousScope,
@@ -582,14 +613,13 @@ async function run() {
                 currentEnglish: comparison.rows.find(row => row.beforeSource.trim() && row.beforeSource !== row.afterSource)?.afterSource });
         }
         await checkVersionHistory([
-            { name: 'French_previous.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'previous') },
-            { name: 'French_current.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'current') }
-        ], ['French_previous.xlsm'], 'Synthetic');
+            { name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'current') }
+        ], [{ name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'previous') }], 'Synthetic');
         if (realHistoryWorkbooks) {
             const previousPath = process.env.CLIENTTEXT_HISTORY_PREVIOUS || 'C:/Users/lpeac/Downloads/2026-10-05_POE2/French_PoE2.xlsm',
                 currentPath = process.env.CLIENTTEXT_HISTORY_CURRENT || 'C:/Users/lpeac/Downloads/2026-10-13_POE2/French.xlsx',
                 beforeHashes = [previousPath, currentPath].map(checksum);
-            await checkVersionHistory([previousPath, currentPath], [require('node:path').basename(previousPath)], 'Real French');
+            await checkVersionHistory([currentPath], [previousPath], 'Real French');
             assert.deepEqual([previousPath, currentPath].map(checksum), beforeHashes, 'Real source workbooks remain byte-for-byte unchanged');
         }
         await monitor(page, false);

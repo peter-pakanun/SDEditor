@@ -3550,7 +3550,7 @@ test('ClientText field comparisons replace the dedicated sidebar and modal while
     assert.equal(window.ClientTextUI.toolsComponent,window.EditorComponents.Tools);
     assert.equal(template.includes('ctHistoryViewer'),false);assert.match(template,/!historyClientText/);
     assert.match(window.EditorComponents.Tools.template,/editorVisible && !historyClientText/);
-    assert.match(window.EditorComponents.FieldToolbar.template,/→ Latest/);assert.match(window.EditorComponents.FieldToolbar.template,/controller\.formattingDisabled/);
+    assert.match(window.EditorComponents.FieldToolbar.template,/>Latest<\/span>/);assert.match(window.EditorComponents.FieldToolbar.template,/controller\.formattingDisabled/);
 });
 
 test('field comparisons auto-open meaningful Outdated source changes and retain manual closure through refresh and editor transitions',async()=>{
@@ -3704,7 +3704,8 @@ test('offline sheet testing is available to every role including guests and does
         app._cloud={request(){assert.fail('Opening a test must stay local');}};
         assert.equal(await app.ctOpenOfflineTest(),true);
         assert.equal(app.ctUploadVisible,true);
-        assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);app.ctCloseUpload();
+        assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);assert.equal(app.ctUploadHistory,false);
+        assert.equal(app.ctUploadHistoryFiles.length,0);app.ctCloseUpload();
     }
 });
 
@@ -3744,35 +3745,68 @@ test('offline test activation, drafts, save/history and exit use memory and rest
     assert.throws(()=>app.ctStorage(oldScope),/session has ended/);await assert.rejects(store.getSaved(oldScope),{code:'LOCAL_TEST_DISPOSED'});
 });
 
-test('offline version pairs parse separately and reject ambiguous language, role or version choices before reading files',async()=>{
-    const h=uploadPreparationHarness(['French.xlsm','French_previous.xlsm','French_Gender.xlsm','French_Gender_previous.xlsm']);
-    Object.assign(h.app,{ctUploadTest:true,ctUploadLocal:true});
-    h.app.ctUploadFiles.filter(candidate=>candidate.file.name.includes('previous')).forEach(candidate=>candidate.testVersion='previous');
+function offlinePreparationHarness(currentNames,previousNames=[],enabled=previousNames.length>0){
+    const h=uploadPreparationHarness(currentNames);Object.assign(h.app,{ctUploadTest:true,ctUploadLocal:true});
+    h.app.ctSetHistoryComparison(true);
+    if(previousNames.length)h.app.ctChooseFiles({target:{files:previousNames.map(name=>new File(['Exact original bytes: '+name],name))}},true);
+    h.app.ctSetHistoryComparison(enabled);return h;
+}
+
+test('offline version pairs parse separate current/history lists and reject ambiguous language or role choices before reading files',async()=>{
+    const h=offlinePreparationHarness(['French.xlsm','French_Gender.xlsm'],['French_previous.xlsm','French_Gender_previous.xlsm']);
     await h.app.ctPrepareUpload();assert.equal(h.app.ctUploadError,'');assert.equal(h.parseCalls.length,4);
     const prepared=h.app.ctPrepared[0];assert.equal(h.app.ctPrepared.length,1);assert.equal(prepared.units.length,2);assert.equal(prepared.previous.units.length,2);
     assert.deepEqual(Array.from(prepared.assets,asset=>asset.name),['French.xlsm','French_Gender.xlsm']);
     assert.deepEqual(Array.from(prepared.previous.assets,asset=>asset.name),['French_previous.xlsm','French_Gender_previous.xlsm']);
     assert.deepEqual(h.requests,[]);assert.deepEqual(h.storeCalls,[]);
-    for(const [names,versions,message] of [
-        [['Thai.xlsx','Thai_old.xlsx'],['current','current'],/Duplicate.*Choose one Previous/],
-        [['Thai.xlsx'],['previous'],/at least one Current/],
-        [['French.xlsx','French_Gender.xlsx'],['current','previous'],/same role/],
-        [['Thai.xlsx','French.xlsx'],['current','previous'],/one language/]
+    for(const [currentNames,previousNames,enabled,message] of [
+        [['Thai.xlsx','Thai_current_copy.xlsx'],[],false,/Duplicate.*Current/i],
+        [['Thai.xlsx'],['Thai_old.xlsx','Thai_previous_copy.xlsx'],true,/Duplicate.*Previous/i],
+        [[],['Thai.xlsx'],true,/at least one Current/i],
+        [['Thai.xlsx'],[],true,/previous.*workbook|history.*workbook/i],
+        [['French.xlsx'],['French_Gender.xlsx'],true,/same role/],
+        [['Thai.xlsx'],['French.xlsx'],true,/one language/]
     ]) {
-        const {app,parseCalls}=uploadPreparationHarness(names);Object.assign(app,{ctUploadTest:true,ctUploadLocal:true});
-        app.ctUploadFiles.forEach((candidate,index)=>candidate.testVersion=versions[index]);
+        const {app,parseCalls}=offlinePreparationHarness(currentNames,previousNames,enabled);
         await app.ctPrepareUpload();assert.match(app.ctUploadError,message);assert.equal(parseCalls.length,0);
     }
 });
 
-test('test sheet file selection appends separate folders, preserves version choices and supports removing a mistaken file',()=>{
-    const {app}=harness({ctUploadTest:true}),oldFile=new File(['old'],'Thai.xlsx'),currentFile=new File(['new'],'Thai.xlsx');
-    app.ctChooseFiles({target:{files:[oldFile]}});app.ctUploadFiles[0].testVersion='previous';
-    app.ctChooseFiles({target:{files:[currentFile]}});
-    assert.equal(app.ctUploadFiles.length,2);assert.equal(app.ctUploadFiles[0].testVersion,'previous');assert.equal(app.ctUploadFiles[1].testVersion,'current');
-    assert.strictEqual(app.ctUploadFiles[0].file,oldFile);assert.strictEqual(app.ctUploadFiles[1].file,currentFile);
-    app.ctRemoveTestFile(0);assert.equal(app.ctUploadFiles.length,1);assert.strictEqual(app.ctUploadFiles[0].file,currentFile);
+test('test sheet selectors append independently, isolate same names and remove only from their own list',()=>{
+    const {app}=harness({ctUploadTest:true}),oldFile=new File(['old'],'Thai.xlsx'),currentFile=new File(['new'],'Thai.xlsx'),
+        anotherCurrent=new File(['other current'],'Thai_Gender.xlsx'),anotherPrevious=new File(['other previous'],'Thai_Gender.xlsx');
+    assert.equal(app.ctUploadHistory,false);app.ctSetHistoryComparison(true);
+    app.ctChooseFiles({target:{files:[oldFile]}},true);app.ctChooseFiles({target:{files:[currentFile]}});
+    app.ctChooseFiles({target:{files:[anotherCurrent]}});app.ctChooseFiles({target:{files:[anotherPrevious]}},true);
+    assert.deepEqual(Array.from(app.ctUploadFiles,candidate=>candidate.testVersion),['current','current']);
+    assert.deepEqual(Array.from(app.ctUploadHistoryFiles,candidate=>candidate.testVersion),['previous','previous']);
+    assert.strictEqual(app.ctUploadHistoryFiles[0].file,oldFile);assert.strictEqual(app.ctUploadFiles[0].file,currentFile);
+    app.ctRemoveTestFile(0,true);assert.equal(app.ctUploadHistoryFiles.length,1);assert.strictEqual(app.ctUploadHistoryFiles[0].file,anotherPrevious);
+    assert.equal(app.ctUploadFiles.length,2);assert.strictEqual(app.ctUploadFiles[0].file,currentFile);
+    app.ctRemoveTestFile(1);assert.equal(app.ctUploadFiles.length,1);assert.strictEqual(app.ctUploadFiles[0].file,currentFile);
+    assert.equal(app.ctUploadHistoryFiles.length,1);assert.strictEqual(app.ctUploadHistoryFiles[0].file,anotherPrevious);
     app.ctUploadTest=false;app.ctChooseFiles({target:{files:[oldFile]}});assert.equal(app.ctUploadFiles.length,1);assert.strictEqual(app.ctUploadFiles[0].file,oldFile);
+});
+
+test('optional history toggle clears prepared state while retaining hidden selections and excluding them from preparation',async()=>{
+    const {app,parseCalls}=offlinePreparationHarness(['Thai.xlsx'],['French.xlsx']);
+    const previous=app.ctUploadHistoryFiles[0];app.ctPrepared=[{stale:true}];app.ctUploadError='Old validation failure';
+    app.ctSetHistoryComparison(false);assert.equal(app.ctUploadHistory,false);assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploadError,'');
+    assert.equal(app.ctUploadHistoryFiles.length,1);assert.strictEqual(app.ctUploadHistoryFiles[0],previous);
+    app.ctChooseFiles({target:{files:[new File(['ignored'],'German.xlsx')]}},true);
+    assert.equal(app.ctUploadHistoryFiles.length,1,'A hidden history selector cannot add a workbook');
+    await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(parseCalls.length,1);assert.equal(parseCalls[0].filename,'Thai.xlsx');
+    assert.equal(app.ctPrepared[0].previous,undefined,'Unchecked history is excluded from the prepared in-memory version');
+    app.ctSetHistoryComparison(true);assert.equal(app.ctUploadHistory,true);assert.equal(app.ctPrepared.length,0);assert.strictEqual(app.ctUploadHistoryFiles[0],previous);
+    app.ctUploadTest=false;app.ctChooseFiles({target:{files:[new File(['ignored'],'German.xlsx')]}},true);
+    assert.equal(app.ctUploadHistoryFiles.length,1,'Ordinary importers cannot add to test history');
+});
+
+test('offline importer markup separates current and optional history selectors without per-file version choices',()=>{
+    const html=fs.readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
+    for(const label of ['Current workbooks','Previous workbooks','Add history workbook for comparison'])assert.equal(html.includes(label),true);
+    assert.equal(html.includes("'Version for '"),false);
+    assert.match(html,/ctUploadHistoryFiles/);assert.match(html,/ctSetHistoryComparison/);
 });
 
 test('offline Outdated import history loads actual old English and removed fields through the regular diff viewer without durable or cloud access',async()=>{

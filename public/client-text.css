@@ -13,8 +13,8 @@
 .editorFieldToolbar button:hover,.editorFieldToolbar button:focus-visible,.editorFieldToolbar button.active {border-color:var(--ui-border);background:var(--color-element-alt);}
 .editorFieldToolbar .fieldDiffButton svg {width:18px;height:18px;fill:none;stroke-width:2;stroke-linecap:round;}.fieldDiffRemoved {stroke:var(--ui-error);}.fieldDiffAdded {stroke:var(--ui-success,#55a96b);}
 .editorFieldToolbar .fieldStyle-b {font-weight:700;}.editorFieldToolbar .fieldStyle-i {font-style:italic;font-family:Georgia,serif;}.editorFieldToolbar .fieldStyle-u {text-decoration:underline;text-underline-offset:3px;}
-.editorFieldComparisonControls {display:flex;align-items:center;gap:5px;margin-top:5px;min-width:0;}.editorFieldComparisonControls select {flex:1;min-width:0;max-width:100%;width:120px;font:inherit;padding:4px;border:1px solid var(--ui-border);background:var(--color-element-alt);color:var(--color-font);}
-.fieldToolbarSeparator {height:17px;margin-left:auto;border-left:1px solid var(--ui-border);}.editorFieldToolbar .fieldHistoryMenuButton {font-size:18px;}.fieldDiffLatest {white-space:nowrap;}.fieldDiffUnavailable {color:var(--ui-muted);margin:5px 0;}
+.editorFieldComparisonControls {display:flex;align-items:stretch;gap:5px;margin-top:5px;min-width:0;}.editorFieldComparisonControls select,.fieldDiffLatest {box-sizing:border-box;font:inherit;padding:4px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);color:var(--color-font);}.editorFieldComparisonControls select {flex:1;min-width:0;max-width:100%;width:120px;}.fieldDiffLatest {display:inline-flex;align-items:center;justify-content:center;flex:none;padding-inline:8px;white-space:nowrap;}.fieldDiffArrow {align-self:center;flex:none;color:var(--ui-muted);}
+.fieldToolbarSeparator {height:17px;margin-left:auto;border-left:1px solid var(--ui-border);}.editorFieldToolbar .fieldHistoryMenuButton {font-size:18px;}.fieldDiffUnavailable {color:var(--ui-muted);margin:5px 0;}
 .ctInlineDiff {box-sizing:border-box;min-height:1.5em;margin:4px 0;padding:8px;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;font:inherit;color:var(--color-font);background:var(--color-element-alt);border:1px solid var(--ui-border);border-radius:4px;}
 .ctSourceDiff {font-family:inherit;line-height:1.55;}.ctTranslationDiff {margin-top:5px;}
 .fieldHistoryMenu {max-width:100%;padding:8px;margin:6px 0;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);color:var(--color-font);}
@@ -117,6 +117,13 @@
 .ctUploadDialog .ctUploadSelectors .ctUploadField { margin:0; }
 .ctUploadSelectors input[type=file] { padding:8px; line-height:1.6; font:inherit; }
 .ctUploadSelectors input[type=file]::file-selector-button { margin-right:10px; }
+.ctTestWorkbookGroup { margin:20px 0; padding:16px; border:1px solid var(--ui-border); border-radius:6px; }
+.ctTestWorkbookGroup h3 { margin:0 0 8px; }
+.ctTestWorkbookGroup > p { margin:0; }
+.ctTestWorkbookGroup .ctUploadFiles { margin-bottom:0; }
+.ctTestWorkbookGroup .ctUploadFiles td:first-child { overflow-wrap:anywhere; }
+.ctUploadDialog .ctTestHistoryToggle { display:flex; align-items:center; gap:8px; margin:20px 0; }
+.ctTestHistoryToggle input { flex:none; margin:0; }
 .ctUploadPolicy { margin:20px 0; padding:12px; border:1px solid var(--ui-border); border-radius:6px; }
 .ctUploadPolicy summary { cursor:pointer; }
 .ctUploadPolicy p { margin:12px 0; }
