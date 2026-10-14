@@ -1466,14 +1466,13 @@ button, label, th, td, input[type="checkbox"] {
   width: 100%;
   min-width: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   gap: calc(0.45em * var(--density));
 }
 
 .gamePreviewLineLabel {
   flex: 0 0 calc(2.2em * var(--density));
-  padding-top: calc(0.5em * var(--density));
   color: var(--color-font);
   opacity: 0.65;
   font-size: calc(10px * var(--density));
@@ -1493,8 +1492,7 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewWindow {
   display: block;
   max-width: 100%;
-  min-height: calc(2.7em * var(--density));
-  padding: calc(0.4em * var(--density)) calc(0.75em * var(--density));
+  padding: calc(0.6em * var(--density)) calc(0.75em * var(--density));
   background: var(--color-bg);
   border: 1px solid var(--color-element-alt);
   border-radius: 2px;
