@@ -24,6 +24,7 @@ const realHistoryWorkbooks = process.argv.includes('--history-real-workbooks');
 const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
 const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
 const disposableFolder = resolve(__dirname, '../temp/clienttext-npc-offline-fixture');
+const vueScriptPath=process.env.FIXTURE_VUE_PATH || resolve(__dirname,'../temp/clienttext-fixture-vue.min.js');
 const checksum = filename => createHash('sha256').update(readFileSync(filename)).digest('hex');
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -135,7 +136,9 @@ async function run() {
     const frontend = express(), server = createServer(frontend);
     frontend.use((request, response, next) => { response.set('Cache-Control', 'no-store'); next(); });
     frontend.get('/', (request, response) => response.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8')
-        .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
+        .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')
+        .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js',existsSync(vueScriptPath)?'/fixture/vue.global.prod.js':'https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js')));
+    frontend.get('/fixture/vue.global.prod.js',(request,response)=>response.type('js').send(readFileSync(vueScriptPath)));
     frontend.get('/fixture/jszip.min.js', (request, response) => response.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
     frontend.get('/clientTextWorker.js', (request, response) => response.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8')
         .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
@@ -303,7 +306,7 @@ async function run() {
         await saved(page, unit.id, unit.field, 'Épée offline final');
         await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
         await workspace.getByRole('button', { name: 'offline-test-record', exact: true }).click();
-        await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+        await workspace.locator('.ctFullEditor .ctTarget').first().getByRole('button',{name:'Comparison options and revision history'}).click();
         await page.waitForFunction(() => !window.__offlineTestApp.ctHistoryLoading && window.__offlineTestApp.ctHistory.length >= 2);
         assert.equal(await page.evaluate(() => window.__offlineTestApp.ctHistoryError), '');
         assert.ok(await page.evaluate(({ id, field }) => window.__offlineTestApp.ctHistory.some(entry => entry.unitId === id && entry.after.values[field] === 'Épée offline final'), unit), 'Saved edits retain local in-memory history');
@@ -501,6 +504,11 @@ async function run() {
             { active: false, workspace: null, units: 0, stores: 0 }, 'Versions discards the whole temporary workspace');
         await assertLocal(page, 'Leaving the test', true);
         async function checkVersionHistory(files, previousNames, label) {
+            // Establish the real editor preference before measuring the test
+            // session; changing a personal setting itself is durable work.
+            await monitor(page,false);
+            await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.inlineEditor=true;await vm.saveSettings();});
+            await page.waitForTimeout(500);await monitor(page,true);
             await openTest(files, previousNames);
             const sample = await page.evaluate(async () => {
                 const vm = window.__offlineTestApp, store = vm.ctStorage(vm.ctWorkspace.scope),
@@ -523,27 +531,49 @@ async function run() {
             await workspace.getByRole('button', { name: 'All sheets', exact: true }).click();
             await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).fill(sample.recordId);
             await workspace.getByRole('button', { name: sample.recordId, exact: true }).click();
-            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+            assert.equal(await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).count(),0,'ClientText has no History sidebar tab');
             await page.waitForFunction(() => !window.__offlineTestApp.ctHistoryLoading && window.__offlineTestApp.ctHistory.length);
-            assert.equal(await workspace.locator('.ctHistoryEvent').count(), 1);
-            await workspace.getByRole('button', { name: 'Compare previous version', exact: true }).click();
-            const dialog = page.getByRole('dialog', { name: /^Compare ·/ });
-            await dialog.waitFor();
+            await page.waitForFunction(()=>!window.__offlineTestApp.ctComparisonBusy && window.__offlineTestApp.ctComparisonVersions.length>0);
+            const editor=workspace.locator('.ctFullEditor'),sourceDiff=editor.locator('.ctSourceDiff').first();await sourceDiff.waitFor();
             const comparison = await page.evaluate(() => {
-                const vm = window.__offlineTestApp;
-                return { error: vm.ctHistoryError, rows: vm.ctHistoryComparison.rows, notes: vm.ctHistoryComparison.hasNotes,
-                    previous: vm.ctHistoryComparison.before.unit.id, current: vm.ctCurrentUnit.id };
+                const vm = window.__offlineTestApp,old=vm.ctComparisonVersions[0].snapshot.unit,latest=vm.ctCurrentUnit;
+                return { error: vm.ctComparisonError, rows:latest.fields.map(field=>({beforeSource:old.fields.find(value=>value.id===field.id)?.source || '',afterSource:field.source})),
+                    previous:old.id,current:latest.id };
             });
             assert.equal(comparison.error, '');assert.equal(comparison.previous, sample.id);assert.equal(comparison.current, sample.id);
             assert.ok(comparison.rows.some(row => row.beforeSource !== row.afterSource), label + ': actual previous English differs from current');
-            await dialog.getByRole('checkbox', { name: 'Show whitespace', exact: true }).check();
-            await dialog.getByRole('checkbox', { name: 'Character differences', exact: true }).uncheck();
-            await layout(page, dialog, label + ' previous-version diff');
+            const sourceKey=await sourceDiff.evaluate(field=>field.closest('.ctSourceBlock').dataset.sourceField),source=editor.locator('.ctSourceBlock[data-source-field='+JSON.stringify(sourceKey)+']');
+            assert.deepEqual(await source.locator('.editorFieldToolbar').evaluate(bar=>({last:bar.lastElementChild.classList.contains('fieldDiffButton'),separator:bar.lastElementChild.previousElementSibling.getAttribute('role'),insideField:!!bar.closest('.editorFieldFrame')})),
+                {last:true,separator:'separator',insideField:true},'Diff toggle is the final toolbar item inside the field');
+            assert.equal(await source.locator('.editorFieldComparisonControls').evaluate(controls=>!controls.closest('.editorFieldFrame') && controls.getBoundingClientRect().top>=controls.parentElement.querySelector('.editorFieldFrame').getBoundingClientRect().bottom),true,'Comparison selector sits underneath the field');
+            assert.equal(await source.getByRole('button',{name:'Bold',exact:true}).isDisabled(),true,'Source has matching disabled style controls');
+            await source.getByRole('button',{name:'Comparison options and revision history'}).click();
+            await source.getByRole('checkbox', { name: 'Show whitespace', exact: true }).check();
+            await source.getByRole('checkbox', { name: 'Character differences', exact: true }).check();
+            await source.getByRole('button',{name:'Close revision menu'}).press('Escape');
+            assert.equal(await source.locator('.fieldHistoryMenu').count(),0);
+            const target=editor.locator('.ctTarget').first(),draft=target.locator('[data-ct-target]');
+            await draft.fill('Selected\nsecond line');await draft.press('Control+a');await draft.press('Control+b');
+            assert.equal(await draft.inputValue(),'<b>{Selected\nsecond line}');await draft.press('Control+z');assert.equal(await draft.inputValue(),'Selected\nsecond line');
+            await draft.press('Control+a');await target.getByRole('button',{name:'Italic',exact:true}).click();assert.equal(await draft.inputValue(),'<i>{Selected\nsecond line}');
+            await target.getByRole('button',{name:'Compare translation',exact:true}).click();assert.equal(await target.locator('.ctTranslationDiff').count(),1);
+            await draft.fill('Live draft comparison');
+            assert.equal(await target.locator('.ctTranslationDiff').evaluate(diff=>[...diff.querySelectorAll('span')].filter(span=>!span.classList.contains('diffInlineDel')).map(span=>span.textContent).join('')),'Live·draft·comparison');
+            const inputNode=await draft.evaluate(input=>{input.__fieldIdentity=42;return input.dataset.ctTarget;});
+            await source.getByRole('button',{name:'Compare English source',exact:true}).click();
+            await page.evaluate(()=>window.__offlineTestApp.ctAutoOpenComparisons());assert.equal(await source.locator('.ctSourceDiff').count(),0,'Manual closure survives refresh');
+            assert.equal(await draft.evaluate(input=>input.__fieldIdentity),42,'Toggling source diff retains translation input');
+            await source.getByRole('button',{name:'Compare English source',exact:true}).click();
+            await layout(page, editor, label + ' previous-version inline diff');
             mkdirSync(disposableFolder, { recursive: true });
-            await dialog.screenshot({ path: join(disposableFolder, 'history-' + (label === 'Synthetic' ? 'synthetic' : 'real') + '.png') });
-            await dialog.getByRole('button', { name: 'Close history comparison' }).press('Escape');
-            await dialog.waitFor({ state: 'hidden' });
+            await editor.screenshot({ path: join(disposableFolder, 'history-' + (label === 'Synthetic' ? 'synthetic' : 'real') + '.png') });
             assert.equal(await workspace.getByRole('button', { name: 'Close', exact: true }).isVisible(), true);
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+            const row=workspace.locator('tr[data-unit-id='+JSON.stringify(sample.id)+']');await row.click();
+            await row.locator('[data-ct-target]').first().waitFor();await layout(page,row,label+' inline row toolbar');
+            assert.equal(await row.locator('.ctTranslationDiff').count(),1,'Inline/full transition retains the translation comparison');
+            await row.locator('[data-ct-target]').first().press('Control+Enter');await editor.waitFor();
+            assert.equal(await editor.locator('[data-ct-target]').first().inputValue(),'Live draft comparison','Field toolbar transitions retain the exact draft');
             await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();await offline.waitFor();
             await assertLocal(page, label + ' previous version history', true);
@@ -740,7 +770,7 @@ async function run() {
                 await translation.fill(target);
                 await workspace.getByRole('button', { name: 'Save', exact: true }).click();
                 await saved(page, entry.id, entry.field, target);
-                await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+                await workspace.locator('.ctFullEditor .ctTarget').first().getByRole('button',{name:'Comparison options and revision history'}).click();
                 await page.waitForFunction(({ id, field, target }) => {
                     const vm = window.__offlineTestApp;
                     return !vm.ctHistoryLoading && vm.ctHistory.some(entry => entry.unitId === id && entry.after.values[field] === target);
@@ -818,6 +848,7 @@ async function run() {
             return { active: vm?.ctActive, test: vm?.ctOfflineTest, workspace: vm?.ctWorkspace?.scope,
                 uploadVisible: vm?.ctUploadVisible, uploadError: vm?.ctUploadError, error: vm?.ctError,
                 busy: vm?.ctBusy, uploading: vm?.ctUploading, units: vm?.ctUnits?.length,
+                comparisonBusy:vm?.ctComparisonBusy,comparisonError:vm?.ctComparisonError,historyError:vm?.ctHistoryError,comparisons:vm?.ctComparisonVersions?.length,
                 chooser: vm?.versionChooserVisible, stores: vm?._ctTestStores?.size,
                 writes: window.__offlineTestWrites, storageWrites: window.__offlineTestStorageWrites,
                 requests: window.__offlineTestRequests };

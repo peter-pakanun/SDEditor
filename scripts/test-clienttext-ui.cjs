@@ -15,6 +15,7 @@ function harness(changes={}){
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorSession.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/editorComponents.js'),'utf8'),context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextComparisons.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
         ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS,clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
@@ -2226,7 +2227,7 @@ test('shared field components preserve distinct form sources and autosizing chan
     assert.deepEqual(Array.from(groups,entry=>entry.text),['Masculine','Feminine']);assert.deepEqual(Array.from(groups,entry=>entry.label),['MS','FS']);
     const fields=window.ClientTextUI.fieldsComponent,target=window.ClientTextUI.targetComponent,tools=window.ClientTextUI.toolsComponent;
     assert.equal(fields.props.side.default,'both');assert.match(fields.template,/side !== 'translation'/);assert.match(fields.template,/side !== 'source'/);
-    assert.match(fields.template,/<editor-native-field :controller="host.ctSourceFieldController\(group,source\)" kind="english"/);
+    assert.match(fields.template,/<editor-native-field v-else :controller="host.ctSourceFieldController\(group,source\)" kind="english"/);
     assert.match(fields.template,/field.kind !== 'gender' \|\| field.source/,'blank enum metadata has no fake English textarea');
     assert.match(target.template,/<editor-native-field v-else :controller="host.ctFieldController\(field\)" kind="translation"/);
     const raw='Masculine@literal\\n\r\nraw',rawField={...app.ctCurrentUnit.fields[0],source:raw};app.ctCurrentUnit.fields=[rawField];app.ctValues=S.valuesFor(app.ctCurrentUnit);app.ctDisplayedFields=()=>[rawField];
@@ -2591,7 +2592,7 @@ function enableHistory(h) {
     return h;
 }
 test('history normalizes local and shared before/after values with verified raw field context',async()=>{
-    const h=enableHistory(harness()),{app,window,original}=h,requests=[],calls=[];
+    const h=enableHistory(harness({ctHistoryCharacters:true})),{app,window,original}=h,requests=[],calls=[];
     original.fields[0].source='Thai ไทย@literal\\nactual\n<script>alert(1)</script>';
     original.fields.push({id:'gender',name:'Gender',kind:'gender',source:'',target:'M',required:false},
         {id:'form-ms',name:'Name',kind:'form',form:'MS',source:'Male {0}',target:'Old MS',required:false});
@@ -2617,8 +2618,8 @@ test('history normalizes local and shared before/after values with verified raw 
     assert.ok(calls.some(call=>call.after==='Literal \\n and real\n@<img>'));
     app.ctHistoryWhitespace=true;
     assert.equal(app.ctHistoryDisplay('x@\\n y\nz'),'x@\\n·y↵\nz');
-    const template=window.EditorComponents.History.template,ctHistory=template.slice(template.indexOf('class="ctHistoryPanel historyPanel"'),template.indexOf("sideTab === 'history' && editorReady && !historyClientText"));
-    assert.ok(ctHistory.includes('{{ ctHistoryDisplay(part.value) }}'));assert.equal(ctHistory.includes('v-html'),false,'CT history uses Vue text interpolation to escape source, notes and target HTML');
+    const ctHistory=window.EditorComponents.FieldToolbar.template;
+    assert.ok(ctHistory.includes('{{ controller.display(part.value) }}'));assert.equal(ctHistory.includes('v-html'),false,'CT history uses Vue text interpolation to escape source, notes and target HTML');
     app.ctHistoryCompareA=shared.key+':before';app.ctHistoryCompareB=local.key+':after';
     assert.equal(app.ctHistoryComparison.rows[0].beforeTarget,'Shared before');
     assert.equal(app.ctHistoryComparison.rows[0].afterTarget,local.after.values[fieldId]);
@@ -3544,11 +3545,155 @@ test('uncertain legacy finalization uses live accepted upload state before any c
 });
 
 
-test('ClientText history comparison teleports outside the sticky editor sidebar stacking context',()=>{
+test('ClientText field comparisons replace the dedicated sidebar and modal while preserving SD history',()=>{
     const {window}=harness(),template=window.EditorComponents.History.template;
     assert.equal(window.ClientTextUI.toolsComponent,window.EditorComponents.Tools);
-    assert.match(template,/<Teleport to="body"><div v-if="ctHistoryViewer"/);assert.match(template,/<\/div><\/Teleport>\s*<\/section>/);
-    assert.match(fs.readFileSync(path.join(__dirname,'../public/client-text.css'),'utf8'),/\.ctHistoryBackdrop[^}]*z-index:16000/);
+    assert.equal(template.includes('ctHistoryViewer'),false);assert.match(template,/!historyClientText/);
+    assert.match(window.EditorComponents.Tools.template,/editorVisible && !historyClientText/);
+    assert.match(window.EditorComponents.FieldToolbar.template,/→ Latest/);assert.match(window.EditorComponents.FieldToolbar.template,/controller\.formattingDisabled/);
+});
+
+test('field comparisons auto-open meaningful Outdated source changes and retain manual closure through refresh and editor transitions',async()=>{
+    const {app,original}=enableHistory(harness()),previous=clone(original);
+    original.fields[0].source='Latest English';previous.fields[0].source='Earlier English';
+    app.ctSaved={[original.id]:{saved:false,outdated:[fieldId],values:S.valuesFor(original)}};
+    app.ctComparisonVersions=[{key:'v0',version:{name:'Version zero'},scope:{groupId:'old'},snapshot:{unit:previous,values:S.valuesFor(previous),available:true}}];
+    app.ctAutoOpenComparisons();assert.equal(app.ctComparisonState(original.fields[0],'source').open,true);
+    await app.ctToggleFieldComparison(original.fields[0],'source');app.ctMergeHistory();app.ctAutoOpenComparisons();
+    assert.equal(app.ctComparisonState(original.fields[0],'source').open,false);
+    app.$nextTick=async()=>{};app.ctRefreshLayout=()=>{};app.ctFocusTarget=()=>{};
+    await app.ctSelect(original,true);assert.equal(app.ctComparisonState(original.fields[0],'source').open,false);
+    app.ctResetHistory();assert.deepEqual(clone(app.ctFieldComparisons),{});
+    for(const [before,after,outdated] of [['Dialogue','[NOAUDIO] Dialogue',true],['[OLD AUDIO] Dialogue','[AUDIOTEST] Dialogue',true],['Old','New',false]]){
+        previous.fields[0].source=before;original.fields[0].source=after;app.ctSaved={[original.id]:{saved:false,outdated:outdated?[fieldId]:[],values:S.valuesFor(original)}};
+        app.ctComparisonVersions=[{key:'v0',snapshot:{unit:previous,available:true}}];app.ctAutoOpenComparisons();
+        assert.equal(app.ctComparisonState(original.fields[0],'source').open,false,'missing and marker-only sources stay closed');
+    }
+});
+
+test('translation diff follows live draft text, labels collaborator revisions, preserves all field identities and retains removed-field recovery',()=>{
+    const {app,window,original}=enableHistory(harness()),previous=clone(original),calls=[];
+    previous.fields.push({id:'removed',name:'Old field',kind:'text',source:'Removed English',target:'Removed target'});
+    app.ctWorkspace.metadata={version:{name:'Latest release'}};app.ctValues[fieldId]='Live unsaved text';
+    app.ctComparisonVersions=[{key:'old',version:{name:'Previous release'},scope:{groupId:'old-group'},snapshot:{unit:previous,values:S.valuesFor(previous),available:true}}];
+    const entry=app.ctComparisonHistoryEntry({id:5,createdAt:100,actor:{name:'Alice'},after:{revision:3,values:{[fieldId]:'Alice correction'}}},app.ctComparisonVersions[0],'shared',0);
+    app.ctHistory=[entry];window.Diff={diffWordsWithSpace(a,b){calls.push([a,b]);return[{value:a,removed:true},{value:b,added:true}];}};
+    const choices=app.ctComparisonChoices(original.fields[0],'translation');assert.ok(choices.some(choice=>choice.group==='Previous release' && choice.label.includes('Alice · r3')));
+    app.ctSetComparisonState(original.fields[0],'translation',{reference:entry.key+':after',open:true});app.ctComparisonParts(original.fields[0],'translation');
+    assert.deepEqual(calls.at(-1),['Alice correction','Live unsaved text']);app.ctValues[fieldId]='Typed again';app.ctComparisonParts(original.fields[0],'translation');
+    assert.equal(calls.at(-1)[1],'Typed again');assert.ok(app.ctComparisonDetailRows('old').some(row=>row.id==='removed' && row.removed));
+    assert.equal(app.ctFieldToolbar(original.fields[0],'source').formattingDisabled,true);assert.equal(app.ctFieldToolbar(original.fields[0],'translation').formattingDisabled,false);
+});
+
+test('shared form English separates only when verified old source differs, preserving exact grammatical identities',()=>{
+    const {app}=enableHistory(harness()),fields=['MS','FS'].map(form=>({id:form,name:'Text',form,kind:'form',source:'Shared latest'})),previous={fields:fields.map(field=>({...field,source:field.id==='MS'?'Old masculine':'Old feminine'}))};
+    app.ctComparisonVersions=[{key:'old',snapshot:{unit:previous,available:true}}];
+    assert.equal(app.ctSourceGroups({name:'Text',fields}).length,2);
+    previous.fields[1].source='Old masculine';assert.equal(app.ctSourceGroups({name:'Text',fields}).length,1);
+    assert.deepEqual(Array.from(app.ctSourceGroups({name:'Text',fields})[0].fieldIds),['MS','FS']);
+});
+
+test('older source discovery walks authorized release ancestry past versions without ClientText and leaves workspace and drafts active',async()=>{
+    const {app,original}=enableHistory(harness()),previous=clone(original),routes=[];
+    app.ctWorkspace={scope:clone(scope),metadata:{version:{id:scope.versionId,parentVersionId:'gap',name:'Current'},group:{logicalKey:'clienttext:Thai'}}};
+    previous.fields[0].source='Earlier English';app.ctValues[fieldId]='Private draft';app.managedOnlineAvailable=true;
+    app._ctStore={async listWorkspaces(){return[];},async getMetadata(captured){return{state:'ready'};},async getUnit(){return previous;},async listHistory(){return[];}};
+    app._cloud={async request(route){routes.push(route);if(route.includes('/units/'))return{history:[]};const id=route.includes('/gap/')?'gap':'old-version';return{version:{id,game:scope.game,branchId:scope.branchId,parentVersionId:id==='gap'?'old-version':null,name:id},contentGroups:id==='gap'?[]:[{id:'old-group',versionId:id,contentMode:'clienttext',language:scope.language,logicalKey:'clienttext:Thai'}]};}};
+    assert.equal(await app.ctLoadOlderComparisonVersion(),true);assert.ok(routes[0].includes('/versions/gap/content-groups'));assert.ok(routes[1].includes('/versions/old-version/content-groups'));
+    assert.ok(routes.every(route=>!route.includes('content-predecessor')));assert.equal(app.ctComparisonVersions[0].snapshot.unit.fields[0].source,'Earlier English');
+    assert.equal(app.ctWorkspace.scope.groupId,scope.groupId);assert.equal(app.ctValues[fieldId],'Private draft');assert.equal(app.ctComparisonMore,false);
+    const controller=app._ctComparisonAbort;app.ctResetHistory();assert.equal(controller.signal.aborted,true);
+    assert.equal(await app.ctLoadOlderComparisonVersion(),true,'new selections receive a fresh, usable cancellation controller');
+});
+
+test('late original discovery cannot publish comparisons into another selection or account',async()=>{
+    for(const changed of ['unit','account']){
+        const {app}=enableHistory(harness()),held=deferred(),started=deferred();app.ctWorkspace.metadata={version:{parentVersionId:'old'}};
+        app._ctStore={async listWorkspaces(){started.resolve();return held.promise;}};
+        const loading=app.ctLoadOlderComparisonVersion();await started.promise;
+        if(changed==='unit')app.ctSelection='different';else app.ctWorkspace={scope:{...scope,accountId:'other'}};
+        held.resolve([]);assert.equal(await loading,false);assert.equal(app.ctComparisonVersions.length,0);
+    }
+});
+
+test('source comparison follows the nearest release ancestor instead of older translation provenance',async()=>{
+    const {app,original}=enableHistory(harness()),previous=clone(original),routes=[];
+    app.ctWorkspace.metadata={version:{id:scope.versionId,parentVersionId:'nearest'},group:{logicalKey:'clienttext:Thai'}};
+    app.ctSaved={[original.id]:{provenance:{groupId:'older-group'}}};app.managedOnlineAvailable=true;
+    app._ctStore={async listWorkspaces(){return[{...scope,versionId:'older',groupId:'older-group',state:'ready',version:{id:'older',game:scope.game,branchId:scope.branchId}}];},
+        async getMetadata(){return{state:'ready'};},async getUnit(){return previous;},async listHistory(){return[];}};
+    app._cloud={async request(route){routes.push(route);if(route.includes('/units/'))return{history:[]};return{version:{id:'nearest',game:scope.game,branchId:scope.branchId,parentVersionId:'older'},
+        contentGroups:[{id:'nearest-group',versionId:'nearest',contentMode:'clienttext',language:scope.language,logicalKey:'clienttext:Thai'}]};}};
+    assert.equal(await app.ctLoadOlderComparisonVersion(),true);assert.equal(app.ctComparisonVersions[0].scope.groupId,'nearest-group');
+    assert.ok(routes[0].includes('/versions/nearest/content-groups'));assert.equal(app.ctComparisonMore,true);
+});
+
+test('missing revision payloads stay unavailable while originals and local/offline revision labels remain explicit',()=>{
+    const {app,original}=enableHistory(harness()),version={scope:{groupId:'old'},version:{name:'Earlier'},snapshot:{unit:original,values:S.valuesFor(original),available:true}},
+        entry=app.ctComparisonHistoryEntry({id:'missing',actor:{name:'Alice'},before:null},version,'shared',0);
+    assert.equal(entry.before.available,true);assert.equal(entry.after.available,false);assert.deepEqual(clone(entry.after.values),{});
+    app.ctComparisonVersions=[version];app.ctHistory=[entry];
+    assert.equal(app.ctComparisonSnapshot(entry.key+':after'),null);
+    assert.equal(app.ctComparisonChoices(original.fields[0],'translation').some(choice=>choice.key===entry.key+':after'),false);
+    entry.origin='local';entry.action='save';entry.after={...entry.before,revision:2};
+    assert.ok(app.ctComparisonChoices(original.fields[0],'translation').some(choice=>choice.label.includes('Local save · Alice · r2')));
+    app.ctWorkspace.scope.groupId='local:test:example';entry.action='version_import';
+    assert.ok(app.ctComparisonChoices(original.fields[0],'translation').some(choice=>choice.label.includes('Offline sample · Alice · r2')));
+});
+
+test('format buttons and Ctrl+B/I/U preserve raw selection/newlines, toggle wrappers and reject stale or metadata selections',()=>{
+    for(const style of ['b','i','u']){
+        const {app,original}=harness({$nextTick:callback=>callback?.()}),field=original.fields[0],raw='First\r\nSelected {0}\n@tail';
+        app.ctValues[fieldId]=raw;app.ctEdited=()=>{app.ctDraftDirty=true;};app.ctCloseCompletion=()=>{};
+        const input={value:raw.replace(/\r\n/g,'\n'),selectionStart:6,selectionEnd:18,isConnected:true,dataset:{ctTarget:fieldId},
+            focus(){},setSelectionRange(a,b){this.selectionStart=a;this.selectionEnd=b;},setRangeText(text,a,b){this.value=this.value.slice(0,a)+text+this.value.slice(b);}};
+        app.ctDictionaryTarget=()=>input;app.ctCaptureToolbarSelection(field);assert.equal(app.ctFormatSelection(field,style),true);
+        assert.equal(app.ctValues[fieldId],'First\r\n<'+style+'>{Selected {0}}\n@tail');assert.equal(app.ctDraftDirty,true);
+        app.ctCaptureToolbarSelection(field);assert.equal(app.ctFormatSelection(field,style),true);assert.equal(app.ctValues[fieldId],raw);
+        input.setSelectionRange(0,0);app.ctCaptureToolbarSelection(field);assert.equal(app.ctFormatSelection(field,style),true);assert.ok(app.ctValues[fieldId].startsWith('<'+style+'>{}'));
+        assert.equal(input.selectionStart,4);assert.equal(input.selectionEnd,4);
+        app.ctCaptureToolbarSelection(field);app.ctWorkspace={scope:{...scope,language:'German'}};assert.equal(app.ctFormatSelection(field,style),false);
+    }
+    const {app,original}=harness(),event={ctrlKey:true,key:'b',target:{dataset:{ctTarget:fieldId}},preventDefault(){this.prevented=true;},stopPropagation(){}};
+    let applied;app.ctCaptureToolbarSelection=()=>{};app.ctFormatSelection=(_field,style)=>{applied=style;};app.ctKeyboardOverlayOpen=()=>false;
+    assert.equal(app.ctFormattingKeydown(event),true);assert.equal(applied,'b');assert.equal(event.prevented,true);
+    event.isComposing=true;assert.equal(app.ctFormattingKeydown(event),false);
+    const metadata=harness();assert.equal(metadata.app.ctFormatSelection({...metadata.original.fields[0],kind:'gender'},'b'),false);
+    assert.equal(metadata.app.ctFieldToolbar(metadata.original.fields[0],'source').format('b'),false);
+});
+
+test('formatting handles nested tags and only unwraps an exactly enclosing tag',()=>{
+    const {app,original}=harness({$nextTick:callback=>callback?.()}),field=original.fields[0];app.ctEdited=()=>{};
+    let input;app.ctDictionaryTarget=()=>input;
+    const format=(value,start,end)=>{
+        app.ctValues[fieldId]=value;input={value,selectionStart:start,selectionEnd:end,isConnected:true,focus(){},
+            setSelectionRange(a,b){this.selectionStart=a;this.selectionEnd=b;},setRangeText(text,a,b){this.value=this.value.slice(0,a)+text+this.value.slice(b);}};
+        app.ctCaptureToolbarSelection(field);assert.equal(app.ctFormatSelection(field,'b'),true);return app.ctValues[fieldId];
+    };
+    const nested='<b>{<i>{nested}}';assert.equal(format(nested,0,nested.length),'<i>{nested}');
+    assert.equal(format('<b>{one} two}',4,12),'<b>{<b>{one} two}}','a selection spanning beyond the enclosing tag is wrapped');
+});
+
+test('failed earlier-original reads retry the same version and rejected foreign groups never expose source text',async()=>{
+    const {app,original}=enableHistory(harness()),oldScope={...scope,versionId:'old',groupId:'old-group'},previous=clone(original);let reads=0;
+    app.ctWorkspace.metadata={version:{parentVersionId:'old'}};
+    app._ctStore={async listWorkspaces(){return[{...oldScope,state:'ready',version:{id:'old',game:scope.game,branchId:scope.branchId}}];},
+        async getMetadata(){return{state:'ready'};},async getUnit(){if(++reads===1)throw Error('Previous original read failed');return previous;},async listHistory(){return[];}};
+    assert.equal(await app.ctLoadOlderComparisonVersion(),false);assert.match(app.ctComparisonError,/read failed/);assert.equal(app.ctComparisonVersions.length,0);
+    assert.equal(await app.ctLoadOlderComparisonVersion(),true);assert.equal(app.ctComparisonVersions.length,1);assert.equal(app.ctComparisonError,'');
+    app.ctResetHistory();app.managedOnlineAvailable=true;app._ctStore={async listWorkspaces(){return[];},async getMetadata(){return{};}};
+    app._cloud={async request(){return{version:{id:'old',game:'poe1',branchId:scope.branchId},contentGroups:[]};}};
+    assert.equal(await app.ctLoadOlderComparisonVersion(),false);assert.match(app.ctComparisonError,/game and branch/);assert.equal(app.ctComparisonVersions.length,0);
+});
+
+test('earlier history failures retain verified originals and provide a scoped retry without losing existing entries',async()=>{
+    const {app,original}=enableHistory(harness()),oldScope={...scope,versionId:'old',groupId:'old-group'},previous=clone(original);let fail=true;
+    app.ctWorkspace.metadata={version:{parentVersionId:'old'}};
+    app._ctStore={async listWorkspaces(){return[{...oldScope,state:'ready',version:{id:'old',game:scope.game,branchId:scope.branchId}}];},
+        async getMetadata(){return{state:'ready'};},async getUnit(){return previous;},async listHistory(){if(fail)throw Error('History unavailable');return[{id:'old-save',after:{values:S.valuesFor(previous)},createdAt:5}];}};
+    assert.equal(await app.ctLoadOlderComparisonVersion(),true);assert.equal(app.ctComparisonVersions.length,1);assert.equal(app.ctHistory.length,1);
+    assert.match(app.ctComparisonError,/History unavailable/);assert.equal(app.ctFieldToolbar(original.fields[0],'translation').moreHistory,true);
+    fail=false;assert.equal(await app.ctLoadComparisonHistory(),true);assert.equal(app.ctHistory.length,2);assert.equal(app.ctComparisonError,'');
 });
 
 test('offline sheet testing is available to every role including guests and does not request publication policy',async()=>{

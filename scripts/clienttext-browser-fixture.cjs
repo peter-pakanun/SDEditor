@@ -171,7 +171,10 @@ async function run() {
         if (req.get('X-Fixture-Key') !== secret || !['admin', ...(managerAccessOnly ? ['manager', 'translator'] : [])].includes(account)) return res.sendStatus(403);
         res.json(store.createSession('fixture-' + account));
     });
-    frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
+    const vueScriptPath=process.env.FIXTURE_VUE_PATH || join(__dirname,'../temp/clienttext-fixture-vue.min.js');
+    frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')
+        .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js',existsSync(vueScriptPath)?'/fixture/vue.global.prod.js':'https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js')));
+    frontend.get('/fixture/vue.global.prod.js',(req,res)=>res.type('js').send(readFileSync(vueScriptPath)));
     frontend.get('/fixture/jszip.min.js', (req, res) => res.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
     frontend.get('/clientTextWorker.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/clientTextWorker.js'), 'utf8').replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
@@ -424,11 +427,12 @@ async function run() {
             assert.deepEqual(first.history.find(entry=>entry.after.jobId===first.saved.jobId).after.values,values);
             assert.ok(first.saved.serverRevision>0,'v3 API acknowledges both independent fields');
             await target('Possessive').press('Control+Enter');await page.waitForFunction(()=>window.__clientFixtureApp.ctEditor&&!window.__clientFixtureApp.ctBusy);
-            await workspace.locator('.ctTools').getByRole('button',{name:/History$/}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctHistoryLoading&&window.__clientFixtureApp.ctHistory.length);
-            await workspace.locator('.ctHistoryEvent').first().getByRole('button',{name:'Compare change',exact:true}).click();
-            const viewer=page.getByRole('dialog',{name:'Compare · BaseItemTypes · named',exact:true});await viewer.waitFor();
-            for(const form of ['Normal','Possessive'])assert.equal(await viewer.locator('.ctHistoryDiffField[data-form="'+form+' Translation"] .ctHistory-after .ctHistoryTarget').textContent(),values[fid(form)]);
-            await viewer.getByRole('button',{name:'Close history comparison',exact:true}).click();await workspace.getByRole('button',{name:'Close',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor);
+            await workspace.locator('.ctTarget').first().getByRole('button',{name:'Comparison options and revision history'}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctHistoryLoading&&window.__clientFixtureApp.ctHistory.length);
+            await workspace.locator('.ctHistoryEvent').first().getByRole('button',{name:'Details after',exact:true}).click();
+            const details=await page.evaluate(()=>{const vm=window.__clientFixtureApp;return vm.ctComparisonSnapshot(vm.ctComparisonDetailsKey).values;});
+            for(const form of ['Normal','Possessive'])assert.equal(details[fid(form)],values[fid(form)]);
+            assert.ok((await workspace.locator('.fieldHistoryDetails').textContent()).includes(values[fid('Possessive')]));
+            await workspace.getByRole('button',{name:'Close',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctEditor);
             await workspace.getByRole('button',{name:'Versions',exact:true}).click();await bootstrap();
             await page.evaluate(async({version,group})=>window.__clientFixtureApp.ctOpenGroup(version,group,'Turkish'),accepted);await workspace.waitFor();await page.waitForFunction(()=>!window.__clientFixtureApp.ctBusy&&!window.__clientFixtureApp.workspaceInitializationActive);
             await page.evaluate(()=>{const vm=window.__clientFixtureApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','BaseItemTypes']);});await choose('named');
@@ -649,16 +653,13 @@ async function run() {
             await saved('variant-fixture','StrFourb','Final draft to restore');
             await picker().selectOption(fieldId('StrFourb')); await active('StrFourb'); await target('StrFourb').press('Control+Enter');
             await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
-            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+            await workspace.locator('.ctTarget').first().getByRole('button', { name: 'Comparison options and revision history' }).click();
             await page.waitForFunction(field => !window.__clientFixtureApp.ctHistoryLoading && window.__clientFixtureApp.ctHistory.some(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
             const eventIndex = await page.evaluate(field => window.__clientFixtureApp.ctHistory.findIndex(entry => entry.after.values[field] === 'Final draft to restore'), fieldId('StrFourb'));
-            const event = workspace.locator('.ctHistoryEvent').nth(eventIndex); await event.getByRole('button', { name: 'Compare change', exact: true }).click();
-            const viewer = page.getByRole('dialog', { name: 'Compare · NPCTextAudio_Gender · variant-fixture', exact: true }); await viewer.waitFor();
-            const diff = viewer.locator('.ctHistoryDiffField[data-form="StrFourb"]');
-            assert.equal(await diff.locator('.ctHistory-before .ctHistoryTarget').textContent(), secondText);
-            assert.equal(await diff.locator('.ctHistory-after .ctHistoryTarget').textContent(), 'Final draft to restore');
-            assert.equal(await diff.locator('.ctHistory-before .ctHistorySource').textContent(), '[keyword|Display] {0}\nSecond source line');
-            await viewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
+            const event = workspace.locator('.ctHistoryEvent').nth(eventIndex); await event.getByRole('button', { name: 'Details before', exact: true }).click();
+            const snapshot=await page.evaluate(()=>{const vm=window.__clientFixtureApp;return vm.ctComparisonSnapshot(vm.ctComparisonDetailsKey);});
+            assert.equal(snapshot.values[fieldId('StrFourb')],secondText);
+            assert.equal(snapshot.unit.fields.find(field=>field.id===fieldId('StrFourb')).source,'[keyword|Display] {0}\nSecond source line');
             await event.getByRole('button', { name: 'Restore before', exact: true }).click();
             await page.locator('.appDialog[open]').getByRole('button', { name: 'Restore revision', exact: true }).click();
             await page.waitForFunction(({ field, value }) => { const vm=window.__clientFixtureApp;return vm.ctValues[field]===value && vm.ctSaved[vm.ctSelection]?.values[field]===value && !vm.ctDraftDirty && !vm.ctBusy;}, { field: fieldId('StrFourb'), value: secondText });
@@ -1435,7 +1436,8 @@ async function run() {
         }
         const checkClientHistory = async ({ historyOrigin, currentText, previousText, emptyOlder = false, themes = false }) => {
             const fieldId = JSON.stringify(['Name', null]);
-            await workspace.locator('.ctTools').getByRole('button', { name: /History/i }).click();
+            const target = workspace.locator('.ctFullEditor .ctTarget').first();
+            await target.getByRole('button', { name: 'Comparison options and revision history' }).click();
             let historyPattern, emptyPageSeen = false;
             if (emptyOlder) {
                 const historyScope = await page.evaluate(() => ({ groupId: window.__clientFixtureApp.ctWorkspace.scope.groupId, unitId: window.__clientFixtureApp.ctSelection }));
@@ -1452,7 +1454,7 @@ async function run() {
                 const vm = window.__clientFixtureApp;
                 return !vm.ctHistoryLoading && vm.ctHistory.some(entry => entry.origin === historyOrigin && entry.after.values[fieldId] === currentText && entry.before.values[fieldId] === previousText);
             }, { historyOrigin, fieldId, currentText, previousText });
-            const panel = workspace.locator('.ctHistoryPanel');
+            const panel = target.locator('.fieldHistoryMenu');
             if (emptyOlder) {
                 const beforeKeys = await page.evaluate(() => window.__clientFixtureApp.ctHistory.map(entry => entry.key));
                 await panel.getByRole('button', { name: 'Load older history', exact: true }).click();
@@ -1470,35 +1472,26 @@ async function run() {
             assert.ok(entries.changedIndex >= 0 && entries.previousKey, 'Both saved revisions are available for comparison');
             const event = panel.locator('.ctHistoryEvent').nth(entries.changedIndex);
             if (historyOrigin === 'shared') assert.match(await event.textContent(), /ClientText Fixture Admin/);
-            await event.getByRole('button', { name: 'Compare change', exact: true }).click();
-            const viewer = page.getByRole('dialog', { name: 'Compare · Normal · record', exact: true }); await viewer.waitFor();
-            const historyHeader=await viewer.evaluate(dialog=>{const close=dialog.querySelector('#ctHistoryClose'),box=close.getBoundingClientRect();return{atBody:dialog.closest('.ctHistoryBackdrop').parentElement===document.body,unobscured:close.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2))};});
-            assert.deepEqual(historyHeader,{atBody:true,unobscured:true},'History comparison escapes editor-sidebar stacking and its close control stays on top of preview/actions');
-            const nameField = viewer.locator('.ctHistoryDiffField').filter({ has: page.getByRole('heading', { name: 'Name', exact: true }) });
-            assert.equal(await nameField.locator('.ctHistory-before .ctHistoryTarget').textContent(), previousText);
-            assert.equal(await nameField.locator('.ctHistory-after .ctHistoryTarget').textContent(), currentText);
-            assert.ok(await nameField.locator('.diffInlineAdd').count() > 0, 'Inserted translation text is highlighted');
-            assert.equal(await nameField.locator('.ctHistory-before .ctHistorySource').textContent(), 'Sword');
-            assert.match(await viewer.locator('.ctHistoryNotes').textContent(), /Developer instruction/);
-            assert.equal(await viewer.locator('textarea,input:not([type=checkbox])').count(), 0, 'The comparison is read only');
-            const beforeSelect = viewer.locator('.ctHistoryCompareControls select').nth(0), afterSelect = viewer.locator('.ctHistoryCompareControls select').nth(1);
-            const changedKey = await page.evaluate(index => window.__clientFixtureApp.ctHistory[index].key, entries.changedIndex);
-            await beforeSelect.selectOption(changedKey + ':after'); await afterSelect.selectOption(entries.previousKey + ':after');
-            assert.equal(await nameField.locator('.ctHistory-before .ctHistoryTarget').textContent(), currentText);
-            assert.equal(await nameField.locator('.ctHistory-after .ctHistoryTarget').textContent(), previousText);
-            await beforeSelect.selectOption('original'); await afterSelect.selectOption('current');
-            assert.equal(await nameField.locator('.ctHistory-before .ctHistoryTarget').textContent(), '');
-            assert.equal(await nameField.locator('.ctHistory-after .ctHistoryTarget').textContent(), currentText);
-            const genderField = viewer.locator('.ctHistoryDiffField[data-field-kind=gender]');
-            assert.equal(await genderField.locator('.ctHistory-before .ctHistoryTarget').textContent(), 'M');
-            if (historyOrigin === 'local') assert.equal(await genderField.locator('.ctHistory-after .ctHistoryTarget').textContent(), 'F');
+            await target.getByRole('button', { name: 'Compare translation', exact: true }).click();
+            const selector = target.getByRole('combobox', { name: 'Translation revision to compare' });
+            await selector.selectOption(entries.previousKey + ':after');
+            const rendered = () => target.locator('.ctTranslationDiff').evaluate(diff => ({
+                before: [...diff.querySelectorAll('span')].filter(span => !span.classList.contains('diffInlineAdd')).map(span => span.textContent).join(''),
+                latest: [...diff.querySelectorAll('span')].filter(span => !span.classList.contains('diffInlineDel')).map(span => span.textContent).join('') }));
+            assert.deepEqual(await rendered(),{before:previousText,latest:currentText});
+            if(historyOrigin==='shared')assert.match(await selector.locator('option:checked').textContent(),/ClientText Fixture Admin/);
+            await selector.selectOption('original');assert.deepEqual(await rendered(),{before:'',latest:currentText});
+            assert.equal(await target.locator('textarea').isEditable(),true,'The current translation stays editable during comparison');
+            assert.equal(await page.getByRole('dialog',{name:/^Compare ·/}).count(),0,'Field comparison has no modal');
+            await event.getByRole('button',{name:'Details before',exact:true}).click();
+            assert.match(await panel.locator('.fieldHistoryDetails').textContent(),/Sword/);
+            assert.match(await panel.locator('.fieldHistoryDetails').textContent(),/Developer instruction/);
             if (themes) for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
                 await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
-                const bounds = await viewer.boundingBox();
-                assert.ok(bounds && bounds.width > 900 && bounds.x >= 0 && bounds.x + bounds.width <= 1440 && bounds.y >= 0 && bounds.y + bounds.height <= 1000, theme + ': history comparison fits desktop');
+                const bounds = await target.boundingBox();
+                assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 1440, theme + ': inline comparison fits desktop');
                 await page.screenshot({ path: join(directory, 'clienttext-history-' + theme + '.png'), fullPage: true });
             }
-            await viewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
             assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), currentText, 'Read-only comparison leaves the editor unchanged');
             const beforeRestore = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { history: (await vm._ctStore.listHistory(vm.ctWorkspace.scope, vm.ctSelection)).length, outbox: (await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length }; });
             await event.getByRole('button', { name: 'Restore before', exact: true }).click();
@@ -1825,7 +1818,7 @@ async function run() {
                 });
                 assert.ok(sourceBounds && sourceBounds.right <= bounds.x, 'Readonly English is left of the editable translation in the shared full-editor block');
                 assert.ok(Math.abs(sourceBounds.y - bounds.y) <= 1, 'Full-editor English and translation inputs share their top edge');
-                assert.deepEqual((await workspace.locator('.ctTools .sideTabs .tabBtn').allTextContents()).map(text => text.replace(/[📚🕒]/gu, '').trim()), ['Dictionary', 'Lookup', 'TM', 'History', 'Comments']);
+                assert.deepEqual((await workspace.locator('.ctTools .sideTabs .tabBtn').allTextContents()).map(text => text.replace(/[📚🕒]/gu, '').trim()), ['Dictionary', 'Lookup', 'TM', 'Comments']);
                 assert.equal(await workspace.locator('.side.fixed.editorSidebarHost').count(), 1);
                 assert.match(await workspace.locator('.editorActions h1').textContent(), /Translation/);
                 await page.screenshot({ path: join(directory, `clienttext-shared-full-${size.width}-${theme}.png`), fullPage: true });
@@ -1996,6 +1989,42 @@ async function run() {
             await workspace.getByRole('button', { name: 'Save', exact: true }).click();
             await waitForAsync(page,async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne temporaire')); });
             await checkClientHistory({ historyOrigin: 'shared', currentText: 'En ligne temporaire', previousText: 'En ligne', emptyOlder: true });
+            if(process.argv.includes('--field-tools-only')){
+                const ancestry=[];
+                for(const [name,english] of [['Field tools source v2','New Sword'],['Field tools source v3','Latest Sword']]){
+                    await workspace.getByRole('button',{name:'Versions',exact:true}).click();
+                    const archive=await JSZip.loadAsync(normal),sheet=await archive.file('xl/worksheets/sheet1.xml').async('string');
+                    assert.match(sheet,/>Sword</);archive.file('xl/worksheets/sheet1.xml',sheet.replace('>Sword<','>'+english+'<'));
+                    const changed=await archive.generateAsync({type:'nodebuffer'});
+                    await page.getByRole('button',{name:'Upload next version',exact:true}).click();await upload.locator('input[type=text]').fill(name);
+                    await upload.locator('input[type=file]').first().setInputFiles(files.map(file=>({...file,buffer:file.name.includes('Gender')?gender:changed})));
+                    await upload.getByRole('button',{name:'Prepare and validate',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
+                    assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
+                    await upload.getByRole('button',{name:'Publish complete groups',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
+                    assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
+                    const group=await page.evaluate(()=>window.__clientFixtureApp.ctGroups.find(group=>group.contentMode==='clienttext'));
+                    await details.locator('tr[data-content-group="'+group.id+'"][data-language="French"]').getByRole('button',{name:'Open editor',exact:true}).click();
+                    await page.waitForFunction(()=>window.__clientFixtureApp.ctActive&&!window.__clientFixtureApp.ctBusy);
+                    await navigation.getByRole('button',{name:'Normal',exact:true}).click();await workspace.getByRole('button',{name:'record',exact:true}).click();
+                    await page.waitForFunction(()=>window.__clientFixtureApp.ctComparisonVersions.length&&!window.__clientFixtureApp.ctComparisonBusy);
+                    assert.equal(await workspace.getByRole('textbox',{name:'Name',exact:true}).inputValue(),'En ligne');
+                    assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctStatus().outdated),true);
+                    assert.equal(await workspace.locator('.ctSourceDiff').count(),1,'Outdated English opens in the field');
+                    ancestry.push(group.id);await workspace.getByRole('button',{name:'Close',exact:true}).click();
+                }
+                await workspace.getByRole('button',{name:'record',exact:true}).click();
+                const source=workspace.locator('.ctSourceBlock').filter({has:page.getByRole('button',{name:'Compare English source',exact:true})}).first();
+                await source.getByRole('button',{name:'Comparison options and revision history'}).click();
+                await source.getByRole('button',{name:'Load earlier version',exact:true}).click();
+                await page.waitForFunction(()=>window.__clientFixtureApp.ctComparisonVersions.length===2&&!window.__clientFixtureApp.ctComparisonBusy);
+                const oldest=await page.evaluate(()=>window.__clientFixtureApp.ctComparisonVersions[1].key);
+                await source.getByRole('combobox',{name:'English version to compare'}).selectOption(oldest);
+                assert.deepEqual(await source.locator('.ctSourceDiff').evaluate(diff=>({before:[...diff.querySelectorAll('span')].filter(span=>!span.classList.contains('diffInlineAdd')).map(span=>span.textContent).join(''),
+                    latest:[...diff.querySelectorAll('span')].filter(span=>!span.classList.contains('diffInlineDel')).map(span=>span.textContent).join('')})),{before:'Sword',latest:'Latest Sword'});
+                assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctWorkspace.scope.groupId),ancestry[1]);
+                assert.deepEqual(failures,[]);results.push('Live ClientText toolbar: preserved translations, automatic Outdated source diffs, multiple verified source ancestors and current workspace isolation');
+                console.log(JSON.stringify({status:'PASS',fieldToolsOnly:true,results},null,2));return;
+            }
             await workspace.getByRole('button',{name:'record',exact:true}).click();
             await workspace.locator('.ctTools').getByRole('button',{name:'Comments',exact:true}).click();
             await page.waitForFunction(()=>window.__clientFixtureApp.commentsEligible && window.__clientFixtureApp.commentsFileFeed.loaded && !window.__clientFixtureApp.commentsFileFeed.loading);
@@ -2151,12 +2180,16 @@ async function run() {
             await page.evaluate(async ({ statGroupId, clientGroupId }) => {
                 const vm = window.__clientFixtureApp, details = vm.managedVersionDetails;
                 window.__fixtureOriginalDetails = details;
+                window.__fixtureOriginalCatalog = vm.managedVersions;
                 const stat = vm.ctGroups.find(group => group.id === statGroupId), client = vm.ctGroups.find(group => group.id === clientGroupId);
                 const collection = { id: 'fixture-legacy-collection-1', sequence: 1, createdAt: new Date().toISOString(), downloadReady: true, kind: 'download_only' };
                 const team = { ...stat.teams.find(team => team.language === 'French'), ended: true,
                     counts: { loaded: 5, saved: 2, missing: 1, revised: 1 }, latestCollection: collection,
                     collections: [collection, { ...collection, id: 'fixture-legacy-collection-2', sequence: 2 }] };
                 window.__fixtureLegacyDetails = { ...details, teams: [team], contentGroups: [client, { ...stat, legacyVersionId: details.version.id, teams: [team] }] };
+                // Equal membership revisions merge catalog and detail groups.
+                // Simulate the same legacy response on both surfaces.
+                vm.managedVersions=vm.managedVersions.map(version=>version.id===details.version.id?{...version,contentGroups:window.__fixtureLegacyDetails.contentGroups}:version);
                 vm.managedVersionDetails = window.__fixtureLegacyDetails;
                 window.__fixtureLegacyCalls = []; window.__fixtureLegacyMethods = {};
                 for (const name of ['managedOpenTeam', 'managedCollect', 'managedDownloadCollection', 'managedDownloadPrevious', 'managedReopen']) {
@@ -2201,13 +2234,16 @@ async function run() {
             assert.equal(legacyCalls.at(-1).snapshot, 'fixture-legacy-collection-2');
             await page.evaluate(async () => {
                 const vm = window.__clientFixtureApp;
-                vm.managedVersionDetails = { ...window.__fixtureLegacyDetails, contentGroups: [] };
+                const {contentGroups,...legacy}=window.__fixtureLegacyDetails;
+                vm.managedVersionDetails = legacy;
+                vm.managedVersions=vm.managedVersions.map(version=>{if(version.id!==legacy.version.id)return version;const {contentGroups,...old}=version;return old;});
                 await vm.$nextTick();
             });
             assert.equal(await legacyTeam.count(), 1, 'An old API with no content groups still supplies the StatDescription assignment');
             assert.equal(await details.locator('.contentGroupTeamTable tbody tr').count(), 1);
             await page.evaluate(async () => {
                 const vm = window.__clientFixtureApp;
+                vm.managedVersions=vm.managedVersions.map(version=>version.id===window.__fixtureLegacyDetails.version.id?{...version,contentGroups:window.__fixtureLegacyDetails.contentGroups}:version);
                 vm.managedVersionDetails = { ...window.__fixtureLegacyDetails, teams: [] }; await vm.$nextTick();
             });
             assert.equal(await legacyTeam.count(), 1, 'A group-only legacy response still supplies the StatDescription assignment');
@@ -2218,7 +2254,8 @@ async function run() {
                 const vm = window.__clientFixtureApp;
                 for (const [name, method] of Object.entries(window.__fixtureLegacyMethods)) vm[name] = method;
                 vm.managedVersionDetails = window.__fixtureOriginalDetails;
-                for (const name of ['__fixtureOriginalDetails', '__fixtureLegacyDetails', '__fixtureLegacyCalls', '__fixtureLegacyMethods']) delete window[name];
+                vm.managedVersions = window.__fixtureOriginalCatalog;
+                for (const name of ['__fixtureOriginalDetails', '__fixtureOriginalCatalog', '__fixtureLegacyDetails', '__fixtureLegacyCalls', '__fixtureLegacyMethods']) delete window[name];
                 await vm.$nextTick();
             });
             await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
@@ -2506,17 +2543,18 @@ async function run() {
             assert.equal(await workspace.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'En ligne avant omission', 'Returning French content carries the latest matching accepted work');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctCurrentUnit.fields.find(field => field.name === 'Name').source), 'New Sword');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctStatus().outdated), true, 'Changed English retains carried target as Outdated');
-            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+            await workspace.locator('.ctTarget').first().getByRole('button', { name: 'Comparison options and revision history' }).click();
             const beforePreviousCompare = await page.evaluate(() => { const vm = window.__clientFixtureApp; return { groupId: vm.ctWorkspace.scope.groupId, unitId: vm.ctSelection, target: vm.ctValues[JSON.stringify(['Name', null])], draft: vm.ctDraftDirty, saved: JSON.stringify(vm.ctSaved[vm.ctSelection]) }; });
-            await workspace.getByRole('button', { name: 'Compare previous version', exact: true }).click();
-            const previousViewer = page.getByRole('dialog', { name: 'Compare · Normal · record', exact: true }); await previousViewer.waitFor();
-            const previousName = previousViewer.locator('.ctHistoryDiffField').filter({ has: page.getByRole('heading', { name: 'Name', exact: true }) });
-            assert.equal(await previousName.locator('.ctHistory-before .ctHistorySource').textContent(), 'Sword', 'Previous English comes from the verified matching ancestor');
-            assert.equal(await previousName.locator('.ctHistory-after .ctHistorySource').textContent(), 'New Sword');
-            assert.equal(await previousName.locator('.ctHistory-before .ctHistoryTarget').textContent(), 'En ligne avant omission', 'Previous comparison uses the exact accepted revision');
-            assert.equal(await previousName.locator('.ctHistory-after .ctHistoryTarget').textContent(), 'En ligne avant omission');
-            assert.ok(await previousName.locator('.ctHistory-after .ctHistorySource .diffInlineAdd').count() > 0, 'Changed English is highlighted');
-            await previousViewer.getByRole('button', { name: 'Close history comparison', exact: true }).click();
+            await page.waitForFunction(()=>!window.__clientFixtureApp.ctComparisonBusy && window.__clientFixtureApp.ctComparisonVersions.length);
+            const sourceDiff=workspace.locator('.ctSourceDiff').first();await sourceDiff.waitFor();
+            const sourceSides=await sourceDiff.evaluate(diff=>({before:[...diff.querySelectorAll('span')].filter(span=>!span.classList.contains('diffInlineAdd')).map(span=>span.textContent).join(''),
+                latest:[...diff.querySelectorAll('span')].filter(span=>!span.classList.contains('diffInlineDel')).map(span=>span.textContent).join('')}));
+            assert.deepEqual(sourceSides,{before:'Sword',latest:'New Sword'});
+            assert.ok(await sourceDiff.locator('.diffInlineAdd').count()>0,'Changed English is highlighted');
+            const previousTarget=workspace.locator('.ctTarget').first();await previousTarget.getByRole('button',{name:'Compare translation'}).click();
+            const previousKey=await page.evaluate(()=>{const vm=window.__clientFixtureApp,entry=vm.ctHistory.find(entry=>entry.previousScope && entry.origin==='shared' && entry.after.values[JSON.stringify(['Name',null])]==='En ligne avant omission');return entry?.key+':after';});
+            await previousTarget.getByRole('combobox',{name:'Translation revision to compare'}).selectOption(previousKey);
+            assert.equal(await previousTarget.locator('.ctTranslationDiff').textContent(),'En ligne avant omission','The selector can use the accepted earlier translation');
             const afterPreviousCompare = await page.evaluate(() => { const vm = window.__clientFixtureApp; return { groupId: vm.ctWorkspace.scope.groupId, unitId: vm.ctSelection, target: vm.ctValues[JSON.stringify(['Name', null])], draft: vm.ctDraftDirty, saved: JSON.stringify(vm.ctSaved[vm.ctSelection]) }; });
             assert.deepEqual(afterPreviousCompare, beforePreviousCompare, 'Previous-version comparison does not activate or modify the previous/current workspace');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctHistoryError), '');

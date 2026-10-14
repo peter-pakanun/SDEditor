@@ -404,39 +404,7 @@
             </form>
           </template>
         </section>`);
-  const History = sharedSurface('EditorHistory', String.raw`<section v-if="sideTab === 'history' && editorReady && historyClientText" class="ctHistoryPanel historyPanel"><h3>History</h3>
-                <p>Local and shared saved changes for this group and language.</p>
-                <button @click="ctOpenHistoryViewer()">Compare original and current</button>
-                <button v-if="ctHistoryPreviousProvenance" class="ctHistoryPrevious" @click="ctLoadPreviousHistory()" :disabled="ctBusy || ctHistoryPreviousLoading">{{ ctHistoryPreviousLoading ? 'Preparing previous version…' : 'Compare previous version' }}</button>
-                <p v-if="ctHistoryError" class="ctHistoryError" role="alert">{{ ctHistoryError }}</p>
-                <article v-for="entry in ctHistory" :key="entry.key" class="ctHistoryEvent" :data-history-origin="entry.origin">
-                    <p>{{ ctHistoryLabel(entry) }}</p><small>{{ entry.action }}</small>
-                    <div class="ctHistoryActions"><button @click="ctPickHistory(entry)">Compare change</button><button @click="ctPickHistory(entry,'current')">Compare with current</button>
-                    <button @click="ctRestoreHistory(entry,'before')" :disabled="ctBusy || !entry.before.available">Restore before</button><button @click="ctRestoreHistory(entry,'after')" :disabled="ctBusy || !entry.after.available">Restore after</button></div>
-                </article>
-                <p v-if="ctHistoryLoading" role="status">Loading history…</p><p v-else-if="!ctHistory.length">No saved history for this ID.</p>
-                <button v-if="ctHistoryCursor || ctHistoryLocalMore" class="ctHistoryOlder" @click="ctLoadOlderHistory()" :disabled="ctHistoryLoading">Load older history</button>
-                <Teleport to="body"><div v-if="ctHistoryViewer" class="ctHistoryBackdrop" @keydown.esc.stop.prevent="ctCloseHistoryViewer()" @keydown.tab="ctTrapHistoryFocus($event)">
-                    <section class="ctHistoryViewer" role="dialog" aria-modal="true" aria-labelledby="ctHistoryTitle">
-                        <header><h3 id="ctHistoryTitle">Compare · {{ ctCurrentUnit.sheet }} · {{ ctCurrentUnit.recordId }}</h3><button id="ctHistoryClose" @click="ctCloseHistoryViewer()" aria-label="Close history comparison">Close</button></header>
-                        <div class="ctHistoryCompareControls"><label>Before<select v-model="ctHistoryCompareA"><option v-for="choice in ctHistoryChoices" :key="choice.key" :value="choice.key" :disabled="choice.unavailable">{{ choice.label }}</option></select></label>
-                        <label>After<select v-model="ctHistoryCompareB"><option v-for="choice in ctHistoryChoices" :key="choice.key" :value="choice.key" :disabled="choice.unavailable">{{ choice.label }}</option></select></label><label><input type="checkbox" v-model="ctHistoryWhitespace"> Show whitespace</label><label><input type="checkbox" v-model="ctHistoryCharacters"> Character differences</label></div>
-                        <p class="ctHistoryContext">English, field layout and Developer notes come from verified originals. This group's history uses its immutable original; Compare previous version explicitly loads the earlier original and accepted revision. Unavailable saved revisions are labelled. This comparison is read only; restoring requires confirmation and saves the selected translation.</p>
-                        <p v-if="ctHistoryError" class="ctHistoryError" role="alert">{{ ctHistoryError }}</p>
-                        <div v-if="ctHistoryComparison" class="ctHistoryComparison">
-                            <article v-for="row in ctHistoryComparison.rows" :key="row.id" class="ctHistoryDiffField" :data-field-id="row.id" :data-field-kind="row.kind" :data-form="row.form">
-                                <h4>{{ ctHistoryFieldLabel(row) }}</h4><p v-if="row.added || row.removed">{{ row.added ? 'Added field' : 'Removed field' }}</p>
-                                <div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side" :class="'ctHistory-'+side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5>
-                                    <label>English source</label><pre class="ctHistorySource"><span v-for="(part,index) in row.sourceParts.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ ctHistoryDisplay(part.value) }}</span></pre>
-                                    <label>{{ row.kind === 'gender' ? 'Gender metadata' : 'Translation · '+ctWorkspace.scope.language }}</label><pre class="ctHistoryTarget"><span v-for="(part,index) in row.targetParts.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ ctHistoryDisplay(part.value) }}</span></pre>
-                                </section></div>
-                            </article>
-                            <article v-if="ctHistoryComparison.hasNotes" class="ctHistoryNotes"><h4>Developer notes</h4><div class="ctHistoryColumns"><section v-for="side in ['before','after']" :key="side"><h5>{{ side === 'before' ? 'Before' : 'After' }}</h5><pre><span v-for="(part,index) in ctHistoryComparison.notes.filter(part=>side === 'before' ? !part.added : !part.removed)" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ ctHistoryDisplay(part.value) }}</span></pre></section></div></article>
-                        </div>
-                    </section>
-                </div></Teleport>
-            </section>
-        <div v-if="sideTab === 'history' && editorReady && !historyClientText" class="historyPanel">
+  const History = sharedSurface('EditorHistory', String.raw`<div v-if="sideTab === 'history' && editorReady && !historyClientText" class="historyPanel">
           <div v-if="!editorCurrentEditingDesc" class="historyEmpty">Open a file to see history</div>
           <div v-else>
             <div class="historyMeta">
@@ -476,7 +444,7 @@
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
             <button type="button" class="tabBtn lookupTab" :class="{ active: sideTab === 'lookup' }" @click="openEditorLookup" :aria-pressed="sideTab === 'lookup'" aria-controls="editorLookupPanel"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg> Lookup</button>
             <button type="button" class="tabBtn" :class="{ active: sideTab === 'tm' }" @click="sideTab = 'tm'" aria-controls="tmResultsPanel">TM<span v-if="tmConflicts.length"> ⚡ {{ tmConflicts.length }}</span></button>
-            <button v-if="editorVisible" class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
+            <button v-if="editorVisible && !historyClientText" class="tabBtn" :class="{ active: sideTab === 'history' }" @click="sideTab = 'history'">🕒 History</button>
             <button v-if="!editorVisible" type="button" class="tabBtn" :class="{ active: sideTab === 'preview' }" @click="sideTab = 'preview'">Preview</button>
             <button class="tabBtn commentsTab" :class="{ active: sideTab === 'comments' }" @click="sideTab = 'comments'" :aria-label="'Comments' + (commentsFileUnread ? ', ' + commentsFileUnread + ' unread' : '')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 4V4Z"></path><path d="M7 8h10M7 11h10M7 14h7"></path></svg> Comments<span v-if="commentsFileUnread" class="commentsUnreadBadge" aria-hidden="true">{{ commentsBadge(commentsFileUnread) }}</span></button>
           </div>
@@ -734,5 +702,31 @@
       </span>
     </span>`
   };
-  global.EditorComponents = { NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
+  const FieldToolbar = {
+    name: 'EditorFieldToolbar', props: { controller: { type: Object, required: true } },
+    methods:{closeMenu(){this.controller.closeMenu();this.$nextTick(()=>this.$refs.menuButton?.focus({preventScroll:true}));},toolbarKeydown(event){if(event.key==='Escape' && event.target.closest('.editorFieldToolbar,.editorFieldComparisonControls,.fieldHistoryMenu')){event.preventDefault();event.stopPropagation();this.closeMenu();}}},
+    template: `<div class="editorFieldTools" :data-comparison-side="controller.side" data-inline-focus-surface @click.stop @dblclick.stop @keydown="toolbarKeydown($event)">
+      <div class="editorFieldFrame" :class="controller.tone"><slot></slot>
+      <div class="editorFieldToolbar" role="group" :aria-label="controller.side === 'source' ? 'English field tools' : 'Translation field tools'">
+        <template v-if="controller.formatting"><button v-for="style in ['b','i','u']" :key="style" type="button" :class="['fieldStyleButton','fieldStyle-'+style]" @pointerdown.prevent="controller.capture()" @click="controller.format(style)" :disabled="controller.formattingDisabled" :aria-label="({b:'Bold',i:'Italic',u:'Underline'})[style]" :aria-keyshortcuts="'Control+'+style" :title="({b:'Bold',i:'Italic',u:'Underline'})[style]+' · Ctrl+'+style.toUpperCase()">{{ style.toUpperCase() }}</button></template>
+        <button ref="menuButton" type="button" class="fieldHistoryMenuButton" @click="controller.menu()" :disabled="controller.disabled" :aria-expanded="controller.menuOpen" aria-label="Comparison options and revision history" title="Comparison options and revision history">⋯</button>
+        <span class="fieldToolbarSeparator" role="separator" aria-orientation="vertical"></span>
+        <button type="button" class="fieldDiffButton" :class="{active:controller.open}" @click="controller.toggle()" :disabled="controller.disabled" :aria-expanded="controller.open" :aria-label="controller.side === 'source' ? 'Compare English source' : 'Compare translation'" :title="controller.side === 'source' ? 'Compare an earlier English source with this version' : 'Compare a revision with the current draft'"><svg aria-hidden="true" viewBox="0 0 24 24"><path class="fieldDiffRemoved" d="M3 6h8M3 11h8"/><path class="fieldDiffAdded" d="M14 15h7M17.5 11.5v7.5"/></svg></button>
+      </div></div>
+      <div v-if="controller.open" class="editorFieldComparisonControls"><select :value="controller.reference" @change="controller.select($event.target.value)" :disabled="controller.disabled" :title="controller.choices.find(choice=>choice.key===controller.reference)?.label" :aria-label="controller.side === 'source' ? 'English version to compare' : 'Translation revision to compare'"><option v-if="!controller.choices.length" value="">Earlier original unavailable</option><optgroup v-for="group in controller.groups" :key="group" :label="group"><option v-for="choice in controller.choices.filter(value=>value.group===group)" :key="choice.key" :value="choice.key">{{ choice.label }}</option></optgroup></select><span class="fieldDiffLatest">→ Latest</span></div>
+      <p v-if="controller.open && controller.error" class="ctHistoryError" role="alert">{{ controller.error }}</p>
+      <p v-if="controller.open && !controller.parts" class="fieldDiffUnavailable">{{ controller.busy ? 'Preparing earlier original…' : 'Earlier original unavailable. Open the menu to load previous versions.' }}</p>
+      <pre v-if="controller.open && controller.side === 'translation' && controller.parts" class="ctInlineDiff ctTranslationDiff" aria-label="Translation differences"><span v-for="(part,index) in controller.parts" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre>
+      <section v-if="controller.menuOpen" class="fieldHistoryMenu" aria-label="Revision history and comparison options">
+        <div class="fieldHistoryOptions"><label><input type="checkbox" :checked="controller.whitespace" @change="controller.options('whitespace',$event.target.checked)"> Show whitespace</label><label><input type="checkbox" :checked="controller.characters" @change="controller.options('characters',$event.target.checked)"> Character differences</label><button type="button" @click="closeMenu()" aria-label="Close revision menu">Close</button></div>
+        <p v-if="controller.error" class="ctHistoryError" role="alert">{{ controller.error }}</p>
+        <button v-if="controller.moreVersions" type="button" @click="controller.olderVersions()" :disabled="controller.busy">{{ controller.busy ? 'Preparing earlier original…' : 'Load earlier version' }}</button>
+        <button v-if="controller.moreHistory" type="button" @click="controller.olderHistory()" :disabled="controller.busy">Load older history</button>
+        <p>Restoring creates a saved revision of the whole record.</p>
+        <div class="fieldHistoryEntries"><article v-for="entry in controller.entries" :key="entry.key" class="ctHistoryEvent"><p>{{ controller.label(entry) }}</p><small>{{ entry.action }}</small><div class="ctHistoryActions"><template v-for="part in ['before','after']" :key="part"><span v-if="!entry[part].available" class="fieldDiffUnavailable">{{ part }} revision unavailable</span><button type="button" @click="controller.details(entry,part)" :disabled="!entry[part].available">Details {{ part }}</button><button type="button" @click="controller.restore(entry,part)" :disabled="controller.disabled || !entry[part].available">Restore {{ part }}</button></template></div></article><p v-if="!controller.entries.length">No saved history for this record.</p></div>
+        <div class="fieldHistoryDetails"><article v-for="row in controller.detailRows" :key="row.id"><strong>{{ row.name }}{{ row.removed ? ' · Removed field' : '' }}</strong><label>English changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.source" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre><label>Translation changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.target" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></article><template v-if="controller.detailNotes"><strong>Developer notes</strong><pre class="ctInlineDiff"><span v-for="(part,index) in controller.detailNotes" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></template></div>
+      </section>
+    </div>`
+  };
+  global.EditorComponents = { FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
 })(typeof window !== 'undefined' ? window : globalThis);

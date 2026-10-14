@@ -75,7 +75,7 @@
         const values = Object.fromEntries(context.fields.map(field => [field.id,
             typeof record?.values?.[field.id] === 'string' ? record.values[field.id] : String(field.target ?? '')]));
         return { unit: copy(context), values, reviewed: copy(record?.reviewed || {}), available: !record || !!record.values,
-            originalContext: context === unit, provenance: copy(record?.provenance || {}) };
+            originalContext: context === unit, provenance: copy(record?.provenance || {}), revision: record?.revision };
     }
     function normalizeHistory(entry, origin, unit, ctx) {
         const record = entry.after || entry.saved || entry.value || entry;
@@ -102,7 +102,7 @@
             ctScanProcessed:0,ctScanTotal:0,ctScanRunId:0,ctScanError:'',ctScanPhase:'',ctScanErrorFileCount:0,ctScanWarningFileCount:0,
             ctScanResultsPage:1,ctScanResultsPageSize:20,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
-            ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: true, ctHistoryViewer: false,
+            ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: false, ctHistoryViewer: false,
             ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
             ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
             ctPreviewGggVars: {}, ctPreviewAffixes:previewAffixesFor(null), ctPreviewAffixExamples:previewAffixExamples,
@@ -1415,6 +1415,7 @@
                 const changed=this.ctSelectedVariant(group)!==field;this.ctVariantSelections[this.ctVariantKey(group)]=field.id;return changed;
             },
             ctGroupSources(group) {
+                if(this.ctSourceGroups)return this.ctSourceGroups(group);
                 const sources=new Map();for(const field of group.fields){const text=String(field.source ?? ''),item=sources.get(text);
                     const label=field.form ? this.ctClassVariantLabel(field) : field.name;
                     if(item)item.names.push(label);else sources.set(text,{key:field.id,text,names:[label]});}
@@ -1467,9 +1468,9 @@
             ctDescribeOriginals(units,assets,options) {
                 return this._ctWorker?.buildDescriptors ? this._ctWorker.buildDescriptors(units,assets,options) : root.ClientTextState.buildDescriptors(units,assets,options);
             },
-            async ctCacheGroup(version,full,scope,{signal,current,initialization}={}) {
+            async ctCacheGroup(version,full,scope,{signal,current,initialization,comparison=false}={}) {
                 const guard=current || (()=>!signal?.aborted),check=()=>{if(!guard())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});},
-                    units=[],assets=[],descriptors=(full.assets || []).map(asset=>({...asset,...asset.descriptor})),cached=[];
+                    units=[],assets=[],descriptors=(full.assets || []).map(asset=>({...asset,...asset.descriptor})),cached=[],reportProgress=progress=>{if(!comparison)this.ctReport(progress);};
                 if(!descriptors.length)throw new Error('This content group has no original workbook descriptors.');
                 await this.ctInitializationStep('Checking reusable workbook cache',async report=>{
                     for(let index=0;index<descriptors.length;index++){const descriptor=descriptors[index],hash=descriptor.assetHash || descriptor.artifactHash || descriptor.hash;
@@ -1488,11 +1489,11 @@
                     else{
                         const blob=await this.ctInitializationStep('Downloading original: '+name,async report=>{
                             const result=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(full.id)+'/assets/'+encodeURIComponent(descriptor.role)+'/original',
-                                {responseType:'blob',timeout:180000,signal,onDownloadProgress:(completed,total)=>{if(!guard())return;report({completed,total,unit:'bytes',workbook:name});this.ctReport({phase:'Downloading original',completed,total,workbook:name,sheet:''});}});check();return result;
+                                {responseType:'blob',timeout:180000,signal,onDownloadProgress:(completed,total)=>{if(!guard())return;report({completed,total,unit:'bytes',workbook:name});reportProgress({phase:'Downloading original',completed,total,workbook:name,sheet:''});}});check();return result;
                         },initialization);
                         const parsed=await this.ctInitializationStep('Parsing original: '+name,async report=>{
                             const result=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
-                                onProgress:progress=>{if(!guard())return;const detail={...progress,completed:progress.completed ?? progress.processed,workbook:name};report(detail);this.ctReport(detail);}});check();return result;
+                                onProgress:progress=>{if(!guard())return;const detail={...progress,completed:progress.completed ?? progress.processed,workbook:name};report(detail);reportProgress(detail);}});check();return result;
                         },initialization);
                         if(hash && parsed.artifactHash!==hash)throw new Error('The original workbook hash differs from its published descriptor.');
                         originals=parsed.units;asset={role:descriptor.role,blob,hash:parsed.artifactHash,name:parsed.filename,parserVersion:parsed.parserVersion,parsed:{...parsed,units:undefined},descriptor:full.assets[index]?.descriptor || descriptor};
@@ -1503,7 +1504,7 @@
                 const metadata={version,group:full,storageProtocol:trustedProtocol};
                 await this.ctInitializationStep('Caching selected workspace',async report=>{
                     await this._ctStore.import(scope,{units,assets,descriptors:descriptors.map((descriptor,index)=>full.assets[index]?.descriptor || descriptor),metadata},
-                        {guard,onProgress:progress=>{if(!guard())return;report({...progress,completed:progress.completed ?? progress.processed});this.ctReport(progress);}});check();
+                        {guard,onProgress:progress=>{if(!guard())return;report({...progress,completed:progress.completed ?? progress.processed});reportProgress(progress);}});check();
                 },initialization);
                 return metadata;
             },
@@ -1715,6 +1716,7 @@
                 next.focus?.();return true;
             },
             ctFieldsKeydown(event) {
+                if(this.ctFormattingKeydown?.(event))return;
                 if(!this.ctEditor || this.ctKeyboardBlocked() || event.defaultPrevented || event.isComposing || event.keyCode===229
                     || event.key!=='Tab' || event.ctrlKey || event.altKey || event.metaKey || event.target?.dataset?.ctTarget)return;
                 if(this.ctMoveFullTab(event.target,event.shiftKey?-1:1)){event.preventDefault();event.stopPropagation?.();}
@@ -1736,7 +1738,7 @@
                 // Inline source and target live in separate table cells. Measure
                 // both together so a shorter edit can shrink the pair again.
                 const area=region?.closest?.('tr[data-unit-id]') || region;
-                const fields=[...(area?.querySelectorAll?.('textarea') || [])],scrolls=new Map(fields.map(field=>[field,field.scrollTop]));
+                const fields=[...(area?.querySelectorAll?.('textarea') || []),...(area?.querySelectorAll?.('.ctSourceDiff') || [])],scrolls=new Map(fields.map(field=>[field,field.scrollTop]));
                 for(const field of fields)field.style.height='auto';
                 const heights=new Map(fields.map(field=>[field,field.scrollHeight+2])),groups=new Map();
                 for(const block of area?.querySelectorAll?.('.ctBlock:not(.ctFormBlock)') || []){
@@ -1744,7 +1746,7 @@
                     if(!groups.has(key))groups.set(key,[]);groups.get(key).push(block);
                 }
                 for(const blocks of groups.values()){
-                    const sources=blocks.flatMap(block=>[...block.querySelectorAll('textarea[data-ct-source]')]);
+                    const sources=blocks.flatMap(block=>[...block.querySelectorAll('textarea[data-ct-source]'),...block.querySelectorAll('.ctSourceDiff')]);
                     const targets=blocks.flatMap(block=>[...block.querySelectorAll('textarea[data-ct-target]')]);
                     if(sources.length===1 && targets.length===1){
                         const height=Math.max(heights.get(sources[0]) || 0,heights.get(targets[0]) || 0);
@@ -2171,6 +2173,7 @@
                 }
             },
             ctResetHistory() {
+                this.ctResetComparisons?.();
                 this._ctHistoryRun = {}; this._ctHistoryPreviousRun = {}; this._ctHistoryLocal = []; this._ctHistoryShared = []; this._ctHistoryReferences = []; this._ctHistoryLocalLimit = 100;
                 this.ctHistory = []; this.ctHistoryCursor = null; this.ctHistoryLocalMore = false;
                 this.ctHistoryLoading = false; this.ctHistoryPreviousLoading = false; this.ctHistoryError = ''; this.ctHistoryViewer = false;
@@ -2179,6 +2182,7 @@
             ctMergeHistory() {
                 this.ctHistory = raw([...new Map([...(this._ctHistoryLocal || []), ...(this._ctHistoryShared || []), ...(this._ctHistoryReferences || [])]
                     .map(entry => [entry.key, entry])).values()].sort((a, b) => b.createdAt - a.createdAt || b.key.localeCompare(a.key)));
+                this.ctAutoOpenComparisons?.();
                 for (const name of ['ctHistoryCompareA', 'ctHistoryCompareB']) if (!this.ctHistorySnapshotFor(this[name])) this[name] = name.endsWith('A') ? 'original' : 'current';
             },
             async ctLoadHistory(ctx = this.ctContext(), unitId = this.ctSelection, options = {}) {
@@ -2186,7 +2190,7 @@
                 if (!unit || !this.ctCurrent(ctx) || this.ctSelection !== unitId || options.older && this.ctHistoryLoading) return false;
                 const run = this._ctHistoryRun = {}, client = this._cloud;
                 const current = () => this._ctHistoryRun === run && this.ctCurrent(ctx) && this.ctSelection === unitId && this.ctCurrentUnit === unit;
-                this.ctHistoryLoading = true; this.ctHistoryError = '';
+                this.ctHistoryLoading = true;
                 const localLimit = options.older ? (this._ctHistoryLocalLimit || 100) + 100 : 100;
                 const sharedAllowed = this.managedOnlineAvailable && client?.request && !/^(?:local|staged):/.test(ctx.scope.groupId)
                     && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === ctx.scope.language);
@@ -2211,6 +2215,7 @@
                     const results = await Promise.allSettled(tasks.map(task => task()));
                     if (!current()) return false;
                     this.ctHistoryError = results.filter(result => result.status === 'rejected').map(result => result.reason.message || String(result.reason)).join('; ');
+                    this.ctPrepareComparisons?.(ctx,unitId).catch(()=>{});
                     return !this.ctHistoryError;
                 } finally { if (current()) this.ctHistoryLoading = false; }
             },
@@ -3064,9 +3069,12 @@
                 <div class="ctFieldPair" :class="{ctFullFieldPair:side === 'both'}">
                 <div v-if="side !== 'translation'" class="editorSourceField ctFieldSource">
                     <template v-if="group.fields.some(field=>field.kind !== 'gender' || field.source)">
-                    <div v-for="source in host.ctGroupSources(group)" :key="source.key" class="ctSourceBlock inputField">
+                    <div v-for="source in host.ctGroupSources(group)" :key="source.key" :data-source-field="source.key" class="ctSourceBlock inputField">
                         <label v-if="side === 'both' || host.ctGroupSources(group).length > 1" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
-                        <editor-native-field :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
+                        <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(host.ctSourceComparisonField(source),'source',source.fieldIds) : undefined">
+                        <pre v-if="host.ctFieldToolbar && host.ctComparisonState(host.ctSourceComparisonField(source),'source').open && host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" class="ctInlineDiff ctSourceDiff" aria-label="English source differences"><span v-for="(part,index) in host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre>
+                        <editor-native-field v-else :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
+                        </component>
                     </div>
                     </template>
                 </div>
@@ -3105,14 +3113,18 @@
         }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
+            <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
             <template v-if="field.kind === 'gender'">
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
             </template>
             <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :compact="compact"></editor-native-field>
+            </component>
             <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
+    const comparisonMixin=root.ClientTextComparisons?.mixin;
+    if(comparisonMixin){const originalData=mixin.data;mixin.data=function(){return {...originalData.call(this),...comparisonMixin.data.call(this)};};Object.assign(mixin.methods,comparisonMixin.methods);}
     const toolsComponent = root.EditorComponents?.Tools;
     return { mixin, teams, detect, groupFields, mode, contextComponent, fieldsComponent, targetComponent, toolsComponent };
 });

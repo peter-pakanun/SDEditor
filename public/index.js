@@ -8156,6 +8156,7 @@ if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary
 if (window.EditorComponents?.Tools) app.component('editor-tools', window.EditorComponents.Tools);
 if (window.EditorComponents?.Autocomplete) app.component('editor-autocomplete', window.EditorComponents.Autocomplete);
 if (window.EditorComponents?.NativeField) app.component('editor-native-field', window.EditorComponents.NativeField);
+if (window.EditorComponents?.FieldToolbar) app.component('editor-field-toolbar', window.EditorComponents.FieldToolbar);
 if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-shell', window.EditorComponents.WorkspaceShell);
 if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
 if (window.EditorComponents?.DiagnosticMeta) app.component('editor-diagnostic-meta', window.EditorComponents.DiagnosticMeta);

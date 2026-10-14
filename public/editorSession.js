@@ -135,7 +135,8 @@
       end=options.whole ? previous.length : options.raw ? options.end : rawOffset(previous,options.end ?? input.selectionEnd ?? input.selectionStart ?? 0);
     if(typeof input.value==='string' && input.value!==previous.replace(/\r\n?/g,'\n') || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>previous.length)return false;
     const next=previous.slice(0,start)+replacement+previous.slice(end),offset=Number.isInteger(options.caretOffset) ? Math.max(0,Math.min(replacement.length,options.caretOffset)) : replacement.length,
-      caret=next.slice(0,start+offset).replace(/\r\n?/g,'\n').length;
+      caret=next.slice(0,start+offset).replace(/\r\n?/g,'\n').length,
+      selectionEnd=Number.isInteger(options.selectionEndOffset) ? next.slice(0,start+Math.max(offset,Math.min(replacement.length,options.selectionEndOffset))).replace(/\r\n?/g,'\n').length : caret;
     const history=rawHistory(host,field,previous);
     input.focus?.();
     const shownStart=previous.slice(0,start).replace(/\r\n?/g,'\n').length,shownEnd=previous.slice(0,end).replace(/\r\n?/g,'\n').length;
@@ -150,7 +151,7 @@
     host.ctValues[field.id]=next;host.ctFocusedField=field.id;host.ctEdited(field);host.ctCloseCompletion?.();
     host.$nextTick?.(()=>{const active=root.document?.activeElement;if(key(host,false)!==scope || host.ctCurrentUnit!==unit || host.ctFocusedField!==field.id || host.ctValues[field.id]!==next || input.isConnected===false
       || active && active!==input && active!==root.document.body && active!==root.document.documentElement)return;
-      input.focus?.({preventScroll:true});input.setSelectionRange?.(caret,caret);host.ctResizeField?.(input);});return true;
+      input.focus?.({preventScroll:true});input.setSelectionRange?.(caret,selectionEnd);host.ctResizeField?.(input);});return true;
   }
   function fieldController(host, field, sourceText) {
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
