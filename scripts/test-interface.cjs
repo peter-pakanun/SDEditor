@@ -471,6 +471,7 @@ function attachFileList(harness) {
   const rowElements = new Map();
   const focusedRows = [];
   const revealedRows = [];
+  const rowScrolls = [];
   const openedFiles = [];
   const openedWithReturnFocus = [];
   const document = context.document;
@@ -494,7 +495,7 @@ function attachFileList(harness) {
         dataset: { filepath },
         getAttribute(name) { return name === 'data-filepath' ? filepath : null; },
         focus() { document.activeElement = this; focusedRows.push(filepath); },
-        scrollIntoView() { revealedRows.push(filepath); },
+        scrollIntoView(options) { revealedRows.push(filepath); rowScrolls.push({ filepath, ...options }); },
       }, region));
     }
     return rowElements.get(filepath);
@@ -507,7 +508,7 @@ function attachFileList(harness) {
     openedFiles.push(filepath);
     openedWithReturnFocus.push({ filepath, returnToFileList });
   };
-  return { region, rowElement, focusedRows, revealedRows, openedFiles, openedWithReturnFocus, document };
+  return { region, rowElement, focusedRows, revealedRows, rowScrolls, openedFiles, openedWithReturnFocus, document };
 }
 
 function keyboardEvent(key, target, overrides = {}) {
@@ -531,6 +532,7 @@ test('attention jumps preserve context filters, follow sort across pages, and sk
   assert.equal(editor.attentionNavigationTargets.next.filepath, rows[3].filepath);
   assert.equal(await editor.navigateAttention(1), true);
   assert.deepEqual(table.openedFiles, [rows[3].filepath]); assert.equal(editor.currentPage, 2);
+  assert.equal(table.rowScrolls.at(-1).block, 'start');
   assert.equal(editor.selectedFileFilters, filters); assert.equal(editor.searchText, 'context');
   editor.currentSortDir = 'desc'; editor.currentPage = 2; editor.selectedFilepath = rows[3].filepath;
   assert.equal(editor.attentionNavigationTargets.next, undefined, 'occupied row is the only remaining attention candidate');
@@ -947,6 +949,31 @@ test('programmatic page changes bound invalid, negative, decimal, and out-of-ran
   assert.equal(editor.pageCount, 1);
 });
 
+test('explicit file scrolling aligns page edges inside sticky workspace chrome', () => {
+  const { editor, context } = loadEditor(), scrolls = [], requests = [];
+  context.document.querySelector = selector => ({ getBoundingClientRect: () => selector === '.workspaceHeader' ? { bottom: 70 } : { top: 800 } });
+  context.window.innerHeight = 900; context.window.scrollBy = options => scrolls.push(options.top);
+  let bounds = { top: 0, bottom: 120, height: 120 };
+  const row = { scrollIntoView: options => requests.push(options.block), getBoundingClientRect: () => bounds };
+  editor.scrollWorkspaceFileRow(row, 'start');
+  bounds = { top: 780, bottom: 900, height: 120 }; editor.scrollWorkspaceFileRow(row, 'end');
+  bounds = { top: 200, bottom: 320, height: 120 }; editor.scrollWorkspaceFileRow(row);
+  bounds = { top: 20, bottom: 920, height: 900 }; editor.scrollWorkspaceFileRow(row);
+  assert.deepEqual(requests, ['start', 'end', 'nearest', 'nearest']);
+  assert.deepEqual(scrolls, [-78, 108, -58], 'Explicit edges align even when a row was already partly visible; tall rows reveal their beginning.');
+});
+
+test('deferred file-row scrolling cannot target a replacement scope or selection', () => {
+  for (const change of [editor => { editor.selectedFilepath = 'another-file'; }, editor => { editor.lang = 'German'; },
+    editor => { editor.cloudProfileId = 'another-account'; }, editor => { editor.sourceIdentity = 'another-source'; }]) {
+    const harness = loadEditor(), { editor } = harness;
+    paginatedFixtures(editor); const table = attachFileList(harness);
+    let afterRender; editor.$nextTick = callback => { afterRender = callback; };
+    editor.nextPage(); change(editor); afterRender();
+    assert.deepEqual(table.rowScrolls, []); assert.deepEqual(table.focusedRows, []);
+  }
+});
+
 test('search and status changes return to page one even when later pages remain valid', () => {
   const { editor, config, searchFocusCount } = loadEditor();
   paginatedFixtures(editor);
@@ -1301,6 +1328,7 @@ test('previous and next page controls retain focus while revealing the newly sel
   editor.nextPage();
   assert.equal(editor.selectedFilepath, 'test/entry-21.txt');
   assert.equal(table.revealedRows.at(-1), 'test/entry-21.txt');
+  assert.equal(table.rowScrolls.at(-1).block, 'start');
   assert.equal(table.document.activeElement, pageButton);
   editor.nextPage();
   assert.equal(editor.selectedFilepath, 'test/entry-41.txt');
@@ -1310,6 +1338,7 @@ test('previous and next page controls retain focus while revealing the newly sel
   editor.prevPage();
   assert.equal(editor.selectedFilepath, 'test/entry-20.txt');
   assert.equal(table.revealedRows.at(-1), 'test/entry-20.txt');
+  assert.equal(table.rowScrolls.at(-1).block, 'end');
   assert.equal(table.document.activeElement, pageButton);
 });
 

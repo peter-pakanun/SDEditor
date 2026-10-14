@@ -30,6 +30,43 @@ async function run(){
     page.on('pageerror',error=>errors.push(error.message));
     await page.goto('http://127.0.0.1:'+server.address().port+'/?testMode=1&lang=Thai',{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>!!window.__attentionApp);
+    const assertRowVisible=async(selector,edge)=>{
+      await page.waitForFunction(({selector,edge})=>{
+        const row=document.querySelector(selector),workspace=row?.closest('.workspace');if(!row || !workspace)return false;
+        const bounds=row.getBoundingClientRect(),top=workspace.querySelector('.workspaceHeader').getBoundingClientRect().bottom+8,
+          bottom=workspace.querySelector('.workspaceFooter').getBoundingClientRect().top-8;
+        return edge==='start'?bounds.top>=top-1 && bounds.top<bottom-40:bounds.bottom<=bottom+1 && bounds.bottom>top+40;
+      },{selector,edge});
+    };
+    await page.evaluate(async()=>{
+      const h=window.__attentionApp;
+      Object.assign(h,{showSetting:false,needsInitialSettings:false,versionChooserVisible:false,gameVersion:'poe2',loadingProgress:100,
+        inlineEditor:false,pageSize:20,currentSort:'filename',currentSortDir:'asc',selectedFileFilters:['missing','saved','revised','dropped','diagnosticError','diagnosticWarning','unchanged']});
+      const rows=Array.from({length:45},(_,index)=>({filepath:'scroll/'+String(index).padStart(2,'0')+'.txt',filename:String(index).padStart(2,'0')+'.txt',filedir:'scroll',
+        translations:{English:index===38?Array.from({length:30},(_,entry)=>'English '+index+' entry '+entry):[Array.from({length:4},()=> 'English '+index).join('\\n')],
+          Thai:index===38?Array(30).fill(''):[index===18?'':Array.from({length:4},()=> 'Translation '+index).join('\\n')]}}));
+      h.descs=rows;h._workspaceSourceBaseline=structuredClone(rows);h.localDescs={staged:{},dropped:{},droppedArchive:{},stagedVersion:1};
+      h.filterDesc();h.currentPage=1;h.selectedFilepath=rows[0].filepath;await h.$nextTick();
+    });
+    const nextPage=page.getByRole('button',{name:'Next page',exact:true}),previousPage=page.getByRole('button',{name:'Previous page',exact:true});
+    await nextPage.click();await assertRowVisible('tr[data-filepath="scroll/20.txt"]','start');
+    assert.equal(await nextPage.evaluate(button=>document.activeElement===button),true);
+    await nextPage.click();await assertRowVisible('tr[data-filepath="scroll/40.txt"]','start');
+    await previousPage.click();await assertRowVisible('tr[data-filepath="scroll/39.txt"]','end');
+    await previousPage.click();await assertRowVisible('tr[data-filepath="scroll/19.txt"]','end');
+    await page.locator('tr[data-filepath="scroll/19.txt"]').focus();await page.keyboard.press('ArrowRight');
+    await assertRowVisible('tr[data-filepath="scroll/20.txt"]','start');
+    await page.keyboard.press('ArrowLeft');await assertRowVisible('tr[data-filepath="scroll/19.txt"]','end');
+    await page.evaluate(async()=>{const h=window.__attentionApp;h.inlineEditor=true;h.selectedFilepath='scroll/00.txt';await h.$nextTick();});
+    await page.getByRole('button',{name:'Next file needing attention',exact:true}).click();
+    await page.waitForFunction(()=>window.__attentionApp.inlineActive && !window.__attentionApp.editorLoading);
+    await assertRowVisible('tr[data-filepath="scroll/18.txt"]','start');
+    await page.getByRole('button',{name:'Next file needing attention',exact:true}).click();
+    await page.waitForFunction(()=>window.__attentionApp.editorCurrentEditingDesc?.filepath==='scroll/38.txt' && !window.__attentionApp.editorLoading);
+    await assertRowVisible('tr[data-filepath="scroll/38.txt"]','start');
+    assert.ok(await page.locator('tr[data-filepath="scroll/38.txt"]').evaluate(row=>row.getBoundingClientRect().height>window.innerHeight),'A tall inline SD file reveals its beginning.');
+    await page.evaluate(()=>window.__attentionApp.finishInlineSession({promote:false}));
+    console.log('Long SD pages reveal first/last files and the opened inline attention file with pointer and keyboard navigation.');
     await page.evaluate(async()=>{
       const h=window.__attentionApp;
       Object.assign(h,{showSetting:false,needsInitialSettings:false,versionChooserVisible:false,gameVersion:'poe2',loadingProgress:100,
@@ -47,8 +84,10 @@ async function run(){
     assert.match(await page.locator('.appTooltip').innerText(),/Ctrl\+Shift\+\./);
     await next.click();await page.waitForFunction(()=>window.__attentionApp.editorVisible && !window.__attentionApp.editorLoading);
     assert.equal(await page.evaluate(()=>window.__attentionApp.editorCurrentEditingDesc.filepath),'attention/3.txt');
+    await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
     await page.keyboard.press('Control+Shift+Period');
     await page.waitForFunction(()=>window.__attentionApp.editorCurrentEditingDesc.filepath==='attention/5.txt' && !window.__attentionApp.editorLoading);
+    await page.waitForFunction(()=>Math.abs(document.querySelector('.editor').getBoundingClientRect().top)<1);
     assert.equal(await next.isDisabled(),true);
     await page.keyboard.press('Control+Shift+Comma');
     await page.waitForFunction(()=>window.__attentionApp.editorCurrentEditingDesc.filepath==='attention/3.txt' && !window.__attentionApp.editorLoading);
@@ -93,9 +132,28 @@ async function run(){
       await page.evaluate(async()=>{const h=window.__attentionApp;h.ctEditor=true;await h.$nextTick();});
       await page.getByRole('button',{name:'Next file needing attention',exact:true}).click();
       await waitCt('Renly_Intro_A5');assert.equal(await page.evaluate(()=>window.__attentionApp.ctEditor),true);
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.editor').getBoundingClientRect().top)<1);
       console.log('ClientText '+mode+' inline/full attention navigation passed.');
     }
-    await page.evaluate(async()=>{const h=window.__attentionApp;h.ctEditor=false;h.ctSelection='';h.ctPage=1;await h.$nextTick();});
+    await page.evaluate(async()=>{
+      const h=window.__attentionApp;
+      const units=Array.from({length:45},(_,index)=>Vue.markRaw({id:'scroll-'+index,role:'normal',sheet:'ClientStrings',recordId:'Scroll_'+String(index).padStart(2,'0'),notes:[],fields:[{
+        id:'Text',kind:'text',name:'Text',source:Array.from({length:index===38?60:4},()=> 'English '+index).join('\n'),
+        target:index===18 || index===38?'':Array.from({length:4},()=> 'Translation '+index).join('\n'),required:true,originalMissing:index===18 || index===38
+      }]}));
+      h.ctEditor=false;h.ctSelection='';h.ctUnits=Vue.markRaw(units);h._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));
+      Object.assign(h,{ctBrowseMode:'sheets',ctSheet:'',ctPage:1,pageSize:20,ctInlineClosed:false,ctValues:{},ctSaved:{},ctReviewed:{},ctDiagnostics:{}});await h.$nextTick();
+    });
+    await nextPage.click();await assertRowVisible('tr[data-unit-id="scroll-20"]','start');
+    assert.equal(await nextPage.evaluate(button=>document.activeElement===button),true);
+    await nextPage.click();await assertRowVisible('tr[data-unit-id="scroll-40"]','start');
+    await previousPage.click();await assertRowVisible('tr[data-unit-id="scroll-39"]','end');
+    await previousPage.click();await assertRowVisible('tr[data-unit-id="scroll-19"]','end');
+    await next.click();await waitCt('Scroll_18');await assertRowVisible('tr[data-unit-id="scroll-18"]','start');
+    await next.click();await waitCt('Scroll_38');await assertRowVisible('tr[data-unit-id="scroll-38"]','start');
+    assert.ok(await page.locator('tr[data-unit-id="scroll-38"]').evaluate(row=>row.getBoundingClientRect().height>window.innerHeight),'A tall inline ClientText file reveals its beginning.');
+    console.log('Long ClientText pages reveal first/last files and the opened inline attention file.');
+    await page.evaluate(async()=>{const h=window.__attentionApp;h.ctEditor=false;h.ctSelection='scroll-0';h.ctInlineClosed=true;h.ctPage=1;await h.$nextTick();});
     mkdirSync(artifacts,{recursive:true});
     for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1024]){
       await page.setViewportSize({width,height:900});await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);

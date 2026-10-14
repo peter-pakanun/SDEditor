@@ -1079,13 +1079,22 @@
             },
             async ctSetPage(value) {
                 if(this.ctBusy || this.ctBrowseBusy)return false;const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0;
+                const previous=this.ctPage,region=this.$refs?.ctFileTableRegion,active=root.document?.activeElement,
+                    listHadFocus=!!region && (active===region || region.contains?.(active));
                 if(!await this.ctFlushDraft() || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0))return false;
-                this.ctPage=Math.max(1,Math.min(this.ctPageCount,Math.floor(Number(value)||1)));return true;
+                const next=Math.max(1,Math.min(this.ctPageCount,Math.floor(Number(value)||1)));
+                if(next===this.ctPage)return true;
+                this.ctPage=next;
+                const rows=this.ctPageRows,unitId=(next>previous?rows[0]:rows[rows.length-1])?.id;
+                await this.$nextTick?.();
+                if(!this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctPage!==next || this.ctKeyboardOverlayOpen())return false;
+                this.ctFocusRow(unitId,listHadFocus,next>previous?'start':'end');return true;
             },
-            ctFocusRow(unitId=this.ctSelection) {
+            ctFocusRow(unitId=this.ctSelection,moveFocus=true,block='nearest') {
                 const region=this.$refs?.ctFileTableRegion;
                 const row=[...(region?.querySelectorAll?.('[data-unit-id]') || [])].find(item=>item.dataset.unitId===unitId);
-                (row || region)?.focus?.({preventScroll:true});row?.scrollIntoView?.({block:'nearest'});
+                if(moveFocus)(row || region)?.focus?.({preventScroll:true});
+                this.scrollWorkspaceFileRow?.(row,block);
             },
             ctRefreshLayout() {this.observeInlineBlocks?.();this.measureWorkspaceChrome?.();},
             ctRowClick(unit,event) {
@@ -2111,7 +2120,12 @@
                         if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctCurrentUnit!==unit || this._ctSelectRun!==opened
                             || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
                         const fields=this.ctTabFields(unit),field=fields[options.focusEnd?fields.length-1:0];
-                        this.ctFocusedField=field?.id || '';this.ctFocusTarget(!!options.focusEnd,this.ctFocusedField);return true;
+                        this.ctFocusedField=field?.id || '';this.ctFocusTarget(!!options.focusEnd,this.ctFocusedField);
+                        if(options.attentionOnly){
+                            if(this.ctEditor)root.document?.querySelector?.('.editor')?.scrollIntoView({block:'start',behavior:'instant'});
+                            else this.ctFocusRow(id,false,'start');
+                        }
+                        return true;
                     }
                     this.ctNotice='No available files in this direction.';return false;
                 } finally {if(this._ctNavigationRun===run){this._ctNavigationRun=null;this.ctNavigationBusy=false;}}

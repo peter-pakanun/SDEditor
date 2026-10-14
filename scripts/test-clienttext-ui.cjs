@@ -808,6 +808,33 @@ test('page changes and Close preserve durable drafts and cannot alter a replacem
     assert.equal(await app.ctCloseEditor(),true);assert.equal(app.ctEditor,false);assert.equal(focused,1);assert.ok(app.ctCurrentUnit);
 });
 
+test('ClientText page buttons reveal the directional edge without activating a record or moving button focus',async()=>{
+    const rows=Array.from({length:5},(_,index)=>namedUnit('ID'+index)),{app,window}=listHarness({ctUnits:rows,
+        _ctUnitIndex:new Map(rows.map(value=>[value.id,value])),ctSelection:rows[0].id}),reveals=[];
+    app.ctFlushDraft=async()=>true;app.ctFocusRow=(id,moveFocus,block)=>reveals.push({id,moveFocus,block});
+    const button={};window.document={activeElement:button};
+    app.$refs.ctFileTableRegion={contains:()=>false};
+    app.ctSelect=()=>assert.fail('Paging must not activate a record.');
+    assert.equal(await app.ctSetPage(2),true);
+    assert.equal(await app.ctSetPage(3),true);
+    assert.equal(await app.ctSetPage(2),true);
+    assert.deepEqual(reveals,[{id:rows[2].id,moveFocus:false,block:'start'},
+        {id:rows[4].id,moveFocus:false,block:'start'},{id:rows[3].id,moveFocus:false,block:'end'}]);
+    assert.equal(app.ctSelection,rows[0].id);assert.equal(window.document.activeElement,button);
+    await app.ctSetPage(2);assert.equal(reveals.length,3,'A boundary/no-op does not move the page.');
+    window.document.activeElement=app.$refs.ctFileTableRegion;
+    await app.ctSetPage(1);assert.equal(reveals.at(-1).moveFocus,true);
+});
+
+test('a page render superseded by a scope change cannot scroll a replacement ClientText workspace',async()=>{
+    const rows=Array.from({length:3},(_,index)=>namedUnit('ID'+index)),{app}=listHarness({ctUnits:rows}),paint=deferred();
+    app.ctFlushDraft=async()=>true;app.$nextTick=()=>paint.promise;
+    app.ctFocusRow=()=>assert.fail('A stale page render must not scroll.');
+    const turning=app.ctSetPage(2);await settle();
+    app.ctWorkspace={scope:{...scope,groupId:'replacement'}};paint.resolve();
+    assert.equal(await turning,false);
+});
+
 test('leaving a ClientText inline row stages changed work through its save owner and closes only after success',async()=>{
     const {app,window}=listHarness({inlineEditor:true,ctDraftDirty:true}),calls=[];
     window.document={activeElement:{closest:()=>null},hidden:false,hasFocus:()=>true};
@@ -2267,10 +2294,12 @@ for(const full of [false,true])test('ClientText attention navigation skips compl
     const {app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,ctEditor:full,pageSize:2,
         _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctPeers:[{unitId:rows[1].id,sessionId:'other'}],
         ctDiagnostics:{[rows[4].id]:[{severity:'warning'}],[rows[5].id]:[{severity:'error'}]}}),filters=app.ctSelectedFilters;
+    const reveals=[];app.ctFocusRow=(id,moveFocus,block)=>reveals.push({id,moveFocus,block});
     app.ctSave=async()=>true;
     assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);
     assert.equal(app.ctSelection,rows[3].id);assert.equal(app.ctPage,2);assert.equal(app.ctEditor,full);
     assert.equal(app.ctNavigationBusy,false);
+    assert.deepEqual(reveals,full?[]:[{id:rows[3].id,moveFocus:false,block:'start'}]);
     assert.equal(focuses.at(-1).unitId,rows[3].id);assert.equal(app.ctSelectedFilters,filters);
     assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[4].id);
     assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[5].id);

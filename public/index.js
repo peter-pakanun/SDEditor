@@ -5364,6 +5364,10 @@ const config = Vue.defineComponent({
           this.collaborationNotice = '';
           if (releaseLocalSaves) await this.yieldEditorPaint();
           if ((ctx && !this.collaborationContextCurrent(ctx)) || cancelRevision !== (this._editorOpenCancelRevision || 0)) return false;
+          if (attentionOnly) {
+            if (this.editorVisible) document.querySelector('.editor')?.scrollIntoView({ block: 'start', behavior: 'instant' });
+            else this.focusSelectedFileRow(false, 'start');
+          }
           return true;
         }
         this.collaborationNotice = 'No available files in this direction.';
@@ -6236,26 +6240,33 @@ const config = Vue.defineComponent({
       if (this.inlineEditor && this.activateInlineRow) return this.activateInlineRow(filepath);
       this.editFile(filepath, true);
     },
-    focusSelectedFileRow(moveFocus = true) {
+    scrollWorkspaceFileRow(row, block = 'nearest') {
+      if (!row || row.isConnected === false) return;
+      row.scrollIntoView?.({ block, inline: 'nearest', behavior: 'instant' });
+      const bounds = row.getBoundingClientRect?.();
+      if (!bounds) return;
+      const workspace = row.closest?.('.workspace') || document;
+      const top = (workspace.querySelector('.workspaceHeader')?.getBoundingClientRect().bottom || 0) + 8;
+      const bottom = (workspace.querySelector('.workspaceFooter')?.getBoundingClientRect().top || window.innerHeight) - 8;
+      const delta = block === 'start' ? bounds.top - top : block === 'end' ? bounds.bottom - bottom
+        : bounds.top < top || bounds.height > bottom - top
+          ? bounds.top - top : bounds.bottom > bottom ? bounds.bottom - bottom : 0;
+      if (delta) window.scrollBy({ top: delta, behavior: 'instant' });
+    },
+    focusSelectedFileRow(moveFocus = true, block = 'nearest') {
+      const filepath = this.selectedFilepath, region = this.$refs.fileTableRegion, scope = window.EditorSession.key(this, false);
       this.$nextTick(() => {
-        if (this.fileListNavigationBlocked()) return;
-        const region = this.$refs.fileTableRegion;
+        if (this.selectedFilepath !== filepath || this.$refs.fileTableRegion !== region
+          || window.EditorSession.key(this, false) !== scope || this.fileListNavigationBlocked()) return;
         const row = Array.from(region?.querySelectorAll('tr[data-filepath]') || [])
-          .find(element => element.dataset.filepath === this.selectedFilepath);
+          .find(element => element.dataset.filepath === filepath);
         if (!row) {
           if (moveFocus) region?.focus({ preventScroll: true });
           return;
         }
         if (moveFocus) row.focus({ preventScroll: true });
-        row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
         // Keep keyboard selection clear of both sticky navigation surfaces.
-        const bounds = row.getBoundingClientRect?.();
-        if (!bounds) return;
-        const top = (document.querySelector('.workspaceHeader')?.getBoundingClientRect().bottom || 0) + 8;
-        const bottom = (document.querySelector('.workspaceFooter')?.getBoundingClientRect().top || window.innerHeight) - 8;
-        const delta = bounds.top < top || bounds.height > bottom - top
-          ? bounds.top - top : bounds.bottom > bottom ? bounds.bottom - bottom : 0;
-        if (delta) window.scrollBy({ top: delta, behavior: 'instant' });
+        this.scrollWorkspaceFileRow(row, block);
       });
     },
     fileTableFocused() {
@@ -6553,7 +6564,7 @@ const config = Vue.defineComponent({
       this.currentPage = next;
       const rows = this.descsDisplay;
       this.selectedFilepath = (next > previous ? rows[0] : rows[rows.length - 1])?.filepath || '';
-      this.focusSelectedFileRow(listHadFocus);
+      this.focusSelectedFileRow(listHadFocus, next > previous ? 'start' : 'end');
     },
     prevPage() {
       this.gotoPage(this.currentPage - 1);

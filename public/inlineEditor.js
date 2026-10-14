@@ -536,7 +536,7 @@
           const field = this.getEditorRef('translation', index, block?.isTable ? Math.min(column, Math.max(0, block.tableColumns.length - 1)) : null);
           field?.focus?.({ preventScroll: !end });
           if (end) field?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-          else this.focusSelectedFileRow(false);
+          else this.focusSelectedFileRow(false, attentionOnly ? 'start' : 'nearest');
           return true;
         };
         // Preserve the outgoing anchor before promotion can remove it from a filter.
