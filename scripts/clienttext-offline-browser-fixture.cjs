@@ -19,7 +19,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
     'C:/Program Files/Google/Chrome/Application/chrome.exe'
 ].find(existsSync);
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
-const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks');
+const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks') || process.argv.includes('--convo-real-workbooks');
 const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
 const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
 const disposableFolder = resolve(__dirname, '../temp/clienttext-npc-offline-fixture');
@@ -45,9 +45,11 @@ async function workbook(role = 'normal') {
     if (role === 'normal') sheets.push(
         { name: 'NPCs', rows: [row(1, ['ID', 'Name', 'Translation', 'Short Name', 'Translation']),
             row(2, ['Metadata/NPC/Renly', 'Renly', 'Renly traduit', 'Renly', 'Renly court']),
-            row(3, ['Metadata/NPC/Una', 'Una', 'Una traduite', 'Una', 'Una courte'])] },
+            row(3, ['Metadata/NPC/Una', 'Una', 'Una traduite', 'Una', 'Una courte']),
+            row(4, ['Metadata/NPC/Doryani', 'Doryani', 'Doryani traduit', 'Doryani', 'Doryani court'])] },
         { name: 'NPCTalk', rows: [row(1, ['ID', 'Text', 'Translation']),
-            row(2, ['Metadata/NPC/Renly::0', 'A conversation with Renly', 'Conversation avec Renly'])] },
+            row(2, ['Metadata/NPC/Renly::0', 'A conversation with Renly', 'Conversation avec Renly']),
+            row(3, ['Metadata/NPC/Doryani::0', 'Introduction', 'Introduction'])] },
         { name: 'NPCTextAudio', rows: [row(1, ['ID', 'Text', 'Translation']),
             row(2, ['RenlyIntro', 'Welcome, friend.', 'Bienvenue, ami.']),
             row(3, ['UnaRenly', 'Have you spoken with Renly?', 'Avez-vous parlé à Renly ?']),
@@ -55,7 +57,10 @@ async function workbook(role = 'normal') {
         { name: 'NPCTalkDialogueTextAudio', rows: [row(1, ['ID', 'Text', 'Translation', 'Character']),
             row(2, ['RenlyIntro', 'Player reply addressing Renly.', 'Réponse du joueur.', 'Metadata/Characters/Str/StrFourb']),
             row(3, ['HuntressRenlyReply', 'Renly, can you help?', 'Renly, pouvez-vous aider ?', 'Metadata/Characters/Dex/DexFourb']),
-            row(4, ['UnknownReply', 'A reply without an NPC ID match.', 'Réponse sans association.', 'Metadata/Characters/Int/IntFour'])] }
+            row(4, ['UnknownReply', 'A reply without an NPC ID match.', 'Réponse sans association.', 'Metadata/Characters/Int/IntFour']),
+            row(5, ['DoryaniA4_Intro_A1_Str4b', 'Doryani introduces the expedition.', '', 'Metadata/Characters/Str/StrFourb']),
+            row(6, ['DoryaniA4_Intro_A2_Dex4', 'A player asks Doryani about the expedition.', 'Question au sujet de l’expédition.', 'Metadata/Characters/Dex/DexFour']),
+            row(7, ['DoryaniA4_Quest_A1_Str4b', 'Doryani discusses a different quest.', 'Une autre quête.', 'Metadata/Characters/Str/StrFourb'])] }
     );
     else sheets.push({ name: 'NPCTextAudio_Gender', rows: [row(1, ['ID', 'Text', 'MS', 'FS', 'NS', 'MP', 'FP', 'NP']),
         row(2, ['RenlyGenderReply', 'Renly-related grammatical variants.', 'Variante Renly', 'Variante Renly', '', '', '', 'NONEXISTENT'])] });
@@ -354,6 +359,51 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctNpcBrowseTitle), 'Renly', label + ': NPC selection survives tab switching');
             return related.related;
         }
+        async function browseConvoFamily(label, stem, expectedUnits) {
+            const before = await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { mode: vm.ctBrowseMode, snapshot: vm.ctBrowseSnapshot(), counts: vm.ctCounts, ids: vm.ctUnits.map(unit => unit.id) };
+            });
+            await workspace.getByRole('tab', { name: 'Convo', exact: true }).click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'convo' && !window.__offlineTestApp.ctBrowseBusy);
+            const allConversations = await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { families: vm._ctConvoIndex.families.length, units: vm.ctRows.length, total: vm.ctConvoTotal,
+                    ids: vm.ctUnits.map(unit => unit.id), counts: vm.ctCounts, scans: vm.ctScanDone };
+            });
+            assert.deepEqual(allConversations.ids, before.ids, label + ': Convo preserves immutable workbook units');
+            assert.deepEqual(allConversations.counts, before.counts, label + ': Convo counts remain separate from workspace totals');
+            assert.equal(allConversations.units, allConversations.total, label + ': All conversations initially includes every status');
+            assert.equal(allConversations.scans, false, label + ': browsing does not run optional diagnostic scans');
+            const info = await page.evaluate(stem => {
+                const vm = window.__offlineTestApp, family = vm._ctConvoIndex.familyByKey.get(stem), parent = vm._ctConvoIndex.parentByKey.get(family.parentKey);
+                return { familyKey: family.key, familyLabel: family.label, parentKey: parent.key, parentLabel: parent.label,
+                    units: family.units.map(unit => ({ id: unit.id, role: unit.role, sheet: unit.sheet, recordId: unit.recordId })),
+                    rowKey: JSON.stringify(['family', family.key]), parentRowKey: JSON.stringify(['parent', parent.key]) };
+            }, stem);
+            assert.equal(info.units.length, expectedUnits, label + ': exact stem has the expected original unit count');
+            const tree = workspace.getByRole('tree', { name: 'Conversations', exact: true });
+            const parent = tree.getByRole('treeitem', { name: info.parentLabel, exact: true });
+            await parent.focus(); await parent.press('ArrowRight');
+            await page.waitForFunction(key => window.__offlineTestApp.ctConvoExpanded.includes(key), info.parentKey);
+            assert.equal(await parent.getAttribute('aria-expanded'), 'true', label + ': ArrowRight expands the parent');
+            const childSelector = await page.evaluate(key => '[data-convo-key="' + CSS.escape(key) + '"]', info.rowKey);
+            const child = tree.locator(childSelector);
+            await child.focus(); await child.press('Enter');
+            await page.waitForFunction(key => window.__offlineTestApp.ctConvoSelection === key && !window.__offlineTestApp.ctBrowseBusy, info.rowKey);
+            assert.equal(await child.getAttribute('aria-selected'), 'true', label + ': Enter selects the family');
+            assert.deepEqual(await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.id).sort()), info.units.map(unit => unit.id).sort(), label + ': family selection contains exact original units');
+            assert.ok(info.units.every(unit => unit.sheet.replace(/_Gender$/, '') === 'NPCTalkDialogueTextAudio'), label + ': Convo excludes names, menu topics and standalone dialogue');
+            const expanded = await page.evaluate(() => window.__offlineTestApp.ctConvoExpanded.slice());
+            await workspace.getByRole('tab', { name: before.mode === 'npcs' ? 'NPCs' : 'Sheets', exact: true }).click();
+            await page.waitForFunction(mode => window.__offlineTestApp.ctBrowseMode === mode && !window.__offlineTestApp.ctBrowseBusy, before.mode);
+            assert.deepEqual(await page.evaluate(() => window.__offlineTestApp.ctBrowseSnapshot()), before.snapshot, label + ': previous tab retains its independent navigation/search/filter state');
+            await workspace.getByRole('tab', { name: 'Convo', exact: true }).click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'convo' && !window.__offlineTestApp.ctBrowseBusy);
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctConvoSelection), info.rowKey, label + ': family selection survives tabs');
+            assert.deepEqual(await page.evaluate(() => window.__offlineTestApp.ctConvoExpanded), expanded, label + ': expansion survives tabs');
+            return { ...info, allConversations };
+        }
         const syntheticRelated = await browseRenly('Synthetic offline NPCs');
         assert.equal(syntheticRelated.filter(unit => unit.recordId === 'RenlyIntro').length, 2, 'Identical audio IDs retain their two distinct sheets');
         const orderedNpcIds = await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.id));
@@ -397,9 +447,40 @@ async function run() {
         assert.deepEqual(await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.recordId).sort()), ['UnarmedStart', 'UnknownReply'], 'Unassigned dialogue excludes false Una prefix matches');
         await workspace.getByRole('button', { name: 'All NPC text', exact: true }).click();
         await page.waitForFunction(() => window.__offlineTestApp.ctNpcSelection === 'all' && !window.__offlineTestApp.ctBrowseBusy);
-        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctRows.length), 9, 'All NPC text contains every recognized unit exactly once');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctRows.length), 14, 'All NPC text contains every recognized unit exactly once');
         await assertLocal(page, 'Synthetic NPC browsing and cross-sheet save');
         results.push('NPC tabs, keyboard focus, independent Sheets state, four-sheet Renly group, distinct IDs, kind filtering and temporary cross-sheet save');
+        const syntheticConvo = await browseConvoFamily('Synthetic Convo', 'DoryaniA4_Intro', 2);
+        assert.equal(await page.evaluate(key => window.__offlineTestApp.ctConvoSeverities.get(key), syntheticConvo.parentRowKey), 'error', 'Missing turn text marks its family and NPC parent actionable');
+        assert.equal(syntheticConvo.allConversations.families, 5, 'Conversation families strip turn/class suffixes while preserving unrelated stems');
+        assert.equal(syntheticConvo.allConversations.units, 6, 'All conversations includes only original conversation-turn units');
+        const convoFilter = workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true });
+        await convoFilter.fill('DORYANI');
+        assert.equal(await workspace.getByRole('tree', { name: 'Conversations' }).getByRole('treeitem', { name: 'Doryani', exact: true }).count(), 1, 'Tree search matches immutable NPC names case-insensitively');
+        await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).fill('player asks');
+        await page.waitForFunction(() => window.__offlineTestApp.ctRows.length === 1);
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctRows[0].recordId), 'DoryaniA4_Intro_A2_Dex4', 'Row search intersects the selected conversation family');
+        await workspace.getByRole('tab', { name: 'NPCs', exact: true }).click();
+        await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
+        assert.equal(await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).inputValue(), '', 'Convo row search does not leak into NPC browsing');
+        await workspace.getByRole('tab', { name: 'Convo', exact: true }).click();
+        await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'convo' && !window.__offlineTestApp.ctBrowseBusy);
+        assert.equal(await convoFilter.inputValue(), 'DORYANI');
+        assert.equal(await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).inputValue(), 'player asks', 'Convo restores its independent row and tree search');
+        await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).press('Escape');
+        await page.waitForFunction(() => window.__offlineTestApp.ctRows.length === 2);
+        const convoEntry = await page.evaluate(() => {
+            const unit = window.__offlineTestApp.ctRows.find(unit => unit.recordId === 'DoryaniA4_Intro_A1_Str4b');
+            return { id: unit.id, field: unit.fields[0].id };
+        });
+        await workspace.getByRole('button', { name: 'DoryaniA4_Intro_A1_Str4b', exact: true }).click();
+        await translation.fill('Présentation de Doryani enregistrée');
+        await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
+        await saved(page, convoEntry.id, convoEntry.field, 'Présentation de Doryani enregistrée');
+        await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+        assert.equal(await page.evaluate(key => window.__offlineTestApp.ctConvoSeverities.get(key), syntheticConvo.parentRowKey), '', 'A complete temporary save resolves the parent Missing severity');
+        await assertLocal(page, 'Synthetic conversation tree/search/edit');
+        results.push('Convo exact families, dedicated turn counts, keyboard expansion/select, independent searches/tabs and temporary save with reactive severity');
         await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
         await offline.waitFor();
         assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, workspace: window.__offlineTestApp.ctWorkspace, units: window.__offlineTestApp.ctUnits.length, stores: window.__offlineTestApp._ctTestStores?.size || 0 })),
@@ -490,7 +571,7 @@ async function run() {
                 }
                 await kinds.getByRole('button', { name: /^Conversations/ }).click();
                 await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.length > 0);
-                const entry = await page.evaluate(async () => {
+                let entry = await page.evaluate(async () => {
                     const vm = window.__offlineTestApp;
                     const unit = vm.ctRows.find(unit => unit.recordId === 'RenlyP1_Intro_A2_Str4b' && unit.role === 'normal')
                         || vm.ctRows.find(unit => unit.role === 'normal') || vm.ctRows[0];
@@ -511,6 +592,40 @@ async function run() {
                 }, entry.field));
                 await layout(page, workspace.locator('.ctFullEditor'), language + ' supplied conversation editor');
                 if (language === 'Thai') await page.screenshot({ path: join(screenshotFolder, 'npc-conversation-renly.png') });
+                await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+                await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+                const realConvo = await browseConvoFamily(language + ' supplied Convo', 'DoryaniA4_Intro', 25);
+                if (language === 'Thai') {
+                    assert.equal(realConvo.allConversations.families, 1119, 'Thai supplied workbook exposes all 1,119 conversation families');
+                    assert.equal(realConvo.allConversations.units, 11717, 'Thai supplied workbook exposes all 11,717 conversation turns');
+                }
+                await workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true }).fill('Doryani');
+                await layout(page, workspace, language + ' supplied Convo worklist');
+                if (language === 'Thai') {
+                    const selectedFamily = await page.evaluate(key => '[data-convo-key="' + CSS.escape(key) + '"]', realConvo.rowKey);
+                    await workspace.getByRole('tree', { name: 'Conversations', exact: true }).locator(selectedFamily).scrollIntoViewIfNeeded();
+                    await page.mouse.move(1, 1);
+                    await workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true }).focus();
+                    await page.waitForTimeout(100);
+                    await page.screenshot({ path: join(screenshotFolder, 'convo-browse-doryani.png') });
+                }
+                entry = await page.evaluate(() => {
+                    const vm = window.__offlineTestApp, unit = vm.ctPageRows[0], field = unit.fields.find(field => field.kind !== 'gender');
+                    return { id: unit.id, role: unit.role, recordId: unit.recordId, field: field.id, sheet: unit.sheet,
+                        source: field.source, target: field.target, row: 0 };
+                });
+                await workspace.locator('.ctTable tbody tr').nth(entry.row).getByRole('button', { name: entry.recordId, exact: true }).click();
+                await translation.waitFor();
+                entry.field = await translation.getAttribute('data-ct-target');
+                Object.assign(entry, await page.evaluate(fieldId => {
+                    const field = window.__offlineTestApp.ctCurrentUnit.fields.find(field => field.id === fieldId);
+                    return { source: field.source, target: field.target };
+                }, entry.field));
+                assert.equal(await workspace.locator('.ctFullEditor .ctConvoRelation').textContent(), 'ID match', 'Convo editor retains explicit ID association context');
+                if (language === 'Thai') {
+                    await page.mouse.move(1, 1);
+                    await page.screenshot({ path: join(screenshotFolder, 'convo-editor-doryani.png') });
+                }
                 const target = entry.target + ' [offline fixture saved edit]';
                 await translation.fill(target);
                 await workspace.getByRole('button', { name: 'Save', exact: true }).click();
@@ -552,11 +667,12 @@ async function run() {
                 // interval; long preparation must not accidentally hide an
                 // unisolated timer behind a fast synthetic workbook.
                 await page.waitForTimeout(Math.max(0, 21000 - (Date.now() - preparationStarted)));
-                await assertLocal(page, language + ' real NPC browsing/save/history/export');
+                await assertLocal(page, language + ' real NPC/Convo browsing/save/history/export');
                 await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
                 await offline.waitFor();
-                assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, units: window.__offlineTestApp.ctUnits.length, groups: window.__offlineTestApp.ctNpcGroups.length })),
-                    { active: false, units: 0, groups: 0 }, 'Leaving real workbooks clears derived NPC and in-memory translation data');
+                assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, units: window.__offlineTestApp.ctUnits.length,
+                    groups: window.__offlineTestApp.ctNpcGroups.length, conversations: window.__offlineTestApp.ctConvoParents.length })),
+                    { active: false, units: 0, groups: 0, conversations: 0 }, 'Leaving real workbooks clears derived NPC/Convo and in-memory translation data');
                 await assertLocal(page, language + ' real session exit', true);
                 await monitor(page, false);
                 // Verify disappearance through a real reload, then re-establish
@@ -566,10 +682,10 @@ async function run() {
                 await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && !window.__offlineTestApp.workspaceInitializationActive);
                 assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), false, 'Reload cannot restore supplied in-memory workbooks');
                 await bootstrap('admin');
-                results.push({ name: language + ' real import: NPC grouping, original cross-sheet identity, temporary save/history, native workbook export, no durable/cloud activity and exit/reload cleanup', preparationMs });
+                results.push({ name: language + ' real import: NPC/Convo grouping, original cross-sheet identity, temporary save/history, native workbook export, no durable/cloud activity and exit/reload cleanup', preparationMs });
             }
             for (const filename of filenames) assert.equal(checksum(join(realWorkbookFolder, filename)), originalHashes[filename], 'Supplied ' + filename + ' checksum remains unchanged');
-            results.push({ screenshots: ['npc-browse-renly.png', 'npc-conversation-renly.png'].map(filename => join(screenshotFolder, filename)), originalWorkbookSha256: originalHashes });
+            results.push({ screenshots: ['npc-browse-renly.png', 'npc-conversation-renly.png', 'convo-browse-doryani.png', 'convo-editor-doryani.png'].map(filename => join(screenshotFolder, filename)), originalWorkbookSha256: originalHashes });
         }
         for (const version of [null, { id: 'fixture-normal-version', name: 'Existing fixture version' }]) {
             // Inspect the ordinary importer without beginning a publication or

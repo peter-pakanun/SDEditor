@@ -16,7 +16,7 @@
 .ctSheetControls { flex:none; }.ctSheetControls > strong { display:block; margin-bottom:8px; }.ctSheetList { min-height:0; overflow:auto; scrollbar-gutter:stable; }
 .ctNavigation h3 { font-size:12px; color:var(--ui-muted); margin:15px 0 6px; }.ctNavigation button { display:block; box-sizing:border-box; width:100%; padding:6px 8px; margin:3px 0; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font:inherit; }.ctNavigation button.active { background:var(--ui-accent-soft); border-color:var(--ui-accent); color:var(--ui-accent); }
 .ctNavigation .ctSheetFilter { box-sizing:border-box; width:100%; min-width:0; margin-bottom:8px; padding:6px 8px; font:inherit; }.ctSheetEmpty { color:var(--ui-muted); font-size:12px; margin:12px 0 0; }
-.ctBrowseTabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; flex:none; margin-bottom:10px; }
+.ctBrowseTabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; flex:none; margin-bottom:10px; }
 .ctNavigation .ctBrowseTabs button { margin:0; text-align:center; font-weight:600; padding:7px 4px; }
 .ctNavigationPanel { display:flex; flex-direction:column; flex:1; min-height:0; }
 .ctNpcListCount,.ctNpcCount { font-variant-numeric:tabular-nums; color:var(--ui-muted); font-size:11px; }
@@ -26,6 +26,18 @@
 .ctNpcName.ctNpcSeverity-error { color:var(--ui-error); }
 .ctNpcName.ctNpcSeverity-warning { color:var(--ui-warning); }
 .ctNpcButton .ctNpcCount { flex:none; }
+.ctConvoTree { margin-top:8px; }
+.ctConvoNode { outline:none; cursor:pointer; }
+.ctConvoRow { display:flex; align-items:center; gap:5px; padding:6px; margin:3px 0; border:1px solid transparent; border-radius:4px; min-width:0; }
+.ctConvoNode[aria-selected="true"] > .ctConvoRow { background:var(--ui-accent-soft); border-color:var(--ui-accent); }
+.ctConvoNode:focus-visible > .ctConvoRow { outline:2px solid var(--ui-accent); outline-offset:-1px; }
+.ctConvoNode[aria-disabled="true"] > .ctConvoRow { cursor:default; }
+.ctNavigation .ctConvoChevron { flex:none; width:18px; padding:0; margin:0; text-align:center; border:0; background:transparent; color:var(--ui-muted); }
+.ctConvoChildren { margin-left:15px; padding-left:3px; border-left:1px solid var(--ui-border); }
+.ctConvoFamilyText { flex:1; min-width:0; }
+.ctConvoFamilyText .ctNpcName,.ctConvoAnchor { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ctConvoAnchor { margin-top:2px; font-size:10px; color:var(--ui-muted); }
+.ctConvoRow .ctNpcCount { flex:none; }
 .ctNpcHeading { padding:12px 14px; margin-bottom:12px; background:var(--color-element); border:1px solid var(--ui-border); border-radius:10px; }
 .ctNpcHeadingTitle { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:6px 14px; }
 .ctNpcHeadingTitle h2 { margin:0; font-size:16px; font-weight:600; overflow-wrap:anywhere; }

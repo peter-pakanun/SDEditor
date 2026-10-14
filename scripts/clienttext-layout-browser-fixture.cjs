@@ -31,6 +31,7 @@ const navigation = between(html, '<nav class="ctNavigation"', '</nav>') + '</nav
 const workspaceShell = between(html, '<editor-workspace-shell ', '>') + '>';
 const table = between(html, '<table class="display compact cell-border fileTable ctTable"', '</table>') + '</table>';
 const npcHeading = between(html, '<section v-if="ctBrowseMode===\'npcs\'" class="ctNpcHeading"', '</section>') + '</section>';
+const convoHeading = between(html, '<section v-if="ctBrowseMode===\'convo\'" class="ctNpcHeading ctConvoHeading"', '</section>') + '</section>';
 const fullEditor = between(html, '<editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor', '</editor-full-shell>') + '</editor-full-shell>';
 const tooltipComponent = between(indexJs, 'const AppTooltip = {', 'function escapeTooltipAttr');
 const tooltipMethods = between(indexJs, '    normalizeTooltipText(value) {', '    htmlTooltipMouseMove(e) {');
@@ -94,7 +95,8 @@ const app = Vue.createApp({
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
     computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount',
-        'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities']
+        'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
+        'ctConvoParents','ctConvoTree','ctConvoBrowseTitle','ctConvoTotal','ctConvoSeverities']
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
     methods:{...ct.methods,scheduleInlineAlignment:window.InlineEditor.mixin.methods.scheduleInlineAlignment,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
@@ -135,6 +137,33 @@ const app = Vue.createApp({
             this.ctVariantSelections={};this.ctFocusedField='npc-text';this.lang='Thai';this.ctWorkspace.scope.language='Thai';
             this._ctInlineReturn=null;this._ctBrowseViews=null;this._ctBrowseCandidateCache=null;this._ctOrderCache=null;this._ctSelectRun={};this.ctCloseCompletion();
         },
+        async ctStartConvoFixture(){
+            await this.ctStartNpcFixture();
+            const text=(id,sheet,recordId,source,row=2,target='Localized '+source)=>({id,role:'normal',sheet,recordId,notes:[],metadata:{},
+                fields:[{id:'convo-text',name:sheet==='NPCs'?'Name':'Text',kind:'text',source,target,sourceCell:'B'+row,targetCell:'C'+row,
+                    required:true,originalMissing:!target.trim(),outdated:false}]});
+            const units=this.ctUnits.filter(unit=>unit.sheet!=='NPCTalkDialogueTextAudio').concat([
+                text('convo-doryani-name','NPCs','Metadata/NPC/Doryani','Doryani',80),
+                text('convo-doryani-intro-a1','NPCTalkDialogueTextAudio','DoryaniA4_Intro_A1_Str4b','Doryani introduces the expedition.',2,''),
+                text('convo-doryani-intro-a2','NPCTalkDialogueTextAudio','DoryaniA4_Intro_A2_Dex4','A player asks Doryani about the expedition.',3),
+                text('convo-doryani-quest','NPCTalkDialogueTextAudio','DoryaniA4_Quest_A1_Str4b','A different quest.',4),
+                text('convo-renly-intro','NPCTalkDialogueTextAudio','RenlyIntro_A1_Str4b','A Renly reply.',5),
+                text('convo-unassigned','NPCTalkDialogueTextAudio','UnknownAnchor_A1_Str4b','Unassigned conversation.',6),
+                text('convo-long','NPCTalkDialogueTextAudio','LongResidentIntro_A1_Str4b','A conversation related to a long NPC name.',7),
+                ...Array.from({length:65},(_,index)=>text('convo-resident-'+index,'NPCTalkDialogueTextAudio',
+                    'TownResident'+String(index).padStart(3,'0')+'Intro_A1_Str4b','Town conversation '+index,index+8))
+            ]);
+            units.find(unit=>unit.id==='convo-doryani-quest').fields[0].outdated=true;
+            const npcIndex=await window.ClientTextNpcIndex.buildNpcIndex(units,{yield:()=>new Promise(resolve=>setTimeout(resolve,0))});
+            const convoIndex=await window.ClientTextConvoIndex.buildConvoIndex(units,npcIndex,{yield:()=>new Promise(resolve=>setTimeout(resolve,0))});
+            this._ctNpcIndex=Vue.markRaw(npcIndex);this._ctConvoIndex=Vue.markRaw(convoIndex);this.ctUnits=Vue.markRaw(units);this.ctRevision++;
+            this._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));this.ctSelection='convo-doryani-intro-a2';
+            this.ctValues={'convo-text':'Localized A player asks Doryani about the expedition.'};this.ctFocusedField='convo-text';
+            this.ctConvoSelection='all';this.ctConvoFilter='';this.ctConvoExpanded=[];this.ctConvoFocusKey='';
+            this.ctDiagnostics=Vue.markRaw({'convo-renly-intro':[{severity:'error',code:'fixture-error',message:'Fixture diagnostic'}],
+                'convo-unassigned':[{severity:'warning',code:'fixture-warning',message:'Fixture diagnostic'}]});
+            this._ctBrowseCandidateCache=null;this._ctOrderCache=null;this._ctSelectRun={};
+        },
     },
     created(){this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));this._ctSheets=Vue.markRaw(sheets);},
     mounted(){this._fixtureKey=event=>this.ctKey(event);document.addEventListener('keydown',this._fixtureKey);},
@@ -161,10 +190,10 @@ async function run() {
         <meta charset="utf-8">${stylesheets}</head><body><div id="app"><div class="appRoot" data-density="compact">
         <section class="ctWorkspace" aria-label="ClientText workspace">
         ${workspaceShell}<template #content>
-        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList">${npcHeading}<div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
+        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList">${npcHeading}${convoHeading}<div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
-        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/clientTextConvoIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -617,6 +646,72 @@ async function run() {
             assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-error') || element.classList.contains('ctNpcSeverity-warning')),false,name+': removing the final finding restores normal text');
             assert.equal(await unaName.evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),false,name+': other resolved names also return to normal');
             results.push({name:name+' accessible tabs, production labels, long names, fixed filter, independent scroll/page and exact editor caret handoff'});
+        }
+        for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){
+            await page.setViewportSize({width,height:900});
+            await page.evaluate(async theme=>{document.documentElement.dataset.theme=theme;await window.__ctLayoutFixture.ctStartConvoFixture();},theme);
+            await settle();const name=theme+'/'+width+' Convo browsing',tabs=page.getByRole('tablist',{name:'Browse workbooks'}),
+                sheetsTab=tabs.getByRole('tab',{name:'Sheets',exact:true}),npcTab=tabs.getByRole('tab',{name:'NPCs',exact:true}),convoTab=tabs.getByRole('tab',{name:'Convo',exact:true});
+            await sheetsTab.focus();await sheetsTab.press('End');await settle();
+            assert.equal(await convoTab.evaluate(element=>element===document.activeElement),true,name+': End focuses Convo tab');
+            await convoTab.press('Enter');await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='convo' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            const tree=nav.getByRole('tree',{name:'Conversations',exact:true}),filter=page.getByRole('searchbox',{name:'Filter conversations',exact:true}),
+                parent=tree.getByRole('treeitem',{name:'Doryani',exact:true}),heading=page.getByRole('region',{name:'Conversation text'});
+            assert.equal(await heading.getByRole('heading',{level:2}).textContent(),'All conversations',name+': default production title');
+            assert.equal(await parent.getAttribute('aria-expanded'),'false',name+': parents start collapsed');
+            assert.ok((await parent.getAttribute('aria-description')).includes('Missing or Error'),name+': parent advertises actionable severity');
+            assert.equal(await parent.locator(':scope > .ctConvoRow > .ctNpcName').evaluate(element=>element.classList.contains('ctNpcSeverity-error')),true,name+': Missing marks the parent red');
+            await parent.focus();await parent.press('Home');await settle();
+            assert.equal(await tree.getByRole('treeitem',{name:'Unassigned NPC',exact:true}).evaluate(element=>element===document.activeElement),true,name+': Home focuses Unassigned first');
+            await page.keyboard.press('d');await settle();
+            assert.equal(await parent.evaluate(element=>element===document.activeElement),true,name+': typeahead focuses the matching NPC parent');
+            await parent.press('ArrowRight');await settle();
+            assert.equal(await parent.getAttribute('aria-expanded'),'true',name+': Right expands without selecting');
+            assert.equal(await parent.getAttribute('aria-selected'),'false',name+': expansion is independent from selection');
+            const childKey=JSON.stringify(['family','DoryaniA4_Intro']),childSelector=await page.evaluate(key=>'[data-convo-key="'+CSS.escape(key)+'"]',childKey),child=tree.locator(childSelector);
+            await parent.press('ArrowRight');await settle();
+            assert.equal(await child.evaluate(element=>element===document.activeElement),true,name+': second Right focuses the first child');
+            await child.press('Enter');await page.waitForFunction(()=>!window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await child.getAttribute('aria-selected'),'true',name+': Enter selects the family');
+            assert.deepEqual(await page.evaluate(()=>window.__ctLayoutFixture.ctRows.map(unit=>unit.id).sort()),['convo-doryani-intro-a1','convo-doryani-intro-a2'],name+': selection contains exact family records');
+            assert.equal(await child.locator('.ctNpcName').evaluate(element=>element.classList.contains('ctNpcSeverity-error')),true,name+': Missing marks the family red');
+            const questSelector=await page.evaluate(key=>'[data-convo-key="'+CSS.escape(key)+'"]',JSON.stringify(['family','DoryaniA4_Quest'])),quest=tree.locator(questSelector);
+            assert.equal(await quest.locator('.ctNpcName').evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),true,name+': Outdated marks a different family orange');
+            const geometry=await nav.evaluate(element=>({left:element.getBoundingClientRect().left,right:element.getBoundingClientRect().right,document:document.documentElement.scrollWidth,
+                controls:[...element.querySelectorAll('button,input,[role=treeitem]')].filter(control=>control.getClientRects().length && getComputedStyle(control).visibility!=='hidden')
+                    .map(control=>({left:control.getBoundingClientRect().left,right:control.getBoundingClientRect().right}))}));
+            assert.ok(geometry.left>=-1 && geometry.right<=width+1 && geometry.document<=width+1,name+': nested tree fits desktop without page overflow');
+            assert.ok(geometry.controls.every(control=>control.left>=-1 && control.right<=width+1),name+': tree rows and controls fit');
+            await filter.fill('DORYANI');await settle();
+            assert.equal(await tree.locator('[role="treeitem"][aria-level="1"]').count(),1,name+': tree search intersects immutable parent names');
+            await page.evaluate(()=>{const host=window.__ctLayoutFixture;host.ctSearch='player asks';host.ctAppliedSearch='player asks';});await settle();
+            assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctRows.length),1,name+': row search intersects the selected family');
+            await npcTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='npcs' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctSearch),'',name+': Convo row search does not leak into NPC tab');
+            await convoTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='convo' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await filter.inputValue(),'DORYANI');assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctSearch),'player asks',name+': Convo restores independent searches');
+            await filter.press('Escape');await page.evaluate(()=>{const host=window.__ctLayoutFixture;host.ctSearch='';host.ctAppliedSearch='';});await settle();
+            await child.focus();await child.press('ArrowLeft');await settle();assert.equal(await parent.evaluate(element=>element===document.activeElement),true,name+': Left returns to parent');
+            await parent.press('ArrowLeft');await settle();assert.equal(await parent.getAttribute('aria-expanded'),'false',name+': second Left collapses');
+            await parent.getByRole('button',{name:'Expand Doryani',exact:true}).click();await settle();
+            assert.equal(await parent.getAttribute('aria-expanded'),'true',name+': pointer chevron expands independently');
+            const list=nav.locator('.ctConvoList'),scrollBefore=await list.evaluate(element=>{element.scrollTop=413;return element.scrollTop;});assert.ok(scrollBefore>0,name+': tree list scrolls');
+            await page.locator('.ctID').filter({hasText:'DoryaniA4_Intro_A2_Dex4'}).click();await page.locator('.ctFullEditor').waitFor();await settle();
+            const field=page.locator('.ctFullEditor [data-ct-target="convo-text"]');await field.focus();await field.evaluate(element=>element.setSelectionRange(2,6,'backward'));await field.press('Escape');
+            await page.locator('.ctFullEditor').waitFor({state:'detached'});await settle();
+            assert.equal(await list.evaluate(element=>element.scrollTop),scrollBefore,name+': full editor return retains tree scroll');
+            const inline=page.locator('.ctListWorkspace [data-ct-target="convo-text"]');await inline.focus();await inline.evaluate(element=>element.setSelectionRange(1,5,'backward'));await inline.press('Control+Enter');
+            await page.locator('.ctFullEditor').waitFor();await settle();assert.deepEqual(await field.evaluate(element=>({active:element===document.activeElement,start:element.selectionStart,end:element.selectionEnd,direction:element.selectionDirection})),
+                {active:true,start:1,end:5,direction:'backward'},name+': Convo full editor retains exact field and caret');
+            await field.press('Escape');await page.locator('.ctFullEditor').waitFor({state:'detached'});await settle();
+            assert.deepEqual(await inline.evaluate(element=>({active:element===document.activeElement,start:element.selectionStart,end:element.selectionEnd,direction:element.selectionDirection})),
+                {active:true,start:1,end:5,direction:'backward'},name+': Convo Escape restores inline caret');
+            await sheetsTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='sheets' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctPage),2,name+': Sheets retains independent page');
+            await convoTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='convo' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await parent.getAttribute('aria-expanded'),'true',name+': expansion survives three tabs');
+            assert.equal(await list.evaluate(element=>element.scrollTop),scrollBefore,name+': tab return preserves conversation scroll');
+            results.push({name:name+' accessible tree keyboard/typeahead, exact families, severity, independent searches/page/expansion/scroll and caret continuity'});
         }
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));

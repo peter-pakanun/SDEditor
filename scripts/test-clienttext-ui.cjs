@@ -9,6 +9,7 @@ function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
+        ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
         ContentAdapters:require('../public/contentAdapters.js'),
         TerminologyDiagnostics:require('../public/terminologyDiagnostics.js'),Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
@@ -25,7 +26,8 @@ function harness(changes={}){
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
-    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities'])
+    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
+        'ctConvoParents','ctConvoTree','ctConvoBrowseTitle','ctConvoTotal','ctConvoSeverities'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
@@ -84,6 +86,140 @@ function npcUiHarness(changes={}) {
     h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};
     return {...h,index,names,topic,dialogue,reply,gender,una,unassigned,other};
 }
+
+function convoUiHarness(changes={}) {
+    const h=npcUiHarness(),row=(id,number,target='Translation',role='normal')=>{
+        const sheet='NPCTalkDialogueTextAudio'+(role==='gender'?'_Gender':''),result={...namedUnit(id,'English '+id,target),id:JSON.stringify([role,sheet,id]),role,sheet};
+        result.fields=result.fields.map(field=>({...field,sourceCell:'B'+number,targetCell:'C'+number}));return result;
+    };
+    const cSin=row('RenlyP1_Intro_C_Sin',7),a=row('RenlyP1_Intro_A1',8),gender=row('RenlyP1_Intro_A1',9,'Gender translation','gender'),
+        missing=row('RenlyP1_Intro_B1',10,''),c=row('RenlyP1_Intro_C',11),unassigned=row('Nameless_Story_A1',12),
+        una=row('Una_Greeting_A1',16),bye=row('RenlyP1_Farewell_A1',20);
+    const family=(key,parentKey,units)=>({key,stem:key,anchor:key.split('_')[0],label:parentKey==='unassigned'?key:key.slice(key.indexOf('_')+1),parentKey,units});
+    const intro=family('RenlyP1_Intro','renly',[cSin,a,gender,missing,c]),farewell=family('RenlyP1_Farewell','renly',[bye]),
+        unknown=family('Nameless_Story','unassigned',[unassigned]),greeting=family('Una_Greeting','una',[una]);
+    const parents=[{key:'unassigned',label:'Unassigned',paths:[],npcUnits:[],families:[unknown],units:[unassigned]},
+        {...h.index.groups[0],families:[farewell,intro],units:[cSin,a,gender,missing,c,bye]},
+        {...h.index.groups[1],families:[greeting],units:[una]}],families=[unknown,farewell,intro,greeting],units=[cSin,a,gender,missing,c,unassigned,una,bye],memberships=new Map();
+    for(const family of families)for(const unit of family.units)memberships.set(unit.id,{parentKey:family.parentKey,familyKey:family.key,anchor:family.anchor,
+        turn:unit.recordId.slice(family.stem.length+1),aliases:family.parentKey==='unassigned'?[]:[family.parentKey==='renly'?'Renly':'Una'],aliasType:'name',ambiguous:false});
+    const convoIndex={parents,parentByKey:new Map(parents.map(parent=>[parent.key,parent])),families,familyByKey:new Map(families.map(family=>[family.key,family])),memberships,units};
+    h.app.ctUnits=[...h.app.ctUnits,...units];h.app._ctUnitIndex=new Map(h.app.ctUnits.map(unit=>[unit.id,unit]));h.app._ctConvoIndex=convoIndex;
+    Object.assign(h.app,{ctSelection:a.id,ctValues:S.valuesFor(a)},changes);
+    return {...h,convoIndex,cSin,a,gender,missing,c,unassigned,una,bye,intro,farewell,unknown,greeting};
+}
+
+test('Convo uses only its original conversation records, shared row order, all-status context and existing filters',async()=>{
+    const {app,convoIndex,cSin,a,gender,missing,c,intro}=convoUiHarness({ctSheet:JSON.stringify(['normal','NPCs']),ctSelectedFilters:['saved']}),
+        before=clone(app.ctUnits),counts=clone(app.ctCounts);
+    assert.equal(await app.ctSetBrowseMode('convo'),true);assert.equal(app.ctSort,'row');assert.equal(app.ctSortDir,'asc');assert.ok(app.ctSelectedFilters.includes('unchanged'));
+    assert.equal(app.ctConvoBrowseTitle,'All conversations');assert.equal(app.ctConvoTotal,convoIndex.units.length);
+    assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),convoIndex.units.map(unit=>unit.id),'the inactive sheet filter cannot constrain Convo');
+    assert.equal(await app.ctSetConvo('family',intro.key),true);assert.equal(app.ctConvoTotal,5);assert.equal(app.ctConvoBrowseTitle,'Renly / Intro (RenlyP1)');
+    assert.deepEqual(Array.from(app.ctRows),[cSin,a,gender,missing,c]);assert.equal(app.ctRows[0],cSin,'worksheet rows place C_Sin before C');
+    assert.equal(a.recordId,gender.recordId);assert.notEqual(a.id,gender.id);assert.equal(app.ctRows[2],gender);
+    app.ctSelectedFilters=['missing'];assert.deepEqual(Array.from(app.ctRows),[missing]);app.ctSearch='No match';app.ctApplySearch();assert.equal(app.ctRows.length,0);
+    app.ctResetFilters();assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(app.ctRows.length,5);
+    assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(app.ctUnits,before);
+    assert.equal(app.ctConvoRelation(a).label,'ID match');assert.match(app.ctConvoRelation(a).tooltip,/RenlyP1/);assert.match(app.ctConvoRelation(a).tooltip,/Matched NPC aliases: Renly/);
+    assert.match(app.ctConvoRelation(a).tooltip,/does not identify the speaker or conversation order/);assert.equal(app.ctConvoRelation(app.other).label,'');
+});
+
+test('Convo tree search temporarily reveals matching children and preserves stored expansion and selection',async()=>{
+    const {app,intro,farewell,unknown,names,unassigned}=convoUiHarness();await app.ctSetBrowseMode('convo');
+    assert.deepEqual(Array.from(app.ctConvoTree,row=>row.type),['parent','parent','parent']);
+    app.ctConvoToggle('renly');const expanded=app.ctConvoExpanded.slice();assert.equal(app.ctConvoTree.filter(row=>row.type==='family').length,2);
+    await app.ctSetConvo('family',intro.key);app.ctConvoFilter='Intro';
+    assert.deepEqual(Array.from(app.ctConvoTree,row=>[row.type,row.node.key]),[['parent','renly'],['family',intro.key]]);assert.equal(app.ctConvoToggle('renly'),false);
+    app.ctConvoFilter='Renly';assert.deepEqual(Array.from(app.ctConvoTree.filter(row=>row.type==='family'),row=>row.node.key),[farewell.key,intro.key]);
+    app.ctSaved={[names.id]:{values:{[fieldId]:'เรนลี'},reviewed:{},revision:1}};app.ctRevision++;app.ctConvoFilter='เรน';assert.equal(app.ctConvoTree.length,3);
+    app.ctConvoFilter='Nameless_Story_A1';assert.deepEqual(Array.from(app.ctConvoTree,row=>row.node.key),['unassigned',unknown.key]);
+    assert.equal(app.ctConvoRelation(unassigned).label,'ID family');assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('family',intro.key));
+    app.ctConvoFilter='';assert.deepEqual(Array.from(app.ctConvoExpanded),Array.from(expanded));assert.equal(app.ctConvoTree.filter(row=>row.type==='family').length,2);
+    app.ctConvoToggle('renly');assert.equal(app.ctConvoTree.filter(row=>row.type==='family').length,0);assert.equal(app.ctConvoTree.filter(row=>row.focused).length,1);
+    assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('family',intro.key),'collapsing an NPC retains its selected family and current editor');
+    app._ctConvoIndex={...app._ctConvoIndex,units:[]};app.ctRevision++;assert.equal(app.ctConvoTree.length,0);
+});
+
+test('Convo tree arrows, expansion and typeahead move focus separately from checkpointed activation',async()=>{
+    const {app,intro,farewell}=convoUiHarness();await app.ctSetBrowseMode('convo');const focuses=[];let checkpoints=0;
+    app.ctFlushDraft=async()=>{checkpoints++;return true;};app.ctConvoFocus=row=>{app.ctConvoFocusKey=row.key;focuses.push(row.key);return true;};
+    const key=(value,targetKey=app.ctConvoFocusKey)=>({...rowEvent(value),target:{closest:selector=>selector==='[data-convo-key]'?{dataset:{convoKey:targetKey}}:null}});
+    app.ctConvoFocusKey=app.ctConvoNodeKey('parent','renly');assert.equal(app.ctConvoTreeKeydown(key('ArrowRight')),true);assert.deepEqual(Array.from(app.ctConvoExpanded),['renly']);
+    assert.equal(app.ctConvoTreeKeydown(key('ArrowRight')),true);assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('family',farewell.key));
+    app.ctConvoTreeKeydown(key('ArrowDown'));assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('family',intro.key));assert.equal(checkpoints,0);assert.equal(app.ctConvoSelection,'all');
+    await app.ctConvoTreeKeydown(key('Enter'));assert.equal(checkpoints,1);assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('family',intro.key));
+    app.ctConvoTreeKeydown(key('ArrowLeft'));assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('parent','renly'));
+    app.ctConvoTreeKeydown(key('ArrowLeft'));assert.equal(app.ctConvoExpanded.length,0);app.ctConvoTreeKeydown(key('Home'));assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('parent','unassigned'));
+    app.ctConvoTreeKeydown(key('u'));assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('parent','una'));app.ctConvoTreeKeydown(key('End'));assert.equal(app.ctConvoFocusKey,app.ctConvoNodeKey('parent','una'));
+    await app.ctConvoTreeKeydown(key(' '));assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('parent','una'));assert.equal(checkpoints,2);
+    assert.ok(focuses.length>4);
+});
+
+test('Convo chevrons focus their parent and retain selected children without checkpointing or stealing hidden-view focus',async()=>{
+    const {app,intro}=convoUiHarness();await app.ctSetBrowseMode('convo');app.ctConvoToggle('renly');await app.ctSetConvo('family',intro.key);
+    const focused=[];let checkpoints=0;app.ctFlushDraft=async()=>{checkpoints++;return true;};
+    app.$refs.ctConvoTree={querySelectorAll:()=>app.ctConvoTree.map(row=>({dataset:{convoKey:row.key},focus(){focused.push(row.key);}}))};
+    const child=app.ctConvoTree.find(row=>row.node.key===intro.key);assert.equal(app.ctConvoFocus(child),true);
+    assert.equal(app.ctConvoToggle('renly'),true);assert.equal(focused.at(-1),app.ctConvoNodeKey('parent','renly'));assert.equal(app.ctConvoExpanded.length,0);
+    assert.equal(app.ctConvoSelection,child.key);assert.equal(checkpoints,0);
+    const native={...rowEvent('Enter'),target:{closest:selector=>selector==='button'?{}:{dataset:{convoKey:app.ctConvoNodeKey('parent','renly')}}}};
+    assert.equal(app.ctConvoTreeKeydown(native),false);assert.equal(native.defaultPrevented,undefined,'native chevron activation is retained');
+    app.ctBrowseMode='npcs';const count=focused.length;app.ctConvoToggle('renly');assert.equal(focused.length,count);
+});
+
+test('three browse modes restore independent Convo state, query, filters, sorting, page and scroll',async()=>{
+    const {app,intro}=convoUiHarness({ctSheet:'sheet',ctSearch:'sheet text',ctAppliedSearch:'sheet text',ctSelectedFilters:['saved'],ctPage:2}),
+        region={scrollTop:0,scrollLeft:19,clientHeight:100,scrollHeight:100};app.$refs.ctFileTableRegion=region;
+    await app.ctSetBrowseMode('npcs');await app.ctSetNpc('renly');app.ctSearch='npc text';app.ctAppliedSearch='npc text';
+    await app.ctSetBrowseMode('convo');await app.ctSetConvo('family',intro.key);app.ctConvoToggle('renly');
+    Object.assign(app,{ctConvoFilter:'Intro',ctConvoFocusKey:app.ctConvoNodeKey('family',intro.key),ctSearch:'convo text',ctAppliedSearch:'convo text',ctSelectedFilters:['missing'],ctSort:'filename',ctSortDir:'desc',ctPage:3});region.scrollLeft=72;
+    await app.ctSetBrowseMode('sheets');assert.equal(app.ctSheet,'sheet');assert.equal(app.ctSearch,'sheet text');assert.deepEqual(Array.from(app.ctSelectedFilters),['saved']);assert.equal(region.scrollLeft,19);
+    await app.ctSetBrowseMode('npcs');assert.equal(app.ctSearch,'npc text');assert.equal(app.ctNpcSelection,'renly');
+    await app.ctSetBrowseMode('convo');assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('family',intro.key));assert.deepEqual(Array.from(app.ctConvoExpanded),['renly']);assert.equal(app.ctConvoFilter,'Intro');
+    assert.equal(app.ctSearch,'convo text');assert.deepEqual(Array.from(app.ctSelectedFilters),['missing']);assert.equal(app.ctSort,'filename');assert.equal(app.ctSortDir,'desc');assert.equal(app.ctPage,3);assert.equal(region.scrollLeft,72);
+    await app.ctShowAllLoaded();assert.equal(app.ctBrowseMode,'sheets');assert.equal(app.ctRows.length,app.ctUnits.length);
+    app.ctFence();assert.equal(app._ctConvoIndex,null);assert.equal(app.ctConvoSelection,'all');assert.equal(app.ctConvoExpanded.length,0);assert.equal(app.ctConvoFocusKey,'');
+});
+
+test('all three navigation lists restore independent offsets after hidden panels clamp their scroll',async()=>{
+    const {app}=convoUiHarness(),sheets={scrollTop:129,scrollLeft:5},npcs={scrollTop:0,scrollLeft:0},convo={scrollTop:0,scrollLeft:0},table={scrollTop:0,scrollLeft:0,clientHeight:100,scrollHeight:100};
+    Object.assign(app.$refs,{ctSheetList:sheets,ctNpcList:npcs,ctConvoList:convo,ctFileTableRegion:table});
+    // Simulate hidden panels losing overflow as another view's snapshot
+    // restores its own filter and expansion fields.
+    app.$nextTick=async()=>{for(const [mode,list] of [['sheets',sheets],['npcs',npcs],['convo',convo]])if(mode!==app.ctBrowseMode){list.scrollTop=0;list.scrollLeft=0;}};
+    await app.ctSetBrowseMode('npcs');npcs.scrollTop=321;npcs.scrollLeft=2;
+    await app.ctSetBrowseMode('convo');convo.scrollTop=777;convo.scrollLeft=8;
+    await app.ctSetBrowseMode('sheets');assert.deepEqual([sheets.scrollTop,sheets.scrollLeft],[129,5]);assert.equal(convo.scrollTop,0);
+    await app.ctSetBrowseMode('npcs');assert.deepEqual([npcs.scrollTop,npcs.scrollLeft],[321,2]);
+    await app.ctSetBrowseMode('convo');assert.deepEqual([convo.scrollTop,convo.scrollLeft],[777,8]);assert.deepEqual([table.scrollTop,table.scrollLeft],[0,0]);
+    assert.deepEqual(clone(app._ctBrowseViews.convo.scroll.navigation),{top:777,left:8});
+});
+
+test('Convo selection failures and delayed focus or navigation cannot alter a replacement family or scope',async()=>{
+    const {app,intro,farewell,a,missing}=convoUiHarness({ctDraftDirty:true}),values=app.ctValues;await app.ctSetBrowseMode('convo');await app.ctSetConvo('family',intro.key);
+    app.ctFlushDraft=async()=>false;assert.equal(await app.ctSetConvo('family',farewell.key),false);assert.equal(app.ctConvoSelection,app.ctConvoNodeKey('family',intro.key));assert.equal(app.ctValues,values);
+    app.ctFlushDraft=async()=>true;app.ctEditor=true;app.ctSelectedFilters=['missing'];app.ctValues[fieldId]='Correction';app.ctSave=async()=>true;
+    const selections=[];app.ctSelect=async unit=>{selections.push(unit.id);app.ctSelection=unit.id;return true;};
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.deepEqual(selections,[missing.id],'the filtered anchor navigates only within the selected family');
+    app.ctSelection=a.id;const pending=deferred();app.ctSave=()=>pending.promise;const moving=app.ctSaveAndNavigate();await settle();await app.ctSetConvo('family',farewell.key);pending.resolve(true);
+    assert.equal(await moving,false);assert.equal(app.ctSelection,a.id);assert.equal(selections.length,1);
+    app.ctEditor=false;const callbacks=[];app.$nextTick=callback=>{if(callback)callbacks.push(callback);};app.$refs.ctConvoTree={querySelectorAll:()=>[]};
+    const row={key:app.ctConvoNodeKey('parent','renly')};app.ctConvoFocus(row);let focus=0;
+    app.$refs.ctConvoTree={querySelectorAll:()=>[{dataset:{convoKey:row.key},focus(){focus++;}}]};app.ctWorkspace={scope:{...scope,groupId:'new-convo-scope'}};
+    callbacks.forEach(callback=>callback());assert.equal(focus,0);assert.equal(app.ctValues[fieldId],'Correction');
+});
+
+test('Convo parent and child severities include all committed members and never ordinary NPC name or audio rows',async()=>{
+    const {app,intro,farewell,a,missing,names,dialogue,bye}=convoUiHarness();await app.ctSetBrowseMode('convo');await app.ctSetConvo('family',farewell.key);
+    const before=clone(app.ctUnits),parent=app.ctConvoNodeKey('parent','renly'),child=app.ctConvoNodeKey('family',intro.key),other=app.ctConvoNodeKey('family',farewell.key);
+    app.ctSearch='Hidden';app.ctApplySearch();app.ctSelectedFilters=['unchanged'];assert.equal(app.ctConvoSeverities.get(parent),'error');assert.equal(app.ctConvoSeverities.get(child),'error');assert.equal(app.ctConvoSeverities.get(other),'');
+    app.ctSaved={[missing.id]:{values:{[fieldId]:'Complete reply'},reviewed:{},revision:1}};app.ctRevision++;
+    app.ctDiagnostics={[a.id]:[{severity:'warning'}],[bye.id]:[{severity:'error'}],[names.id]:[{severity:'error'}],[dialogue.id]:[{severity:'error'}]};
+    assert.equal(app.ctConvoSeverities.get(child),'warning');assert.equal(app.ctConvoSeverities.get(other),'error');assert.equal(app.ctConvoSeverities.get(parent),'error');
+    app.ctDiagnostics={[names.id]:[{severity:'error'}],[dialogue.id]:[{severity:'error'}]};assert.equal(app.ctConvoSeverities.get(parent),'');
+    assert.equal(app.ctNpcSeverities.get('renly'),'error','ordinary NPC severity remains independently derived');assert.deepEqual(app.ctUnits,before);
+});
 
 test('NPC sidebar severity uses red before yellow and clears only after its committed work or findings resolve',()=>{
     const {app,topic,dialogue,reply,gender,una}=npcUiHarness();topic.fields[0].outdated=true;
@@ -203,7 +339,7 @@ test('Sheets and NPCs restore independent table and page scrolling without copyi
 test('late browse rendering cannot restore table or page scroll into a replacement scope or behind an overlay',async()=>{
     for(const changed of ['scope','overlay','generation']) {
         const {app,window}=npcUiHarness(),gate=deferred(),started=deferred(),region={scrollTop:8,scrollLeft:15,clientHeight:100,scrollHeight:100},scrolls=[];
-        app.$refs.ctFileTableRegion=region;window.scrollY=120;window.scrollTo=(...args)=>scrolls.push(args);
+        app.$refs.ctFileTableRegion=region;app.$refs.ctSheetList={scrollTop:60,scrollLeft:3};app.$refs.ctNpcList={scrollTop:77,scrollLeft:9};window.scrollY=120;window.scrollTo=(...args)=>scrolls.push(args);
         app.$nextTick=()=>{started.resolve();return gate.promise;};
         const switching=app.ctSetBrowseMode('npcs');await started.promise;
         const replacement={scrollTop:23,scrollLeft:42,clientHeight:100,scrollHeight:100};app.$refs.ctFileTableRegion=replacement;
@@ -211,6 +347,7 @@ test('late browse rendering cannot restore table or page scroll into a replaceme
         if(changed==='overlay')app.settingsDialogVisible=true;
         if(changed==='generation')app._ctBrowseGeneration++;
         gate.resolve();assert.equal(await switching,false,changed);assert.deepEqual([replacement.scrollTop,replacement.scrollLeft],[23,42]);
+        assert.deepEqual([app.$refs.ctNpcList.scrollTop,app.$refs.ctNpcList.scrollLeft],[77,9]);
         assert.deepEqual(scrolls,[]);assert.equal(app.ctBrowseBusy,false);
     }
 });
@@ -3202,6 +3339,15 @@ test('late shared NPC index preparation cannot replace the index or units of a n
     pending.resolve();assert.equal(await opening,false);assert.equal(app._ctNpcIndex,index);assert.equal(app.ctUnits[0],replacement);assert.notEqual(app.ctUnits,oldUnits);
     assert.equal(app.ctError,'');
 });
+test('late conversation preparation publishes neither derived index into a replacement workspace',async()=>{
+    const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app,window}=initializationHarness({_ctStore:f.store}),actual=window.ClientTextConvoIndex,started=deferred(),pending=deferred();
+    window.ClientTextConvoIndex={...actual,async buildConvoIndex(units,npcIndex,options){started.resolve();await pending.promise;return actual.buildConvoIndex(units,npcIndex,options);}};
+    const opening=app.ctActivate(scope,await f.store.getMetadata(scope));await started.promise;assert.equal(app._ctNpcIndex,null);assert.equal(app._ctConvoIndex,null);
+    app.ctFence();app.ctWorkspace={scope:{...scope,groupId:'replacement-index-scope'}};
+    const npc=app._ctNpcIndex={groups:[]},convo=app._ctConvoIndex={parents:[]};pending.resolve();
+    assert.equal(await opening,false);assert.equal(app._ctNpcIndex,npc);assert.equal(app._ctConvoIndex,convo);assert.equal(app.ctError,'');
+});
 test('a nested cached ClientText owner cannot release the shared foreground preparation gate',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app}=initializationHarness({_ctStore:f.store});
     const outer=app.beginWorkspaceInitialization({label:'Outer selected workspace',plan:['Outer preparation']});
@@ -3333,7 +3479,7 @@ test('offline test activation, drafts, save/history and exit use memory and rest
         _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(){assert.fail('Test operation must not access durable storage');}})}),{app,mixin}=h;
     app.ensureDictionarySnapshot=()=>assert.fail('Test activation must not load/sync Dictionary');
     app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
-    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);
+    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);assert.ok(app._ctConvoIndex);
     assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),false);
     for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
     await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;

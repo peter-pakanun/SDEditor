@@ -93,6 +93,7 @@
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctBrowseMode: 'sheets', ctNpcSelection: 'all', ctNpcKind: '', ctNpcFilter: '', ctBrowseBusy: false,
+            ctConvoSelection: 'all', ctConvoFilter: '', ctConvoExpanded: [], ctConvoFocusKey: '',
             ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
@@ -294,6 +295,46 @@
                 for(const unit of this.ctNpcCandidates()) {const kind=root.ClientTextNpcIndex?.kindFor(unit);if(kind in counts)counts[kind]++;}
                 return [{key:'',label:'All text',count:this.ctNpcTotal},...Object.entries(counts).map(([key,count])=>({key,label:this.ctNpcKindName(key),count}))];
             },
+            ctConvoParents() {this.ctUnits;this.ctRevision;return this._ctConvoIndex?.parents || [];},
+            ctConvoTree() {
+                this.ctRevision;
+                if(!this._ctConvoIndex?.units.length)return [];
+                const query=this.ctConvoFilter.trim().toLocaleLowerCase(),expanded=new Set(this.ctConvoExpanded),rows=[];
+                for(const parent of this.ctConvoParents){
+                    const parentMatches=!!query && [parent.label,...parent.paths,...parent.npcUnits.flatMap(unit=>{
+                        const values=this.ctValuesFor(unit);return unit.fields.filter(field=>/^(?:short )?name$/i.test(field.name)).map(field=>values[field.id]);
+                    })].some(value=>String(value ?? '').toLocaleLowerCase().includes(query));
+                    const families=query && !parentMatches ? parent.families.filter(family=>[family.stem,...family.units.map(unit=>unit.recordId)]
+                        .some(value=>String(value).toLocaleLowerCase().includes(query))) : parent.families;
+                    if(query && !parentMatches && !families.length)continue;
+                    const key=this.ctConvoNodeKey('parent',parent.key),open=!!families.length && (!!query || expanded.has(parent.key));
+                    rows.push({key,type:'parent',node:parent,level:1,expanded:open,selected:this.ctConvoSelection===key});
+                    if(open)for(const family of families){const key=this.ctConvoNodeKey('family',family.key);
+                        rows.push({key,type:'family',node:family,level:2,expanded:false,selected:this.ctConvoSelection===key});}
+                }
+                const focus=rows.some(row=>row.key===this.ctConvoFocusKey)?this.ctConvoFocusKey
+                    : rows.find(row=>row.selected)?.key || rows[0]?.key;
+                return rows.map(row=>({...row,focused:row.key===focus}));
+            },
+            ctConvoBrowseTitle() {
+                this.ctRevision;const selected=this.ctConvoSelectedNode();
+                if(!selected)return 'All conversations';
+                if(selected.type==='parent')return selected.node.label;
+                const parent=this._ctConvoIndex.parentByKey.get(selected.node.parentKey);
+                return [parent?.label,`${selected.node.label} (${selected.node.anchor})`].filter(Boolean).join(' / ');
+            },
+            ctConvoTotal() {this.ctUnits;this.ctRevision;return this.ctConvoCandidates().length;},
+            ctConvoSeverities() {
+                this.ctRevision;const severityFor=units=>{let severity='';for(const unit of units){
+                    const status=this.ctStatus(unit),issues=this.ctDiagnostics[unit.id] || [];
+                    if(status.missing || issues.some(issue=>issue.severity==='error'))return 'error';
+                    if(status.outdated || issues.some(issue=>issue.severity==='warning'))severity='warning';
+                }return severity;},severities=new Map();
+                for(const parent of this.ctConvoParents){
+                    severities.set(this.ctConvoNodeKey('parent',parent.key),severityFor(parent.units));
+                    for(const family of parent.families)severities.set(this.ctConvoNodeKey('family',family.key),severityFor(family.units));
+                }return severities;
+            },
             ctFilteredSheets() {
                 const query = this.ctSheetFilter.trim().toLowerCase();
                 return query ? this.ctSheets.filter(sheet=>sheet.name.toLowerCase().includes(query)) : this.ctSheets;
@@ -364,7 +405,7 @@
                 const query = this.ctAppliedSearch.toLocaleLowerCase();
                 return this.ctBrowseOrderedUnits().filter(unit => {
                     const fields=this.ctFieldsFor(unit);if(!fields.length)return false;
-                    if (this.ctBrowseMode!=='npcs' && this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
+                    if (this.ctBrowseMode==='sheets' && this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
@@ -539,6 +580,7 @@
             ctSearch() { clearTimeout(this._ctSearchTimer); if(!this._ctBrowseRestoring && this.ctSearch!==this.ctAppliedSearch)this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 250); },
             ctFilter() { if(!this._ctBrowseRestoring)this.ctPage = 1; }, ctSheet() { if(!this._ctBrowseRestoring)this.ctPage = 1; },
             ctSelectedFilters: {deep:true,handler() {if(!this._ctBrowseRestoring)this.ctPage=1;}},
+            ctConvoFilter() {this._ctConvoFocusRun=null;},
             inlineEditor() { this.ctFlushDraft().catch(()=>{});this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctFiltersVisible() { this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
@@ -778,8 +820,9 @@
                     : index.groupByKey.get(this.ctNpcSelection)?.units || [];
             },
             ctBrowseOrderedUnits() {
-                const ordered=this.ctOrderedUnits();if(this.ctBrowseMode!=='npcs')return ordered;
-                const candidates=this.ctNpcCandidates(),index=this._ctNpcIndex,kind=this.ctNpcKind;
+                const ordered=this.ctOrderedUnits();if(this.ctBrowseMode==='sheets')return ordered;
+                const convo=this.ctBrowseMode==='convo',candidates=convo?this.ctConvoCandidates():this.ctNpcCandidates(),
+                    index=convo?this._ctConvoIndex:this._ctNpcIndex,kind=convo?'':this.ctNpcKind;
                 let cache=this._ctBrowseCandidateCache;
                 if(!cache || cache.index!==index || cache.candidates!==candidates || cache.kind!==kind){
                     const ids=new Set(candidates.filter(unit=>!kind || root.ClientTextNpcIndex?.kindFor(unit)===kind).map(unit=>unit.id));
@@ -799,26 +842,100 @@
             },
             ctNpcSeverityLabel(group) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[this.ctNpcSeverities.get(group.key)] || '';},
             ctNpcGroupTooltip(group) {return [group.label,this.ctNpcSeverityLabel(group),`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].filter(Boolean).join('\n');},
+            ctConvoNodeKey(type,key) {return JSON.stringify([type,key]);},
+            ctConvoSelectedNode() {
+                if(this.ctConvoSelection==='all' || !this._ctConvoIndex)return null;
+                try {const [type,key]=JSON.parse(this.ctConvoSelection),node=(type==='parent'?this._ctConvoIndex.parentByKey:type==='family'?this._ctConvoIndex.familyByKey:null)?.get(key);
+                    return node?{type,node}:null;}catch(_error){return null;}
+            },
+            ctConvoCandidates() {
+                if(!this._ctConvoIndex)return [];
+                return this.ctConvoSelection==='all'?this._ctConvoIndex.units:this.ctConvoSelectedNode()?.node.units || [];
+            },
+            ctConvoSeverityLabel(node) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[
+                this.ctConvoSeverities.get(this.ctConvoNodeKey(node.stem===undefined?'parent':'family',node.key))] || '';},
+            ctConvoTooltip(node) {return [node.label,this.ctConvoSeverityLabel(node),node.stem?`ID stem: ${node.stem}`:'',
+                `${node.units.length.toLocaleString('en-US')} related records`,...(node.paths || [])].filter(Boolean).join('\n');},
+            ctConvoRelation(unit) {
+                const relation=this._ctConvoIndex?.memberships.get(unit?.id);if(!relation)return {label:'',tooltip:''};
+                const mapped=relation.parentKey!=='unassigned';
+                return {label:mapped?'ID match':'ID family',tooltip:[`ID anchor: ${relation.anchor}`,`ID stem: ${relation.familyKey}`,
+                    mapped?`Matched NPC aliases: ${(relation.aliases || []).join(', ')}`:relation.ambiguous?'Several NPC aliases match this anchor.':'No unique NPC alias matches this anchor.',
+                    'Related records are grouped by their text IDs. The anchor does not identify the speaker or conversation order.'].join('\n')};
+            },
+            ctSetConvo(type,key) {
+                if(type!=='all' && !(type==='parent'?this._ctConvoIndex?.parentByKey:type==='family'?this._ctConvoIndex?.familyByKey:null)?.has(key))return Promise.resolve(false);
+                return this.ctChangeBrowse(()=>{this.ctConvoSelection=type==='all'?'all':this.ctConvoNodeKey(type,key);this.ctPage=1;});
+            },
+            ctConvoToggle(parentKey) {
+                if(this.ctBrowseBusy || this.ctBusy || this.ctEditor || this.ctConvoFilter.trim() || this.ctKeyboardOverlayOpen() || !this._ctConvoIndex?.parentByKey.has(parentKey))return false;
+                this.ctConvoExpanded=this.ctConvoExpanded.includes(parentKey)?this.ctConvoExpanded.filter(key=>key!==parentKey):[...this.ctConvoExpanded,parentKey];
+                const parent=this.ctConvoTree.find(row=>row.type==='parent' && row.node.key===parentKey);if(parent)this.ctConvoFocus(parent);
+                return true;
+            },
+            ctConvoFocus(row) {
+                if(!row || !this.ctActive || this.ctEditor || this.ctBrowseMode!=='convo' || this.ctBrowseBusy || this.ctBusy || this.ctHistoryViewer || this.ctKeyboardOverlayOpen())return false;
+                const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0,selection=this._ctSelectRun,run=this._ctConvoFocusRun={},active=root.document?.activeElement;
+                this.ctConvoFocusKey=row.key;
+                const focus=()=>{if(this._ctConvoFocusRun!==run || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0)
+                    || this._ctSelectRun!==selection || !this.ctActive || this.ctEditor || this.ctBrowseMode!=='convo' || this.ctBrowseBusy || this.ctBusy || this.ctHistoryViewer
+                    || this.ctKeyboardOverlayOpen() || !this.ctConvoTree.some(candidate=>candidate.key===row.key))return false;
+                    const element=[...(this.$refs?.ctConvoTree?.querySelectorAll?.('[data-convo-key]') || [])].find(element=>element.dataset.convoKey===row.key);
+                    if(!element || element.isConnected===false)return false;element.focus?.({preventScroll:true});element.scrollIntoView?.({block:'nearest'});return true;};
+                if(focus())return true;
+                this.$nextTick?.(()=>{const next=root.document?.activeElement;
+                    if(next && next!==active && next!==root.document?.body && next!==root.document?.documentElement)return;
+                    focus();});return true;
+            },
+            ctConvoTreeKeydown(event) {
+                if(event.defaultPrevented || event.isComposing || event.keyCode===229 || event.altKey || event.ctrlKey || event.metaKey || this.ctBrowseBusy || this.ctBusy
+                    || !this.ctActive || this.ctEditor || this.ctHistoryViewer || this.ctKeyboardOverlayOpen() || this.ctBrowseMode!=='convo')return false;
+                const rows=this.ctConvoTree,target=event.target?.closest?.('[data-convo-key]'),index=rows.findIndex(row=>row.key===(target?.dataset.convoKey || this.ctConvoFocusKey)),
+                    row=rows[index<0?rows.findIndex(row=>row.focused):index];if(!row)return false;
+                let next=null;
+                if(event.key==='Enter' || event.key===' '){if(event.target?.closest?.('button'))return false;event.preventDefault();return this.ctSetConvo(row.type,row.node.key);}
+                if(event.key==='ArrowDown')next=rows[Math.min(rows.length-1,rows.indexOf(row)+1)];
+                else if(event.key==='ArrowUp')next=rows[Math.max(0,rows.indexOf(row)-1)];
+                else if(event.key==='Home')next=rows[0];else if(event.key==='End')next=rows[rows.length-1];
+                else if(event.key==='ArrowRight'){
+                    if(row.type==='parent' && row.node.families.length){if(!row.expanded)this.ctConvoToggle(row.node.key);else next=rows[rows.indexOf(row)+1];}
+                } else if(event.key==='ArrowLeft'){
+                    if(row.type==='parent' && row.expanded){if(!this.ctConvoFilter.trim())this.ctConvoToggle(row.node.key);}
+                    else if(row.type==='family')next=rows.find(candidate=>candidate.type==='parent' && candidate.node.key===row.node.parentKey);
+                } else if(event.key.length===1 && event.key.trim()){
+                    const now=Date.now(),previous=this._ctConvoTypeAhead,character=event.key.toLocaleLowerCase(),text=previous && now-previous.time<700?previous.text+character:character;
+                    this._ctConvoTypeAhead={text,time:now};const start=rows.indexOf(row),find=needle=>Array.from({length:rows.length},(_,offset)=>rows[(start+offset+1)%rows.length])
+                        .find(candidate=>candidate.node.label.toLocaleLowerCase().startsWith(needle));
+                    next=find(text) || find(character);
+                }else return false;
+                event.preventDefault();if(next)this.ctConvoFocus(next);return true;
+            },
             ctBrowseSnapshot() {
                 return Object.fromEntries(['ctSheet','ctSheetFilter','ctSearch','ctAppliedSearch','ctFilter','ctSelectedFilters','ctSort','ctSortDir','ctPage',
-                    'ctNpcSelection','ctNpcKind','ctNpcFilter'].map(key=>[key,key==='ctSelectedFilters'?this[key].slice():this[key]]));
+                    'ctNpcSelection','ctNpcKind','ctNpcFilter','ctConvoSelection','ctConvoFilter','ctConvoExpanded','ctConvoFocusKey']
+                    .map(key=>[key,['ctSelectedFilters','ctConvoExpanded'].includes(key)?this[key].slice():this[key]]));
             },
             ctCaptureBrowseScroll() {
                 const region=this.$refs?.ctFileTableRegion,scroll={top:Number(region?.scrollTop) || 0,left:Number(region?.scrollLeft) || 0};
+                const navigation=this.ctBrowseNavigation();if(navigation)scroll.navigation={top:Number(navigation.scrollTop) || 0,left:Number(navigation.scrollLeft) || 0};
                 // The table has horizontal overflow without a fixed height;
                 // ordinary vertical scrolling belongs to the page.
                 if(!(region?.scrollHeight>region?.clientHeight+1))scroll.windowTop=Number(root.scrollY) || 0;
                 return scroll;
             },
             ctBrowseViewSnapshot() {return {state:this.ctBrowseSnapshot(),scroll:this.ctCaptureBrowseScroll()};},
+            ctBrowseNavigation() {return this.$refs?.[{sheets:'ctSheetList',npcs:'ctNpcList',convo:'ctConvoList'}[this.ctBrowseMode]];},
             ctRestoreBrowseScroll(scroll) {
                 if(!scroll)return;
                 const region=this.$refs?.ctFileTableRegion;
                 if(region){region.scrollTop=scroll.top;region.scrollLeft=scroll.left;}
+                const navigation=this.ctBrowseNavigation();if(navigation && scroll.navigation){navigation.scrollTop=scroll.navigation.top;navigation.scrollLeft=scroll.navigation.left;}
                 if(Number.isFinite(scroll.windowTop))root.scrollTo?.(Number(root.scrollX) || 0,scroll.windowTop);
             },
             ctDefaultNpcView() {return {ctSearch:'',ctAppliedSearch:'',ctFilter:'',ctSelectedFilters:statusFilters.map(item=>item.key),ctSort:'row',ctSortDir:'asc',ctPage:1,
                 ctNpcSelection:'all',ctNpcKind:'',ctNpcFilter:''};},
+            ctDefaultConvoView() {return {ctSearch:'',ctAppliedSearch:'',ctFilter:'',ctSelectedFilters:statusFilters.map(item=>item.key),ctSort:'row',ctSortDir:'asc',ctPage:1,
+                ctConvoSelection:'all',ctConvoFilter:'',ctConvoExpanded:[],ctConvoFocusKey:''};},
             async ctChangeBrowse(change) {
                 if(this.ctBusy || this.ctBrowseBusy || !this.ctActive || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
                 const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0,unit=this.ctCurrentUnit,selection=this._ctSelectRun,
@@ -845,11 +962,11 @@
                 }}
             },
             ctSetBrowseMode(mode) {
-                if(!['sheets','npcs'].includes(mode))return Promise.resolve(false);
+                if(!['sheets','npcs','convo'].includes(mode))return Promise.resolve(false);
                 if(mode===this.ctBrowseMode)return Promise.resolve(true);
                 return this.ctChangeBrowse(()=>{
                     const views=this._ctBrowseViews ||= {};views[this.ctBrowseMode]=this.ctBrowseViewSnapshot();
-                    const view=views[mode] || {state:mode==='npcs'?this.ctDefaultNpcView():{},scroll:{top:0,left:0,windowTop:0}};
+                    const view=views[mode] || {state:mode==='npcs'?this.ctDefaultNpcView():mode==='convo'?this.ctDefaultConvoView():{},scroll:{top:0,left:0,windowTop:0,navigation:{top:0,left:0}}};
                     this.ctBrowseMode=mode;Object.assign(this,view.state);return view.scroll;
                 });
             },
@@ -902,7 +1019,7 @@
             },
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
             ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
-            ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=this.ctBrowseMode==='npcs'?statusFilters.map(item=>item.key):defaultFilters();this.ctSearch='';this.ctApplySearch();},
+            ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=this.ctBrowseMode!=='sheets'?statusFilters.map(item=>item.key):defaultFilters();this.ctSearch='';this.ctApplySearch();},
             ctFilterByStatus(status,event) {
                 const current=this.ctFilter ? [this.ctFilter] : this.ctSelectedFilters;
                 this.ctFilter='';
@@ -1114,8 +1231,10 @@
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
                 this._ctNpcIndex=null;this._ctBrowseCandidateCache=null;this._ctBrowseViews=null;this._ctBrowseGeneration=(this._ctBrowseGeneration || 0)+1;
+                this._ctConvoIndex=null;this._ctConvoFocusRun=null;this._ctConvoTypeAhead=null;
                 this._ctBrowseTransitionRun=null;this._ctBrowseRestoring=false;this.ctBrowseBusy=false;
                 this.ctBrowseMode='sheets';this.ctNpcSelection='all';this.ctNpcKind='';this.ctNpcFilter='';
+                this.ctConvoSelection='all';this.ctConvoFilter='';this.ctConvoExpanded=[];this.ctConvoFocusKey='';
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
                 this.ctPreviewGggVars={};this.ctPreviewAffixes=previewAffixesFor(null);this.ctFocusedField='';
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
@@ -1402,7 +1521,8 @@
                         const index=await root.ContentAdapters.clienttext.contextReferenceIndex(units,{guard:current});check();
                         this._ctReferenceIndexCache={units:this.ctUnits,workspace:this.ctWorkspace,index};
                         const npcIndex=await root.ClientTextNpcIndex.buildNpcIndex(units,{guard:current,signal});check();
-                        this._ctNpcIndex=raw(npcIndex);this.ctRevision++;
+                        const convoIndex=await root.ClientTextConvoIndex.buildConvoIndex(units,npcIndex,{guard:current,signal});check();
+                        this._ctNpcIndex=raw(npcIndex);this._ctConvoIndex=raw(convoIndex);this.ctRevision++;
                     },initialization);
                     await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();if(!test){await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();}},initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{

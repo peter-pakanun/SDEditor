@@ -113,6 +113,16 @@ Menu topics use exact NPC metadata links. Dialogue marked **ID match** has a mat
 
 This browsing view is also available in **Test Sheet Offline**. That session's existing temporary-save notice still applies; downloading workbooks preserves its saved translations.
 
+### Conversation browsing
+
+The **Convo** tab groups records from **NPCTalkDialogueTextAudio** and its **Gender** counterpart into conversation families. **All conversations** opens the complete worklist. Click an NPC name to show all its conversations, or use its chevron to expand the tree and select a family. **Filter conversations** searches English and translated NPC names, metadata paths, family prefixes and full record IDs. Unmatched or ambiguous NPC prefixes appear first under **Unassigned NPC**, with their full family prefix retained.
+
+Each family keeps its context: **Intro** with **DoryaniA4** includes all `DoryaniA4_Intro_A`, `…_B`, `…_C` and their variants, while other Doryani contexts remain separate. Numbered turns such as `A1`, `A1a` and `A1b`, conditional endings and recognized class qualifiers before a turn can share a family. Earlier namespaces remain intact, so `Doryani_Inc_Intro_A1` appears as **Inc_Intro**. IDs without a recognized turn remain under their complete ID rather than a guessed topic.
+
+Parents and families show distinct-record counts and the highest severity across their conversation records: red **Missing/Error**, then yellow **Outdated/Warning**, then normal. Hidden records still contribute. Convo starts with all statuses selected and worksheet-row order; normal table sorting remains available. Its filters, sorting, page, tree expansion and scroll are kept separately from Sheets and NPCs for the active session. The shared inline/full editors, draft checkpoints, saves, comments, history and assistance continue to use the original workbook records.
+
+Arrow keys move tree focus without changing the worklist. Right expands a parent or enters its children; Left collapses it or returns to its parent; Home/End move to the first/last visible node. Enter or Space opens the focused parent or family. **ID match** identifies a matched NPC prefix, and **ID family** identifies an unassigned family; their tooltips show the ID evidence. The tree groups browsing context and retains original row order. It does not identify speakers or determine branches or playback order. Test Sheet Offline retains its temporary-save notice.
+
 ### Finding Files and Navigating Pages
 
 The main action header stays visible while you scroll, with controls for exporting, importing, diagnostic scans, a Settings cog, and a right-sidebar icon for file tools. Search the file list by name, English source, or translation using the search field in this sticky navigation bar. Results update after typing pauses for 250 ms; press **Enter** to apply the search immediately. Clearing the field or pressing **Esc** restores the list immediately, keeping the selected status filters.
