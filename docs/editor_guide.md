@@ -101,6 +101,16 @@ An inherited record offers **Compare previous version**. This explicitly verifie
 
 Cell text remains raw: `@`, actual line breaks and literal `\n` have different meanings. Completion and diagnostics recognize bracket links, numeric substitutions and `<<…>>` icons/keybinds, while brace contents after formatting tags remain localizable. The exact audio metadata markers `[NOAUDIO]`, `[NO AUDIO]`, `[OLD AUDIO]` and `[AUDIOTEST]` are optional in translations and omitted from completion suggestions. Adding, removing or replacing one of these prefixes alone does not require source review when the original dialogue is verified; repeated markers or other text changes remain significant. ClientText TM learns valid text/form saves and accepted shared work into this browser's language/game projection, matched by field/form context; Gender metadata, sentinel/blank values and unreviewed or conflicted work do not teach it. Double-click a ClientText TM match or choose **Use translation** to insert its text into the focused target field as a draft. This projection is separate from cloud StatDescription TM.
 
+### NPC browsing
+
+In ClientText, switch from **Sheets** to **NPCs** to read and edit related text across worksheets. **Filter NPCs** searches English names, selected-language names and metadata paths. Choose an NPC, **All NPC text**, or **Unassigned dialogue**, then use **Names**, **Menu topics**, **Dialogue** and **Conversations** to narrow the worklist. Counts show distinct records; workspace progress still covers the complete workspace.
+
+NPC browsing starts with all statuses selected, including **Unchanged**. Sheets and NPCs keep separate search, status filters, sorting, pagination and navigation scroll during the current workspace session. Every row retains its original workbook role, sheet and row number. Inline and full editors use the same save, history and keyboard behavior in either view.
+
+Menu topics use exact NPC metadata links. Dialogue marked **ID match** has a matching NPC name or metadata alias in its record ID; hover or focus the label to see the match. It identifies related text, not a verified speaker or playback order. Ambiguous aliases stay under **Unassigned dialogue** and **All NPC text**. A conversation reply may belong to another character, and one record can be related to several NPCs. Names, grammatical forms and records with the same ID on different sheets remain separate editing records.
+
+This browsing view is also available in **Test Sheet Offline**. That session's existing temporary-save notice still applies; downloading workbooks preserves its saved translations.
+
 ### Finding Files and Navigating Pages
 
 The main action header stays visible while you scroll, with controls for exporting, importing, diagnostic scans, a Settings cog, and a right-sidebar icon for file tools. Search the file list by name, English source, or translation using the search field in this sticky navigation bar. Results update after typing pauses for 250 ms; press **Enter** to apply the search immediately. Clearing the field or pressing **Esc** restores the list immediately, keeping the selected status filters.

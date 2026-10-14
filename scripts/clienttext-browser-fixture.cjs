@@ -266,7 +266,7 @@ async function run() {
             await thaiRow.getByRole('button', { name: 'Open editor', exact: true }).click();
             await workspace.waitFor();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy && !window.__clientFixtureApp.workspaceInitializationActive);
-            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'Normal', exact: true }).click();
+            await workspace.getByRole('navigation', { name: 'Workbook navigation' }).getByRole('button', { name: 'Normal', exact: true }).click();
             await workspace.getByRole('button', { name: 'record', exact: true }).click();
             await workspace.getByRole('textbox', { name: 'Name', exact: true }).fill('Manager Thai translation');
             await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
@@ -541,7 +541,7 @@ async function run() {
             const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
             const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
             await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
-            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'NPCTextAudio_Gender', exact: true }).click();
+            await workspace.getByRole('navigation', { name: 'Workbook navigation' }).getByRole('button', { name: 'NPCTextAudio_Gender', exact: true }).click();
             const id = record => JSON.stringify(['gender','NPCTextAudio_Gender',record]), fieldId = form => JSON.stringify(['Text',form]);
             const target = form => workspace.getByRole('textbox', { name: 'Text ' + form, exact: true });
             const picker = () => workspace.getByRole('combobox', { name: 'All worksheet class variants', exact: true });
@@ -748,7 +748,7 @@ async function run() {
             const workspace = page.getByRole('region', { name: 'ClientText workspace' }); await workspace.waitFor();
             const filters = workspace.getByRole('button', { name: 'Filters', exact: true }); await filters.click();
             await workspace.locator('.fileFilters').getByRole('button', { name: 'Select all', exact: true }).click(); await filters.click();
-            await workspace.getByRole('navigation', { name: 'Workbook sheets' }).getByRole('button', { name: 'Normal', exact: true }).click();
+            await workspace.getByRole('navigation', { name: 'Workbook navigation' }).getByRole('button', { name: 'Normal', exact: true }).click();
             const fieldId = JSON.stringify(['Gender', null]), nameId = JSON.stringify(['Name', null]), unitId = id => JSON.stringify(['normal', 'Normal', id]);
             const control = () => workspace.locator('[data-ct-target][aria-label="Gender"]');
             const choose = async id => {
@@ -912,7 +912,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'Original French workbooks store locally');
             const storeMs = Date.now() - started - prepareMs;
             await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'French')));
-            const captureWorkspace = page.getByRole('region', { name: 'ClientText workspace' }), sheetNavigation = captureWorkspace.getByRole('navigation', { name: 'Workbook sheets' });
+            const captureWorkspace = page.getByRole('region', { name: 'ClientText workspace' }), sheetNavigation = captureWorkspace.getByRole('navigation', { name: 'Workbook navigation' });
             await captureWorkspace.waitFor(); await page.waitForFunction(() => !window.__clientFixtureApp.ctBusy, null, { timeout: 180000 });
             assert.equal(await captureWorkspace.getByRole('combobox', { name: 'Content group', exact: true }).count(), 0, 'Production capture uses the Versions assignment workflow without a header selector');
             const candidates = await page.evaluate(() => {
@@ -1047,6 +1047,8 @@ async function run() {
                             vm.ctReport({ phase: completed % 2 ? 'Validating' : 'Preparing', workbook: 'French_Gender_PoE2.xlsm',
                                 sheet: completed ? 'A very long worksheet label with repeated descriptive names '.repeat(5) : 'Normal', completed, total: 1000000 });
                             await vm.$nextTick();
+                            await document.fonts.ready;
+                            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
                         }, completed);
                         const progress = upload.locator('.ctProgress'); await progress.scrollIntoViewIfNeeded();
                         const bounds = await progress.evaluate(element => {
@@ -1103,7 +1105,7 @@ async function run() {
             if (allStatuses) await showAllClientStatuses();
         };
         await openCached({ allStatuses: dictionaryOnly });
-        const workspace = page.getByRole('region', { name: 'ClientText workspace' }), navigation = workspace.getByRole('navigation', { name: 'Workbook sheets' });
+        const workspace = page.getByRole('region', { name: 'ClientText workspace' }), navigation = workspace.getByRole('navigation', { name: 'Workbook navigation' });
         await navigation.getByRole('button', { name: 'All sheets', exact: true }).click();
         const clientChrome = new Map();
         const visibilityFields = { Name: ' \tVisible English\nline \t', Description: '', Unused: ' \t\n' };
@@ -1418,9 +1420,11 @@ async function run() {
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return vm.ctInlineClosed && !vm.ctEditor && document.activeElement?.dataset.unitId === vm.ctSelection; });
             assert.equal(await workspace.locator('[data-ct-target]').count(), 0, 'Inline Escape closes translation controls and returns focus to the exact file row');
             const reopenedRow = workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'complete', exact: true }) });
-            await reopenedRow.click(); await waitTarget('complete', false, fieldKey('Description'));
+            await reopenedRow.click(); await waitTarget('complete', false, fieldKey('Name'));
             assert.equal(await description.inputValue(),handoffDraft,'Reopening an escaped inline row preserves its exact private draft');
-            await workspace.getByRole('button', { name: 'Discard draft', exact: true }).click();
+            assert.equal(await workspace.getByRole('button', { name: 'Discard draft', exact: true }).count(), 0, 'Ordinary drafts do not expose the blocked-draft action');
+            // Clear this isolated fixture's private draft before unrelated history checks.
+            assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctDiscardDraft()), true);
             await page.waitForFunction(() => !window.__clientFixtureApp.ctDraftDirty);
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.inlineEditor = false; vm.ctNotice = ''; await vm.$nextTick(); });
             await navigation.getByRole('button', { name: 'Normal', exact: true }).click();
@@ -1682,7 +1686,7 @@ async function run() {
             await memoryMatch.click();
             assert.equal(await name.inputValue(), 'A private ' + editorMode + ' draft', 'One click does not insert a ClientText memory');
             await memoryMatch.dblclick();
-            await page.locator('.appDialog[open]').getByRole('button',{name:'Replace draft',exact:true}).click();
+            await page.locator('.appDialog[open]').getByRole('button',{name:'Replace translation',exact:true}).click();
             assert.equal(await name.inputValue(), 'Épée', editorMode + ': a TM match double-click inserts into the focused Name field');
             assert.deepEqual(await page.evaluate(() => {
                 const vm = window.__clientFixtureApp;
@@ -1737,8 +1741,8 @@ async function run() {
         await inlinePreview.getByRole('textbox', { name: 'Variable {0}', exact: true }).fill('42');
         assert.deepEqual(await inlinePreview.locator('.gamePreviewVarValue').allTextContents(), ['84', '42']);
         await page.screenshot({ path: join(directory, 'clienttext-inline-game-preview.png'), fullPage: true });
-        await workspace.getByRole('button', { name: 'complete', exact: true }).click();
-        await page.waitForFunction(() => window.__clientFixtureApp.ctEditor);
+        await workspace.getByRole('textbox', { name: 'Description', exact: true }).press('Control+Enter');
+        await page.waitForFunction(() => window.__clientFixtureApp.ctEditor && window.__clientFixtureApp.ctFocusedField === JSON.stringify(['Description', null]));
         assert.equal(await fullPreview.getByRole('textbox', { name: 'Variable {0:+d}', exact: true }).inputValue(), '84', 'Same-field inline/full handoff preserves preview variables');
         const afterPreview = await page.evaluate(async () => { const vm = window.__clientFixtureApp; return { values: JSON.stringify(vm.ctValues), saved: JSON.stringify(await vm._ctStore.getSaved(vm.ctWorkspace.scope)) }; });
         assert.deepEqual(afterPreview, beforePreview, 'Preview and {} inputs never change raw targets or committed translation work');
@@ -1760,6 +1764,7 @@ async function run() {
         await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
         await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor && !window.__clientFixtureApp.ctBusy);
         await navigation.getByRole('button', { name: 'Second', exact: true }).click();
+        await workspace.getByRole('button', { name: 'second', exact: true }).waitFor();
         assert.equal(await workspace.getByRole('button', { name: 'second', exact: true }).count(), 1);
         await navigation.getByRole('button', { name: 'All sheets', exact: true }).click();
         await workspace.getByRole('searchbox', { name: 'Search ClientText' }).fill('Developer instruction');

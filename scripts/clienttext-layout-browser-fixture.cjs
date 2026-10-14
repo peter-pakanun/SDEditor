@@ -1,10 +1,9 @@
 // Disposable loopback UI fixture using current ClientText templates/components and CSS.
 // It avoids API, IndexedDB, workbook imports and application lifecycle hooks.
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync } = require('node:fs');
 const { join } = require('node:path');
 const { createServer } = require('node:http');
-const { tmpdir } = require('node:os');
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 
@@ -17,6 +16,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 if (!executablePath) throw new Error('Set FIXTURE_BROWSER_PATH to an installed Edge/Chrome; no browser download is needed.');
 
 const publicDir = join(__dirname, '../public');
+const fixtureArtifacts = join(__dirname, '../temp/clienttext-layout-fixture');
 const html = readFileSync(join(publicDir, 'index.html'), 'utf8');
 const indexJs = readFileSync(join(publicDir, 'index.js'), 'utf8');
 const stylesheets = [...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)]
@@ -30,11 +30,13 @@ function between(source, start, end) {
 const navigation = between(html, '<nav class="ctNavigation"', '</nav>') + '</nav>';
 const workspaceShell = between(html, '<editor-workspace-shell ', '>') + '>';
 const table = between(html, '<table class="display compact cell-border fileTable ctTable"', '</table>') + '</table>';
+const npcHeading = between(html, '<section v-if="ctBrowseMode===\'npcs\'" class="ctNpcHeading"', '</section>') + '</section>';
 const fullEditor = between(html, '<editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor', '</editor-full-shell>') + '</editor-full-shell>';
 const tooltipComponent = between(indexJs, 'const AppTooltip = {', 'function escapeTooltipAttr');
 const tooltipMethods = between(indexJs, '    normalizeTooltipText(value) {', '    htmlTooltipMouseMove(e) {');
 const tooltipDirective = between(indexJs, "app.directive('tooltip', {", "app.mount('#app');");
 const longSheet = 'A very long ClientText sheet name that must remain readable through the tooltip without widening the sheet navigation';
+const longNpc = 'An exceptionally long NPC name that stays readable in its tooltip while the navigation panel retains its desktop width';
 const sheetData = [
     ['normal', longSheet], ['normal', 'QuestDialogues'], ['normal', 'ItemNames'],
     ['gender', longSheet], ['gender', 'ItemNames'],
@@ -90,11 +92,14 @@ const app = Vue.createApp({
         gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,hideEditorClipboard:true,
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
-    computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount']
+    computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount',
+        'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions']
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
     methods:{...ct.methods,scheduleInlineAlignment:window.InlineEditor.mixin.methods.scheduleInlineAlignment,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
         async ctFlushDraft(){return true;},async ctFlushCommentDraft(){},
+        ctStorage(){return {getDraft:async()=>null};},ctLoadHistory(){},ctLoadCommentDraft(){},ctRefreshDraftSummaries(){},
+        ctPresence(){},scheduleClientTextDictionaryMatches(){},
         ctStartClassVariantFixture(){
             this.ctEditor=false;this.ctUnits=Vue.markRaw([classUnit,...characterUnits]);
             this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));
@@ -107,6 +112,27 @@ const app = Vue.createApp({
             this.ctValues=Object.fromEntries(namedFormUnit.fields.map(field=>[field.id,field.target]));this.ctReviewed={};this.ctDraftDirty=false;
             this.ctVariantSelections={};this.ctFocusedField=namedFormUnit.fields[0].id;this.lang='Turkish';this.ctWorkspace.scope.language='Turkish';
             this._ctInlineReturn=null;this.ctCloseCompletion();
+        },
+        async ctStartNpcFixture(){
+            const text=(id,sheet,recordId,source,row=2)=>({id,role:'normal',sheet,recordId,notes:[],metadata:{},
+                fields:[{id:'npc-text',name:sheet==='NPCs'?'Name':'Text',kind:'text',source,target:'Localized '+source,
+                    sourceCell:'B'+row,targetCell:'C'+row,required:true,originalMissing:false,outdated:false}]});
+            const npcUnits=[text('npc-renly','NPCs','Metadata/NPC/Renly','Renly'),text('npc-una','NPCs','Metadata/NPC/Una','Una',3),
+                text('npc-long','NPCs','Metadata/NPC/LongResident',${JSON.stringify(longNpc)},4),
+                ...Array.from({length:65},(_,index)=>text('npc-resident-'+index,'NPCs','Metadata/NPC/TownResident'+index,'Town Resident '+String(index).padStart(3,'0'),index+5)),
+                text('npc-renly-topic','NPCTalk','Metadata/NPC/Renly::0','A menu topic concerning Renly'),
+                text('npc-renly-audio','NPCTextAudio','RenlyLayoutIntro','Renly welcomes an adventurer.'),
+                text('npc-renly-conversation','NPCTalkDialogueTextAudio','RenlyLayoutReply','A player reply addressing Renly.'),
+                text('npc-unassigned-audio','NPCTextAudio','UnarmedLayoutIntro','Unrelated to Una.')];
+            const index=await window.ClientTextNpcIndex.buildNpcIndex(npcUnits,{yield:()=>new Promise(resolve=>setTimeout(resolve,0))});
+            this.ctEditor=false;this.ctInlineClosed=false;this._ctNpcIndex=Vue.markRaw(index);this.ctUnits=Vue.markRaw(npcUnits);this.ctRevision++;
+            this._ctUnitIndex=Vue.markRaw(new Map(npcUnits.map(unit=>[unit.id,unit])));
+            this._ctSheets=Vue.markRaw([...new Set(npcUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
+            this.ctBrowseMode='sheets';this.ctNpcSelection='all';this.ctNpcKind='';this.ctNpcFilter='';this.ctSheet=JSON.stringify(['normal','NPCs']);
+            this.ctSheetFilter='';this.ctSearch='';this.ctAppliedSearch='';this.ctFilter='';this.ctSelectedFilters=['unchanged'];this.ctPage=2;
+            this.ctSaved=Vue.markRaw({});this.ctSelection='npc-renly';this.ctValues={'npc-text':'Localized Renly'};this.ctReviewed={};this.ctDraftDirty=false;
+            this.ctVariantSelections={};this.ctFocusedField='npc-text';this.lang='Thai';this.ctWorkspace.scope.language='Thai';
+            this._ctInlineReturn=null;this._ctBrowseViews=null;this._ctBrowseCandidateCache=null;this._ctOrderCache=null;this._ctSelectRun={};this.ctCloseCompletion();
         },
     },
     created(){this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));this._ctSheets=Vue.markRaw(sheets);},
@@ -128,15 +154,16 @@ window.__ctLayoutFixture=app.mount('#app');
 })().catch(error=>{console.error(error);window.__ctLayoutFixtureError=String(error);});`;
 
 async function run() {
+    mkdirSync(fixtureArtifacts, { recursive: true });
     const frontend = express(), server = createServer(frontend);
     frontend.get('/', (req, res) => res.type('html').send(`<!doctype html><html data-theme="dark"><head>
         <meta charset="utf-8">${stylesheets}</head><body><div id="app"><div class="appRoot" data-density="compact">
         <section class="ctWorkspace" aria-label="ClientText workspace">
         ${workspaceShell}<template #content>
-        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList"><div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
+        <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList">${npcHeading}<div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
-        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -152,7 +179,7 @@ async function run() {
         await page.waitForFunction(() => !!window.__ctLayoutFixture || !!window.__ctLayoutFixtureError);
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixtureError),undefined,'Fixture preparation succeeds');
         const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        const nav = page.getByRole('navigation', {name:'Workbook sheets'});
+        const nav = page.getByRole('navigation', {name:'Workbook navigation'});
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
         const rowHeader = page.getByRole('columnheader', {name:'Row number'});
@@ -168,14 +195,14 @@ async function run() {
             return {sheet:host.ctSheet,selection:host.ctSelection,search:host.ctSearch,applied:host.ctAppliedSearch};
         }), {sheet:sheetData[0].key,selection:'layout-record',search:'Main search retained',applied:''}, 'Sheet filtering preserves the selected sheet, record and main search');
         await filter.fill('  ITEMnames  ');
-        assert.deepEqual(await nav.locator('h3').allTextContents(), ['Normal','Gender']);
+        assert.deepEqual(await nav.locator('h3:visible').allTextContents(), ['Normal','Gender']);
         assert.equal(await nav.getByRole('button', {name:'ItemNames',exact:true}).count(), 2);
         assert.equal(await nav.getByRole('button').count(), 3);
         await assertPreserved();
         await filter.fill('no such sheet');
         assert.equal(await nav.getByRole('status').textContent(), 'No sheets match.');
         assert.equal(await nav.getByRole('button', {name:'All sheets',exact:true}).count(), 1);
-        assert.equal(await nav.locator('h3').count(), 0);
+        assert.equal(await nav.locator('h3:visible').count(), 0);
         await assertPreserved();
         await filter.press('Escape');
         assert.equal(await filter.inputValue(), '');
@@ -330,7 +357,7 @@ async function run() {
             if(width===1100)await checkContextInteraction(theme+'/'+width+' inline');
             if(theme==='modern-dark' && width===1100) {
                 await longButton.hover();await tooltip.waitFor();await settle();
-                const path=join(tmpdir(),'sdeditor-clienttext-inline-'+randomUUID()+'.png');
+                const path=join(fixtureArtifacts,'sdeditor-clienttext-inline-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
                 await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});
             }
@@ -366,7 +393,7 @@ async function run() {
             assert.deepEqual(retained,{nav:true,list:true,filter:true,button:true,top:scrollBefore.top},theme+'/'+width+': returning preserves original Sheets DOM and scroll');
             await page.locator('.ctID').first().click();await page.locator('.ctFullEditor').waitFor();
             await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Close',exact:true}).click();await settle();
-            assert.equal(await page.locator('.ctSheetList').evaluate(element=>element.scrollTop),scrollBefore.top,theme+'/'+width+': pointer open and Close retain Sheets scroll');
+            assert.equal(await page.locator('#ctSheetsPanel .ctSheetList').evaluate(element=>element.scrollTop),scrollBefore.top,theme+'/'+width+': pointer open and Close retain Sheets scroll');
             await assertPreserved();
             results.push({name:theme+'/'+width+' Sheets DOM, fixed filter, scroll and keyboard focus retention',scrollTop:retained.top});
             await page.locator('.ctID').first().click();await page.locator('.ctFullEditor').waitFor();await page.mouse.move(1,1);await tooltip.waitFor({state:'detached'});await settle();
@@ -396,7 +423,7 @@ async function run() {
             assert.equal(gutter.padding,gutter.shellPadding,theme+'/'+width+': full editor keeps the shared shell gutter');
             assert.equal(gutter.margin,'0px',theme+'/'+width+': full editor has no left margin');
             if(theme==='modern-dark' && width===1440) {
-                const path=join(tmpdir(),'sdeditor-clienttext-full-'+randomUUID()+'.png');
+                const path=join(fixtureArtifacts,'sdeditor-clienttext-full-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
             }
         }
@@ -439,7 +466,7 @@ async function run() {
             assert.equal(await page.locator('[data-ct-target="class-IntFourb"]').inputValue(),'',name+': mapped blank Missing variant remains selectable');
             results.push({name:name+' default/disabled display, immutable values, exact IDs, caret and keyboard selection'});
             if(theme==='modern-dark' && full){
-                const path=join(tmpdir(),'sdeditor-clienttext-class-mapping-'+randomUUID()+'.png');
+                const path=join(fixtureArtifacts,'sdeditor-clienttext-class-mapping-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
             }
         }
@@ -484,11 +511,62 @@ async function run() {
             }
             results.push({name:name+' blank optional validation, independent fields, shared English, worksheet keyboard order and exact full/inline handoff'});
         }
+        for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){
+            await page.setViewportSize({width,height:900});
+            await page.evaluate(async theme=>{document.documentElement.dataset.theme=theme;await window.__ctLayoutFixture.ctStartNpcFixture();},theme);
+            await settle();const name=theme+'/'+width+' NPC browsing',tabs=page.getByRole('tablist',{name:'Browse workbooks'}),
+                sheetsTab=tabs.getByRole('tab',{name:'Sheets',exact:true}),npcTab=tabs.getByRole('tab',{name:'NPCs',exact:true});
+            assert.equal(await sheetsTab.getAttribute('aria-selected'),'true',name+': Sheets is the default');
+            await sheetsTab.focus();await sheetsTab.press('ArrowRight');await settle();
+            assert.equal(await npcTab.evaluate(element=>element===document.activeElement),true,name+': ArrowRight moves tab focus');
+            await npcTab.press('Space');await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='npcs' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            const npcFilter=page.getByRole('searchbox',{name:'Filter NPCs',exact:true});
+            assert.ok(await page.evaluate(()=>window.__ctLayoutFixture.ctSelectedFilters.includes('unchanged')),name+': NPC view includes Unchanged');
+            const heading=page.getByRole('region',{name:'NPC text'});
+            assert.equal(await heading.getByRole('heading',{level:2}).textContent(),'All NPC text',name+': production heading');
+            const longNpcButton=nav.getByRole('button',{name:longNpc,exact:true}),longNpcLabel=longNpcButton.locator('.ctNpcName');
+            const clipped=await longNpcLabel.evaluate(element=>({client:element.clientWidth,scroll:element.scrollWidth,
+                overflow:getComputedStyle(element).overflow,textOverflow:getComputedStyle(element).textOverflow,whiteSpace:getComputedStyle(element).whiteSpace}));
+            assert.equal(clipped.overflow,'hidden');assert.equal(clipped.textOverflow,'ellipsis');assert.equal(clipped.whiteSpace,'nowrap');
+            assert.ok(clipped.scroll>clipped.client,name+': long name truncates inside navigation');
+            const geometry=await nav.evaluate(element=>({left:element.getBoundingClientRect().left,right:element.getBoundingClientRect().right,
+                width:innerWidth,document:document.documentElement.scrollWidth,
+                controls:[...element.querySelectorAll('button,input')].filter(control=>control.getClientRects().length && getComputedStyle(control).visibility!=='hidden')
+                    .map(control=>({left:control.getBoundingClientRect().left,right:control.getBoundingClientRect().right}))}));
+            assert.ok(geometry.left>=-1 && geometry.right<=width+1 && geometry.document<=width+1,name+': panel and page fit desktop width');
+            assert.ok(geometry.controls.every(control=>control.left>=-1 && control.right<=width+1),name+': all navigation controls fit');
+            await npcFilter.fill('RENLY');
+            assert.equal(await nav.locator('.ctNpcButton:visible').count(),1,name+': NPC filter ignores case');
+            await nav.getByRole('button',{name:'Renly',exact:true}).click();await page.waitForFunction(()=>!window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.deepEqual(await page.evaluate(()=>window.__ctLayoutFixture.ctRows.map(unit=>unit.sheet).sort()),['NPCTextAudio','NPCs','NPCTalk','NPCTalkDialogueTextAudio'].sort(),name+': one worklist spans all four sheets');
+            await npcFilter.press('Escape');await settle();
+            const list=nav.locator('.ctNpcList'),scrollBefore=await list.evaluate(element=>{element.scrollTop=413;return element.scrollTop;});
+            assert.ok(scrollBefore>0,name+': NPC list scrolls independently');
+            await page.locator('.ctID').filter({hasText:'RenlyLayoutIntro'}).click();await page.locator('.ctFullEditor').waitFor();await settle();
+            const field=page.locator('.ctFullEditor [data-ct-target="npc-text"]');
+            await field.focus();await field.evaluate(element=>element.setSelectionRange(1,5,'backward'));await field.press('Escape');
+            await page.locator('.ctFullEditor').waitFor({state:'detached'});await settle();
+            assert.equal(await list.evaluate(element=>element.scrollTop),scrollBefore,name+': returning retains NPC scroll');
+            const inline=page.locator('.ctListWorkspace [data-ct-target="npc-text"]');
+            await inline.focus();await inline.evaluate(element=>element.setSelectionRange(2,6,'backward'));await inline.press('Control+Enter');
+            await page.locator('.ctFullEditor').waitFor();await settle();
+            assert.deepEqual(await field.evaluate(element=>({active:element===document.activeElement,start:element.selectionStart,end:element.selectionEnd,direction:element.selectionDirection})),
+                {active:true,start:2,end:6,direction:'backward'},name+': NPC full editor preserves exact inline caret');
+            await field.press('Escape');await page.locator('.ctFullEditor').waitFor({state:'detached'});await settle();
+            assert.deepEqual(await inline.evaluate(element=>({active:element===document.activeElement,start:element.selectionStart,end:element.selectionEnd,direction:element.selectionDirection})),
+                {active:true,start:2,end:6,direction:'backward'},name+': NPC Escape restores inline caret');
+            await sheetsTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='sheets' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctPage),2,name+': Sheets retains its independent page');
+            await npcTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='npcs' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await heading.getByRole('heading',{level:2}).textContent(),'Renly',name+': NPC selection survives return');
+            assert.equal(await list.evaluate(element=>element.scrollTop),scrollBefore,name+': tab return preserves NPC scroll');
+            results.push({name:name+' accessible tabs, production labels, long names, fixed filter, independent scroll/page and exact editor caret handoff'});
+        }
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));
     } catch(error) {
         if(page && !page.isClosed()) {
-            const path=join(tmpdir(),'sdeditor-clienttext-failure-'+randomUUID()+'.png');
+            const path=join(fixtureArtifacts,'sdeditor-clienttext-failure-'+randomUUID()+'.png');
             await page.screenshot({path});console.error('Failure screenshot: '+path);
         }
         throw error;

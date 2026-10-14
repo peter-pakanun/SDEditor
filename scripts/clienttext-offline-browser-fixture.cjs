@@ -1,10 +1,12 @@
 'use strict';
 // Disposable normal-mode check. Fixture identity is injected locally; no API,
-// production account, retained workbook, or downloaded browser is needed.
+// production account or downloaded browser is needed. --npc-real-workbooks
+// additionally verifies supplied Thai and French/French_Gender files.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { resolve, join } = require('node:path');
-const { readFileSync, existsSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync } = require('node:fs');
+const { createHash } = require('node:crypto');
 const { createServer } = require('node:http');
 const Codec = require('../public/clientTextCodec.js');
 const fromApi = createRequire(resolve(__dirname, '../../SDEditor-API/package.json'));
@@ -17,6 +19,11 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
     'C:/Program Files/Google/Chrome/Application/chrome.exe'
 ].find(existsSync);
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
+const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks');
+const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
+const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
+const disposableFolder = resolve(__dirname, '../temp/clienttext-npc-offline-fixture');
+const checksum = filename => createHash('sha256').update(readFileSync(filename)).digest('hex');
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const VBA = Buffer.from([0, 255, 8, 99, 14, 0]);
@@ -34,9 +41,27 @@ async function workbook(role = 'normal') {
         row(2, ['offline-test-gender', 'weapon', 'Strong', 'Fort', 'Forte', '', '', '', 'NONEXISTENT'])
     ];
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>');
-    zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${role === 'normal' ? 'Normal' : 'Words_Gender'}" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-    zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
-    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${rows.join('')}</sheetData></worksheet>`);
+    const sheets = [{ name: role === 'normal' ? 'Normal' : 'Words_Gender', rows }];
+    if (role === 'normal') sheets.push(
+        { name: 'NPCs', rows: [row(1, ['ID', 'Name', 'Translation', 'Short Name', 'Translation']),
+            row(2, ['Metadata/NPC/Renly', 'Renly', 'Renly traduit', 'Renly', 'Renly court']),
+            row(3, ['Metadata/NPC/Una', 'Una', 'Una traduite', 'Una', 'Una courte'])] },
+        { name: 'NPCTalk', rows: [row(1, ['ID', 'Text', 'Translation']),
+            row(2, ['Metadata/NPC/Renly::0', 'A conversation with Renly', 'Conversation avec Renly'])] },
+        { name: 'NPCTextAudio', rows: [row(1, ['ID', 'Text', 'Translation']),
+            row(2, ['RenlyIntro', 'Welcome, friend.', 'Bienvenue, ami.']),
+            row(3, ['UnaRenly', 'Have you spoken with Renly?', 'Avez-vous parlé à Renly ?']),
+            row(4, ['UnarmedStart', 'Unarmed dialogue unrelated to Una.', 'Sans armes.'])] },
+        { name: 'NPCTalkDialogueTextAudio', rows: [row(1, ['ID', 'Text', 'Translation', 'Character']),
+            row(2, ['RenlyIntro', 'Player reply addressing Renly.', 'Réponse du joueur.', 'Metadata/Characters/Str/StrFourb']),
+            row(3, ['HuntressRenlyReply', 'Renly, can you help?', 'Renly, pouvez-vous aider ?', 'Metadata/Characters/Dex/DexFourb']),
+            row(4, ['UnknownReply', 'A reply without an NPC ID match.', 'Réponse sans association.', 'Metadata/Characters/Int/IntFour'])] }
+    );
+    else sheets.push({ name: 'NPCTextAudio_Gender', rows: [row(1, ['ID', 'Text', 'MS', 'FS', 'NS', 'MP', 'FP', 'NP']),
+        row(2, ['RenlyGenderReply', 'Renly-related grammatical variants.', 'Variante Renly', 'Variante Renly', '', '', '', 'NONEXISTENT'])] });
+    zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => `<sheet name="${sheet.name}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`);
+    for (const [index, sheet] of sheets.entries()) zip.file(`xl/worksheets/sheet${index + 1}.xml`, `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${sheet.rows.join('')}</sheetData></worksheet>`);
     zip.file('xl/styles.xml', `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
     zip.file('xl/vbaProject.bin', VBA);
     zip.file('xl/metadata', Buffer.from([0, 77, 255, 16]));
@@ -144,11 +169,11 @@ async function run() {
             if (url.origin === origin || !/\/auth\/|\/v1\//.test(url.pathname)) return route.continue();
             throw new Error('Fixture unexpectedly attempted an actual API request: ' + url.pathname);
         });
-        async function bootstrap(role = 'manager') {
+        async function bootstrap(role = 'manager', selectedLanguage = 'French') {
             await page.evaluate(() => window.OfflineStore?.updateHybridState?.(state => { state.auth = null; state.activeProfile = 'guest'; return state; }));
             await page.goto(origin);
             await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && window.__offlineTestApp?._cloud?.state && !window.__offlineTestApp.workspaceInitializationActive);
-            await page.evaluate(async role => {
+            await page.evaluate(async ({ role, selectedLanguage }) => {
                 const vm = window.__offlineTestApp;
                 // Keep the actual cloud client for scope guards. Destroy its
                 // scheduling and replace API transport; only empty catalog
@@ -159,6 +184,9 @@ async function run() {
                 vm._cloud.refreshSession = async () => {};
                 vm._cloud.sync = async () => {};
                 clearInterval(vm._cloudPoll);
+                clearInterval(vm._managedTimer);
+                clearInterval(vm._commentsPollTimer);
+                clearTimeout(vm._commentsReadTimer);
                 vm._cloud.request = async path => {
                     if (String(path).startsWith('/v1/versions?')) return { versions: [], branch: { id: 'default' } };
                     if (window.__offlineTestMonitoring) window.__offlineTestRequests.push(String(path));
@@ -170,7 +198,7 @@ async function run() {
                 vm._cloud.state = await OfflineStore.updateHybridState(state => {
                     if (role !== 'guest') {
                         state.profiles[id] = JSON.parse(JSON.stringify(state.profiles.guest));
-                        state.profiles[id].settings.lang = 'French';
+                        state.profiles[id].settings.lang = selectedLanguage;
                     }
                     state.activeProfile = id;
                     state.auth = user ? { token: 'fixture-local-identity', user } : null;
@@ -183,7 +211,7 @@ async function run() {
                 await vm.activateGameVersion('poe2', { checkMigration: false });
                 await vm.ctRefreshLocal();
                 await vm.$nextTick();
-            }, role);
+            }, { role, selectedLanguage });
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
             // Scope changes may queue ordinary settings/account preparation;
             // complete those fixture tasks before measuring test activity.
@@ -212,6 +240,7 @@ async function run() {
         const workspace = page.getByRole('region', { name: 'ClientText workspace' });
         let layoutChecked = false;
         async function openTest(files) {
+            const selectedLanguage = await page.evaluate(() => window.__offlineTestApp.lang);
             await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).click();
             await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
             assert.equal(await upload.locator('input[type=file]').first().getAttribute('accept'), '.xlsx,.xlsm');
@@ -224,7 +253,7 @@ async function run() {
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
                 return !vm.ctUploading && !vm.ctBusy && !vm.workspaceInitializationActive && (vm.ctActive || vm.ctUploadError);
-            });
+            }, null, { timeout: realNpcWorkbooks ? 180000 : 30000 });
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '', 'One Open click prepares and validates the workbooks');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), true, 'Prepared test sheet opens successfully');
             await workspace.waitFor();
@@ -232,7 +261,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctOfflineTest), true);
             assert.match(await workspace.textContent(), /In-memory test/);
-            assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), 'French', 'Opening a test preserves the selected language');
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), selectedLanguage, 'Opening a test preserves the selected language');
         }
         await monitor(page, true);
         // A French Normal workbook alone is allowed here even though a
@@ -282,6 +311,95 @@ async function run() {
         assert.equal(exported.units.find(unit => unit.recordId === 'offline-test-blank').fields.find(field => field.name === 'Name').target, '');
         await assertLocal(page, 'Prepare/open/edit/history/save/export');
         results.push('Manager Normal-only XLSM: in-memory edit, Save, Save & close, history, blank save and byte-preserving export');
+        async function browseRenly(label) {
+            const sheetsTab = workspace.getByRole('tab', { name: 'Sheets', exact: true });
+            const npcsTab = workspace.getByRole('tab', { name: 'NPCs', exact: true });
+            const before = await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { ids: vm.ctUnits.map(unit => unit.id), counts: vm.ctCounts, sheet: vm.ctSheet,
+                    search: vm.ctSearch, applied: vm.ctAppliedSearch, filters: vm.ctSelectedFilters.slice(), page: vm.ctPage };
+            });
+            await sheetsTab.focus(); await sheetsTab.press('ArrowRight');
+            assert.equal(await npcsTab.evaluate(element => element === document.activeElement), true, label + ': arrow key focuses NPCs');
+            await npcsTab.press('Enter');
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
+            assert.equal(await npcsTab.getAttribute('aria-selected'), 'true');
+            assert.ok(await page.evaluate(() => window.__offlineTestApp.ctSelectedFilters.includes('unchanged')), label + ': NPCs initially includes Unchanged');
+            const npcFilter = workspace.getByRole('searchbox', { name: 'Filter NPCs', exact: true });
+            await npcFilter.fill(' Renly ');
+            const npc = workspace.getByRole('button', { name: 'Renly', exact: true });
+            assert.equal(await npc.count(), 1, label + ': the NPC filter resolves one shared name group');
+            await npc.click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctNpcBrowseTitle === 'Renly' && !window.__offlineTestApp.ctBrowseBusy);
+            const related = await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { ids: vm.ctUnits.map(unit => unit.id), counts: vm.ctCounts,
+                    related: vm.ctRows.map(unit => ({ id: unit.id, recordId: unit.recordId, role: unit.role, sheet: unit.sheet })), total: vm.ctNpcTotal };
+            });
+            assert.deepEqual(related.ids, before.ids, label + ': browsing preserves immutable unit identities');
+            assert.deepEqual(related.counts, before.counts, label + ': NPC counts never replace workspace progress');
+            assert.equal(new Set(related.related.map(unit => unit.id)).size, related.related.length, label + ': original units appear once');
+            for (const sheet of ['NPCs', 'NPCTalk', 'NPCTextAudio', 'NPCTalkDialogueTextAudio']) assert.ok(related.related.some(unit => unit.sheet.replace(/_Gender$/, '') === sheet), label + ': Renly spans ' + sheet);
+            assert.equal(related.related.length, related.total, label + ': all statuses expose the complete related worklist');
+            await npcFilter.press('Escape');
+            await layout(page, workspace, label + ' NPC worklist');
+            await sheetsTab.click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'sheets' && !window.__offlineTestApp.ctBrowseBusy);
+            assert.deepEqual(await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { sheet: vm.ctSheet, search: vm.ctSearch, applied: vm.ctAppliedSearch, filters: vm.ctSelectedFilters.slice(), page: vm.ctPage };
+            }), { sheet: before.sheet, search: before.search, applied: before.applied, filters: before.filters, page: before.page }, label + ': Sheets restores independent browsing state');
+            await npcsTab.click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctNpcBrowseTitle), 'Renly', label + ': NPC selection survives tab switching');
+            return related.related;
+        }
+        const syntheticRelated = await browseRenly('Synthetic offline NPCs');
+        assert.equal(syntheticRelated.filter(unit => unit.recordId === 'RenlyIntro').length, 2, 'Identical audio IDs retain their two distinct sheets');
+        const orderedNpcIds = await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.id));
+        await workspace.locator('.ctTable tbody tr').first().locator('.ctID').click();
+        await workspace.locator('.ctFullEditor').waitFor();
+        await workspace.getByRole('button', { name: 'Next', exact: true }).click();
+        await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && !window.__offlineTestApp.ctBusy, orderedNpcIds[1]);
+        await workspace.getByRole('button', { name: 'Previous', exact: true }).click();
+        await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && !window.__offlineTestApp.ctBusy, orderedNpcIds[0]);
+        await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+        await assertLocal(page, 'NPC full-editor cross-sheet Next/Previous');
+        await monitor(page, false);
+        await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = true; await vm.$nextTick(); await vm.saveSettings(); });
+        await monitor(page, true);
+        const inlineTargets = workspace.locator('.ctListWorkspace textarea[data-ct-target]');
+        await inlineTargets.last().focus(); await inlineTargets.last().press('Tab');
+        await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && !window.__offlineTestApp.ctBusy, orderedNpcIds[1]);
+        assert.equal(await inlineTargets.first().evaluate(element => element === document.activeElement), true, 'Tab enters the first target of the next original sheet record');
+        await inlineTargets.first().press('Shift+Tab');
+        await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && !window.__offlineTestApp.ctBusy, orderedNpcIds[0]);
+        assert.equal(await inlineTargets.last().evaluate(element => element === document.activeElement), true, 'Shift+Tab returns to the exact preceding worksheet target');
+        await assertLocal(page, 'NPC inline cross-sheet Tab/Shift+Tab');
+        await monitor(page, false);
+        await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = false; await vm.$nextTick(); await vm.saveSettings(); });
+        await monitor(page, true);
+        const kinds = workspace.getByRole('group', { name: 'NPC text types' });
+        await kinds.getByRole('button', { name: /^Conversations/ }).click();
+        await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.every(unit => unit.sheet === 'NPCTalkDialogueTextAudio'));
+        const conversation = await page.evaluate(() => {
+            const unit = window.__offlineTestApp.ctRows.find(unit => unit.recordId === 'RenlyIntro');
+            return { id: unit.id, field: unit.fields[0].id };
+        });
+        await workspace.getByRole('button', { name: 'RenlyIntro', exact: true }).click();
+        await translation.fill('Réponse Renly enregistrée');
+        await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
+        await saved(page, conversation.id, conversation.field, 'Réponse Renly enregistrée');
+        await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+        await kinds.getByRole('button', { name: /^All text/ }).click();
+        await workspace.getByRole('button', { name: 'Unassigned dialogue', exact: true }).click();
+        await page.waitForFunction(() => window.__offlineTestApp.ctNpcSelection === 'unassigned' && !window.__offlineTestApp.ctBrowseBusy);
+        assert.deepEqual(await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.recordId).sort()), ['UnarmedStart', 'UnknownReply'], 'Unassigned dialogue excludes false Una prefix matches');
+        await workspace.getByRole('button', { name: 'All NPC text', exact: true }).click();
+        await page.waitForFunction(() => window.__offlineTestApp.ctNpcSelection === 'all' && !window.__offlineTestApp.ctBrowseBusy);
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctRows.length), 9, 'All NPC text contains every recognized unit exactly once');
+        await assertLocal(page, 'Synthetic NPC browsing and cross-sheet save');
+        results.push('NPC tabs, keyboard focus, independent Sheets state, four-sheet Renly group, distinct IDs, kind filtering and temporary cross-sheet save');
         await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
         await offline.waitFor();
         assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, workspace: window.__offlineTestApp.ctWorkspace, units: window.__offlineTestApp.ctUnits.length, stores: window.__offlineTestApp._ctTestStores?.size || 0 })),
@@ -345,6 +463,114 @@ async function run() {
         await monitor(page, false);
         results.push('Manager, Admin, Translator, and Guest access is local-only; Gender-only tests remain local');
         results.push('Different test language preserves account language; importer, list and full editor fit all four themes at 1440px and 1100px');
+        if (realNpcWorkbooks) {
+            mkdirSync(disposableFolder, { recursive: true });
+            mkdirSync(screenshotFolder, { recursive: true });
+            const filenames = ['Thai.xlsx', 'French.xlsx', 'French_Gender.xlsx'];
+            const originalHashes = Object.fromEntries(filenames.map(filename => [filename, checksum(join(realWorkbookFolder, filename))]));
+            for (const [language, files] of [['Thai', ['Thai.xlsx']], ['French', ['French.xlsx', 'French_Gender.xlsx']]]) {
+                console.log('Validating supplied ' + language + ' workbooks through Test Sheet Offline…');
+                await bootstrap('admin', language);
+                assert.equal(await page.evaluate(() => window.__offlineTestApp.cloudStorageError), '', 'Fixture profile language is established before entering the test');
+                const preparationStarted = Date.now();
+                await monitor(page, true);
+                await openTest(files.map(filename => join(realWorkbookFolder, filename)));
+                const preparationMs = Date.now() - preparationStarted;
+                const related = await browseRenly(language + ' supplied workbook');
+                if (language === 'French') assert.ok(related.some(unit => unit.role === 'gender'), 'Normal/Gender pair shares the complete NPC index');
+                assert.equal(await workspace.getByRole('note').filter({ hasText: /Saves are temporary/ }).count(), 1, 'Real workbook screenshots retain the genuine temporary-save notice');
+                if (language === 'Thai') {
+                    await workspace.getByRole('searchbox', { name: 'Filter NPCs', exact: true }).fill('Renly');
+                    await workspace.getByRole('button', { name: 'Renly', exact: true }).click();
+                    await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy);
+                    await page.mouse.move(1, 1);
+                    await workspace.getByRole('searchbox', { name: 'Filter NPCs', exact: true }).focus();
+                    await page.waitForTimeout(100);
+                    await page.screenshot({ path: join(screenshotFolder, 'npc-browse-renly.png') });
+                }
+                await kinds.getByRole('button', { name: /^Conversations/ }).click();
+                await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.length > 0);
+                const entry = await page.evaluate(async () => {
+                    const vm = window.__offlineTestApp;
+                    const unit = vm.ctRows.find(unit => unit.recordId === 'RenlyP1_Intro_A2_Str4b' && unit.role === 'normal')
+                        || vm.ctRows.find(unit => unit.role === 'normal') || vm.ctRows[0];
+                    const field = unit.fields.find(field => field.kind !== 'gender');
+                    const index = vm.ctRows.findIndex(candidate => candidate.id === unit.id);
+                    vm.ctSetPage(Math.floor(index / vm.ctEffectivePageSize) + 1);
+                    await vm.$nextTick();
+                    return { id: unit.id, role: unit.role, recordId: unit.recordId, field: field.id, sheet: unit.sheet, source: field.source, target: field.target,
+                        row: vm.ctPageRows.findIndex(candidate => candidate.id === unit.id) };
+                });
+                await workspace.locator('.ctTable tbody tr').nth(entry.row).getByRole('button', { name: entry.recordId, exact: true }).click();
+                await translation.waitFor();
+                assert.ok((await workspace.locator('.editorFileIdentity').textContent()).includes(entry.role + ' / ' + entry.sheet + ' / ' + entry.recordId), 'Conversation editor retains the exact workbook identity');
+                entry.field = await translation.getAttribute('data-ct-target');
+                Object.assign(entry, await page.evaluate(fieldId => {
+                    const field = window.__offlineTestApp.ctCurrentUnit.fields.find(field => field.id === fieldId);
+                    return { source: field.source, target: field.target };
+                }, entry.field));
+                await layout(page, workspace.locator('.ctFullEditor'), language + ' supplied conversation editor');
+                if (language === 'Thai') await page.screenshot({ path: join(screenshotFolder, 'npc-conversation-renly.png') });
+                const target = entry.target + ' [offline fixture saved edit]';
+                await translation.fill(target);
+                await workspace.getByRole('button', { name: 'Save', exact: true }).click();
+                await saved(page, entry.id, entry.field, target);
+                await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+                await page.waitForFunction(({ id, field, target }) => {
+                    const vm = window.__offlineTestApp;
+                    return !vm.ctHistoryLoading && vm.ctHistory.some(entry => entry.unitId === id && entry.after.values[field] === target);
+                }, { id: entry.id, field: entry.field, target });
+                await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+                await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+                const downloadPromise = page.waitForEvent('download', { timeout: 180000 });
+                await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
+                await page.waitForFunction(() => !window.__offlineTestApp.ctBusy, null, { timeout: 180000 });
+                assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '', 'Real supplied workbook export succeeds');
+                const download = await downloadPromise;
+                const outputPath = join(disposableFolder, language + '-' + download.suggestedFilename());
+                await download.saveAs(outputPath);
+                const downloadedBytes = readFileSync(outputPath);
+                const envelope = files.length > 1 ? await JSZip.loadAsync(downloadedBytes) : null;
+                for (const filename of files) {
+                    const exportedBytes = envelope ? await envelope.file(filename).async('nodebuffer') : downloadedBytes;
+                    const role = filename.includes('_Gender') ? 'gender' : 'normal';
+                    if (role !== entry.role) assert.deepEqual(exportedBytes, readFileSync(join(realWorkbookFolder, filename)), 'Untouched paired ' + role + ' workbook preserves exact original bytes');
+                    else {
+                        const parsed = await Codec.parseWorkbook(exportedBytes, { filename, role });
+                        const unit = parsed.units.find(unit => unit.id === entry.id);
+                        assert.equal(unit.fields.find(field => field.id === entry.field).target, target, 'Downloaded workbook contains the temporary saved translation');
+                        assert.equal(unit.fields.find(field => field.id === entry.field).source, entry.source, 'Downloaded workbook preserves immutable English');
+                        const originalZip = await JSZip.loadAsync(readFileSync(join(realWorkbookFolder, filename))), exportedZip = await JSZip.loadAsync(exportedBytes);
+                        assert.deepEqual(Object.keys(exportedZip.files).sort(), Object.keys(originalZip.files).sort(), 'Export preserves native workbook parts');
+                        const changedSheet = parsed.sheets.find(sheet => sheet.name === entry.sheet).path;
+                        for (const [path, part] of Object.entries(originalZip.files)) if (!part.dir && path !== changedSheet && path !== 'xl/styles.xml') {
+                            assert.deepEqual(await exportedZip.file(path).async('nodebuffer'), await part.async('nodebuffer'), 'Export retains original native part ' + path);
+                        }
+                    }
+                }
+                // Keep monitoring across at least one normal 20s polling
+                // interval; long preparation must not accidentally hide an
+                // unisolated timer behind a fast synthetic workbook.
+                await page.waitForTimeout(Math.max(0, 21000 - (Date.now() - preparationStarted)));
+                await assertLocal(page, language + ' real NPC browsing/save/history/export');
+                await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+                await offline.waitFor();
+                assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, units: window.__offlineTestApp.ctUnits.length, groups: window.__offlineTestApp.ctNpcGroups.length })),
+                    { active: false, units: 0, groups: 0 }, 'Leaving real workbooks clears derived NPC and in-memory translation data');
+                await assertLocal(page, language + ' real session exit', true);
+                await monitor(page, false);
+                // Verify disappearance through a real reload, then re-establish
+                // only the fixture account before the next independent import.
+                await page.evaluate(() => OfflineStore.updateHybridState(state => { state.auth = null; state.activeProfile = 'guest'; return state; }));
+                await page.reload();
+                await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && !window.__offlineTestApp.workspaceInitializationActive);
+                assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), false, 'Reload cannot restore supplied in-memory workbooks');
+                await bootstrap('admin');
+                results.push({ name: language + ' real import: NPC grouping, original cross-sheet identity, temporary save/history, native workbook export, no durable/cloud activity and exit/reload cleanup', preparationMs });
+            }
+            for (const filename of filenames) assert.equal(checksum(join(realWorkbookFolder, filename)), originalHashes[filename], 'Supplied ' + filename + ' checksum remains unchanged');
+            results.push({ screenshots: ['npc-browse-renly.png', 'npc-conversation-renly.png'].map(filename => join(screenshotFolder, filename)), originalWorkbookSha256: originalHashes });
+        }
         for (const version of [null, { id: 'fixture-normal-version', name: 'Existing fixture version' }]) {
             // Inspect the ordinary importer without beginning a publication or
             // invoking its API policy/preparation actions.

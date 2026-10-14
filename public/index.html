@@ -459,22 +459,44 @@
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <div v-if="ctProgress" class="ctProgress" role="status"><div class="ctProgressMain"><span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span><progress :value="ctProgress.completed || 0" :max="ctProgress.total || 1" aria-label="Workbook operation progress"></progress><span class="ctProgressCount">{{ Math.round(ctProgress.completed || 0) }} / {{ ctProgress.total || '…' }}</span></div><button class="ctProgressCancel" @click="ctCancel">Cancel</button></div>
           <div class="ctWorkspaceBody" :class="{ctToolsOpen:inlineEditor && inlineSidebarVisible}">
-            <nav class="ctNavigation" aria-label="Workbook sheets">
+            <nav class="ctNavigation" aria-label="Workbook navigation">
+              <div ref="ctBrowseTabs" class="ctBrowseTabs" role="tablist" aria-label="Browse workbooks" @keydown="ctBrowseTabKeydown($event)">
+                <button id="ctSheetsTab" type="button" role="tab" aria-controls="ctSheetsPanel" :aria-selected="ctBrowseMode==='sheets'" :tabindex="ctBrowseMode==='sheets'?0:-1" :class="{active:ctBrowseMode==='sheets'}" :disabled="ctBrowseBusy || ctBusy" @click="ctSetBrowseMode('sheets')">Sheets</button>
+                <button id="ctNpcsTab" type="button" role="tab" aria-controls="ctNpcsPanel" :aria-selected="ctBrowseMode==='npcs'" :tabindex="ctBrowseMode==='npcs'?0:-1" :class="{active:ctBrowseMode==='npcs'}" :disabled="ctBrowseBusy || ctBusy" @click="ctSetBrowseMode('npcs')">NPCs</button>
+              </div>
+              <div id="ctSheetsPanel" class="ctNavigationPanel" role="tabpanel" aria-labelledby="ctSheetsTab" v-show="ctBrowseMode==='sheets'">
               <div class="ctSheetControls">
-                <strong>Sheets</strong>
                 <label class="srOnly" for="ctSheetFilter">Filter sheets</label>
                 <input id="ctSheetFilter" class="ctSheetFilter" type="search" v-model="ctSheetFilter" placeholder="Filter sheets…" @keydown.esc.stop.prevent="ctSheetFilter=''">
               </div>
-              <div class="ctSheetList">
-                <button @click="ctSheet=''" :class="{active:!ctSheet}">All sheets</button>
+              <div ref="ctSheetList" class="ctSheetList">
+                <button type="button" @click="ctSetSheet('')" :class="{active:!ctSheet}" :aria-pressed="!ctSheet" :disabled="ctBrowseBusy || ctBusy">All sheets</button>
                 <template v-for="role in [...new Set(ctFilteredSheets.map(sheet=>sheet.role))]" :key="role">
                   <h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3>
-                  <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" @click="ctSheet=sheet.key" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
+                  <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" type="button" @click="ctSetSheet(sheet.key)" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
                 </template>
                 <p v-if="!ctFilteredSheets.length" class="ctSheetEmpty" role="status">No sheets match.</p>
               </div>
+              </div>
+              <div id="ctNpcsPanel" class="ctNavigationPanel" role="tabpanel" aria-labelledby="ctNpcsTab" v-show="ctBrowseMode==='npcs'">
+                <div class="ctSheetControls">
+                  <label class="srOnly" for="ctNpcFilter">Filter NPCs</label>
+                  <input id="ctNpcFilter" class="ctSheetFilter" type="search" v-model="ctNpcFilter" placeholder="Filter NPCs…" @keydown.esc.stop.prevent="ctNpcFilter=''">
+                </div>
+                <div ref="ctNpcList" class="ctSheetList ctNpcList">
+                  <button type="button" @click="ctSetNpc('all')" :class="{active:ctNpcSelection==='all'}" :aria-pressed="ctNpcSelection==='all'" :disabled="ctBrowseBusy || ctBusy">All NPC text</button>
+                  <button type="button" @click="ctSetNpc('unassigned')" :class="{active:ctNpcSelection==='unassigned'}" :aria-pressed="ctNpcSelection==='unassigned'" :disabled="ctBrowseBusy || ctBusy">Unassigned dialogue</button>
+                  <h3>NPCs <span class="ctNpcListCount">{{ ctNpcGroups.length }}</span></h3>
+                  <button v-for="group in ctNpcFilteredGroups" :key="group.key" type="button" class="ctNpcButton" @click="ctSetNpc(group.key)" :class="{active:ctNpcSelection===group.key}" :aria-label="group.label" :aria-pressed="ctNpcSelection===group.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="ctNpcGroupTooltip(group)"><span class="ctNpcName">{{ group.label }}</span><span class="ctNpcCount">{{ group.units.length }}</span></button>
+                  <p v-if="!ctNpcFilteredGroups.length" class="ctSheetEmpty" role="status">{{ ctNpcGroups.length ? 'No NPCs match.' : 'No NPC names in this workspace.' }}</p>
+                </div>
+              </div>
             </nav>
             <div class="workspaceMain ctList">
+              <section v-if="ctBrowseMode==='npcs'" class="ctNpcHeading" aria-label="NPC text">
+                <div class="ctNpcHeadingTitle"><h2>{{ ctNpcBrowseTitle }}</h2><span class="ctNpcResults">{{ ctRows.length }} of {{ ctNpcTotal }} records</span></div>
+                <div class="ctNpcTypeFilters" role="group" aria-label="NPC text types"><button v-for="option in ctNpcKindOptions" :key="option.key" type="button" @click="ctSetNpcKind(option.key)" :class="{active:ctNpcKind===option.key}" :aria-pressed="ctNpcKind===option.key" :disabled="ctBrowseBusy || ctBusy">{{ option.label }}<span class="ctNpcCount">{{ option.count }}</span></button></div>
+              </section>
               <p id="ctFileTableKeyboardHelp" class="srOnly">Arrow keys move between records while the list is focused. Enter or a filename opens the full editor. In inline mode, clicking a row edits its translation in the table. Text fields retain normal arrow keys and newlines.</p>
               <div ref="ctFileTableRegion" class="fileTableScroll" role="region" aria-label="ClientText IDs" aria-describedby="ctFileTableKeyboardHelp" tabindex="0" @keydown="ctRowKeydown(null,$event)">
                 <table class="display compact cell-border fileTable ctTable" role="grid" aria-label="ClientText IDs" aria-multiselectable="false">
@@ -487,7 +509,7 @@
                   </tr></thead>
                   <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)" @focusout="ctInlineFocusOut">
                     <td class="ctRowNumber" data-label="Row number">{{ ctSortValue(unit,'row') }}</td>
-                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><ct-context v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" :items="ctReferenceMetadata(unit)" compact></ct-context><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id && ctDraftBlocked" class="inlineFileActions" @click.stop><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
+                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true)" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><small v-if="ctBrowseMode==='npcs'" class="ctNpcRecordFacts"><span>{{ ctNpcKindLabel(unit) }}</span><span v-if="ctNpcRelation(unit).label" class="ctNpcRelation" tabindex="0" v-tooltip="ctNpcRelation(unit).tooltip">{{ ctNpcRelation(unit).label }}</span></small><ct-context v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" :items="ctReferenceMetadata(unit)" compact></ct-context><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id && ctDraftBlocked" class="inlineFileActions" @click.stop><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
                     <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
                     <td class="translationTr inlineTranslationCell" :data-label="ctWorkspace.scope.language+' translation'"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
                   </tr></tbody>
@@ -520,6 +542,7 @@
         </template>
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation</h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button v-if="ctDraftBlocked" @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep unsaved edits">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
+          <p v-if="ctBrowseMode==='npcs'" class="ctNpcRecordFacts"><span>{{ ctNpcKindLabel(ctCurrentUnit) }}</span><span v-if="ctNpcRelation(ctCurrentUnit).label" class="ctNpcRelation" tabindex="0" v-tooltip="ctNpcRelation(ctCurrentUnit).tooltip">{{ ctNpcRelation(ctCurrentUnit).label }}</span></p>
           <ct-context :host="$root" :items="ctReferenceMetadata()"></ct-context>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button></div>
           <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
@@ -1344,6 +1367,7 @@
   <script src="normalizedRooms.js"></script>
   <script src="offlineStore.js"></script>
   <script src="clientTextState.js"></script>
+  <script src="clientTextNpcIndex.js"></script>
   <script src="contentAdapters.js"></script>
   <script src="clientTextStore.js"></script>
   <script src="clientTextMemoryStore.js"></script>

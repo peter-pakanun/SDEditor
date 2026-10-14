@@ -16,6 +16,24 @@
 .ctSheetControls { flex:none; }.ctSheetControls > strong { display:block; margin-bottom:8px; }.ctSheetList { min-height:0; overflow:auto; scrollbar-gutter:stable; }
 .ctNavigation h3 { font-size:12px; color:var(--ui-muted); margin:15px 0 6px; }.ctNavigation button { display:block; box-sizing:border-box; width:100%; padding:6px 8px; margin:3px 0; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font:inherit; }.ctNavigation button.active { background:var(--ui-accent-soft); border-color:var(--ui-accent); color:var(--ui-accent); }
 .ctNavigation .ctSheetFilter { box-sizing:border-box; width:100%; min-width:0; margin-bottom:8px; padding:6px 8px; font:inherit; }.ctSheetEmpty { color:var(--ui-muted); font-size:12px; margin:12px 0 0; }
+.ctBrowseTabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; flex:none; margin-bottom:10px; }
+.ctNavigation .ctBrowseTabs button { margin:0; text-align:center; font-weight:600; padding:7px 4px; }
+.ctNavigationPanel { display:flex; flex-direction:column; flex:1; min-height:0; }
+.ctNpcListCount,.ctNpcCount { font-variant-numeric:tabular-nums; color:var(--ui-muted); font-size:11px; }
+.ctNpcListCount { float:right; font-weight:400; }
+.ctNavigation .ctNpcButton { display:flex; align-items:baseline; gap:8px; }
+.ctNpcName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.ctNpcButton .ctNpcCount { flex:none; }
+.ctNpcHeading { padding:12px 14px; margin-bottom:12px; background:var(--color-element); border:1px solid var(--ui-border); border-radius:10px; }
+.ctNpcHeadingTitle { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:6px 14px; }
+.ctNpcHeadingTitle h2 { margin:0; font-size:16px; font-weight:600; overflow-wrap:anywhere; }
+.ctNpcResults { color:var(--ui-muted); font-size:12px; font-variant-numeric:tabular-nums; }
+.ctNpcTypeFilters { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.ctNpcTypeFilters button { display:flex; align-items:baseline; gap:8px; padding:5px 9px; font:inherit; font-size:12px; }
+.ctNpcTypeFilters button.active { background:var(--ui-accent-soft); border-color:var(--ui-accent); color:var(--ui-accent); }
+.ctNpcRecordFacts { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px 8px; margin-top:6px; color:var(--ui-muted); font-size:11px; }
+.ctNpcRelation { border:1px solid var(--ui-border); border-radius:4px; padding:1px 5px; cursor:help; }
+.ctNpcRelation:focus-visible { outline:2px solid var(--ui-accent); outline-offset:2px; }
 .ctList { min-width:0; }.ctFilePath { display:block; margin-top:4px; color:var(--ui-muted); font-size:11px; overflow-wrap:anywhere; }.ctMetadataValue { display:block; margin-top:4px; font-size:11px; color:var(--ui-muted); }
 .ctTable tr.isOutdated > td { background-color:color-mix(in srgb,var(--ui-dropped) 8%,transparent); }
 .ctTable .ctRowNumber { width:76px; white-space:nowrap; font-variant-numeric:tabular-nums; }

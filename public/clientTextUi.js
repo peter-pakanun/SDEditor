@@ -92,6 +92,7 @@
         data() { return {
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
+            ctBrowseMode: 'sheets', ctNpcSelection: 'all', ctNpcKind: '', ctNpcFilter: '', ctBrowseBusy: false,
             ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
@@ -260,6 +261,25 @@
                 return { before, after, rows, notes: this.ctHistoryDiffParts(aNotes, bNotes), hasNotes: !!(aNotes || bNotes) };
             },
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
+            ctNpcGroups() { this.ctUnits; this.ctRevision; return this._ctNpcIndex?.groups || []; },
+            ctNpcFilteredGroups() {
+                this.ctRevision;
+                const query=this.ctNpcFilter.trim().toLocaleLowerCase();
+                return query ? this.ctNpcGroups.filter(group=>[group.label,...group.paths,...group.npcUnits.flatMap(unit=>{
+                    const values=this.ctValuesFor(unit);return unit.fields.filter(field=>/^(?:short )?name$/i.test(field.name)).map(field=>values[field.id]);
+                })].some(value=>String(value ?? '').toLocaleLowerCase().includes(query))) : this.ctNpcGroups;
+            },
+            ctNpcBrowseTitle() {
+                this.ctRevision;
+                return this.ctNpcSelection==='all' ? 'All NPC text' : this.ctNpcSelection==='unassigned' ? 'Unassigned dialogue'
+                    : this._ctNpcIndex?.groupByKey.get(this.ctNpcSelection)?.label || 'NPC text';
+            },
+            ctNpcTotal() { this.ctUnits; this.ctRevision; return this.ctNpcCandidates().length; },
+            ctNpcKindOptions() {
+                const counts={names:0,topics:0,dialogue:0,conversations:0};
+                for(const unit of this.ctNpcCandidates()) {const kind=root.ClientTextNpcIndex?.kindFor(unit);if(kind in counts)counts[kind]++;}
+                return [{key:'',label:'All text',count:this.ctNpcTotal},...Object.entries(counts).map(([key,count])=>({key,label:this.ctNpcKindName(key),count}))];
+            },
             ctFilteredSheets() {
                 const query = this.ctSheetFilter.trim().toLowerCase();
                 return query ? this.ctSheets.filter(sheet=>sheet.name.toLowerCase().includes(query)) : this.ctSheets;
@@ -328,9 +348,9 @@
             ctRows() {
                 this.ctRevision;
                 const query = this.ctAppliedSearch.toLocaleLowerCase();
-                return this.ctOrderedUnits().filter(unit => {
+                return this.ctBrowseOrderedUnits().filter(unit => {
                     const fields=this.ctFieldsFor(unit);if(!fields.length)return false;
-                    if (this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
+                    if (this.ctBrowseMode!=='npcs' && this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
@@ -502,9 +522,9 @@
                 const next={};for(const key of keys)next[key]=this.ctPreviewGggVars[key] ?? this.defaultPreviewVarValue(key);
                 this.ctPreviewGggVars=next;
             }},
-            ctSearch() { clearTimeout(this._ctSearchTimer); this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 250); },
-            ctFilter() { this.ctPage = 1; }, ctSheet() { this.ctPage = 1; },
-            ctSelectedFilters: {deep:true,handler() {this.ctPage=1;}},
+            ctSearch() { clearTimeout(this._ctSearchTimer); if(!this._ctBrowseRestoring && this.ctSearch!==this.ctAppliedSearch)this._ctSearchTimer = setTimeout(() => { this.ctAppliedSearch = this.ctSearch; this.ctPage = 1; }, 250); },
+            ctFilter() { if(!this._ctBrowseRestoring)this.ctPage = 1; }, ctSheet() { if(!this._ctBrowseRestoring)this.ctPage = 1; },
+            ctSelectedFilters: {deep:true,handler() {if(!this._ctBrowseRestoring)this.ctPage=1;}},
             inlineEditor() { this.ctFlushDraft().catch(()=>{});this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctFiltersVisible() { this.$nextTick?.(()=>this.ctRefreshLayout()); },
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
@@ -735,6 +755,106 @@
                     input.focus();input.setSelectionRange?.(start+replacement.length,start+replacement.length);this.ctResizeField(input);
                 });return true;
             },
+            ctNpcKindName(kind) {return {names:'Names',topics:'Menu topics',dialogue:'Dialogue',conversations:'Conversations'}[kind] || '';},
+            ctNpcKindLabel(unit) {return {names:'Name',topics:'Menu topic',dialogue:'Dialogue',conversations:'Conversation turn'}[root.ClientTextNpcIndex?.kindFor(unit)] || '';},
+            ctNpcCandidates() {
+                const index=this._ctNpcIndex;
+                if(!index)return [];
+                return this.ctNpcSelection==='all' ? index.units : this.ctNpcSelection==='unassigned' ? index.unassigned
+                    : index.groupByKey.get(this.ctNpcSelection)?.units || [];
+            },
+            ctBrowseOrderedUnits() {
+                const ordered=this.ctOrderedUnits();if(this.ctBrowseMode!=='npcs')return ordered;
+                const candidates=this.ctNpcCandidates(),index=this._ctNpcIndex,kind=this.ctNpcKind;
+                let cache=this._ctBrowseCandidateCache;
+                if(!cache || cache.index!==index || cache.candidates!==candidates || cache.kind!==kind){
+                    const ids=new Set(candidates.filter(unit=>!kind || root.ClientTextNpcIndex?.kindFor(unit)===kind).map(unit=>unit.id));
+                    cache=this._ctBrowseCandidateCache={index,candidates,kind,ids};
+                }
+                return ordered.filter(unit=>cache.ids.has(unit.id));
+            },
+            ctNpcRelation(unit) {
+                const memberships=this._ctNpcIndex?.memberships.get(unit?.id);
+                if(!memberships?.size)return {label:'Unassigned',tooltip:'No NPC relationship was found in the workbook paths or text IDs.'};
+                const matching=this.ctNpcSelection==='all' ? [...memberships.entries()] : [...memberships.entries()].filter(([key])=>key===this.ctNpcSelection),
+                    selected=matching.length?matching:[...memberships.entries()];
+                const inferred=selected.some(([,relation])=>relation.aliases?.length),labels=selected.map(([key])=>this._ctNpcIndex.groupByKey.get(key)?.label || key);
+                return {label:inferred?'ID match':'Exact link',tooltip:inferred
+                    ? `Related to ${labels.join(', ')} by text ID: ${[...new Set(selected.flatMap(([,relation])=>relation.aliases || []))].join(', ')}. This does not identify the speaker or conversation order.`
+                    : `Linked to ${labels.join(', ')} by an exact NPC record or menu-topic path. This does not identify the dialogue speaker.`};
+            },
+            ctNpcGroupTooltip(group) {return [group.label,`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].join('\n');},
+            ctBrowseSnapshot() {
+                return Object.fromEntries(['ctSheet','ctSheetFilter','ctSearch','ctAppliedSearch','ctFilter','ctSelectedFilters','ctSort','ctSortDir','ctPage',
+                    'ctNpcSelection','ctNpcKind','ctNpcFilter'].map(key=>[key,key==='ctSelectedFilters'?this[key].slice():this[key]]));
+            },
+            ctCaptureBrowseScroll() {
+                const region=this.$refs?.ctFileTableRegion,scroll={top:Number(region?.scrollTop) || 0,left:Number(region?.scrollLeft) || 0};
+                // The table has horizontal overflow without a fixed height;
+                // ordinary vertical scrolling belongs to the page.
+                if(!(region?.scrollHeight>region?.clientHeight+1))scroll.windowTop=Number(root.scrollY) || 0;
+                return scroll;
+            },
+            ctBrowseViewSnapshot() {return {state:this.ctBrowseSnapshot(),scroll:this.ctCaptureBrowseScroll()};},
+            ctRestoreBrowseScroll(scroll) {
+                if(!scroll)return;
+                const region=this.$refs?.ctFileTableRegion;
+                if(region){region.scrollTop=scroll.top;region.scrollLeft=scroll.left;}
+                if(Number.isFinite(scroll.windowTop))root.scrollTo?.(Number(root.scrollX) || 0,scroll.windowTop);
+            },
+            ctDefaultNpcView() {return {ctSearch:'',ctAppliedSearch:'',ctFilter:'',ctSelectedFilters:statusFilters.map(item=>item.key),ctSort:'row',ctSortDir:'asc',ctPage:1,
+                ctNpcSelection:'all',ctNpcKind:'',ctNpcFilter:''};},
+            async ctChangeBrowse(change) {
+                if(this.ctBusy || this.ctBrowseBusy || !this.ctActive || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0,unit=this.ctCurrentUnit,selection=this._ctSelectRun,
+                    run=this._ctBrowseTransitionRun={},current=()=>this._ctBrowseTransitionRun===run && this.ctCurrent(ctx)
+                        && generation===(this._ctBrowseGeneration || 0) && this.ctCurrentUnit===unit && this._ctSelectRun===selection
+                        && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
+                this.ctBrowseBusy=true;
+                try {
+                    if(!await this.ctFlushDraft() || !current())return false;
+                    if(await this.ctFlushCommentDraft()===false || !current())return false;
+                    clearTimeout(this._ctSearchTimer);this._ctBrowseRestoring=true;
+                    const scroll=change();this._ctBrowseGeneration=generation+1;this.ctCloseCompletion();this._ctInlineReturn=null;
+                    await this.$nextTick?.();
+                    if(!this.ctCurrent(ctx) || this._ctBrowseTransitionRun!==run || (this._ctBrowseGeneration || 0)!==generation+1
+                        || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                    this.ctRefreshLayout();this.ctRestoreBrowseScroll(scroll);return true;
+                } catch(error) {if(this.ctCurrent(ctx))this.ctError='Draft was not stored before changing navigation: '+error.message;return false;}
+                finally {if(this._ctBrowseTransitionRun===run){
+                    this._ctBrowseTransitionRun=null;this._ctBrowseRestoring=false;this.ctBrowseBusy=false;
+                    if(this.ctCurrent(ctx) && this.ctSearch!==this.ctAppliedSearch){
+                        const resumedGeneration=this._ctBrowseGeneration || 0;
+                        this._ctSearchTimer=setTimeout(()=>{if(this.ctCurrent(ctx) && resumedGeneration===(this._ctBrowseGeneration || 0))this.ctApplySearch();},250);
+                    }
+                }}
+            },
+            ctSetBrowseMode(mode) {
+                if(!['sheets','npcs'].includes(mode))return Promise.resolve(false);
+                if(mode===this.ctBrowseMode)return Promise.resolve(true);
+                return this.ctChangeBrowse(()=>{
+                    const views=this._ctBrowseViews ||= {};views[this.ctBrowseMode]=this.ctBrowseViewSnapshot();
+                    const view=views[mode] || {state:mode==='npcs'?this.ctDefaultNpcView():{},scroll:{top:0,left:0,windowTop:0}};
+                    this.ctBrowseMode=mode;Object.assign(this,view.state);return view.scroll;
+                });
+            },
+            ctSetSheet(key) {return this.ctChangeBrowse(()=>{this.ctSheet=key;this.ctPage=1;});},
+            ctSetNpc(key) {
+                if(!['all','unassigned'].includes(key) && !this._ctNpcIndex?.groupByKey.has(key))return Promise.resolve(false);
+                return this.ctChangeBrowse(()=>{this.ctNpcSelection=key;this.ctPage=1;});
+            },
+            ctSetNpcKind(kind) {
+                if(!['','names','topics','dialogue','conversations'].includes(kind))return Promise.resolve(false);
+                return this.ctChangeBrowse(()=>{this.ctNpcKind=kind;this.ctPage=1;});
+            },
+            ctBrowseTabKeydown(event) {
+                if(event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || this.ctBrowseBusy || this.ctBusy)return false;
+                if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return false;
+                event.preventDefault();const tabs=[...(this.$refs?.ctBrowseTabs?.querySelectorAll?.('[role="tab"]') || [])];
+                const index=tabs.indexOf(event.target),next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+                const tab=tabs[next];if(!tab)return false;
+                tab.focus?.();return true;
+            },
             ctOrderedUnits() {
                 const key=this.ctSort,units=this.ctUnits,saved=key==='translation'?this.ctSaved:null;
                 let cache=this._ctOrderCache;
@@ -762,12 +882,12 @@
                 return item[key] ?? item.filename;
             },
             ctSortBy(key) {
-                if(!['row','filename','english','translation'].includes(key) || this.ctBusy)return;
+                if(!['row','filename','english','translation'].includes(key) || this.ctBusy || this.ctBrowseBusy)return;
                 this.ctSortDir=this.ctSort===key && this.ctSortDir==='asc'?'desc':'asc';this.ctSort=key;this.ctPage=1;
             },
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
             ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
-            ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=defaultFilters();this.ctSearch='';this.ctApplySearch();},
+            ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=this.ctBrowseMode==='npcs'?statusFilters.map(item=>item.key):defaultFilters();this.ctSearch='';this.ctApplySearch();},
             ctFilterByStatus(status,event) {
                 const current=this.ctFilter ? [this.ctFilter] : this.ctSelectedFilters;
                 this.ctFilter='';
@@ -775,9 +895,11 @@
                 this.ctPage=1;
             },
             ctShowAllLoaded() {
-                this.ctFilter='';this.ctSheet='';this.ctSheetFilter='';
-                this.ctSelectedFilters=statusFilters.map(item=>item.key);
-                this.ctSearch='';this.ctApplySearch();
+                return this.ctChangeBrowse(()=>{
+                    const views=this._ctBrowseViews ||= {};views[this.ctBrowseMode]=this.ctBrowseViewSnapshot();this.ctBrowseMode='sheets';
+                    this.ctFilter='';this.ctSheet='';this.ctSheetFilter='';this.ctSelectedFilters=statusFilters.map(item=>item.key);
+                    this.ctSearch='';this.ctAppliedSearch='';this.ctPage=1;
+                });
             },
             ctDiagnosticDialog() {return this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs?.ctDiagnosticDialog;},
             ctOpenScanDialog() {
@@ -809,8 +931,8 @@
                 } catch(error){if(current())this.ctError='Draft was not stored before opening Versions: '+error.message;return false;}
             },
             async ctSetPage(value) {
-                if(this.ctBusy)return false;const ctx=this.ctContext();
-                if(!await this.ctFlushDraft() || !this.ctCurrent(ctx))return false;
+                if(this.ctBusy || this.ctBrowseBusy)return false;const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0;
+                if(!await this.ctFlushDraft() || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0))return false;
                 this.ctPage=Math.max(1,Math.min(this.ctPageCount,Math.floor(Number(value)||1)));return true;
             },
             ctFocusRow(unitId=this.ctSelection) {
@@ -824,9 +946,9 @@
                 return this.ctSelect(unit,!this.inlineEditor);
             },
             ctRowDoubleClick(unit,event) {
-                if(rowControl(event))return false;
+                if(this.ctBrowseBusy || rowControl(event))return false;
                 const pending=this._ctSelectRun;
-                if(pending?.pending && pending.unitId===unit?.id && this.ctCurrent(pending.ctx)){pending.full=true;if(this.ctSelection===unit.id)this.ctEditor=true;return true;}
+                if(pending?.pending && pending.unitId===unit?.id && pending.generation===(this._ctBrowseGeneration || 0) && this.ctCurrent(pending.ctx)){pending.full=true;if(this.ctSelection===unit.id)this.ctEditor=true;return true;}
                 if(this.ctBusy)return false;
                 return this.ctSelect(unit,true);
             },
@@ -850,27 +972,29 @@
             },
             async ctRowKeydown(unit,event) {
                 if(!event || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
-                    || this.ctBusy || this.ctEditor || this.ctHistoryViewer || this.ctDiagnosticDialog()?.open || rowControl(event))return false;
+                    || this.ctBusy || this.ctBrowseBusy || this.ctEditor || this.ctHistoryViewer || this.ctDiagnosticDialog()?.open || rowControl(event))return false;
                 const keys=['ArrowUp','ArrowDown','Home','End','PageUp','PageDown','ArrowLeft','ArrowRight','Enter'];
                 if(!keys.includes(event.key))return false;
                 unit ||= this.ctCurrentUnit || this.ctPageRows[0];if(!unit)return false;
-                event.preventDefault();const ctx=this.ctContext();
+                event.preventDefault();const ctx=this.ctContext(),generation=this._ctBrowseGeneration || 0;
                 if(event.key==='Enter')return this.ctSelect(unit,true);
-                const rows=this.ctRows,size=this.ctEffectivePageSize,index=Math.max(0,rows.findIndex(item=>item.id===unit.id));
-                let targetIndex=index;
+                const rows=this.ctRows,size=this.ctEffectivePageSize,index=rows.findIndex(item=>item.id===unit.id);
+                let targetIndex=index<0?Math.min(rows.length-1,(this.ctPage-1)*size):index;
                 if(event.key==='Home')targetIndex=0;else if(event.key==='End')targetIndex=rows.length-1;
-                else if(event.key==='ArrowUp')targetIndex--;else if(event.key==='ArrowDown')targetIndex++;
+                else if(event.key==='ArrowUp')targetIndex=index<0?rows.length-1:index-1;
+                else if(event.key==='ArrowDown')targetIndex=index<0?0:index+1;
                 else targetIndex+=(event.key==='PageUp'||event.key==='ArrowLeft'?-size:size);
                 targetIndex=Math.max(0,Math.min(rows.length-1,targetIndex));const target=rows[targetIndex];if(!target)return false;
-                if(!await this.ctSelect(target,false,{focus:false}) || !this.ctCurrent(ctx))return false;
+                if(!await this.ctSelect(target,false,{focus:false}) || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0))return false;
                 this.ctPage=Math.floor(targetIndex/size)+1;await this.$nextTick?.();
-                if(this.ctCurrent(ctx) && this.ctSelection===target.id)this.ctFocusRow(target.id);return true;
+                if(this.ctCurrent(ctx) && generation===(this._ctBrowseGeneration || 0) && this.ctSelection===target.id)this.ctFocusRow(target.id);return true;
             },
             async ctCloseEditor() {
-                if(this.ctBusy || this._ctCloseRun)return false;
+                if(this.ctBusy || this.ctBrowseBusy || this._ctCloseRun)return false;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,unitId=this.ctSelection,selectionRun=this._ctSelectRun,
-                    returning=this._ctInlineReturn,run=this._ctCloseRun={};
+                    generation=this._ctBrowseGeneration || 0,returning=this._ctInlineReturn,run=this._ctCloseRun={};
                 const current=()=>this._ctCloseRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
+                    && generation===(this._ctBrowseGeneration || 0)
                     && this.ctCurrentUnit===unit && this._ctSelectRun===selectionRun && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
                 const input=this.ctTargetInputs().find(input=>input.dataset.ctTarget===returning?.fieldId);
                 const caret=input && this.ctFocusedField===returning?.fieldId ? this.ctCaptureCaret(input) : returning?.caret;
@@ -889,8 +1013,9 @@
             },
             async ctCloseInline() {
                 if(this.ctKeyboardBlocked() || this._ctCloseRun)return false;
-                const ctx=this.ctContext(),unit=this.ctCurrentUnit,run=this._ctCloseRun={},selectionRun=this._ctSelectRun;
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,run=this._ctCloseRun={},selectionRun=this._ctSelectRun,generation=this._ctBrowseGeneration || 0;
                 const current=()=>this._ctCloseRun===run && this.ctCurrent(ctx) && this.ctCurrentUnit===unit
+                    && generation===(this._ctBrowseGeneration || 0)
                     && this._ctSelectRun===selectionRun && !this.ctEditor && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
                 try {
                     if(!await this.ctFlushDraft() || !current())return false;
@@ -965,7 +1090,7 @@
                 this.ctFlushDraft().catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
-                this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);
+                this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
                 this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
@@ -973,6 +1098,9 @@
                 this.ctVariantSelections={};this._ctClassNameCache=null;this._ctReferenceIndexCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
+                this._ctNpcIndex=null;this._ctBrowseCandidateCache=null;this._ctBrowseViews=null;this._ctBrowseGeneration=(this._ctBrowseGeneration || 0)+1;
+                this._ctBrowseTransitionRun=null;this._ctBrowseRestoring=false;this.ctBrowseBusy=false;
+                this.ctBrowseMode='sheets';this.ctNpcSelection='all';this.ctNpcKind='';this.ctNpcFilter='';
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
                 this.ctPreviewGggVars={};this.ctPreviewAffixes=previewAffixesFor(null);this.ctFocusedField='';
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
@@ -1229,6 +1357,7 @@
             },
             async ctActivate(scope, metadata, initializationSession) {
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
+                const test=String(scope.groupId).startsWith('local:test:');
                 const store=this.ctStorage(scope);
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
                 const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
@@ -1257,6 +1386,8 @@
                     await this.ctInitializationStep('Preparing context references',async()=>{
                         const index=await root.ContentAdapters.clienttext.contextReferenceIndex(units,{guard:current});check();
                         this._ctReferenceIndexCache={units:this.ctUnits,workspace:this.ctWorkspace,index};
+                        const npcIndex=await root.ClientTextNpcIndex.buildNpcIndex(units,{guard:current,signal});check();
+                        this._ctNpcIndex=raw(npcIndex);this.ctRevision++;
                     },initialization);
                     await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();if(!test){await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();}},initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
@@ -1306,10 +1437,11 @@
                 try{return await operation;}finally{if(this._ctSyncRun===run)this._ctSyncRun=null;}
             },
             async ctSelect(unit, full = false, options = {}) {
-                if (!unit || this.ctBusy || this._ctUnitIndex?.get(unit.id)!==unit) return false;
-                const ctx = this.ctContext(),run=this._ctSelectRun={unitId:unit.id,ctx,full,pending:true};
+                if (!unit || this.ctBusy || this.ctBrowseBusy || this._ctUnitIndex?.get(unit.id)!==unit) return false;
+                const ctx = this.ctContext(),generation=this._ctBrowseGeneration || 0,run=this._ctSelectRun={unitId:unit.id,ctx,generation,full,pending:true};
                 const current=()=>{
                     const valid=this.ctCurrent(ctx) && this._ctSelectRun===run && this._ctUnitIndex?.get(unit.id)===unit
+                        && generation===(this._ctBrowseGeneration || 0)
                         && (!options.guard || options.guard());
                     if(!valid && this._ctSelectRun===run)run.pending=false;
                     return valid;
@@ -1359,11 +1491,11 @@
             ctFocusTarget(last=false,fieldId=last?null:this.ctFocusedField,caret=null) {
                 const fields=this.ctTabFields(),field=fields.find(field=>field.id===fieldId) || fields[last?fields.length-1:0];
                 if(!field || this.ctKeyboardBlocked())return false;
-                const ctx=this.ctContext(),unit=this.ctCurrentUnit,selectionRun=this._ctSelectRun,full=this.ctEditor,
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,selectionRun=this._ctSelectRun,full=this.ctEditor,generation=this._ctBrowseGeneration || 0,
                     run=this._ctFieldFocusRun={},changed=this.ctRevealTarget(field),active=root.document?.activeElement;
                 this.ctFocusedField=field.id;
                 const focus=()=>{
-                    if(this._ctFieldFocusRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selectionRun
+                    if(this._ctFieldFocusRun!==run || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selectionRun
                         || this.ctEditor!==full || this.ctFocusedField!==field.id || this.ctKeyboardBlocked())return false;
                     const input=this.ctTargetInputs().find(input=>input.dataset.ctTarget===field.id);if(!input)return false;
                     input.focus?.();
@@ -1386,7 +1518,7 @@
                     || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft || this.draftRecoveryVisible);
             },
             ctKeyboardBlocked() {
-                return !this.ctActive || this.ctBusy || this._ctSelectRun?.pending || this.ctHistoryViewer || this.ctKeyboardOverlayOpen();
+                return !this.ctActive || this.ctBusy || this.ctBrowseBusy || this._ctSelectRun?.pending || this.ctHistoryViewer || this.ctKeyboardOverlayOpen();
             },
             ctKeyboardTarget(field,input) {
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field?.id),region=this.ctEditorElement();
@@ -1725,9 +1857,9 @@
                 finally{head.pending--;}
             },
             async ctSave(close = false, options = {}) {
-                if (this.ctBusy || !this.ctCurrentUnit) return false;
+                if (this.ctBusy || this.ctBrowseBusy || !this.ctCurrentUnit) return false;
                 if(this.ctChoices.length){this.ctError='Choose between the retained alternatives before saving this ID.';return false;}
-                const ctx=this.ctContext(),unitId=this.ctSelection,scopeKey=root.ClientTextStore.scopeKey(ctx.scope);
+                const ctx=this.ctContext(),unitId=this.ctSelection,scopeKey=root.ClientTextStore.scopeKey(ctx.scope),generation=this._ctBrowseGeneration || 0;
                 const store=this.ctStorage(ctx.scope);
                 const existing=this._ctSaveJob, retry=existing?.unitId===unitId && existing.scopeKey===scopeKey && existing.command;
                 // An uncertain commit must find its receipt with the exact old
@@ -1748,9 +1880,9 @@
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);this.ctRefreshDraftSummaries(ctx);
-                    if (close && sameEditor) {
+                    if (close && sameEditor && generation===(this._ctBrowseGeneration || 0)) {
                         this.ctEditor = false;this.ctInlineClosed=false;this._ctInlineReturn=null;this.ctCompletion=null;await this.$nextTick?.();
-                        if(!this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
+                        if(!this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctSelection!==unitId)return false;
                         this.ctRefreshLayout();this.ctFocusRow(unitId);
                     }
                     this.ctSync(ctx); return sameEditor;
@@ -1788,13 +1920,13 @@
             },
             async ctSaveAndNavigate(reverse=false,options={}) {
                 if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
-                const ctx=this.ctContext(),unitId=this.ctSelection,original=this.ctCurrentUnit,selectionRun=this._ctSelectRun,
+                const ctx=this.ctContext(),unitId=this.ctSelection,original=this.ctCurrentUnit,selectionRun=this._ctSelectRun,generation=this._ctBrowseGeneration || 0,
                     hadEditor=this.ctEditor || this.ctInlineUnitVisible(),direction=reverse?-1:1;
                 if(!hadEditor)this.ctApplySearch();
                 let rows=this.ctRows.slice();
                 if(hadEditor && original && !rows.some(unit=>unit.id===unitId)){
                     const visible=new Set(rows.map(unit=>unit.id));
-                    rows=this.ctOrderedUnits().filter(unit=>unit.id===unitId || visible.has(unit.id));
+                    rows=this.ctBrowseOrderedUnits().filter(unit=>unit.id===unitId || visible.has(unit.id));
                 }
                 const anchor=hadEditor?rows.findIndex(unit=>unit.id===unitId)
                     :(this.ctPage-1)*this.ctEffectivePageSize+(reverse?this.ctPageRows.length-1:0);
@@ -1803,6 +1935,7 @@
                     this.ctNotice='No available files in this direction.';return false;
                 }
                 const run=this._ctNavigationRun={},current=()=>this._ctNavigationRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
+                    && generation===(this._ctBrowseGeneration || 0)
                     && this.ctCurrentUnit===original && this._ctSelectRun===selectionRun && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
                 try {
                     const pending=this._ctSaveJob,retry=pending?.unitId===unitId && pending.scopeKey===root.ClientTextStore.scopeKey(ctx.scope) && pending.command;
@@ -1814,10 +1947,10 @@
                         if(!current() || !await this.ctSelect(unit,!options.inline,{focus:false,guard:()=>this._ctNavigationRun===run
                             && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer}))return false;
                         const opened=this._ctSelectRun;
-                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this.ctSelection!==id
+                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctCurrentUnit!==unit || this.ctSelection!==id
                             || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
                         this.ctPage=Math.floor(index/this.ctEffectivePageSize)+1;await this.$nextTick?.();
-                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==opened
+                        if(this._ctNavigationRun!==run || !this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctCurrentUnit!==unit || this._ctSelectRun!==opened
                             || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
                         const fields=this.ctTabFields(unit),field=fields[options.focusEnd?fields.length-1:0];
                         this.ctFocusedField=field?.id || '';this.ctFocusTarget(!!options.focusEnd,this.ctFocusedField);return true;

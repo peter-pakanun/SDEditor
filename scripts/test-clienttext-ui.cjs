@@ -8,6 +8,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 function harness(changes={}){
     let nextId=0;
     const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+        ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ContentAdapters:require('../public/contentAdapters.js'),
         TerminologyDiagnostics:require('../public/terminologyDiagnostics.js'),Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
@@ -23,6 +24,8 @@ function harness(changes={}){
     Object.defineProperty(app,'ctOfflineTest',{get:()=>mixin.computed.ctOfflineTest.call(app)});
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
+        Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
+    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
@@ -59,6 +62,177 @@ function namedUnit(id,source='English',target='Translation',outdated=false){
     return {...unit(source,target,outdated),id:JSON.stringify(['normal','ClientStrings',id]),recordId:id};
 }
 const rowEvent=(key,control=false)=>({key,target:{closest:()=>control?{}:null},preventDefault(){this.defaultPrevented=true;},stopPropagation(){}});
+
+function npcUiHarness(changes={}) {
+    const row=(sheet,id,number,target='Translation',role='normal')=>{
+        const result={...namedUnit(id,'English '+id,target),id:JSON.stringify([role,sheet,id]),role,sheet};
+        result.fields=result.fields.map(field=>({...field,sourceCell:'B'+number,targetCell:'C'+number}));return result;
+    };
+    const names=row('NPCs','Metadata/NPC/Renly',2),topic=row('NPCTalk','Metadata/NPC/Renly::1',3),
+        dialogue=row('NPCTextAudio','RenlyIntro',4),reply=row('NPCTalkDialogueTextAudio','RenlyIntro',5,''),
+        gender=row('NPCTextAudio_Gender','RenlyIntro',6,'Gender translation','gender'),
+        una=row('NPCTextAudio','UnaIntro',7),unassigned=row('NPCTextAudio','UnknownIntro',8),other=row('ClientStrings','Unrelated',9);
+    const groups=[{key:'renly',label:'Renly',paths:['Metadata/NPC/Renly'],npcUnits:[names],units:[names,topic,dialogue,reply,gender]},
+        {key:'una',label:'Una',paths:['Metadata/NPC/Una'],npcUnits:[],units:[una]}],memberships=new Map();
+    for(const group of groups)for(const unit of group.units)memberships.set(unit.id,new Map([[group.key,{kind:require('../public/clientTextNpcIndex.js').kindFor(unit),
+        aliases:['NPCs','NPCTalk'].includes(unit.sheet)?[]:[group.label]}]]));
+    memberships.set(unassigned.id,new Map());names.fields[0].name='Name';
+    const units=[names,topic,dialogue,reply,gender,una,unassigned,other],index={groups,groupByKey:new Map(groups.map(group=>[group.key,group])),
+        units:units.slice(0,-1),unassigned:[unassigned],memberships};
+    const h=listHarness({ctUnits:units,_ctUnitIndex:new Map(units.map(unit=>[unit.id,unit])),ctSelection:dialogue.id,
+        ctValues:S.valuesFor(dialogue),_ctNpcIndex:index,...changes});
+    h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};
+    return {...h,index,names,topic,dialogue,reply,gender,una,unassigned,other};
+}
+
+test('NPC browse preserves full record identity, all-status context, classifications and workspace counts',async()=>{
+    const {app,index,names,topic,dialogue,reply,gender,una,unassigned,other}=npcUiHarness(),before=clone(app.ctUnits),counts=clone(app.ctCounts);
+    app.ctSelectedFilters=['missing'];assert.equal(await app.ctSetBrowseMode('npcs'),true);
+    assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(app.ctNpcTotal,7);assert.equal(app.ctNpcBrowseTitle,'All NPC text');
+    assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),index.units.map(unit=>unit.id));assert.equal(app.ctRows.includes(other),false);
+    assert.equal(await app.ctSetNpc('renly'),true);assert.equal(app.ctNpcTotal,5);assert.equal(app.ctNpcBrowseTitle,'Renly');
+    assert.deepEqual(Array.from(app.ctNpcKindOptions,option=>[option.key,option.count]),[['',5],['names',1],['topics',1],['dialogue',2],['conversations',1]]);
+    assert.equal(app.ctRows.find(unit=>unit.id===gender.id),gender);assert.equal(app.ctRows.find(unit=>unit.id===dialogue.id),dialogue);
+    assert.equal(dialogue.recordId,reply.recordId);assert.notEqual(dialogue.id,reply.id);assert.notEqual(dialogue.id,gender.id);
+    app.ctSelectedFilters=['missing'];assert.deepEqual(Array.from(app.ctRows),[reply]);
+    app.ctSelectedFilters=['unchanged','missing'];app.ctSearch='RenlyIntro';app.ctApplySearch();assert.equal(app.ctRows.length,3);
+    assert.equal(await app.ctSetNpcKind('conversations'),true);assert.deepEqual(Array.from(app.ctRows),[reply]);
+    assert.equal(app.ctNpcTotal,5,'category/search/status filters do not change the total context count');
+    assert.equal(app.ctSortValue(reply,'row'),5);assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(app.ctUnits,before);
+    assert.equal(app.ctNpcRelation(names).label,'Exact link');assert.equal(app.ctNpcRelation(topic).label,'Exact link');
+    assert.equal(app.ctNpcRelation(dialogue).label,'ID match');assert.match(app.ctNpcRelation(reply).tooltip,/does not identify the speaker or conversation order/);
+    app.ctNpcFilter='  meTADATA/npc/uNA  ';assert.deepEqual(Array.from(app.ctNpcFilteredGroups),[index.groups[1]]);
+    assert.equal(await app.ctSetNpc('unassigned'),true);assert.equal(app.ctNpcBrowseTitle,'Unassigned dialogue');
+    assert.equal(await app.ctSetNpcKind(''),true);app.ctSearch='';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows),[unassigned]);
+    assert.equal(app.ctNpcRelation(unassigned).label,'Unassigned');assert.equal(app.ctNpcKindLabel(una),'Dialogue');
+    assert.ok(app.ctNpcGroupTooltip(index.groups[0]).includes('Metadata/NPC/Renly'));
+});
+
+test('Sheets and NPCs restore independent session queries, filters, sorting, pages and selected context',async()=>{
+    const {app,dialogue}=npcUiHarness({ctSheet:'sheet-selection',ctSheetFilter:'sheet query',ctSearch:'sheet text',ctAppliedSearch:'sheet text',
+        ctFilter:'saved',ctSelectedFilters:['saved'],ctSort:'filename',ctSortDir:'desc',ctPage:3,ctTool:'history',ctHistory:[{key:'retained'}],ctDraftDirty:true}),
+        values=app.ctValues,selection=app.ctSelection;
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.equal(app.ctSearch,'');assert.equal(app.ctPage,1);assert.equal(app.ctSort,'row');
+    assert.equal(await app.ctSetNpc('renly'),true);assert.equal(await app.ctSetNpcKind('dialogue'),true);
+    Object.assign(app,{ctNpcFilter:'Ren',ctSearch:'npc text',ctAppliedSearch:'npc text',ctFilter:'',ctSelectedFilters:['unchanged'],ctSort:'english',ctSortDir:'asc',ctPage:2});
+    assert.equal(await app.ctSetBrowseMode('sheets'),true);
+    assert.equal(app.ctSheet,'sheet-selection');assert.equal(app.ctSheetFilter,'sheet query');assert.equal(app.ctSearch,'sheet text');assert.equal(app.ctFilter,'saved');
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['saved']);assert.equal(app.ctSort,'filename');assert.equal(app.ctSortDir,'desc');assert.equal(app.ctPage,3);
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.equal(app.ctNpcSelection,'renly');assert.equal(app.ctNpcKind,'dialogue');assert.equal(app.ctNpcFilter,'Ren');
+    assert.equal(app.ctSearch,'npc text');assert.equal(app.ctSort,'english');assert.equal(app.ctPage,2);
+    assert.equal(app.ctSelection,selection);assert.equal(app.ctCurrentUnit,dialogue);assert.equal(app.ctValues,values);assert.equal(app.ctDraftDirty,true);
+    assert.equal(app.ctTool,'history');assert.equal(app.ctHistory[0].key,'retained');
+    assert.equal(await app.ctShowAllLoaded(),true);assert.equal(app.ctBrowseMode,'sheets');assert.equal(app.ctSheet,'');assert.equal(app.ctSearch,'');
+    assert.equal(app.ctRows.length,app.ctUnits.length);assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.equal(app.ctNpcSelection,'renly');
+    app.ctFence();assert.equal(app.ctBrowseMode,'sheets');assert.equal(app._ctNpcIndex,null);assert.equal(app._ctBrowseViews,null);assert.equal(app.ctNpcFilter,'');
+});
+
+test('Sheets and NPCs restore independent table and page scrolling without copying auxiliary keys into state',async()=>{
+    const {app,window}=npcUiHarness(),region={scrollTop:0,scrollLeft:37,clientHeight:100,scrollHeight:100},scrolls=[];
+    app.$refs.ctFileTableRegion=region;window.scrollX=0;window.scrollY=240;
+    window.scrollTo=(left,top)=>{window.scrollX=left;window.scrollY=top;scrolls.push([left,top]);};
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.deepEqual([region.scrollTop,region.scrollLeft,window.scrollY],[0,0,0]);
+    region.scrollLeft=81;window.scrollY=430;app.ctPage=2;
+    assert.equal(await app.ctSetBrowseMode('sheets'),true);assert.deepEqual([region.scrollTop,region.scrollLeft,window.scrollY],[0,37,240]);
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.deepEqual([region.scrollTop,region.scrollLeft,window.scrollY],[0,81,430]);assert.equal(app.ctPage,2);
+    assert.equal(Object.hasOwn(app,'state'),false);assert.equal(Object.hasOwn(app,'scroll'),false);
+    assert.deepEqual(clone(app._ctBrowseViews.sheets.scroll),{top:0,left:37,windowTop:240});
+    const count=scrolls.length;assert.equal(await app.ctSetNpc('renly'),true);assert.equal(await app.ctSetNpcKind('dialogue'),true);
+    assert.deepEqual([region.scrollLeft,window.scrollY],[81,430]);assert.equal(scrolls.length,count,'NPC/category choices do not restore an unrelated view scroll');
+    region.scrollHeight=300;region.scrollTop=64;const snapshot=app.ctCaptureBrowseScroll();
+    assert.deepEqual(clone(snapshot),{top:64,left:81},'a vertically scrolling table does not capture window scroll');
+    await app.ctSetBrowseMode('sheets');region.scrollTop=12;window.scrollY=19;
+    await app.ctSetBrowseMode('npcs');assert.equal(region.scrollTop,64);assert.equal(region.scrollLeft,81);assert.equal(window.scrollY,19);
+});
+
+test('late browse rendering cannot restore table or page scroll into a replacement scope or behind an overlay',async()=>{
+    for(const changed of ['scope','overlay','generation']) {
+        const {app,window}=npcUiHarness(),gate=deferred(),started=deferred(),region={scrollTop:8,scrollLeft:15,clientHeight:100,scrollHeight:100},scrolls=[];
+        app.$refs.ctFileTableRegion=region;window.scrollY=120;window.scrollTo=(...args)=>scrolls.push(args);
+        app.$nextTick=()=>{started.resolve();return gate.promise;};
+        const switching=app.ctSetBrowseMode('npcs');await started.promise;
+        const replacement={scrollTop:23,scrollLeft:42,clientHeight:100,scrollHeight:100};app.$refs.ctFileTableRegion=replacement;
+        if(changed==='scope')app.ctWorkspace={scope:{...scope,groupId:'replacement-scope'}};
+        if(changed==='overlay')app.settingsDialogVisible=true;
+        if(changed==='generation')app._ctBrowseGeneration++;
+        gate.resolve();assert.equal(await switching,false,changed);assert.deepEqual([replacement.scrollTop,replacement.scrollLeft],[23,42]);
+        assert.deepEqual(scrolls,[]);assert.equal(app.ctBrowseBusy,false);
+    }
+});
+
+test('browse checkpoint failures, duplicate clicks, overlays and scope changes preserve the previous view and draft',async()=>{
+    for(const failure of ['draft','comment','comment-result','scope','overlay']) {
+        const {app}=npcUiHarness({ctDraftDirty:true}),values=app.ctValues,gate=deferred();
+        app.ctFlushDraft=failure==='draft'?async()=>false:failure.startsWith('comment')?async()=>true:()=>gate.promise;
+        if(failure==='comment')app.ctFlushCommentDraft=async()=>{throw new Error('checkpoint failed');};
+        if(failure==='comment-result')app.ctFlushCommentDraft=async()=>false;
+        const changing=app.ctSetBrowseMode('npcs');
+        assert.equal(await app.ctSetBrowseMode('npcs'),false,'duplicate transitions are blocked');
+        if(failure==='scope')app.ctWorkspace={scope:{...scope,groupId:'replacement'}};
+        if(failure==='overlay')app.settingsDialogVisible=true;
+        gate.resolve(true);assert.equal(await changing,false,failure);assert.equal(app.ctBrowseMode,'sheets');
+        assert.equal(app.ctValues,values);assert.equal(app.ctDraftDirty,true);assert.equal(app.ctBrowseBusy,false);
+    }
+});
+
+test('NPC navigation searches committed translated names and arrow keys focus tabs without activating them',async()=>{
+    const {app,names,index}=npcUiHarness();app.ctSaved={[names.id]:{values:{[fieldId]:'เรนลี'},revision:1,reviewed:{}}};app.ctRevision++;
+    app.ctNpcFilter='เรน';assert.deepEqual(Array.from(app.ctNpcFilteredGroups),[index.groups[0]]);
+    app.ctValues={[fieldId]:'Only a draft name'};app.ctNpcFilter='Only a draft name';assert.equal(app.ctNpcFilteredGroups.length,0);
+    const focused=[],tabs=[{id:'ctSheetsTab',focus(){focused.push(this.id);}},{id:'ctNpcsTab',focus(){focused.push(this.id);}}];
+    app.$refs.ctBrowseTabs={querySelectorAll(){return tabs;}};
+    const event={...rowEvent('ArrowRight'),target:tabs[0]};assert.equal(app.ctBrowseTabKeydown(event),true);assert.equal(event.defaultPrevented,true);
+    assert.deepEqual(focused,['ctNpcsTab']);assert.equal(app.ctBrowseMode,'sheets');assert.equal(app.ctBrowseBusy,false);
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.equal(app.ctBrowseMode,'npcs');
+});
+
+test('opening a diagnostic or lookup record outside the selected NPC reports its actual relation',async()=>{
+    const {app,una,unassigned}=npcUiHarness();await app.ctSetBrowseMode('npcs');await app.ctSetNpc('renly');
+    app._ctStore={getDraft:async()=>null};app.ctLoadCommentDraft=()=>{};
+    assert.equal(await app.ctSelect(una,true),true);assert.equal(app.ctNpcSelection,'renly');assert.equal(app.ctNpcBrowseTitle,'Renly');
+    assert.equal(app.ctCurrentUnit,una);assert.equal(app.ctRows.includes(una),false);
+    const relation=app.ctNpcRelation(una);assert.equal(relation.label,'ID match');assert.match(relation.tooltip,/Related to Una/);
+    assert.doesNotMatch(relation.tooltip,/Related to Renly|Linked to\s+by/);assert.equal(app.ctNpcRelation(unassigned).label,'Unassigned');
+});
+
+test('list navigation enters the visible NPC rows at the proper edge when its retained selection is hidden',async()=>{
+    for(const [key,expectedIndex] of [['ArrowDown',0],['ArrowUp',4],['Home',0],['End',4],['PageDown',2],['ArrowRight',2],['PageUp',0],['ArrowLeft',0]]){
+        const {app,una,index}=npcUiHarness();await app.ctSetBrowseMode('npcs');await app.ctSetNpc('renly');
+        app.ctSelection=una.id;app.ctValues=S.valuesFor(una);const visible=index.groups[0].units,calls=[];
+        app.ctSelect=async(target,full,options)=>{assert.equal(full,false);assert.equal(options.focus,false);calls.push(target.id);app.ctSelection=target.id;return true;};
+        app.ctFocusRow=id=>calls.push('focus:'+id);
+        assert.equal(await app.ctRowKeydown(null,rowEvent(key)),true,key);assert.equal(app.ctSelection,visible[expectedIndex].id,key);
+        assert.deepEqual(calls,[visible[expectedIndex].id,'focus:'+visible[expectedIndex].id]);assert.equal(app.ctPage,Math.floor(expectedIndex/2)+1);
+    }
+    const {app,una,index}=npcUiHarness();await app.ctSetBrowseMode('npcs');await app.ctSetNpc('renly');app.ctSelection=una.id;app.ctPage=3;
+    app.ctSelect=async target=>{app.ctSelection=target.id;return true;};app.ctFocusRow=()=>{};
+    assert.equal(await app.ctRowKeydown(null,rowEvent('PageUp')),true);assert.equal(app.ctSelection,index.groups[0].units[2].id,'page movement anchors to the current visible page');
+});
+
+test('queued pages and record navigation cannot complete in a replacement NPC browsing generation',async()=>{
+    const {app,dialogue,reply}=npcUiHarness(),gate=deferred();let calls=0;
+    app.ctFlushDraft=()=>++calls===1?gate.promise:Promise.resolve(true);
+    const paging=app.ctSetPage(3);assert.equal(await app.ctSetBrowseMode('npcs'),true);gate.resolve(true);
+    assert.equal(await paging,false);assert.equal(app.ctPage,1);
+    await app.ctSetNpc('renly');app.ctEditor=true;app.ctSelectedFilters=['missing'];app.ctValues[fieldId]='Changed draft';
+    const pending=deferred();app.ctSave=()=>pending.promise;let selections=0;app.ctSelect=async()=>{selections++;return true;};
+    const navigating=app.ctSaveAndNavigate();await settle();assert.equal(await app.ctSetNpc('una'),true);pending.resolve(true);
+    assert.equal(await navigating,false);assert.equal(selections,0);assert.equal(app.ctSelection,dialogue.id);assert.equal(app.ctValues[fieldId],'Changed draft');
+    app.ctNpcSelection='renly';app.ctEditor=true;app.ctSave=async()=>true;
+    app.ctSelect=async unit=>{app.ctSelection=unit.id;return true;};
+    assert.equal(await app.ctSaveAndNavigate(),true);assert.equal(app.ctSelection,reply.id,'hidden active anchor stays inside the selected NPC candidate order');
+});
+
+test('a scoped save acknowledgement remains applied while obsolete browsing close and focus are suppressed',async()=>{
+    const {app,dialogue}=npcUiHarness({ctEditor:true}),pending=deferred();let focus=0;
+    app.ctValues[fieldId]='Accepted exact raw@text\\n';app.ctDraftDirty=true;
+    app._ctStore={save:()=>pending.promise};app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctRefreshDraftSummaries=()=>{};app.ctFocusRow=()=>focus++;
+    const saving=app.ctSave(true);await settle();assert.equal(app.ctBusy,true);
+    app._ctBrowseGeneration=(app._ctBrowseGeneration || 0)+1;app.ctBrowseMode='npcs';app.ctNpcSelection='una';
+    const saved={values:{[fieldId]:'Accepted exact raw@text\\n'},reviewed:{},revision:1};pending.resolve({saved});
+    assert.equal(await saving,true);assert.equal(app.ctSaved[dialogue.id],saved);assert.equal(app.ctDraftDirty,false);
+    assert.equal(app.ctEditor,true);assert.equal(focus,0);assert.equal(app.ctSelection,dialogue.id);
+});
 
 test('ClientText exposes selected record reference metadata separately from developer notes',()=>{
     const {app,original}=harness(),raw='Metadata/Characters/Dex/DexFourb\r\n raw\\n ';
@@ -2963,6 +3137,16 @@ test('late context reference preparation cannot publish an index into a replacem
     pending.resolve();assert.equal(await opening,false);assert.equal(app.ctActive,false);
     assert.equal(app.ctUnits[0],replacement);assert.equal(app._ctReferenceIndexCache,cache);assert.equal(app.ctError,'');
 });
+test('late shared NPC index preparation cannot replace the index or units of a new workspace',async()=>{
+    const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app,window}=initializationHarness({_ctStore:f.store}),actual=window.ClientTextNpcIndex,started=deferred(),pending=deferred();
+    window.ClientTextNpcIndex={...actual,async buildNpcIndex(units,options){started.resolve();await pending.promise;return actual.buildNpcIndex(units,options);}};
+    const opening=app.ctActivate(scope,await f.store.getMetadata(scope));await started.promise;
+    const oldUnits=app.ctUnits;app.ctFence();const replacement=namedUnit('Replacement');app.ctUnits=[replacement];app.ctWorkspace={scope:{...scope,groupId:'new-index-scope'}};
+    const index=app._ctNpcIndex={groups:[],groupByKey:new Map(),units:[],unassigned:[],memberships:new Map()};
+    pending.resolve();assert.equal(await opening,false);assert.equal(app._ctNpcIndex,index);assert.equal(app.ctUnits[0],replacement);assert.notEqual(app.ctUnits,oldUnits);
+    assert.equal(app.ctError,'');
+});
 test('a nested cached ClientText owner cannot release the shared foreground preparation gate',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app}=initializationHarness({_ctStore:f.store});
     const outer=app.beginWorkspaceInitialization({label:'Outer selected workspace',plan:['Outer preparation']});
@@ -3094,7 +3278,7 @@ test('offline test activation, drafts, save/history and exit use memory and rest
         _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(){assert.fail('Test operation must not access durable storage');}})}),{app,mixin}=h;
     app.ensureDictionarySnapshot=()=>assert.fail('Test activation must not load/sync Dictionary');
     app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
-    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);
+    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);
     assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),false);
     for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
     await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;
@@ -3138,7 +3322,7 @@ test('combined offline Open waits for validation, rejects duplicate clicks and l
 
 test('combined offline Open never opens failed, cancelled or superseded preparation',async()=>{
     for(const change of [app=>{app.ctUploadError='Invalid workbook';},app=>{app._ctAbort.abort();},
-        app=>{app.managedCatalogScope='another-account';},app=>{app._ctEpoch=1;},app=>{app.ctUploadVisible=false;},app=>{app.managedManagerAccess=false;}]){
+        app=>{app.managedCatalogScope='another-account';},app=>{app._ctEpoch=1;},app=>{app.ctUploadVisible=false;},app=>{app.ctUploadTest=false;}]){
         const {app}=harness({ctUploadTest:true,ctUploadVisible:true,managedManagerAccess:true,ctUploadFiles:[{}],ctPrepared:[{old:true}]}),gate=deferred();
         app.ctPrepareUpload=async()=>{app._ctAbort=new AbortController();await gate.promise;};
         app.ctPublishPrepared=()=>assert.fail('A failed or stale preparation cannot open old prepared work');
