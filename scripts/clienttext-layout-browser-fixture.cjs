@@ -94,7 +94,7 @@ const app = Vue.createApp({
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
     computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount',
-        'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions']
+        'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities']
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
     methods:{...ct.methods,scheduleInlineAlignment:window.InlineEditor.mixin.methods.scheduleInlineAlignment,${tooltipMethods}
         ctQueueDraft(){},ctSuggest(){},ctCompletionSelectionChanged(){},
@@ -590,6 +590,28 @@ async function run() {
             await npcTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='npcs' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
             assert.equal(await heading.getByRole('heading',{level:2}).textContent(),'Renly',name+': NPC selection survives return');
             assert.equal(await list.evaluate(element=>element.scrollTop),scrollBefore,name+': tab return preserves NPC scroll');
+            await page.evaluate(()=>{
+                const vm=window.__ctLayoutFixture,renly=vm.ctUnits.find(unit=>unit.recordId==='RenlyLayoutIntro'),una=vm.ctUnits.find(unit=>unit.recordId==='Metadata/NPC/Una');
+                vm.ctSaved=Vue.markRaw({[renly.id]:{saved:true,values:{'npc-text':''},reviewed:{}}});
+                vm.ctDiagnostics=Vue.markRaw({[renly.id]:[{severity:'warning'}],[una.id]:[{severity:'warning'}]});vm.ctRevision++;
+                vm.ctSelectedFilters=['unchanged'];vm.ctNpcKind='names';
+            });await settle();
+            const renlyButton=nav.getByRole('button',{name:'Renly',exact:true}),unaButton=nav.getByRole('button',{name:'Una',exact:true}),
+                renlyName=renlyButton.locator('.ctNpcName'),unaName=unaButton.locator('.ctNpcName');
+            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-error')),true,name+': a hidden Missing entry takes precedence over Warning');
+            assert.equal(await renlyName.evaluate(element=>getComputedStyle(element).color),await renlyName.evaluate(element=>{
+                const probe=document.createElement('span');probe.style.color='var(--ui-error)';element.append(probe);const color=getComputedStyle(probe).color;probe.remove();return color;
+            }),name+': selected NPC name retains red rather than the selection accent');
+            assert.equal(await renlyButton.getAttribute('aria-description'),'Missing or Error in related text');
+            assert.equal(await unaName.evaluate(element=>getComputedStyle(element).color),['dark','modern-dark'].includes(theme)?'rgb(243, 211, 107)':'rgb(114, 85, 0)',name+': warning name uses readable yellow');
+            await page.evaluate(()=>{
+                const vm=window.__ctLayoutFixture,renly=vm.ctUnits.find(unit=>unit.recordId==='RenlyLayoutIntro');
+                vm.ctSaved=Vue.markRaw({[renly.id]:{saved:true,values:{'npc-text':'Complete translation'},reviewed:{}}});vm.ctRevision++;
+            });await settle();
+            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),true,name+': completed text falls back to its remaining Warning');
+            await page.evaluate(()=>{window.__ctLayoutFixture.ctDiagnostics=Vue.markRaw({});});await settle();
+            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-error') || element.classList.contains('ctNpcSeverity-warning')),false,name+': removing the final finding restores normal text');
+            assert.equal(await unaName.evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),false,name+': other resolved names also return to normal');
             results.push({name:name+' accessible tabs, production labels, long names, fixed filter, independent scroll/page and exact editor caret handoff'});
         }
         assert.deepEqual(errors,[],'No browser page errors');

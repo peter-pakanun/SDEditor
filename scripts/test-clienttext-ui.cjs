@@ -25,7 +25,7 @@ function harness(changes={}){
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
-    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions'])
+    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
@@ -84,6 +84,61 @@ function npcUiHarness(changes={}) {
     h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};
     return {...h,index,names,topic,dialogue,reply,gender,una,unassigned,other};
 }
+
+test('NPC sidebar severity uses red before yellow and clears only after its committed work or findings resolve',()=>{
+    const {app,topic,dialogue,reply,gender,una}=npcUiHarness();topic.fields[0].outdated=true;
+    const before=clone(app.ctUnits);app.ctDiagnostics={[dialogue.id]:[{severity:'warning'}],[gender.id]:[{severity:'error'}],[una.id]:[{severity:'warning'}]};
+    assert.equal(app.ctNpcSeverities.get('renly'),'error');assert.equal(app.ctNpcSeverities.get('una'),'warning');
+    app.ctSaved={[reply.id]:{values:{[fieldId]:'Completed reply'},reviewed:{},revision:1}};app.ctRevision++;
+    assert.equal(app.ctStatus(reply).missing,false);assert.equal(app.ctNpcSeverities.get('renly'),'error','a retained error still outranks Outdated and Warning');
+    app.ctDiagnostics={[dialogue.id]:[{severity:'warning'}],[una.id]:[{severity:'warning'}]};
+    assert.equal(app.ctNpcSeverities.get('renly'),'warning');
+    app.ctSaved={...app.ctSaved,[topic.id]:{values:S.valuesFor(topic),reviewed:{[fieldId]:S.sourceHash(topic.fields[0].source)},revision:1}};app.ctRevision++;
+    assert.equal(app.ctStatus(topic).outdated,false);assert.equal(app.ctNpcSeverities.get('renly'),'warning','a retained warning survives an unrelated save or reviewed field');
+    app.ctDiagnostics={[una.id]:[{severity:'warning'}]};assert.equal(app.ctNpcSeverities.get('renly'),'');assert.equal(app.ctNpcSeverities.get('una'),'warning');
+    app.ctSaved={...app.ctSaved,[dialogue.id]:{values:{[fieldId]:'A saved correction'},reviewed:{},revision:1}};app.ctRevision++;
+    assert.equal(app.ctStatus(reply).saved,true);assert.equal(app.ctStatus(dialogue).revised,true);assert.equal(app.ctNpcSeverities.get('renly'),'','Saved and Revised are neutral');
+    app.ctDiagnostics={};assert.equal(app.ctNpcSeverities.get('una'),'');assert.deepEqual(app.ctUnits,before);
+});
+
+test('NPC sidebar severity includes related records hidden by every browsing filter and excludes draft-only changes',()=>{
+    const {app,dialogue,reply}=npcUiHarness({ctBrowseMode:'npcs',ctNpcSelection:'renly',ctNpcKind:'names',ctNpcFilter:'No matching NPC',
+        ctSearch:'No matching text',ctAppliedSearch:'No matching text',ctSelectedFilters:['unchanged']});
+    const before=clone(app.ctUnits);assert.equal(app.ctRows.length,0);assert.equal(app.ctNpcFilteredGroups.length,0);
+    assert.equal(app.ctNpcSeverities.get('renly'),'error','hidden missing conversation text still colors the NPC');
+    app.ctSelection=reply.id;app.ctValues={[fieldId]:'Unsaved complete reply'};app.ctDraftDirty=true;
+    assert.equal(app.ctNpcSeverities.get('renly'),'error','an unsaved completion does not resolve committed Missing');
+    app.ctSaved={[reply.id]:{values:{[fieldId]:'Committed complete reply'},reviewed:{},revision:1}};app.ctRevision++;
+    assert.equal(app.ctNpcSeverities.get('renly'),'');app.ctSelection=dialogue.id;app.ctValues={[fieldId]:''};
+    assert.equal(app.ctNpcSeverities.get('renly'),'','a blank draft does not manufacture committed Missing');
+    app.ctDiagnostics={[dialogue.id]:[{severity:'error'}]};assert.equal(app.ctNpcSeverities.get('renly'),'error','hidden scan errors also contribute');
+    assert.deepEqual(app.ctUnits,before);
+});
+
+test('NPC sidebar severity preserves full cross-sheet identities and contributes shared records to every related group',()=>{
+    const {app,index,topic,dialogue,reply,gender}=npcUiHarness();
+    app.ctSaved={[reply.id]:{values:{[fieldId]:'Complete'},reviewed:{},revision:1}};
+    index.groups[0].units=index.groups[0].units.filter(unit=>unit!==gender);index.groups[1].units.push(gender);
+    index.memberships.set(gender.id,new Map([['una',{kind:'dialogue',aliases:['Una']}]]));
+    const before=clone(app.ctUnits);assert.equal(dialogue.recordId,gender.recordId);assert.notEqual(dialogue.id,gender.id);
+    app.ctDiagnostics={[dialogue.id]:[{severity:'error'}]};assert.equal(app.ctNpcSeverities.get('renly'),'error');assert.equal(app.ctNpcSeverities.get('una'),'');
+    app.ctDiagnostics={[gender.id]:[{severity:'warning'}]};assert.equal(app.ctNpcSeverities.get('renly'),'');assert.equal(app.ctNpcSeverities.get('una'),'warning');
+    index.groups[1].units.push(topic);index.memberships.get(topic.id).set('una',{kind:'topics',aliases:[]});app.ctRevision++;
+    app.ctDiagnostics={[topic.id]:[{severity:'error'}]};assert.equal(app.ctNpcSeverities.get('renly'),'error');assert.equal(app.ctNpcSeverities.get('una'),'error');
+    app.ctDiagnostics={[topic.id]:[{severity:'warning'}]};assert.equal(app.ctNpcSeverities.get('renly'),'warning');assert.equal(app.ctNpcSeverities.get('una'),'warning');
+    assert.deepEqual(app.ctUnits,before);
+});
+
+test('NPC sidebar severity is discarded with its scoped index before another workspace reuses record IDs',()=>{
+    const {app,dialogue}=npcUiHarness();app.ctDiagnostics={[dialogue.id]:[{severity:'error'}]};assert.equal(app.ctNpcSeverities.get('renly'),'error');
+    app.ctFence();assert.equal(app.ctNpcSeverities.size,0);
+    const replacement={...dialogue,fields:dialogue.fields.map(field=>({...field,target:'',originalMissing:true}))},group={key:'new-npc',label:'New NPC',paths:[],npcUnits:[],units:[replacement]};
+    app.ctWorkspace={scope:{...scope,accountId:'other-account',game:'poe1',groupId:'other-group',language:'German'}};app.ctActive=true;
+    app.ctUnits=[replacement];app._ctUnitIndex=new Map([[replacement.id,replacement]]);app._ctNpcIndex={groups:[group],groupByKey:new Map([[group.key,group]]),
+        units:[replacement],unassigned:[],memberships:new Map([[replacement.id,new Map([[group.key,{kind:'dialogue',aliases:[]}]])]])};app.ctRevision++;
+    assert.equal(app.ctNpcSeverities.has('renly'),false);assert.equal(app.ctNpcSeverities.get('new-npc'),'error');assert.equal(Object.keys(app.ctDiagnostics).length,0);
+    assert.equal(Object.keys(app.ctSaved).length,0);
+});
 
 test('NPC browse preserves full record identity, all-status context, classifications and workspace counts',async()=>{
     const {app,index,names,topic,dialogue,reply,gender,una,unassigned,other}=npcUiHarness(),before=clone(app.ctUnits),counts=clone(app.ctCounts);

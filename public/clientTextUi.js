@@ -262,6 +262,20 @@
             },
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
             ctNpcGroups() { this.ctUnits; this.ctRevision; return this._ctNpcIndex?.groups || []; },
+            ctNpcSeverities() {
+                this.ctRevision;
+                const severities=new Map(),diagnostics=this.ctDiagnostics;
+                for(const group of this.ctNpcGroups){
+                    let severity='';
+                    for(const unit of group.units){
+                        const status=this.ctStatus(unit),issues=diagnostics[unit.id] || [];
+                        if(status.missing || issues.some(issue=>issue.severity==='error')){severity='error';break;}
+                        if(status.outdated || issues.some(issue=>issue.severity==='warning'))severity='warning';
+                    }
+                    severities.set(group.key,severity);
+                }
+                return severities;
+            },
             ctNpcFilteredGroups() {
                 this.ctRevision;
                 const query=this.ctNpcFilter.trim().toLocaleLowerCase();
@@ -783,7 +797,8 @@
                     ? `Related to ${labels.join(', ')} by text ID: ${[...new Set(selected.flatMap(([,relation])=>relation.aliases || []))].join(', ')}. This does not identify the speaker or conversation order.`
                     : `Linked to ${labels.join(', ')} by an exact NPC record or menu-topic path. This does not identify the dialogue speaker.`};
             },
-            ctNpcGroupTooltip(group) {return [group.label,`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].join('\n');},
+            ctNpcSeverityLabel(group) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[this.ctNpcSeverities.get(group.key)] || '';},
+            ctNpcGroupTooltip(group) {return [group.label,this.ctNpcSeverityLabel(group),`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].filter(Boolean).join('\n');},
             ctBrowseSnapshot() {
                 return Object.fromEntries(['ctSheet','ctSheetFilter','ctSearch','ctAppliedSearch','ctFilter','ctSelectedFilters','ctSort','ctSortDir','ctPage',
                     'ctNpcSelection','ctNpcKind','ctNpcFilter'].map(key=>[key,key==='ctSelectedFilters'?this[key].slice():this[key]]));
