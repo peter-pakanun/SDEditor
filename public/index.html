@@ -406,7 +406,7 @@
           </div>
         </template>
         <div class="ctUploadSelectors">
-          <label class="ctUploadField">Select files<input type="file" multiple :accept="ctUploadTest ? '.xlsx,.xlsm' : '.zip,.xlsx,.xlsm,.txt'" @change="ctChooseFiles" :disabled="ctUploading"></label>
+          <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple :accept="ctUploadTest ? '.xlsx,.xlsm' : '.zip,.xlsx,.xlsm,.txt'" @change="ctChooseFiles" :disabled="ctUploading"></label>
           <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
         </div>
         <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th></tr></thead><tbody><tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.name }}</td><template v-if="!candidate.file.name.toLowerCase().endsWith('.zip')"><td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td><td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td></template><td v-else colspan="2">StatDescription</td></tr></tbody></table>
