@@ -262,6 +262,19 @@
                 return { before, after, rows, notes: this.ctHistoryDiffParts(aNotes, bNotes), hasNotes: !!(aNotes || bNotes) };
             },
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
+            ctSheetSeverities() {
+                this.ctRevision;
+                const severities=new Map();
+                for(const unit of this.ctUnits){
+                    const key=JSON.stringify([unit.role,unit.sheet]);
+                    if(severities.get(key)==='error')continue;
+                    const status=this.ctStatus(unit),issues=this.ctDiagnostics[unit.id] || [];
+                    const severity=status.missing || issues.some(issue=>issue.severity==='error') ? 'error'
+                        : status.outdated || issues.some(issue=>issue.severity==='warning') ? 'warning' : '';
+                    if(severity || !severities.has(key))severities.set(key,severity);
+                }
+                return severities;
+            },
             ctNpcGroups() { this.ctUnits; this.ctRevision; return this._ctNpcIndex?.groups || []; },
             ctNpcSeverities() {
                 this.ctRevision;
@@ -842,6 +855,8 @@
             },
             ctNpcSeverityLabel(group) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[this.ctNpcSeverities.get(group.key)] || '';},
             ctNpcGroupTooltip(group) {return [group.label,this.ctNpcSeverityLabel(group),`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].filter(Boolean).join('\n');},
+            ctSheetSeverityLabel(sheet) {return {error:'Missing or Error in this sheet',warning:'Outdated or Warning in this sheet'}[this.ctSheetSeverities.get(sheet.key)] || '';},
+            ctSheetTooltip(sheet) {return [sheet.name,(sheet.role==='gender'?'Gender':'Normal')+' workbook',this.ctSheetSeverityLabel(sheet)].filter(Boolean).join('\n');},
             ctConvoNodeKey(type,key) {return JSON.stringify([type,key]);},
             ctConvoSelectedNode() {
                 if(this.ctConvoSelection==='all' || !this._ctConvoIndex)return null;

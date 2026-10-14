@@ -26,7 +26,7 @@ function harness(changes={}){
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
     for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
-    for(const name of ['ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
+    for(const name of ['ctSheetSeverities','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
         'ctConvoParents','ctConvoTree','ctConvoBrowseTitle','ctConvoTotal','ctConvoSeverities'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
@@ -235,6 +235,42 @@ test('NPC sidebar severity uses red before yellow and clears only after its comm
     app.ctSaved={...app.ctSaved,[dialogue.id]:{values:{[fieldId]:'A saved correction'},reviewed:{},revision:1}};app.ctRevision++;
     assert.equal(app.ctStatus(reply).saved,true);assert.equal(app.ctStatus(dialogue).revised,true);assert.equal(app.ctNpcSeverities.get('renly'),'','Saved and Revised are neutral');
     app.ctDiagnostics={};assert.equal(app.ctNpcSeverities.get('una'),'');assert.deepEqual(app.ctUnits,before);
+});
+
+test('Sheet sidebar severity includes hidden committed work and findings, with errors above warnings and drafts excluded',()=>{
+    const {app,dialogue,reply,topic}=npcUiHarness({ctSheet:'another sheet',ctSheetFilter:'No matching sheet',
+        ctSearch:'No matching text',ctAppliedSearch:'No matching text',ctSelectedFilters:['unchanged']});
+    topic.fields[0].outdated=true;
+    const before=clone(app.ctUnits),key=unit=>JSON.stringify([unit.role,unit.sheet]);
+    app.ctDiagnostics={[dialogue.id]:[{severity:'warning'}],[reply.id]:[{severity:'warning'}]};
+    assert.equal(app.ctRows.length,0);assert.equal(app.ctSheetSeverities.get(key(reply)),'error');
+    assert.equal(app.ctSheetSeverities.get(key(dialogue)),'warning');assert.equal(app.ctSheetSeverities.get(key(topic)),'warning');
+    app.ctSelection=reply.id;app.ctValues={[fieldId]:'Only a draft'};app.ctDraftDirty=true;
+    assert.equal(app.ctSheetSeverities.get(key(reply)),'error');
+    app.ctSaved={[reply.id]:{values:{[fieldId]:'Saved complete'},reviewed:{},revision:1}};app.ctRevision++;
+    assert.equal(app.ctSheetSeverities.get(key(reply)),'warning','saving leaves the retained scan warning visible');
+    app.ctDiagnostics={[dialogue.id]:[{severity:'warning'},{severity:'error'}]};
+    assert.equal(app.ctSheetSeverities.get(key(dialogue)),'error');assert.equal(app.ctSheetSeverities.get(key(reply)),'');
+    app.ctDiagnostics={};app.ctSelection=dialogue.id;app.ctValues={[fieldId]:''};
+    assert.equal(app.ctSheetSeverities.get(key(dialogue)),'','blank drafts do not change the sidebar');
+    app.ctSaved={...app.ctSaved,[topic.id]:{values:S.valuesFor(topic),reviewed:{[fieldId]:S.sourceHash(topic.fields[0].source)},revision:1},
+        [dialogue.id]:{values:{[fieldId]:'Saved correction'},reviewed:{},revision:1}};app.ctRevision++;
+    assert.equal(app.ctSheetSeverities.get(key(topic)),'');assert.equal(app.ctSheetSeverities.get(key(dialogue)),'','Saved and Revised remain neutral');
+    assert.deepEqual(app.ctUnits,before);
+});
+
+test('Sheet sidebar keeps same-named workbook roles separate and resets severity on a workspace fence',()=>{
+    const normal=namedUnit('Shared'),gender={...namedUnit('Shared'),id:JSON.stringify(['gender','ClientStrings','Shared']),role:'gender'},
+        {app}=listHarness({ctUnits:[normal,gender],ctDiagnostics:{[normal.id]:[{severity:'warning'}],[gender.id]:[{severity:'error'}]}}),
+        sheets=[{key:JSON.stringify(['normal','ClientStrings']),name:'ClientStrings',role:'normal'},
+            {key:JSON.stringify(['gender','ClientStrings']),name:'ClientStrings',role:'gender'}];
+    assert.equal(app.ctSheetSeverities.get(sheets[0].key),'warning');assert.equal(app.ctSheetSeverities.get(sheets[1].key),'error');
+    assert.equal(app.ctSheetSeverityLabel(sheets[0]),'Outdated or Warning in this sheet');
+    assert.equal(app.ctSheetTooltip(sheets[1]),'ClientStrings\nGender workbook\nMissing or Error in this sheet');
+    app.ctDiagnostics={[normal.id]:[{severity:'error'}]};
+    assert.equal(app.ctSheetSeverities.get(sheets[0].key),'error');assert.equal(app.ctSheetSeverities.get(sheets[1].key),'');
+    app.ctFence();assert.equal(app.ctSheetSeverities.size,0);
+    app.ctUnits=[gender];assert.equal(app.ctSheetSeverities.get(sheets[1].key),'','old findings cannot color a reopened workbook');
 });
 
 test('NPC sidebar severity includes related records hidden by every browsing filter and excludes draft-only changes',()=>{

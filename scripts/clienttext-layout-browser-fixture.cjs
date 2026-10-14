@@ -94,7 +94,7 @@ const app = Vue.createApp({
         gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,hideEditorClipboard:true,
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
-    computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount',
+    computed:{...Object.fromEntries(['ctCurrentUnit','ctFieldGroups','ctSheets','ctFilteredSheets','ctSheetSeverities','ctRows','ctPageRows','ctEffectivePageSize','ctDraftUnitIds','ctDraftCount',
         'ctOfflineTest','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
         'ctConvoParents','ctConvoTree','ctConvoBrowseTitle','ctConvoTotal','ctConvoSeverities']
         .map(key=>[key,ct.computed[key]])),sharedEditorController:window.EditorSession.mixin.computed.sharedEditorController},
@@ -209,6 +209,18 @@ async function run() {
         await page.waitForFunction(() => !!window.__ctLayoutFixture || !!window.__ctLayoutFixtureError);
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixtureError),undefined,'Fixture preparation succeeds');
         const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const assertNavigationSeverity = async (button,severity,name) => {
+            const expected=await page.evaluate(severity=>{
+                const filter=document.createElement('label');filter.className='filterChip '+severity+' selected';document.body.append(filter);
+                const style=getComputedStyle(filter),result={color:style.color,border:style.borderColor,background:style.backgroundColor};
+                filter.remove();return result;
+            },severity);
+            assert.deepEqual(await button.evaluate(element=>{
+                const style=getComputedStyle(element);return {color:style.color,border:style.borderColor,background:style.backgroundColor};
+            }),expected,name+': whole row matches the '+severity+' filter');
+            if(await button.locator('.ctNpcCount').count())assert.equal(await button.locator('.ctNpcCount').evaluate(element=>getComputedStyle(element).color),expected.color,name+': count inherits the status color');
+            if(await button.getAttribute('aria-pressed')==='true')assert.notEqual(await button.evaluate(element=>getComputedStyle(element).boxShadow),'none',name+': selection remains visible on a colored row');
+        };
         const nav = page.getByRole('navigation', {name:'Workbook navigation'});
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
@@ -625,26 +637,38 @@ async function run() {
                 vm.ctDiagnostics=Vue.markRaw({[renly.id]:[{severity:'warning'}],[una.id]:[{severity:'warning'}]});vm.ctRevision++;
                 vm.ctSelectedFilters=['unchanged'];vm.ctNpcKind='names';
             });await settle();
-            const renlyButton=nav.getByRole('button',{name:'Renly',exact:true}),unaButton=nav.getByRole('button',{name:'Una',exact:true}),
-                renlyName=renlyButton.locator('.ctNpcName'),unaName=unaButton.locator('.ctNpcName');
-            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-error')),true,name+': a hidden Missing entry takes precedence over Warning');
-            assert.equal(await renlyName.evaluate(element=>getComputedStyle(element).color),await renlyName.evaluate(element=>{
-                const probe=document.createElement('span');probe.style.color='var(--ui-error)';element.append(probe);const color=getComputedStyle(probe).color;probe.remove();return color;
-            }),name+': selected NPC name retains red rather than the selection accent');
+            const renlyButton=nav.getByRole('button',{name:'Renly',exact:true}),unaButton=nav.getByRole('button',{name:'Una',exact:true});
+            assert.equal(await renlyButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-error')),true,name+': a hidden Missing entry takes precedence over Warning');
+            await assertNavigationSeverity(renlyButton,'error',name);await assertNavigationSeverity(unaButton,'warning',name);
             assert.equal(await renlyButton.getAttribute('aria-description'),'Missing or Error in related text');
-            assert.equal(await unaName.evaluate(element=>getComputedStyle(element).color),await page.evaluate(()=>{
-                const filter=document.createElement('label');filter.className='filterChip warning selected';
-                const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=true;filter.append(checkbox);
-                document.body.append(filter);const color=getComputedStyle(checkbox).accentColor;filter.remove();return color;
-            }),name+': warning name matches the warning filter checkbox');
+            if(theme==='modern-dark' && width===1440){
+                await renlyButton.scrollIntoViewIfNeeded();
+                const path=join(fixtureArtifacts,'sdeditor-clienttext-npc-status-'+randomUUID()+'.png');
+                await nav.screenshot({path});screenshots.push(path);
+            }
+            await sheetsTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='sheets' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            const audioSheet=nav.getByRole('button',{name:'NPCTextAudio',exact:true}),namesSheet=nav.getByRole('button',{name:'NPCs',exact:true});
+            await assertNavigationSeverity(audioSheet,'error',name+' Sheets');await assertNavigationSeverity(namesSheet,'warning',name+' Sheets');
+            await audioSheet.click();await settle();await assertNavigationSeverity(audioSheet,'error',name+' selected Sheet');
+            assert.equal(await audioSheet.getAttribute('aria-description'),'Missing or Error in this sheet');
+            if(theme==='modern-dark' && width===1440){
+                const path=join(fixtureArtifacts,'sdeditor-clienttext-sheet-status-'+randomUUID()+'.png');
+                await nav.screenshot({path});screenshots.push(path);
+            }
             await page.evaluate(()=>{
                 const vm=window.__ctLayoutFixture,renly=vm.ctUnits.find(unit=>unit.recordId==='RenlyLayoutIntro');
                 vm.ctSaved=Vue.markRaw({[renly.id]:{saved:true,values:{'npc-text':'Complete translation'},reviewed:{}}});vm.ctRevision++;
             });await settle();
-            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),true,name+': completed text falls back to its remaining Warning');
+            await assertNavigationSeverity(audioSheet,'warning',name+' completed Sheet');
+            await npcTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='npcs' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await renlyButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),true,name+': completed text falls back to its remaining Warning');
+            await assertNavigationSeverity(renlyButton,'warning',name+' completed NPC');
             await page.evaluate(()=>{window.__ctLayoutFixture.ctDiagnostics=Vue.markRaw({});});await settle();
-            assert.equal(await renlyName.evaluate(element=>element.classList.contains('ctNpcSeverity-error') || element.classList.contains('ctNpcSeverity-warning')),false,name+': removing the final finding restores normal text');
-            assert.equal(await unaName.evaluate(element=>element.classList.contains('ctNpcSeverity-warning')),false,name+': other resolved names also return to normal');
+            assert.equal(await renlyButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-error') || element.classList.contains('ctNavigationSeverity-warning')),false,name+': removing the final finding restores normal styling');
+            assert.equal(await unaButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': other resolved rows also return to normal');
+            await sheetsTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='sheets' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
+            assert.equal(await audioSheet.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': resolved Sheets return to normal');
+            assert.equal(await namesSheet.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': unrelated Sheets also refresh');
             results.push({name:name+' accessible tabs, production labels, long names, fixed filter, independent scroll/page and exact editor caret handoff'});
         }
         for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){

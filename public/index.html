@@ -474,7 +474,7 @@
                 <button type="button" @click="ctSetSheet('')" :class="{active:!ctSheet}" :aria-pressed="!ctSheet" :disabled="ctBrowseBusy || ctBusy">All sheets</button>
                 <template v-for="role in [...new Set(ctFilteredSheets.map(sheet=>sheet.role))]" :key="role">
                   <h3>{{ role === 'gender' ? 'Gender' : 'Normal' }}</h3>
-                  <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" type="button" @click="ctSetSheet(sheet.key)" :class="{active:ctSheet===sheet.key}" :aria-pressed="ctSheet===sheet.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="sheet.name+'\n'+(sheet.role === 'gender' ? 'Gender' : 'Normal')+' workbook'">{{ sheet.name }}</button>
+                  <button v-for="sheet in ctFilteredSheets.filter(sheet=>sheet.role===role)" :key="sheet.key" type="button" @click="ctSetSheet(sheet.key)" :class="{active:ctSheet===sheet.key,'ctNavigationSeverity-error':ctSheetSeverities.get(sheet.key)==='error','ctNavigationSeverity-warning':ctSheetSeverities.get(sheet.key)==='warning'}" :aria-description="ctSheetSeverityLabel(sheet) || undefined" :aria-pressed="ctSheet===sheet.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="ctSheetTooltip(sheet)">{{ sheet.name }}</button>
                 </template>
                 <p v-if="!ctFilteredSheets.length" class="ctSheetEmpty" role="status">No sheets match.</p>
               </div>
@@ -488,7 +488,7 @@
                   <button type="button" @click="ctSetNpc('all')" :class="{active:ctNpcSelection==='all'}" :aria-pressed="ctNpcSelection==='all'" :disabled="ctBrowseBusy || ctBusy">All NPC text</button>
                   <button type="button" @click="ctSetNpc('unassigned')" :class="{active:ctNpcSelection==='unassigned'}" :aria-pressed="ctNpcSelection==='unassigned'" :disabled="ctBrowseBusy || ctBusy">Unassigned dialogue</button>
                   <h3>NPCs <span class="ctNpcListCount">{{ ctNpcGroups.length }}</span></h3>
-                  <button v-for="group in ctNpcFilteredGroups" :key="group.key" type="button" class="ctNpcButton" @click="ctSetNpc(group.key)" :class="{active:ctNpcSelection===group.key}" :aria-label="group.label" :aria-description="ctNpcSeverityLabel(group) || undefined" :aria-pressed="ctNpcSelection===group.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="ctNpcGroupTooltip(group)"><span class="ctNpcName" :class="{'ctNpcSeverity-error':ctNpcSeverities.get(group.key)==='error','ctNpcSeverity-warning':ctNpcSeverities.get(group.key)==='warning'}">{{ group.label }}</span><span class="ctNpcCount">{{ group.units.length }}</span></button>
+                  <button v-for="group in ctNpcFilteredGroups" :key="group.key" type="button" class="ctNpcButton" @click="ctSetNpc(group.key)" :class="{active:ctNpcSelection===group.key,'ctNavigationSeverity-error':ctNpcSeverities.get(group.key)==='error','ctNavigationSeverity-warning':ctNpcSeverities.get(group.key)==='warning'}" :aria-label="group.label" :aria-description="ctNpcSeverityLabel(group) || undefined" :aria-pressed="ctNpcSelection===group.key" :disabled="ctBrowseBusy || ctBusy" v-tooltip="ctNpcGroupTooltip(group)"><span class="ctNpcName">{{ group.label }}</span><span class="ctNpcCount">{{ group.units.length }}</span></button>
                   <p v-if="!ctNpcFilteredGroups.length" class="ctSheetEmpty" role="status">{{ ctNpcGroups.length ? 'No NPCs match.' : 'No NPC names in this workspace.' }}</p>
                 </div>
               </div>
