@@ -135,6 +135,8 @@ Click **Conflicting dropped copies need review…** in the workspace or editor s
 
 Page navigation and the workspace status counters sit together in a sticky bar at the bottom of the file list. Pagination shows the visible range and matching total (for example, **1–50 of 4,090**) with previous/next arrow buttons. The status order is **Loaded**, **Missing**, **Errors**, **Dropped**, **Scan warnings**, **Revised**, **Saved**. Unsaved edits have no separate counter. Errors include present incomplete committed SD language blocks immediately, together with manual scan errors. An absent selected-language tag counts as Missing only. Scan warnings appear during/after a scan. Clearing a scan retains intrinsic completeness errors. **Missing**, **Dropped**, **Saved**, **Revised**, and scan counts describe files eligible under **Hide DNT entries**, independently of search and status choices; **Loaded** covers every loaded file, and the result count describes the files matching your search and filters. The current version name opens the source chooser; unnamed versions show the shortened ZIP hash. Hover over or focus the name/hash for full version details. A managed deadline reminder follows **Saved**. While the hash is being calculated, this spot shows **Hashing…** with a progress indicator.
 
+The **‹!** and **!›** buttons beside pagination jump to the previous or next file needing attention: **Missing**, **Dropped** (SD) or **Outdated** (ClientText), or committed diagnostic **Error/Warning** findings. They keep your search, status filters (including **Unchanged**), browsing group and sort order, move across pages, skip files being edited by others, and stop at the list boundaries. They are also available in the full editor and in ClientText **Sheets**, **NPCs** and **Convo** views. Hover or focus for details. **Ctrl+Shift+,** and **Ctrl+Shift+.** trigger these jumps (Ctrl+< and Ctrl+> on a US keyboard); **Ctrl+, / Ctrl+.** and **F1/F2** retain ordinary save-and-file navigation. Leaving edited work uses the existing save checks and draft recovery. A failed explicit save blocks the jump; SD inline navigation can retain an invalid or declined draft and its findings while moving to the next row. A draft-storage failure keeps the current editor open.
+
 ### File Status Indicators
 
 In the file list, colors indicate each file's state. The bottom navigation bar shows the workspace counters:
@@ -447,8 +449,10 @@ See the [Translation Memory Guide](translation_memory.md) for matching, game sco
 ```
 | Shortcut          | Action                                        |
 |-------------------|-----------------------------------------------|
-| F1 / Ctrl + <     | Move to previous file                         |
-| F2 / Ctrl + >     | Move to next file                             |
+| F1 / Ctrl + ,     | Save and move to previous file                |
+| F2 / Ctrl + .     | Save and move to next file                    |
+| Ctrl + Shift + ,  | Previous file needing attention               |
+| Ctrl + Shift + .  | Next file needing attention                   |
 | Ctrl + F          | Focus on search box                           |
 ```
 ### In the Main Editor

@@ -871,18 +871,33 @@ const config = Vue.defineComponent({
     pageCount() {
       return Math.max(1, Math.ceil(this.filteredDescs.length / this.pageSize));
     },
+    orderedFileRows() {
+      const key = this.currentSort, modifier = this.currentSortDir === 'desc' ? -1 : 1;
+      return this.filteredDescs.slice().sort((a, b) => a[key] < b[key] ? -modifier : a[key] > b[key] ? modifier : 0);
+    },
+    attentionNavigationTargets() {
+      // The collaboration client is nonreactive; its published presence
+      // snapshot makes disabled controls update when an occupied file frees up.
+      this.collaborationState;
+      return { previous: this.attentionCandidates(-1, true)[0], next: this.attentionCandidates(1, true)[0] };
+    },
+    attentionNavigationBlocked() {
+      if (this.ctActive) return this.ctBusy || this.ctBrowseBusy || this.ctNavigationBusy || this.ctHistoryViewer || this.ctKeyboardOverlayOpen();
+      return this.navigationBusy || this.editorSaving || this.editorLoading || !!this.editorLoadError || this.inlineTransitionBusy
+        || (this.editorSessionActive && this.editorTranslationReadOnly) || this._importingSource || this._reconcilingImport
+        || this.versionStorageLoading || this.workspaceInitializationActive || window.AppDialogs?.isOpen
+        || this.settingsDialogVisible || this.showSetting || this.importDialogVisible || this.versionChooserVisible
+        || this.consistencyResolver || this.draftRecoveryVisible || this.cloudResolverVisible || this.cloudHistoryVisible
+        || this.settingsImportDraft || this.duplicateLangImportWarning || this.pendingSingleVersionMigration || this.showMultiInstanceGate
+        || this.collaborationConflictVisible || this.collaborationHistoryVisible || this.$refs.rawFileDialog?.open
+        || (this.getEditorComponentRef?.('diagnosticScanDialog') || this.$refs.diagnosticScanDialog)?.open;
+    },
     descsDisplay() {
       if (this.inlineActive && this._inlineHeldRows) return this._inlineHeldRows;
-      const key = this.currentSort;
       const modifier = this.currentSortDir === 'desc' ? -1 : 1;
       this.currentSortIcon = modifier === 1 ? '▲' : '▼';
-      const descsToDisplay = this.filteredDescs.slice().sort((a, b) => {
-        if (a[key] < b[key]) return -modifier;
-        if (a[key] > b[key]) return modifier;
-        return 0;
-      });
       const start = (this.currentPage - 1) * this.pageSize;
-      return descsToDisplay.slice(start, start + this.pageSize);
+      return this.orderedFileRows.slice(start, start + this.pageSize);
     },
     hlPopupSelectedItem() {
       return this.hlPopup.visible ? this.hlPopup.filtered[this.hlPopup.selectedIndex] || null : null;
@@ -5174,6 +5189,12 @@ const config = Vue.defineComponent({
         return;
       }
 
+      if (this.isAttentionNavigationShortcut(e)) {
+        e.preventDefault();
+        if (!e.target?.closest?.('.side, .commentsSidebar, [role="menu"], [role="listbox"]')) this.navigateAttention(e.code === 'Comma' ? -1 : 1);
+        return;
+      }
+
       // Ctrl + S: Save in editor or Export in table view
       if (e.ctrlKey && e.code === "KeyS") {
         e.preventDefault();
@@ -5238,14 +5259,14 @@ const config = Vue.defineComponent({
         }
       }
 
-      // F2 or Ctrl + >: save and open next file
-      if (e.code === "F2" || (e.ctrlKey && e.code === "Period")) {
+      // F2 or Ctrl + Period: save and open next file
+      if (e.code === "F2" || (e.ctrlKey && !e.shiftKey && e.code === "Period")) {
         e.preventDefault();
         this.saveAndSkipFile(false, true);
         return;
       }
-      // F1 or Ctrl + <: save and open previous file
-      if (e.code === "F1" || (e.ctrlKey && e.code === "Comma")) {
+      // F1 or Ctrl + Comma: save and open previous file
+      if (e.code === "F1" || (e.ctrlKey && !e.shiftKey && e.code === "Comma")) {
         e.preventDefault();
         this.saveAndSkipFile(true, true);
         return;
@@ -5274,9 +5295,35 @@ const config = Vue.defineComponent({
       }
       return false;
     },
-    async saveAndSkipFile(reverse = false, noSaveIfNotChanged = false) {
+    isAttentionNavigationShortcut(event) {
+      return event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && ['Comma', 'Period'].includes(event.code);
+    },
+    fileNeedsAttention(row) {
+      return !!(row?.isMissing || row?.isDropped || row?.hasDiagnosticError || row?.hasDiagnosticWarning);
+    },
+    attentionCandidates(direction, firstOnly = false) {
+      return window.EditorSession.attentionCandidates(this, direction, firstOnly);
+    },
+    attentionNavigationTooltip(direction) {
+      const action = direction < 0 ? 'Previous' : 'Next', shortcut = direction < 0 ? ',' : '.';
+      const statuses = this.ctActive ? 'Missing, Outdated, or diagnostic errors/warnings' : 'Missing, Dropped, or errors/warnings';
+      const target = this.attentionNavigationTargets[direction < 0 ? 'previous' : 'next'];
+      return `${action} file needing attention (Ctrl+Shift+${shortcut}).\n${statuses} in the current filtered list and sort order. Keeps context filters; skips files being edited by others.\nUses the current editor's save checks before leaving edited work.`
+        + (target ? '' : '\nNo available file needing attention in this direction.');
+    },
+    navigateAttention(direction) {
+      if (this.attentionNavigationBlocked || ![-1, 1].includes(direction)) return false;
+      if (this.ctActive) return this.ctSaveAndNavigate(direction < 0, { inline: !this.ctEditor && this.inlineEditor, attentionOnly: true });
+      if (!this.editorSessionActive && this._fileSearchTimer != null) this.applyFileSearch();
+      if (!this.attentionCandidates(direction, true).length) return false;
+      if (this.inlineEditor && !this.editorVisible) return this.moveInlineFile(direction, undefined, { attentionOnly: true });
+      return this.saveAndSkipFile(direction < 0, true, { attentionOnly: true });
+    },
+    async saveAndSkipFile(reverse = false, noSaveIfNotChanged = false, { attentionOnly = false } = {}) {
       if (this.editorLoading || this.editorLoadError || this.navigationBusy || this.editorSaving || this.collaborationConflictVisible || this.collaborationHistoryVisible) return false;
       if (!this.editorVisible && this._fileSearchTimer != null) this.applyFileSearch();
+      const attentionRows = attentionOnly ? this.attentionCandidates(reverse ? -1 : 1) : null;
+      if (attentionOnly && !attentionRows.length) return false;
       this.navigationBusy = true;
       const ctx = this.captureCollaborationContext?.();
       const cancelRevision = this._editorOpenCancelRevision || 0;
@@ -5290,8 +5337,8 @@ const config = Vue.defineComponent({
       const currentPath = this.editorCurrentEditingDesc?.filepath;
       const anchor = hadEditor ? ordered.findIndex(d => d.filepath === currentPath)
         : (this.currentPage - 1) * this.pageSize + (reverse ? this.descsDisplay.length - 1 : 0);
-      const candidates = [];
-      for (let i = hadEditor ? anchor + direction : anchor; i >= 0 && i < ordered.length; i += direction) candidates.push(ordered[i].filepath);
+      const candidates = attentionOnly ? attentionRows.map(row => row.filepath) : [];
+      if (!attentionOnly) for (let i = hadEditor ? anchor + direction : anchor; i >= 0 && i < ordered.length; i += direction) candidates.push(ordered[i].filepath);
       const willSave = hadEditor && (!noSaveIfNotChanged || this.editorHaveChanges() || this._draftSession?.record);
       // Starting the old file's worker transaction first can lock IndexedDB's
       // draft store while the next file is claiming/preparing its editor.
@@ -5303,8 +5350,9 @@ const config = Vue.defineComponent({
         for (const filepath of candidates) {
           if (this._collaboration?.isEditing(filepath)) continue;
           // Saving can remove the current row from the filter; keep its original anchor.
-          const position = sortRows().findIndex(d => d.filepath === filepath);
+          const currentRows = sortRows(), position = currentRows.findIndex(d => d.filepath === filepath);
           if (position < 0) continue;
+          if (attentionOnly && !this.fileNeedsAttention(currentRows[position])) continue;
           // Revisiting already queued work deliberately awaits that save; it
           // must be allowed to run before editFile enters its pending barrier.
           if (this.pendingDraftSaveFor?.(filepath)) releaseLocalSaves?.();
@@ -8101,6 +8149,7 @@ if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-she
 if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
 if (window.EditorComponents?.DiagnosticMeta) app.component('editor-diagnostic-meta', window.EditorComponents.DiagnosticMeta);
 if (window.EditorComponents?.DiagnosticScan) app.component('editor-diagnostic-scan', window.EditorComponents.DiagnosticScan);
+if (window.EditorComponents?.AttentionNavigation) app.component('editor-attention-navigation', window.EditorComponents.AttentionNavigation);
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);
 
 app.component('app-tooltip', AppTooltip);

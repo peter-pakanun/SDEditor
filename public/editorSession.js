@@ -219,6 +219,37 @@
     if(host.ctActive){host.ctKey(event);return true;}
     return false;
   }
+  function attentionCandidates(host, direction, firstOnly=false) {
+    if(![-1,1].includes(direction))return [];
+    const ct=host.ctActive, id=row=>ct ? row.id : row.filepath;
+    let rows=ct ? host.ctRows : host.orderedFileRows;
+    const size=ct ? host.ctEffectivePageSize : host.pageSize, page=ct ? host.ctPage : host.currentPage;
+    const active=ct ? host.ctEditor || host.ctInlineUnitVisible() : host.editorSessionActive;
+    const selected=ct ? host.ctSelection : active ? host.editorCurrentEditingDesc?.filepath : host.selectedFilepath;
+    // A save can remove the active row from a status filter. Keep its position
+    // in the current browsing order without adding it to the visible worklist.
+    if(active && selected && !rows.some(row=>id(row)===selected)){
+      if(ct){
+        const visible=new Set(rows.map(id));
+        rows=host.ctBrowseOrderedUnits().filter(row=>row.id===selected || visible.has(row.id));
+      } else {
+        const anchor=host.getDescByFilepath(selected);
+        if(anchor){const modifier=host.currentSortDir==='desc'?-1:1;
+          rows=[...rows,anchor].sort((a,b)=>a[host.currentSort]<b[host.currentSort]?-modifier:a[host.currentSort]>b[host.currentSort]?modifier:0);}
+      }
+    }
+    const anchor=rows.findIndex(row=>id(row)===selected), start=(page-1)*size;
+    const anchored=anchor>=0 && (active || anchor>=start && anchor<start+size);
+    const candidates=[];
+    for(let index=anchored ? anchor+direction : direction>0 ? start : Math.min(rows.length,page*size)-1;
+      index>=0 && index<rows.length;index+=direction){
+      const row=rows[index];
+      if(!(ct ? host.ctNeedsAttention(row) : host.fileNeedsAttention(row))
+        || (ct ? host.ctUnitOccupied(row.id) : host._collaboration?.isEditing(row.filepath)))continue;
+      candidates.push(row);if(firstOnly)break;
+    }
+    return candidates;
+  }
   // These contracts keep workbook data and SD recovery/save rules outside the
   // native controls. Hidden fields remain part of ClientText's field contract.
   function formatAdapter(host,id) {
@@ -342,5 +373,5 @@
       toolsVisible:this.sharedEditorToolsMounted && (this.ctEditor || this.editorVisible || this.inlineSidebarVisible),tool:this.ctActive?this.ctTool:this.sideTab,
       version:this.ctActive ? this.ctWorkspace?.metadata?.version || this.ctWorkspace?.version : this.managedActiveVersion,group:this.activeContentGroup};},
   }};
-  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,diagnosticPresentation,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut};
+  return {mixin,context,key,create,fieldController,formatAdapter,renderRanges,renderAnnotatedRanges,diagnosticPresentation,ranges,insert,preserveRawEdit,applyRawInput,rawOffset,escape,memoryKeydown,dispatchShortcut,attentionCandidates};
 });

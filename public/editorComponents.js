@@ -719,5 +719,20 @@
         </footer>
       </form>
     </dialog>`);
-  global.EditorComponents = { NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan };
+  const AttentionNavigation = {
+    name: 'EditorAttentionNavigation',
+    props: { controller: { type: Object, required: true } },
+    methods: {
+      showTooltip(event, text) { this.controller.showTooltip(event, text); },
+      hideTooltip() { this.controller.hideTooltip(); }
+    },
+    template: `<span class="attentionNavigation" role="group" aria-label="Files needing attention" data-inline-focus-surface>
+      <span v-for="direction in [-1, 1]" :key="direction" class="attentionNavigationTarget" :tabindex="controller.attentionNavigationBlocked || !controller.attentionNavigationTargets[direction < 0 ? 'previous' : 'next'] ? 0 : -1" :aria-label="controller.attentionNavigationTooltip(direction)" v-tooltip="controller.attentionNavigationTooltip(direction)">
+        <button type="button" class="paginationArrow attentionArrow" @click="controller.navigateAttention(direction)" :disabled="controller.attentionNavigationBlocked || !controller.attentionNavigationTargets[direction < 0 ? 'previous' : 'next']" :aria-label="direction < 0 ? 'Previous file needing attention' : 'Next file needing attention'" :aria-keyshortcuts="direction < 0 ? 'Control+Shift+,' : 'Control+Shift+.'" v-tooltip="controller.attentionNavigationTooltip(direction)">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path v-if="direction < 0" d="m9 7-5 5 5 5M17 6v7m0 4v.1"></path><path v-else d="m15 7 5 5-5 5M7 6v7m0 4v.1"></path></svg>
+        </button>
+      </span>
+    </span>`
+  };
+  global.EditorComponents = { NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -84,7 +84,7 @@ function harness({ records = new Map(), tm = false } = {}) {
       nextTick(callback) { return Promise.resolve().then(callback); }, markRaw(value) { return value; }, toRaw(value) { return value; } } });
   for (const name of ['workspaceState.js', 'dictionaryScope.js', 'statDescCodec.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js',
     ...(tm ? ['translationMemory.js', 'tmWorkerClient.js', 'tmUi.js'] : []),
-    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'entryAlignment.js', 'entryAlignmentUi.js', 'index.js']) {
+    'terminologyDiagnostics.js', 'editorDictionaryIndex.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'collaborationIntegration.js', 'inlineEditor.js', 'entryAlignment.js', 'entryAlignmentUi.js', 'editorSession.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -3145,6 +3145,16 @@ test('inline Ctrl+Arrow navigation follows sorted rows across pages and focuses 
   editor.currentSortDir = 'desc';
   assert.equal(await editor.moveInlineFile(-1), true);
   assert.equal(editor.editorCurrentEditingDesc.filepath, rows[1].filepath); assert.equal(editor.currentPage, 2);
+});
+
+test('inline attention jumps use the existing guarded promotion and retain context rows', async () => {
+  const { editor, rows, calls } = await inlineNavigationHarness();
+  editor.filteredDescs = editor.filteredDescs.map(row => ({ ...row, isMissing: row.filepath === rows[2].filepath, isDropped: false, hasDiagnosticError: false, hasDiagnosticWarning: false }));
+  assert.equal(await editor.moveInlineFile(1, undefined, { attentionOnly: true }), true);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, rows[2].filepath);
+  assert.equal(editor.inlineActive, true); assert.equal(editor.editorVisible, false);
+  assert.equal(editor.filteredDescs.length, rows.length); assert.deepEqual(calls.translationFocus.at(-1).args, ['translation', 0, null]);
+  assert.equal(await editor.moveInlineFile(1, undefined, { attentionOnly: true }), false);
 });
 
 test('inline keyboard navigation focuses column zero for table entries', async () => {

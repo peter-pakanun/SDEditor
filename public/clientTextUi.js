@@ -97,7 +97,7 @@
             ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
-            ctBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
+            ctBusy: false, ctNavigationBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
             ctScanProcessed:0,ctScanTotal:0,ctScanRunId:0,ctScanError:'',ctScanPhase:'',ctScanErrorFileCount:0,ctScanWarningFileCount:0,
             ctScanResultsPage:1,ctScanResultsPageSize:20,
@@ -1225,7 +1225,7 @@
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
-                this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;
+                this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this._ctNavigationRun=null;this.ctNavigationBusy=false;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
                 this.ctVariantSelections={};this._ctClassNameCache=null;this._ctReferenceIndexCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
@@ -2053,6 +2053,10 @@
             ctUnitOccupied(unitId) {
                 return this.ctPeers.some(peer=>peer.unitId===unitId && peer.sessionId!==this.instanceTabId && !peer.away);
             },
+            ctNeedsAttention(unit) {
+                const status=this.ctStatus(unit);
+                return !!(status.missing || status.outdated || (this.ctDiagnostics[unit.id] || []).some(issue=>['error','warning'].includes(issue.severity)));
+            },
             async ctSaveAndNavigate(reverse=false,options={}) {
                 if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
                 const ctx=this.ctContext(),unitId=this.ctSelection,original=this.ctCurrentUnit,selectionRun=this._ctSelectRun,generation=this._ctBrowseGeneration || 0,
@@ -2065,13 +2069,16 @@
                 }
                 const anchor=hadEditor?rows.findIndex(unit=>unit.id===unitId)
                     :(this.ctPage-1)*this.ctEffectivePageSize+(reverse?this.ctPageRows.length-1:0);
-                const candidates=[];for(let index=hadEditor?anchor+direction:anchor;index>=0&&index<rows.length;index+=direction)candidates.push(rows[index].id);
+                const candidates=options.attentionOnly ? root.EditorSession.attentionCandidates(this,direction).map(unit=>unit.id) : [];
+                if(!options.attentionOnly)for(let index=hadEditor?anchor+direction:anchor;index>=0&&index<rows.length;index+=direction)candidates.push(rows[index].id);
+                if(options.attentionOnly && !candidates.length)return false;
                 if(options.inline && !candidates.some(id=>this._ctUnitIndex.has(id) && !this.ctUnitOccupied(id))){
                     this.ctNotice='No available files in this direction.';return false;
                 }
                 const run=this._ctNavigationRun={},current=()=>this._ctNavigationRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
                     && generation===(this._ctBrowseGeneration || 0)
                     && this.ctCurrentUnit===original && this._ctSelectRun===selectionRun && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer;
+                this.ctNavigationBusy=true;
                 try {
                     const pending=this._ctSaveJob,retry=pending?.unitId===unitId && pending.scopeKey===root.ClientTextStore.scopeKey(ctx.scope) && pending.command;
                     if(hadEditor && (retry || options.saveUnchanged || this.ctHasEditorChanges()) && !await this.ctSave())return false;
@@ -2079,6 +2086,7 @@
                     for(const id of candidates){
                         const ordered=this.ctRows,index=ordered.findIndex(unit=>unit.id===id);if(index<0)continue;
                         const unit=this._ctUnitIndex.get(id);if(!unit || this.ctUnitOccupied(id))continue;
+                        if(options.attentionOnly && !this.ctNeedsAttention(unit))continue;
                         if(!current() || !await this.ctSelect(unit,!options.inline,{focus:false,guard:()=>this._ctNavigationRun===run
                             && !this.ctKeyboardOverlayOpen() && !this.ctHistoryViewer}))return false;
                         const opened=this._ctSelectRun;
@@ -2091,9 +2099,16 @@
                         this.ctFocusedField=field?.id || '';this.ctFocusTarget(!!options.focusEnd,this.ctFocusedField);return true;
                     }
                     this.ctNotice='No available files in this direction.';return false;
-                } finally {if(this._ctNavigationRun===run)this._ctNavigationRun=null;}
+                } finally {if(this._ctNavigationRun===run){this._ctNavigationRun=null;this.ctNavigationBusy=false;}}
             },
             async ctKey(event) {
+                if(event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && ['Comma','Period'].includes(event.code)){
+                    if(event.defaultPrevented || event.isComposing || event.keyCode===229 || event.target?.composing)return;
+                    event.preventDefault();
+                    if(!this.ctKeyboardBlocked() && !event.target?.closest?.('.ctTools, .commentsSidebar, [role="menu"], [role="listbox"]'))
+                        await this.navigateAttention(event.code==='Comma'?-1:1);
+                    return;
+                }
                 if(event.isComposing || event.keyCode===229 || event.defaultPrevented || event.altKey || event.shiftKey)return;
                 if(this.ctKeyboardOverlayOpen()){
                     if(['F1','F2'].includes(event.key) || (event.ctrlKey || event.metaKey)

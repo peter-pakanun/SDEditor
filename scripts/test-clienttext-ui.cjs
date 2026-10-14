@@ -2224,6 +2224,47 @@ test('SD-style keyboard aliases route F1/F2, full Ctrl+S, inline staging and tab
     app.ctEditor=false;app.inlineEditor=true;await press('s','KeyS',true);assert.deepEqual(calls.splice(0),[['save',false]]);
     app.inlineEditor=false;await press('s','KeyS',true);assert.deepEqual(calls.splice(0),[['download']]);
 });
+
+for(const full of [false,true])test('ClientText attention navigation skips complete context and occupied rows across pages '+(full?'full':'inline'),async()=>{
+    const rows=Array.from({length:6},(_,index)=>worksheetUnit('Attention'+index,index+2));
+    rows[1].fields[0].target='';rows[1].fields[0].required=true;rows[3].fields[0].outdated=true;
+    const {app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,ctEditor:full,pageSize:2,
+        _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctPeers:[{unitId:rows[1].id,sessionId:'other'}],
+        ctDiagnostics:{[rows[4].id]:[{severity:'warning'}],[rows[5].id]:[{severity:'error'}]}}),filters=app.ctSelectedFilters;
+    app.ctSave=async()=>true;
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);
+    assert.equal(app.ctSelection,rows[3].id);assert.equal(app.ctPage,2);assert.equal(app.ctEditor,full);
+    assert.equal(app.ctNavigationBusy,false);
+    assert.equal(focuses.at(-1).unitId,rows[3].id);assert.equal(app.ctSelectedFilters,filters);
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[4].id);
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[5].id);
+    let saves=0;app.ctSave=async()=>{saves++;return true;};app.ctValues[rows[5].fields[0].id]='unsaved at boundary';
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),false);assert.equal(saves,0);assert.equal(app.ctNavigationBusy,false);
+    assert.equal(await app.ctSaveAndNavigate(true,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[4].id);
+});
+
+test('ClientText attention navigation stays inside NPC and Convo groups with unchanged context selected',async()=>{
+    for(const mode of ['npcs','convo']){
+        const h=mode==='npcs'?npcUiHarness():convoUiHarness(),{app,window}=h;
+        app.ctBrowseMode=mode;app.ctSelection='';app.inlineEditor=false;app.ctPage=1;
+        const candidates=window.EditorSession.attentionCandidates(app,1);
+        assert.ok(candidates.length);assert.ok(candidates.every(unit=>app.ctBrowseOrderedUnits().includes(unit) && app.ctNeedsAttention(unit)));
+        if(mode==='npcs')app.ctNpcSelection='renly';else app.ctConvoSelection=app.ctConvoNodeKey('family','RenlyP1_Intro');
+        const grouped=window.EditorSession.attentionCandidates(app,1);
+        assert.ok(grouped.length);assert.ok(grouped.every(unit=>app.ctBrowseOrderedUnits().includes(unit)));
+        assert.ok(app.ctSelectedFilters.includes('unchanged'));
+    }
+});
+
+test('ClientText attention hotkeys work in either editor and retain IME, tool and overlay isolation',async()=>{
+    const {app}=listHarness(),calls=[];app.navigateAttention=async direction=>calls.push(direction);
+    for(const code of ['Comma','Period']){
+        const press=overrides=>app.ctKey({...rowEvent(code==='Comma'?'<':'>'),code,ctrlKey:true,shiftKey:true,...overrides});
+        await press();assert.equal(calls.pop(),code==='Comma'?-1:1);
+        await press({isComposing:true});app.settingsDialogVisible=true;await press();app.settingsDialogVisible=false;
+        await press({target:{closest:()=>({})}});assert.equal(calls.length,0);
+    }
+});
 test('Save and close retains the acknowledged row and uses the real SD layout measurement methods',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});
     const {app,original}=listHarness({ctEditor:true,ctDraftDirty:true,ctValues:{[fieldId]:'saved@literal\\nactual\nไทย'}}),calls=[];

@@ -509,10 +509,13 @@
         field.focus();
         return true;
       },
-      async moveInlineFile(direction, path = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : this.selectedFilepath, { focusEnd = false } = {}) {
+      async moveInlineFile(direction, path = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : this.selectedFilepath, { focusEnd = false, attentionOnly = false } = {}) {
         if (!this.inlineEditor || this.inlineTransitionBusy || this.navigationBusy || this.editorSaving
           || (this.inlineActive && this.editorTranslationReadOnly) || this._importingSource || this.versionStorageLoading
           || this.draftRecoveryVisible || this.fileListNavigationBlocked()) return false;
+        const attentionRows = attentionOnly ? this.attentionCandidates(direction) : null;
+        if (attentionOnly && !attentionRows.length) return false;
+        path ||= attentionRows?.[0]?.filepath;
         if (!path || ![-1, 1].includes(direction)) return false;
         const outgoingPath = this.inlineActive ? this.editorCurrentEditingDesc?.filepath : null;
         const scope = this.editorDraftScope(path), context = this.captureCollaborationContext?.();
@@ -545,14 +548,15 @@
         }
         const modifier = this.currentSortDir === 'desc' ? -1 : 1;
         rows.sort((a, b) => a[this.currentSort] < b[this.currentSort] ? -modifier : a[this.currentSort] > b[this.currentSort] ? modifier : 0);
-        const candidates = [], anchor = rows.findIndex(row => row.filepath === path);
-        for (let index = anchor + direction; index >= 0 && index < rows.length; index += direction) candidates.push(rows[index].filepath);
+        const candidates = attentionOnly ? attentionRows.map(row => row.filepath) : [], anchor = rows.findIndex(row => row.filepath === path);
+        if (!attentionOnly) for (let index = anchor + direction; index >= 0 && index < rows.length; index += direction) candidates.push(rows[index].filepath);
         let lastRequested = path;
         this.navigationBusy = true;
         try {
           for (const filepath of candidates) {
             if (!current()) return false;
             if (this._collaboration?.isEditing(filepath) || !this.filteredDescs.some(row => row.filepath === filepath)) continue;
+            if (attentionOnly && !this.fileNeedsAttention(this.filteredDescs.find(row => row.filepath === filepath))) continue;
             lastRequested = filepath;
             const opened = await this.activateInlineRow(filepath, { automatic: true });
             if (!current() || this._inlineRequestedPath !== filepath) return false;

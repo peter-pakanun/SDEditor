@@ -64,7 +64,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'index.js']) {
+  for (const name of ['workspaceState.js', 'statDescCodec.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'editorSession.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
@@ -519,6 +519,54 @@ function keyboardEvent(key, target, overrides = {}) {
     ...overrides,
   };
 }
+
+test('attention jumps preserve context filters, follow sort across pages, and skip occupied work', async () => {
+  const harness = loadEditor(), { editor } = harness;
+  const rows = [description('01'), description('02', { isMissing: true }), description('03'),
+    description('04', { isDropped: true }), description('05', { hasDiagnosticWarning: true }), description('06', { hasDiagnosticError: true })];
+  editor.descs = rows; editor.filteredDescs = rows; editor.pageSize = 2; editor.currentSort = 'filename';
+  editor.selectedFileFilters = ['missing', 'unchanged']; editor.searchText = 'context'; editor.selectedFilepath = rows[0].filepath;
+  editor._collaboration = { isEditing: path => path === rows[1].filepath };
+  const table = attachFileList(harness), filters = editor.selectedFileFilters;
+  assert.equal(editor.attentionNavigationTargets.next.filepath, rows[3].filepath);
+  assert.equal(await editor.navigateAttention(1), true);
+  assert.deepEqual(table.openedFiles, [rows[3].filepath]); assert.equal(editor.currentPage, 2);
+  assert.equal(editor.selectedFileFilters, filters); assert.equal(editor.searchText, 'context');
+  editor.currentSortDir = 'desc'; editor.currentPage = 2; editor.selectedFilepath = rows[3].filepath;
+  assert.equal(editor.attentionNavigationTargets.next, undefined, 'occupied row is the only remaining attention candidate');
+  assert.equal(editor.attentionNavigationTargets.previous.filepath, rows[4].filepath);
+  editor.currentPage = 1; editor.selectedFilepath = rows[0].filepath;
+  assert.equal(editor.attentionNavigationTargets.next.filepath, rows[5].filepath, 'off-page selection uses the current page edge');
+});
+
+test('attention navigation keeps a hidden active anchor and never saves at a boundary or after a failed save', async () => {
+  const { editor } = loadEditor();
+  const rows = [description('01', { isMissing: true }), description('02'), description('03', { isDropped: true })];
+  editor.descs = rows; editor.filteredDescs = [rows[0], rows[2]]; editor.currentSort = 'filename'; editor.editorVisible = true;
+  editor.editorCurrentEditingDesc = rows[1]; editor.editorHaveChanges = () => true;
+  let saves = 0, opens = 0; editor.editorSave = async () => { saves++; return false; }; editor.editFile = () => { opens++; };
+  assert.equal(editor.attentionNavigationTargets.next.filepath, rows[2].filepath);
+  assert.equal(editor.attentionNavigationTargets.previous.filepath, rows[0].filepath);
+  assert.equal(await editor.saveAndSkipFile(false, true, { attentionOnly: true }), false);
+  assert.equal(saves, 1); assert.equal(opens, 0); assert.equal(editor.editorCurrentEditingDesc, rows[1]);
+  editor.editorCurrentEditingDesc = rows[2];
+  assert.equal(await editor.saveAndSkipFile(false, true, { attentionOnly: true }), false);
+  assert.equal(saves, 1, 'no candidate means no incidental save');
+});
+
+test('Ctrl+Shift punctuation routes attention while Ctrl punctuation retains ordinary navigation and guards IME and overlays', () => {
+  const { editor } = loadEditor(), calls = [];
+  editor.navigateAttention = direction => calls.push(['attention', direction]);
+  editor.saveAndSkipFile = reverse => calls.push(['ordinary', reverse]);
+  for (const [code, key, direction] of [['Comma', '<', -1], ['Period', '>', 1]]) {
+    const attention = keyboardEvent(key, null, { code, ctrlKey: true, shiftKey: true }); editor.handleKeydown(attention);
+    assert.equal(attention.defaultPrevented, true); assert.deepEqual(calls.pop(), ['attention', direction]);
+    editor.handleKeydown(keyboardEvent(key, null, { code, ctrlKey: true })); assert.deepEqual(calls.pop(), ['ordinary', direction < 0]);
+    editor.handleKeydown(keyboardEvent(key, null, { code, ctrlKey: true, shiftKey: true, isComposing: true }));
+    editor.settingsDialogVisible = true; editor.handleKeydown(attention); editor.settingsDialogVisible = false;
+    assert.equal(calls.length, 0);
+  }
+});
 
 test('default status choices include work needing translation or diagnostics and leave Unchanged last', () => {
   const { editor } = loadEditor();
