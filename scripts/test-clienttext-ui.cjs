@@ -3060,15 +3060,15 @@ test('ClientText history comparison teleports outside the sticky editor sidebar 
     assert.match(fs.readFileSync(path.join(__dirname,'../public/client-text.css'),'utf8'),/\.ctHistoryBackdrop[^}]*z-index:16000/);
 });
 
-test('offline sheet testing is gated to Manager/Admin and does not request publication policy',async()=>{
-    for(const role of ['manager','admin','translator']){
+test('offline sheet testing is available to every role including guests and does not request publication policy',async()=>{
+    for(const role of ['manager','admin','translator','guest']){
         const {app}=cloudAccessHarness(harness(), 'Thai');
         app.cloudUser.role=role;app.ctActive=false;
+        if(role==='guest'){app.cloudSignedIn=false;app.cloudProfileId='guest';app.cloudUser=null;}
         app._cloud={request(){assert.fail('Opening a test must stay local');}};
-        assert.equal(await app.ctOpenOfflineTest(),role!=='translator');
-        assert.equal(app.ctUploadVisible,role!=='translator');
-        if(role!=='translator'){assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);app.ctCloseUpload();}
-        app.cloudSignedIn=false;assert.equal(await app.ctOpenOfflineTest(),false);
+        assert.equal(await app.ctOpenOfflineTest(),true);
+        assert.equal(app.ctUploadVisible,true);
+        assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);app.ctCloseUpload();
     }
 });
 

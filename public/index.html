@@ -364,7 +364,7 @@
             <button class="primaryAction" @click="managedImportOffline(false)" :disabled="managedVersionBusy">Import StatDescriptions.zip</button>
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
-          <div v-if="managedManagerAccess" class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Test Sheet Offline</button></div>
+          <div class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Test Sheet Offline</button></div>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>

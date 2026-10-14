@@ -1229,7 +1229,6 @@
             },
             async ctActivate(scope, metadata, initializationSession) {
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
-                const test=String(scope.groupId).startsWith('local:test:');if(test && !this.managedManagerAccess)return false;
                 const store=this.ctStorage(scope);
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
                 const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
@@ -2360,13 +2359,13 @@
             },
             ctOpenOfflineTest() { return this.ctOpenUpload(null, true, true); },
             async ctOpenTestSheet() {
-                if(!this.ctUploadTest || !this.ctUploadVisible || !this.managedManagerAccess || this.ctUploading || this.ctBusy || this._ctTestOpenRun || !this.ctUploadFiles.length)return false;
+                if(!this.ctUploadTest || !this.ctUploadVisible || this.ctUploading || this.ctBusy || this._ctTestOpenRun || !this.ctUploadFiles.length)return false;
                 const run=this._ctTestOpenRun={},key=this.managedCatalogScope,epoch=this._ctEpoch || 0;
                 try{
                     const preparation=this.ctPrepareUpload(),signal=this._ctAbort?.signal;
                     await preparation;
                     if(this._ctTestOpenRun!==run || key!==this.managedCatalogScope || epoch!==(this._ctEpoch || 0)
-                        || !this.ctUploadTest || !this.ctUploadVisible || !this.managedManagerAccess || signal?.aborted
+                        || !this.ctUploadTest || !this.ctUploadVisible || signal?.aborted
                         || this.ctUploadError || !this.ctPrepared.length)return false;
                     return await this.ctPublishPrepared();
                 }finally{if(this._ctTestOpenRun===run)this._ctTestOpenRun=null;}
@@ -2378,7 +2377,7 @@
                 return true;
             },
             async ctOpenUpload(version = null, local = false, test = false) {
-                if (((!local || test) && !this.managedManagerAccess) || this.ctUploading || this.ctBusy) return false;
+                if ((!test && !local && !this.managedManagerAccess) || this.ctUploading || this.ctBusy) return false;
                 if(test){local=true;version=null;}
                 this._ctPublicationRequest=null;this._ctReleaseRequest=null;this._ctReleaseCommand=null;this.ctDuplicateChoices={};
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadTest = test; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
@@ -2393,7 +2392,6 @@
                 this.ctUploadFiles = raw(Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name) })));
             },
             async ctPrepareUpload() {
-                if(this.ctUploadTest && !this.managedManagerAccess)return false;
                 if (this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; this._ctAbort = new AbortController();
                 const key = this.managedCatalogScope, prepared = [];
                 try {
@@ -2569,7 +2567,6 @@
                 await this.ctRememberPublication();
             },
             async ctPublishPrepared() {
-                if(this.ctUploadTest && !this.managedManagerAccess)return false;
                 if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; const key = this.managedCatalogScope,client=this._cloud; this._ctAbort = new AbortController();
                 try {
                     if(this.ctUploadTest){

@@ -165,13 +165,15 @@ async function run() {
                     if (String(path).startsWith('/v1/comments/unread?')) return { total: 0, files: [] };
                     throw new Error('Offline test attempted cloud data request: ' + path);
                 };
-                const id = 'fixture-' + role;
-                const user = { id, role, isAdmin: role === 'admin', language: role === 'translator' ? 'French' : null, assignmentVersion: 1 };
+                const id = role === 'guest' ? 'guest' : 'fixture-' + role;
+                const user = role === 'guest' ? null : { id, role, isAdmin: role === 'admin', language: role === 'translator' ? 'French' : null, assignmentVersion: 1 };
                 vm._cloud.state = await OfflineStore.updateHybridState(state => {
-                    state.profiles[id] = JSON.parse(JSON.stringify(state.profiles.guest));
-                    state.profiles[id].settings.lang = 'French';
+                    if (role !== 'guest') {
+                        state.profiles[id] = JSON.parse(JSON.stringify(state.profiles.guest));
+                        state.profiles[id].settings.lang = 'French';
+                    }
                     state.activeProfile = id;
-                    state.auth = { token: 'fixture-local-identity', user };
+                    state.auth = user ? { token: 'fixture-local-identity', user } : null;
                     return state;
                 });
                 await vm.cloudApply(vm._cloud.snapshot());
@@ -307,10 +309,22 @@ async function run() {
         assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, workspace: window.__offlineTestApp.ctWorkspace, test: window.__offlineTestApp.ctOfflineTest })),
             { active: false, workspace: null, test: false }, 'Reload never restores an in-memory test');
         results.push('Versions discards the test; reload restores no test and existing persisted data is unchanged');
-        await bootstrap('translator');
-        assert.equal(await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).count(), 0, 'Translators have no test entry');
+        await bootstrap('guest');
+        assert.equal(await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).count(), 1, 'Guests have an offline test button');
         await page.evaluate(async () => { await window.__offlineTestApp.ctOpenOfflineTest(); });
-        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadVisible), false, 'Direct invocation is denied for Translators');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadVisible), true, 'Guests can open the local test importer');
+        await page.evaluate(() => window.__offlineTestApp.ctCloseUpload());
+        await monitor(page, true);
+        await openTest([{ name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }]);
+        await assertLocal(page, 'Guest ClientText testing');
+        await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+        await offline.waitFor();
+        await assertLocal(page, 'Leaving guest test', true);
+        await monitor(page, false);
+        await bootstrap('translator');
+        assert.equal(await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).count(), 1, 'Translators have an offline test button');
+        await page.evaluate(async () => { await window.__offlineTestApp.ctOpenOfflineTest(); });
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadVisible), true, 'Direct invocation is available to Translators');
         await bootstrap('admin');
         assert.equal(await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).count(), 1, 'Admin has an offline test button');
         await monitor(page, true);
@@ -329,7 +343,7 @@ async function run() {
         await offline.waitFor();
         await assertLocal(page, 'Admin Gender-only session', true);
         await monitor(page, false);
-        results.push('Manager/Admin access is allowed; Translator button and direct invocation are denied; Gender-only tests remain local');
+        results.push('Manager, Admin, Translator, and Guest access is local-only; Gender-only tests remain local');
         results.push('Different test language preserves account language; importer, list and full editor fit all four themes at 1440px and 1100px');
         for (const version of [null, { id: 'fixture-normal-version', name: 'Existing fixture version' }]) {
             // Inspect the ordinary importer without beginning a publication or
