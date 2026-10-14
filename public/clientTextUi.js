@@ -2218,18 +2218,19 @@
             async ctLoadPreviousHistory() {
                 const provenance = this.ctHistoryPreviousProvenance, unit = this.ctCurrentUnit;
                 if (!provenance || !unit || this.ctBusy || this.ctHistoryPreviousLoading) return false;
-                const ctx = this.ctContext(), client = this._cloud, run = this._ctHistoryPreviousRun = {}, originalUnitId = provenance.unitId || unit.id;
+                const ctx = this.ctContext(), client = this._cloud, store = this.ctStorage(ctx.scope), run = this._ctHistoryPreviousRun = {}, originalUnitId = provenance.unitId || unit.id;
                 const current = () => this._ctHistoryPreviousRun === run && this.ctCurrent(ctx) && this.ctCurrentUnit === unit && this._cloud === client;
                 const revision = Number(provenance.revision ?? 0);
                 if (!Number.isSafeInteger(revision) || revision < 0) return false;
                 this.ctHistoryPreviousLoading = true; this.ctHistoryError = '';
                 try {
-                    const rows = await this._ctStore.listWorkspaces({ accountId: ctx.scope.accountId, game: ctx.scope.game });
+                    const rows = await store.listWorkspaces({ accountId: ctx.scope.accountId, game: ctx.scope.game });
                     if (!current()) return false;
                     const cached = rows.find(row => row.groupId === provenance.groupId && row.language === ctx.scope.language
                         && row.branchId === ctx.scope.branchId && row.state === 'ready');
                     let previousScope = cached && this.ctScope(cached.versionId, cached.groupId, ctx.scope.language);
                     if (!previousScope) {
+                        if (this.ctOfflineTest) throw new Error('The previous workbook is unavailable in this test session.');
                         if (!this.managedOnlineAvailable || !client?.request) throw new Error('Connect once to verify the previous version original before comparing its English.');
                         const result = await client.request('/v1/content-groups/' + encodeURIComponent(provenance.groupId));
                         if (!current()) return false;
@@ -2240,12 +2241,12 @@
                         if (!await this.ctOpenGroup(version, group, ctx.scope.language, false) || !current()) return false;
                         previousScope = this.ctScope(version.id, group.id, ctx.scope.language);
                     }
-                    const previous = await this._ctStore.getUnit(previousScope, originalUnitId);
+                    const previous = await store.getUnit(previousScope, originalUnitId);
                     if (!current()) return false;
                     if (!previous) throw new Error('This record is unavailable in the verified previous version.');
                     let record = revision === 0 ? null : undefined;
                     if (revision) {
-                        const local = await this._ctStore.listHistory(previousScope, originalUnitId, { limit: 5000 });
+                        const local = await store.listHistory(previousScope, originalUnitId, { limit: 5000 });
                         if (!current()) return false;
                         // Remote bases are accepted facts, even if their local
                         // overlay contains a later pending correction.
@@ -2701,7 +2702,13 @@
             },
             ctChooseFiles(event) {
                 this.ctPrepared = raw([]); this.ctUploadError = '';
-                this.ctUploadFiles = raw(Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name) })));
+                const selected = Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name), ...(this.ctUploadTest ? { testVersion: 'current' } : {}) }));
+                this.ctUploadFiles = raw(this.ctUploadTest ? [...this.ctUploadFiles, ...selected] : selected);
+                if(this.ctUploadTest)event.target.value='';
+            },
+            ctRemoveTestFile(index) {
+                if(!this.ctUploadTest || this.ctUploading)return;
+                this.ctUploadFiles=raw(this.ctUploadFiles.filter((_,position)=>position!==index));this.ctPrepared=raw([]);this.ctUploadError='';
             },
             async ctPrepareUpload() {
                 if (this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; this._ctAbort = new AbortController();
@@ -2721,10 +2728,19 @@
                             prepared.push({ contentMode: 'statdescription', candidates: [candidate], assignments: this.ctUploadAssignments.slice(),parentGroupId:parent?.id,duplicateGroups }); continue;
                         }
                         if (!candidate.language) throw new Error('Confirm the language team for ' + candidate.file.name + '.');
-                        const candidates = groups.get(candidate.language) || []; if (candidates.some(item => item.role === candidate.role)) throw new Error('Duplicate ' + candidate.role + ' workbook for ' + candidate.language + '.'); candidates.push(candidate); groups.set(candidate.language, candidates);
+                        if (this.ctUploadTest && !['previous','current'].includes(candidate.testVersion || 'current')) throw new Error('Choose Previous or Current for ' + candidate.file.name + '.');
+                        const groupKey = this.ctUploadTest ? JSON.stringify([candidate.language, candidate.testVersion || 'current']) : candidate.language;
+                        const candidates = groups.get(groupKey) || []; if (candidates.some(item => item.role === candidate.role)) throw new Error('Duplicate ' + candidate.role + ' workbook for ' + candidate.language + (this.ctUploadTest ? ' (' + (candidate.testVersion || 'current') + '). Choose one Previous and one Current workbook for comparison.' : '.')); candidates.push(candidate); groups.set(groupKey, candidates);
                     }
-                    if(this.ctUploadTest && groups.size!==1)throw new Error('Test one language at a time. Select its normal workbook, Gender workbook, or both.');
-                    for (const [language, candidates] of groups) {
+                    if(this.ctUploadTest){
+                        if(new Set(this.ctUploadFiles.map(candidate=>candidate.language)).size!==1)throw new Error('Test one language at a time. Select its normal workbook, Gender workbook, or both.');
+                        const current=this.ctUploadFiles.filter(candidate=>(candidate.testVersion || 'current')==='current');
+                        if(!current.length)throw new Error('Select at least one Current workbook to open.');
+                        if(this.ctUploadFiles.some(candidate=>candidate.testVersion==='previous' && !current.some(next=>next.role===candidate.role)))throw new Error('Each Previous workbook needs a Current workbook with the same role.');
+                    }
+                    let testPrevious = null;
+                    for (const candidates of groups.values()) {
+                        const language = candidates[0].language;
                         if(!this.ctUploadLocal)await this.ctRequireTrustedProtocol(this._ctAbort.signal,[root.ClientTextState.PARSER_VERSION]);
                         const required = this.ctUploadTest ? ['normal','gender'].filter(role=>candidates.some(candidate=>candidate.role===role)) : this.ctPolicy.clientTextRoles[language] || this.ctPolicy.clientTextRoles.default || ['normal'];
                         if (required.some(role => !candidates.some(item => item.role === role)) || candidates.some(item => !required.includes(item.role))) throw new Error(language + ' requires exactly these workbook roles: ' + required.join(', ') + '.');
@@ -2749,8 +2765,10 @@
                         const originals = await this.ctDescribeOriginals(units, assets,{signal:this._ctAbort.signal,onProgress:progress=>this.ctReport(progress)});
                         const preparedGroup={ contentMode: 'clienttext',storageProtocol:trustedProtocol, language, assignments: [language], candidates, units, assets, originals, warnings: assets.flatMap(asset => asset.parsed.warnings || []) };
                         if(!this.ctUploadLocal)await this.ctPrepareCarry(preparedGroup);
-                        prepared.push(preparedGroup);
+                        if(this.ctUploadTest && candidates[0].testVersion==='previous')testPrevious=preparedGroup;
+                        else prepared.push(preparedGroup);
                     }
+                    if(testPrevious)prepared[0].previous=testPrevious;
                     if (key === this.managedCatalogScope) this.ctPrepared = raw(prepared);
                 } catch (error) { if (key === this.managedCatalogScope && error.name !== 'AbortError') this.ctUploadError = error.message; }
                 finally { if (key === this.managedCatalogScope) { this.ctUploading = false; this.ctProgress = null; } }
@@ -2840,15 +2858,7 @@
                 for(let index=0;index<prepared.units.length;index++){
                     const next=prepared.units[index],old=previousUnits.get(next.id);if(!old)continue;
                     const before=accepted[next.id],state=root.ClientTextState.carryForward(old,next,before);
-                    let markerReview=false;
-                    for(const field of next.fields){const previous=old.fields.find(item=>item.id===field.id);
-                        // Only verified raw predecessor/current originals can
-                        // establish this strict marker-only equivalence.
-                        if(previous && previous.source!==field.source && field.outdated && !root.ClientTextState.audioOnly(field.source)
-                            && root.ClientTextState.canonicalSource(field.source).trim() && root.ClientTextState.canonicalSource(previous.source)===root.ClientTextState.canonicalSource(field.source)){
-                            state.reviewed[field.id]=root.ClientTextState.sourceHash(field.source);markerReview=true;
-                        }
-                    }
+                    const markerReview=root.ClientTextState.reviewAudioMarkerChanges(old,next,state);
                     if(before || state.outdated.length || markerReview){
                         const asset=prepared.assets.find(asset=>asset.role===next.role),previousAsset=previousAssets[next.role];
                         carry.push({id:next.id,role:next.role,assetHash:asset.hash,parserVersion:asset.parserVersion || asset.parsed?.parserVersion || root.ClientTextState.PARSER_VERSION,
@@ -2889,13 +2899,23 @@
                             scope=this.ctScope(versionId,groupId,prepared.language),metadata={version,group,descriptors:prepared.originals.descriptors};
                         const store=root.ClientTextMemoryStore.create();this._ctTestStores ||= new Map();this._ctTestStores.set(groupId,store);
                         try{
-                            await store.import(scope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata});
+                            const options={signal:this._ctAbort.signal,guard:()=>key===this.managedCatalogScope,
+                                onProgress:progress=>this.ctReport(progress)};
+                            await store.import(scope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata},options);
+                            if(prepared.previous){
+                                const previous=prepared.previous,previousVersion={...version,id:'local:test:'+uuid(),name:'Previous workbook sample'},
+                                    previousGroup={...group,id:'local:test:'+uuid(),versionId:previousVersion.id,roles:previous.assets.map(asset=>asset.role)},
+                                    previousScope=this.ctScope(previousVersion.id,previousGroup.id,prepared.language);
+                                await store.import(previousScope,{units:previous.units,assets:previous.assets,descriptors:previous.originals.descriptors,
+                                    summaries:previous.originals.summaries,metadata:{version:previousVersion,group:previousGroup}},options);
+                                await store.seedPreviousVersion(scope,previousScope,options);
+                            }
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return false;
                             const opened=await this.ctActivate(scope,metadata);
                             if(!opened && key===this.managedCatalogScope && this.ctWorkspace?.scope.groupId===groupId){
                                 const message=this.ctError || 'The test sheet could not be opened. Prepare the workbook and try again.';
                                 this.ctFence();this.versionChooserVisible=true;this.ctUploadVisible=true;this.ctUploadError=message;
-                                this.ctPrepared=raw([prepared]);this.ctUploadFiles=raw(prepared.candidates);
+                                this.ctPrepared=raw([prepared]);this.ctUploadFiles=raw([...prepared.candidates,...(prepared.previous?.candidates || [])]);
                             }
                             return opened;
                         }finally{if(this.ctWorkspace?.scope.groupId!==groupId){store.dispose();this._ctTestStores.delete(groupId);}}

@@ -28,6 +28,63 @@ async function prepared(options = {}) {
 }
 const values = (original = unit(), target = 'Saved {0}') => ({ ...S.valuesFor(original), [textId]: target });
 
+test('previous workbook comparisons create source-only import history, Outdated and verified audio-marker reviews', async () => {
+    for (const [before, after, orange, outdated] of [
+        ['Old dialogue', 'New dialogue', false, true],
+        ['Dialogue', '[NOAUDIO] Dialogue', true, false],
+        ['[OLD AUDIO] Dialogue', '[AUDIOTEST] Dialogue', true, false],
+        ['Dialogue', '[NOAUDIO] Different dialogue', true, true],
+        ['Dialogue', '[NOAUDIO]  Dialogue', true, true],
+        ['[NOAUDIO]', '[NOAUDIO]', false, false]
+    ]) {
+        const store = Memory.create(), previousScope = { ...scope, versionId: 'old', groupId: 'local:test:old' },
+            previous = unit(), current = unit();
+        previous.fields[0].source = before; previous.fields[0].target = 'Previous translation';
+        current.fields[0].source = after; current.fields[0].target = 'Current translation'; current.fields[0].outdated = orange;
+        const oldSnapshot = S.copy(previous), newSnapshot = S.copy(current);
+        await prepared({ store, original: previous, scope: previousScope });
+        await prepared({ store, original: current });
+        await store.seedPreviousVersion(scope, previousScope);
+        const saved = (await store.getSaved(scope))[current.id], status = S.statusFor(current, saved), history = await store.listHistory(scope, current.id);
+        assert.equal(status.outdated, outdated, before + ' -> ' + after); assert.equal(status.saved, false);
+        assert.equal(S.valuesFor(current, saved)[textId], 'Current translation');
+        if (before !== after) {
+            assert.equal(history.length, 1); assert.equal(history[0].origin, 'version_import');
+            assert.equal(history[0].after.saved, false); assert.equal(history[0].after.provenance.groupId, previousScope.groupId);
+            if (!outdated) assert.equal(saved.reviewed[textId], S.sourceHash(after));
+        } else assert.equal(history.length, 0);
+        await store.seedPreviousVersion(scope, previousScope);
+        assert.equal((await store.listHistory(scope, current.id)).length, history.length, 'seeding is idempotent');
+        assert.deepEqual(await store.getUnit(previousScope, previous.id), oldSnapshot);
+        assert.deepEqual(await store.getUnit(scope, current.id), newSnapshot);
+        assert.equal((await store.listWorkspaces({ language: scope.language })).length, 2);
+        assert.deepEqual(await store.listWorkspaces({ language: 'German' }), []);
+        if (outdated) {
+            await store.save(scope, current.id, { jobId: 'review', values: S.valuesFor(current), reviewed: { [textId]: S.sourceHash(after) } });
+            assert.equal(S.statusFor(current, (await store.getSaved(scope))[current.id]).outdated, false);
+            assert.equal((await store.listHistory(scope, current.id)).length, 2);
+        }
+    }
+});
+
+test('previous comparisons fence every scope and cancel atomically without publishing partial history', async () => {
+    for (const dimension of ['accountId', 'game', 'branchId', 'language']) {
+        const store = Memory.create(), previousScope = { ...scope, versionId: 'old', groupId: 'local:test:old', [dimension]: dimension === 'game' ? 'poe1' : 'other' };
+        await prepared({ store }); await prepared({ store, scope: previousScope });
+        await assert.rejects(store.seedPreviousVersion(scope, previousScope), /must match/);
+        assert.deepEqual(await store.getSaved(scope), {});
+    }
+    let valid = true;
+    const store = Memory.create({ yield: async () => { valid = false; } }), previousScope = { ...scope, versionId: 'old', groupId: 'local:test:old' },
+        oldUnits = Array.from({ length: 256 }, (_, i) => unit(String(i))), nextUnits = S.copy(oldUnits);
+    nextUnits.forEach(original => { original.fields[0].source = 'Changed English'; });
+    await store.import(previousScope, { units: oldUnits, assets: [asset] });
+    await store.import(scope, { units: nextUnits, assets: [asset] }); valid = true;
+    await assert.rejects(store.seedPreviousVersion(scope, previousScope, { guard: () => valid }), error => error.stale);
+    assert.deepEqual(await store.getSaved(scope), {}); assert.deepEqual(await store.listHistory(scope, nextUnits[0].id), []);
+    store.dispose(); await assert.rejects(store.listWorkspaces(), { code: 'LOCAL_TEST_DISPOSED' });
+});
+
 test('browser and Node adapters never access durable storage, workers or networking', async () => {
     const sandbox = { ClientTextState: S, ClientTextStore: CT, setTimeout, Map, Blob, console };
     for (const name of ['indexedDB', 'OfflineStore', 'localStorage', 'sessionStorage', 'fetch', 'WebSocket', 'Worker']) {

@@ -20,6 +20,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 ].find(existsSync);
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
 const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks') || process.argv.includes('--convo-real-workbooks');
+const realHistoryWorkbooks = process.argv.includes('--history-real-workbooks');
 const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
 const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
 const disposableFolder = resolve(__dirname, '../temp/clienttext-npc-offline-fixture');
@@ -30,7 +31,7 @@ const VBA = Buffer.from([0, 255, 8, 99, 14, 0]);
 const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const cell = (ref, value) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escape(value)}</t></is></c>`;
 const row = (number, values) => `<row r="${number}">${values.map((value, index) => cell(String.fromCharCode(65 + index) + number, value)).join('')}</row>`;
-async function workbook(role = 'normal') {
+async function workbook(role = 'normal', sampleVersion = '') {
     const zip = new JSZip();
     const rows = role === 'normal' ? [
         row(1, ['ID', 'Notes', 'Name', 'Translation', 'Gender', 'Description', 'Translation']),
@@ -40,6 +41,13 @@ async function workbook(role = 'normal') {
         row(1, ['ID', 'Tags', 'Text', 'MS', 'FS', 'NS', 'MP', 'FP', 'NP']),
         row(2, ['offline-test-gender', 'weapon', 'Strong', 'Fort', 'Forte', '', '', '', 'NONEXISTENT'])
     ];
+    if (role === 'normal' && sampleVersion) {
+        const previous = sampleVersion === 'previous';
+        rows.push(row(4, ['version-changed', previous ? 'Previous note' : 'Current note', previous ? 'Previous English' : 'Current English', previous ? 'Ancienne traduction' : 'Traduction actuelle', 'M', '', '']),
+            row(5, ['version-noaudio', '', previous ? 'Marker dialogue' : '[NOAUDIO] Marker dialogue', 'Dialogue traduit', 'M', '', '']),
+            row(6, ['version-audiotest', '', previous ? '[OLD AUDIO] Test dialogue' : '[AUDIOTEST] Test dialogue', 'Dialogue test', 'M', '', '']));
+        if (!previous) for (const index of [3,4,5]) rows[index] = rows[index].replace(/<c r="D(\d+)"/, '<c s="1" r="D$1"');
+    }
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>');
     const sheets = [{ name: role === 'normal' ? 'Normal' : 'Words_Gender', rows }];
     if (role === 'normal') sheets.push(
@@ -67,7 +75,7 @@ async function workbook(role = 'normal') {
     zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => `<sheet name="${sheet.name}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`);
     zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`);
     for (const [index, sheet] of sheets.entries()) zip.file(`xl/worksheets/sheet${index + 1}.xml`, `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${sheet.rows.join('')}</sheetData></worksheet>`);
-    zip.file('xl/styles.xml', `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
+    zip.file('xl/styles.xml', `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF9966"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="1" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
     zip.file('xl/vbaProject.bin', VBA);
     zip.file('xl/metadata', Buffer.from([0, 77, 255, 16]));
     return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -244,7 +252,7 @@ async function run() {
         const upload = page.getByRole('region', { name: 'Content upload' });
         const workspace = page.getByRole('region', { name: 'ClientText workspace' });
         let layoutChecked = false;
-        async function openTest(files) {
+        async function openTest(files, previousNames = []) {
             const selectedLanguage = await page.evaluate(() => window.__offlineTestApp.lang);
             await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).click();
             await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
@@ -253,12 +261,18 @@ async function run() {
             assert.equal(await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).count(), 0, 'Test sheets combine preparation and opening into one action');
             assert.equal(await upload.getByRole('button', { name: 'Open test sheet', exact: true }).count(), 0, 'The previous separate opening action is absent');
             if (!layoutChecked) await layout(page, upload, 'Offline workbook importer');
-            await upload.locator('input[type=file]').first().setInputFiles(files);
+            if(previousNames.length){
+                await upload.locator('input[type=file]').first().setInputFiles(files.slice(0,1));
+                await upload.locator('input[type=file]').first().setInputFiles(files.slice(1));
+                assert.equal(await upload.locator('.ctUploadFiles tbody tr').count(),files.length,'Successive file choices retain both versions');
+            }else await upload.locator('input[type=file]').first().setInputFiles(files);
+            for (const name of previousNames) await upload.getByRole('combobox', { name: 'Version for ' + name, exact: true }).selectOption('previous');
+            if(previousNames.length)await layout(page,upload,'Previous/current workbook selection');
             await upload.getByRole('button', { name: 'Open', exact: true }).click();
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
                 return !vm.ctUploading && !vm.ctBusy && !vm.workspaceInitializationActive && (vm.ctActive || vm.ctUploadError);
-            }, null, { timeout: realNpcWorkbooks ? 180000 : 30000 });
+            }, null, { timeout: realNpcWorkbooks || realHistoryWorkbooks ? 180000 : 30000 });
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '', 'One Open click prepares and validates the workbooks');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), true, 'Prepared test sheet opens successfully');
             await workspace.waitFor();
@@ -486,6 +500,68 @@ async function run() {
         assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, workspace: window.__offlineTestApp.ctWorkspace, units: window.__offlineTestApp.ctUnits.length, stores: window.__offlineTestApp._ctTestStores?.size || 0 })),
             { active: false, workspace: null, units: 0, stores: 0 }, 'Versions discards the whole temporary workspace');
         await assertLocal(page, 'Leaving the test', true);
+        async function checkVersionHistory(files, previousNames, label) {
+            await openTest(files, previousNames);
+            const sample = await page.evaluate(async () => {
+                const vm = window.__offlineTestApp, store = vm.ctStorage(vm.ctWorkspace.scope),
+                    previousScope = (await store.getMetadata(vm.ctWorkspace.scope)).previousScope,
+                    reviewed = vm.ctUnits.flatMap(unit => unit.fields.filter(field => vm.ctSaved[unit.id]?.reviewed?.[field.id]).map(field => ({ id: unit.id, source: field.source, outdated: vm.ctStatus(unit).fields[field.id].outdated }))),
+                    imported = Object.values(vm.ctSaved).filter(record => record.provenance?.origin === 'version_import');
+                let changed;
+                for(const unit of vm.ctUnits.filter(unit=>vm.ctSaved[unit.id]?.outdated?.length)){
+                    const old=await store.getUnit(previousScope,unit.id);
+                    if(unit.fields.some(field=>vm.ctSaved[unit.id].outdated.includes(field.id) && old.fields.some(before=>before.id===field.id && before.source.trim()
+                        && ClientTextState.canonicalSource(before.source)!==ClientTextState.canonicalSource(field.source)))){changed=unit;break;}
+                }
+                return { id: changed?.id, recordId: changed?.recordId, source: changed?.fields.find(field => vm.ctSaved[changed.id].outdated.includes(field.id))?.source,
+                    reviewed, noaudioReviewed:reviewed.filter(field=>field.source.includes('[NOAUDIO]') && !field.outdated).length, imported: imported.length, saved: vm.ctCounts.saved };
+            });
+            assert.ok(sample.id, label + ': changed dialogue is Outdated');
+            assert.equal(sample.saved, 0, label + ': source-only imports do not count as Saved');
+            assert.ok(sample.reviewed.some(field => /\[(?:NOAUDIO|AUDIOTEST|OLD AUDIO|NO AUDIO)\]/.test(field.source) && !field.outdated), label + ': real parsed marker-only changes satisfy source review');
+            assert.ok(sample.noaudioReviewed>0,label+': NOAUDIO-only changes resolve orange source review');
+            await workspace.getByRole('button', { name: 'All sheets', exact: true }).click();
+            await workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true }).fill(sample.recordId);
+            await workspace.getByRole('button', { name: sample.recordId, exact: true }).click();
+            await workspace.locator('.ctTools').getByRole('button', { name: /History$/ }).click();
+            await page.waitForFunction(() => !window.__offlineTestApp.ctHistoryLoading && window.__offlineTestApp.ctHistory.length);
+            assert.equal(await workspace.locator('.ctHistoryEvent').count(), 1);
+            await workspace.getByRole('button', { name: 'Compare previous version', exact: true }).click();
+            const dialog = page.getByRole('dialog', { name: /^Compare ·/ });
+            await dialog.waitFor();
+            const comparison = await page.evaluate(() => {
+                const vm = window.__offlineTestApp;
+                return { error: vm.ctHistoryError, rows: vm.ctHistoryComparison.rows, notes: vm.ctHistoryComparison.hasNotes,
+                    previous: vm.ctHistoryComparison.before.unit.id, current: vm.ctCurrentUnit.id };
+            });
+            assert.equal(comparison.error, '');assert.equal(comparison.previous, sample.id);assert.equal(comparison.current, sample.id);
+            assert.ok(comparison.rows.some(row => row.beforeSource !== row.afterSource), label + ': actual previous English differs from current');
+            await dialog.getByRole('checkbox', { name: 'Show whitespace', exact: true }).check();
+            await dialog.getByRole('checkbox', { name: 'Character differences', exact: true }).uncheck();
+            await layout(page, dialog, label + ' previous-version diff');
+            mkdirSync(disposableFolder, { recursive: true });
+            await dialog.screenshot({ path: join(disposableFolder, 'history-' + (label === 'Synthetic' ? 'synthetic' : 'real') + '.png') });
+            await dialog.getByRole('button', { name: 'Close history comparison' }).press('Escape');
+            await dialog.waitFor({ state: 'hidden' });
+            assert.equal(await workspace.getByRole('button', { name: 'Close', exact: true }).isVisible(), true);
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+            await workspace.getByRole('button', { name: 'Versions', exact: true }).click();await offline.waitFor();
+            await assertLocal(page, label + ' previous version history', true);
+            results.push({ name: label + ' previous/current workbook comparison', imported: sample.imported, reviewedMarkerFields: sample.reviewed.length,noaudioReviewedFields:sample.noaudioReviewed,
+                oldEnglish: comparison.rows.find(row => row.beforeSource.trim() && row.beforeSource !== row.afterSource)?.beforeSource,
+                currentEnglish: comparison.rows.find(row => row.beforeSource.trim() && row.beforeSource !== row.afterSource)?.afterSource });
+        }
+        await checkVersionHistory([
+            { name: 'French_previous.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'previous') },
+            { name: 'French_current.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: await workbook('normal', 'current') }
+        ], ['French_previous.xlsm'], 'Synthetic');
+        if (realHistoryWorkbooks) {
+            const previousPath = process.env.CLIENTTEXT_HISTORY_PREVIOUS || 'C:/Users/lpeac/Downloads/2026-10-05_POE2/French_PoE2.xlsm',
+                currentPath = process.env.CLIENTTEXT_HISTORY_CURRENT || 'C:/Users/lpeac/Downloads/2026-10-13_POE2/French.xlsx',
+                beforeHashes = [previousPath, currentPath].map(checksum);
+            await checkVersionHistory([previousPath, currentPath], [require('node:path').basename(previousPath)], 'Real French');
+            assert.deepEqual([previousPath, currentPath].map(checksum), beforeHashes, 'Real source workbooks remain byte-for-byte unchanged');
+        }
         await monitor(page, false);
         const retained = await page.evaluate(async () => {
             const db = await OfflineStore.openClientTextDb();

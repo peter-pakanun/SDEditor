@@ -336,6 +336,20 @@
             && canonicalSource(before.get(field.id).source) !== canonicalSource(field.source)).map(field => field.id);
         return { values, reviewed, outdated, conflicts, removed, saved: !!previousSaved && previousSaved.saved !== false, dropped: [] };
     }
+    // Only verified predecessor/current originals establish marker-only changes.
+    // Shared publication and disposable test sheets use the same review rule.
+    function reviewAudioMarkerChanges(previousUnit, nextUnit, state) {
+        const before = new Map(previousUnit.fields.map(field => [field.id, field]));
+        let changed = false;
+        for (const field of nextUnit.fields) {
+            const previous = before.get(field.id);
+            if (previous && previous.source !== field.source && field.outdated && !audioOnly(field.source)
+                && canonicalSource(field.source).trim() && canonicalSource(previous.source) === canonicalSource(field.source)) {
+                state.reviewed[field.id] = sourceHash(field.source); changed = true;
+            }
+        }
+        return changed;
+    }
     // This is SD's variable grammar plus the numeric format extension already
     // accepted by ClientText (for example {2:0.1f}). Braces around localizable
     // formatting text, such as {Fire Rune}, are not variable placeholders.
@@ -496,5 +510,5 @@
     return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

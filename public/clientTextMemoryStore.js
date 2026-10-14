@@ -92,6 +92,48 @@
         async function getMetadata(rawScope, options) {
             return S.copy(workspaces.get(capture(rawScope, options).id)?.metadata);
         }
+        async function listWorkspaces(filter = {}, options) {
+            guard(options);
+            return [...workspaces.values()].map(value => value.metadata)
+                .filter(scope => ['accountId', 'game', 'branchId', 'language'].every(key => !filter[key] || scope[key] === filter[key])).map(S.copy);
+        }
+        async function seedPreviousVersion(rawScope, rawPreviousScope, options = {}) {
+            const captured = capture(rawScope, options), previous = capture(rawPreviousScope, options);
+            if (captured.id === previous.id || ['accountId', 'game', 'branchId', 'language'].some(key => captured.scope[key] !== previous.scope[key]))
+                throw new TypeError('Previous test workbooks must match the current account, game, branch and language.');
+            const workspace = ready(captured), predecessor = ready(previous), records = [];
+            if (workspace.metadata.previousScope) {
+                if (scopeKey(workspace.metadata.previousScope) !== previous.id) throw new Error('The previous test version is already selected.');
+                return;
+            }
+            if (workspace.saved.size || workspace.history.size || workspace.drafts.size) throw new Error('Prepare the previous test version before editing.');
+            for (let index = 0; index < workspace.units.length; index++) {
+                const unit = workspace.units[index], old = predecessor.byId.get(unit.id);
+                if (old) {
+                    const state = S.carryForward(old, unit, null), markerReview = S.reviewAudioMarkerChanges(old, unit, state);
+                    if (state.outdated.length || markerReview) {
+                        const before = new Map(old.fields.map(field => [field.id, field])), requiredReview = {};
+                        for (const field of unit.fields) if (before.has(field.id) && S.sourceHash(before.get(field.id).source) !== S.sourceHash(field.source)
+                            && !S.audioOnly(field.source) && S.needsSourceReview(field, state.values[field.id])) requiredReview[field.id] = S.sourceHash(field.source);
+                        const provenance = { groupId: previous.scope.groupId, unitId: unit.id, revision: 0, sourceOnly: true,
+                            requiredReview, conflicts: state.conflicts, origin: 'version_import' };
+                        const after = { unitId: unit.id, values: state.values, reviewed: state.reviewed, saved: false, revision: 1,
+                            serverRevision: 0, provenance, conflicts: state.conflicts,
+                            outdated: Object.keys(requiredReview).filter(id => state.reviewed[id] !== requiredReview[id]) };
+                        records.push({ id: 'test-version-import:' + unit.id, unitId: unit.id, origin: 'version_import',
+                            actor: { name: 'Previous workbook sample' }, createdAt: Date.now(),
+                            before: { unitId: unit.id, values: S.valuesFor(unit), reviewed: {}, revision: 0 }, after });
+                    }
+                }
+                if (index % 256 === 255) {
+                    options.onProgress?.({ phase: 'Comparing previous workbook', processed: index + 1, total: workspace.units.length, sheet: unit.sheet });
+                    await pause(); guard(options);
+                }
+            }
+            guard(options);
+            for (const entry of records) { workspace.saved.set(entry.unitId, entry.after); workspace.history.set(entry.unitId, [entry]); }
+            workspace.metadata.previousScope = S.copy(previous.scope);
+        }
         async function getUnits(rawScope, options) { return ready(capture(rawScope, options)).units; }
         async function getUnit(rawScope, unitId, options) { return S.copy(ready(capture(rawScope, options)).byId.get(unitId)); }
         async function getSaved(rawScope, options) {
@@ -159,7 +201,7 @@
             capture(rawScope, options); return { units: [], counts: { total: 0, text: 0, form: 0 } };
         }
         function dispose() { disposed = true; workspaces.clear(); }
-        return { import: importContent, importContent, getMetadata, getUnits, getUnit, getSaved, getAsset,
+        return { import: importContent, importContent, getMetadata, listWorkspaces, seedPreviousVersion, getUnits, getUnit, getSaved, getAsset,
             putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, getMemory, normalizeScope, scopeKey, dispose };
     }
     return { normalizeScope, scopeKey, create };

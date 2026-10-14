@@ -3599,6 +3599,57 @@ test('offline test activation, drafts, save/history and exit use memory and rest
     assert.throws(()=>app.ctStorage(oldScope),/session has ended/);await assert.rejects(store.getSaved(oldScope),{code:'LOCAL_TEST_DISPOSED'});
 });
 
+test('offline version pairs parse separately and reject ambiguous language, role or version choices before reading files',async()=>{
+    const h=uploadPreparationHarness(['French.xlsm','French_previous.xlsm','French_Gender.xlsm','French_Gender_previous.xlsm']);
+    Object.assign(h.app,{ctUploadTest:true,ctUploadLocal:true});
+    h.app.ctUploadFiles.filter(candidate=>candidate.file.name.includes('previous')).forEach(candidate=>candidate.testVersion='previous');
+    await h.app.ctPrepareUpload();assert.equal(h.app.ctUploadError,'');assert.equal(h.parseCalls.length,4);
+    const prepared=h.app.ctPrepared[0];assert.equal(h.app.ctPrepared.length,1);assert.equal(prepared.units.length,2);assert.equal(prepared.previous.units.length,2);
+    assert.deepEqual(Array.from(prepared.assets,asset=>asset.name),['French.xlsm','French_Gender.xlsm']);
+    assert.deepEqual(Array.from(prepared.previous.assets,asset=>asset.name),['French_previous.xlsm','French_Gender_previous.xlsm']);
+    assert.deepEqual(h.requests,[]);assert.deepEqual(h.storeCalls,[]);
+    for(const [names,versions,message] of [
+        [['Thai.xlsx','Thai_old.xlsx'],['current','current'],/Duplicate.*Choose one Previous/],
+        [['Thai.xlsx'],['previous'],/at least one Current/],
+        [['French.xlsx','French_Gender.xlsx'],['current','previous'],/same role/],
+        [['Thai.xlsx','French.xlsx'],['current','previous'],/one language/]
+    ]) {
+        const {app,parseCalls}=uploadPreparationHarness(names);Object.assign(app,{ctUploadTest:true,ctUploadLocal:true});
+        app.ctUploadFiles.forEach((candidate,index)=>candidate.testVersion=versions[index]);
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,message);assert.equal(parseCalls.length,0);
+    }
+});
+
+test('test sheet file selection appends separate folders, preserves version choices and supports removing a mistaken file',()=>{
+    const {app}=harness({ctUploadTest:true}),oldFile=new File(['old'],'Thai.xlsx'),currentFile=new File(['new'],'Thai.xlsx');
+    app.ctChooseFiles({target:{files:[oldFile]}});app.ctUploadFiles[0].testVersion='previous';
+    app.ctChooseFiles({target:{files:[currentFile]}});
+    assert.equal(app.ctUploadFiles.length,2);assert.equal(app.ctUploadFiles[0].testVersion,'previous');assert.equal(app.ctUploadFiles[1].testVersion,'current');
+    assert.strictEqual(app.ctUploadFiles[0].file,oldFile);assert.strictEqual(app.ctUploadFiles[1].file,currentFile);
+    app.ctRemoveTestFile(0);assert.equal(app.ctUploadFiles.length,1);assert.strictEqual(app.ctUploadFiles[0].file,currentFile);
+    app.ctUploadTest=false;app.ctChooseFiles({target:{files:[oldFile]}});assert.equal(app.ctUploadFiles.length,1);assert.strictEqual(app.ctUploadFiles[0].file,oldFile);
+});
+
+test('offline Outdated import history loads actual old English and removed fields through the regular diff viewer without durable or cloud access',async()=>{
+    const Memory=require('../public/clientTextMemoryStore.js'),store=Memory.create(),previous=unit('Previous English','Previous translation'),current=unit('Current English','Current translation'),
+        testScope={...scope,versionId:'local:test:v2',groupId:'local:test:g2'},previousScope={...scope,versionId:'local:test:v1',groupId:'local:test:g1'};
+    previous.developerNotes='Old developer note';previous.fields.push({id:'removed',name:'Removed field',source:'Old removed English',target:'Old removed translation',kind:'text'});
+    await store.import(previousScope,{units:[previous],assets:[asset]});await store.import(testScope,{units:[current],assets:[asset]});await store.seedPreviousVersion(testScope,previousScope);
+    const {app}=enableHistory(harness({ctWorkspace:{scope:testScope},ctUnits:[current],ctSelection:current.id,_ctUnitIndex:new Map([[current.id,current]]),
+        ctValues:S.valuesFor(current),ctSaved:await store.getSaved(testScope),_ctTestStores:new Map([[testScope.groupId,store]]),
+        managedOnlineAvailable:true,cloudCanAccessAllLanguages:true}));
+    app._ctStore=new Proxy({}, {get(){assert.fail('A test comparison must never touch IndexedDB');}});
+    app._cloud={request(){assert.fail('A test comparison must never reach the API');}};
+    assert.equal(app.ctStatus(current).outdated,true);assert.equal(app.ctStatus(current).saved,false);
+    assert.equal(await app.ctLoadHistory(),true);assert.equal(app.ctHistory.length,1);assert.equal(app.ctHistory[0].action,'version_import');
+    assert.equal(await app.ctLoadPreviousHistory(),true);assert.equal(app.ctHistoryViewer,true);assert.equal(app.ctHistoryError,'');
+    const diff=app.ctHistoryComparison;assert.equal(diff.rows[0].beforeSource,'Previous English');assert.equal(diff.rows[0].afterSource,'Current English');
+    assert.equal(diff.rows[0].beforeTarget,'Previous translation');assert.equal(diff.rows[0].afterTarget,'Current translation');
+    assert.equal(diff.rows.find(field=>field.id==='removed').removed,true);assert.equal(diff.hasNotes,true);
+    assert.equal(app.ctWorkspace.scope.groupId,testScope.groupId);assert.equal(app.ctValues[fieldId],'Current translation');
+    app.ctFence();assert.equal(app._ctTestStores.size,0);await assert.rejects(store.getUnit(previousScope,previous.id),{code:'LOCAL_TEST_DISPOSED'});
+});
+
 test('late test draft work cannot fall back to durable storage after disposal',async()=>{
     const pending=deferred(),started=deferred(),testScope={...scope,versionId:'local:test:v',groupId:'local:test:g'},
         {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true});
