@@ -108,3 +108,7 @@ dist
 
 # Local Codex attachments
 /.codex-remote-attachments/
+
+# Temporary agent working files (keep the directory, ignore its contents)
+/temp/*
+!/temp/.gitkeep
