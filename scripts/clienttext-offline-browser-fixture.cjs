@@ -574,8 +574,8 @@ async function run() {
             assert.equal(comparison.error, '');assert.equal(comparison.previous, sample.id);assert.equal(comparison.current, sample.id);
             assert.ok(comparison.rows.some(row => row.beforeSource !== row.afterSource), label + ': actual previous English differs from current');
             const sourceKey=await sourceDiff.evaluate(field=>field.closest('.ctSourceBlock').dataset.sourceField),source=editor.locator('.ctSourceBlock[data-source-field='+JSON.stringify(sourceKey)+']');
-            assert.deepEqual(await source.locator('.editorFieldToolbar').evaluate(bar=>({last:bar.lastElementChild.classList.contains('fieldDiffButton'),separator:bar.lastElementChild.previousElementSibling.getAttribute('role'),insideField:!!bar.closest('.editorFieldFrame')})),
-                {last:true,separator:'separator',insideField:true},'Diff toggle is the final toolbar item inside the field');
+            assert.deepEqual(await source.locator('.editorFieldToolbar').evaluate(bar=>({last:bar.lastElementChild.classList.contains('fieldHistoryMenuButton'),history:bar.lastElementChild.previousElementSibling.classList.contains('fieldDiffButton'),separator:bar.lastElementChild.previousElementSibling.previousElementSibling.getAttribute('role'),insideField:!!bar.closest('.editorFieldFrame')})),
+                {last:true,history:true,separator:'separator',insideField:true},'Settings cog follows the history toggle at the right edge inside the field');
             assert.equal(await source.locator('.editorFieldComparisonControls').evaluate(controls=>!controls.closest('.editorFieldFrame') && controls.getBoundingClientRect().top>=controls.parentElement.querySelector('.editorFieldFrame').getBoundingClientRect().bottom),true,'Comparison selector sits underneath the field');
             assert.equal(await source.getByRole('button',{name:'Bold',exact:true}).isDisabled(),true,'Source has matching disabled style controls');
             await source.getByRole('button',{name:'Comparison options and revision history'}).click();
