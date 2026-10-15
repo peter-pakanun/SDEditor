@@ -88,6 +88,25 @@ function description(name, flags = {}, english = `English ${name}`, thai = `р╕ар
   };
 }
 
+test('game preview fonts follow the active ClientText language without changing Settings', () => {
+  const { editor } = loadEditor();
+  editor.lang = 'German';
+  const settingsFont = editor.gamePreviewFontFamily, sourceFont = editor.gamePreviewSourceFontFamily;
+  editor.ctActive = true;
+  editor.ctWorkspace = { scope: { groupId: 'local:test:fonts', language: 'Thai' } };
+  assert.equal(editor.gamePreviewFontFamily, '"Kanit", sans-serif', 'Offline Thai workbooks use Kanit even with German in Settings.');
+  assert.equal(editor.gamePreviewSourceFontFamily, sourceFont, 'English keeps its own preview font.');
+  editor.gamePreviewFonts = { Thai: '"Custom Thai", sans-serif', German: '"Custom German", serif' };
+  assert.equal(editor.gamePreviewFontFamily, '"Custom Thai", sans-serif', 'Custom stacks use the workbook language too.');
+  editor.ctWorkspace.scope.language = 'Japanese';
+  assert.match(editor.gamePreviewFontFamily, /^"Koruri Regular"/, 'Opening another workbook uses its language.');
+  editor.ctActive = false;
+  assert.equal(editor.gamePreviewFontFamily, '"Custom German", serif', 'SD previews continue to follow Settings.');
+  editor.gamePreviewFonts = null;
+  assert.equal(editor.gamePreviewFontFamily, settingsFont);
+  assert.equal(editor.lang, 'German', 'Previewing a workbook does not change the selected Settings language.');
+});
+
 test('one-file save and draft refreshes preserve unrelated rows and match a full status rebuild', () => {
   const { editor, context } = loadEditor();
   const state = context.window.WorkspaceState;

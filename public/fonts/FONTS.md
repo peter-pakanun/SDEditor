@@ -32,5 +32,7 @@ is the Turkish variant. To bundle these exact faces later, add the actual licens
 font assets and matching `@font-face` declarations.
 
 Saved `gamePreviewFonts` language overrides continue to take precedence over
-these defaults. Preview fonts do not change editor text, saved translations or
-exports.
+these defaults. ClientText previews use the open workbook's language, including
+Test Sheet Offline sessions whose language differs from Settings. StatDescription
+previews use the selected Settings language; English previews use their own stack.
+Preview fonts do not change editor text, saved translations or exports.

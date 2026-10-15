@@ -1022,7 +1022,8 @@ const config = Vue.defineComponent({
       });
     },
     gamePreviewFontFamily() {
-      return this.getGamePreviewFontFamily(this.lang);
+      const language = this.ctActive ? this.ctWorkspace?.scope.language || this.lang : this.lang;
+      return this.getGamePreviewFontFamily(language);
     },
     gamePreviewSourceFontFamily() {
       return this.getGamePreviewFontFamily("English");

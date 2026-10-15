@@ -1571,6 +1571,7 @@ button, label, th, td, input[type="checkbox"] {
   margin-block: 0.5em;
   padding-block: 0.35em;
   border-block: 1px solid currentColor;
+  border-image: linear-gradient(to right, transparent 25%, currentColor 37.5%, currentColor 62.5%, transparent 75%) 1;
   color: #945b35;
   text-align: center;
 }
