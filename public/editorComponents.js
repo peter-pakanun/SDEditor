@@ -561,7 +561,7 @@
                 <div v-if="!hideSourceInPreviewPanel" class="gamePreviewSourcePane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'English preview' : undefined">
                 <div class="gamePreviewLine">
                   <div class="gamePreviewLineLabel">EN</div>
-                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily }">
+                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in gamePreviewDisplaySource" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
@@ -591,7 +591,7 @@
                 <div v-if="row.label" class="gamePreviewVariantLabel">{{ row.label }}</div>
                 <div class="gamePreviewLine" :data-preview-variant="row.key">
                   <div class="gamePreviewLineLabel">{{ translationEditorBcp47 || lang || 'TL' }}</div>
-                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily }">
+                  <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in row.segments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
