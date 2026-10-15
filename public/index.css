@@ -1530,6 +1530,10 @@ button, label, th, td, input[type="checkbox"] {
   box-sizing: border-box;
 }
 
+.gamePreviewWindow--dialogue {
+  background: #181a1f;
+}
+
 .gamePreviewWindow:has(.gamePreviewRightAlign) {
   display: flex;
   flex-wrap: wrap;
@@ -1577,7 +1581,8 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 [data-theme="dark"] .gamePreviewContinue,
-[data-theme="modern-dark"] .gamePreviewContinue {
+[data-theme="modern-dark"] .gamePreviewContinue,
+.gamePreviewWindow--dialogue .gamePreviewContinue {
   color: #dca16b;
 }
 
@@ -1620,6 +1625,10 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewEmpty {
   color: #6a6560;
   font-style: italic;
+}
+
+.gamePreviewWindow--dialogue .gamePreviewEmpty {
+  color: #b8b29a;
 }
 
 .gamePreviewRightAlign {

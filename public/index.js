@@ -1028,10 +1028,10 @@ const config = Vue.defineComponent({
     gamePreviewSourceFontFamily() {
       return this.getGamePreviewFontFamily("English");
     },
-    gamePreviewDefaultTextColor() {
-      return this.ctActive && /^(?:NPCTalkDialogueTextAudio|NPCTextAudio)(?:_Gender)?$/.test(this.ctCurrentUnit?.sheet || '')
-        ? '#f5f1ba' : undefined;
+    gamePreviewIsDialogue() {
+      return this.ctActive && /^(?:NPCTalkDialogueTextAudio|NPCTextAudio)(?:_Gender)?$/.test(this.ctCurrentUnit?.sheet || '');
     },
+    gamePreviewDefaultTextColor() { return this.gamePreviewIsDialogue ? '#f5f1ba' : undefined; },
     gamePreviewMounted() { return this.ctActive ? this.ctPreviewMounted : this.editorToolsMounted; },
     gamePreviewFullEditor() { return this.ctActive ? this.ctEditor : this.editorVisible; },
     gamePreviewTarget() {
