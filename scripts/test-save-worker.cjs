@@ -124,6 +124,66 @@ test('repeat draft saves use durable staged bases without cloning the full immut
   assert.equal(f.revisions.length, 2);
 });
 
+test('aligned shared recovery saves accept the exact unstaged ZIP projection without rewriting retained blocks or retry bytes', async t => {
+  for (const [count, retained] of [[11, 23], [11, 28], [1, 7], [1, 4]]) await t.test(`${count}/${retained}`, async () => {
+    const f = fixture({ collaboration: true, worker: true }), workspace = f.kv.get('workspace_poe1');
+    const source = copy(workspace.descs), original = source[0];
+    original.translations.English = Array.from({ length: count }, (_, i) => 'English ' + i);
+    original.translations.Thai = Array.from({ length: retained }, (_, i) => 'Preserved translation ' + i);
+    workspace.descs = copy(source); f.kv.set('source_poe1', copy(source));
+    W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+    W.dropTranslation(workspace, original, 'Thai', { id: 'shared-drop', game: 'poe1', ownership: 'online',
+      originSourceHash: 'older-source', targetSourceHash: 'source', revision: 4 });
+    const projected = { filepath: original.filepath, translations: original.translations.Thai.slice(0, count),
+      trackedForExport: false, needsReview: false, revision: 0 };
+    const room = f.kv.get('collaboration_v1').rooms[key];
+    room.mode = 'sparse'; room.manifest.files[0].english = [...original.translations.English];
+    room.local[original.filepath] = copy(projected); room.shared = {};
+    const draftScope = { profile: 'account', game: 'poe1', sourceHash: 'source', language: 'Thai', filepath: original.filepath };
+    const draftKey = f.store.translationDraftKey(draftScope), translations = projected.translations;
+    const record = { ...draftScope, key: draftKey, id: 'aligned-draft', revision: 'aligned-revision', state: 'active',
+      translations: [...translations], base: copy(projected), source: copy(original),
+      alignmentRecovery: [{ translations: [...original.translations.Thai], english: original.translations.Thai.map(() => null), savedAt: 10 }] };
+    f.kv.set(draftKey, record);
+    const promoteDropped = { id: 'shared-drop', revision: 4, targetSourceHash: 'source', ownership: 'online' };
+    const request = batch({ files: [{ ...file(), translations }], descriptions: [copy(original)],
+      bases: { [original.filepath]: copy(projected) },
+      draft: { key: draftKey, id: record.id, revision: record.revision, base: copy(record.base) },
+      promoteDropped, collaboration: { key, identity, origin: 'save', bases: { [original.filepath]: copy(projected) }, promoteDropped },
+      revisions: [{ filepath: original.filepath, lang: 'Thai', note: 'Before entry alignment', translations: [...original.translations.Thai] },
+        { filepath: original.filepath, lang: 'Thai', note: 'save', translations: [...translations] }] });
+    const capturedRequest = copy(request), ack = await commit(f, f.store.saveTranslationBatch(request));
+    assert.equal(ack.draftConsumed, true);
+    assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai[original.filepath].translations, translations);
+    assert.equal(f.kv.get('workspace_poe1').droppedArchive['shared-drop'].status, 'promoted');
+    assert.equal(f.kv.get(draftKey).state, 'promoted');
+    assert.deepEqual(f.kv.get('source_poe1'), source);
+    assert.deepEqual(f.revisions[0].translations, original.translations.Thai);
+    assert.deepEqual(f.kv.get('collaboration_v1').rooms[key].outbox[0].files[0].base, projected);
+    assert.deepEqual(request, capturedRequest, 'Validation must not rewrite a queued request or its receipt signature.');
+    const retry = await commit(f, f.store.saveTranslationBatch(request));
+    assert.equal(retry.duplicate, true); assert.equal(f.revisions.length, 2);
+  });
+});
+
+test('a projected original base cannot bypass a new staged translation or a stale Shared Dropped revision', async t => {
+  for (const change of ['staged', 'candidate']) await t.test(change, async () => {
+    const f = fixture({ collaboration: true, worker: true }), workspace = f.kv.get('workspace_poe1');
+    const source = copy(workspace.descs); source[0].translations.Thai.push('Removed original block');
+    workspace.descs = copy(source); f.kv.set('source_poe1', copy(source));
+    W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+    W.dropTranslation(workspace, source[0], 'Thai', { id: 'shared-drop', game: 'poe1', ownership: 'online',
+      originSourceHash: 'older-source', targetSourceHash: 'source', revision: 4 });
+    if (change === 'staged') W.stageTranslation(workspace, file('Peer save'), 'Thai', { source: source[0], sourceHash: 'source' });
+    const projected = { ...file('old'), trackedForExport: false, revision: 0 };
+    const before = copy(Object.fromEntries(f.kv));
+    await assert.rejects(f.store.saveTranslationBatch(batch({ bases: { 'stat.txt': projected },
+      promoteDropped: { id: 'shared-drop', ownership: 'online', revision: 3, targetSourceHash: 'source' },
+      collaboration: { key, identity, origin: 'save' } })), error => error.code === (change === 'staged' ? 'DRAFT_BASE_CHANGED' : 'DROPPED_PROMOTION_CHANGED'));
+    assert.deepEqual(copy(Object.fromEntries(f.kv)), before); assert.equal(f.revisions.length, 0);
+  });
+});
+
 test('modern ordinary saves skip unused source reads while migration and staged deletion retain them', async () => {
   const f = fixture({ worker: true }), workspace = f.kv.get('workspace_poe1');
   W.initializeWorkspace(workspace, { source: copy(workspace.descs), sourceHash: 'source', game: 'poe1', language: 'Thai' });

@@ -106,6 +106,46 @@ const modern = (source = sourceDesc(), hash = 'old') => W.initializeWorkspace({ 
   { source: [source], sourceHash: hash, game: 'poe1', language: 'Thai' });
 const online = (source = sourceDesc(), hash = 'old') => Object.assign(modern(source, hash), { workspaceOrigin: 'online' });
 
+test('overflowing immutable SD originals match their exact local and collaboration baseline views without changing recovery', () => {
+  const source = sourceDesc('One', { Thai: ['one', 'removed translation'] }), workspace = online(source, 'current');
+  const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'shared-overflow', ownership: 'online', revision: 3,
+    originSourceHash: 'previous', translations: ['older one', 'older removed'] });
+  const raw = { filepath: source.filepath, translations: ['one', 'removed translation'], revision: 0,
+    needsReview: false, trackedForExport: false };
+  const shared = { ...structuredClone(raw), translations: ['one'] };
+  const before = structuredClone({ source, workspace, raw, shared });
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').needsReview, true, 'Dropped review is independent of an unstaged baseline base.');
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', shared), true);
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw, shared), true);
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', shared, raw), true);
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw), true);
+  assert.deepEqual({ source, workspace, raw, shared }, before, 'Base matching must not alter immutable entries, frozen recovery or request bytes.');
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai').id, candidate.id);
+});
+
+test('overflow base equivalence cannot hide authored revisions, stages, changed entries or a different source view', () => {
+  const source = sourceDesc('One', { Thai: ['one', 'removed translation'], German: ['eins'] });
+  const workspace = online(source, 'current'), raw = { translations: ['one', 'removed translation'], revision: 0 };
+  const shared = { translations: ['one'], revision: 0 };
+  for (const patch of [{ revision: 1 }, { trackedForExport: true }, { needsReview: true }, { filepath: 'another.txt' }]) {
+    assert.equal(W.translationBaseMatches(workspace, source, 'Thai', { ...shared, ...patch }), false);
+    assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw, { ...shared, ...patch }), false);
+  }
+  for (const translations of [['changed'], ['one', 'changed removed'], ['one', 'removed translation', 'extra']]) {
+    assert.equal(W.translationBaseMatches(workspace, source, 'Thai', { translations, revision: 0 }), false);
+    assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw, { translations, revision: 0 }), false);
+  }
+  assert.equal(W.translationBaseMatches(workspace, source, 'German', shared), false, 'A different language cannot borrow the overflowing block.');
+  assert.equal(W.translationBaseMatches(workspace, { ...source, translations: { English: ['One', 'Two', 'Three'], Thai: source.translations.Thai } }, 'Thai', shared), false,
+    'Short translations use ordinary exact padded-base matching.');
+  assert.equal(W.translationBaseMatches({ ...workspace, contentMode: 'clienttext' }, source, 'Thai', shared), false);
+  W.stageTranslation(workspace, { filepath: source.filepath, translations: ['one'] }, 'Thai', { source });
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw), false, 'An authored stage cannot match the raw overflow through a prefix.');
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', raw, shared), false, 'An explicit current view cannot bypass an active stage.');
+  assert.equal(W.translationBaseMatches(workspace, source, 'Thai', { ...shared, trackedForExport: true, revision: 9 }), true,
+    'Ordinary exact committed text comparisons retain their existing semantics.');
+});
+
 test('shared-only legacy recovery is discoverable locally without becoming local Dropped workload', () => {
   const source = sourceDesc(), workspace = modern(source, 'current');
   W.stageTranslation(workspace, { filepath: source.filepath, translations: ['local correction'] }, 'Thai', { source });

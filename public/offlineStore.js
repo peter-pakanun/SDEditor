@@ -1395,7 +1395,7 @@
           const original = values[batchSourceKey]?.find(desc => desc.filepath === file.filepath) || workspace.descs.find(desc => desc.filepath === file.filepath);
           const current = original ? WorkspaceState.workspaceFile(workspace, original, batch.language).translations : [];
           const capturedBase = batch.bases[file.filepath];
-          if (!capturedBase || JSON.stringify(current) !== JSON.stringify(capturedBase.translations))
+          if (!WorkspaceState.translationBaseMatches(workspace, original, batch.language, capturedBase))
             throw Object.assign(new Error('The committed translation changed before this save. Review both versions before saving again.'), { code: 'DRAFT_BASE_CHANGED', filepath: file.filepath, currentTranslations: current });
         }
         if (resetStaging) {
@@ -1431,7 +1431,7 @@
           const original = (values[batchSourceKey] || batch.descriptions || []).find(file => file.filepath === filepath)
             || workspace.descs.find(file => file.filepath === filepath);
           const current = original ? WorkspaceState.workspaceFile(workspace, original, batch.language).translations : [];
-          if (JSON.stringify(current) !== JSON.stringify(draft.base.translations)) {
+          if (!WorkspaceState.translationBaseMatches(workspace, original, batch.language, draft.base)) {
             throw Object.assign(new Error('The committed translation changed after this draft was opened. Review both versions in the editor before saving.'),
               { code: 'DRAFT_BASE_CHANGED', filepath, currentTranslations: [...current] });
           }

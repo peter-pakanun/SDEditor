@@ -757,6 +757,29 @@ test('inline promotion cannot implicitly approve an unresolved dropped translati
   assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, e.lang).id, candidate.id);
 });
 
+test('reviewed overflow drafts accept raw and shared original bases without changing their captured recovery', async t => {
+  for (const rawDraft of [false, true]) await t.test(rawDraft ? 'raw draft / shared original' : 'shared draft / raw original', async () => {
+    const { editor: e, desc, window } = saveFixture();
+    e.testMode = true;
+    desc.translations.Thai.push('Removed original translation');
+    const source = JSON.parse(JSON.stringify(desc)), raw = [...desc.translations.Thai], projected = raw.slice(0, 2);
+    e._workspaceSourceBaseline = [source];
+    e.localDescs = { sourceHash: e.sourceIdentity, descs: [], status: {} };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, { source: [source], sourceHash: e.sourceIdentity, game: 'poe1', language: 'Thai' });
+    const draft = { key: 'draft-scope', id: 'aligned-draft', revision: 'aligned-revision',
+      base: { filepath: desc.filepath, translations: rawDraft ? raw : projected, revision: 0, trackedForExport: false } };
+    const captured = JSON.parse(JSON.stringify(draft));
+    e._collaboration = { snapshot: () => ({ conflicts: [] }),
+      fileBase: () => ({ filepath: desc.filepath, translations: rawDraft ? projected : raw, revision: 0, trackedForExport: false }) };
+    const result = await e.persistTranslationBatch([{ desc, lines: ['Aligned translation', 'Second aligned translation'] }], 'save',
+      { draft, workspace: JSON.parse(JSON.stringify(e.localDescs)) });
+    assert.equal(result.status, 'local');
+    assert.deepEqual(draft, captured, 'The original checkpoint and queued retry representation stay unchanged.');
+    assert.deepEqual(e._workspaceSourceBaseline[0].translations.Thai, raw);
+    assert.deepEqual(Array.from(e.localDescs.staged.Thai[desc.filepath].translations), ['Aligned translation', 'Second aligned translation']);
+  });
+});
+
 test('known shared conflicts and committed-base changes retain drafts before either editor can enqueue staging', async t => {
   for (const inline of [false, true]) for (const conflict of [false, true]) await t.test(`${inline ? 'inline' : 'full'} ${conflict ? 'conflict' : 'changed base'}`, async () => {
     const { editor: e, desc, calls } = enablePending(saveFixture());

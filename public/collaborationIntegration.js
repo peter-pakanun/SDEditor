@@ -1120,7 +1120,8 @@
             }
             const current = ctx.client?.fileBase?.(desc.filepath) || this.collaborationFile(desc, ctx.language);
             if (Array.isArray(options.draft.base?.translations)
-              && JSON.stringify(options.draft.base.translations) !== JSON.stringify(current.translations)) {
+              && !window.WorkspaceState.translationBaseMatches(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc,
+                ctx.language, options.draft.base, current)) {
               throw Object.assign(new Error('Open the full editor and review this Local draft against the changed committed translation before staging it.'),
                 { code: 'DRAFT_BASE_CHANGED', draftReview: 'base', filepath: desc.filepath, currentTranslations: [...current.translations] });
             }

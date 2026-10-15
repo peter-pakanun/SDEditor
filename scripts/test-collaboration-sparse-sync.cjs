@@ -100,6 +100,7 @@ function serverFixture(archive) {
 let id = 0;
 async function fixture(options = {}) {
   const baselineSource = options.source || source;
+  const language = options.language || 'Thai';
   const archive = await P.finalizeArchive({ version: 2, zipHash: await P.zipHash(new Uint8Array([1, 2, 3])), zipSize: 3,
     fileCount: baselineSource.length, descriptionCount: baselineSource.length, parserVersion: 1, decisions: [] });
   const store = options.store || storeFixture(baselineSource), server = options.server || serverFixture(archive), remote = [];
@@ -107,8 +108,8 @@ async function fixture(options = {}) {
     onStatus: options.onStatus, onWork: options.onWork,
     onRemote: files => { options.onRemote?.(files, store); remote.push(copy(files)); } });
   const baselineInitial = options.files || (options.source ? baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
-    translations: desc.translations.Thai || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
-  const connection = { accountId: options.accountId || 'user', game: 'poe1', language: 'Thai', source: baselineSource, files: baselineInitial,
+    translations: desc.translations[language] || [], needsReview: false, trackedForExport: false }, desc.translations.English.length)) : initial);
+  const connection = { accountId: options.accountId || 'user', game: 'poe1', language, source: baselineSource, files: baselineInitial,
     workspace: store.workspace, archive, baselineSource, deferRemote: !!options.deferRemote, onProgress: options.onProgress };
   await options.beforeConnect?.({ client, store, server, remote, connection, archive });
   await client.connect(connection);
@@ -299,6 +300,89 @@ test('sparse first save sends one edited witness; later valid saves omit it and 
   await assert.rejects(client.save({ workspace: store.workspace, files: [{ filepath: 'a.txt', translations: ['', ''], trackedForExport: true }] }),
     error => error.code === 'SD_TRANSLATION_INVALID');
   assert.deepEqual(store.workspace, before); assert.equal(server.requests.length, requests);
+});
+
+test('aligned German saves retain count-limited merge bases while preserving excess immutable ZIP entries', async t => {
+  const shapes = [
+    ['advanced_mod_stat_descriptions/000010_local_unique_jewel_alternate_tree_version.txt', 11, 23],
+    ['stat_descriptions/000001_local_unique_jewel_alternate_tree_version.txt', 11, 28],
+    ['stat_descriptions/014850_fishing_lure_type.txt', 1, 7],
+    ['stat_descriptions/map_elder_boss_variation.txt', 1, 4],
+  ];
+  const baselineSource = shapes.map(([filepath, englishCount, targetCount]) => ({ filepath, name: '', stats: ['stat'],
+    variables: Array(englishCount).fill('#'), remarks: Array(englishCount).fill(''),
+    translations: { English: Array.from({ length: englishCount }, (_, index) => 'Source ' + index),
+      German: Array.from({ length: targetCount }, (_, index) => 'Original German ' + index) } }));
+  const immutable = copy(baselineSource);
+  const files = baselineSource.map(desc => P.fileState({ filepath: desc.filepath,
+    translations: desc.translations.German, trackedForExport: false }));
+  const { client, store, server } = await fixture({ source: baselineSource, files, language: 'German',
+    beforeConnect({ store, archive }) {
+      W.initializeWorkspace(store.workspace, { source: baselineSource, sourceHash: archive.baselineId,
+        game: 'poe1', language: 'German' });
+    } });
+  t.after(() => client.destroy());
+  const corrected = baselineSource.map(desc => ({ filepath: desc.filepath,
+    translations: desc.translations.English.map((_, index) => 'Aligned German ' + index), trackedForExport: true }));
+  const bases = Object.fromEntries(baselineSource.map(desc => [desc.filepath, client.fileBase(desc.filepath)]));
+  for (const desc of baselineSource) {
+    assert.deepEqual(bases[desc.filepath].translations, desc.translations.German.slice(0, desc.translations.English.length));
+    assert.equal(bases[desc.filepath].revision, 0);
+    assert.equal(W.workspaceFile(store.workspace, desc, 'German').isInvalidTranslation, true);
+  }
+  const result = await client.save({ workspace: store.workspace, files: corrected, bases });
+  assert.equal(result.status, 'synced'); assert.equal(client.snapshot().conflicts.length, 0);
+  const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+  assert.equal(mutations.length, 1);
+  for (const original of immutable) {
+    const sent = mutations[0].options.body.files.find(file => file.filepath === original.filepath);
+    const saved = corrected.find(file => file.filepath === original.filepath);
+    assert.deepEqual(sent.translations, saved.translations);
+    assert.deepEqual(sent.baseline.translations.German, original.translations.German,
+      'The witness keeps deleted-block overflow even though the merge base has the current English count.');
+    assert.equal(sent.baseRevision, 0);
+    assert.deepEqual(store.workspace.staged.German[original.filepath].translations, saved.translations);
+    assert.equal(W.workspaceFile(store.workspace, original, 'German').isInvalidTranslation, false);
+  }
+  assert.deepEqual(baselineSource, immutable);
+  assert.deepEqual([...client.baselineFiles.values()], immutable);
+});
+
+test('aligned Shared Dropped promotion retains its revision guard with excess original ZIP entries', async t => {
+  const baselineSource = [copy(source[1])];
+  baselineSource[0].translations.German = ['Original', 'Deleted block 1', 'Deleted block 2', 'Deleted block 3'];
+  const original = copy(baselineSource[0]), filepath = original.filepath;
+  let candidate;
+  const { client, store, server, archive } = await fixture({ source: baselineSource, language: 'German',
+    files: [{ filepath, translations: original.translations.German, trackedForExport: false }],
+    beforeConnect({ store, archive }) {
+      W.initializeWorkspace(store.workspace, { source: baselineSource, sourceHash: archive.baselineId,
+        game: 'poe1', language: 'German' });
+      candidate = W.dropTranslation(store.workspace, original, 'German', { id: 'shared-german', ownership: 'online',
+        revision: 4, game: 'poe1', originSourceHash: 'previous', targetSourceHash: archive.baselineId,
+        translations: ['Preserved German', 'Deleted old block'] });
+      W.dropTranslation(store.workspace, original, 'German', { id: 'local-german', ownership: 'local',
+        game: 'poe1', originSourceHash: 'local-previous', targetSourceHash: archive.baselineId,
+        translations: ['Independent local recovery'] });
+    } });
+  t.after(() => client.destroy());
+  const base = client.fileBase(filepath);
+  assert.deepEqual(base.translations, ['Original']);
+  const result = await client.save({ workspace: store.workspace,
+    files: [{ filepath, translations: ['Reviewed aligned German'], trackedForExport: true }],
+    bases: { [filepath]: base }, promoteDropped: { id: candidate.id, revision: candidate.revision,
+      ownership: 'online', targetSourceHash: archive.baselineId } });
+  assert.equal(result.status, 'synced');
+  const request = server.requests.find(request => request.path.endsWith('/mutations'));
+  assert.deepEqual(request.options.body.promoteDropped,
+    { id: 'shared-german', revision: 4, targetSourceHash: archive.baselineId });
+  assert.deepEqual(request.options.body.files[0].translations, ['Reviewed aligned German']);
+  assert.deepEqual(request.options.body.files[0].baseline.translations.German, original.translations.German);
+  assert.equal(W.droppedForFile(store.workspace, filepath, 'German', 'online'), null);
+  assert.equal(store.workspace.droppedArchive['shared-german'].status, 'promoted');
+  assert.deepEqual(store.workspace.droppedArchive['shared-german'].snapshot.translations, candidate.snapshot.translations);
+  assert.equal(W.droppedForFile(store.workspace, filepath, 'German', 'local').id, 'local-german');
+  assert.deepEqual(baselineSource[0], original);
 });
 
 test('joining with a legacy carried translation does not author it; committed text preserves recovery before callbacks', async t => {

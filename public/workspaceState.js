@@ -487,6 +487,23 @@
       hasSharedRecovery: workspaceDroppedOwnership(workspace) === 'local' && !!droppedForFile(workspace, desc?.filepath, language, 'online'),
       needsReview: !!candidate && !staged && !complete(translations, count), candidate, staged };
   }
+  function translationBaseMatches(workspace, original, language, captured, current) {
+    const state = workspaceFile(workspace, original, language);
+    current ||= { translations: state.translations, trackedForExport: state.hasChanges, needsReview: false, revision: 0 };
+    if (!Array.isArray(captured?.translations) || !Array.isArray(current?.translations)) return false;
+    if (equal(captured.translations, current.translations)) return true;
+    // Callers supply the verified immutable source. An overflowing original SD
+    // block has two existing views: the complete local text and the source-count
+    // collaboration baseline. Only those exact unsaved revision-zero views are
+    // equivalent; authored saves and their durable retry bodies stay untouched.
+    const count = original?.translations?.English?.length, originals = original?.translations?.[language];
+    if (!object(workspace) || !statDescription(workspace) || state.staged || !Number.isSafeInteger(count) || count < 1
+      || !Array.isArray(originals) || originals.length <= count || originals.some(text => typeof text !== 'string')) return false;
+    const baselineView = value => !value.trackedForExport && !value.needsReview && Number(value.revision || 0) === 0
+      && (!value.filepath || value.filepath === original.filepath)
+      && (equal(value.translations, originals) || equal(value.translations, originals.slice(0, count)));
+    return baselineView(captured) && baselineView(current);
+  }
   function resolveDroppedPromotion(workspace, filepath, language, promotion, options = {}) {
     if (!object(workspace) || !languageName(language) || !filepath || !promotion) throw new Error('Invalid dropped promotion.');
     maps(workspace);
@@ -1140,7 +1157,7 @@
     return choice === 'shared' ? shared : workspace.dropped[language][filepath];
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
-    initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
+    initializeWorkspace, workspaceFile, translationBaseMatches, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
     sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
     translationIssues, assertCompleteTranslation, archiveInvalidTranslation, quarantineInvalidTranslations, resolveDroppedPromotion,
     dropTranslation, droppedForFile, droppedCandidatesForFile, droppedOwnership, workspaceDroppedOwnership,
