@@ -51,6 +51,9 @@ test('offline ClientText testing skips durable StatDescription draft listing and
 
 function harness({ records = new Map(), tm = false } = {}) {
   let config, nextId = 0;
+  const windowListeners = new Map(), documentListeners = new Map();
+  const listen = listeners => (name, handler, capture) => listeners.set(name, { handler, capture });
+  const unlisten = listeners => (name, handler) => { if (listeners.get(name)?.handler === handler) listeners.delete(name); };
   const calls = { writes: [], discards: [], promotions: [], confirms: [], alerts: [], focused: 0 };
   const store = {
     translationDraftKey(scope) { return 'draft:' + JSON.stringify([scope.profile, scope.game, scope.sourceHash, scope.language, scope.filepath]); },
@@ -74,9 +77,9 @@ function harness({ records = new Map(), tm = false } = {}) {
     },
   };
   const window = { location: { search: '?lang=Thai' }, CloudUI: { mixin: {} }, OfflineStore: store,
-    crypto: { randomUUID: () => 'test-id-' + (++nextId) }, addEventListener() {}, removeEventListener() {}, setTimeout, clearTimeout, performance };
+    crypto: { randomUUID: () => 'test-id-' + (++nextId) }, addEventListener: listen(windowListeners), removeEventListener: unlisten(windowListeners), setTimeout, clearTimeout, performance };
   const document = { hidden: false, activeElement: null, querySelectorAll() { return []; }, querySelector() { return null; },
-    addEventListener() {}, removeEventListener() {}, createElement() { return { set innerHTML(html) {
+    addEventListener: listen(documentListeners), removeEventListener: unlisten(documentListeners), createElement() { return { set innerHTML(html) {
       this.value = html.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&');
     } }; } };
   const context = vm.createContext({ window, document, URLSearchParams, console, setTimeout, clearTimeout, performance,
@@ -126,7 +129,7 @@ function harness({ records = new Map(), tm = false } = {}) {
     editor.editorOriginalTranslations = [...accepted.translations];
     return { typedDuringSave: false };
   };
-  return { editor, config, calls, window, store, records, desc, document, context };
+  return { editor, config, calls, window, store, records, desc, document, context, windowListeners, documentListeners };
 }
 
 async function inlineTMFixture(t, { sources = ['Damage'], translations = sources.map(() => ''), targets = sources.map(() => 'Remembered translation') } = {}) {
@@ -1816,6 +1819,97 @@ test('focus within the active row, sidebar or confirmation belongs to the same s
   } });
   for (const kind of ['same', 'side', 'dialog']) assert.equal(editor.inlineFocusContains(target(kind)), true);
   assert.equal(editor.inlineFocusContains(target('other')), false);
+});
+
+test('row pointer capture retains the inline layout through focus changes until its click can run', async t => {
+  const h = harness(), { editor, desc, document, documentListeners, window } = h;
+  window.InlineEditor.mixin.mounted.call(editor); await tick(); await editor.activateInlineRow(desc.filepath);
+  t.after(() => window.InlineEditor.mixin.beforeUnmount.call(editor));
+  editor.editorBlocks[0].translation = 'preserve until the destination click';
+  const next = editor.descs[1], row = { dataset: { filepath: next.filepath } },
+    target = { closest: selector => selector.includes('tr[data-filepath]') ? row : null };
+  document.activeElement = target;
+  for (const name of ['pointerdown', 'pointerup', 'pointercancel']) assert.equal(documentListeners.get(name).capture, true);
+  documentListeners.get('pointerdown').handler({ target, pointerId: 7, button: 0, isPrimary: true });
+  let activated = 0; editor.activateInlineRow = async () => { activated++; return true; };
+  documentListeners.get('focusin').handler({ target });
+  await editor.inlineRowFocus({ target }, next.filepath);
+  editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+  assert.equal(editor.inlineRowPointerPending(), true); assert.equal(editor.inlineActive, true);
+  assert.equal(activated, 0, 'Pointer focus must leave activation to the delivered click.');
+  assert.equal(h.calls.promotions.length, 0, 'A held row gesture cannot save or collapse the outgoing editor.');
+  let released = false; const settling = editor.waitForInlineRowPointer().then(() => { released = true; });
+  documentListeners.get('pointerup').handler({ pointerId: 8 }); await tick();
+  assert.equal(released, false, 'Another pointer cannot release this gesture.');
+  documentListeners.get('pointerup').handler({ pointerId: 7 });
+  assert.equal(editor.inlineRowPointerPending(), true, 'The following click still owns the original row layout.');
+  await editor.inlineRowClick({ target }, next.filepath);
+  document.activeElement = { closest: selector => selector === 'tr[data-filepath]' ? { dataset: { filepath: desc.filepath } } : null };
+  assert.equal(activated, 1); await settling;
+  assert.equal(editor.inlineRowPointerPending(), false);
+  await editor.inlineRowFocus({ target }, next.filepath);
+  assert.equal(activated, 2, 'Keyboard focus keeps its immediate row activation.');
+});
+
+test('cancelled row gestures and window blur release deferred inline focusout without losing work', async t => {
+  for (const ending of ['pointercancel', 'blur']) {
+    const h = harness(), { editor, desc, document, documentListeners, windowListeners, window } = h;
+    window.InlineEditor.mixin.mounted.call(editor); await tick(); await editor.activateInlineRow(desc.filepath);
+    t.after(() => window.InlineEditor.mixin.beforeUnmount.call(editor));
+    editor.editorBlocks[0].translation = 'save after ' + ending;
+    const row = { dataset: { filepath: editor.descs[1].filepath } },
+      target = { closest: selector => selector.includes('tr[data-filepath]') ? row : null };
+    document.activeElement = { closest: () => null };
+    documentListeners.get('pointerdown').handler({ target, pointerId: 9, button: 0, isPrimary: true });
+    editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+    assert.equal(h.calls.promotions.length, 0, ending); assert.equal(editor.inlineActive, true, ending);
+    const settling = editor.waitForInlineRowPointer();
+    if (ending === 'blur') windowListeners.get('blur').handler();
+    else documentListeners.get(ending).handler({ pointerId: 9 });
+    await settling; await settleFocus();
+    assert.equal(editor.inlineRowPointerPending(), false, ending);
+    assert.equal(editor.inlineActive, false, ending); assert.equal(h.calls.promotions.length, 1, ending);
+    assert.equal(desc.translations.Thai[0], 'save after ' + ending);
+  }
+});
+
+test('a held row gesture cannot close an inline session after its source, account, language or session changes', async t => {
+  for (const changed of ['source', 'account', 'language', 'session']) {
+    const h = harness(), { editor, desc, document, documentListeners, window } = h;
+    window.InlineEditor.mixin.mounted.call(editor); await tick(); await editor.activateInlineRow(desc.filepath);
+    t.after(() => window.InlineEditor.mixin.beforeUnmount.call(editor));
+    editor.editorBlocks[0].translation = 'recoverable old work';
+    const target = { closest: () => ({ dataset: { filepath: editor.descs[1].filepath } }) };
+    document.activeElement = { closest: () => null };
+    documentListeners.get('pointerdown').handler({ target, pointerId: 2, button: 0, isPrimary: true });
+    let closes = 0; editor.finishInlineSession = async () => { closes++; return true; };
+    editor.inlineRowFocusOut({ relatedTarget: null }); await settleFocus();
+    if (changed === 'source') editor.sourceIdentity = 'replacement-source';
+    if (changed === 'account') editor.cloudProfileId = 'replacement-account';
+    if (changed === 'language') editor.lang = 'German';
+    if (changed === 'session') editor._draftSession = { ...editor._draftSession };
+    documentListeners.get('pointerup').handler({ pointerId: 2 }); await settleFocus();
+    assert.equal(editor.inlineRowPointerPending(), false, changed); assert.equal(closes, 0, changed);
+    assert.equal(editor.inlineActive, true, changed); assert.equal(h.calls.promotions.length, 0, changed);
+  }
+});
+
+test('nonprimary, right-button and non-row pointer gestures keep normal inline focus behavior', async t => {
+  const h = harness(), { editor, documentListeners, window } = h;
+  window.InlineEditor.mixin.mounted.call(editor); await tick();
+  t.after(() => window.InlineEditor.mixin.beforeUnmount.call(editor));
+  const row = { closest: () => ({ dataset: { unitId: 'dialogue-record' } }) };
+  for (const event of [{ target: row, button: 2, isPrimary: true }, { target: row, button: 0, isPrimary: false },
+    { target: { closest: () => null }, button: 0, isPrimary: true }]) {
+    documentListeners.get('pointerdown').handler({ pointerId: 1, ...event });
+    assert.equal(editor.inlineRowPointerPending(), false);
+  }
+  documentListeners.get('pointerdown').handler({ target: row, pointerId: 1, button: 0, isPrimary: true });
+  assert.equal(editor.inlineRowPointerPending(), true, 'ClientText rows share the same capture guard.');
+  const settling = editor.waitForInlineRowPointer();
+  window.InlineEditor.mixin.beforeUnmount.call(editor); await settling;
+  assert.equal(editor.inlineRowPointerPending(), false); assert.equal(documentListeners.has('pointerdown'), false);
+  assert.equal(documentListeners.has('pointerup'), false); assert.equal(documentListeners.has('pointercancel'), false);
 });
 
 test('clicking nonfocusable sidebar content focuses its surface and retains inline editing', async () => {

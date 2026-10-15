@@ -1127,14 +1127,14 @@
             ctRefreshLayout() {this.observeInlineBlocks?.();this.measureWorkspaceChrome?.();},
             ctRowClick(unit,event) {
                 if(this.ctBusy || rowControl(event))return false;
-                return this.ctSelect(unit,!this.inlineEditor);
+                return this.ctSelect(unit,!this.inlineEditor,{saveInline:true});
             },
             ctRowDoubleClick(unit,event) {
                 if(this.ctBrowseBusy || rowControl(event))return false;
                 const pending=this._ctSelectRun;
                 if(pending?.pending && pending.unitId===unit?.id && pending.generation===(this._ctBrowseGeneration || 0) && this.ctCurrent(pending.ctx)){pending.full=true;if(this.ctSelection===unit.id)this.ctEditor=true;return true;}
                 if(this.ctBusy)return false;
-                return this.ctSelect(unit,true);
+                return this.ctSelect(unit,true,{saveInline:true});
             },
             ctInlineFocusContains(target) {
                 return target?.closest?.('tr[data-unit-id]')?.dataset.unitId===this.ctSelection
@@ -1144,6 +1144,7 @@
                 if(!this.ctInlineUnitVisible() || this.ctKeyboardBlocked() || this._ctCloseRun || this.ctInlineFocusContains(event.relatedTarget))return;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,selection=this._ctSelectRun;
                 setTimeout(async()=>{
+                    await this.waitForInlineRowPointer?.();
                     if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || !this.ctInlineUnitVisible()
                         || this.ctKeyboardBlocked() || root.document?.hidden || root.document?.hasFocus?.()===false
                         || event.target?.composing || this.ctInlineFocusContains(root.document?.activeElement))return;
@@ -1640,6 +1641,12 @@
                 if(this.ctSelection===unit.id){
                     this.ctEditor=run.full;this.ctInlineClosed=false;if(run.full && this.ctTool==='preview')this.ctTool='dictionary';await this.$nextTick?.();if(!current())return false;
                     run.pending=false;this.ctRefreshLayout();if(options.focus!==false && (run.full || this.inlineEditor))this.ctFocusTarget(false,null);return true;
+                }
+                // A pointer row switch owns the outgoing automatic save. Blur
+                // waits for the click, so it cannot close the row or swallow
+                // that click behind ctBusy while the pointer is still down.
+                if(options.saveInline && this.ctInlineUnitVisible() && this.ctHasEditorChanges()){
+                    if(!await this.ctSave() || !current()){run.pending=false;return false;}
                 }
                 if (!await this.ctFlushDraft()) {run.pending=false;return false;}
                 if(!current())return false;

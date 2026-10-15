@@ -609,9 +609,89 @@ async function run() {
         await track().click(); await dialoguePlaying();
         await track().focus(); await track().press('Escape');
         await page.waitForFunction(() => window.__offlineTestApp.ctInlineClosed && !document.querySelector('.ctAudioFloating audio'));
+        const pointerDestination = await page.evaluate(id => {
+            const rows = window.__offlineTestApp.ctPageRows, index = rows.findIndex(unit => unit.id === id), unit = rows[index + 1];
+            return unit && { id: unit.id, selector: '[data-unit-id="' + CSS.escape(unit.id) + '"]' };
+        }, dialogue.id);
+        assert.ok(pointerDestination, 'The audio fixture has a following visible row to expose collapse-induced movement');
+        const destinationRow = workspace.locator(pointerDestination.selector);
+        async function holdDestinationPointer(label) {
+            const source = destinationRow.locator('.inlineSourceCell');
+            await source.scrollIntoViewIfNeeded();
+            await page.evaluate(async () => { await window.__offlineTestApp.$nextTick(); await new Promise(requestAnimationFrame); });
+            const before = { row: await dialogueRow.boundingBox(), destination: await source.boundingBox() };
+            assert.ok(before.row && before.destination, label + ': both rows are visible before pressing');
+            await page.mouse.move(before.destination.x + Math.min(20, before.destination.width / 2), before.destination.y + Math.min(10, before.destination.height / 2));
+            await page.mouse.down();
+            try {
+                // A real pointer pause lets the zero-delay focusout callback run
+                // before click. Collapsing the old editor here moves the target.
+                await page.waitForTimeout(100);
+                const during = await page.evaluate(() => {
+                    const vm = window.__offlineTestApp;
+                    return { id: vm.ctSelection, closed: vm.ctInlineClosed, busy: vm.ctBusy, saveStarted: !!window.__offlineTestRowSaveGate?.started };
+                });
+                assert.deepEqual(during, { id: dialogue.id, closed: false, busy: false, saveStarted: false }, label + ': pointerdown retains the editor without starting its blur save');
+                const held = { row: await dialogueRow.boundingBox(), destination: await source.boundingBox() };
+                assert.ok(held.row && held.destination, label + ': both rows remain mounted while pressed');
+                assert.ok(Math.abs(held.row.height - before.row.height) < 1, label + ': the previous inline editor keeps its height');
+                assert.ok(Math.abs(held.destination.y - before.destination.y) < 1, label + ': the intended row stays under the pointer');
+            } finally { await page.mouse.up(); }
+        }
+        await dialogueRow.locator('.inlineSourceCell').click();
+        const tallDialogue = Array.from({ length: 6 }, (_, index) => 'Saved dialogue line ' + (index + 1)).join('\n');
+        await dialogueTarget.fill(tallDialogue); await dialogueTarget.press('Control+s');
+        await saved(page, dialogue.id, dialogue.field, tallDialogue);
+        await track().click(); await dialoguePlaying(); await nativeAudio().focus();
+        await holdDestinationPointer('Clicking another row from native dialogue audio');
+        await page.waitForFunction(id => {
+            const vm = window.__offlineTestApp;
+            return vm.ctSelection === id && !vm.ctBusy && !vm.ctInlineClosed && !vm.ctEditor;
+        }, pointerDestination.id);
+        assert.ok(await destinationRow.locator('[data-ct-target]').count(), 'The row pressed from native audio opens its inline editor after release');
+        assert.equal(await nativeAudio().count(), 0, 'Changing records stops and removes the previous dialogue player');
+        await dialogueRow.locator('.inlineSourceCell').click();
+        await dialogueTarget.waitFor();
+        const dirtyDialogue = tallDialogue + '\nUnsaved line before the next row';
+        await dialogueTarget.fill(dirtyDialogue);
+        await page.evaluate(() => {
+            const vm = window.__offlineTestApp, store = vm.ctStorage(vm.ctWorkspace.scope), original = store.save;
+            const gate = window.__offlineTestRowSaveGate = { store, original, started: false, release: null };
+            store.save = async function (...args) {
+                gate.started = true;
+                await new Promise(resolve => { gate.release = resolve; });
+                return original.apply(this, args);
+            };
+        });
+        try {
+            await holdDestinationPointer('Clicking another row from a changed textarea');
+            await page.waitForFunction(() => window.__offlineTestRowSaveGate.started);
+            assert.deepEqual(await page.evaluate(() => ({ id: window.__offlineTestApp.ctSelection, closed: window.__offlineTestApp.ctInlineClosed })),
+                { id: dialogue.id, closed: false }, 'A delayed outgoing save retains the editor while preserving the clicked destination');
+            await page.evaluate(() => window.__offlineTestRowSaveGate.release());
+            await saved(page, dialogue.id, dialogue.field, dirtyDialogue);
+            await page.waitForFunction(id => {
+                const vm = window.__offlineTestApp;
+                return vm.ctSelection === id && !vm.ctBusy && !vm.ctInlineClosed && !vm.ctEditor;
+            }, pointerDestination.id);
+            assert.ok(await destinationRow.locator('[data-ct-target]').count(), 'The original row click survives the delayed outgoing save');
+        } finally {
+            await page.evaluate(() => {
+                const gate = window.__offlineTestRowSaveGate;
+                if (gate) { gate.store.save = gate.original; gate.release?.(); delete window.__offlineTestRowSaveGate; }
+            });
+        }
+        // Use row padding that remains a plain row surface when the first
+        // click mounts source textareas; double-clicks inside controls stay native.
+        await dialogueRow.locator('.fileIdentityCell').dblclick({ position: { x: 5, y: 5 } });
+        await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && window.__offlineTestApp.ctEditor && !window.__offlineTestApp.ctBusy, dialogue.id);
+        assert.ok(await workspace.locator('.ctFullEditor [data-ct-target]').count(), 'Double-clicking another row still opens its full editor');
+        await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+        await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
         await assertLocal(page, 'Actual inline audio focus, shortcuts and native controls');
         assert.ok(audioRequests.length >= 2, 'Explicit play and replay use only the locally generated fixture clip');
         results.push('Dialogue audio: loading/native-control focus retains inline drafts, Ctrl+S saves from icon/player, Escape closes, native pause/resume works, and explicit media stays fixture-local');
+        results.push('Row pointer handoff keeps layout stable through a held mouse press from native audio or changed text, saves before switching, survives slow storage, and retains double-click full editing');
         await monitor(page, false);
         await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = false; await vm.$nextTick(); await vm.saveSettings(); });
         await monitor(page, true);

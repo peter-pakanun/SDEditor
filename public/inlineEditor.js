@@ -86,11 +86,26 @@
           this.flushEditorDraft(); event.preventDefault(); event.returnValue = '';
         }
       };
-      this._draftWindowBlur = () => { this.flushEditorDraft(); };
-      this._draftVisibility = () => { if (document.hidden) this.flushEditorDraft(); };
+      this._draftWindowBlur = () => { this.finishInlineRowPointer(); this.flushEditorDraft(); };
+      this._draftVisibility = () => { if (document.hidden) { this.finishInlineRowPointer(); this.flushEditorDraft(); } };
+      this._inlinePointerDown = event => {
+        if (event.button !== 0 || event.isPrimary === false || !event.target?.closest?.('tr[data-filepath], tr[data-unit-id]')) return;
+        this.finishInlineRowPointer();
+        let resolve;
+        const settled = new Promise(done => { resolve = done; });
+        this._inlineRowPointer = { pointerId: event.pointerId, settled, resolve };
+      };
+      this._inlinePointerEnd = event => {
+        const pointer = this._inlineRowPointer;
+        if (!pointer || pointer.pointerId !== event.pointerId) return;
+        // Let the click following pointerup claim its row before blur can
+        // collapse the outgoing editor or start an automatic save.
+        clearTimeout(pointer.timer);
+        pointer.timer = setTimeout(() => this.finishInlineRowPointer(pointer), 0);
+      };
       this._inlineLayoutResize = () => { this.measureWorkspaceChrome(); this.scheduleInlineAlignment(); };
       this._inlineFocusIn = event => {
-        if (!this.inlineActive || this.inlineTransitionBusy || this.editorSaving || document.hidden || root.AppDialogs?.isOpen) return;
+        if (!this.inlineActive || this.inlineTransitionBusy || this.editorSaving || document.hidden || root.AppDialogs?.isOpen || this.inlineRowPointerPending()) return;
         if (!this.inlineFocusContains(event.target)) {
           const path = event.target?.closest?.('tr[data-filepath]')?.dataset.filepath;
           if (path) this.activateInlineRow(path);
@@ -102,6 +117,9 @@
       root.addEventListener('resize', this._inlineLayoutResize);
       document.addEventListener('visibilitychange', this._draftVisibility);
       document.addEventListener('focusin', this._inlineFocusIn);
+      document.addEventListener('pointerdown', this._inlinePointerDown, true);
+      document.addEventListener('pointerup', this._inlinePointerEnd, true);
+      document.addEventListener('pointercancel', this._inlinePointerEnd, true);
       this.loadEditorDrafts();
       this.$nextTick(() => this.observeInlineBlocks());
     },
@@ -112,6 +130,10 @@
       root.removeEventListener('resize', this._inlineLayoutResize);
       document.removeEventListener('visibilitychange', this._draftVisibility);
       document.removeEventListener('focusin', this._inlineFocusIn);
+      document.removeEventListener('pointerdown', this._inlinePointerDown, true);
+      document.removeEventListener('pointerup', this._inlinePointerEnd, true);
+      document.removeEventListener('pointercancel', this._inlinePointerEnd, true);
+      this.finishInlineRowPointer();
       if (this._inlineAlignmentFrame) cancelAnimationFrame(this._inlineAlignmentFrame);
     },
     methods: {
@@ -442,6 +464,20 @@
         return target.closest('tr[data-filepath]')?.dataset.filepath === this.editorCurrentEditingDesc?.filepath
           || !!target.closest('[data-inline-focus-surface], .appDialogOverlay, .appDialog');
       },
+      inlineRowPointerPending() { return !!this._inlineRowPointer; },
+      async waitForInlineRowPointer() {
+        while (this._inlineRowPointer) await this._inlineRowPointer.settled;
+      },
+      finishInlineRowPointer(pointer = this._inlineRowPointer) {
+        if (!pointer) return;
+        clearTimeout(pointer.timer);
+        if (this._inlineRowPointer === pointer) this._inlineRowPointer = null;
+        pointer.resolve();
+      },
+      inlineRowFocus(event, filepath) {
+        this.selectFileRow(filepath);
+        if (this.inlineEditor && !this.inlineRowPointerPending()) return this.activateInlineRow(filepath);
+      },
       inlineFocusSurfacePointerDown(event) {
         if (!this.inlineActive || event.button != null && event.button !== 0) return;
         const surface = event.currentTarget;
@@ -453,8 +489,11 @@
       },
       inlineRowFocusOut(event) {
         if (!this.inlineActive || this.inlineTransitionBusy || this.editorSaving || this.inlineFocusContains(event.relatedTarget)) return;
-        setTimeout(() => {
-          if (document.hidden || document.hasFocus?.() === false || root.AppDialogs?.isOpen || this.inlineTransitionBusy) return;
+        const session = this._draftSession, scope = this.editorDraftScope();
+        setTimeout(async () => {
+          await this.waitForInlineRowPointer();
+          if (!this.inlineActive || this._draftSession !== session || !this.draftScopeCurrent(scope)
+            || document.hidden || document.hasFocus?.() === false || root.AppDialogs?.isOpen || this.inlineTransitionBusy) return;
           if (!this.inlineFocusContains(document.activeElement)) this.finishInlineSession({ promote: true });
         }, 0);
       },

@@ -849,6 +849,7 @@ test('row clicks follow inline preference and controls keep native editing and s
     await app.ctRowClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],true);
     app.inlineEditor=true;await app.ctRowClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],false);
     await app.ctRowDoubleClick(original,rowEvent(''));assert.equal(calls.at(-1)[1],true);
+    for(const call of calls)assert.equal(call[2].saveInline,true,'Row activation carries the outgoing inline save intent.');
 });
 test('same-unit inline to full transitions preserve exact drafts, review choices, tool tab and history',async()=>{
     const {app,original}=listHarness({inlineEditor:true,ctTool:'history',ctHistory:[{key:'history'}],ctLookup:'retained lookup',ctDraftDirty:true}),
@@ -867,6 +868,60 @@ test('a double-click during inline draft hydration keeps its full-editor intent 
     const selecting=app.ctRowClick(original,rowEvent(''));await settle();assert.equal(app.ctBusy,true);
     assert.equal(app.ctRowDoubleClick(original,rowEvent('')),true);pending.resolve({values:{[fieldId]:'preserved draft'},reviewed:{},revision:2});
     assert.equal(await selecting,true);assert.equal(reads,1);assert.equal(app.ctEditor,true);assert.equal(app.ctValues[fieldId],'preserved draft');assert.equal(app.ctDraftDirty,true);
+});
+test('a dirty inline row click waits for its save and a double-click upgrades the same pending selection',async()=>{
+    const rows=[namedUnit('Before'),namedUnit('After')],pointer=deferred(),save=deferred(),calls=[],
+        {app,window}=listHarness({inlineEditor:true,ctDraftDirty:true,ctUnits:rows,ctSelection:rows[0].id,
+            ctValues:S.valuesFor(rows[0]),_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit]))});
+    app.ctValues[fieldId]='Exact outgoing@draft\\n\nไทย';const values=app.ctValues;
+    window.document={activeElement:{closest:()=>null},hidden:false,hasFocus:()=>true};
+    app.waitForInlineRowPointer=()=>pointer.promise;
+    app.ctHasEditorChanges=()=>true;
+    app.ctSave=async()=>{calls.push(['save',app.ctSelection,app.ctValues]);app.ctBusy=true;try{return await save.promise;}finally{app.ctBusy=false;}};
+    app.ctFlushDraft=async()=>{calls.push(['checkpoint',app.ctSelection]);return true;};app.ctFlushCommentDraft=async()=>{};
+    app._ctStore={async getDraft(_scope,id){calls.push(['read',id]);return null;}};
+    app.ctLoadCommentDraft=()=>{};app.ctRefreshDraftSummaries=()=>{};app.scheduleClientTextDictionaryMatches=()=>{};
+    app.ctFocusTarget=()=>calls.push(['focus',app.ctSelection]);app.ctRefreshLayout=()=>calls.push(['layout',app.ctSelection]);
+    app.ctInlineFocusOut({target:{},relatedTarget:null});await new Promise(resolve=>setTimeout(resolve,10));
+    assert.deepEqual(calls,[]);assert.equal(app.ctInlineClosed,false,'Holding the mouse down keeps the outgoing row height stable.');
+    const selecting=app.ctRowClick(rows[1],rowEvent(''));await settle();
+    assert.equal(app.ctSelection,rows[0].id);assert.equal(app.ctValues,values);assert.equal(app.ctInlineClosed,false);
+    assert.equal(calls.length,1);assert.equal(calls[0][0],'save');assert.equal(calls[0][1],rows[0].id);assert.equal(calls[0][2],values);
+    assert.equal(app._ctSelectRun.pending,true);assert.equal(app.ctRowDoubleClick(rows[1],rowEvent('')),true);
+    assert.equal(app._ctSelectRun.full,true,'The full-editor intent is retained while the previous row is saving.');
+    pointer.resolve();await new Promise(resolve=>setTimeout(resolve,10));assert.equal(calls.length,1,'Deferred blur cannot race the click with another save.');
+    save.resolve(true);assert.equal(await selecting,true);
+    assert.equal(app.ctSelection,rows[1].id);assert.equal(app.ctEditor,true);assert.equal(app.ctInlineClosed,false);assert.equal(app._ctSelectRun.pending,false);
+    assert.deepEqual(calls.map(call=>call[0]),['save','checkpoint','read','layout','focus']);
+});
+test('a failed outgoing inline save leaves the selected row and exact draft ready for retry',async()=>{
+    const rows=[namedUnit('Before'),namedUnit('After')],{app}=listHarness({inlineEditor:true,ctDraftDirty:true,ctUnits:rows,ctSelection:rows[0].id,
+        ctValues:S.valuesFor(rows[0]),_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit]))});
+    app.ctValues[fieldId]='Retained@literal\\n\n';const values=app.ctValues;let saves=0;
+    app.ctHasEditorChanges=()=>true;app.ctSave=async()=>{saves++;return false;};
+    app.ctFlushDraft=()=>assert.fail('A failed save cannot move on to another draft.');
+    app.ctFlushCommentDraft=()=>assert.fail('A failed save cannot flush another selection.');
+    for(const method of ['ctRowClick','ctRowDoubleClick']){
+        assert.equal(await app[method](rows[1],rowEvent('')),false);assert.equal(app._ctSelectRun.pending,false);
+        assert.equal(app.ctSelection,rows[0].id);assert.equal(app.ctValues,values);assert.equal(app.ctDraftDirty,true);
+        assert.equal(app.ctInlineClosed,false);assert.equal(app.ctEditor,false);
+    }
+    assert.equal(saves,2);
+});
+test('an outgoing inline save cannot select its destination after the workspace or browse generation changes',async()=>{
+    for(const changed of ['account','group','language','generation']){
+        const rows=[namedUnit('Before'),namedUnit('After')],save=deferred(),{app}=listHarness({inlineEditor:true,ctDraftDirty:true,ctUnits:rows,ctSelection:rows[0].id,
+            ctValues:S.valuesFor(rows[0]),_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit]))});
+        app.ctValues[fieldId]='Old scope@draft\\n\n';const values=app.ctValues;
+        app.ctHasEditorChanges=()=>true;app.ctSave=()=>save.promise;
+        app.ctFlushDraft=()=>assert.fail('A stale save cannot checkpoint the replacement workspace.');
+        app.ctFlushCommentDraft=()=>assert.fail('A stale save cannot flush replacement comments.');
+        const selecting=app.ctRowClick(rows[1],rowEvent(''));await settle();assert.equal(app._ctSelectRun.pending,true,changed);
+        if(changed==='generation')app._ctBrowseGeneration=1;
+        else app.ctWorkspace={scope:{...scope,[changed==='account'?'accountId':changed==='group'?'groupId':'language']:'replacement'}};
+        save.resolve(true);assert.equal(await selecting,false,changed);assert.equal(app._ctSelectRun.pending,false,changed);
+        assert.equal(app.ctSelection,rows[0].id,changed);assert.equal(app.ctValues,values,changed);assert.equal(app.ctInlineClosed,false,changed);
+    }
 });
 test('keyboard list navigation uses the page-size preference, keeps row focus and fences late scope changes',async()=>{
     const rows=Array.from({length:5},(_,index)=>namedUnit('ID'+index)),{app}=listHarness({ctUnits:rows,ctSelectedFilters:['unchanged'],ctSelection:rows[0].id,
